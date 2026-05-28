@@ -2,11 +2,8 @@ package coop.handshake;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.ModSpecAPI;
+import coop.build.CoopBuildInfo;
 
-import java.net.URL;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.security.CodeSource;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -14,7 +11,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.jar.Manifest;
 
 public record CoopHandshakeManifest(
         String gameVersion,
@@ -94,16 +90,15 @@ public record CoopHandshakeManifest(
     }
 
     private static ModEntry fromModSpec(ModSpecAPI spec) {
-        Path modRoot = resolveModRoot(spec.getPath());
         LinkedHashMap<String, String> checksums = new LinkedHashMap<>();
-        checksums.put("mod_info.json", CoopChecksum.sha256IfExists(modRoot.resolve("mod_info.json")));
+        checksums.put("mod_info.json", CoopChecksum.unavailable("script-sandbox"));
 
         List<String> jars = spec.getJars() == null ? List.of() : spec.getJars().stream()
                 .map(CoopHandshakeManifest::normalizePath)
                 .sorted()
                 .toList();
         for (String jar : jars) {
-            checksums.put(jar, CoopChecksum.sha256IfExists(resolveListedFile(modRoot, jar)));
+            checksums.put(jar, CoopChecksum.unavailable("script-sandbox"));
         }
 
         return new ModEntry(
@@ -116,52 +111,12 @@ public record CoopHandshakeManifest(
                 checksums);
     }
 
-    private static Path resolveModRoot(String modPath) {
-        Path path = Paths.get(normalize(modPath, "."));
-        if (path.isAbsolute()) {
-            return path.normalize();
-        }
-        return Paths.get("").toAbsolutePath().resolve(path).normalize();
-    }
-
-    private static Path resolveListedFile(Path root, String listedPath) {
-        Path path = Paths.get(listedPath);
-        if (path.isAbsolute()) {
-            return path.normalize();
-        }
-        return root.resolve(path).normalize();
-    }
-
     private static String captureBuildVersion() {
-        Package manifestPackage = CoopHandshakeManifest.class.getPackage();
-        if (manifestPackage != null && hasText(manifestPackage.getImplementationVersion())) {
-            return manifestPackage.getImplementationVersion();
-        }
-        return readOwnManifestAttribute("Implementation-Version", "dev");
+        return normalize(CoopBuildInfo.VERSION, "dev");
     }
 
     private static String captureGitCommit() {
-        return readOwnManifestAttribute("Coop-Git-Commit", "dev-uncommitted");
-    }
-
-    private static String readOwnManifestAttribute(String name, String fallback) {
-        try {
-            CodeSource codeSource = CoopHandshakeManifest.class.getProtectionDomain().getCodeSource();
-            if (codeSource == null) {
-                return fallback;
-            }
-            URL location = codeSource.getLocation();
-            if (location == null || !location.toString().endsWith(".jar")) {
-                return fallback;
-            }
-            URL manifestUrl = new URL("jar:" + location + "!/META-INF/MANIFEST.MF");
-            try (var stream = manifestUrl.openStream()) {
-                String value = new Manifest(stream).getMainAttributes().getValue(name);
-                return hasText(value) ? value.trim() : fallback;
-            }
-        } catch (Exception ex) {
-            return fallback;
-        }
+        return normalize(CoopBuildInfo.GIT_COMMIT, "dev-uncommitted");
     }
 
     private static void appendField(StringBuilder json, String name, String value) {
@@ -247,10 +202,6 @@ public record CoopHandshakeManifest(
         return normalize(value, "").replace('\\', '/');
     }
 
-    private static boolean hasText(String value) {
-        return value != null && !value.trim().isEmpty();
-    }
-
     public record ModEntry(
             String id,
             String name,
@@ -276,7 +227,7 @@ public record CoopHandshakeManifest(
                         .sorted(Map.Entry.comparingByKey())
                         .forEach(entry -> sortedChecksums.put(
                                 normalizePath(entry.getKey()),
-                                normalize(entry.getValue(), CoopChecksum.MISSING)));
+                                normalize(entry.getValue(), CoopChecksum.unavailable("unknown"))));
             }
             checksums = Collections.unmodifiableMap(sortedChecksums);
         }

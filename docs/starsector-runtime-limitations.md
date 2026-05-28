@@ -16,12 +16,14 @@ Observed blocked patterns:
 
 - Netty `4.1.69.Final` initializes `io.netty.util.internal.PlatformDependent0`, which loads reflection classes such as `java.lang.reflect.Method`. This crashes during host startup.
 - `java.io.*` is treated as file access even when the class is only an in-memory type. `ByteArrayOutputStream` in `CoopNetService` crashed at object construction.
+- `java.nio.file.Files` is blocked in campaign scripts. Phase 5 manifest capture crashed at `coop.handshake.CoopChecksum.sha256IfExists()` before sending `HANDSHAKE_MANIFEST`.
 - Mod-created networking daemon threads are not reliable enough for campaign networking. In live two-client testing the `coop-net-*` threads disappeared while the game stayed running and the socket state was left half-open.
 
 Current rules:
 
 - Do not add Netty or similar reflection-heavy networking libraries to `mod_info.json`.
 - Do not use `java.io.*` in runtime campaign/network code. Use plain arrays, strings, and sandbox-proven JDK types instead.
+- Do not use `java.nio.file.*`, `java.net.URL.openStream()`, or protection-domain jar inspection in runtime handshake code. Runtime manifests may compare Starsector/mod metadata and generated coop build constants, but direct file checksums are blocked by the Starsector script sandbox unless a future non-script API is found.
 - Keep coop networking progressed from `EveryFrameScript.advance()` on the campaign thread.
 - Keep runtime dependencies minimal and covered by sandbox compatibility tests.
 

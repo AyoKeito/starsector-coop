@@ -1,40 +1,29 @@
 package coop.handshake;
 
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
 
 public final class CoopChecksum {
-    public static final String MISSING = "MISSING";
+    private static final String UNAVAILABLE_PREFIX = "UNAVAILABLE:";
 
     private CoopChecksum() {
     }
 
-    public static String sha256IfExists(Path path) {
-        if (path == null || !Files.isRegularFile(path)) {
-            return MISSING;
-        }
+    public static String sha256Text(String value) {
         try {
-            return sha256(path);
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return hex(digest.digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8)));
         } catch (Exception ex) {
-            throw new IllegalStateException("Unable to checksum " + path, ex);
+            throw new IllegalStateException("Unable to checksum text", ex);
         }
     }
 
-    public static String sha256(Path path) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] buffer = new byte[8192];
-        try (InputStream input = Files.newInputStream(path)) {
-            int read = input.read(buffer);
-            while (read >= 0) {
-                if (read > 0) {
-                    digest.update(buffer, 0, read);
-                }
-                read = input.read(buffer);
-            }
+    public static String unavailable(String reason) {
+        String normalized = reason == null ? "" : reason.trim();
+        if (normalized.isEmpty()) {
+            normalized = "unknown";
         }
-        return hex(digest.digest());
+        return UNAVAILABLE_PREFIX + normalized;
     }
 
     private static String hex(byte[] bytes) {

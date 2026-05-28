@@ -1,10 +1,7 @@
 package coop.handshake;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -13,9 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopHandshakeManifestTest {
-    @TempDir
-    Path tempDir;
-
     @Test
     void matchingManifestsHaveNoDiff() {
         CoopHandshakeManifest manifest = manifestWithMod("0.98a-RC8", "utility", "Utility Mod", "1.0.0",
@@ -86,18 +80,15 @@ class CoopHandshakeManifestTest {
     }
 
     @Test
-    void checksumUsesSha256HexForExistingFile() throws Exception {
-        Path file = tempDir.resolve("mod_info.json");
-        Files.writeString(file, "{\"id\":\"utility\"}");
-
-        String checksum = CoopChecksum.sha256(file);
+    void checksumUsesSha256HexForTextResource() {
+        String checksum = CoopChecksum.sha256Text("{\"id\":\"utility\"}");
 
         assertEquals("18ccf9f498f9f2f65048fcf529457bf7a3df1e4bd56f0f18f9f092108bf49470", checksum);
     }
 
     @Test
-    void missingChecksumIsStableSentinel() {
-        assertEquals("MISSING", CoopChecksum.sha256IfExists(tempDir.resolve("missing.jar")));
+    void unavailableChecksumIsStableSentinelWithReason() {
+        assertEquals("UNAVAILABLE:script-sandbox", CoopChecksum.unavailable("script-sandbox"));
     }
 
     private static CoopHandshakeManifest manifestWithMod(String gameVersion, String modId, String modName,

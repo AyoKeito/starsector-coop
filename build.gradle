@@ -25,6 +25,7 @@ def resolveGitCommit = {
 }
 
 def coopGitCommit = resolveGitCommit()
+def generatedBuildInfoDir = layout.buildDirectory.dir('generated/sources/coopBuildInfo/java')
 
 java {
     toolchain {
@@ -48,10 +49,41 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.3'
 }
 
+tasks.register('generateCoopBuildInfo') {
+    inputs.property('version', project.version.toString())
+    inputs.property('gitCommit', coopGitCommit)
+    outputs.dir(generatedBuildInfoDir)
+
+    doLast {
+        def outputFile = generatedBuildInfoDir.get().file('coop/build/CoopBuildInfo.java').asFile
+        outputFile.parentFile.mkdirs()
+        outputFile.text = """package coop.build;
+
+public final class CoopBuildInfo {
+    public static final String VERSION = "${project.version}";
+    public static final String GIT_COMMIT = "${coopGitCommit}";
+
+    private CoopBuildInfo() {
+    }
+}
+"""
+    }
+}
+
+sourceSets {
+    main {
+        java {
+            srcDir generatedBuildInfoDir
+        }
+    }
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 17
 }
+
+compileJava.dependsOn tasks.named('generateCoopBuildInfo')
 
 test {
     useJUnitPlatform()
