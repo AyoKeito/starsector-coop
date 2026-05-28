@@ -6,7 +6,7 @@
 
 **Architecture:** Keep development in the main coop mod folder. Copy the base Starsector install into host and guest test installs, deploy the built coop mod into both, and launch clients with JVM properties that auto-start Phase 3 host/guest networking once a campaign is loaded.
 
-**Tech Stack:** PowerShell scripts, Starsector `vmparams`, Java system properties, JUnit 5, existing Netty Phase 3 pump.
+**Tech Stack:** PowerShell scripts, Starsector `vmparams`, Java system properties, JUnit 5, existing Phase 3 TCP pump.
 
 ---
 

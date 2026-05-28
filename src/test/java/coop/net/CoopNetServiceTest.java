@@ -20,7 +20,7 @@ class CoopNetServiceTest {
         try {
             host.startHost(port);
             guest.connect("127.0.0.1", port);
-            waitUntil(() -> host.isConnected() && guest.isConnected(), "host and guest connected");
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
 
             guest.send(CoopMessages.ping(null, guest.nextSeq(), 1000L));
             guest.flushOutbound();
@@ -32,6 +32,24 @@ class CoopNetServiceTest {
             CoopMessages.Message inboundPong = waitForMessage(guest, "guest inbound pong");
             assertEquals(CoopMessages.Type.PONG, inboundPong.type());
             assertEquals("{\"pingSeq\":1}", inboundPong.payloadJson());
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
+    void guestRetriesUntilLateHostStartsListening() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            guest.connect("127.0.0.1", port);
+            Thread.sleep(300L);
+
+            host.startHost(port);
+
+            waitUntil(() -> bothConnected(host, guest), "guest retry connected to late host");
         } finally {
             guest.shutdown();
             host.shutdown();
@@ -63,5 +81,11 @@ class CoopNetServiceTest {
             Thread.sleep(25L);
         }
         assertTrue(condition.getAsBoolean(), "Timed out waiting for " + description);
+    }
+
+    private boolean bothConnected(CoopNetService host, CoopNetService guest) {
+        boolean hostConnected = host.isConnected();
+        boolean guestConnected = guest.isConnected();
+        return hostConnected && guestConnected;
     }
 }

@@ -7,8 +7,6 @@ import java.time.Instant
 group = 'coop'
 version = '0.1.0'
 
-def nettyVersion = '4.1.69.Final'
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(17)
@@ -23,19 +21,8 @@ def starsectorJars = files(
     "${starsectorCore}/lwjgl_util.jar"
 )
 
-configurations {
-    nettyRuntime
-    implementation.extendsFrom(nettyRuntime)
-}
-
 dependencies {
     compileOnly starsectorJars
-    nettyRuntime "io.netty:netty-buffer:${nettyVersion}"
-    nettyRuntime "io.netty:netty-codec:${nettyVersion}"
-    nettyRuntime "io.netty:netty-common:${nettyVersion}"
-    nettyRuntime "io.netty:netty-handler:${nettyVersion}"
-    nettyRuntime "io.netty:netty-resolver:${nettyVersion}"
-    nettyRuntime "io.netty:netty-transport:${nettyVersion}"
     testImplementation starsectorJars
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.3'
@@ -51,13 +38,7 @@ test {
     useJUnitPlatform()
 }
 
-tasks.register('copyNettyJars', Copy) {
-    from configurations.nettyRuntime
-    into file('jars/netty')
-}
-
 jar {
-    dependsOn tasks.named('copyNettyJars')
     archiveFileName = 'coop.jar'
     destinationDirectory = file('jars')
     manifest {
@@ -67,8 +48,4 @@ jar {
             'Coop-Build-Time': Instant.now().toString()
         )
     }
-}
-
-build {
-    dependsOn tasks.named('copyNettyJars')
 }

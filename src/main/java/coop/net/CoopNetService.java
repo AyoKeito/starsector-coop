@@ -1,94 +1,81 @@
 package coop.net;
 
 import coop.util.CoopLog;
-import io.netty.bootstrap.Bootstrap;
-import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.SimpleChannelInboundHandler;
-import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.handler.codec.LineBasedFrameDecoder;
-import io.netty.handler.codec.string.StringDecoder;
-import io.netty.handler.codec.string.StringEncoder;
 
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class CoopNetService {
     private static final int MAX_FRAME_BYTES = 64 * 1024;
+    private static final int READ_BUFFER_BYTES = 8 * 1024;
+    private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
 
     private final Queue<CoopMessages.Message> inbound = new ConcurrentLinkedQueue<>();
     private final Queue<CoopMessages.Message> outbound = new ConcurrentLinkedQueue<>();
-    private final AtomicReference<Channel> activeChannel = new AtomicReference<>();
     private final AtomicLong nextSeq = new AtomicLong();
     private final Object lifecycleLock = new Object();
+    private final ByteBuffer readBuffer = ByteBuffer.allocate(READ_BUFFER_BYTES);
+    private final byte[] inboundFrame = new byte[MAX_FRAME_BYTES];
 
-    private volatile CoopConnectionRole role = CoopConnectionRole.NONE;
-    private EventLoopGroup bossGroup;
-    private EventLoopGroup workerGroup;
-    private EventLoopGroup clientGroup;
-    private Channel serverChannel;
+    private CoopConnectionRole role = CoopConnectionRole.NONE;
+    private ServerSocketChannel serverChannel;
+    private SocketChannel activeChannel;
+    private SocketChannel pendingConnectChannel;
+    private ByteBuffer pendingWrite;
+    private int inboundFrameLength;
+    private String connectHost;
+    private int connectPort;
+    private long nextConnectAttemptAtMillis;
+    private boolean connectFailureLogged;
+    private boolean discardingOversizedFrame;
 
     public void startHost(int port) {
         synchronized (lifecycleLock) {
-            shutdown();
+            shutdownLocked();
             role = CoopConnectionRole.HOST;
-            bossGroup = new NioEventLoopGroup(1);
-            workerGroup = new NioEventLoopGroup(1);
-
-            ServerBootstrap bootstrap = new ServerBootstrap();
-            bootstrap.group(bossGroup, workerGroup)
-                    .channel(NioServerSocketChannel.class)
-                    .childOption(ChannelOption.TCP_NODELAY, true)
-                    .childHandler(new CoopChannelInitializer());
-
-            ChannelFuture bind = bootstrap.bind(port).syncUninterruptibly();
-            serverChannel = bind.channel();
-            CoopLog.info(CoopNetService.class, "Coop TCP host listening on port " + port);
+            try {
+                ServerSocketChannel channel = ServerSocketChannel.open();
+                channel.configureBlocking(false);
+                channel.socket().setReuseAddress(true);
+                channel.bind(new InetSocketAddress(port));
+                serverChannel = channel;
+                CoopLog.info(CoopNetService.class, "Coop TCP host listening on port " + port);
+            } catch (Exception ex) {
+                shutdownLocked();
+                throw new IllegalStateException("Unable to start coop TCP host on port " + port, ex);
+            }
         }
     }
 
     public void connect(String host, int port) {
         synchronized (lifecycleLock) {
-            shutdown();
+            shutdownLocked();
             role = CoopConnectionRole.GUEST;
-            clientGroup = new NioEventLoopGroup(1);
-
-            Bootstrap bootstrap = new Bootstrap();
-            bootstrap.group(clientGroup)
-                    .channel(NioSocketChannel.class)
-                    .option(ChannelOption.TCP_NODELAY, true)
-                    .handler(new CoopChannelInitializer());
-
-            bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
-                if (future.isSuccess()) {
-                    CoopLog.info(CoopNetService.class, "Coop TCP guest connected to " + host + ":" + port);
-                } else {
-                    CoopLog.warn(CoopNetService.class, "Coop TCP guest failed to connect to " + host + ":" + port,
-                            future.cause());
-                }
-            });
+            connectHost = host;
+            connectPort = port;
+            nextConnectAttemptAtMillis = 0L;
+            connectFailureLogged = false;
+            pollNetworkLocked();
         }
     }
 
     public CoopConnectionRole role() {
-        return role;
+        synchronized (lifecycleLock) {
+            return role;
+        }
     }
 
     public boolean isConnected() {
-        Channel channel = activeChannel.get();
-        return channel != null && channel.isActive();
+        synchronized (lifecycleLock) {
+            pollNetworkLocked();
+            return activeChannel != null && activeChannel.isOpen() && activeChannel.isConnected();
+        }
     }
 
     public long nextSeq() {
@@ -100,89 +87,266 @@ public class CoopNetService {
     }
 
     public void flushOutbound() {
-        Channel channel = activeChannel.get();
-        if (channel == null || !channel.isActive()) {
-            return;
-        }
-
-        CoopMessages.Message message;
-        while ((message = outbound.poll()) != null) {
-            channel.writeAndFlush(CoopMessages.encode(message) + "\n");
+        synchronized (lifecycleLock) {
+            pollNetworkLocked();
+            flushOutboundLocked();
         }
     }
 
     public CoopMessages.Message pollInbound() {
-        return inbound.poll();
+        synchronized (lifecycleLock) {
+            pollNetworkLocked();
+            return inbound.poll();
+        }
     }
 
     public void shutdown() {
         synchronized (lifecycleLock) {
-            closeChannel(serverChannel);
-            serverChannel = null;
-            closeChannel(activeChannel.getAndSet(null));
-            shutdownGroup(bossGroup);
-            shutdownGroup(workerGroup);
-            shutdownGroup(clientGroup);
-            bossGroup = null;
-            workerGroup = null;
-            clientGroup = null;
-            role = CoopConnectionRole.NONE;
+            shutdownLocked();
         }
     }
 
-    private void closeChannel(Channel channel) {
-        if (channel != null) {
-            channel.close();
+    private void pollNetworkLocked() {
+        try {
+            acceptHostConnectionLocked();
+            progressGuestConnectionLocked();
+            readAvailableLocked();
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP polling failed", ex);
+            closeActiveChannelLocked(activeChannel);
+            closeChannel(pendingConnectChannel);
+            pendingConnectChannel = null;
         }
     }
 
-    private void shutdownGroup(EventLoopGroup group) {
-        if (group != null) {
-            group.shutdownGracefully();
+    private void acceptHostConnectionLocked() throws Exception {
+        if (role != CoopConnectionRole.HOST || serverChannel == null || activeChannel != null) {
+            return;
+        }
+
+        SocketChannel accepted = serverChannel.accept();
+        if (accepted == null) {
+            return;
+        }
+
+        if (!attachChannelLocked(accepted)) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP rejecting extra connection");
+            closeChannel(accepted);
         }
     }
 
-    private final class CoopChannelInitializer extends ChannelInitializer<SocketChannel> {
-        @Override
-        protected void initChannel(SocketChannel channel) {
-            channel.pipeline().addLast(new LineBasedFrameDecoder(MAX_FRAME_BYTES));
-            channel.pipeline().addLast(new StringDecoder(StandardCharsets.UTF_8));
-            channel.pipeline().addLast(new StringEncoder(StandardCharsets.UTF_8));
-            channel.pipeline().addLast(new CoopChannelHandler());
+    private void progressGuestConnectionLocked() throws Exception {
+        if (role != CoopConnectionRole.GUEST || activeChannel != null) {
+            return;
+        }
+
+        if (pendingConnectChannel != null) {
+            try {
+                if (pendingConnectChannel.finishConnect()) {
+                    SocketChannel connected = pendingConnectChannel;
+                    pendingConnectChannel = null;
+                    attachChannelLocked(connected);
+                    connectFailureLogged = false;
+                    CoopLog.info(CoopNetService.class,
+                            "Coop TCP guest connected to " + connectHost + ":" + connectPort);
+                    return;
+                }
+            } catch (Exception ex) {
+                closeChannel(pendingConnectChannel);
+                pendingConnectChannel = null;
+                scheduleConnectRetryLocked(ex);
+            }
+        }
+
+        long now = System.currentTimeMillis();
+        if (pendingConnectChannel != null || now < nextConnectAttemptAtMillis) {
+            return;
+        }
+
+        beginConnectAttemptLocked(now);
+    }
+
+    private void beginConnectAttemptLocked(long now) {
+        try {
+            SocketChannel channel = SocketChannel.open();
+            channel.configureBlocking(false);
+            channel.socket().setTcpNoDelay(true);
+            if (channel.connect(new InetSocketAddress(connectHost, connectPort))) {
+                attachChannelLocked(channel);
+                connectFailureLogged = false;
+                CoopLog.info(CoopNetService.class,
+                        "Coop TCP guest connected to " + connectHost + ":" + connectPort);
+            } else {
+                pendingConnectChannel = channel;
+            }
+        } catch (Exception ex) {
+            scheduleConnectRetryLocked(ex);
+            nextConnectAttemptAtMillis = now + CONNECT_RETRY_DELAY_MILLIS;
         }
     }
 
-    private final class CoopChannelHandler extends SimpleChannelInboundHandler<String> {
-        @Override
-        public void channelActive(ChannelHandlerContext ctx) {
-            Channel newChannel = ctx.channel();
-            if (!activeChannel.compareAndSet(null, newChannel)) {
-                CoopLog.warn(CoopNetService.class, "Coop TCP rejecting extra connection");
-                newChannel.close();
+    private void scheduleConnectRetryLocked(Exception ex) {
+        nextConnectAttemptAtMillis = System.currentTimeMillis() + CONNECT_RETRY_DELAY_MILLIS;
+        if (!connectFailureLogged) {
+            CoopLog.warn(CoopNetService.class,
+                    "Coop TCP guest failed to connect to " + connectHost + ":" + connectPort + "; will retry", ex);
+            connectFailureLogged = true;
+        }
+    }
+
+    private boolean attachChannelLocked(SocketChannel channel) throws Exception {
+        if (role == CoopConnectionRole.NONE || activeChannel != null) {
+            return false;
+        }
+
+        channel.configureBlocking(false);
+        channel.socket().setTcpNoDelay(true);
+        activeChannel = channel;
+        inboundFrameLength = 0;
+        discardingOversizedFrame = false;
+        CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role);
+        return true;
+    }
+
+    private void readAvailableLocked() throws Exception {
+        SocketChannel channel = activeChannel;
+        if (channel == null || !channel.isOpen() || !channel.isConnected()) {
+            return;
+        }
+
+        readBuffer.clear();
+        int read = channel.read(readBuffer);
+        while (read > 0) {
+            readBuffer.flip();
+            while (readBuffer.hasRemaining()) {
+                appendInboundByte(readBuffer.get());
+            }
+            readBuffer.clear();
+            read = channel.read(readBuffer);
+        }
+
+        if (read < 0) {
+            closeActiveChannelLocked(channel);
+        }
+    }
+
+    private void appendInboundByte(byte value) {
+        int unsigned = value & 0xff;
+        if (unsigned == '\n') {
+            if (discardingOversizedFrame) {
+                inboundFrameLength = 0;
+                discardingOversizedFrame = false;
                 return;
             }
-            CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role);
+            String frame = new String(inboundFrame, 0, inboundFrameLength, StandardCharsets.UTF_8);
+            inboundFrameLength = 0;
+            handleFrame(frame.trim());
+            return;
         }
 
-        @Override
-        public void channelInactive(ChannelHandlerContext ctx) {
-            activeChannel.compareAndSet(ctx.channel(), null);
-            CoopLog.info(CoopNetService.class, "Coop TCP channel inactive as " + role);
+        if (unsigned == '\r' || discardingOversizedFrame) {
+            return;
         }
 
-        @Override
-        protected void channelRead0(ChannelHandlerContext ctx, String frame) {
-            try {
-                inbound.add(CoopMessages.decode(frame.trim()));
-            } catch (RuntimeException ex) {
-                CoopLog.warn(CoopNetService.class, "Coop TCP received invalid frame", ex);
+        if (inboundFrameLength >= MAX_FRAME_BYTES) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP received oversized frame");
+            inboundFrameLength = 0;
+            discardingOversizedFrame = true;
+            return;
+        }
+
+        inboundFrame[inboundFrameLength] = (byte) unsigned;
+        inboundFrameLength++;
+    }
+
+    private void handleFrame(String frame) {
+        if (frame.isEmpty()) {
+            return;
+        }
+        try {
+            inbound.add(CoopMessages.decode(frame));
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP received invalid frame", ex);
+        }
+    }
+
+    private void flushOutboundLocked() {
+        SocketChannel channel = activeChannel;
+        if (channel == null || !channel.isOpen() || !channel.isConnected()) {
+            return;
+        }
+
+        try {
+            if (pendingWrite != null && !writePendingLocked(channel)) {
+                return;
+            }
+            pendingWrite = null;
+
+            CoopMessages.Message message;
+            while ((message = outbound.poll()) != null) {
+                pendingWrite = ByteBuffer.wrap((CoopMessages.encode(message) + "\n")
+                        .getBytes(StandardCharsets.UTF_8));
+                if (!writePendingLocked(channel)) {
+                    return;
+                }
+                pendingWrite = null;
+            }
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP failed to flush outbound messages", ex);
+            closeActiveChannelLocked(channel);
+        }
+    }
+
+    private boolean writePendingLocked(SocketChannel channel) throws Exception {
+        while (pendingWrite.hasRemaining()) {
+            if (channel.write(pendingWrite) == 0) {
+                return false;
             }
         }
+        return true;
+    }
 
-        @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            CoopLog.warn(CoopNetService.class, "Coop TCP channel exception", cause);
-            ctx.close();
+    private void closeActiveChannelLocked(SocketChannel channel) {
+        if (channel == null || activeChannel != channel) {
+            return;
+        }
+
+        activeChannel = null;
+        pendingWrite = null;
+        inboundFrameLength = 0;
+        discardingOversizedFrame = false;
+        closeChannel(channel);
+        CoopLog.info(CoopNetService.class, "Coop TCP channel inactive as " + role);
+        if (role == CoopConnectionRole.GUEST) {
+            nextConnectAttemptAtMillis = System.currentTimeMillis() + CONNECT_RETRY_DELAY_MILLIS;
+        }
+    }
+
+    private void shutdownLocked() {
+        closeChannel(serverChannel);
+        closeChannel(activeChannel);
+        closeChannel(pendingConnectChannel);
+        serverChannel = null;
+        activeChannel = null;
+        pendingConnectChannel = null;
+        pendingWrite = null;
+        connectHost = null;
+        connectPort = 0;
+        nextConnectAttemptAtMillis = 0L;
+        connectFailureLogged = false;
+        inboundFrameLength = 0;
+        discardingOversizedFrame = false;
+        role = CoopConnectionRole.NONE;
+    }
+
+    private void closeChannel(java.nio.channels.Channel channel) {
+        if (channel == null) {
+            return;
+        }
+        try {
+            channel.close();
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP failed to close channel", ex);
         }
     }
 }
