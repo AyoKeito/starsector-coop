@@ -1,8 +1,10 @@
 package coop.net;
 
 import coop.session.CoopPlayerInfo;
+import coop.handshake.CoopHandshakeManifest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -83,5 +85,48 @@ class CoopMessagesTest {
         assertEquals(CoopMessages.Type.LOBBY_REJECT, decoded.type());
         assertNull(decoded.sessionId());
         assertEquals("Lobby already has a guest", payload.get("reason"));
+    }
+
+    @Test
+    void handshakeManifestRoundTripsManifestAndIronMode() {
+        CoopHandshakeManifest manifest = new CoopHandshakeManifest("0.98a-RC8", "0.1.0", "commit-a", List.of());
+
+        CoopMessages.Message message = CoopMessages.handshakeManifest(6L, 7000L, manifest, false);
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(message));
+        Map<String, Object> payload = CoopMessages.decodePayload(decoded);
+
+        assertEquals(CoopMessages.Type.HANDSHAKE_MANIFEST, decoded.type());
+        assertNull(decoded.sessionId());
+        assertEquals(manifest, CoopHandshakeManifest.fromJson((String) payload.get("manifestJson")));
+        assertEquals("false", payload.get("ironMode"));
+    }
+
+    @Test
+    void handshakeAcceptResultCarriesCanonicalSessionId() {
+        CoopMessages.Message result = CoopMessages.handshakeResultAccept(7L, 8000L, "session-a");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(result));
+        Map<String, Object> payload = CoopMessages.decodePayload(decoded);
+
+        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals("true", payload.get("accepted"));
+        assertEquals("session-a", payload.get("sessionId"));
+        assertEquals("", payload.get("diff"));
+    }
+
+    @Test
+    void handshakeRejectResultCarriesReadableDiffWithoutCanonicalSessionId() {
+        CoopMessages.Message result = CoopMessages.handshakeResultReject(8L, 9000L,
+                "mod utility.version: host=1.0.0 guest=1.1.0");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(result));
+        Map<String, Object> payload = CoopMessages.decodePayload(decoded);
+
+        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, decoded.type());
+        assertNull(decoded.sessionId());
+        assertEquals("false", payload.get("accepted"));
+        assertEquals("", payload.get("sessionId"));
+        assertEquals("mod utility.version: host=1.0.0 guest=1.1.0", payload.get("diff"));
     }
 }

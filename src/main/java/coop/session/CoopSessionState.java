@@ -92,6 +92,34 @@ public class CoopSessionState {
         clearCanonicalSession();
     }
 
+    public synchronized String hostAcceptHandshake() {
+        if (role != CoopConnectionRole.HOST || connectionState != CoopLobbyState.HOST_CONNECTED) {
+            throw new IllegalStateException("Host lobby is not ready for handshake acceptance");
+        }
+        if (handshakeValidated) {
+            return sessionId;
+        }
+        sessionId = nextId("sessionId");
+        handshakeValidated = true;
+        return sessionId;
+    }
+
+    public synchronized void guestAcceptHandshake(String acceptedSessionId) {
+        if (role != CoopConnectionRole.GUEST || connectionState != CoopLobbyState.GUEST_CONNECTED) {
+            throw new IllegalStateException("Guest lobby is not ready for handshake acceptance");
+        }
+        sessionId = requireText(acceptedSessionId, "sessionId");
+        handshakeValidated = true;
+    }
+
+    public synchronized void rejectHandshake(String reason) {
+        if (role == CoopConnectionRole.NONE) {
+            throw new IllegalStateException("No active lobby can reject a handshake");
+        }
+        connectionState = CoopLobbyState.REJECTED;
+        clearCanonicalSession();
+    }
+
     public synchronized CoopPlayerInfo localPlayerInfo() {
         if (localPlayerId == null || localName == null) {
             throw new IllegalStateException("Local player info is not initialized");

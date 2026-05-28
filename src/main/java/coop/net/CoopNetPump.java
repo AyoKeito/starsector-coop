@@ -4,13 +4,18 @@ import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.handshake.CoopHandshakeDiff;
+import coop.handshake.CoopHandshakeManifest;
+import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.util.CoopLog;
 
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 public class CoopNetPump implements EveryFrameScript {
     private static final long PING_INTERVAL_MILLIS = 3000L;
@@ -26,6 +31,9 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean startupConfigChecked;
     private boolean memoryConfigWarningLogged;
     private boolean lobbyHelloSent;
+    private boolean handshakeManifestSent;
+    private final Supplier<CoopHandshakeManifest> manifestSupplier;
+    private final BooleanSupplier ironModeSupplier;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -36,9 +44,16 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis) {
+        this(service, sessionState, clockMillis, CoopHandshakeManifest::capture, CoopIronModeGuard::isIronModeActive);
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
+                       Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
+        this.manifestSupplier = Objects.requireNonNull(manifestSupplier, "manifestSupplier");
+        this.ironModeSupplier = Objects.requireNonNull(ironModeSupplier, "ironModeSupplier");
         this.nextPingAtMillis = clockMillis.getAsLong() + PING_INTERVAL_MILLIS;
     }
 
@@ -59,6 +74,7 @@ public class CoopNetPump implements EveryFrameScript {
         service.flushOutbound();
         maybeSendLobbyHello();
         drainInbound();
+        maybeSendHandshakeManifest();
         maybeSendPing();
         service.flushOutbound();
     }
@@ -78,11 +94,13 @@ public class CoopNetPump implements EveryFrameScript {
                 service.startHost(config.port());
                 sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
                 lobbyHelloSent = false;
+                handshakeManifestSent = false;
                 CoopLog.info(CoopNetPump.class, "Coop host started from JVM property "
                         + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
             } else if (config.role() == CoopConnectionRole.GUEST) {
                 sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
                 lobbyHelloSent = false;
+                handshakeManifestSent = false;
                 service.connect(config.host(), config.port());
                 CoopLog.info(CoopNetPump.class, "Coop guest started from JVM properties "
                         + CoopNetStartupConfig.CONNECT_HOST_PROPERTY + "=" + config.host() + ", "
@@ -115,6 +133,7 @@ public class CoopNetPump implements EveryFrameScript {
                 service.startHost(port);
                 sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
                 lobbyHelloSent = false;
+                handshakeManifestSent = false;
                 CoopLog.info(CoopNetPump.class, "Coop host control consumed memory flag " + HOST_PORT_FLAG + "=" + port);
                 return;
             }
@@ -127,6 +146,7 @@ public class CoopNetPump implements EveryFrameScript {
                 }
                 sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
                 lobbyHelloSent = false;
+                handshakeManifestSent = false;
                 service.connect(host, port);
                 CoopLog.info(CoopNetPump.class,
                         "Coop guest control consumed memory flags " + CONNECT_HOST_FLAG + "=" + host
@@ -169,6 +189,8 @@ public class CoopNetPump implements EveryFrameScript {
                 case LOBBY_HELLO -> handleLobbyHello(message);
                 case LOBBY_ACCEPT -> handleLobbyAccept(message);
                 case LOBBY_REJECT -> handleLobbyReject(message);
+                case HANDSHAKE_MANIFEST -> handleHandshakeManifest(message);
+                case HANDSHAKE_RESULT -> handleHandshakeResult(message);
                 case PING -> sendPong(message);
                 default -> {
                 }
@@ -191,6 +213,30 @@ public class CoopNetPump implements EveryFrameScript {
         service.send(hello);
         lobbyHelloSent = true;
         log("outbound", hello);
+    }
+
+    private void maybeSendHandshakeManifest() {
+        if (handshakeManifestSent
+                || service.role() != CoopConnectionRole.GUEST
+                || !service.isConnected()
+                || sessionState.connectionState() != CoopLobbyState.GUEST_CONNECTED
+                || sessionState.handshakeValidated()) {
+            return;
+        }
+
+        try {
+            CoopMessages.Message handshake = CoopMessages.handshakeManifest(
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    manifestSupplier.get(),
+                    ironModeSupplier.getAsBoolean());
+            service.send(handshake);
+            handshakeManifestSent = true;
+            log("outbound", handshake);
+        } catch (RuntimeException ex) {
+            sessionState.rejectHandshake("Failed to capture handshake manifest: " + ex.getMessage());
+            CoopLog.warn(CoopNetPump.class, "Failed to capture coop handshake manifest", ex);
+        }
     }
 
     private void handleLobbyHello(CoopMessages.Message message) {
@@ -252,12 +298,78 @@ public class CoopNetPump implements EveryFrameScript {
                 "Coop lobby rejected: " + CoopMessages.requiredPayloadString(message, "reason"));
     }
 
+    private void handleHandshakeManifest(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+
+        String diff = handshakeDiffFor(message);
+        if (!diff.isEmpty()) {
+            sessionState.rejectHandshake(diff);
+            CoopMessages.Message reject = CoopMessages.handshakeResultReject(
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    diff);
+            service.send(reject);
+            log("outbound", reject);
+            CoopLog.warn(CoopNetPump.class, "Coop handshake rejected:\n" + diff);
+            return;
+        }
+
+        String sessionId = sessionState.hostAcceptHandshake();
+        CoopMessages.Message accept = CoopMessages.handshakeResultAccept(
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                sessionId);
+        service.send(accept);
+        log("outbound", accept);
+        CoopLog.info(CoopNetPump.class, "Coop handshake accepted sessionId=" + sessionId);
+    }
+
+    private String handshakeDiffFor(CoopMessages.Message message) {
+        try {
+            boolean hostIronMode = ironModeSupplier.getAsBoolean();
+            boolean guestIronMode = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "ironMode"));
+            if (hostIronMode) {
+                return "ironMode: host=true";
+            }
+            if (guestIronMode) {
+                return "ironMode: guest=true";
+            }
+
+            CoopHandshakeManifest hostManifest = manifestSupplier.get();
+            CoopHandshakeManifest guestManifest = CoopHandshakeManifest.fromJson(
+                    CoopMessages.requiredPayloadString(message, "manifestJson"));
+            return CoopHandshakeDiff.compare(hostManifest, guestManifest).toDisplayString();
+        } catch (RuntimeException ex) {
+            return "handshakeManifest: " + ex.getMessage();
+        }
+    }
+
+    private void handleHandshakeResult(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+
+        boolean accepted = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "accepted"));
+        if (accepted) {
+            String sessionId = CoopMessages.requiredPayloadString(message, "sessionId");
+            sessionState.guestAcceptHandshake(sessionId);
+            CoopLog.info(CoopNetPump.class, "Coop handshake accepted sessionId=" + sessionId);
+            return;
+        }
+
+        String diff = CoopMessages.requiredPayloadString(message, "diff");
+        sessionState.rejectHandshake(diff);
+        CoopLog.warn(CoopNetPump.class, "Coop handshake rejected:\n" + diff);
+    }
+
     private void maybeSendPing() {
         if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()) {
             return;
         }
         if (sessionState.connectionState() != CoopLobbyState.NONE
-                && sessionState.connectionState() != CoopLobbyState.GUEST_CONNECTED) {
+                && !sessionState.handshakeValidated()) {
             return;
         }
 
@@ -266,7 +378,7 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
-        CoopMessages.Message ping = CoopMessages.ping(null, service.nextSeq(), now);
+        CoopMessages.Message ping = CoopMessages.ping(sessionState.sessionId(), service.nextSeq(), now);
         service.send(ping);
         log("outbound", ping);
         nextPingAtMillis = now + PING_INTERVAL_MILLIS;

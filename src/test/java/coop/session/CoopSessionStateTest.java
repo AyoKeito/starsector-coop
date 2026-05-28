@@ -78,6 +78,45 @@ class CoopSessionStateTest {
         assertFalse(state.handshakeValidated());
     }
 
+    @Test
+    void hostAllocatesCanonicalSessionOnlyAfterHandshakeAcceptance() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+
+        String sessionId = state.hostAcceptHandshake();
+
+        assertEquals("session-a", sessionId);
+        assertEquals("session-a", state.sessionId());
+        assertTrue(state.handshakeValidated());
+    }
+
+    @Test
+    void guestRecordsCanonicalSessionOnlyAfterHandshakeAcceptance() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("guest-player"));
+        state.startGuest("Guest");
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+
+        state.guestAcceptHandshake("session-a");
+
+        assertEquals("session-a", state.sessionId());
+        assertTrue(state.handshakeValidated());
+    }
+
+    @Test
+    void handshakeRejectionClearsCanonicalSession() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        state.hostAcceptHandshake();
+
+        state.rejectHandshake("gameVersion: host=0.98a-RC8 guest=0.97a");
+
+        assertEquals(CoopLobbyState.REJECTED, state.connectionState());
+        assertNull(state.sessionId());
+        assertFalse(state.handshakeValidated());
+    }
+
     private static final class SequencedIds implements java.util.function.Supplier<String> {
         private final Queue<String> ids;
 

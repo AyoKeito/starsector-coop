@@ -1,5 +1,6 @@
 package coop.net;
 
+import coop.handshake.CoopHandshakeManifest;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
@@ -100,17 +101,124 @@ class CoopNetPumpTest {
         session.startGuest("Guest");
         service.inbound.add(CoopMessages.lobbyAccept(1L, 8000L, "lobby-a",
                 new CoopPlayerInfo("host-player", "Host")));
-        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L);
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false);
 
         pump.advance(0f);
 
         assertEquals(CoopLobbyState.GUEST_CONNECTED, session.connectionState());
         assertEquals("lobby-a", session.provisionalLobbyId());
         assertEquals("host-player", session.remotePlayerId());
-        assertEquals(1, service.sent.size());
+        assertEquals(2, service.sent.size());
         assertEquals(CoopMessages.Type.LOBBY_HELLO, service.sent.get(0).type());
+        assertEquals(CoopMessages.Type.HANDSHAKE_MANIFEST, service.sent.get(1).type());
         assertNull(session.sessionId());
         assertFalse(session.handshakeValidated());
+    }
+
+    @Test
+    void guestSendsHandshakeManifestAfterLobbyAccept() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        service.inbound.add(CoopMessages.lobbyAccept(1L, 8000L, "lobby-a",
+                new CoopPlayerInfo("host-player", "Host")));
+        CoopHandshakeManifest manifest = emptyManifest("0.98a-RC8", "commit-a");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L, () -> manifest, () -> false);
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTED, session.connectionState());
+        assertEquals(2, service.sent.size());
+        assertEquals(CoopMessages.Type.LOBBY_HELLO, service.sent.get(0).type());
+        CoopMessages.Message handshake = service.sent.get(1);
+        assertEquals(CoopMessages.Type.HANDSHAKE_MANIFEST, handshake.type());
+        assertEquals(manifest.toJson(), CoopMessages.requiredPayloadString(handshake, "manifestJson"));
+        assertEquals("false", CoopMessages.requiredPayloadString(handshake, "ironMode"));
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+    }
+
+    @Test
+    void hostAcceptsMatchingHandshakeAndAllocatesCanonicalSession() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopHandshakeManifest manifest = emptyManifest("0.98a-RC8", "commit-a");
+        service.inbound.add(CoopMessages.handshakeManifest(2L, 9000L, manifest, false));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> manifest, () -> false);
+
+        pump.advance(0f);
+
+        assertEquals("session-a", session.sessionId());
+        assertTrue(session.handshakeValidated());
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message result = service.sent.get(0);
+        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, result.type());
+        assertEquals("session-a", result.sessionId());
+        assertEquals("true", CoopMessages.requiredPayloadString(result, "accepted"));
+        assertEquals("session-a", CoopMessages.requiredPayloadString(result, "sessionId"));
+    }
+
+    @Test
+    void hostRejectsMismatchedHandshakeBeforeSessionAllocation() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopHandshakeManifest hostManifest = emptyManifest("0.98a-RC8", "commit-a");
+        CoopHandshakeManifest guestManifest = emptyManifest("0.97a", "commit-a");
+        service.inbound.add(CoopMessages.handshakeManifest(2L, 9000L, guestManifest, false));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> hostManifest, () -> false);
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+        CoopMessages.Message result = service.sent.get(0);
+        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, result.type());
+        assertNull(result.sessionId());
+        assertEquals("false", CoopMessages.requiredPayloadString(result, "accepted"));
+        assertEquals("gameVersion: host=0.98a-RC8 guest=0.97a",
+                CoopMessages.requiredPayloadString(result, "diff"));
+    }
+
+    @Test
+    void hostRejectsIronModeHandshakeBeforeSessionAllocation() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopHandshakeManifest manifest = emptyManifest("0.98a-RC8", "commit-a");
+        service.inbound.add(CoopMessages.handshakeManifest(2L, 9000L, manifest, true));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> manifest, () -> false);
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+        CoopMessages.Message result = service.sent.get(0);
+        assertEquals("false", CoopMessages.requiredPayloadString(result, "accepted"));
+        assertEquals("ironMode: guest=true", CoopMessages.requiredPayloadString(result, "diff"));
+    }
+
+    @Test
+    void guestRecordsHandshakeAcceptSessionId() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        service.inbound.add(CoopMessages.handshakeResultAccept(3L, 11000L, "session-a"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 12000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false);
+
+        pump.advance(0f);
+
+        assertEquals("session-a", session.sessionId());
+        assertTrue(session.handshakeValidated());
     }
 
     @Test
@@ -177,5 +285,9 @@ class CoopNetPumpTest {
         public String get() {
             return ids.remove();
         }
+    }
+
+    private static CoopHandshakeManifest emptyManifest(String gameVersion, String commit) {
+        return new CoopHandshakeManifest(gameVersion, "0.1.0", commit, List.of());
     }
 }

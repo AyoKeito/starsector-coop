@@ -1,5 +1,6 @@
 package coop.net;
 
+import coop.handshake.CoopHandshakeManifest;
 import coop.session.CoopPlayerInfo;
 
 import java.util.LinkedHashMap;
@@ -15,6 +16,8 @@ public final class CoopMessages {
         LOBBY_HELLO,
         LOBBY_ACCEPT,
         LOBBY_REJECT,
+        HANDSHAKE_MANIFEST,
+        HANDSHAKE_RESULT,
         PING,
         PONG,
         DISCONNECT
@@ -59,6 +62,29 @@ public final class CoopMessages {
     public static Message lobbyReject(long seq, long sentAtMillis, String reason) {
         return new Message(Type.LOBBY_REJECT, null, seq, sentAtMillis,
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    public static Message handshakeManifest(long seq, long sentAtMillis, CoopHandshakeManifest manifest,
+                                             boolean ironMode) {
+        Objects.requireNonNull(manifest, "manifest");
+        return new Message(Type.HANDSHAKE_MANIFEST, null, seq, sentAtMillis,
+                "{\"manifestJson\":\"" + escapeJson(manifest.toJson()) + "\","
+                        + "\"ironMode\":\"" + ironMode + "\"}");
+    }
+
+    public static Message handshakeResultAccept(long seq, long sentAtMillis, String sessionId) {
+        String acceptedSessionId = requireText(sessionId, "sessionId");
+        return new Message(Type.HANDSHAKE_RESULT, acceptedSessionId, seq, sentAtMillis,
+                "{\"accepted\":\"true\","
+                        + "\"sessionId\":\"" + escapeJson(acceptedSessionId) + "\","
+                        + "\"diff\":\"\"}");
+    }
+
+    public static Message handshakeResultReject(long seq, long sentAtMillis, String diff) {
+        return new Message(Type.HANDSHAKE_RESULT, null, seq, sentAtMillis,
+                "{\"accepted\":\"false\","
+                        + "\"sessionId\":\"\","
+                        + "\"diff\":\"" + escapeJson(diff == null ? "" : diff) + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
