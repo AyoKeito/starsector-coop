@@ -2,7 +2,7 @@ package coop;
 
 import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
-import coop.net.CoopNetPump;
+import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
 import coop.util.CoopLog;
 
@@ -21,8 +21,7 @@ public class CoopModPlugin extends BaseModPlugin {
             netService.shutdown();
         }
         netService = new CoopNetService();
-        Global.getSector().removeScriptsOfClass(CoopNetPump.class);
-        Global.getSector().addScript(new CoopNetPump(netService));
+        CoopNetPumpInstaller.install(Global.getSector(), netService);
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
     }
 }

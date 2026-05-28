@@ -19,7 +19,8 @@ def starsectorCore = file('../../starsector-core')
 def starsectorJars = files(
     "${starsectorCore}/starfarer.api.jar",
     "${starsectorCore}/xstream-1.4.10.jar",
-    "${starsectorCore}/log4j-1.2.9.jar"
+    "${starsectorCore}/log4j-1.2.9.jar",
+    "${starsectorCore}/lwjgl_util.jar"
 )
 
 configurations {
