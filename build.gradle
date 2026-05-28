@@ -1,0 +1,41 @@
+plugins {
+    id 'java'
+}
+
+group = 'coop'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+def starsectorCore = file('../../starsector-core')
+def starsectorJars = files(
+    "${starsectorCore}/starfarer.api.jar",
+    "${starsectorCore}/xstream-1.4.10.jar",
+    "${starsectorCore}/log4j-1.2.9.jar"
+)
+
+dependencies {
+    compileOnly starsectorJars
+    testImplementation starsectorJars
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.3'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+test {
+    useJUnitPlatform()
+}
+
+jar {
+    archiveFileName = 'coop.jar'
+    destinationDirectory = file('jars')
+}
