@@ -2,6 +2,10 @@
 
 Run commands from PowerShell. Repository-level instructions require the `rtk` prefix for shell commands.
 
+## Runtime Notes
+
+Read `docs/starsector-runtime-limitations.md` before changing campaign scripts, networking, dependencies, or save-visible state. It records the Starsector sandbox and save-serialization limits found during Phase 3 TCP testing.
+
 ## Build, Test, And Package
 
 Use the repeatable build script:
