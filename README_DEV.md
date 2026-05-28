@@ -76,3 +76,37 @@ Show recent coop log lines:
 ```powershell
 rtk powershell -NoProfile -Command "Select-String -Path 'K:\Starsector\starsector-core\starsector.log' -Pattern 'coop|CoopModPlugin' | Select-Object -Last 50"
 ```
+
+## Two-Client Local Coop Test
+
+Create isolated host and guest Starsector copies under `K:\Starsector-coop-test`:
+
+```powershell
+rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\setup-two-client-test.ps1'
+```
+
+Build and deploy the current coop mod into both test clients:
+
+```powershell
+rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\deploy-to-test-clients.ps1'
+```
+
+Launch host and guest:
+
+```powershell
+rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\launch-host.ps1' -Port 7777
+rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\launch-guest.ps1' -HostAddress '127.0.0.1' -Port 7777
+```
+
+After both clients load a campaign, inspect coop log lines from both profiles:
+
+```powershell
+rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\tail-two-client-logs.ps1'
+```
+
+Expected Phase 3 evidence:
+
+```text
+Host log: inbound PING and outbound PONG
+Guest log: outbound PING and inbound PONG
+```

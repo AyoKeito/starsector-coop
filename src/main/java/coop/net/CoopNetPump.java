@@ -18,6 +18,7 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopNetService service;
     private final LongSupplier clockMillis;
     private long nextPingAtMillis;
+    private boolean startupConfigChecked;
     private boolean memoryConfigWarningLogged;
 
     public CoopNetPump(CoopNetService service) {
@@ -42,11 +43,38 @@ public class CoopNetPump implements EveryFrameScript {
 
     @Override
     public void advance(float amount) {
+        maybeStartFromSystemProperties();
         maybeStartFromMemoryFlags();
         service.flushOutbound();
         drainInbound();
         maybeSendPing();
         service.flushOutbound();
+    }
+
+    private void maybeStartFromSystemProperties() {
+        if (startupConfigChecked || service.role() != CoopConnectionRole.NONE) {
+            return;
+        }
+        startupConfigChecked = true;
+
+        try {
+            CoopNetStartupConfig config = CoopNetStartupConfig.fromSystemProperties();
+            if (!config.isPresent()) {
+                return;
+            }
+            if (config.role() == CoopConnectionRole.HOST) {
+                service.startHost(config.port());
+                CoopLog.info(CoopNetPump.class, "Coop host started from JVM property "
+                        + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
+            } else if (config.role() == CoopConnectionRole.GUEST) {
+                service.connect(config.host(), config.port());
+                CoopLog.info(CoopNetPump.class, "Coop guest started from JVM properties "
+                        + CoopNetStartupConfig.CONNECT_HOST_PROPERTY + "=" + config.host() + ", "
+                        + CoopNetStartupConfig.CONNECT_PORT_PROPERTY + "=" + config.port());
+            }
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Invalid coop networking JVM properties", ex);
+        }
     }
 
     private void maybeStartFromMemoryFlags() {
