@@ -2,6 +2,8 @@ plugins {
     id 'java'
 }
 
+import java.time.Instant
+
 group = 'coop'
 version = '0.1.0'
 
@@ -38,4 +40,11 @@ test {
 jar {
     archiveFileName = 'coop.jar'
     destinationDirectory = file('jars')
+    manifest {
+        attributes(
+            'Implementation-Title': 'Starsector Coop V1',
+            'Implementation-Version': project.version.toString(),
+            'Coop-Build-Time': Instant.now().toString()
+        )
+    }
 }
