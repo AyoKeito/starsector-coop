@@ -129,4 +129,45 @@ class CoopMessagesTest {
         assertEquals("", payload.get("sessionId"));
         assertEquals("mod utility.version: host=1.0.0 guest=1.1.0", payload.get("diff"));
     }
+
+    @Test
+    void seedLockRequestCarriesSeedAndHostFingerprint() {
+        CoopMessages.Message request = CoopMessages.seedLockRequest(
+                "session-a", 9L, 10000L, 123456789L, "coop-00000000075bcd15", "fingerprint-host");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(request));
+        Map<String, Object> payload = CoopMessages.decodePayload(decoded);
+
+        assertEquals(CoopMessages.Type.SEED_LOCK_REQUEST, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals(123456789L, payload.get("seedLong"));
+        assertEquals("coop-00000000075bcd15", payload.get("seedString"));
+        assertEquals("fingerprint-host", payload.get("sectorFingerprint"));
+        assertEquals(123456789L, CoopMessages.requiredPayloadLong(decoded, "seedLong"));
+    }
+
+    @Test
+    void seedLockAckCarriesGuestFingerprint() {
+        CoopMessages.Message ack = CoopMessages.seedLockAck("session-a", 10L, 11000L, "fingerprint-guest");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(ack));
+        Map<String, Object> payload = CoopMessages.decodePayload(decoded);
+
+        assertEquals(CoopMessages.Type.SEED_LOCK_ACK, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals("fingerprint-guest", payload.get("sectorFingerprint"));
+    }
+
+    @Test
+    void seedLockRejectCarriesReadableReason() {
+        CoopMessages.Message reject = CoopMessages.seedLockReject(
+                "session-a", 11L, 12000L, "sectorFingerprint: host=a guest=b");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(reject));
+        Map<String, Object> payload = CoopMessages.decodePayload(decoded);
+
+        assertEquals(CoopMessages.Type.SEED_LOCK_REJECT, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals("sectorFingerprint: host=a guest=b", payload.get("reason"));
+    }
 }

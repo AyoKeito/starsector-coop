@@ -1,0 +1,92 @@
+package coop.seed;
+
+import com.fs.starfarer.api.characters.CharacterCreationData;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Proxy;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class CoopSeedSyncTest {
+    @Test
+    void seedDataFormatsLongAsStableSeedString() {
+        CoopSeedSync.SeedData seed = CoopSeedSync.seedData(123456789L);
+
+        assertEquals(123456789L, seed.seedLong());
+        assertEquals("coop-00000000075bcd15", seed.seedString());
+    }
+
+    @Test
+    void appliesSeedToCharacterCreationDataBeforeProcgen() {
+        Map<String, Object> calls = new HashMap<>();
+        CharacterCreationData data = recordingCharacterCreationData(calls);
+        CoopSeedSync.SeedData seed = new CoopSeedSync.SeedData(987654321L, "coop-seed", "fingerprint-a");
+
+        CoopSeedSync.applyToCharacterCreationData(data, seed);
+
+        assertEquals(987654321L, calls.get("seed"));
+        assertEquals("coop-seed", calls.get("seedString"));
+    }
+
+    @Test
+    void storesSeedDataInPersistentData() {
+        Map<String, Object> persistentData = new HashMap<>();
+        CoopSeedSync.SeedData seed = new CoopSeedSync.SeedData(42L, "coop-42", "fingerprint-a");
+
+        CoopSeedSync.storePersistentData(persistentData, seed);
+
+        assertEquals(42L, persistentData.get(CoopSeedSync.PERSISTENT_SEED_LONG));
+        assertEquals("coop-42", persistentData.get(CoopSeedSync.PERSISTENT_SEED_STRING));
+        assertEquals("fingerprint-a", persistentData.get(CoopSeedSync.PERSISTENT_SECTOR_FINGERPRINT));
+    }
+
+    @Test
+    void seedDataFromVisibleSeedStringIsStableAndPreservesSeedString() {
+        CoopSeedSync.SeedData first = CoopSeedSync.seedDataFromSeedString("MN-2587421401119275744");
+        CoopSeedSync.SeedData second = CoopSeedSync.seedDataFromSeedString("MN-2587421401119275744");
+        CoopSeedSync.SeedData different = CoopSeedSync.seedDataFromSeedString("MN-2587421401119275745");
+
+        assertEquals("MN-2587421401119275744", first.seedString());
+        assertEquals(first.seedLong(), second.seedLong());
+        org.junit.jupiter.api.Assertions.assertNotEquals(first.seedLong(), different.seedLong());
+    }
+
+    @Test
+    void seedStringMismatchReportsOnlyDifferentVisibleSeedStrings() {
+        assertEquals("", CoopSeedSync.seedStringMismatch(" MN-2587421401119275744 ",
+                "MN-2587421401119275744"));
+        assertEquals("seedString: host=MN-2587421401119275744 guest=MN-2587421401119275745",
+                CoopSeedSync.seedStringMismatch("MN-2587421401119275744", "MN-2587421401119275745"));
+    }
+
+    private static CharacterCreationData recordingCharacterCreationData(Map<String, Object> calls) {
+        return (CharacterCreationData) Proxy.newProxyInstance(
+                CharacterCreationData.class.getClassLoader(),
+                new Class<?>[]{CharacterCreationData.class},
+                (proxy, method, args) -> {
+                    if ("setSeed".equals(method.getName())) {
+                        calls.put("seed", args[0]);
+                        return null;
+                    }
+                    if ("setSeedString".equals(method.getName())) {
+                        calls.put("seedString", args[0]);
+                        return null;
+                    }
+                    if (method.getReturnType() == boolean.class) {
+                        return false;
+                    }
+                    if (method.getReturnType() == int.class) {
+                        return 0;
+                    }
+                    if (method.getReturnType() == long.class) {
+                        return 0L;
+                    }
+                    if (method.getReturnType() == float.class) {
+                        return 0f;
+                    }
+                    return null;
+                });
+    }
+}

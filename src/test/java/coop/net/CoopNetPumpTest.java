@@ -1,6 +1,7 @@
 package coop.net;
 
 import coop.handshake.CoopHandshakeManifest;
+import coop.seed.CoopSeedSync;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
@@ -147,18 +148,101 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         CoopHandshakeManifest manifest = emptyManifest("0.98a-RC8", "commit-a");
         service.inbound.add(CoopMessages.handshakeManifest(2L, 9000L, manifest, false));
-        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> manifest, () -> false);
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> manifest, () -> false,
+                () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
+                () -> "fingerprint-host");
 
         pump.advance(0f);
 
         assertEquals("session-a", session.sessionId());
         assertTrue(session.handshakeValidated());
-        assertEquals(1, service.sent.size());
         CoopMessages.Message result = service.sent.get(0);
         assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, result.type());
         assertEquals("session-a", result.sessionId());
         assertEquals("true", CoopMessages.requiredPayloadString(result, "accepted"));
         assertEquals("session-a", CoopMessages.requiredPayloadString(result, "sessionId"));
+    }
+
+    @Test
+    void hostSendsSeedLockRequestAfterHandshakeAcceptance() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopHandshakeManifest manifest = emptyManifest("0.98a-RC8", "commit-a");
+        service.inbound.add(CoopMessages.handshakeManifest(2L, 9000L, manifest, false));
+        CoopSeedSync.SeedData seed = new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> manifest, () -> false,
+                () -> seed, () -> "fingerprint-host");
+
+        pump.advance(0f);
+
+        assertEquals("session-a", session.sessionId());
+        assertEquals(123456789L, session.seedLong());
+        assertEquals("coop-seed", session.seedString());
+        assertEquals("fingerprint-host", session.sectorFingerprint());
+        assertEquals(2, service.sent.size());
+        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, service.sent.get(0).type());
+        CoopMessages.Message request = service.sent.get(1);
+        assertEquals(CoopMessages.Type.SEED_LOCK_REQUEST, request.type());
+        assertEquals("session-a", request.sessionId());
+        assertEquals(123456789L, CoopMessages.requiredPayloadLong(request, "seedLong"));
+        assertEquals("coop-seed", CoopMessages.requiredPayloadString(request, "seedString"));
+        assertEquals("fingerprint-host", CoopMessages.requiredPayloadString(request, "sectorFingerprint"));
+    }
+
+    @Test
+    void guestRejectsSeedLockWhenLocalFingerprintDiffers() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 14000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-guest",
+                () -> "coop-seed");
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message reject = service.sent.get(0);
+        assertEquals(CoopMessages.Type.SEED_LOCK_REJECT, reject.type());
+        assertEquals("sectorFingerprint: host=fingerprint-host guest=fingerprint-guest",
+                CoopMessages.requiredPayloadString(reject, "reason"));
+    }
+
+    @Test
+    void guestRejectsSeedLockWhenLocalSeedStringDiffers() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "MN-host", "fingerprint-host"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 14000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "MN-guest");
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message reject = service.sent.get(0);
+        assertEquals(CoopMessages.Type.SEED_LOCK_REJECT, reject.type());
+        assertEquals("seedString: host=MN-host guest=MN-guest",
+                CoopMessages.requiredPayloadString(reject, "reason"));
     }
 
     @Test

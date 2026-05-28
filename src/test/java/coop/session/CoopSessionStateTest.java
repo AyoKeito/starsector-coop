@@ -109,12 +109,30 @@ class CoopSessionStateTest {
         state.startHost("Host");
         state.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         state.hostAcceptHandshake();
+        state.recordSeedLock(123456789L, "coop-seed", "fingerprint-a");
 
         state.rejectHandshake("gameVersion: host=0.98a-RC8 guest=0.97a");
 
         assertEquals(CoopLobbyState.REJECTED, state.connectionState());
         assertNull(state.sessionId());
         assertFalse(state.handshakeValidated());
+        assertNull(state.seedLong());
+        assertNull(state.seedString());
+        assertNull(state.sectorFingerprint());
+    }
+
+    @Test
+    void seedLockFieldsAreStoredAfterHandshake() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        state.hostAcceptHandshake();
+
+        state.recordSeedLock(123456789L, "coop-seed", "fingerprint-a");
+
+        assertEquals(123456789L, state.seedLong());
+        assertEquals("coop-seed", state.seedString());
+        assertEquals("fingerprint-a", state.sectorFingerprint());
     }
 
     private static final class SequencedIds implements java.util.function.Supplier<String> {

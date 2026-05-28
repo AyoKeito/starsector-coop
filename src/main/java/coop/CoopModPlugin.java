@@ -4,6 +4,7 @@ import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
 import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
+import coop.seed.CoopSeedSync;
 import coop.util.CoopLog;
 
 public class CoopModPlugin extends BaseModPlugin {
@@ -22,6 +23,12 @@ public class CoopModPlugin extends BaseModPlugin {
         }
         netService = new CoopNetService();
         CoopNetPumpInstaller.install(Global.getSector(), netService);
+        CoopSeedSync.storeCurrentSectorFingerprint();
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
+    }
+
+    @Override
+    public void onNewGameAfterProcGen() {
+        CoopSeedSync.storeCurrentSectorFingerprint();
     }
 }

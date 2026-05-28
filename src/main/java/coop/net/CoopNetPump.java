@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
+import coop.seed.CoopSeedSync;
 import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
@@ -32,8 +33,12 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean memoryConfigWarningLogged;
     private boolean lobbyHelloSent;
     private boolean handshakeManifestSent;
+    private boolean seedLockRequestSent;
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
     private final BooleanSupplier ironModeSupplier;
+    private final Supplier<CoopSeedSync.SeedData> hostSeedSupplier;
+    private final Supplier<String> sectorFingerprintSupplier;
+    private final Supplier<String> sectorSeedStringSupplier;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -49,11 +54,32 @@ public class CoopNetPump implements EveryFrameScript {
 
     public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
                        Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier) {
+        this(service, sessionState, clockMillis, manifestSupplier, ironModeSupplier,
+                CoopSeedSync::seedForLoadedSector,
+                CoopSeedSync::currentSectorFingerprint,
+                CoopSeedSync::currentSectorSeedString);
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
+                       Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier,
+                       Supplier<CoopSeedSync.SeedData> hostSeedSupplier, Supplier<String> sectorFingerprintSupplier) {
+        this(service, sessionState, clockMillis, manifestSupplier, ironModeSupplier,
+                hostSeedSupplier, sectorFingerprintSupplier, CoopSeedSync::currentSectorSeedString);
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
+                       Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier,
+                       Supplier<CoopSeedSync.SeedData> hostSeedSupplier,
+                       Supplier<String> sectorFingerprintSupplier,
+                       Supplier<String> sectorSeedStringSupplier) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.manifestSupplier = Objects.requireNonNull(manifestSupplier, "manifestSupplier");
         this.ironModeSupplier = Objects.requireNonNull(ironModeSupplier, "ironModeSupplier");
+        this.hostSeedSupplier = Objects.requireNonNull(hostSeedSupplier, "hostSeedSupplier");
+        this.sectorFingerprintSupplier = Objects.requireNonNull(sectorFingerprintSupplier, "sectorFingerprintSupplier");
+        this.sectorSeedStringSupplier = Objects.requireNonNull(sectorSeedStringSupplier, "sectorSeedStringSupplier");
         this.nextPingAtMillis = clockMillis.getAsLong() + PING_INTERVAL_MILLIS;
     }
 
@@ -75,6 +101,7 @@ public class CoopNetPump implements EveryFrameScript {
         maybeSendLobbyHello();
         drainInbound();
         maybeSendHandshakeManifest();
+        maybeSendSeedLockRequest();
         maybeSendPing();
         service.flushOutbound();
     }
@@ -95,12 +122,14 @@ public class CoopNetPump implements EveryFrameScript {
                 sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
+                seedLockRequestSent = false;
                 CoopLog.info(CoopNetPump.class, "Coop host started from JVM property "
                         + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
             } else if (config.role() == CoopConnectionRole.GUEST) {
                 sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
+                seedLockRequestSent = false;
                 service.connect(config.host(), config.port());
                 CoopLog.info(CoopNetPump.class, "Coop guest started from JVM properties "
                         + CoopNetStartupConfig.CONNECT_HOST_PROPERTY + "=" + config.host() + ", "
@@ -134,6 +163,7 @@ public class CoopNetPump implements EveryFrameScript {
                 sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
+                seedLockRequestSent = false;
                 CoopLog.info(CoopNetPump.class, "Coop host control consumed memory flag " + HOST_PORT_FLAG + "=" + port);
                 return;
             }
@@ -147,6 +177,7 @@ public class CoopNetPump implements EveryFrameScript {
                 sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
+                seedLockRequestSent = false;
                 service.connect(host, port);
                 CoopLog.info(CoopNetPump.class,
                         "Coop guest control consumed memory flags " + CONNECT_HOST_FLAG + "=" + host
@@ -191,6 +222,9 @@ public class CoopNetPump implements EveryFrameScript {
                 case LOBBY_REJECT -> handleLobbyReject(message);
                 case HANDSHAKE_MANIFEST -> handleHandshakeManifest(message);
                 case HANDSHAKE_RESULT -> handleHandshakeResult(message);
+                case SEED_LOCK_REQUEST -> handleSeedLockRequest(message);
+                case SEED_LOCK_ACK -> handleSeedLockAck(message);
+                case SEED_LOCK_REJECT -> handleSeedLockReject(message);
                 case PING -> sendPong(message);
                 default -> {
                 }
@@ -326,6 +360,44 @@ public class CoopNetPump implements EveryFrameScript {
         CoopLog.info(CoopNetPump.class, "Coop handshake accepted sessionId=" + sessionId);
     }
 
+    private void maybeSendSeedLockRequest() {
+        if (seedLockRequestSent
+                || service.role() != CoopConnectionRole.HOST
+                || !service.isConnected()
+                || !sessionState.handshakeValidated()
+                || sessionState.seedLong() != null) {
+            return;
+        }
+
+        try {
+            CoopSeedSync.SeedData seed = hostSeedSupplier.get();
+            String fingerprint = seed.sectorFingerprint().isEmpty()
+                    ? sectorFingerprintSupplier.get()
+                    : seed.sectorFingerprint();
+            CoopSeedSync.SeedData lockedSeed = seed.withFingerprint(fingerprint);
+            sessionState.recordSeedLock(lockedSeed.seedLong(), lockedSeed.seedString(), lockedSeed.sectorFingerprint());
+            CoopSeedSync.storeCurrentSectorPersistentData(lockedSeed);
+
+            CoopMessages.Message request = CoopMessages.seedLockRequest(
+                    sessionState.sessionId(),
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    lockedSeed.seedLong(),
+                    lockedSeed.seedString(),
+                    lockedSeed.sectorFingerprint());
+            service.send(request);
+            seedLockRequestSent = true;
+            log("outbound", request);
+            CoopLog.info(CoopNetPump.class,
+                    "Coop seed lock requested seedLong=" + lockedSeed.seedLong()
+                            + " seedString=" + lockedSeed.seedString()
+                            + " sectorFingerprint=" + lockedSeed.sectorFingerprint());
+        } catch (RuntimeException ex) {
+            sessionState.rejectHandshake("seedLock: " + ex.getMessage());
+            CoopLog.warn(CoopNetPump.class, "Failed to create coop seed lock request", ex);
+        }
+    }
+
     private String handshakeDiffFor(CoopMessages.Message message) {
         try {
             boolean hostIronMode = ironModeSupplier.getAsBoolean();
@@ -364,12 +436,103 @@ public class CoopNetPump implements EveryFrameScript {
         CoopLog.warn(CoopNetPump.class, "Coop handshake rejected:\n" + diff);
     }
 
+    private void handleSeedLockRequest(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !sessionState.handshakeValidated()) {
+            return;
+        }
+
+        long seedLong = CoopMessages.requiredPayloadLong(message, "seedLong");
+        String seedString = CoopMessages.requiredPayloadString(message, "seedString");
+        String hostFingerprint = CoopMessages.requiredPayloadString(message, "sectorFingerprint");
+        String guestSeedString = sectorSeedStringSupplier.get();
+        String guestFingerprint = sectorFingerprintSupplier.get();
+        CoopLog.info(CoopNetPump.class,
+                "Coop seed lock comparing hostSeedString=" + seedString
+                        + " guestSeedString=" + guestSeedString
+                        + " hostFingerprint=" + hostFingerprint
+                        + " guestFingerprint=" + guestFingerprint);
+        String seedMismatch = CoopSeedSync.seedStringMismatch(seedString, guestSeedString);
+        if (!seedMismatch.isEmpty()) {
+            sessionState.rejectHandshake(seedMismatch);
+            CoopMessages.Message reject = CoopMessages.seedLockReject(
+                    message.sessionId(),
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    seedMismatch);
+            service.send(reject);
+            log("outbound", reject);
+            CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + seedMismatch);
+            return;
+        }
+
+        String mismatch = CoopSeedSync.fingerprintMismatch(hostFingerprint, guestFingerprint);
+        if (!mismatch.isEmpty()) {
+            sessionState.rejectHandshake(mismatch);
+            CoopMessages.Message reject = CoopMessages.seedLockReject(
+                    message.sessionId(),
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    mismatch);
+            service.send(reject);
+            log("outbound", reject);
+            CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + mismatch);
+            return;
+        }
+
+        sessionState.recordSeedLock(seedLong, seedString, hostFingerprint);
+        CoopSeedSync.storeCurrentSectorPersistentData(new CoopSeedSync.SeedData(seedLong, seedString, hostFingerprint));
+        CoopMessages.Message ack = CoopMessages.seedLockAck(
+                message.sessionId(),
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                guestFingerprint);
+        service.send(ack);
+        log("outbound", ack);
+        CoopLog.info(CoopNetPump.class,
+                "Coop seed lock accepted seedLong=" + seedLong
+                        + " seedString=" + seedString
+                        + " sectorFingerprint=" + hostFingerprint);
+    }
+
+    private void handleSeedLockAck(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !sessionState.handshakeValidated()) {
+            return;
+        }
+
+        String guestFingerprint = CoopMessages.requiredPayloadString(message, "sectorFingerprint");
+        String mismatch = CoopSeedSync.fingerprintMismatch(sessionState.sectorFingerprint(), guestFingerprint);
+        if (!mismatch.isEmpty()) {
+            sessionState.rejectHandshake(mismatch);
+            CoopMessages.Message reject = CoopMessages.seedLockReject(
+                    message.sessionId(),
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    mismatch);
+            service.send(reject);
+            log("outbound", reject);
+            CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected after guest ACK: " + mismatch);
+            return;
+        }
+
+        CoopLog.info(CoopNetPump.class,
+                "Coop seed lock accepted by guest sectorFingerprint=" + guestFingerprint);
+    }
+
+    private void handleSeedLockReject(CoopMessages.Message message) {
+        String reason = CoopMessages.requiredPayloadString(message, "reason");
+        sessionState.rejectHandshake(reason);
+        CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
+    }
+
     private void maybeSendPing() {
         if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()) {
             return;
         }
         if (sessionState.connectionState() != CoopLobbyState.NONE
                 && !sessionState.handshakeValidated()) {
+            return;
+        }
+        if (sessionState.handshakeValidated() && sessionState.seedLong() == null) {
             return;
         }
 

@@ -18,6 +18,9 @@ public class CoopSessionState {
     private CoopConnectionRole role = CoopConnectionRole.NONE;
     private CoopLobbyState connectionState = CoopLobbyState.NONE;
     private boolean handshakeValidated;
+    private Long seedLong;
+    private String seedString;
+    private String sectorFingerprint;
 
     public CoopSessionState() {
         this(() -> UUID.randomUUID().toString());
@@ -120,6 +123,16 @@ public class CoopSessionState {
         clearCanonicalSession();
     }
 
+    public synchronized void recordSeedLock(long acceptedSeedLong, String acceptedSeedString,
+                                            String acceptedSectorFingerprint) {
+        if (!handshakeValidated || sessionId == null) {
+            throw new IllegalStateException("Seed lock requires an accepted handshake");
+        }
+        seedLong = acceptedSeedLong;
+        seedString = requireText(acceptedSeedString, "seedString");
+        sectorFingerprint = requireText(acceptedSectorFingerprint, "sectorFingerprint");
+    }
+
     public synchronized CoopPlayerInfo localPlayerInfo() {
         if (localPlayerId == null || localName == null) {
             throw new IllegalStateException("Local player info is not initialized");
@@ -163,6 +176,18 @@ public class CoopSessionState {
         return handshakeValidated;
     }
 
+    public synchronized Long seedLong() {
+        return seedLong;
+    }
+
+    public synchronized String seedString() {
+        return seedString;
+    }
+
+    public synchronized String sectorFingerprint() {
+        return sectorFingerprint;
+    }
+
     public synchronized void reset() {
         sessionId = null;
         provisionalLobbyId = null;
@@ -173,11 +198,17 @@ public class CoopSessionState {
         role = CoopConnectionRole.NONE;
         connectionState = CoopLobbyState.NONE;
         handshakeValidated = false;
+        seedLong = null;
+        seedString = null;
+        sectorFingerprint = null;
     }
 
     private void clearCanonicalSession() {
         sessionId = null;
         handshakeValidated = false;
+        seedLong = null;
+        seedString = null;
+        sectorFingerprint = null;
     }
 
     private String nextId(String fieldName) {

@@ -18,6 +18,9 @@ public final class CoopMessages {
         LOBBY_REJECT,
         HANDSHAKE_MANIFEST,
         HANDSHAKE_RESULT,
+        SEED_LOCK_REQUEST,
+        SEED_LOCK_ACK,
+        SEED_LOCK_REJECT,
         PING,
         PONG,
         DISCONNECT
@@ -87,6 +90,26 @@ public final class CoopMessages {
                         + "\"diff\":\"" + escapeJson(diff == null ? "" : diff) + "\"}");
     }
 
+    public static Message seedLockRequest(String sessionId, long seq, long sentAtMillis, long seedLong,
+                                          String seedString, String sectorFingerprint) {
+        return new Message(Type.SEED_LOCK_REQUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"seedLong\":" + seedLong + ","
+                        + "\"seedString\":\"" + escapeJson(requireText(seedString, "seedString")) + "\","
+                        + "\"sectorFingerprint\":\""
+                        + escapeJson(requireText(sectorFingerprint, "sectorFingerprint")) + "\"}");
+    }
+
+    public static Message seedLockAck(String sessionId, long seq, long sentAtMillis, String sectorFingerprint) {
+        return new Message(Type.SEED_LOCK_ACK, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"sectorFingerprint\":\""
+                        + escapeJson(requireText(sectorFingerprint, "sectorFingerprint")) + "\"}");
+    }
+
+    public static Message seedLockReject(String sessionId, long seq, long sentAtMillis, String reason) {
+        return new Message(Type.SEED_LOCK_REJECT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
         return new Message(Type.DISCONNECT, sessionId, seq, sentAtMillis,
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
@@ -140,6 +163,10 @@ public final class CoopMessages {
 
     public static String requiredPayloadString(Message message, String name) {
         return requiredString(decodePayload(message), name);
+    }
+
+    public static long requiredPayloadLong(Message message, String name) {
+        return requiredLong(decodePayload(message), name);
     }
 
     private static String nullableString(Map<String, Object> fields, String name) {
