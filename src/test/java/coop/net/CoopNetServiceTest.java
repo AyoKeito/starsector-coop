@@ -56,6 +56,30 @@ class CoopNetServiceTest {
         }
     }
 
+    @Test
+    void hostSendsLobbyRejectToExtraTcpGuest() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        CoopNetService extraGuest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "first guest connected");
+
+            extraGuest.connect("127.0.0.1", port);
+            CoopMessages.Message reject = waitForMessageWhilePollingHost(host, extraGuest, "extra guest lobby reject");
+
+            assertEquals(CoopMessages.Type.LOBBY_REJECT, reject.type());
+            assertEquals("{\"reason\":\"Host already has an active connection\"}", reject.payloadJson());
+            assertTrue(bothConnected(host, guest), "first guest remains connected");
+        } finally {
+            extraGuest.shutdown();
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
     private int reserveLocalPort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             socket.setReuseAddress(true);
@@ -67,6 +91,17 @@ class CoopNetServiceTest {
         AtomicReference<CoopMessages.Message> message = new AtomicReference<>();
         waitUntil(() -> {
             message.set(service.pollInbound());
+            return message.get() != null;
+        }, description);
+        return message.get();
+    }
+
+    private CoopMessages.Message waitForMessageWhilePollingHost(CoopNetService host, CoopNetService guest,
+                                                                String description) throws InterruptedException {
+        AtomicReference<CoopMessages.Message> message = new AtomicReference<>();
+        waitUntil(() -> {
+            host.isConnected();
+            message.set(guest.pollInbound());
             return message.get() != null;
         }, description);
         return message.get();

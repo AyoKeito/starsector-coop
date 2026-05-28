@@ -1,5 +1,7 @@
 package coop.net;
 
+import coop.session.CoopPlayerInfo;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -10,6 +12,9 @@ public final class CoopMessages {
 
     public enum Type {
         HELLO,
+        LOBBY_HELLO,
+        LOBBY_ACCEPT,
+        LOBBY_REJECT,
         PING,
         PONG,
         DISCONNECT
@@ -33,6 +38,27 @@ public final class CoopMessages {
 
     public static Message pong(String sessionId, long seq, long sentAtMillis, long pingSeq) {
         return new Message(Type.PONG, sessionId, seq, sentAtMillis, "{\"pingSeq\":" + pingSeq + "}");
+    }
+
+    public static Message lobbyHello(long seq, long sentAtMillis, CoopPlayerInfo playerInfo) {
+        Objects.requireNonNull(playerInfo, "playerInfo");
+        return new Message(Type.LOBBY_HELLO, null, seq, sentAtMillis,
+                "{\"playerId\":\"" + escapeJson(playerInfo.playerId()) + "\","
+                        + "\"playerName\":\"" + escapeJson(playerInfo.name()) + "\"}");
+    }
+
+    public static Message lobbyAccept(long seq, long sentAtMillis, String provisionalLobbyId,
+                                      CoopPlayerInfo hostInfo) {
+        Objects.requireNonNull(hostInfo, "hostInfo");
+        return new Message(Type.LOBBY_ACCEPT, null, seq, sentAtMillis,
+                "{\"provisionalLobbyId\":\"" + escapeJson(requireText(provisionalLobbyId, "provisionalLobbyId")) + "\","
+                        + "\"hostPlayerId\":\"" + escapeJson(hostInfo.playerId()) + "\","
+                        + "\"hostName\":\"" + escapeJson(hostInfo.name()) + "\"}");
+    }
+
+    public static Message lobbyReject(long seq, long sentAtMillis, String reason) {
+        return new Message(Type.LOBBY_REJECT, null, seq, sentAtMillis,
+                "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
@@ -65,6 +91,11 @@ public final class CoopMessages {
         return new Message(type, sessionId, seq, sentAtMillis, payloadJson);
     }
 
+    public static Map<String, Object> decodePayload(Message message) {
+        Objects.requireNonNull(message, "message");
+        return new Parser(message.payloadJson()).parseObject();
+    }
+
     private static void appendNullableString(StringBuilder json, String value) {
         if (value == null) {
             json.append("null");
@@ -79,6 +110,10 @@ public final class CoopMessages {
             return stringValue;
         }
         throw new IllegalArgumentException("Missing string field: " + name);
+    }
+
+    public static String requiredPayloadString(Message message, String name) {
+        return requiredString(decodePayload(message), name);
     }
 
     private static String nullableString(Map<String, Object> fields, String name) {
@@ -122,6 +157,14 @@ public final class CoopMessages {
             }
         }
         return escaped.toString();
+    }
+
+    private static String requireText(String value, String fieldName) {
+        String normalized = Objects.requireNonNull(value, fieldName).trim();
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException(fieldName + " is blank");
+        }
+        return normalized;
     }
 
     private static final class Parser {

@@ -1,5 +1,8 @@
 package coop.net;
 
+import coop.session.CoopLobbyState;
+import coop.session.CoopPlayerInfo;
+import coop.session.CoopSessionState;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
@@ -10,6 +13,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopNetPumpTest {
@@ -53,6 +57,81 @@ class CoopNetPumpTest {
         assertEquals("{\"pingSeq\":42}", reply.payloadJson());
     }
 
+    @Test
+    void guestSendsLobbyHelloOnceConnected() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 7000L);
+
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message hello = service.sent.get(0);
+        assertEquals(CoopMessages.Type.LOBBY_HELLO, hello.type());
+        assertEquals("{\"playerId\":\"guest-player\",\"playerName\":\"Guest\"}", hello.payloadJson());
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, session.connectionState());
+    }
+
+    @Test
+    void hostAcceptsFirstLobbyHelloAndRecordsRemoteGuest() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 8000L);
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+        assertEquals("guest-player", session.remotePlayerId());
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message accept = service.sent.get(0);
+        assertEquals(CoopMessages.Type.LOBBY_ACCEPT, accept.type());
+        assertEquals("{\"provisionalLobbyId\":\"lobby-a\",\"hostPlayerId\":\"host-player\",\"hostName\":\"Host\"}",
+                accept.payloadJson());
+    }
+
+    @Test
+    void guestRecordsLobbyAcceptWithoutCanonicalSession() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        service.inbound.add(CoopMessages.lobbyAccept(1L, 8000L, "lobby-a",
+                new CoopPlayerInfo("host-player", "Host")));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L);
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTED, session.connectionState());
+        assertEquals("lobby-a", session.provisionalLobbyId());
+        assertEquals("host-player", session.remotePlayerId());
+        assertEquals(1, service.sent.size());
+        assertEquals(CoopMessages.Type.LOBBY_HELLO, service.sent.get(0).type());
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+    }
+
+    @Test
+    void hostRejectsLobbyHelloAfterFirstGuestConnected() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        service.inbound.add(CoopMessages.lobbyHello(2L, 9000L, new CoopPlayerInfo("guest-b", "Guest B")));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L);
+
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+        assertEquals("guest-a", session.remotePlayerId());
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message reject = service.sent.get(0);
+        assertEquals(CoopMessages.Type.LOBBY_REJECT, reject.type());
+        assertEquals("{\"reason\":\"Lobby already has a guest\"}", reject.payloadJson());
+    }
+
     private static final class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
@@ -84,6 +163,19 @@ class CoopNetPumpTest {
 
         @Override
         public void flushOutbound() {
+        }
+    }
+
+    private static final class SequencedIds implements java.util.function.Supplier<String> {
+        private final Queue<String> ids;
+
+        private SequencedIds(String... ids) {
+            this.ids = new ArrayDeque<>(List.of(ids));
+        }
+
+        @Override
+        public String get() {
+            return ids.remove();
         }
     }
 }

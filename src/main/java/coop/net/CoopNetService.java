@@ -15,6 +15,7 @@ public class CoopNetService {
     private static final int MAX_FRAME_BYTES = 64 * 1024;
     private static final int READ_BUFFER_BYTES = 8 * 1024;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
+    private static final String EXTRA_CONNECTION_REJECT_REASON = "Host already has an active connection";
 
     private final Queue<CoopMessages.Message> inbound = new ConcurrentLinkedQueue<>();
     private final Queue<CoopMessages.Message> outbound = new ConcurrentLinkedQueue<>();
@@ -120,7 +121,7 @@ public class CoopNetService {
     }
 
     private void acceptHostConnectionLocked() throws Exception {
-        if (role != CoopConnectionRole.HOST || serverChannel == null || activeChannel != null) {
+        if (role != CoopConnectionRole.HOST || serverChannel == null) {
             return;
         }
 
@@ -129,9 +130,35 @@ public class CoopNetService {
             return;
         }
 
+        if (activeChannel != null) {
+            rejectExtraConnectionLocked(accepted);
+            return;
+        }
+
         if (!attachChannelLocked(accepted)) {
             CoopLog.warn(CoopNetService.class, "Coop TCP rejecting extra connection");
-            closeChannel(accepted);
+            rejectExtraConnectionLocked(accepted);
+        }
+    }
+
+    private void rejectExtraConnectionLocked(SocketChannel channel) {
+        try {
+            channel.configureBlocking(true);
+            channel.socket().setTcpNoDelay(true);
+            CoopMessages.Message reject = CoopMessages.lobbyReject(
+                    nextSeq(),
+                    System.currentTimeMillis(),
+                    EXTRA_CONNECTION_REJECT_REASON);
+            ByteBuffer frame = ByteBuffer.wrap((CoopMessages.encode(reject) + "\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            while (frame.hasRemaining()) {
+                channel.write(frame);
+            }
+            CoopLog.warn(CoopNetService.class, "Coop TCP rejected extra connection with lobby reject");
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP failed to reject extra connection cleanly", ex);
+        } finally {
+            closeChannel(channel);
         }
     }
 

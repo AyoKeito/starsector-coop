@@ -4,6 +4,9 @@ import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.session.CoopLobbyState;
+import coop.session.CoopPlayerInfo;
+import coop.session.CoopSessionState;
 import coop.util.CoopLog;
 
 import java.util.Objects;
@@ -14,19 +17,27 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String HOST_PORT_FLAG = "coop.hostPort";
     private static final String CONNECT_HOST_FLAG = "coop.connectHost";
     private static final String CONNECT_PORT_FLAG = "coop.connectPort";
+    private static final String PLAYER_NAME_PROPERTY = "coop.playerName";
 
     private final CoopNetService service;
+    private final CoopSessionState sessionState;
     private final LongSupplier clockMillis;
     private long nextPingAtMillis;
     private boolean startupConfigChecked;
     private boolean memoryConfigWarningLogged;
+    private boolean lobbyHelloSent;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
     }
 
     public CoopNetPump(CoopNetService service, LongSupplier clockMillis) {
+        this(service, new CoopSessionState(), clockMillis);
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis) {
         this.service = Objects.requireNonNull(service, "service");
+        this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.nextPingAtMillis = clockMillis.getAsLong() + PING_INTERVAL_MILLIS;
     }
@@ -46,6 +57,7 @@ public class CoopNetPump implements EveryFrameScript {
         maybeStartFromSystemProperties();
         maybeStartFromMemoryFlags();
         service.flushOutbound();
+        maybeSendLobbyHello();
         drainInbound();
         maybeSendPing();
         service.flushOutbound();
@@ -64,9 +76,13 @@ public class CoopNetPump implements EveryFrameScript {
             }
             if (config.role() == CoopConnectionRole.HOST) {
                 service.startHost(config.port());
+                sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
+                lobbyHelloSent = false;
                 CoopLog.info(CoopNetPump.class, "Coop host started from JVM property "
                         + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
             } else if (config.role() == CoopConnectionRole.GUEST) {
+                sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
+                lobbyHelloSent = false;
                 service.connect(config.host(), config.port());
                 CoopLog.info(CoopNetPump.class, "Coop guest started from JVM properties "
                         + CoopNetStartupConfig.CONNECT_HOST_PROPERTY + "=" + config.host() + ", "
@@ -97,6 +113,8 @@ public class CoopNetPump implements EveryFrameScript {
             if (memory.contains(HOST_PORT_FLAG)) {
                 int port = parsePort(memory.get(HOST_PORT_FLAG), HOST_PORT_FLAG);
                 service.startHost(port);
+                sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
+                lobbyHelloSent = false;
                 CoopLog.info(CoopNetPump.class, "Coop host control consumed memory flag " + HOST_PORT_FLAG + "=" + port);
                 return;
             }
@@ -107,6 +125,8 @@ public class CoopNetPump implements EveryFrameScript {
                 if (host.isEmpty()) {
                     throw new IllegalArgumentException(CONNECT_HOST_FLAG + " is blank");
                 }
+                sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
+                lobbyHelloSent = false;
                 service.connect(host, port);
                 CoopLog.info(CoopNetPump.class,
                         "Coop guest control consumed memory flags " + CONNECT_HOST_FLAG + "=" + host
@@ -118,6 +138,14 @@ public class CoopNetPump implements EveryFrameScript {
                 memoryConfigWarningLogged = true;
             }
         }
+    }
+
+    private String localPlayerName(CoopConnectionRole role) {
+        String configured = System.getProperty(PLAYER_NAME_PROPERTY);
+        if (configured != null && !configured.trim().isEmpty()) {
+            return configured.trim();
+        }
+        return role == CoopConnectionRole.HOST ? "Host" : "Guest";
     }
 
     private int parsePort(Object value, String flagName) {
@@ -137,14 +165,99 @@ public class CoopNetPump implements EveryFrameScript {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
             log("inbound", message);
-            if (message.type() == CoopMessages.Type.PING) {
-                sendPong(message);
+            switch (message.type()) {
+                case LOBBY_HELLO -> handleLobbyHello(message);
+                case LOBBY_ACCEPT -> handleLobbyAccept(message);
+                case LOBBY_REJECT -> handleLobbyReject(message);
+                case PING -> sendPong(message);
+                default -> {
+                }
             }
         }
     }
 
+    private void maybeSendLobbyHello() {
+        if (lobbyHelloSent
+                || service.role() != CoopConnectionRole.GUEST
+                || !service.isConnected()
+                || sessionState.connectionState() != CoopLobbyState.GUEST_CONNECTING) {
+            return;
+        }
+
+        CoopMessages.Message hello = CoopMessages.lobbyHello(
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                sessionState.localPlayerInfo());
+        service.send(hello);
+        lobbyHelloSent = true;
+        log("outbound", hello);
+    }
+
+    private void handleLobbyHello(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+
+        CoopPlayerInfo guest = new CoopPlayerInfo(
+                CoopMessages.requiredPayloadString(message, "playerId"),
+                CoopMessages.requiredPayloadString(message, "playerName"));
+
+        if (!sessionState.canAcceptGuest()) {
+            String reason = sessionState.rejectReasonForGuest(guest);
+            CoopMessages.Message reject = CoopMessages.lobbyReject(
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    reason);
+            service.send(reject);
+            log("outbound", reject);
+            return;
+        }
+
+        sessionState.hostAcceptGuest(guest);
+        CoopMessages.Message accept = CoopMessages.lobbyAccept(
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                sessionState.provisionalLobbyId(),
+                sessionState.localPlayerInfo());
+        service.send(accept);
+        log("outbound", accept);
+        CoopLog.info(CoopNetPump.class,
+                "Coop lobby accepted provisionalLobbyId=" + sessionState.provisionalLobbyId()
+                        + " hostPlayerId=" + sessionState.localPlayerId()
+                        + " guestPlayerId=" + sessionState.remotePlayerId());
+    }
+
+    private void handleLobbyAccept(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+
+        CoopPlayerInfo host = new CoopPlayerInfo(
+                CoopMessages.requiredPayloadString(message, "hostPlayerId"),
+                CoopMessages.requiredPayloadString(message, "hostName"));
+        sessionState.guestAcceptLobby(
+                CoopMessages.requiredPayloadString(message, "provisionalLobbyId"),
+                host);
+        CoopLog.info(CoopNetPump.class,
+                "Coop lobby connected provisionalLobbyId=" + sessionState.provisionalLobbyId()
+                        + " hostPlayerId=" + sessionState.remotePlayerId()
+                        + " guestPlayerId=" + sessionState.localPlayerId());
+    }
+
+    private void handleLobbyReject(CoopMessages.Message message) {
+        if (service.role() == CoopConnectionRole.GUEST) {
+            sessionState.guestRejectLobby(CoopMessages.requiredPayloadString(message, "reason"));
+        }
+        CoopLog.warn(CoopNetPump.class,
+                "Coop lobby rejected: " + CoopMessages.requiredPayloadString(message, "reason"));
+    }
+
     private void maybeSendPing() {
         if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()) {
+            return;
+        }
+        if (sessionState.connectionState() != CoopLobbyState.NONE
+                && sessionState.connectionState() != CoopLobbyState.GUEST_CONNECTED) {
             return;
         }
 
