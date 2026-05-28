@@ -8,11 +8,26 @@ public final class CoopLog {
     }
 
     public static Logger getLogger(Class<?> source) {
-        return Global.getLogger(source);
+        try {
+            return Global.getLogger(source);
+        } catch (RuntimeException | LinkageError ex) {
+            return Logger.getLogger(source);
+        }
     }
 
     public static void info(Class<?> source, String message) {
         getLogger(source).info(message);
     }
-}
 
+    public static void warn(Class<?> source, String message) {
+        getLogger(source).warn(message);
+    }
+
+    public static void warn(Class<?> source, String message, Throwable throwable) {
+        getLogger(source).warn(message, throwable);
+    }
+
+    public static void error(Class<?> source, String message, Throwable throwable) {
+        getLogger(source).error(message, throwable);
+    }
+}
