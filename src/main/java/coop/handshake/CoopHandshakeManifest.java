@@ -199,7 +199,15 @@ public record CoopHandshakeManifest(
     }
 
     private static String normalizePath(String value) {
-        return normalize(value, "").replace('\\', '/');
+        String normalized = normalize(value, "").replace('\\', '/');
+        int modsIndex = normalized.lastIndexOf("/mods/");
+        if (modsIndex >= 0) {
+            return "mods/" + normalized.substring(modsIndex + "/mods/".length());
+        }
+        if (normalized.startsWith("mods/")) {
+            return normalized;
+        }
+        return normalized;
     }
 
     public record ModEntry(

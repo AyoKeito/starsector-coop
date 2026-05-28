@@ -69,6 +69,20 @@ class CoopHandshakeManifestTest {
     }
 
     @Test
+    void installLocalModPathPrefixesNormalizeToSameLogicalPath() {
+        CoopHandshakeManifest host = manifestWithPath(
+                "K:/Starsector-coop-test/host/starsector-core/../mods/coop");
+        CoopHandshakeManifest guest = manifestWithPath(
+                "K:/Starsector-coop-test/guest/starsector-core/../mods/coop");
+
+        CoopHandshakeDiff diff = CoopHandshakeDiff.compare(host, guest);
+
+        assertTrue(diff.isEmpty());
+        assertEquals("mods/coop", host.enabledMods().get(0).path());
+        assertEquals("mods/coop", guest.enabledMods().get(0).path());
+    }
+
+    @Test
     void manifestJsonRoundTripsDeterministically() {
         CoopHandshakeManifest manifest = manifestWithMod("0.98a-RC8", "utility", "Utility Mod", "1.0.0",
                 Map.of("mod_info.json", "abc123", "jars/utility.jar", "def456"));
@@ -102,5 +116,18 @@ class CoopHandshakeManifestTest {
                 List.of("jars/" + modId + ".jar"),
                 checksums);
         return new CoopHandshakeManifest(gameVersion, "0.1.0", "commit-a", List.of(mod));
+    }
+
+    private static CoopHandshakeManifest manifestWithPath(String path) {
+        CoopHandshakeManifest.ModEntry mod = new CoopHandshakeManifest.ModEntry(
+                "coop",
+                "Starsector Coop V1",
+                "0.1.0",
+                "0.98a-RC8",
+                path,
+                List.of("jars/coop.jar"),
+                Map.of("mod_info.json", CoopChecksum.unavailable("script-sandbox"),
+                        "jars/coop.jar", CoopChecksum.unavailable("script-sandbox")));
+        return new CoopHandshakeManifest("0.98a-RC8", "0.1.0", "commit-a", List.of(mod));
     }
 }
