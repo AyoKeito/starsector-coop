@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -33,7 +34,18 @@ class CoopCampaignInputBlockerTest {
         assertTrue(alreadyConsumed.consumed);
     }
 
+    @Test
+    void doesNotProbeUnsupportedControlEnumAliases() {
+        RecordingInputEvent mouseMove = new RecordingInputEvent("MOUSE_MOVE", false, false, false);
+
+        new CoopCampaignInputBlocker().processCampaignInputPreCore(List.of(mouseMove.proxy()));
+
+        assertFalse(mouseMove.consumed);
+    }
+
     private static final class RecordingInputEvent {
+        private static final Set<String> ENGINE_CONTROL_ENUM_NAMES = Set.of("PAUSE", "FAST_FORWARD");
+
         private final String controlName;
         private final boolean activated;
         private final boolean down;
@@ -60,17 +72,26 @@ class CoopCampaignInputBlockerTest {
                                 return null;
                             }
                             case "isControlActivated" -> {
+                                requireSupportedControl((String) args[0]);
                                 return activated && controlName.equals(args[0]);
                             }
                             case "isControlDownEvent" -> {
+                                requireSupportedControl((String) args[0]);
                                 return down && controlName.equals(args[0]);
                             }
                             case "isControlUpEvent" -> {
+                                requireSupportedControl((String) args[0]);
                                 return false;
                             }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
                     });
+        }
+
+        private static void requireSupportedControl(String control) {
+            if (!ENGINE_CONTROL_ENUM_NAMES.contains(control)) {
+                throw new IllegalArgumentException("No enum constant Controls." + control);
+            }
         }
     }
 }

@@ -10,8 +10,6 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
     private static final int INPUT_PRIORITY = Integer.MAX_VALUE;
     private static final Set<String> LOCKED_CONTROLS = Set.of(
             "PAUSE",
-            "CAMPAIGN_PAUSE",
-            "TOGGLE_PAUSE",
             "FAST_FORWARD");
 
     @Override
