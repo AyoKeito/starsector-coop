@@ -1,7 +1,10 @@
 package coop.net;
 
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
 import coop.session.CoopLobbyState;
@@ -429,6 +432,119 @@ class CoopNetPumpTest {
         assertFalse(sector.paused);
     }
 
+    @Test
+    void hostBroadcastsAcceptedLocalInteractionAndReleaseOnDialogClose() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        pump.advance(0f);
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message accept = service.sent.get(0);
+        assertEquals(CoopMessages.Type.INTERACTION_ACCEPT, accept.type());
+        assertEquals("market-1", CoopMessages.requiredPayloadString(accept, "entityId"));
+        assertEquals("host-player", CoopMessages.requiredPayloadString(accept, "playerId"));
+        assertEquals("Jangala", CoopMessages.requiredPayloadString(accept, "entityName"));
+        assertEquals(1L, CoopMessages.requiredPayloadLong(accept, "hostSeq"));
+
+        ui.target = null;
+        pump.advance(0f);
+
+        assertEquals(2, service.sent.size());
+        CoopMessages.Message release = service.sent.get(1);
+        assertEquals(CoopMessages.Type.INTERACTION_RELEASE, release.type());
+        assertEquals("market-1", CoopMessages.requiredPayloadString(release, "entityId"));
+        assertEquals("host-player", CoopMessages.requiredPayloadString(release, "playerId"));
+    }
+
+    @Test
+    void hostRejectsGuestClaimForEntityAlreadyHeldByHost() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+        pump.advance(0f);
+        service.sent.clear();
+
+        service.inbound.add(CoopMessages.interactionClaim(
+                "session-a", 7L, 1100L, "market-1", "Jangala", "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message reject = service.sent.get(0);
+        assertEquals(CoopMessages.Type.INTERACTION_REJECT, reject.type());
+        assertEquals("market-1", CoopMessages.requiredPayloadString(reject, "entityId"));
+        assertEquals("already_claimed_by:host-player", CoopMessages.requiredPayloadString(reject, "reason"));
+    }
+
+    @Test
+    void guestSendsInteractionClaimAndReleaseForLocalDialog() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L));
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, timeLock);
+
+        pump.advance(0f);
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message claim = service.sent.get(0);
+        assertEquals(CoopMessages.Type.INTERACTION_CLAIM, claim.type());
+        assertEquals("market-1", CoopMessages.requiredPayloadString(claim, "entityId"));
+        assertEquals("Jangala", CoopMessages.requiredPayloadString(claim, "entityName"));
+        assertEquals("guest-player", CoopMessages.requiredPayloadString(claim, "playerId"));
+
+        ui.target = null;
+        pump.advance(0f);
+
+        assertEquals(2, service.sent.size());
+        CoopMessages.Message release = service.sent.get(1);
+        assertEquals(CoopMessages.Type.INTERACTION_RELEASE, release.type());
+        assertEquals("market-1", CoopMessages.requiredPayloadString(release, "entityId"));
+        assertEquals("guest-player", CoopMessages.requiredPayloadString(release, "playerId"));
+        assertTrue(timeLock.inputBlockerStates.contains(true));
+    }
+
+    @Test
+    void guestBlocksWorldInteractionWhileHostClaimIsActive() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L));
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, timeLock);
+
+        service.inbound.add(CoopMessages.interactionAccept(
+                "session-a", 8L, 1200L, "market-1", "host-player", "Jangala", 5L));
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(2, ui.disallowInteractionCount);
+        assertEquals(List.of("Remote player is interacting: Jangala"), ui.messages);
+        assertEquals(List.of(
+                new InteractionBlock(true, "Jangala"),
+                new InteractionBlock(true, "Jangala")), timeLock.interactionBlocks);
+
+        service.inbound.add(CoopMessages.interactionRelease(
+                "session-a", 9L, 1300L, "market-1", "host-player"));
+        pump.advance(0f);
+
+        assertEquals(new InteractionBlock(false, null),
+                timeLock.interactionBlocks.get(timeLock.interactionBlocks.size() - 1));
+    }
+
     private static final class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
@@ -465,9 +581,15 @@ class CoopNetPumpTest {
 
     private static final class RecordingSector {
         private boolean paused;
+        private final RecordingCampaignUi campaignUi;
 
         private RecordingSector(boolean paused) {
+            this(paused, null);
+        }
+
+        private RecordingSector(boolean paused, RecordingCampaignUi campaignUi) {
             this.paused = paused;
+            this.campaignUi = campaignUi;
         }
 
         private SectorAPI proxy() {
@@ -475,6 +597,10 @@ class CoopNetPumpTest {
                     SectorAPI.class.getClassLoader(),
                     new Class<?>[]{SectorAPI.class},
                     (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
                         switch (method.getName()) {
                             case "isPaused" -> {
                                 return paused;
@@ -483,10 +609,106 @@ class CoopNetPumpTest {
                                 paused = (boolean) args[0];
                                 return null;
                             }
+                            case "getCampaignUI" -> {
+                                return campaignUi == null ? null : campaignUi.proxy();
+                            }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
                     });
         }
+    }
+
+    private static final class RecordingCampaignUi {
+        private RecordingEntity target;
+        private int disallowInteractionCount;
+        private final List<String> messages = new ArrayList<>();
+
+        private RecordingCampaignUi(RecordingEntity target) {
+            this.target = target;
+        }
+
+        private CampaignUIAPI proxy() {
+            return (CampaignUIAPI) Proxy.newProxyInstance(
+                    CampaignUIAPI.class.getClassLoader(),
+                    new Class<?>[]{CampaignUIAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        switch (method.getName()) {
+                            case "getCurrentInteractionDialog" -> {
+                                return target == null ? null : interactionDialogProxy(target);
+                            }
+                            case "setDisallowPlayerInteractionsForOneFrame" -> {
+                                disallowInteractionCount++;
+                                return null;
+                            }
+                            case "addMessage" -> {
+                                messages.add((String) args[0]);
+                                return null;
+                            }
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        }
+                    });
+        }
+
+        private InteractionDialogAPI interactionDialogProxy(RecordingEntity entity) {
+            return (InteractionDialogAPI) Proxy.newProxyInstance(
+                    InteractionDialogAPI.class.getClassLoader(),
+                    new Class<?>[]{InteractionDialogAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        if ("getInteractionTarget".equals(method.getName())) {
+                            return entity.proxy();
+                        }
+                        throw new UnsupportedOperationException(method.getName());
+                    });
+        }
+    }
+
+    private static final class RecordingEntity {
+        private final String id;
+        private final String name;
+
+        private RecordingEntity(String id, String name) {
+            this.id = id;
+            this.name = name;
+        }
+
+        private SectorEntityToken proxy() {
+            return (SectorEntityToken) Proxy.newProxyInstance(
+                    SectorEntityToken.class.getClassLoader(),
+                    new Class<?>[]{SectorEntityToken.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        return switch (method.getName()) {
+                            case "getId" -> id;
+                            case "getName" -> name;
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        };
+                    });
+        }
+    }
+
+    private static final Object UNHANDLED = new Object();
+
+    private static Object objectMethodResult(Object proxy, String methodName, Object[] args) {
+        return switch (methodName) {
+            case "toString" -> proxy.getClass().getName();
+            case "hashCode" -> System.identityHashCode(proxy);
+            case "equals" -> proxy == args[0];
+            default -> UNHANDLED;
+        };
+    }
+
+    private record InteractionBlock(boolean blocked, String entityName) {
     }
 
     private static final class SequencedIds implements java.util.function.Supplier<String> {
@@ -506,10 +728,41 @@ class CoopNetPumpTest {
         return new CoopHandshakeManifest(gameVersion, "0.1.0", commit, List.of());
     }
 
+    private static CoopSessionState activeHostSession() {
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        return session;
+    }
+
+    private static CoopSessionState activeGuestSession() {
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        return session;
+    }
+
+    private static CoopNetPump pumpWithTimeLock(RecordingNetService service, CoopSessionState session,
+                                                java.util.function.LongSupplier clockMillis,
+                                                RecordingTimeLock timeLock) {
+        return new CoopNetPump(service, session, clockMillis,
+                () -> emptyManifest("0.98a-RC8", "commit-a"),
+                () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed",
+                timeLock);
+    }
+
     private static final class RecordingTimeLock extends CoopTimeLock {
         private final CoopTimeLock.TimeSnapshot snapshot;
         private final List<CoopTimeLock.TimeSnapshot> applied = new ArrayList<>();
         private final List<Boolean> inputBlockerStates = new ArrayList<>();
+        private final List<InteractionBlock> interactionBlocks = new ArrayList<>();
 
         private RecordingTimeLock(CoopTimeLock.TimeSnapshot snapshot) {
             this.snapshot = snapshot;
@@ -533,6 +786,11 @@ class CoopNetPumpTest {
         @Override
         public void syncGuestInputBlocker(boolean active) {
             inputBlockerStates.add(active);
+        }
+
+        @Override
+        public void setInteractionBlocked(boolean blocked, String entityName) {
+            interactionBlocks.add(new InteractionBlock(blocked, entityName));
         }
     }
 }

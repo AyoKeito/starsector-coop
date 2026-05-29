@@ -2,13 +2,18 @@ package coop.net;
 
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.fleet.CoopFleetMirror;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
+import coop.interaction.CoopInteractionClaim;
+import coop.interaction.CoopInteractionGate;
 import coop.seed.CoopSeedSync;
 import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
@@ -45,6 +50,9 @@ public class CoopNetPump implements EveryFrameScript {
     private long nextFleetSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
+    private final CoopInteractionGate interactionGate = new CoopInteractionGate();
+    private String localInteractionEntityId;
+    private String lastBlockedEntityName;
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
     private final BooleanSupplier ironModeSupplier;
     private final Supplier<CoopSeedSync.SeedData> hostSeedSupplier;
@@ -135,6 +143,7 @@ public class CoopNetPump implements EveryFrameScript {
         syncFleetMirror();
         drainFleetDatagrams();
         maybeSendFleetSnapshot();
+        syncInteractionGate();
         maybeSendPing();
         service.flushOutbound();
     }
@@ -259,6 +268,10 @@ public class CoopNetPump implements EveryFrameScript {
                 case SEED_LOCK_ACK -> handleSeedLockAck(message);
                 case SEED_LOCK_REJECT -> handleSeedLockReject(message);
                 case TIME_SNAPSHOT -> handleTimeSnapshot(message);
+                case INTERACTION_CLAIM -> handleInteractionClaim(message);
+                case INTERACTION_ACCEPT -> handleInteractionAccept(message);
+                case INTERACTION_REJECT -> handleInteractionReject(message);
+                case INTERACTION_RELEASE -> handleInteractionRelease(message);
                 case PING -> sendPong(message);
                 default -> {
                 }
@@ -709,6 +722,195 @@ public class CoopNetPump implements EveryFrameScript {
             // fall through to the vanilla player faction id
         }
         return DEFAULT_PLAYER_FACTION_ID;
+    }
+
+    private void handleInteractionClaim(CoopMessages.Message message) {
+        // Only the host arbitrates. Assign a host receive sequence and accept the first claim per
+        // entity; reject later claims with already_claimed_by:<playerId> until the holder releases.
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
+        String entityName = CoopMessages.requiredPayloadString(message, "entityName");
+        String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        CoopInteractionGate.ClaimResult result = interactionGate.arbitrate(entityId, playerId, entityName);
+        if (result.accepted()) {
+            CoopMessages.Message accept = CoopMessages.interactionAccept(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                    entityId, playerId, entityName, result.hostSeq());
+            service.send(accept);
+            log("outbound", accept);
+            CoopLog.info(CoopNetPump.class, "Coop interaction claim accepted entityId=" + entityId
+                    + " playerId=" + playerId + " hostSeq=" + result.hostSeq());
+        } else {
+            CoopMessages.Message reject = CoopMessages.interactionReject(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                    entityId, result.rejectReason());
+            service.send(reject);
+            log("outbound", reject);
+            CoopLog.info(CoopNetPump.class, "Coop interaction claim rejected entityId=" + entityId
+                    + " requester=" + playerId + " " + result.rejectReason());
+        }
+    }
+
+    private void handleInteractionAccept(CoopMessages.Message message) {
+        // Guest mirrors the host's authoritative decision. When the accepted player is the remote
+        // player, this is what locks the guest out via blockingClaimFor.
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        CoopInteractionClaim claim = new CoopInteractionClaim(
+                CoopMessages.requiredPayloadString(message, "entityId"),
+                CoopMessages.requiredPayloadString(message, "playerId"),
+                CoopMessages.requiredPayloadString(message, "entityName"),
+                CoopMessages.requiredPayloadLong(message, "hostSeq"));
+        interactionGate.applyAccepted(claim);
+    }
+
+    private void handleInteractionReject(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
+        String reason = CoopMessages.requiredPayloadString(message, "reason");
+        // Our optimistic local interaction lost the race; stop tracking it so we re-claim cleanly
+        // next time. Full forced-close of the guest's already-open dialog is deferred past v1.
+        if (entityId.equals(localInteractionEntityId)) {
+            localInteractionEntityId = null;
+        }
+        CoopLog.warn(CoopNetPump.class, "Coop interaction rejected entityId=" + entityId + " " + reason);
+    }
+
+    private void handleInteractionRelease(CoopMessages.Message message) {
+        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
+        String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        interactionGate.release(entityId, playerId);
+    }
+
+    private void syncInteractionGate() {
+        if (service.role() == CoopConnectionRole.NONE
+                || !service.isConnected()
+                || !isGameplaySessionActive()) {
+            resetInteractionState();
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            detectLocalInteraction(sector);
+            applyLocalBlocking(sector);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync coop interaction gate", ex);
+        }
+    }
+
+    private void detectLocalInteraction(SectorAPI sector) {
+        String currentEntityId = null;
+        String currentEntityName = null;
+        CampaignUIAPI ui = sector.getCampaignUI();
+        if (ui != null) {
+            InteractionDialogAPI dialog = ui.getCurrentInteractionDialog();
+            if (dialog != null) {
+                SectorEntityToken target = dialog.getInteractionTarget();
+                if (target != null) {
+                    currentEntityId = target.getId();
+                    currentEntityName = target.getName();
+                }
+            }
+        }
+
+        if (Objects.equals(currentEntityId, localInteractionEntityId)) {
+            return;
+        }
+
+        // The local interaction we were tracking has ended (dialog closed or target changed):
+        // release the claim and tell the remote client.
+        if (localInteractionEntityId != null) {
+            sendInteractionRelease(localInteractionEntityId);
+            if (service.role() == CoopConnectionRole.HOST) {
+                interactionGate.release(localInteractionEntityId, sessionState.localPlayerId());
+            }
+            localInteractionEntityId = null;
+        }
+
+        // A new local interaction just opened: host arbitrates locally and broadcasts the accept;
+        // guest requests the claim from the host.
+        if (currentEntityId != null) {
+            beginLocalInteraction(currentEntityId, currentEntityName);
+        }
+    }
+
+    private void beginLocalInteraction(String entityId, String entityName) {
+        localInteractionEntityId = entityId;
+        String localPlayerId = sessionState.localPlayerId();
+        if (service.role() == CoopConnectionRole.HOST) {
+            CoopInteractionGate.ClaimResult result = interactionGate.arbitrate(entityId, localPlayerId, entityName);
+            if (result.accepted()) {
+                CoopMessages.Message accept = CoopMessages.interactionAccept(
+                        sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                        entityId, localPlayerId, entityName, result.hostSeq());
+                service.send(accept);
+                log("outbound", accept);
+            } else {
+                CoopLog.warn(CoopNetPump.class, "Host opened interaction on entityId=" + entityId
+                        + " already claimed by " + result.rejectedByPlayerId());
+            }
+        } else {
+            CoopMessages.Message claim = CoopMessages.interactionClaim(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                    entityId, entityName, localPlayerId);
+            service.send(claim);
+            log("outbound", claim);
+        }
+    }
+
+    private void sendInteractionRelease(String entityId) {
+        CoopMessages.Message release = CoopMessages.interactionRelease(
+                sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                entityId, sessionState.localPlayerId());
+        service.send(release);
+        log("outbound", release);
+    }
+
+    private void applyLocalBlocking(SectorAPI sector) {
+        String localPlayerId = sessionState.localPlayerId();
+        CoopInteractionClaim blocking = localPlayerId == null
+                ? null
+                : interactionGate.blockingClaimFor(localPlayerId);
+        if (blocking != null) {
+            CampaignUIAPI ui = sector.getCampaignUI();
+            if (ui != null) {
+                // Engine-level guard: stop a new interaction dialog from opening this frame.
+                ui.setDisallowPlayerInteractionsForOneFrame();
+            }
+            // Guest-only input lock (consume world input except camera). No-op on host.
+            timeLock.setInteractionBlocked(true, blocking.entityName());
+            if (!blocking.entityName().equals(lastBlockedEntityName)) {
+                if (ui != null) {
+                    ui.addMessage("Remote player is interacting: " + blocking.entityName());
+                }
+                lastBlockedEntityName = blocking.entityName();
+            }
+        } else {
+            timeLock.setInteractionBlocked(false, null);
+            lastBlockedEntityName = null;
+        }
+    }
+
+    private void resetInteractionState() {
+        if (localInteractionEntityId == null && lastBlockedEntityName == null) {
+            return;
+        }
+        localInteractionEntityId = null;
+        lastBlockedEntityName = null;
+        interactionGate.clear();
+        try {
+            timeLock.setInteractionBlocked(false, null);
+        } catch (RuntimeException ex) {
+            // No active sector to clear the blocker on; the blocker is removed by syncGuestInputBlocker.
+        }
     }
 
     private void syncGuestInputBlocker() {

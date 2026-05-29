@@ -38,6 +38,7 @@ def starsectorJars = files(
     "${starsectorCore}/starfarer.api.jar",
     "${starsectorCore}/xstream-1.4.10.jar",
     "${starsectorCore}/log4j-1.2.9.jar",
+    "${starsectorCore}/json.jar",
     "${starsectorCore}/lwjgl_util.jar"
 )
 

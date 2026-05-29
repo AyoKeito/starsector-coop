@@ -82,6 +82,26 @@ public class CoopTimeLock {
         }
     }
 
+    /**
+     * Phase 9: toggle the installed guest input blocker's interaction lock (consume world input
+     * except camera movement while the remote player holds an interaction). No-op when no blocker is
+     * installed, which is the host case (the host blocks its own new interactions via
+     * {@code setDisallowPlayerInteractionsForOneFrame} instead).
+     */
+    public void setInteractionBlocked(boolean blocked, String entityName) {
+        SectorAPI sector = sectorOrNull();
+        if (sector == null) {
+            return;
+        }
+        ListenerManagerAPI listeners = sector.getListenerManager();
+        if (listeners == null) {
+            return;
+        }
+        for (CoopCampaignInputBlocker blocker : listeners.getListeners(CoopCampaignInputBlocker.class)) {
+            blocker.setInteractionBlocked(blocked, entityName);
+        }
+    }
+
     public static TimeSnapshot fromMessage(CoopMessages.Message message) {
         Objects.requireNonNull(message, "message");
         if (message.type() != CoopMessages.Type.TIME_SNAPSHOT) {

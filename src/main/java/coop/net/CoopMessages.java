@@ -23,6 +23,10 @@ public final class CoopMessages {
         SEED_LOCK_REJECT,
         TIME_SNAPSHOT,
         FLEET_SNAPSHOT,
+        INTERACTION_CLAIM,
+        INTERACTION_ACCEPT,
+        INTERACTION_REJECT,
+        INTERACTION_RELEASE,
         PING,
         PONG,
         DISCONNECT
@@ -120,6 +124,37 @@ public final class CoopMessages {
                         + "\"timestampMillis\":" + timestampMillis + ","
                         + "\"campaignDay\":" + campaignDay + ","
                         + "\"sentAtMillis\":" + sentAtMillis + "}");
+    }
+
+    public static Message interactionClaim(String sessionId, long seq, long sentAtMillis,
+                                           String entityId, String entityName, String playerId) {
+        return new Message(Type.INTERACTION_CLAIM, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
+                        + "\"entityName\":\"" + escapeJson(entityName == null ? "" : entityName) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
+    }
+
+    public static Message interactionAccept(String sessionId, long seq, long sentAtMillis,
+                                            String entityId, String playerId, String entityName, long hostSeq) {
+        return new Message(Type.INTERACTION_ACCEPT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
+                        + "\"entityName\":\"" + escapeJson(entityName == null ? "" : entityName) + "\","
+                        + "\"hostSeq\":" + hostSeq + "}");
+    }
+
+    public static Message interactionReject(String sessionId, long seq, long sentAtMillis,
+                                            String entityId, String reason) {
+        return new Message(Type.INTERACTION_REJECT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
+                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    public static Message interactionRelease(String sessionId, long seq, long sentAtMillis,
+                                             String entityId, String playerId) {
+        return new Message(Type.INTERACTION_RELEASE, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
