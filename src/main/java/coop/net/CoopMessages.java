@@ -21,6 +21,7 @@ public final class CoopMessages {
         SEED_LOCK_REQUEST,
         SEED_LOCK_ACK,
         SEED_LOCK_REJECT,
+        TIME_SNAPSHOT,
         PING,
         PONG,
         DISCONNECT
@@ -108,6 +109,16 @@ public final class CoopMessages {
     public static Message seedLockReject(String sessionId, long seq, long sentAtMillis, String reason) {
         return new Message(Type.SEED_LOCK_REJECT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    public static Message timeSnapshot(String sessionId, long seq, boolean paused, boolean fastForward,
+                                       long timestampMillis, long campaignDay, long sentAtMillis) {
+        return new Message(Type.TIME_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"paused\":\"" + paused + "\","
+                        + "\"fastForward\":\"" + fastForward + "\","
+                        + "\"timestampMillis\":" + timestampMillis + ","
+                        + "\"campaignDay\":" + campaignDay + ","
+                        + "\"sentAtMillis\":" + sentAtMillis + "}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {

@@ -5,6 +5,7 @@ import coop.seed.CoopSeedSync;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.time.CoopTimeLock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
@@ -324,6 +325,72 @@ class CoopNetPumpTest {
         assertEquals("{\"reason\":\"Lobby already has a guest\"}", reject.payloadJson());
     }
 
+    @Test
+    void hostSendsTimeSnapshotAtFiveHzAfterSeedLock() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        AtomicLong now = new AtomicLong(1000L);
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(true, false, 222333444L, 17L, 1200L));
+        CoopNetPump pump = new CoopNetPump(service, session, now::get,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed",
+                timeLock);
+
+        pump.advance(0f);
+        now.set(1199L);
+        pump.advance(0f);
+        now.set(1200L);
+        pump.advance(0f);
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message snapshot = service.sent.get(0);
+        assertEquals(CoopMessages.Type.TIME_SNAPSHOT, snapshot.type());
+        assertEquals("session-a", snapshot.sessionId());
+        assertEquals("true", CoopMessages.requiredPayloadString(snapshot, "paused"));
+        assertEquals("false", CoopMessages.requiredPayloadString(snapshot, "fastForward"));
+        assertEquals(222333444L, CoopMessages.requiredPayloadLong(snapshot, "timestampMillis"));
+        assertEquals(17L, CoopMessages.requiredPayloadLong(snapshot, "campaignDay"));
+        assertEquals(1200L, CoopMessages.requiredPayloadLong(snapshot, "sentAtMillis"));
+    }
+
+    @Test
+    void guestAppliesLatestHostTimeSnapshotEveryFrame() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        CoopTimeLock.TimeSnapshot hostSnapshot =
+                new CoopTimeLock.TimeSnapshot(true, true, 222333444L, 17L, 1500L);
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 5L,
+                hostSnapshot.paused(),
+                hostSnapshot.fastForward(),
+                hostSnapshot.timestampMillis(),
+                hostSnapshot.campaignDay(),
+                hostSnapshot.sentAtMillis()));
+        RecordingTimeLock timeLock = new RecordingTimeLock(hostSnapshot);
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1600L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed",
+                timeLock);
+
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(List.of(hostSnapshot, hostSnapshot), timeLock.applied);
+        assertEquals(List.of(true, true), timeLock.inputBlockerStates);
+    }
+
     private static final class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
@@ -373,5 +440,35 @@ class CoopNetPumpTest {
 
     private static CoopHandshakeManifest emptyManifest(String gameVersion, String commit) {
         return new CoopHandshakeManifest(gameVersion, "0.1.0", commit, List.of());
+    }
+
+    private static final class RecordingTimeLock extends CoopTimeLock {
+        private final CoopTimeLock.TimeSnapshot snapshot;
+        private final List<CoopTimeLock.TimeSnapshot> applied = new ArrayList<>();
+        private final List<Boolean> inputBlockerStates = new ArrayList<>();
+
+        private RecordingTimeLock(CoopTimeLock.TimeSnapshot snapshot) {
+            this.snapshot = snapshot;
+        }
+
+        @Override
+        public CoopTimeLock.TimeSnapshot capture(long sentAtMillis) {
+            return new CoopTimeLock.TimeSnapshot(
+                    snapshot.paused(),
+                    snapshot.fastForward(),
+                    snapshot.timestampMillis(),
+                    snapshot.campaignDay(),
+                    sentAtMillis);
+        }
+
+        @Override
+        public void apply(CoopTimeLock.TimeSnapshot snapshot) {
+            applied.add(snapshot);
+        }
+
+        @Override
+        public void syncGuestInputBlocker(boolean active) {
+            inputBlockerStates.add(active);
+        }
     }
 }

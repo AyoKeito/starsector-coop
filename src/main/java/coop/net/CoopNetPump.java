@@ -11,6 +11,7 @@ import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.time.CoopTimeLock;
 import coop.util.CoopLog;
 
 import java.util.Objects;
@@ -34,11 +35,14 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean lobbyHelloSent;
     private boolean handshakeManifestSent;
     private boolean seedLockRequestSent;
+    private long nextTimeSnapshotAtMillis;
+    private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
     private final BooleanSupplier ironModeSupplier;
     private final Supplier<CoopSeedSync.SeedData> hostSeedSupplier;
     private final Supplier<String> sectorFingerprintSupplier;
     private final Supplier<String> sectorSeedStringSupplier;
+    private final CoopTimeLock timeLock;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -72,6 +76,16 @@ public class CoopNetPump implements EveryFrameScript {
                        Supplier<CoopSeedSync.SeedData> hostSeedSupplier,
                        Supplier<String> sectorFingerprintSupplier,
                        Supplier<String> sectorSeedStringSupplier) {
+        this(service, sessionState, clockMillis, manifestSupplier, ironModeSupplier,
+                hostSeedSupplier, sectorFingerprintSupplier, sectorSeedStringSupplier, new CoopTimeLock());
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
+                       Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier,
+                       Supplier<CoopSeedSync.SeedData> hostSeedSupplier,
+                       Supplier<String> sectorFingerprintSupplier,
+                       Supplier<String> sectorSeedStringSupplier,
+                       CoopTimeLock timeLock) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
@@ -80,7 +94,10 @@ public class CoopNetPump implements EveryFrameScript {
         this.hostSeedSupplier = Objects.requireNonNull(hostSeedSupplier, "hostSeedSupplier");
         this.sectorFingerprintSupplier = Objects.requireNonNull(sectorFingerprintSupplier, "sectorFingerprintSupplier");
         this.sectorSeedStringSupplier = Objects.requireNonNull(sectorSeedStringSupplier, "sectorSeedStringSupplier");
-        this.nextPingAtMillis = clockMillis.getAsLong() + PING_INTERVAL_MILLIS;
+        this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
+        long now = clockMillis.getAsLong();
+        this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
+        this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
     }
 
     @Override
@@ -98,10 +115,13 @@ public class CoopNetPump implements EveryFrameScript {
         maybeStartFromSystemProperties();
         maybeStartFromMemoryFlags();
         service.flushOutbound();
+        syncGuestInputBlocker();
         maybeSendLobbyHello();
         drainInbound();
         maybeSendHandshakeManifest();
         maybeSendSeedLockRequest();
+        maybeApplyTimeSnapshot();
+        maybeSendTimeSnapshot();
         maybeSendPing();
         service.flushOutbound();
     }
@@ -225,6 +245,7 @@ public class CoopNetPump implements EveryFrameScript {
                 case SEED_LOCK_REQUEST -> handleSeedLockRequest(message);
                 case SEED_LOCK_ACK -> handleSeedLockAck(message);
                 case SEED_LOCK_REJECT -> handleSeedLockReject(message);
+                case TIME_SNAPSHOT -> handleTimeSnapshot(message);
                 case PING -> sendPong(message);
                 default -> {
                 }
@@ -522,6 +543,71 @@ public class CoopNetPump implements EveryFrameScript {
         String reason = CoopMessages.requiredPayloadString(message, "reason");
         sessionState.rejectHandshake(reason);
         CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
+    }
+
+    private void handleTimeSnapshot(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        latestTimeSnapshot = CoopTimeLock.fromMessage(message);
+    }
+
+    private void maybeApplyTimeSnapshot() {
+        if (service.role() != CoopConnectionRole.GUEST
+                || !isGameplaySessionActive()
+                || latestTimeSnapshot == null) {
+            return;
+        }
+
+        try {
+            timeLock.apply(latestTimeSnapshot);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply coop time snapshot", ex);
+        }
+    }
+
+    private void maybeSendTimeSnapshot() {
+        if (service.role() != CoopConnectionRole.HOST || !service.isConnected() || !isGameplaySessionActive()) {
+            return;
+        }
+
+        long now = clockMillis.getAsLong();
+        if (now < nextTimeSnapshotAtMillis) {
+            return;
+        }
+
+        try {
+            CoopTimeLock.TimeSnapshot snapshot = timeLock.capture(now);
+            CoopMessages.Message message = CoopMessages.timeSnapshot(
+                    sessionState.sessionId(),
+                    service.nextSeq(),
+                    snapshot.paused(),
+                    snapshot.fastForward(),
+                    snapshot.timestampMillis(),
+                    snapshot.campaignDay(),
+                    snapshot.sentAtMillis());
+            service.send(message);
+            log("outbound", message);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to capture coop time snapshot", ex);
+        } finally {
+            nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
+        }
+    }
+
+    private void syncGuestInputBlocker() {
+        boolean active = service.role() == CoopConnectionRole.GUEST
+                && service.isConnected()
+                && isGameplaySessionActive();
+        try {
+            timeLock.syncGuestInputBlocker(active);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign input blocker", ex);
+        }
+    }
+
+    private boolean isGameplaySessionActive() {
+        return sessionState.handshakeValidated() && sessionState.seedLong() != null;
     }
 
     private void maybeSendPing() {
