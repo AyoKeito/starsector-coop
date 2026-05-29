@@ -1,4 +1,7 @@
 /.gradle/
 /build/
 /jars/coop.jar
+/jars/coop-forks.jar
 
+# Local classloader probe scratch. Runtime engine overrides belong under /forks.
+/data/scripts/com/fs/starfarer/api/impl/campaign/procgen/AccretionDiskGenPlugin.java

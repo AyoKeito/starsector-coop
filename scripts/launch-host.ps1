@@ -2,6 +2,7 @@
 param(
     [string] $TestRoot = 'K:\Starsector-coop-test',
     [int] $Port = 7777,
+    [string] $SeedString = 'MN-1234567890123456789',
     [switch] $PatchOnly
 )
 
@@ -27,6 +28,9 @@ function Set-CoopVmParams {
     $content = $content -replace '\s-Dcoop\.hostPort=\S+', ''
     $content = $content -replace '\s-Dcoop\.connectHost=\S+', ''
     $content = $content -replace '\s-Dcoop\.connectPort=\S+', ''
+    $content = $content -replace '\s-Dcoop\.newGameSeed=\S+', ''
+    # Remove any prior coop-forks classpath entry so re-patching stays idempotent.
+    $content = $content -replace '\.\.\\mods\\coop\\jars\\coop-forks\.jar;', ''
 
     $classpathMarker = ' -classpath '
     $index = $content.IndexOf($classpathMarker, [System.StringComparison]::Ordinal)
@@ -34,6 +38,15 @@ function Set-CoopVmParams {
         throw "Could not find -classpath in $vmparams"
     }
 
+    # Prepend coop-forks.jar to the FRONT of the classpath so the JVM system classloader resolves
+    # our forked engine classes (e.g. com.fs.starfarer.api.util.Misc) ahead of starfarer.api.jar.
+    # Path is relative to the JVM working directory (starsector-core); '..' -> install root.
+    $forksEntry = '..\mods\coop\jars\coop-forks.jar;'
+    $cpValueStart = $index + $classpathMarker.Length
+    $content = $content.Substring(0, $cpValueStart) + $forksEntry + $content.Substring($cpValueStart)
+
+    # Insert coop JVM properties just before -classpath.
+    $index = $content.IndexOf($classpathMarker, [System.StringComparison]::Ordinal)
     $insertion = ' ' + ($JvmProperties -join ' ')
     $content = $content.Substring(0, $index) + $insertion + $content.Substring($index)
     Set-Content -LiteralPath $vmparams -Value $content -NoNewline -Encoding ASCII
@@ -49,12 +62,17 @@ if (-not (Test-Path -LiteralPath $exe)) {
     throw "Missing host test client at $exe. Run setup-two-client-test.ps1 first."
 }
 
-Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties @("-Dcoop.hostPort=$Port")
+$jvmProperties = @("-Dcoop.hostPort=$Port")
+if (-not [string]::IsNullOrWhiteSpace($SeedString)) {
+    $jvmProperties += "-Dcoop.newGameSeed=$SeedString"
+}
+
+Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties $jvmProperties
 
 if ($PatchOnly) {
-    Write-Host "Patched host vmparams for coop.hostPort=$Port"
+    Write-Host "Patched host vmparams for coop.hostPort=$Port coop.newGameSeed=$SeedString"
     return
 }
 
 Start-Process -FilePath $exe -WorkingDirectory $profileRoot
-Write-Host "Launched coop host test client on port $Port"
+Write-Host "Launched coop host test client on port $Port with seed $SeedString"

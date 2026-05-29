@@ -167,7 +167,8 @@ public final class CoopSeedSync {
             for (int i = 0; i < Long.BYTES; i++) {
                 value = (value << 8) | (hash[i] & 0xffL);
             }
-            return value;
+            // Vanilla SectorProcGen.prepare skips setSeed when seed <= 0; force positive.
+            return value & Long.MAX_VALUE;
         } catch (Exception ex) {
             throw new IllegalStateException("Unable to derive stable seed from seed string", ex);
         }

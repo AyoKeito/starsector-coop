@@ -41,6 +41,18 @@ def starsectorJars = files(
     "${starsectorCore}/lwjgl_util.jar"
 )
 
+// Forked engine classes need the full set of core jars their original source imports
+// (lwjgl + json on top of the base set). compileOnly: the real classes ship in starfarer.api.jar
+// at runtime; our fork only overrides them via classpath order.
+def forksCompileClasspath = files(
+    "${starsectorCore}/starfarer.api.jar",
+    "${starsectorCore}/xstream-1.4.10.jar",
+    "${starsectorCore}/log4j-1.2.9.jar",
+    "${starsectorCore}/lwjgl.jar",
+    "${starsectorCore}/lwjgl_util.jar",
+    "${starsectorCore}/json.jar"
+)
+
 dependencies {
     compileOnly starsectorJars
     testImplementation starsectorJars
@@ -76,6 +88,15 @@ sourceSets {
             srcDir generatedBuildInfoDir
         }
     }
+    // Forked engine classes (com.fs.starfarer.api.*) plus coop.rng.CoopRandom, which MUST share
+    // the same classloader as the forks (the system loader) - so it is built into coop-forks.jar,
+    // not coop.jar. See CoopRandom's classloader contract.
+    forks {
+        java {
+            srcDirs = ['forks', 'src/main/java/coop/rng']
+        }
+        compileClasspath = forksCompileClasspath
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -92,6 +113,9 @@ test {
 jar {
     archiveFileName = 'coop.jar'
     destinationDirectory = file('jars')
+    // coop.rng.CoopRandom lives in coop-forks.jar (system classloader). Keep it out of coop.jar
+    // (mod classloader) so there is a single canonical copy resolvable by the forked engine classes.
+    exclude 'coop/rng/**'
     manifest {
         attributes(
             'Implementation-Title': 'Starsector Coop V1',
@@ -100,4 +124,23 @@ jar {
             'Coop-Git-Commit': coopGitCommit
         )
     }
+}
+
+tasks.register('forksJar', Jar) {
+    archiveFileName = 'coop-forks.jar'
+    destinationDirectory = file('jars')
+    from sourceSets.forks.output
+    manifest {
+        attributes(
+            'Implementation-Title': 'Starsector Coop V1 Forks',
+            'Implementation-Version': project.version.toString(),
+            'Coop-Build-Time': Instant.now().toString(),
+            'Coop-Git-Commit': coopGitCommit
+        )
+    }
+}
+
+// Building the mod always produces both jars.
+tasks.named('build').configure {
+    dependsOn 'forksJar'
 }

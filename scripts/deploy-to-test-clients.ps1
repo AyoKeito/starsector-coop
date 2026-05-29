@@ -35,10 +35,17 @@ foreach ($profile in @('host', 'guest')) {
     Assert-ProfileRoot $profileRoot
     $modsRoot = Join-Path $profileRoot 'mods'
     $destMod = Join-Path $modsRoot 'coop'
+    $destModFull = [System.IO.Path]::GetFullPath($destMod)
+    if (-not $destModFull.StartsWith($testRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to deploy outside test root: $destModFull"
+    }
 
     if ($WhatIfOnly) {
         Write-Host "Would deploy coop mod to $destMod"
     } else {
+        if (Test-Path -LiteralPath $destMod) {
+            Remove-Item -LiteralPath $destMod -Recurse -Force
+        }
         New-Item -ItemType Directory -Force -Path $destMod | Out-Null
         Copy-Item -LiteralPath (Join-Path $modRoot 'mod_info.json') -Destination $destMod -Force
         Copy-Item -LiteralPath (Join-Path $modRoot 'jars') -Destination $destMod -Recurse -Force

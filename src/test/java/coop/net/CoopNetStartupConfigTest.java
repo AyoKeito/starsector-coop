@@ -62,4 +62,50 @@ class CoopNetStartupConfigTest {
 
         assertThrows(IllegalArgumentException.class, () -> CoopNetStartupConfig.from(properties));
     }
+
+    @Test
+    void parsesNewGameSeedAlongsideHostProperty() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.hostPort", "7777");
+        properties.setProperty("coop.newGameSeed", "  MN-shared-test-seed  ");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertTrue(config.isPresent());
+        assertEquals(CoopConnectionRole.HOST, config.role());
+        assertEquals("MN-shared-test-seed", config.newGameSeed());
+    }
+
+    @Test
+    void parsesNewGameSeedAlongsideGuestProperties() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.connectHost", "127.0.0.1");
+        properties.setProperty("coop.connectPort", "7777");
+        properties.setProperty("coop.newGameSeed", "MN-shared-test-seed");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertTrue(config.isPresent());
+        assertEquals(CoopConnectionRole.GUEST, config.role());
+        assertEquals("MN-shared-test-seed", config.newGameSeed());
+    }
+
+    @Test
+    void newGameSeedAloneIsExposedButNotARoleConfig() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.newGameSeed", "MN-shared-test-seed");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertFalse(config.isPresent());
+        assertEquals(CoopConnectionRole.NONE, config.role());
+        assertEquals("MN-shared-test-seed", config.newGameSeed());
+    }
+
+    @Test
+    void newGameSeedDefaultsToEmpty() {
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(new Properties());
+
+        assertEquals("", config.newGameSeed());
+    }
 }

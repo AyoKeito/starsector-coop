@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopSeedSyncTest {
     @Test
@@ -51,6 +52,22 @@ class CoopSeedSyncTest {
         assertEquals("MN-2587421401119275744", first.seedString());
         assertEquals(first.seedLong(), second.seedLong());
         org.junit.jupiter.api.Assertions.assertNotEquals(first.seedLong(), different.seedLong());
+    }
+
+    @Test
+    void seedDataFromSeedStringProducesPositiveSeedLong() {
+        // Vanilla SectorProcGen.prepare skips setSeed when seed <= 0,
+        // so a stable seed derived from a string must be positive.
+        for (String input : new String[]{
+                "MN-1234567890123456789",
+                "MN-4556855818685483012",
+                "coop-test-shared",
+                "a",
+                "negative-source-zzzzzzz"
+        }) {
+            assertTrue(CoopSeedSync.seedDataFromSeedString(input).seedLong() > 0L,
+                    "expected positive seedLong for " + input);
+        }
     }
 
     @Test
