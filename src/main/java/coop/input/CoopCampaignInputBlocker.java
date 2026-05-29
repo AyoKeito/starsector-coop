@@ -37,12 +37,20 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
 
     private boolean isLockedControl(InputEventAPI event) {
         for (String control : LOCKED_CONTROLS) {
-            if (event.isControlActivated(control)
-                    || event.isControlDownEvent(control)
-                    || event.isControlUpEvent(control)) {
+            if (matchesControl(event, control)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean matchesControl(InputEventAPI event, String control) {
+        try {
+            return event.isControlActivated(control)
+                    || event.isControlDownEvent(control)
+                    || event.isControlUpEvent(control);
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
     }
 }

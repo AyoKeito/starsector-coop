@@ -12,9 +12,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopCampaignInputBlockerTest {
     @Test
-    void consumesCampaignPauseAndFastForwardControlsBeforeCoreInput() {
-        RecordingInputEvent pause = new RecordingInputEvent("PAUSE", true, false, false);
-        RecordingInputEvent fastForward = new RecordingInputEvent("FAST_FORWARD", false, true, false);
+    void consumesSupportedCampaignPauseAndFastForwardControlsBeforeCoreInput() {
+        RecordingInputEvent pause = new RecordingInputEvent(
+                "PAUSE", true, false, false, Set.of("PAUSE", "FAST_FORWARD"));
+        RecordingInputEvent fastForward = new RecordingInputEvent(
+                "FAST_FORWARD", false, true, false, Set.of("PAUSE", "FAST_FORWARD"));
 
         new CoopCampaignInputBlocker().processCampaignInputPreCore(List.of(pause.proxy(), fastForward.proxy()));
 
@@ -24,8 +26,8 @@ class CoopCampaignInputBlockerTest {
 
     @Test
     void ignoresUnrelatedAndAlreadyConsumedInput() {
-        RecordingInputEvent unrelated = new RecordingInputEvent("INTERACT", true, false, false);
-        RecordingInputEvent alreadyConsumed = new RecordingInputEvent("PAUSE", true, false, true);
+        RecordingInputEvent unrelated = new RecordingInputEvent("INTERACT", true, false, false, Set.of("FAST_FORWARD"));
+        RecordingInputEvent alreadyConsumed = new RecordingInputEvent("PAUSE", true, false, true, Set.of());
 
         new CoopCampaignInputBlocker().processCampaignInputPreCore(
                 List.of(unrelated.proxy(), alreadyConsumed.proxy()));
@@ -35,27 +37,30 @@ class CoopCampaignInputBlockerTest {
     }
 
     @Test
-    void doesNotProbeUnsupportedControlEnumAliases() {
-        RecordingInputEvent mouseMove = new RecordingInputEvent("MOUSE_MOVE", false, false, false);
+    void ignoresUnsupportedControlEnumNamesWithoutCrashing() {
+        RecordingInputEvent mouseMove = new RecordingInputEvent("MOUSE_MOVE", false, false, false, Set.of());
+        RecordingInputEvent pause = new RecordingInputEvent("PAUSE", true, false, false, Set.of("FAST_FORWARD"));
 
-        new CoopCampaignInputBlocker().processCampaignInputPreCore(List.of(mouseMove.proxy()));
+        new CoopCampaignInputBlocker().processCampaignInputPreCore(List.of(mouseMove.proxy(), pause.proxy()));
 
         assertFalse(mouseMove.consumed);
+        assertFalse(pause.consumed);
     }
 
     private static final class RecordingInputEvent {
-        private static final Set<String> ENGINE_CONTROL_ENUM_NAMES = Set.of("PAUSE", "FAST_FORWARD");
-
         private final String controlName;
         private final boolean activated;
         private final boolean down;
+        private final Set<String> supportedControls;
         private boolean consumed;
 
-        private RecordingInputEvent(String controlName, boolean activated, boolean down, boolean consumed) {
+        private RecordingInputEvent(String controlName, boolean activated, boolean down, boolean consumed,
+                                    Set<String> supportedControls) {
             this.controlName = controlName;
             this.activated = activated;
             this.down = down;
             this.consumed = consumed;
+            this.supportedControls = supportedControls;
         }
 
         private InputEventAPI proxy() {
@@ -88,8 +93,8 @@ class CoopCampaignInputBlockerTest {
                     });
         }
 
-        private static void requireSupportedControl(String control) {
-            if (!ENGINE_CONTROL_ENUM_NAMES.contains(control)) {
+        private void requireSupportedControl(String control) {
+            if (!supportedControls.contains(control)) {
                 throw new IllegalArgumentException("No enum constant Controls." + control);
             }
         }
