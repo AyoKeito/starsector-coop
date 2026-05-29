@@ -8,8 +8,13 @@ import java.util.Set;
 
 public class CoopCampaignInputBlocker implements CampaignInputListener {
     private static final int INPUT_PRIORITY = Integer.MAX_VALUE;
+    // Control enum-constant names passed to InputEventAPI.isControlActivated/Down/Up(String).
+    // The engine resolves these via Enum.valueOf on the obfuscated control enum
+    // (com.fs.starfarer.title.<obf>$oo in starfarer_obf.jar, Starsector 0.98a-RC8); an
+    // unknown name throws IllegalArgumentException ("No enum constant ...<name>"). The campaign
+    // pause control is GENERAL_PAUSE, not PAUSE - passing "PAUSE" crashed the client.
     private static final Set<String> LOCKED_CONTROLS = Set.of(
-            "PAUSE",
+            "GENERAL_PAUSE",
             "FAST_FORWARD");
 
     @Override

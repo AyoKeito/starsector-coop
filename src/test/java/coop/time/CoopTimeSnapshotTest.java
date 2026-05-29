@@ -1,6 +1,7 @@
 package coop.time;
 
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
 import coop.input.CoopCampaignInputBlocker;
@@ -59,7 +60,7 @@ class CoopTimeSnapshotTest {
 
     @Test
     void capturesSectorPauseFastForwardAndClock() {
-        RecordingSector recording = new RecordingSector(true, true, 222333444L, 17);
+        RecordingSector recording = new RecordingSector(true, false, true, 222333444L, 17);
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
 
         CoopTimeLock.TimeSnapshot snapshot = timeLock.capture(12000L);
@@ -79,7 +80,7 @@ class CoopTimeSnapshotTest {
         timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L));
 
         assertTrue(recording.paused);
-        assertTrue(recording.fastForward);
+        assertTrue(recording.sectorFastAdvance);
     }
 
     @Test
@@ -100,14 +101,21 @@ class CoopTimeSnapshotTest {
 
     private static final class RecordingSector {
         private boolean paused;
-        private boolean fastForward;
+        private boolean sectorFastAdvance;
+        private final boolean uiFastForward;
         private final long timestampMillis;
         private final int day;
         private final RecordingListenerManager listenerManager = new RecordingListenerManager();
 
         private RecordingSector(boolean paused, boolean fastForward, long timestampMillis, int day) {
+            this(paused, fastForward, fastForward, timestampMillis, day);
+        }
+
+        private RecordingSector(boolean paused, boolean sectorFastAdvance, boolean uiFastForward,
+                                long timestampMillis, int day) {
             this.paused = paused;
-            this.fastForward = fastForward;
+            this.sectorFastAdvance = sectorFastAdvance;
+            this.uiFastForward = uiFastForward;
             this.timestampMillis = timestampMillis;
             this.day = day;
         }
@@ -125,12 +133,19 @@ class CoopTimeSnapshotTest {
                                 paused = (boolean) args[0];
                                 return null;
                             }
-                            case "isFastForwardIteration" -> {
-                                return fastForward;
+                            case "isInFastAdvance" -> {
+                                return sectorFastAdvance;
                             }
-                            case "setFastForwardIteration" -> {
-                                fastForward = (boolean) args[0];
+                            case "setInFastAdvance" -> {
+                                sectorFastAdvance = (boolean) args[0];
                                 return null;
+                            }
+                            case "isFastForwardIteration" -> {
+                                // Read only by temporary capture() diagnostic logging.
+                                return sectorFastAdvance;
+                            }
+                            case "getCampaignUI" -> {
+                                return campaignUiProxy();
                             }
                             case "getClock" -> {
                                 return clockProxy();
@@ -140,6 +155,18 @@ class CoopTimeSnapshotTest {
                             }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
+                    });
+        }
+
+        private CampaignUIAPI campaignUiProxy() {
+            return (CampaignUIAPI) Proxy.newProxyInstance(
+                    CampaignUIAPI.class.getClassLoader(),
+                    new Class<?>[]{CampaignUIAPI.class},
+                    (proxy, method, args) -> {
+                        if ("isFastForward".equals(method.getName())) {
+                            return uiFastForward;
+                        }
+                        throw new UnsupportedOperationException(method.getName());
                     });
         }
 

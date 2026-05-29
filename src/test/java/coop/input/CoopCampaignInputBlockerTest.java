@@ -14,9 +14,9 @@ class CoopCampaignInputBlockerTest {
     @Test
     void consumesSupportedCampaignPauseAndFastForwardControlsBeforeCoreInput() {
         RecordingInputEvent pause = new RecordingInputEvent(
-                "PAUSE", true, false, false, Set.of("PAUSE", "FAST_FORWARD"));
+                "GENERAL_PAUSE", true, false, false, Set.of("GENERAL_PAUSE", "FAST_FORWARD"));
         RecordingInputEvent fastForward = new RecordingInputEvent(
-                "FAST_FORWARD", false, true, false, Set.of("PAUSE", "FAST_FORWARD"));
+                "FAST_FORWARD", false, true, false, Set.of("GENERAL_PAUSE", "FAST_FORWARD"));
 
         new CoopCampaignInputBlocker().processCampaignInputPreCore(List.of(pause.proxy(), fastForward.proxy()));
 

@@ -84,6 +84,13 @@ class CoopSectorProcGenTest {
         assertTrue(settingsJson.contains("\"newGameSectorProcGen\":\"coop.seed.CoopSectorProcGen\""));
     }
 
+    @Test
+    void settingsJsonNeutralizesCampaignFastForward() throws Exception {
+        String settingsJson = Files.readString(Path.of("data", "config", "settings.json"));
+
+        assertTrue(settingsJson.contains("\"campaignSpeedupMult\":1"));
+    }
+
     private static CharacterCreationData recordingCharacterCreationData(Map<String, Object> calls) {
         return (CharacterCreationData) Proxy.newProxyInstance(
                 CharacterCreationData.class.getClassLoader(),

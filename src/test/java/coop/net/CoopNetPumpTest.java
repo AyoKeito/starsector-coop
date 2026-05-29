@@ -1,13 +1,17 @@
 package coop.net;
 
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.SectorAPI;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopTimeLock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,6 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopNetPumpTest {
+    @AfterEach
+    void clearGlobalSector() {
+        Global.setSector(null);
+    }
+
     @Test
     void pumpRunsWhilePausedAndDoesNotComplete() {
         CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.GUEST), () -> 1000L);
@@ -391,6 +400,35 @@ class CoopNetPumpTest {
         assertEquals(List.of(true, true), timeLock.inputBlockerStates);
     }
 
+    @Test
+    void hostHoldsCampaignPausedUntilGameplaySessionIsActive() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed",
+                timeLock);
+
+        pump.advance(0f);
+
+        assertTrue(sector.paused);
+
+        sector.paused = false;
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        pump.advance(0f);
+
+        assertFalse(sector.paused);
+    }
+
     private static final class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
@@ -422,6 +460,32 @@ class CoopNetPumpTest {
 
         @Override
         public void flushOutbound() {
+        }
+    }
+
+    private static final class RecordingSector {
+        private boolean paused;
+
+        private RecordingSector(boolean paused) {
+            this.paused = paused;
+        }
+
+        private SectorAPI proxy() {
+            return (SectorAPI) Proxy.newProxyInstance(
+                    SectorAPI.class.getClassLoader(),
+                    new Class<?>[]{SectorAPI.class},
+                    (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "isPaused" -> {
+                                return paused;
+                            }
+                            case "setPaused" -> {
+                                paused = (boolean) args[0];
+                                return null;
+                            }
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        }
+                    });
         }
     }
 

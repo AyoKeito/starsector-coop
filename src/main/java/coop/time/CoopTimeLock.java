@@ -2,6 +2,7 @@ package coop.time;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
 import coop.input.CoopCampaignInputBlocker;
@@ -26,9 +27,13 @@ public class CoopTimeLock {
     public TimeSnapshot capture(long sentAtMillis) {
         SectorAPI sector = requireSector();
         CampaignClockAPI clock = sector.getClock();
+        // Hold-Shift fast-forward is a 2x local clock loop inside CampaignState.advance; it does
+        // NOT set isInFastAdvance()/isFastForwardIteration() (both read false during it, verified).
+        // CampaignUIAPI.isFastForward() is the public getter that reflects that state.
+        boolean fastForward = hostFastForward(sector);
         return new TimeSnapshot(
                 sector.isPaused(),
-                sector.isFastForwardIteration(),
+                fastForward,
                 clock.getTimestamp(),
                 clock.getDay(),
                 sentAtMillis);
@@ -38,7 +43,24 @@ public class CoopTimeLock {
         Objects.requireNonNull(snapshot, "snapshot");
         SectorAPI sector = requireSector();
         sector.setPaused(snapshot.paused());
-        sector.setFastForwardIteration(snapshot.fastForward());
+        // setInFastAdvance(true) drives the extra CampaignClock.advance() path in
+        // CampaignEngine.advance(), making the guest's clock run faster to mirror the host. This
+        // cannot block a guest's own local hold-Shift (that loop lives in obfuscated CampaignState
+        // and polls the key directly); guest self-fast-forward is a documented v1 limitation.
+        // Mirror the host's fast-advance flag for animation/UI consistency. This does NOT control
+        // time speed: setInFastAdvance was verified not to change the guest clock rate. Fast-forward
+        // is instead neutralized for both clients by the campaignSpeedupMult=1 override in
+        // data/config/settings.json (hold-Shift then advances at 1x), so clocks stay aligned.
+        sector.setInFastAdvance(snapshot.fastForward());
+    }
+
+    private boolean hostFastForward(SectorAPI sector) {
+        try {
+            CampaignUIAPI ui = sector.getCampaignUI();
+            return ui != null && ui.isFastForward();
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     public void syncGuestInputBlocker(boolean active) {

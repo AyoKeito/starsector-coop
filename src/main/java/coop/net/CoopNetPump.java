@@ -120,6 +120,7 @@ public class CoopNetPump implements EveryFrameScript {
         drainInbound();
         maybeSendHandshakeManifest();
         maybeSendSeedLockRequest();
+        maybeHoldHostPausedUntilSessionReady();
         maybeApplyTimeSnapshot();
         maybeSendTimeSnapshot();
         maybeSendPing();
@@ -550,6 +551,27 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         latestTimeSnapshot = CoopTimeLock.fromMessage(message);
+    }
+
+    private void maybeHoldHostPausedUntilSessionReady() {
+        // Hold the host paused from the moment it starts hosting until the coop session is fully
+        // established (guest connected + handshake validated + seed lock done). Otherwise host time
+        // advances during the multi-second connect and the guest starts several campaign days
+        // behind; there is no public clock-setter or drivable fast-advance to let the guest catch
+        // up afterwards, so we prevent the gap instead of closing it. Once the session is active we
+        // stop forcing pause and the host's normal pause/unpause mirrors to the guest.
+        if (service.role() != CoopConnectionRole.HOST || isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector != null && !sector.isPaused()) {
+                sector.setPaused(true);
+                CoopLog.info(CoopNetPump.class, "Coop host holding campaign paused until session is ready");
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // No active sector yet (e.g. still on a menu); nothing to pause.
+        }
     }
 
     private void maybeApplyTimeSnapshot() {

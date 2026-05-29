@@ -71,6 +71,82 @@ Guest: Coop net GUEST outbound PING seq=1
 Guest: Coop net GUEST inbound PONG seq=1
 ```
 
+## Phase 7 Time Lock - Control Names and Fast-Forward
+
+Discovered while implementing the guest time lock on `0.98a-RC8`.
+
+### Control enum-constant names (input blocker)
+
+`InputEventAPI.isControlActivated/isControlDownEvent/isControlUpEvent(String)` resolve the
+argument via `Enum.valueOf` on the obfuscated control enum (`com.fs.starfarer.title.<obf>$oo` in
+`starsector-core/starfarer_obf.jar`). An unknown name throws `IllegalArgumentException: No enum
+constant ...<name>`; if uncaught it becomes a **Fatal** crash dialog back to the title screen.
+
+- The campaign pause control is **`GENERAL_PAUSE`**, not `PAUSE`. Passing `"PAUSE"` crashed the client.
+- Campaign fast-forward control is **`FAST_FORWARD`**; combat slow-mo is `GO_SLOW`.
+- To dump the readable list: extract the `$oo` class from `starfarer_obf.jar` and
+  `javap -v <class> | grep "= Utf8"` (constants like `CORE_*`, `CMENU_*`, `C2_*`).
+- `CoopCampaignInputBlocker` wraps the lookups in `try/catch (IllegalArgumentException)` as a
+  defensive net, but tests must assert against the real constant names - the test mocks
+  `InputEventAPI` with arbitrary strings, so a wrong name passes tests yet crashes the real engine.
+
+### Fast-forward has no public on/off setter
+
+Hold-Shift fast-forward is implemented inside the obfuscated
+`com.fs.starfarer.campaign.CampaignState.advance(float, ...)` as a per-frame loop that calls
+`CampaignEngine.advance()` ~2x while the key is held. **Runtime-verified via TIMEDIAG logging:**
+while fast-forwarding, the campaign clock advanced at exactly 2x, yet both
+`SectorAPI.isInFastAdvance()` and `SectorAPI.isFastForwardIteration()` read `false` at the point an
+`EveryFrameScript` observes them.
+
+- `setFastForwardIteration(boolean)` - internal per-frame flag the engine overwrites; setting it
+  does nothing. (Original plan assumption - wrong.)
+- `setInFastAdvance(boolean)` - drives a *separate* extra `CampaignClock.advance()` inside
+  `CampaignEngine.advance()` (the ">>" toggle path), NOT the hold-Shift loop; reads `false` on the
+  host during hold-Shift, so it cannot *capture* fast-forward.
+- **Capture lever (host):** `CampaignUIAPI.isFastForward()` - the public getter that reflects the
+  fast-forward state. Reached via `Global.getSector().getCampaignUI().isFastForward()`.
+- **Apply lever (guest):** `SectorAPI.setInFastAdvance(hostValue)` each frame makes the guest's
+  clock run ~2x to mirror the host.
+- `setInFastAdvance(true)` sticks on the guest (read-back is true) but does **not** change the
+  guest clock rate (verified: `dGuestClockTs` stays 1x). The real 2x comes only from
+  `CampaignState.advance` calling `CampaignEngine.advance()` twice per frame.
+- The guest's own hold-Shift loop lives in obfuscated `CampaignState` and polls the key directly,
+  so it cannot be blocked via public API (consuming the `FAST_FORWARD` input event does not stop
+  it). Forking `CampaignState` is impractical because it is obfuscated engine code (unlike the
+  Phase 11 forks, which were readable `com.fs.starfarer.api.impl.*` source).
+
+### Resolution adopted for v1
+
+Because fast-forward cannot be mirrored or blocked via public API, the coop session is locked to
+1x instead:
+
+- `data/config/settings.json` sets `"campaignSpeedupMult":1` (engine default is 2). Hold-Shift then
+  advances at 1x for any client running the mod, so no client can fast-forward and there is nothing
+  to mirror. Verified: with the override, `clockTs` stays at the 1x delta even while
+  `CampaignUIAPI.isFastForward()` reports true. (Side effect: fast-forward is also disabled in solo
+  games while the coop mod is enabled.)
+- `CoopTimeLock.capture()` still reads `CampaignUIAPI.isFastForward()` and `apply()` still calls
+  `setInFastAdvance(...)` to keep the guest's flag consistent with the host (animation/UI only); the
+  1x lock - not these calls - is what enforces equal time rate.
+
+### Connect-time clock alignment
+
+There is **no public clock-setter** (`CampaignClockAPI` has no `setTimestamp`; `SectorAPI` has no
+`setClock`; `createClock(long)` makes a detached clock that cannot be installed), and fast-advance
+cannot be driven, so a guest that starts behind the host **cannot be made to catch up**. If the host
+runs unpaused during the multi-second connect/handshake/seed-lock, the guest starts several campaign
+days behind permanently.
+
+Fix: the host **holds the campaign paused** (`CoopNetPump.maybeHoldHostPausedUntilSessionReady`) from
+the moment it starts hosting until the session is active (`handshakeValidated && seedLong != null`).
+No time passes during connection, so the guest starts aligned; afterwards the host's normal
+pause/unpause mirrors to the guest (residual offset = network latency, sub-second). Prevent the gap
+rather than close it.
+
+Pause itself is a real lever: `setPaused`/`isPaused` is read by the engine every frame, so the guest
+pause lock works fully.
+
 ## Regression Tests
 
 Keep these tests aligned with the rules above:
