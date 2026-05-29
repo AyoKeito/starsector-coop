@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class CoopMessagesTest {
@@ -169,5 +170,23 @@ class CoopMessagesTest {
         assertEquals(CoopMessages.Type.SEED_LOCK_REJECT, decoded.type());
         assertEquals("session-a", decoded.sessionId());
         assertEquals("sectorFingerprint: host=a guest=b", payload.get("reason"));
+    }
+
+    @Test
+    void datagramEnvelopeRoundTripsHighFrequencyPayload() {
+        String body = "player-a|Guest|corvus\nmember-1|wolf|wolf_Assault";
+        String encoded = CoopMessages.datagram("session-a", CoopMessages.Type.FLEET_SNAPSHOT, body);
+
+        CoopMessages.Datagram decoded = CoopMessages.parseDatagram(encoded);
+
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals(CoopMessages.Type.FLEET_SNAPSHOT, decoded.type());
+        assertEquals(body, decoded.body());
+    }
+
+    @Test
+    void malformedDatagramEnvelopeIsRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseDatagram("session-a|FLEET_SNAPSHOT|payload"));
     }
 }

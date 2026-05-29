@@ -15,6 +15,10 @@ public final class CoopLog {
         }
     }
 
+    public static void debug(Class<?> source, String message) {
+        getLogger(source).debug(message);
+    }
+
     public static void info(Class<?> source, String message) {
         getLogger(source).info(message);
     }

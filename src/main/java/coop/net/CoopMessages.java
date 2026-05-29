@@ -22,6 +22,7 @@ public final class CoopMessages {
         SEED_LOCK_ACK,
         SEED_LOCK_REJECT,
         TIME_SNAPSHOT,
+        FLEET_SNAPSHOT,
         PING,
         PONG,
         DISCONNECT
@@ -124,6 +125,43 @@ public final class CoopMessages {
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
         return new Message(Type.DISCONNECT, sessionId, seq, sentAtMillis,
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    /**
+     * UDP datagram envelope for high-frequency state streams (Phase 8 fleet snapshots, later combat
+     * snapshots). Unlike the TCP {@link Message} line protocol this is not JSON: the body carries its
+     * own compact encoding (e.g. {@link coop.fleet.CoopFleetSnapshot#encode()}), and the envelope is
+     * just {@code sessionId} + {@code type} + {@code body} joined by a unit-separator that never
+     * appears in those encodings. Datagrams are framed one-per-packet by UDP itself.
+     */
+    public record Datagram(String sessionId, Type type, String body) {
+        public Datagram {
+            type = Objects.requireNonNull(type, "type");
+            sessionId = sessionId == null ? "" : sessionId;
+            body = body == null ? "" : body;
+        }
+    }
+
+    private static final char DATAGRAM_SEPARATOR = '\u001f';
+
+    public static String datagram(String sessionId, Type type, String body) {
+        Objects.requireNonNull(type, "type");
+        return (sessionId == null ? "" : sessionId)
+                + DATAGRAM_SEPARATOR + type.name()
+                + DATAGRAM_SEPARATOR + (body == null ? "" : body);
+    }
+
+    public static Datagram parseDatagram(String raw) {
+        Objects.requireNonNull(raw, "raw");
+        int first = raw.indexOf(DATAGRAM_SEPARATOR);
+        int second = first < 0 ? -1 : raw.indexOf(DATAGRAM_SEPARATOR, first + 1);
+        if (first < 0 || second < 0) {
+            throw new IllegalArgumentException("Malformed coop datagram envelope");
+        }
+        String sessionId = raw.substring(0, first);
+        Type type = Type.valueOf(raw.substring(first + 1, second));
+        String body = raw.substring(second + 1);
+        return new Datagram(sessionId, type, body);
     }
 
     public static String encode(Message message) {

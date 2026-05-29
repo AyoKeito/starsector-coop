@@ -3,7 +3,9 @@ package coop.net;
 import coop.util.CoopLog;
 
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.DatagramChannel;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
@@ -14,20 +16,29 @@ import java.util.concurrent.atomic.AtomicLong;
 public class CoopNetService {
     private static final int MAX_FRAME_BYTES = 64 * 1024;
     private static final int READ_BUFFER_BYTES = 8 * 1024;
+    private static final int MAX_DATAGRAM_BYTES = 60 * 1024;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
     private static final String EXTRA_CONNECTION_REJECT_REASON = "Host already has an active connection";
 
     private final Queue<CoopMessages.Message> inbound = new ConcurrentLinkedQueue<>();
     private final Queue<CoopMessages.Message> outbound = new ConcurrentLinkedQueue<>();
+    // High-frequency state datagrams (UDP). Kept separate from the reliable TCP control queues.
+    // Netty is deliberately avoided here: Starsector's script sandbox blocks Netty's reflection
+    // (see CoopNetServiceSandboxCompatibilityTest), so coop networking uses java.nio throughout.
+    private final Queue<String> inboundDatagrams = new ConcurrentLinkedQueue<>();
+    private final Queue<String> outboundDatagrams = new ConcurrentLinkedQueue<>();
     private final AtomicLong nextSeq = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final ByteBuffer readBuffer = ByteBuffer.allocate(READ_BUFFER_BYTES);
+    private final ByteBuffer datagramBuffer = ByteBuffer.allocate(MAX_FRAME_BYTES);
     private final byte[] inboundFrame = new byte[MAX_FRAME_BYTES];
 
     private CoopConnectionRole role = CoopConnectionRole.NONE;
     private ServerSocketChannel serverChannel;
     private SocketChannel activeChannel;
     private SocketChannel pendingConnectChannel;
+    private DatagramChannel udpChannel;
+    private SocketAddress udpRemoteAddress;
     private ByteBuffer pendingWrite;
     private int inboundFrameLength;
     private String connectHost;
@@ -35,6 +46,7 @@ public class CoopNetService {
     private long nextConnectAttemptAtMillis;
     private boolean connectFailureLogged;
     private boolean discardingOversizedFrame;
+    private boolean datagramSendFailureLogged;
 
     public void startHost(int port) {
         synchronized (lifecycleLock) {
@@ -46,6 +58,7 @@ public class CoopNetService {
                 channel.socket().setReuseAddress(true);
                 channel.bind(new InetSocketAddress(port));
                 serverChannel = channel;
+                openUdpLocked(new InetSocketAddress(port), null);
                 CoopLog.info(CoopNetService.class, "Coop TCP host listening on port " + port);
             } catch (Exception ex) {
                 shutdownLocked();
@@ -62,6 +75,9 @@ public class CoopNetService {
             connectPort = port;
             nextConnectAttemptAtMillis = 0L;
             connectFailureLogged = false;
+            // Guest binds an ephemeral UDP port and sends to the host's known address; the host
+            // learns the guest's UDP address from the first datagram it receives.
+            openUdpLocked(new InetSocketAddress(0), new InetSocketAddress(host, port));
             pollNetworkLocked();
         }
     }
@@ -91,6 +107,7 @@ public class CoopNetService {
         synchronized (lifecycleLock) {
             pollNetworkLocked();
             flushOutboundLocked();
+            flushDatagramsLocked();
         }
     }
 
@@ -98,6 +115,22 @@ public class CoopNetService {
         synchronized (lifecycleLock) {
             pollNetworkLocked();
             return inbound.poll();
+        }
+    }
+
+    /** Queues a best-effort UDP datagram (high-frequency state). Dropped if no peer address known. */
+    public void sendDatagram(String payload) {
+        if (payload == null) {
+            return;
+        }
+        outboundDatagrams.add(payload);
+    }
+
+    /** Returns the next received UDP datagram payload, or null. */
+    public String pollDatagram() {
+        synchronized (lifecycleLock) {
+            pollNetworkLocked();
+            return inboundDatagrams.poll();
         }
     }
 
@@ -117,6 +150,83 @@ public class CoopNetService {
             closeActiveChannelLocked(activeChannel);
             closeChannel(pendingConnectChannel);
             pendingConnectChannel = null;
+        }
+        readDatagramsLocked();
+    }
+
+    private void openUdpLocked(InetSocketAddress bindAddress, SocketAddress remoteAddress) {
+        try {
+            DatagramChannel channel = DatagramChannel.open();
+            channel.configureBlocking(false);
+            channel.socket().setReuseAddress(true);
+            channel.bind(bindAddress);
+            udpChannel = channel;
+            udpRemoteAddress = remoteAddress;
+            datagramSendFailureLogged = false;
+            CoopLog.info(CoopNetService.class, "Coop UDP datagram channel bound to " + bindAddress);
+        } catch (Exception ex) {
+            udpChannel = null;
+            udpRemoteAddress = null;
+            CoopLog.warn(CoopNetService.class, "Coop UDP datagram channel unavailable; "
+                    + "campaign state stream disabled (TCP control unaffected)", ex);
+        }
+    }
+
+    private void readDatagramsLocked() {
+        DatagramChannel channel = udpChannel;
+        if (channel == null) {
+            return;
+        }
+        try {
+            datagramBuffer.clear();
+            SocketAddress source = channel.receive(datagramBuffer);
+            while (source != null) {
+                if (role == CoopConnectionRole.HOST) {
+                    // Learn (or relearn, on guest reconnect) the guest's UDP return address.
+                    udpRemoteAddress = source;
+                }
+                datagramBuffer.flip();
+                byte[] bytes = new byte[datagramBuffer.remaining()];
+                datagramBuffer.get(bytes);
+                inboundDatagrams.add(new String(bytes, StandardCharsets.UTF_8));
+                datagramBuffer.clear();
+                source = channel.receive(datagramBuffer);
+            }
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop UDP receive failed", ex);
+        }
+    }
+
+    private void flushDatagramsLocked() {
+        DatagramChannel channel = udpChannel;
+        if (channel == null) {
+            outboundDatagrams.clear();
+            return;
+        }
+        SocketAddress remote = udpRemoteAddress;
+        if (remote == null) {
+            // No peer address known yet (host before first guest datagram). Drop; the next 10 Hz
+            // snapshot supersedes anything queued, so there is no value in buffering stale state.
+            outboundDatagrams.clear();
+            return;
+        }
+
+        String payload;
+        while ((payload = outboundDatagrams.poll()) != null) {
+            byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+            if (bytes.length > MAX_DATAGRAM_BYTES) {
+                CoopLog.warn(CoopNetService.class,
+                        "Coop UDP dropping oversized datagram (" + bytes.length + " bytes)");
+                continue;
+            }
+            try {
+                channel.send(ByteBuffer.wrap(bytes), remote);
+            } catch (Exception ex) {
+                if (!datagramSendFailureLogged) {
+                    CoopLog.warn(CoopNetService.class, "Coop UDP send failed; dropping datagram", ex);
+                    datagramSendFailureLogged = true;
+                }
+            }
         }
     }
 
@@ -353,9 +463,15 @@ public class CoopNetService {
         closeChannel(serverChannel);
         closeChannel(activeChannel);
         closeChannel(pendingConnectChannel);
+        closeChannel(udpChannel);
         serverChannel = null;
         activeChannel = null;
         pendingConnectChannel = null;
+        udpChannel = null;
+        udpRemoteAddress = null;
+        datagramSendFailureLogged = false;
+        inboundDatagrams.clear();
+        outboundDatagrams.clear();
         pendingWrite = null;
         connectHost = null;
         connectPort = 0;

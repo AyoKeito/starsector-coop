@@ -4,6 +4,9 @@ import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.fleet.CoopFleetMirror;
+import coop.fleet.CoopFleetSnapshot;
+import coop.fleet.CoopFleetSnapshotFactory;
 import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
@@ -21,6 +24,9 @@ import java.util.function.Supplier;
 
 public class CoopNetPump implements EveryFrameScript {
     private static final long PING_INTERVAL_MILLIS = 3000L;
+    // Campaign fleet snapshots stream at 10 Hz over UDP (COOP_MP_DESIGN.md section 8.4).
+    private static final long FLEET_SNAPSHOT_INTERVAL_MILLIS = 100L;
+    private static final String DEFAULT_PLAYER_FACTION_ID = "player";
     private static final String HOST_PORT_FLAG = "coop.hostPort";
     private static final String CONNECT_HOST_FLAG = "coop.connectHost";
     private static final String CONNECT_PORT_FLAG = "coop.connectPort";
@@ -36,7 +42,9 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean handshakeManifestSent;
     private boolean seedLockRequestSent;
     private long nextTimeSnapshotAtMillis;
+    private long nextFleetSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
+    private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
     private final BooleanSupplier ironModeSupplier;
     private final Supplier<CoopSeedSync.SeedData> hostSeedSupplier;
@@ -98,6 +106,7 @@ public class CoopNetPump implements EveryFrameScript {
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
+        this.nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
     }
 
     @Override
@@ -123,6 +132,9 @@ public class CoopNetPump implements EveryFrameScript {
         maybeHoldHostPausedUntilSessionReady();
         maybeApplyTimeSnapshot();
         maybeSendTimeSnapshot();
+        syncFleetMirror();
+        drainFleetDatagrams();
+        maybeSendFleetSnapshot();
         maybeSendPing();
         service.flushOutbound();
     }
@@ -617,6 +629,88 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    private boolean shouldStreamFleet() {
+        return service.role() != CoopConnectionRole.NONE
+                && service.isConnected()
+                && isGameplaySessionActive();
+    }
+
+    private void syncFleetMirror() {
+        // Tear the mirror fleet down the moment the session is no longer streaming (disconnect,
+        // reject, session end) so a stale AI fleet is never left behind in the world.
+        if (!shouldStreamFleet() && fleetMirror.hasMirrorFleet()) {
+            fleetMirror.dispose();
+        }
+    }
+
+    private void maybeSendFleetSnapshot() {
+        if (!shouldStreamFleet()) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (now < nextFleetSnapshotAtMillis) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            CoopFleetSnapshot snapshot = CoopFleetSnapshotFactory.captureLocalPlayer(
+                    sector, sessionState.localPlayerId(), sessionState.localName());
+            if (snapshot == null) {
+                return;
+            }
+            String datagram = CoopMessages.datagram(
+                    sessionState.sessionId(), CoopMessages.Type.FLEET_SNAPSHOT, snapshot.encode());
+            service.sendDatagram(datagram);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to capture coop fleet snapshot", ex);
+        } finally {
+            nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
+        }
+    }
+
+    private void drainFleetDatagrams() {
+        String raw;
+        while ((raw = service.pollDatagram()) != null) {
+            try {
+                CoopMessages.Datagram datagram = CoopMessages.parseDatagram(raw);
+                if (datagram.type() != CoopMessages.Type.FLEET_SNAPSHOT) {
+                    continue;
+                }
+                if (!sessionMatches(datagram.sessionId())) {
+                    continue;
+                }
+                CoopFleetSnapshot snapshot = CoopFleetSnapshot.decode(datagram.body());
+                // Ignore our own echoed datagrams and any sender that is not the remote coop player.
+                if (!snapshot.playerId().equals(sessionState.remotePlayerId())) {
+                    continue;
+                }
+                fleetMirror.apply(snapshot, localPlayerFactionId());
+            } catch (RuntimeException ex) {
+                CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram", ex);
+            }
+        }
+    }
+
+    private boolean sessionMatches(String datagramSessionId) {
+        String sessionId = sessionState.sessionId();
+        return sessionId != null && sessionId.equals(datagramSessionId);
+    }
+
+    private String localPlayerFactionId() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector != null && sector.getPlayerFaction() != null) {
+                return sector.getPlayerFaction().getId();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // fall through to the vanilla player faction id
+        }
+        return DEFAULT_PLAYER_FACTION_ID;
+    }
+
     private void syncGuestInputBlocker() {
         boolean active = service.role() == CoopConnectionRole.GUEST
                 && service.isConnected()
@@ -666,7 +760,22 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void log(String direction, CoopMessages.Message message) {
-        CoopLog.info(CoopNetPump.class,
-                "Coop net " + service.role() + " " + direction + " " + message.type() + " seq=" + message.seq());
+        String line = "Coop net " + service.role() + " " + direction + " "
+                + message.type() + " seq=" + message.seq();
+        // Heartbeat/state traffic (ping/pong, 5 Hz time snapshots) is high-frequency and uninteresting
+        // once a session is established, so log it at DEBUG (suppressed by Starsector's default level).
+        // Lobby/handshake/seed-lock/disconnect are low-frequency, one-shot, and stay at INFO.
+        if (isHighFrequency(message.type())) {
+            CoopLog.debug(CoopNetPump.class, line);
+        } else {
+            CoopLog.info(CoopNetPump.class, line);
+        }
+    }
+
+    private static boolean isHighFrequency(CoopMessages.Type type) {
+        return type == CoopMessages.Type.PING
+                || type == CoopMessages.Type.PONG
+                || type == CoopMessages.Type.TIME_SNAPSHOT
+                || type == CoopMessages.Type.FLEET_SNAPSHOT;
     }
 }

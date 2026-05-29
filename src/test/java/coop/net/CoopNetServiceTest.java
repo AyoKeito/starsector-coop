@@ -39,6 +39,35 @@ class CoopNetServiceTest {
     }
 
     @Test
+    void hostAndGuestExchangeFleetDatagramsOverLocalUdp() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            String guestSnapshot = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "guest-snapshot");
+            guest.sendDatagram(guestSnapshot);
+            guest.flushOutbound();
+
+            assertEquals(guestSnapshot, waitForDatagram(host, "host inbound UDP fleet snapshot"));
+
+            String hostSnapshot = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "host-snapshot");
+            host.sendDatagram(hostSnapshot);
+            host.flushOutbound();
+
+            assertEquals(hostSnapshot, waitForDatagram(guest, "guest inbound UDP fleet snapshot"));
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
     void guestRetriesUntilLateHostStartsListening() throws Exception {
         int port = reserveLocalPort();
         CoopNetService host = new CoopNetService();
@@ -94,6 +123,15 @@ class CoopNetServiceTest {
             return message.get() != null;
         }, description);
         return message.get();
+    }
+
+    private String waitForDatagram(CoopNetService service, String description) throws InterruptedException {
+        AtomicReference<String> datagram = new AtomicReference<>();
+        waitUntil(() -> {
+            datagram.set(service.pollDatagram());
+            return datagram.get() != null;
+        }, description);
+        return datagram.get();
     }
 
     private CoopMessages.Message waitForMessageWhilePollingHost(CoopNetService host, CoopNetService guest,
