@@ -404,6 +404,59 @@ class CoopNetPumpTest {
     }
 
     @Test
+    void guestSendsScreenPauseIntentWhenBlockingScreenOpensAndCloses() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        ui.showingMenu = true;
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message open = service.sent.get(0);
+        assertEquals(CoopMessages.Type.PAUSE_INTENT, open.type());
+        assertEquals("SCREEN", CoopMessages.requiredPayloadString(open, "source"));
+        assertEquals("true", CoopMessages.requiredPayloadString(open, "paused"));
+        assertEquals(1L, CoopMessages.requiredPayloadLong(open, "intentSeq"));
+
+        ui.showingMenu = false;
+        pump.advance(0f);
+
+        assertEquals(2, service.sent.size());
+        CoopMessages.Message close = service.sent.get(1);
+        assertEquals(CoopMessages.Type.PAUSE_INTENT, close.type());
+        assertEquals("SCREEN", CoopMessages.requiredPayloadString(close, "source"));
+        assertEquals("false", CoopMessages.requiredPayloadString(close, "paused"));
+        assertEquals(2L, CoopMessages.requiredPayloadLong(close, "intentSeq"));
+    }
+
+    @Test
+    void hostAppliesGuestScreenPauseIntentToAuthoritativeClock() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        service.inbound.add(CoopMessages.pauseIntent(
+                "session-a", 8L, 1200L, CoopMessages.PauseSource.SCREEN, true, 1L));
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1300L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        pump.advance(0f);
+
+        assertTrue(sector.paused);
+
+        service.inbound.add(CoopMessages.pauseIntent(
+                "session-a", 9L, 1400L, CoopMessages.PauseSource.SCREEN, false, 2L));
+        pump.advance(0f);
+
+        assertFalse(sector.paused);
+    }
+
+    @Test
     void hostHoldsCampaignPausedUntilGameplaySessionIsActive() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
@@ -498,8 +551,12 @@ class CoopNetPumpTest {
 
         pump.advance(0f);
 
-        assertEquals(1, service.sent.size());
-        CoopMessages.Message claim = service.sent.get(0);
+        assertEquals(2, service.sent.size());
+        CoopMessages.Message pauseOpen = service.sent.get(0);
+        assertEquals(CoopMessages.Type.PAUSE_INTENT, pauseOpen.type());
+        assertEquals("SCREEN", CoopMessages.requiredPayloadString(pauseOpen, "source"));
+        assertEquals("true", CoopMessages.requiredPayloadString(pauseOpen, "paused"));
+        CoopMessages.Message claim = service.sent.get(1);
         assertEquals(CoopMessages.Type.INTERACTION_CLAIM, claim.type());
         assertEquals("market-1", CoopMessages.requiredPayloadString(claim, "entityId"));
         assertEquals("Jangala", CoopMessages.requiredPayloadString(claim, "entityName"));
@@ -508,8 +565,12 @@ class CoopNetPumpTest {
         ui.target = null;
         pump.advance(0f);
 
-        assertEquals(2, service.sent.size());
-        CoopMessages.Message release = service.sent.get(1);
+        assertEquals(4, service.sent.size());
+        CoopMessages.Message pauseClose = service.sent.get(2);
+        assertEquals(CoopMessages.Type.PAUSE_INTENT, pauseClose.type());
+        assertEquals("SCREEN", CoopMessages.requiredPayloadString(pauseClose, "source"));
+        assertEquals("false", CoopMessages.requiredPayloadString(pauseClose, "paused"));
+        CoopMessages.Message release = service.sent.get(3);
         assertEquals(CoopMessages.Type.INTERACTION_RELEASE, release.type());
         assertEquals("market-1", CoopMessages.requiredPayloadString(release, "entityId"));
         assertEquals("guest-player", CoopMessages.requiredPayloadString(release, "playerId"));
@@ -620,6 +681,7 @@ class CoopNetPumpTest {
 
     private static final class RecordingCampaignUi {
         private RecordingEntity target;
+        private boolean showingMenu;
         private int disallowInteractionCount;
         private final List<String> messages = new ArrayList<>();
 
@@ -639,6 +701,15 @@ class CoopNetPumpTest {
                         switch (method.getName()) {
                             case "getCurrentInteractionDialog" -> {
                                 return target == null ? null : interactionDialogProxy(target);
+                            }
+                            case "isShowingDialog" -> {
+                                return target != null;
+                            }
+                            case "isShowingMenu" -> {
+                                return showingMenu;
+                            }
+                            case "getCurrentCoreTab" -> {
+                                return null;
                             }
                             case "setDisallowPlayerInteractionsForOneFrame" -> {
                                 disallowInteractionCount++;

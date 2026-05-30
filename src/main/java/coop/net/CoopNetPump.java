@@ -19,6 +19,7 @@ import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
 import coop.util.CoopLog;
 
@@ -59,6 +60,11 @@ public class CoopNetPump implements EveryFrameScript {
     private final Supplier<String> sectorFingerprintSupplier;
     private final Supplier<String> sectorSeedStringSupplier;
     private final CoopTimeLock timeLock;
+    private final CoopSharedPauseCoordinator pauseCoordinator = new CoopSharedPauseCoordinator();
+    // Host: the effective pause we applied last frame, used to detect vanilla auto-pause edges (the
+    // host pause key itself is captured by CoopHostPauseInputListener, not here).
+    private boolean hostEffectivePauseApplied;
+    private boolean hostSharedPauseInitialized;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -111,6 +117,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.sectorFingerprintSupplier = Objects.requireNonNull(sectorFingerprintSupplier, "sectorFingerprintSupplier");
         this.sectorSeedStringSupplier = Objects.requireNonNull(sectorSeedStringSupplier, "sectorSeedStringSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
+        this.timeLock.setPauseCoordinator(pauseCoordinator);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
@@ -138,6 +145,7 @@ public class CoopNetPump implements EveryFrameScript {
         maybeSendHandshakeManifest();
         maybeSendSeedLockRequest();
         maybeHoldHostPausedUntilSessionReady();
+        syncSharedPause();
         maybeApplyTimeSnapshot();
         maybeSendTimeSnapshot();
         syncFleetMirror();
@@ -268,6 +276,7 @@ public class CoopNetPump implements EveryFrameScript {
                 case SEED_LOCK_ACK -> handleSeedLockAck(message);
                 case SEED_LOCK_REJECT -> handleSeedLockReject(message);
                 case TIME_SNAPSHOT -> handleTimeSnapshot(message);
+                case PAUSE_INTENT -> handlePauseIntent(message);
                 case INTERACTION_CLAIM -> handleInteractionClaim(message);
                 case INTERACTION_ACCEPT -> handleInteractionAccept(message);
                 case INTERACTION_REJECT -> handleInteractionReject(message);
@@ -599,6 +608,141 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    /**
+     * Phase 11 shared pause. Dispatches by role each frame while the session is active:
+     * <ul>
+     *   <li><b>Host:</b> capture the host's own (vanilla) pause edges as {@code hostPauseIntent},
+     *   compute {@code effectivePaused} as the OR of host/guest/combat intents, and apply it to the
+     *   sector clock. The Phase 7 {@code TIME_SNAPSHOT} then carries that pause to the guest.</li>
+     *   <li><b>Guest:</b> derive the local intent from any open vanilla-blocking screen (plus the
+     *   pause-key intent flipped by {@code CoopCampaignInputBlocker}) and forward it to the host via
+     *   {@code PAUSE_INTENT} when it changes. The guest never drives {@code setPaused} from its own
+     *   intent; its clock follows the host snapshot.</li>
+     * </ul>
+     */
+    private void syncSharedPause() {
+        if (!isGameplaySessionActive()) {
+            resetSharedPauseState();
+            return;
+        }
+        if (service.role() == CoopConnectionRole.HOST) {
+            syncHostSharedPause();
+        } else if (service.role() == CoopConnectionRole.GUEST) {
+            syncGuestSharedPauseIntent();
+        }
+    }
+
+    private void syncHostSharedPause() {
+        SectorAPI sector;
+        try {
+            sector = Global.getSector();
+        } catch (RuntimeException | LinkageError ex) {
+            return;
+        }
+        if (sector == null) {
+            return;
+        }
+        try {
+            boolean observed = sector.isPaused();
+            if (!hostSharedPauseInitialized) {
+                // First active frame: seed the host's intent from the current clock state (it may
+                // still be paused from the connect-time hold) rather than treating it as an edge.
+                pauseCoordinator.setHostPauseIntent(observed);
+                hostSharedPauseInitialized = true;
+            } else if (observed != hostEffectivePauseApplied) {
+                // The clock changed without us setting it AND not via the pause key (that is consumed
+                // by CoopHostPauseInputListener and routed to onHostPauseKey). So this is vanilla
+                // auto-pause (combat/messages); treat it as the host's own pause intent.
+                pauseCoordinator.setHostPauseIntent(observed);
+            }
+            boolean effective = pauseCoordinator.effectivePaused();
+            if (observed != effective) {
+                sector.setPaused(effective);
+            }
+            hostEffectivePauseApplied = effective;
+            // Record what the host clock now shows so the host pause key resolves against it.
+            pauseCoordinator.setObservedPaused(effective);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply host shared pause", ex);
+        }
+    }
+
+    private void syncGuestSharedPauseIntent() {
+        if (!service.isConnected()) {
+            return;
+        }
+        // Screen pause: a level forwarded only when it changes (open/close of a blocking screen).
+        try {
+            SectorAPI sector = Global.getSector();
+            boolean screenOpen = sector != null && isVanillaBlockingScreenOpen(sector);
+            if (pauseCoordinator.updateGuestScreenLevel(screenOpen)) {
+                sendPauseIntent(CoopMessages.PauseSource.SCREEN, screenOpen);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // No sector / UI yet; leave the screen level as-is.
+        }
+        // Manual pause: forwarded on every key press (resolved against the observed pause state) so a
+        // host force-clear can never leave the two out of sync.
+        if (pauseCoordinator.consumeGuestKeyPress()) {
+            sendPauseIntent(CoopMessages.PauseSource.KEY, pauseCoordinator.desiredKeyPause());
+        }
+    }
+
+    private void sendPauseIntent(CoopMessages.PauseSource source, boolean paused) {
+        CoopMessages.Message message = CoopMessages.pauseIntent(
+                sessionState.sessionId(),
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                source,
+                paused,
+                pauseCoordinator.nextLocalSeq());
+        service.send(message);
+        log("outbound", message);
+    }
+
+    private boolean isVanillaBlockingScreenOpen(SectorAPI sector) {
+        CampaignUIAPI ui = sector.getCampaignUI();
+        if (ui == null) {
+            return false;
+        }
+        // The core UI tabs (map/fleet/character/refit/cargo/intel) plus interaction dialogs and the
+        // in-game menu are the vanilla-blocking screens that should pause the shared world so the
+        // guest can read/plan without the host's world running on.
+        return ui.isShowingDialog()
+                || ui.isShowingMenu()
+                || ui.getCurrentCoreTab() != null;
+    }
+
+    private void handlePauseIntent(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        CoopMessages.PauseSource source = CoopMessages.PauseSource.valueOf(
+                CoopMessages.requiredPayloadString(message, "source"));
+        boolean paused = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "paused"));
+        long intentSeq = CoopMessages.requiredPayloadLong(message, "intentSeq");
+        boolean applied = source == CoopMessages.PauseSource.SCREEN
+                ? pauseCoordinator.applyGuestScreenPauseIntent(paused, intentSeq)
+                : pauseCoordinator.applyGuestKeyPauseIntent(paused, intentSeq);
+        if (applied) {
+            CoopLog.info(CoopNetPump.class, "Coop guest pause intent applied source=" + source
+                    + " paused=" + paused + " intentSeq=" + intentSeq);
+        }
+    }
+
+    private void resetSharedPauseState() {
+        if (!hostSharedPauseInitialized
+                && !pauseCoordinator.guestKeyPauseIntent()
+                && !pauseCoordinator.guestScreenPauseIntent()
+                && !pauseCoordinator.guestScreenLevel()
+                && !pauseCoordinator.eitherInCombat()) {
+            return;
+        }
+        pauseCoordinator.reset();
+        hostSharedPauseInitialized = false;
+        hostEffectivePauseApplied = false;
+    }
+
     private void maybeApplyTimeSnapshot() {
         if (service.role() != CoopConnectionRole.GUEST
                 || !isGameplaySessionActive()
@@ -608,6 +752,9 @@ public class CoopNetPump implements EveryFrameScript {
 
         try {
             timeLock.apply(latestTimeSnapshot);
+            // The guest's clock mirrors the host snapshot; record it so the guest pause key resolves
+            // against the observed state instead of blindly toggling a private intent.
+            pauseCoordinator.setObservedPaused(latestTimeSnapshot.paused());
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply coop time snapshot", ex);
         }
@@ -914,13 +1061,15 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void syncGuestInputBlocker() {
-        boolean active = service.role() == CoopConnectionRole.GUEST
-                && service.isConnected()
-                && isGameplaySessionActive();
+        boolean connectedActive = service.isConnected() && isGameplaySessionActive();
+        boolean guest = service.role() == CoopConnectionRole.GUEST && connectedActive;
+        boolean host = service.role() == CoopConnectionRole.HOST && connectedActive;
         try {
-            timeLock.syncGuestInputBlocker(active);
+            timeLock.syncGuestInputBlocker(guest);
+            // Phase 11: the host needs its pause-key interceptor so the shared clock never flickers.
+            timeLock.syncHostInputListener(host);
         } catch (RuntimeException ex) {
-            CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign input blocker", ex);
+            CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign input listeners", ex);
         }
     }
 

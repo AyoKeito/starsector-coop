@@ -2,6 +2,7 @@ package coop.input;
 
 import com.fs.starfarer.api.campaign.listeners.CampaignInputListener;
 import com.fs.starfarer.api.input.InputEventAPI;
+import coop.time.CoopSharedPauseCoordinator;
 
 import java.util.List;
 import java.util.Set;
@@ -13,9 +14,24 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
     // (com.fs.starfarer.title.<obf>$oo in starfarer_obf.jar, Starsector 0.98a-RC8); an
     // unknown name throws IllegalArgumentException ("No enum constant ...<name>"). The campaign
     // pause control is GENERAL_PAUSE, not PAUSE - passing "PAUSE" crashed the client.
+    private static final String GENERAL_PAUSE = "GENERAL_PAUSE";
     private static final Set<String> LOCKED_CONTROLS = Set.of(
-            "GENERAL_PAUSE",
+            GENERAL_PAUSE,
             "FAST_FORWARD");
+
+    // Phase 11 shared pause: instead of unconditionally swallowing GENERAL_PAUSE, a guest pause-key
+    // press flips the shared-pause intent here; the host folds it into effectivePaused and the
+    // guest's clock follows the host snapshot (the guest never setPaused locally). The event is
+    // still consumed so vanilla never pauses the guest's clock directly. Null in legacy/unit paths.
+    private final CoopSharedPauseCoordinator pauseCoordinator;
+
+    public CoopCampaignInputBlocker() {
+        this(null);
+    }
+
+    public CoopCampaignInputBlocker(CoopSharedPauseCoordinator pauseCoordinator) {
+        this.pauseCoordinator = pauseCoordinator;
+    }
 
     // Phase 9 interaction gate: while the remote player holds an interaction claim, the local
     // player is locked out of the world (COOP_MP_DESIGN.md 8.5). This is layered on top of the
@@ -46,6 +62,12 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
         for (InputEventAPI event : events) {
             if (event.isConsumed() || !shouldConsume(event)) {
                 continue;
+            }
+            // On the press edge of GENERAL_PAUSE, record a guest pause-key press; the pump forwards it
+            // to the host next frame (resolved against the observed pause state). Consume on all edges
+            // so vanilla never pauses the guest's clock locally.
+            if (pauseCoordinator != null && matchesControlDown(event, GENERAL_PAUSE)) {
+                pauseCoordinator.recordGuestPauseKeyPress();
             }
             event.consume();
         }
@@ -92,6 +114,14 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
             return event.isControlActivated(control)
                     || event.isControlDownEvent(control)
                     || event.isControlUpEvent(control);
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    private boolean matchesControlDown(InputEventAPI event, String control) {
+        try {
+            return event.isControlDownEvent(control);
         } catch (IllegalArgumentException ex) {
             return false;
         }

@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
 import coop.input.CoopCampaignInputBlocker;
+import coop.input.CoopHostPauseInputListener;
 import coop.net.CoopMessages;
 import org.junit.jupiter.api.Test;
 
@@ -97,6 +98,23 @@ class CoopTimeSnapshotTest {
         assertEquals(List.of(true), recording.listenerManager.transientFlags);
         assertEquals(List.of(CoopCampaignInputBlocker.class), recording.listenerManager.removedClasses);
         assertFalse(recording.listenerManager.hasInputBlocker);
+    }
+
+    @Test
+    void syncHostInputListenerRegistersTransientListenerOnceAndUnregistersWhenInactive() {
+        RecordingSector recording = new RecordingSector(false, false, 222333444L, 17);
+        CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
+        timeLock.setPauseCoordinator(new CoopSharedPauseCoordinator());
+
+        timeLock.syncHostInputListener(true);
+        timeLock.syncHostInputListener(true);
+        timeLock.syncHostInputListener(false);
+
+        assertEquals(1, recording.listenerManager.added.size());
+        assertInstanceOf(CoopHostPauseInputListener.class, recording.listenerManager.added.get(0));
+        assertEquals(List.of(true), recording.listenerManager.transientFlags);
+        assertEquals(List.of(CoopHostPauseInputListener.class), recording.listenerManager.removedClasses);
+        assertFalse(recording.listenerManager.hasHostPauseInputListener);
     }
 
     private static final class RecordingSector {
@@ -193,6 +211,7 @@ class CoopTimeSnapshotTest {
         private final List<Boolean> transientFlags = new ArrayList<>();
         private final List<Class<?>> removedClasses = new ArrayList<>();
         private boolean hasInputBlocker;
+        private boolean hasHostPauseInputListener;
 
         private ListenerManagerAPI proxy() {
             return (ListenerManagerAPI) Proxy.newProxyInstance(
@@ -201,18 +220,32 @@ class CoopTimeSnapshotTest {
                     (proxy, method, args) -> {
                         switch (method.getName()) {
                             case "hasListenerOfClass" -> {
-                                return args[0] == CoopCampaignInputBlocker.class && hasInputBlocker;
+                                if (args[0] == CoopCampaignInputBlocker.class) {
+                                    return hasInputBlocker;
+                                }
+                                if (args[0] == CoopHostPauseInputListener.class) {
+                                    return hasHostPauseInputListener;
+                                }
+                                return false;
                             }
                             case "addListener" -> {
                                 added.add(args[0]);
                                 transientFlags.add(args.length > 1 && (boolean) args[1]);
-                                hasInputBlocker = args[0] instanceof CoopCampaignInputBlocker;
+                                if (args[0] instanceof CoopCampaignInputBlocker) {
+                                    hasInputBlocker = true;
+                                }
+                                if (args[0] instanceof CoopHostPauseInputListener) {
+                                    hasHostPauseInputListener = true;
+                                }
                                 return null;
                             }
                             case "removeListenerOfClass" -> {
                                 removedClasses.add((Class<?>) args[0]);
                                 if (args[0] == CoopCampaignInputBlocker.class) {
                                     hasInputBlocker = false;
+                                }
+                                if (args[0] == CoopHostPauseInputListener.class) {
+                                    hasHostPauseInputListener = false;
                                 }
                                 return null;
                             }

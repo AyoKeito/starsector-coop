@@ -22,6 +22,7 @@ public final class CoopMessages {
         SEED_LOCK_ACK,
         SEED_LOCK_REJECT,
         TIME_SNAPSHOT,
+        PAUSE_INTENT,
         FLEET_SNAPSHOT,
         INTERACTION_CLAIM,
         INTERACTION_ACCEPT,
@@ -124,6 +125,27 @@ public final class CoopMessages {
                         + "\"timestampMillis\":" + timestampMillis + ","
                         + "\"campaignDay\":" + campaignDay + ","
                         + "\"sentAtMillis\":" + sentAtMillis + "}");
+    }
+
+    /** Source of a guest pause intent: {@code KEY} = manual pause-key, {@code SCREEN} = open screen. */
+    public enum PauseSource {
+        KEY,
+        SCREEN
+    }
+
+    /**
+     * Phase 11 guest&rarr;host shared-pause intent (reliable TCP). {@code source} distinguishes the
+     * overridable manual key pause from the non-overridable screen pause. {@code intentSeq} is a
+     * monotonic per-guest sequence used by the host for last-writer-wins debounce, independent of the
+     * network envelope {@code seq}.
+     */
+    public static Message pauseIntent(String sessionId, long seq, long sentAtMillis,
+                                      PauseSource source, boolean paused, long intentSeq) {
+        Objects.requireNonNull(source, "source");
+        return new Message(Type.PAUSE_INTENT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"source\":\"" + source.name() + "\","
+                        + "\"paused\":\"" + paused + "\","
+                        + "\"intentSeq\":" + intentSeq + "}");
     }
 
     public static Message interactionClaim(String sessionId, long seq, long sentAtMillis,

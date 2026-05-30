@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
 import coop.input.CoopCampaignInputBlocker;
+import coop.input.CoopHostPauseInputListener;
 import coop.net.CoopMessages;
 
 import java.util.Objects;
@@ -15,6 +16,9 @@ public class CoopTimeLock {
     public static final long SNAPSHOT_INTERVAL_MILLIS = 200L;
 
     private final Supplier<SectorAPI> sectorSupplier;
+    // Phase 11: handed to the guest input blocker so a guest pause-key press flips the shared-pause
+    // intent instead of pausing locally. Null until the pump installs it (and in legacy/unit paths).
+    private CoopSharedPauseCoordinator pauseCoordinator;
 
     public CoopTimeLock() {
         this(Global::getSector);
@@ -22,6 +26,10 @@ public class CoopTimeLock {
 
     public CoopTimeLock(Supplier<SectorAPI> sectorSupplier) {
         this.sectorSupplier = Objects.requireNonNull(sectorSupplier, "sectorSupplier");
+    }
+
+    public void setPauseCoordinator(CoopSharedPauseCoordinator pauseCoordinator) {
+        this.pauseCoordinator = pauseCoordinator;
     }
 
     public TimeSnapshot capture(long sentAtMillis) {
@@ -76,9 +84,34 @@ public class CoopTimeLock {
 
         boolean installed = listeners.hasListenerOfClass(CoopCampaignInputBlocker.class);
         if (active && !installed) {
-            listeners.addListener(new CoopCampaignInputBlocker(), true);
+            listeners.addListener(new CoopCampaignInputBlocker(pauseCoordinator), true);
         } else if (!active && installed) {
             listeners.removeListenerOfClass(CoopCampaignInputBlocker.class);
+        }
+    }
+
+    /**
+     * Phase 11: install/remove the host-side pause-key interceptor so the host's own pause key flips
+     * {@code hostPauseIntent} and is consumed (the host clock is then driven only by the coordinator's
+     * {@code effectivePaused}, never flickered by a raw vanilla toggle). No-op if no coordinator is set.
+     */
+    public void syncHostInputListener(boolean active) {
+        if (pauseCoordinator == null) {
+            return;
+        }
+        SectorAPI sector = sectorOrNull();
+        if (sector == null) {
+            return;
+        }
+        ListenerManagerAPI listeners = sector.getListenerManager();
+        if (listeners == null) {
+            return;
+        }
+        boolean installed = listeners.hasListenerOfClass(CoopHostPauseInputListener.class);
+        if (active && !installed) {
+            listeners.addListener(new CoopHostPauseInputListener(pauseCoordinator), true);
+        } else if (!active && installed) {
+            listeners.removeListenerOfClass(CoopHostPauseInputListener.class);
         }
     }
 

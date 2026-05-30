@@ -1,6 +1,7 @@
 package coop.input;
 
 import com.fs.starfarer.api.input.InputEventAPI;
+import coop.time.CoopSharedPauseCoordinator;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -79,6 +80,36 @@ class CoopCampaignInputBlockerTest {
         assertFalse(mouseClick.consumed);
         assertFalse(keyboard.consumed);
         assertFalse(blocker.isInteractionBlocked());
+    }
+
+    @Test
+    void guestPauseKeyDownEdgeRecordsAPressAndStillConsumes() {
+        CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
+        CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker(coordinator);
+        // Down edge of the pause control: activated + down.
+        RecordingInputEvent pauseDown = new RecordingInputEvent(
+                "GENERAL_PAUSE", true, true, false, Set.of("GENERAL_PAUSE", "FAST_FORWARD"));
+
+        blocker.processCampaignInputPreCore(List.of(pauseDown.proxy()));
+
+        // The press is recorded for the pump to forward, and the event is consumed so vanilla never
+        // pauses the guest's clock directly.
+        assertTrue(coordinator.consumeGuestKeyPress());
+        assertTrue(pauseDown.consumed);
+    }
+
+    @Test
+    void guestPauseKeyDoesNotRecordOnNonPressEdges() {
+        CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
+        CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker(coordinator);
+        // Held/activated but not a down edge (down=false): must not record a press, but still consumed.
+        RecordingInputEvent pauseHeld = new RecordingInputEvent(
+                "GENERAL_PAUSE", true, false, false, Set.of("GENERAL_PAUSE", "FAST_FORWARD"));
+
+        blocker.processCampaignInputPreCore(List.of(pauseHeld.proxy()));
+
+        assertFalse(coordinator.consumeGuestKeyPress());
+        assertTrue(pauseHeld.consumed);
     }
 
     private static final class RecordingInputEvent {
