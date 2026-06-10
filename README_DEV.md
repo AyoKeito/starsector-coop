@@ -2,6 +2,25 @@
 
 Run commands from PowerShell. Repository-level instructions require the `rtk` prefix for shell commands.
 
+## Repository & Docs
+
+This directory is the git repo (origin: `https://github.com/AyoKeito/starsector-coop`, **private**). The canonical project documents live in `docs/`:
+
+- `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` — the phased implementation plan (canonical; moved into the repo 2026-06-10 — pointer files remain at the old `K:\Starsector\` paths)
+- `docs/COOP_MP_DESIGN.md` — the design document
+- `docs/starsector-runtime-limitations.md` — engine/sandbox limits found during implementation
+- `docs/phase11-rng-determinism.md` — RNG determinism evidence (pre-renumber name; belongs to what is now Phase 13)
+
+Git workflow: run git from this directory (running it from `K:\Starsector` fails — that is not a repo, which is why pre-2026-06-10 sessions deferred their commits). Commit after each plan phase with the message listed in that phase, then push:
+
+```powershell
+rtk git -C K:\Starsector\mods\coop add .
+rtk git -C K:\Starsector\mods\coop commit -m "<message from the phase>"
+rtk git -C K:\Starsector\mods\coop push
+```
+
+Do not commit `jars/` or `build/` (gitignored), and never commit decompiled game sources (`tmp_ff_analysis` stays outside the repo).
+
 ## Runtime Notes
 
 Read `docs/starsector-runtime-limitations.md` before changing campaign scripts, networking, dependencies, or save-visible state. It records the Starsector sandbox and save-serialization limits found during Phase 3 TCP testing.
