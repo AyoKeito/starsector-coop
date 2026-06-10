@@ -40,6 +40,26 @@ public final class CoopFleetSnapshotFactory {
         String factionId = factionId(fleet);
         boolean transponderOn = transponderOn(fleet);
 
+        return CoopFleetSnapshot.create(
+                playerId,
+                username,
+                locationId,
+                location == null ? 0f : location.x,
+                location == null ? 0f : location.y,
+                velocity == null ? 0f : velocity.x,
+                velocity == null ? 0f : velocity.y,
+                factionId,
+                transponderOn,
+                captureMembers(fleet));
+    }
+
+    /**
+     * Captures a fleet's ship roster as replicable members, shared by the Phase 8 player snapshot and
+     * the Phase 9 NPC fleet snapshots ({@link CoopNpcFleetReplicator}). Best-effort: a member that
+     * fails to report a field is skipped rather than aborting the whole roster.
+     */
+    public static List<CoopFleetSnapshot.Member> captureMembers(CampaignFleetAPI fleet) {
+        Objects.requireNonNull(fleet, "fleet");
         List<CoopFleetSnapshot.Member> members = new ArrayList<>();
         try {
             for (FleetMemberAPI member : fleet.getFleetData().getMembersListCopy()) {
@@ -51,18 +71,7 @@ public final class CoopFleetSnapshotFactory {
         } catch (RuntimeException ignored) {
             // Keep whatever members were captured before the failure.
         }
-
-        return CoopFleetSnapshot.create(
-                playerId,
-                username,
-                locationId,
-                location == null ? 0f : location.x,
-                location == null ? 0f : location.y,
-                velocity == null ? 0f : velocity.x,
-                velocity == null ? 0f : velocity.y,
-                factionId,
-                transponderOn,
-                members);
+        return members;
     }
 
     private static CoopFleetSnapshot.Member captureMember(FleetMemberAPI member) {

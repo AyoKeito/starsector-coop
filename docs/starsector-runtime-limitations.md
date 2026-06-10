@@ -92,6 +92,20 @@ constant ...<name>`; if uncaught it becomes a **Fatal** crash dialog back to the
 
 ### Fast-forward has no public on/off setter
 
+> **⚠️ SUPERSEDED IN PART (2026-06-10, see plan Phase 7b).** Everything below is true only for
+> vanilla's default **hold**-Shift input mode. Vanilla also has a **toggle** fast-forward mode
+> (settings-menu checkbox `Campaign "speed up time" is a toggle`, backed by a static boolean in
+> `com.fs.starfarer.settings.StarfarerSettings`: getter `Oo0000()Z`, public static setter
+> `?00000(Z)V`). In toggle mode the per-frame key poll is skipped entirely; the persistent
+> `CampaignState.fastForward` field (plain name, private) is flipped only by a consumable
+> `FAST_FORWARD` key event — so the guest's existing pre-core event consumption blocks it, and a
+> `MethodHandles` field write sticks. The speed loop is
+> `iters = fastForward ? Math.round(getFloat("campaignSpeedupMult")) : 1` with a live `getFloat`
+> each frame, so the multiplier is also runtime-settable via public `SettingsAPI.setFloat`.
+> Verified by `javap` disassembly of `starfarer_obf.jar` (dumps in `K:\Starsector\tmp_ff_analysis\`).
+> Phase 7b restores shared fast-forward on this basis; the 1x lock below remains the fallback when
+> the handles fail to resolve.
+
 Hold-Shift fast-forward is implemented inside the obfuscated
 `com.fs.starfarer.campaign.CampaignState.advance(float, ...)` as a per-frame loop that calls
 `CampaignEngine.advance()` ~2x while the key is held. **Runtime-verified via TIMEDIAG logging:**
@@ -118,8 +132,13 @@ while fast-forwarding, the campaign clock advanced at exactly 2x, yet both
 
 ### Resolution adopted for v1
 
-Because fast-forward cannot be mirrored or blocked via public API, the coop session is locked to
-1x instead:
+> **⚠️ SUPERSEDED (plan Phase 7b):** the 1x lock is demoted from "the resolution" to "the fallback";
+> Phase 7b removes the static `campaignSpeedupMult:1` override and restores shared fast-forward via
+> toggle mode, re-applying a 1x lock at runtime (`setFloat`) only when the MethodHandles are
+> unavailable.
+
+Because hold-mode fast-forward cannot be mirrored or blocked via public API, the v1 coop session was
+locked to 1x instead:
 
 - `data/config/settings.json` sets `"campaignSpeedupMult":1` (engine default is 2). Hold-Shift then
   advances at 1x for any client running the mod, so no client can fast-forward and there is nothing
@@ -132,9 +151,21 @@ Because fast-forward cannot be mirrored or blocked via public API, the coop sess
 
 ### Connect-time clock alignment
 
-There is **no public clock-setter** (`CampaignClockAPI` has no `setTimestamp`; `SectorAPI` has no
-`setClock`; `createClock(long)` makes a detached clock that cannot be installed), and fast-advance
-cannot be driven, so a guest that starts behind the host **cannot be made to catch up**. If the host
+> **⚠️ SUPERSEDED IN PART (2026-06-10, see plan Phase 7c).** The "no public clock-setter" claim
+> below is wrong on 0.98a-RC8: `com.fs.starfarer.campaign.CampaignClock` is `DoNotObfuscate`, its
+> source of truth is a `private transient GregorianCalendar cal` exposed by a **public `getCal()`**
+> (so the clock is writable via plain `cal.setTimeInMillis(...)`), with the cached
+> `private long timestamp` field re-syncable via `MethodHandles` (javap dump:
+> `K:\Starsector\tmp_ff_analysis\CampaignClock.javap.txt`). Also note `advance(float)` int-truncates
+> calendar-seconds per frame, so clocks drift structurally across machines even at shared 1x.
+> Phase 7c builds a guest-side drift reconciler on this basis (bounded monotonic slew + forward-only
+> snaps). The host-pause-hold during connect described below REMAINS correct and primary —
+> prevention still beats correction for the connect gap.
+
+There is **no public clock-setter on the API surface** (`CampaignClockAPI` has no `setTimestamp`;
+`SectorAPI` has no `setClock`; `createClock(long)` makes a detached clock that cannot be installed),
+and fast-advance cannot be driven, so a guest that starts behind the host **cannot be made to catch
+up** *via API-only means*. If the host
 runs unpaused during the multi-second connect/handshake/seed-lock, the guest starts several campaign
 days behind permanently.
 

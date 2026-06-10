@@ -89,26 +89,20 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
 
     public String encode() {
         StringBuilder out = new StringBuilder(128 + members.size() * 48);
-        out.append(field(playerId))
-                .append('|').append(field(username))
-                .append('|').append(field(locationId))
+        out.append(CoopFleetCodec.escape(playerId))
+                .append('|').append(CoopFleetCodec.escape(username))
+                .append('|').append(CoopFleetCodec.escape(locationId))
                 .append('|').append(Float.toString(x))
                 .append('|').append(Float.toString(y))
                 .append('|').append(Float.toString(velocityX))
                 .append('|').append(Float.toString(velocityY))
-                .append('|').append(field(factionId))
+                .append('|').append(CoopFleetCodec.escape(factionId))
                 .append('|').append(transponderOn ? '1' : '0')
-                .append('|').append(field(fleetHash))
+                .append('|').append(CoopFleetCodec.escape(fleetHash))
                 .append('|').append(Integer.toString(members.size()));
         for (Member member : members) {
-            out.append('\n')
-                    .append(field(member.fleetMemberId()))
-                    .append('|').append(field(member.hullId()))
-                    .append('|').append(field(member.variantId()))
-                    .append('|').append(field(member.shipName()))
-                    .append('|').append(field(member.captainName()))
-                    .append('|').append(Float.toString(member.cr()))
-                    .append('|').append(Float.toString(member.hullFraction()));
+            out.append('\n');
+            CoopFleetCodec.appendMember(out, member);
         }
         return out.toString();
     }
@@ -119,7 +113,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         if (lines.length == 0) {
             throw new IllegalArgumentException("Empty fleet snapshot");
         }
-        List<String> header = splitFields(lines[0]);
+        List<String> header = CoopFleetCodec.split(lines[0]);
         if (header.size() != 11) {
             throw new IllegalArgumentException("Expected 11 header fields, got " + header.size());
         }
@@ -130,61 +124,12 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         }
         List<Member> members = new ArrayList<>(memberCount);
         for (int i = 0; i < memberCount; i++) {
-            List<String> fields = splitFields(lines[i + 1]);
-            if (fields.size() != 7) {
-                throw new IllegalArgumentException("Expected 7 member fields, got " + fields.size());
-            }
-            members.add(new Member(fields.get(0), fields.get(1), fields.get(2), fields.get(3),
-                    fields.get(4), Float.parseFloat(fields.get(5)), Float.parseFloat(fields.get(6))));
+            members.add(CoopFleetCodec.parseMember(CoopFleetCodec.split(lines[i + 1])));
         }
         return new CoopFleetSnapshot(header.get(0), header.get(1), header.get(2),
                 Float.parseFloat(header.get(3)), Float.parseFloat(header.get(4)),
                 Float.parseFloat(header.get(5)), Float.parseFloat(header.get(6)),
                 header.get(7), "1".equals(header.get(8)), header.get(9), members);
-    }
-
-    private static String field(String value) {
-        String text = value == null ? "" : value;
-        StringBuilder escaped = new StringBuilder(text.length() + 4);
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            switch (c) {
-                case '\\' -> escaped.append("\\\\");
-                case '|' -> escaped.append("\\|");
-                case '\n' -> escaped.append("\\n");
-                case '\r' -> escaped.append("\\r");
-                default -> escaped.append(c);
-            }
-        }
-        return escaped.toString();
-    }
-
-    private static List<String> splitFields(String line) {
-        List<String> fields = new ArrayList<>();
-        StringBuilder token = new StringBuilder();
-        boolean escaped = false;
-        for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (escaped) {
-                switch (c) {
-                    case '\\' -> token.append('\\');
-                    case '|' -> token.append('|');
-                    case 'n' -> token.append('\n');
-                    case 'r' -> token.append('\r');
-                    default -> token.append(c);
-                }
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '|') {
-                fields.add(token.toString());
-                token.setLength(0);
-            } else {
-                token.append(c);
-            }
-        }
-        fields.add(token.toString());
-        return fields;
     }
 
     private static String normalize(String value) {

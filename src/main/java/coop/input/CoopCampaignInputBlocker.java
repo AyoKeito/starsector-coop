@@ -39,9 +39,25 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
     private volatile boolean interactionBlocked;
     private volatile String blockingEntityName = "";
 
+    // While a vanilla blocking screen (interaction dialog / in-game menu / core tab) owns the
+    // keyboard, the guest blocker must NOT consume input: spacebar advances a station dialog to its
+    // options and ESC dismisses it, so consuming GENERAL_PAUSE/keys here traps the guest in its own
+    // dialog (observed: "You decide to..." with no options, ESC dead). Those screens already stop
+    // both clocks via the shared screen-pause, and the guest re-applies the host TIME_SNAPSHOT every
+    // frame, so suspending consumption here cannot let the guest independently pause/fast-forward.
+    private volatile boolean suspended;
+
     public void setInteractionBlocked(boolean blocked, String entityName) {
         this.interactionBlocked = blocked;
         this.blockingEntityName = entityName == null ? "" : entityName;
+    }
+
+    public void setSuspended(boolean suspended) {
+        this.suspended = suspended;
+    }
+
+    public boolean isSuspended() {
+        return suspended;
     }
 
     public boolean isInteractionBlocked() {
@@ -59,6 +75,11 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
 
     @Override
     public void processCampaignInputPreCore(List<InputEventAPI> events) {
+        if (suspended) {
+            // A blocking screen owns the keyboard; leave every event for the dialog/menu so the guest
+            // can navigate and dismiss it (otherwise spacebar/ESC/number keys are eaten).
+            return;
+        }
         for (InputEventAPI event : events) {
             if (event.isConsumed() || !shouldConsume(event)) {
                 continue;

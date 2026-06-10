@@ -83,6 +83,44 @@ class CoopCampaignInputBlockerTest {
     }
 
     @Test
+    void suspendedBlockerConsumesNothingSoDialogKeysReachTheDialog() {
+        CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
+        CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker(coordinator);
+        blocker.setInteractionBlocked(true, "Jangala");
+        blocker.setSuspended(true);
+
+        // While a blocking screen owns the keyboard: pause key, world clicks, and keyboard all pass
+        // through untouched so the guest can advance its station dialog to the options and ESC out.
+        RecordingInputEvent pauseDown = new RecordingInputEvent(
+                "GENERAL_PAUSE", true, true, false, Set.of("GENERAL_PAUSE", "FAST_FORWARD"));
+        RecordingInputEvent mouseClick = RecordingInputEvent.mouseClick();
+        RecordingInputEvent keyboard = RecordingInputEvent.keyboard();
+
+        blocker.processCampaignInputPreCore(List.of(pauseDown.proxy(), mouseClick.proxy(), keyboard.proxy()));
+
+        assertFalse(pauseDown.consumed);
+        assertFalse(mouseClick.consumed);
+        assertFalse(keyboard.consumed);
+        // Suspension also means no spurious pause-key press is recorded.
+        assertFalse(coordinator.consumeGuestKeyPress());
+        assertTrue(blocker.isSuspended());
+    }
+
+    @Test
+    void resumingBlockerRestoresConsumption() {
+        CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker();
+        blocker.setSuspended(true);
+        blocker.setSuspended(false);
+        RecordingInputEvent pause = new RecordingInputEvent(
+                "GENERAL_PAUSE", true, false, false, Set.of("GENERAL_PAUSE", "FAST_FORWARD"));
+
+        blocker.processCampaignInputPreCore(List.of(pause.proxy()));
+
+        assertTrue(pause.consumed);
+        assertFalse(blocker.isSuspended());
+    }
+
+    @Test
     void guestPauseKeyDownEdgeRecordsAPressAndStillConsumes() {
         CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
         CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker(coordinator);

@@ -13,12 +13,18 @@ import com.fs.starfarer.api.impl.campaign.ids.Factions;
  * of sensor range. The closest public levers are the fleet's own sensor profile and detected-range
  * modifier ({@link com.fs.starfarer.api.campaign.SectorEntityToken#setSensorProfile(Float)} and
  * {@link com.fs.starfarer.api.campaign.SectorEntityToken#getDetectedRangeMod()}). We therefore force
- * a very large sensor profile and detected-range bonus plus a permanently-on transponder, which
- * makes the mirror detectable across normal play distances. This is the public-API approximation of
- * "always visible"; it is driven by sensor mechanics rather than a hard visibility override, so at
- * pathological extreme ranges the engine may still cull it. If a future phase needs a true hard
- * override, the documented fallback (per the Phase 8 plan) is a custom campaign-map overlay marker
- * anchored to the mirror fleet's location.
+ * a very large sensor profile and detected-range bonus, which makes the mirror detectable across
+ * normal play distances. This is the public-API approximation of "always visible"; it is driven by
+ * sensor mechanics rather than a hard visibility override, so at pathological extreme ranges the
+ * engine may still cull it. If a future phase needs a true hard override, the documented fallback
+ * (per the Phase 8 plan) is a custom campaign-map overlay marker anchored to the mirror fleet's
+ * location.
+ *
+ * <p><b>Transponder is intentionally NOT forced here (Phase 9 decoupling).</b> Visibility comes only
+ * from the sensor profile + detected-range bonus, which are independent of transponder state. Forcing
+ * the transponder on would have overwritten the replicated real state, hiding the remote player's
+ * running-dark from the other client's host-side simulation (so patrols could not react to it). The
+ * mirror's transponder is now driven purely by the snapshot in {@link CoopFleetMirror}.
  *
  * <p>Coloring: the mirror fleet is assigned the local player's own faction so it renders in that
  * faction's color and is non-hostile to the local player. The username is set as the fleet name so
@@ -61,7 +67,9 @@ public final class CoopPresenceIndicator {
         }
         try {
             mirrorFleet.setName(presenceLabel(username));
-            mirrorFleet.setTransponderOn(true);
+            // Transponder is driven by the snapshot in CoopFleetMirror, not forced here (Phase 9):
+            // visibility comes from the sensor profile + detected-range bonus, which are transponder-
+            // independent, so the remote player's real transponder state survives replication.
             mirrorFleet.setSensorProfile(SENSOR_PROFILE);
             mirrorFleet.getDetectedRangeMod().modifyFlat(PRESENCE_SOURCE, DETECTED_RANGE_BONUS);
         } catch (RuntimeException ignored) {

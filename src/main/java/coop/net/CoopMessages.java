@@ -28,6 +28,22 @@ public final class CoopMessages {
         INTERACTION_ACCEPT,
         INTERACTION_REJECT,
         INTERACTION_RELEASE,
+        REP_DELTA,
+        GUEST_REP_DELTA,
+        PLAYER_REP_SNAPSHOT,
+        FACTION_REL_DELTA,
+        MISSION_POOL_SNAPSHOT,
+        MISSION_CLAIM_REQUEST,
+        MISSION_CLAIM_ACCEPT,
+        MISSION_CLAIM_REJECT,
+        MARKET_OPEN,
+        MARKET_SNAPSHOT,
+        MARKET_TXN,
+        WORLD_DELTA,
+        ABILITY_ACTIVATE,
+        ORBIT_SNAPSHOT,
+        NPC_FLEET_SET,
+        NPC_FLEET_MOTION,
         PING,
         PONG,
         DISCONNECT
@@ -179,6 +195,134 @@ public final class CoopMessages {
                         + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
     }
 
+    // ---- Phase 12: campaign state replication -------------------------------------------------
+    // Floats ride as quoted strings because the flat envelope parser only understands integral
+    // longs and strings; the campaign layer parses them back with requiredPayloadFloat.
+
+    public static Message repDelta(String sessionId, long seq, long sentAtMillis,
+                                   String targetType, String targetId, float delta, float resultingValue) {
+        return new Message(Type.REP_DELTA, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"targetType\":\"" + escapeJson(requireText(targetType, "targetType")) + "\","
+                        + "\"targetId\":\"" + escapeJson(requireText(targetId, "targetId")) + "\","
+                        + "\"delta\":\"" + delta + "\","
+                        + "\"resultingValue\":\"" + resultingValue + "\"}");
+    }
+
+    /** Guest -> host an earned/lost reputation increment; the host folds the DELTA into canonical. */
+    public static Message guestRepDelta(String sessionId, long seq, long sentAtMillis,
+                                        String targetType, String targetId, float delta) {
+        return new Message(Type.GUEST_REP_DELTA, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"targetType\":\"" + escapeJson(requireText(targetType, "targetType")) + "\","
+                        + "\"targetId\":\"" + escapeJson(requireText(targetId, "targetId")) + "\","
+                        + "\"delta\":\"" + delta + "\"}");
+    }
+
+    /** Host -> guest full set of player faction standings; the guest force-matches them (overwrite). */
+    public static Message playerRepSnapshot(String sessionId, long seq, long sentAtMillis, String encodedStandings) {
+        return new Message(Type.PLAYER_REP_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"reps\":\"" + escapeJson(encodedStandings == null ? "" : encodedStandings) + "\"}");
+    }
+
+    public static Message factionRelDelta(String sessionId, long seq, long sentAtMillis,
+                                          String factionA, String factionB, float resultingValue) {
+        return new Message(Type.FACTION_REL_DELTA, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"factionA\":\"" + escapeJson(requireText(factionA, "factionA")) + "\","
+                        + "\"factionB\":\"" + escapeJson(requireText(factionB, "factionB")) + "\","
+                        + "\"resultingValue\":\"" + resultingValue + "\"}");
+    }
+
+    public static Message missionPoolSnapshot(String sessionId, long seq, long sentAtMillis,
+                                              String marketId, String encodedPool) {
+        return new Message(Type.MISSION_POOL_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"marketId\":\"" + escapeJson(marketId == null ? "" : marketId) + "\","
+                        + "\"pool\":\"" + escapeJson(encodedPool == null ? "" : encodedPool) + "\"}");
+    }
+
+    public static Message missionClaimRequest(String sessionId, long seq, long sentAtMillis,
+                                              String missionId, String playerId) {
+        return new Message(Type.MISSION_CLAIM_REQUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"missionId\":\"" + escapeJson(requireText(missionId, "missionId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
+    }
+
+    public static Message missionClaimAccept(String sessionId, long seq, long sentAtMillis,
+                                             String missionId, String playerId, long hostSeq) {
+        return new Message(Type.MISSION_CLAIM_ACCEPT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"missionId\":\"" + escapeJson(requireText(missionId, "missionId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
+                        + "\"hostSeq\":" + hostSeq + "}");
+    }
+
+    public static Message missionClaimReject(String sessionId, long seq, long sentAtMillis,
+                                             String missionId, String reason) {
+        return new Message(Type.MISSION_CLAIM_REJECT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"missionId\":\"" + escapeJson(requireText(missionId, "missionId")) + "\","
+                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    public static Message marketOpen(String sessionId, long seq, long sentAtMillis,
+                                     String marketId, String playerId) {
+        return new Message(Type.MARKET_OPEN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
+    }
+
+    public static Message marketSnapshot(String sessionId, long seq, long sentAtMillis,
+                                         String marketId, String encodedStock) {
+        return new Message(Type.MARKET_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
+                        + "\"stock\":\"" + escapeJson(encodedStock == null ? "" : encodedStock) + "\"}");
+    }
+
+    public static Message marketTxn(String sessionId, long seq, long sentAtMillis,
+                                    String marketId, String kind, String itemId, int qty, float unitPrice,
+                                    String actingPlayerId) {
+        return new Message(Type.MARKET_TXN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
+                        + "\"kind\":\"" + escapeJson(requireText(kind, "kind")) + "\","
+                        + "\"itemId\":\"" + escapeJson(requireText(itemId, "itemId")) + "\","
+                        + "\"qty\":" + qty + ","
+                        + "\"unitPrice\":\"" + unitPrice + "\","
+                        + "\"actingPlayerId\":\"" + escapeJson(actingPlayerId == null ? "" : actingPlayerId) + "\"}");
+    }
+
+    public static Message worldDelta(String sessionId, long seq, long sentAtMillis,
+                                     String entityId, String kind, boolean consumed,
+                                     String newStateJson, String actingPlayerId) {
+        return new Message(Type.WORLD_DELTA, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
+                        + "\"kind\":\"" + escapeJson(requireText(kind, "kind")) + "\","
+                        + "\"consumed\":\"" + consumed + "\","
+                        + "\"newStateJson\":\"" + escapeJson(newStateJson == null ? "" : newStateJson) + "\","
+                        + "\"actingPlayerId\":\"" + escapeJson(actingPlayerId == null ? "" : actingPlayerId) + "\"}");
+    }
+
+    public static Message abilityActivate(String sessionId, long seq, long sentAtMillis,
+                                          String abilityId, String playerId, String targetJson) {
+        return new Message(Type.ABILITY_ACTIVATE, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"abilityId\":\"" + escapeJson(requireText(abilityId, "abilityId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
+                        + "\"targetJson\":\"" + escapeJson(targetJson == null ? "" : targetJson) + "\"}");
+    }
+
+    public static Message orbitSnapshot(String sessionId, long seq, long sentAtMillis,
+                                        String locationId, String encodedOrbits) {
+        return new Message(Type.ORBIT_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"locationId\":\"" + escapeJson(requireText(locationId, "locationId")) + "\","
+                        + "\"orbits\":\"" + escapeJson(encodedOrbits == null ? "" : encodedOrbits) + "\"}");
+    }
+
+    /**
+     * Phase 9 host&rarr;guest full authoritative NPC fleet set (reliable TCP). The body is a
+     * {@link coop.fleet.CoopNpcFleetSetSnapshot#encode()} blob; the guest reconciles its mirror
+     * registry against it. Rebroadcast whenever the set hash changes. (NPC fleet *motion* rides the
+     * separate high-frequency UDP {@code NPC_FLEET_MOTION} datagram, built via {@link #datagram}.)
+     */
+    public static Message npcFleetSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
+        return new Message(Type.NPC_FLEET_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"set\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
         return new Message(Type.DISCONNECT, sessionId, seq, sentAtMillis,
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
@@ -273,6 +417,11 @@ public final class CoopMessages {
 
     public static long requiredPayloadLong(Message message, String name) {
         return requiredLong(decodePayload(message), name);
+    }
+
+    /** Reads a float field that was encoded as a quoted string (see Phase 12 builders). */
+    public static float requiredPayloadFloat(Message message, String name) {
+        return Float.parseFloat(requiredString(decodePayload(message), name));
     }
 
     private static String nullableString(Map<String, Object> fields, String name) {

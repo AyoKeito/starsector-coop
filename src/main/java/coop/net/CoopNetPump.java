@@ -7,9 +7,16 @@ import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.campaign.CoopCampaignReplicator;
 import coop.fleet.CoopFleetMirror;
+import coop.fleet.CoopFleetMirrorRegistry;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
+import coop.fleet.CoopFleetVisibilityProbe;
+import coop.fleet.CoopNpcFleetMotion;
+import coop.fleet.CoopNpcFleetReplicator;
+import coop.fleet.CoopNpcFleetSetSnapshot;
+import coop.fleet.CoopNpcFleetSuppressor;
 import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.interaction.CoopInteractionClaim;
@@ -21,8 +28,10 @@ import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
+import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
@@ -51,7 +60,14 @@ public class CoopNetPump implements EveryFrameScript {
     private long nextFleetSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
+    private final CoopFleetMirrorRegistry npcFleetRegistry = new CoopFleetMirrorRegistry();
+    private final CoopNpcFleetSuppressor npcFleetSuppressor = new CoopNpcFleetSuppressor();
+    private final CoopNpcFleetReplicator npcFleetReplicator;
+    private boolean npcReplicationStreaming;
+    private String lastNpcDebug;
+    private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
+    private final CoopCampaignReplicator campaignReplicator;
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
@@ -118,6 +134,8 @@ public class CoopNetPump implements EveryFrameScript {
         this.sectorSeedStringSupplier = Objects.requireNonNull(sectorSeedStringSupplier, "sectorSeedStringSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
         this.timeLock.setPauseCoordinator(pauseCoordinator);
+        this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
+        this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
@@ -151,7 +169,13 @@ public class CoopNetPump implements EveryFrameScript {
         syncFleetMirror();
         drainFleetDatagrams();
         maybeSendFleetSnapshot();
+        syncNpcReplication();
         syncInteractionGate();
+        debugDialogState();
+        syncCampaignReplicator();
+        campaignReplicator.tickWorldDeltas();
+        campaignReplicator.tickOrbitSync();
+        campaignReplicator.tickPlayerRepSync();
         maybeSendPing();
         service.flushOutbound();
     }
@@ -281,9 +305,9 @@ public class CoopNetPump implements EveryFrameScript {
                 case INTERACTION_ACCEPT -> handleInteractionAccept(message);
                 case INTERACTION_REJECT -> handleInteractionReject(message);
                 case INTERACTION_RELEASE -> handleInteractionRelease(message);
+                case NPC_FLEET_SET -> handleNpcFleetSet(message);
                 case PING -> sendPong(message);
-                default -> {
-                }
+                default -> campaignReplicator.handle(message);
             }
         }
     }
@@ -750,6 +774,17 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
+        // While the guest has its own interaction dialog open, let vanilla own the local clock. A
+        // docked station dialog auto-pauses but briefly advances to process core-tab transitions
+        // (e.g. closing the Trade screen and repopulating "You decide to..." options). Coop forcing
+        // sector.setPaused(true) every time vanilla tries to advance froze that transition: the
+        // trade tab stayed open (getCurrentCoreTab()==CARGO) and the option list never came back.
+        // The host still freezes meanwhile because the guest's screen-pause INTENT keeps the host
+        // paused, so the two worlds don't drift; the guest re-syncs the moment the dialog closes.
+        if (isGuestInteractionDialogOpen()) {
+            return;
+        }
+
         try {
             timeLock.apply(latestTimeSnapshot);
             // The guest's clock mirrors the host snapshot; record it so the guest pause key resolves
@@ -757,6 +792,19 @@ public class CoopNetPump implements EveryFrameScript {
             pauseCoordinator.setObservedPaused(latestTimeSnapshot.paused());
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply coop time snapshot", ex);
+        }
+    }
+
+    private boolean isGuestInteractionDialogOpen() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return false;
+            }
+            CampaignUIAPI ui = sector.getCampaignUI();
+            return ui != null && ui.getCurrentInteractionDialog() != null;
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
         }
     }
 
@@ -836,22 +884,124 @@ public class CoopNetPump implements EveryFrameScript {
         while ((raw = service.pollDatagram()) != null) {
             try {
                 CoopMessages.Datagram datagram = CoopMessages.parseDatagram(raw);
-                if (datagram.type() != CoopMessages.Type.FLEET_SNAPSHOT) {
-                    continue;
-                }
                 if (!sessionMatches(datagram.sessionId())) {
                     continue;
                 }
-                CoopFleetSnapshot snapshot = CoopFleetSnapshot.decode(datagram.body());
-                // Ignore our own echoed datagrams and any sender that is not the remote coop player.
-                if (!snapshot.playerId().equals(sessionState.remotePlayerId())) {
-                    continue;
+                switch (datagram.type()) {
+                    case FLEET_SNAPSHOT -> applyFleetSnapshotDatagram(datagram);
+                    case NPC_FLEET_MOTION -> handleNpcFleetMotion(datagram);
+                    default -> { /* ignore unknown datagram types */ }
                 }
-                fleetMirror.apply(snapshot, localPlayerFactionId());
             } catch (RuntimeException ex) {
                 CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram", ex);
             }
         }
+    }
+
+    private void applyFleetSnapshotDatagram(CoopMessages.Datagram datagram) {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.decode(datagram.body());
+        // Ignore our own echoed datagrams and any sender that is not the remote coop player.
+        if (!snapshot.playerId().equals(sessionState.remotePlayerId())) {
+            return;
+        }
+        fleetMirror.apply(snapshot, localPlayerFactionId());
+    }
+
+    private void handleNpcFleetMotion(CoopMessages.Datagram datagram) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        List<CoopNpcFleetMotion> motions = CoopNpcFleetMotion.decodeBatch(datagram.body());
+        npcFleetRegistry.applyMotion(motions);
+    }
+
+    private void handleNpcFleetSet(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            String encoded = CoopMessages.requiredPayloadString(message, "set");
+            npcFleetRegistry.applySet(CoopNpcFleetSetSnapshot.decode(encoded));
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply NPC_FLEET_SET", ex);
+        }
+    }
+
+    /**
+     * Phase 9 NPC fleet replication. The host streams its authoritative NPC population; the guest
+     * renders host mirrors and suppresses its own NPC simulation. Mirrors are created/disposed by the
+     * NPC_FLEET_SET handler and motion by the datagram drain; this method drives the host sender, the
+     * guest suppressor sweep, and session-edge (re)set/teardown.
+     */
+    private void syncNpcReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !npcReplicationStreaming) {
+            // (Re)starting: rebroadcast the full set and re-arm the guest suppressor.
+            npcFleetReplicator.reset();
+            npcFleetSuppressor.reset();
+            npcReplicationStreaming = true;
+        } else if (!active && npcReplicationStreaming) {
+            // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
+            npcFleetRegistry.disposeAll();
+            npcReplicationStreaming = false;
+            lastNpcDebug = null;
+        }
+        if (!active) {
+            return;
+        }
+        try {
+            if (service.role() == CoopConnectionRole.HOST) {
+                npcFleetReplicator.tick();
+            } else if (CoopNpcFleetSuppressor.activeForRole(service.role())) {
+                npcFleetSuppressor.tick(Global.getSector());
+            }
+            maybeDumpNpcDiagnostics();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync NPC fleet replication", ex);
+        }
+    }
+
+    private void maybeDumpNpcDiagnostics() {
+        if (!CoopDebug.diagnosticsEnabled()) {
+            return;
+        }
+        String state;
+        if (service.role() == CoopConnectionRole.HOST) {
+            state = "host fleets=" + npcFleetReplicator.lastFleetCount()
+                    + " hash=" + shortHash(npcFleetReplicator.lastSetHash());
+        } else {
+            state = "guest mirrors=" + npcFleetRegistry.size() + " ids=" + npcFleetRegistry.fleetIds();
+        }
+        if (!state.equals(lastNpcDebug)) {
+            CoopLog.info(CoopNetPump.class, "Coop NPC-set " + state);
+            lastNpcDebug = state;
+        }
+        maybeDumpVisibilityProbe();
+    }
+
+    /**
+     * Detection-parity probe (CoopDebug only, throttled). Dumps per-fleet sensor profile + the engine's
+     * {@code VisibilityLevel} verdict and detection range, keyed by {@code coopFleetId} so the host and
+     * guest logs can be diffed line-for-line to see exactly why a fleet visible on the host is not
+     * rendered on the guest (not created vs low profile vs weak observer vs out of range).
+     */
+    private void maybeDumpVisibilityProbe() {
+        long now = clockMillis.getAsLong();
+        if (now < nextNpcProbeAtMillis) {
+            return;
+        }
+        nextNpcProbeAtMillis = now + 2000L;
+        String dump = service.role() == CoopConnectionRole.HOST
+                ? CoopFleetVisibilityProbe.dumpHost(Global.getSector())
+                : CoopFleetVisibilityProbe.dumpGuest(Global.getSector());
+        CoopLog.info(CoopNetPump.class, dump);
+    }
+
+    private static String shortHash(String hash) {
+        if (hash == null || hash.isEmpty()) {
+            return "(none)";
+        }
+        return hash.length() <= 8 ? hash : hash.substring(0, 8);
     }
 
     private boolean sessionMatches(String datagramSessionId) {
@@ -1060,6 +1210,85 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    private String lastDialogDebug = "";
+
+    /**
+     * Dormant diagnostic (guest only), off unless {@link CoopDebug#diagnosticsEnabled()}: logs the
+     * interaction-dialog + coop gate/pause state whenever it changes, to investigate why a guest's
+     * station dialog options fail to repopulate after exiting the trade core tab. {@code hasOptions()}
+     * distinguishes a population failure (false) from a pure render glitch (true).
+     */
+    private void debugDialogState() {
+        if (!CoopDebug.diagnosticsEnabled()
+                || service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            CampaignUIAPI ui = sector.getCampaignUI();
+            if (ui == null) {
+                return;
+            }
+            InteractionDialogAPI dialog = ui.getCurrentInteractionDialog();
+            String state;
+            if (dialog == null) {
+                state = "dialog=none"
+                        + " coreTab=" + ui.getCurrentCoreTab()
+                        + " showDialog=" + ui.isShowingDialog()
+                        + " showMenu=" + ui.isShowingMenu()
+                        + " paused=" + sector.isPaused();
+            } else {
+                SectorEntityToken target = dialog.getInteractionTarget();
+                boolean hasOptions = false;
+                try {
+                    hasOptions = dialog.getOptionPanel() != null && dialog.getOptionPanel().hasOptions();
+                } catch (RuntimeException ignored) {
+                    // option panel not ready this frame
+                }
+                String localPlayerId = sessionState.localPlayerId();
+                CoopInteractionClaim blocking = localPlayerId == null
+                        ? null : interactionGate.blockingClaimFor(localPlayerId);
+                state = "dialog=" + (target == null ? "null" : target.getId())
+                        + " hasOptions=" + hasOptions
+                        + " coreTab=" + ui.getCurrentCoreTab()
+                        + " showDialog=" + ui.isShowingDialog()
+                        + " paused=" + sector.isPaused()
+                        + " inFastAdvance=" + sector.isInFastAdvance()
+                        + " blocked=" + (blocking != null)
+                        + " screenOwnsInput=" + isVanillaBlockingScreenOpen(sector)
+                        + " trackedEntity=" + localInteractionEntityId;
+            }
+            if (!state.equals(lastDialogDebug)) {
+                CoopLog.info(CoopNetPump.class, "Coop dialog-debug " + state);
+                lastDialogDebug = state;
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // diagnostics must never disrupt the pump
+        }
+    }
+
+    private void syncCampaignReplicator() {
+        // Register the Phase 12 campaign event listener once the session is active and tear it down
+        // (clearing all replicated state) when the session ends, mirroring the fleet-mirror lifecycle.
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            boolean active = service.isConnected() && isGameplaySessionActive();
+            if (active && !campaignReplicator.isRegistered()) {
+                campaignReplicator.registerOn(sector);
+            } else if (!active && campaignReplicator.isRegistered()) {
+                campaignReplicator.dispose(sector);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign replicator", ex);
+        }
+    }
+
     private void syncGuestInputBlocker() {
         boolean connectedActive = service.isConnected() && isGameplaySessionActive();
         boolean guest = service.role() == CoopConnectionRole.GUEST && connectedActive;
@@ -1068,8 +1297,23 @@ public class CoopNetPump implements EveryFrameScript {
             timeLock.syncGuestInputBlocker(guest);
             // Phase 11: the host needs its pause-key interceptor so the shared clock never flickers.
             timeLock.syncHostInputListener(host);
+            // Suspend the guest blocker's consumption while a vanilla blocking screen owns the
+            // keyboard, so the guest can advance/dismiss its own interaction dialog (spacebar to the
+            // options, ESC to leave). The shared screen-pause already stops both clocks there.
+            if (guest) {
+                timeLock.setInputBlockerSuspended(isGuestScreenOwningInput());
+            }
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign input listeners", ex);
+        }
+    }
+
+    private boolean isGuestScreenOwningInput() {
+        try {
+            SectorAPI sector = Global.getSector();
+            return sector != null && isVanillaBlockingScreenOpen(sector);
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
         }
     }
 
@@ -1127,6 +1371,7 @@ public class CoopNetPump implements EveryFrameScript {
         return type == CoopMessages.Type.PING
                 || type == CoopMessages.Type.PONG
                 || type == CoopMessages.Type.TIME_SNAPSHOT
-                || type == CoopMessages.Type.FLEET_SNAPSHOT;
+                || type == CoopMessages.Type.FLEET_SNAPSHOT
+                || type == CoopMessages.Type.NPC_FLEET_MOTION;
     }
 }

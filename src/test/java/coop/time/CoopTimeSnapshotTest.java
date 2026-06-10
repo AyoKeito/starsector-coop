@@ -74,7 +74,7 @@ class CoopTimeSnapshotTest {
     }
 
     @Test
-    void guestApplySetsPauseAndFastForwardEveryFrame() {
+    void guestApplySetsPauseAndFastForwardOnTransition() {
         RecordingSector recording = new RecordingSector(false, false, 222333444L, 17);
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
 
@@ -82,6 +82,29 @@ class CoopTimeSnapshotTest {
 
         assertTrue(recording.paused);
         assertTrue(recording.sectorFastAdvance);
+        assertEquals(1, recording.setPausedCalls);
+        assertEquals(1, recording.setFastAdvanceCalls);
+    }
+
+    @Test
+    void guestApplyDoesNotReissueUnchangedPauseEveryFrame() {
+        // Regression: re-issuing setPaused(true) every frame clobbered a vanilla interaction
+        // dialog's option reshow on the guest (blank "You decide to..." after leaving the trade
+        // tab). The guest must only flip the clock on a genuine transition, like the host does.
+        RecordingSector recording = new RecordingSector(true, false, 222333444L, 17);
+        CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
+
+        // Already paused, not fast-forwarding; applying the same state repeatedly must be a no-op.
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, false, 222333555L, 18L, 13000L));
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, false, 222333666L, 19L, 13200L));
+
+        assertEquals(0, recording.setPausedCalls);
+        assertEquals(0, recording.setFastAdvanceCalls);
+
+        // A real transition still flips the clock exactly once.
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(false, false, 222333777L, 20L, 13400L));
+        assertFalse(recording.paused);
+        assertEquals(1, recording.setPausedCalls);
     }
 
     @Test
@@ -120,6 +143,8 @@ class CoopTimeSnapshotTest {
     private static final class RecordingSector {
         private boolean paused;
         private boolean sectorFastAdvance;
+        private int setPausedCalls;
+        private int setFastAdvanceCalls;
         private final boolean uiFastForward;
         private final long timestampMillis;
         private final int day;
@@ -149,6 +174,7 @@ class CoopTimeSnapshotTest {
                             }
                             case "setPaused" -> {
                                 paused = (boolean) args[0];
+                                setPausedCalls++;
                                 return null;
                             }
                             case "isInFastAdvance" -> {
@@ -156,6 +182,7 @@ class CoopTimeSnapshotTest {
                             }
                             case "setInFastAdvance" -> {
                                 sectorFastAdvance = (boolean) args[0];
+                                setFastAdvanceCalls++;
                                 return null;
                             }
                             case "isFastForwardIteration" -> {

@@ -3,6 +3,7 @@ param(
     [string] $TestRoot = 'K:\Starsector-coop-test',
     [int] $Port = 7777,
     [string] $SeedString = 'MN-1234567890123456789',
+    [switch] $Diagnostics,
     [switch] $PatchOnly
 )
 
@@ -29,6 +30,7 @@ function Set-CoopVmParams {
     $content = $content -replace '\s-Dcoop\.connectHost=\S+', ''
     $content = $content -replace '\s-Dcoop\.connectPort=\S+', ''
     $content = $content -replace '\s-Dcoop\.newGameSeed=\S+', ''
+    $content = $content -replace '\s-Dcoop\.debug\.diagnostics=\S+', ''
     # Remove any prior coop-forks classpath entry so re-patching stays idempotent.
     $content = $content -replace '\.\.\\mods\\coop\\jars\\coop-forks\.jar;', ''
 
@@ -66,13 +68,18 @@ $jvmProperties = @("-Dcoop.hostPort=$Port")
 if (-not [string]::IsNullOrWhiteSpace($SeedString)) {
     $jvmProperties += "-Dcoop.newGameSeed=$SeedString"
 }
+if ($Diagnostics) {
+    $jvmProperties += "-Dcoop.debug.diagnostics=true"
+}
 
 Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties $jvmProperties
 
+$diagNote = if ($Diagnostics) { ' diagnostics=ON' } else { '' }
+
 if ($PatchOnly) {
-    Write-Host "Patched host vmparams for coop.hostPort=$Port coop.newGameSeed=$SeedString"
+    Write-Host "Patched host vmparams for coop.hostPort=$Port coop.newGameSeed=$SeedString$diagNote"
     return
 }
 
 Start-Process -FilePath $exe -WorkingDirectory $profileRoot
-Write-Host "Launched coop host test client on port $Port with seed $SeedString"
+Write-Host "Launched coop host test client on port $Port with seed $SeedString$diagNote"

@@ -50,7 +50,15 @@ public class CoopTimeLock {
     public void apply(TimeSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         SectorAPI sector = requireSector();
-        sector.setPaused(snapshot.paused());
+        // Only flip the clock when the desired state actually differs from what the sector already
+        // shows. Re-issuing setPaused(true) every frame (the guest applies a host snapshot each
+        // frame) fights a vanilla interaction dialog's own pause/option-reshow state machine: it left
+        // the guest's station dialog blank with no options when returning from the trade tab (the
+        // dialog needs a few un-clobbered frames to repopulate). Idempotent-on-change avoids that
+        // while still mirroring the host authoritatively.
+        if (sector.isPaused() != snapshot.paused()) {
+            sector.setPaused(snapshot.paused());
+        }
         // setInFastAdvance(true) drives the extra CampaignClock.advance() path in
         // CampaignEngine.advance(), making the guest's clock run faster to mirror the host. This
         // cannot block a guest's own local hold-Shift (that loop lives in obfuscated CampaignState
@@ -59,7 +67,9 @@ public class CoopTimeLock {
         // time speed: setInFastAdvance was verified not to change the guest clock rate. Fast-forward
         // is instead neutralized for both clients by the campaignSpeedupMult=1 override in
         // data/config/settings.json (hold-Shift then advances at 1x), so clocks stay aligned.
-        sector.setInFastAdvance(snapshot.fastForward());
+        if (sector.isInFastAdvance() != snapshot.fastForward()) {
+            sector.setInFastAdvance(snapshot.fastForward());
+        }
     }
 
     private boolean hostFastForward(SectorAPI sector) {
@@ -132,6 +142,25 @@ public class CoopTimeLock {
         }
         for (CoopCampaignInputBlocker blocker : listeners.getListeners(CoopCampaignInputBlocker.class)) {
             blocker.setInteractionBlocked(blocked, entityName);
+        }
+    }
+
+    /**
+     * Suspend/resume the installed guest input blocker's consumption while a vanilla blocking screen
+     * (interaction dialog / in-game menu / core tab) owns the keyboard. Prevents the blocker from
+     * eating the spacebar/ESC/keys a station dialog needs to advance to its options and be dismissed.
+     */
+    public void setInputBlockerSuspended(boolean suspended) {
+        SectorAPI sector = sectorOrNull();
+        if (sector == null) {
+            return;
+        }
+        ListenerManagerAPI listeners = sector.getListenerManager();
+        if (listeners == null) {
+            return;
+        }
+        for (CoopCampaignInputBlocker blocker : listeners.getListeners(CoopCampaignInputBlocker.class)) {
+            blocker.setSuspended(suspended);
         }
     }
 
