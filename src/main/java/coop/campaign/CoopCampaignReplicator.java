@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.CargoStackAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.PlayerMarketTransaction;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CustomCampaignEntityAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
@@ -14,10 +15,13 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
+import com.fs.starfarer.api.impl.campaign.ids.Entities;
+import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import coop.net.CoopConnectionRole;
@@ -131,6 +135,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
         listener = new CoopCampaignEventListener(this);
         sector.addTransientListener(listener);
+        // CargoScreenListener is dispatched through the listener manager, not the campaign-event
+        // list, so it needs its own transient registration (Phase 12d: cargo pod replication).
+        try {
+            sector.getListenerManager().addListener(listener, true);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Could not register coop cargo-screen listener; pod replication will not fire", ex);
+        }
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
 
@@ -141,6 +153,12 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 sector.removeListener(listener);
             } catch (RuntimeException ex) {
                 CoopLog.warn(CoopCampaignReplicator.class, "Failed to remove coop campaign listener", ex);
+            }
+            try {
+                sector.getListenerManager().removeListener(listener);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class,
+                        "Failed to remove coop cargo-screen listener", ex);
             }
         }
         listener = null;
@@ -961,6 +979,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     private void applyWorldDeltaToEngine(CoopWorldDelta delta) {
+        if (delta.kind() == CoopWorldDelta.Kind.SPAWN) {
+            applySpawnToEngine(delta);
+            return;
+        }
         if (!delta.consumed()) {
             return;
         }
@@ -969,7 +991,8 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             return;
         }
         // Remove the consumed entity wherever it lives so it cannot be re-looted on this client.
-        var entity = sector.getEntityById(delta.entityId());
+        // Resolved by coop id first for replicated entities, whose engine ids differ per client.
+        SectorEntityToken entity = findEntityForDelta(sector, delta.entityId());
         if (entity != null && entity.getContainingLocation() != null) {
             entity.getContainingLocation().removeEntity(entity);
         }
@@ -996,9 +1019,13 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 return;
             }
             Set<String> current = new HashSet<>();
-            for (SectorEntityToken entity : location.getEntitiesWithTag(Tags.SALVAGEABLE)) {
-                if (entity.getId() != null) {
-                    current.add(entity.getId());
+            for (SectorEntityToken entity : location.getAllEntities()) {
+                if (!isConsumableWorldEntity(entity)) {
+                    continue;
+                }
+                String key = consumeKeyFor(entity);
+                if (key != null) {
+                    current.add(key);
                 }
             }
             // Entering a new location: re-seed the baseline silently (the old location's entities are
@@ -1215,6 +1242,239 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         if (list != null) {
             list.remove(e);
         }
+    }
+
+    /**
+     * Which entities the consume watcher tracks (Phase 12d widening).
+     *
+     * <p>Was an allowlist of {@code Tags.SALVAGEABLE} only, which silently missed everything nobody
+     * had thought to tag: verified in-game on 2026-08-09, {@code nav_buoy_makeshift} is tagged
+     * {@code [nav_buoy, neutrino_high, objective, makeshift]} and {@code cargo_pods} is tagged
+     * {@code [has_interaction_dialog, neutrino, salvage_music]} — neither carries {@code salvageable},
+     * so disassembling a makeshift structure or emptying a pod reported nothing at all.
+     *
+     * <p>Now: anything salvage-tagged, anything coop-replicated, or any custom entity. Custom
+     * entities cover pods and the makeshift structures without naming either. Planets, stars, and
+     * jump points are not custom entities and so stay out; fleets are excluded outright because
+     * Phase 9 owns them.
+     */
+    private boolean isConsumableWorldEntity(SectorEntityToken entity) {
+        if (entity == null) {
+            return false;
+        }
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        return shouldTrackForConsume(
+                entity instanceof CampaignFleetAPI,
+                entity.hasTag(Tags.SALVAGEABLE),
+                memory != null && memory.contains(CoopWorldEntitySpawn.COOP_ENTITY_TAG),
+                entity instanceof CustomCampaignEntityAPI);
+    }
+
+    /** Pure decision function (unit-tested) behind {@link #isConsumableWorldEntity}. */
+    static boolean shouldTrackForConsume(boolean isFleet, boolean salvageTagged,
+                                         boolean coopReplicated, boolean isCustomEntity) {
+        if (isFleet) {
+            return false; // Phase 9 owns fleet existence
+        }
+        return salvageTagged || coopReplicated || isCustomEntity;
+    }
+
+    /**
+     * Identity used for consume tracking. Coop-replicated entities key on their coop-assigned id
+     * because the engine mints its own per client and the two never match; everything else keys on
+     * the engine id, which deterministic worldgen makes identical across clients.
+     */
+    private String consumeKeyFor(SectorEntityToken entity) {
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        if (memory != null && memory.contains(CoopWorldEntitySpawn.COOP_ENTITY_TAG)) {
+            Object coopId = memory.get(CoopWorldEntitySpawn.COOP_ENTITY_TAG);
+            if (coopId != null && !String.valueOf(coopId).isBlank()) {
+                return String.valueOf(coopId);
+            }
+        }
+        return entity.getId();
+    }
+
+    /** Finds a replicated entity by coop id, falling back to the engine id for worldgen entities. */
+    private SectorEntityToken findEntityForDelta(SectorAPI sector, String entityId) {
+        SectorEntityToken byEngineId = sector.getEntityById(entityId);
+        if (byEngineId != null) {
+            return byEngineId;
+        }
+        for (LocationAPI location : sector.getAllLocations()) {
+            if (location == null) {
+                continue;
+            }
+            for (SectorEntityToken entity : location.getAllEntities()) {
+                MemoryAPI memory = entity == null ? null : entity.getMemoryWithoutUpdate();
+                if (memory != null
+                        && entityId.equals(String.valueOf(memory.get(CoopWorldEntitySpawn.COOP_ENTITY_TAG)))) {
+                    return entity;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The local player left cargo pods behind (jettison, or cargo left in stable orbit). Replicate
+     * them so the partner can actually pick them up — v1 has no direct trade UI, so pods are the
+     * only way the two players can hand each other anything (Phase 12d).
+     */
+    @Override
+    public void onPlayerLeftCargoPods(SectorEntityToken pods) {
+        if (!isActive() || pods == null || replayGuard.isReplaying()) {
+            return;
+        }
+        try {
+            LocationAPI location = pods.getContainingLocation();
+            if (location == null) {
+                return;
+            }
+            String coopEntityId = session.localPlayerId() + ":" + pods.getId();
+            pods.getMemoryWithoutUpdate().set(CoopWorldEntitySpawn.COOP_ENTITY_TAG, coopEntityId);
+
+            CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn(
+                    coopEntityId,
+                    Entities.CARGO_PODS,
+                    location.getId(),
+                    pods.getLocation() == null ? 0f : pods.getLocation().x,
+                    pods.getLocation() == null ? 0f : pods.getLocation().y,
+                    pods.getVelocity() == null ? 0f : pods.getVelocity().x,
+                    pods.getVelocity() == null ? 0f : pods.getVelocity().y,
+                    contentsOf(pods));
+
+            CoopWorldDelta delta = new CoopWorldDelta(coopEntityId, CoopWorldDelta.Kind.SPAWN, false,
+                    spawn.encode(), session.localPlayerId());
+            // Mark locally applied first so the host's echo rebroadcast is a no-op here.
+            if (worldLedger.apply(delta)) {
+                reportWorldDelta(delta);
+                CoopLog.info(CoopCampaignReplicator.class, "Coop reported cargo pod spawn id="
+                        + coopEntityId + " stacks=" + spawn.contents().size());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to report cargo pods", ex);
+        }
+    }
+
+    /**
+     * Everything a pod holds, keyed {@code KIND:id}. Commodities alone would silently drop the
+     * weapons, fighters, and ships players most want to hand each other — and a vanishing ship is a
+     * far worse failure than a missing crate of supplies.
+     */
+    private Map<String, Integer> contentsOf(SectorEntityToken pods) {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        CargoAPI cargo = pods instanceof CustomCampaignEntityAPI custom ? custom.getCargo() : null;
+        if (cargo == null) {
+            return out;
+        }
+        for (CargoStackAPI stack : cargo.getStacksCopy()) {
+            StackRef ref = classify(stack);
+            if (ref == null) {
+                continue;
+            }
+            int size = Math.round(stack.getSize());
+            if (size > 0) {
+                out.merge(CoopWorldEntitySpawn.key(spawnKindOf(ref.kind()), ref.id()), size, Integer::sum);
+            }
+        }
+        FleetDataAPI ships = cargo.getMothballedShips();
+        if (ships != null) {
+            for (FleetMemberAPI member : ships.getMembersListCopy()) {
+                String variantId = shipVariantId(member);
+                if (variantId != null) {
+                    out.merge(CoopWorldEntitySpawn.key(
+                            CoopWorldEntitySpawn.ItemKind.SHIP, variantId), 1, Integer::sum);
+                }
+            }
+        }
+        return out;
+    }
+
+    private static CoopWorldEntitySpawn.ItemKind spawnKindOf(CoopMarketSync.ItemKind kind) {
+        return switch (kind) {
+            case WEAPON -> CoopWorldEntitySpawn.ItemKind.WEAPON;
+            case FIGHTER -> CoopWorldEntitySpawn.ItemKind.FIGHTER;
+            default -> CoopWorldEntitySpawn.ItemKind.COMMODITY;
+        };
+    }
+
+    /** Materializes a replicated world entity on this client. */
+    private void applySpawnToEngine(CoopWorldDelta delta) {
+        SectorAPI sector = Global.getSector();
+        if (sector == null) {
+            return;
+        }
+        CoopWorldEntitySpawn spawn = CoopWorldEntitySpawn.decode(delta.newStateJson());
+        if (findEntityForDelta(sector, spawn.coopEntityId()) != null) {
+            return; // already materialized (duplicate packet, or our own echo)
+        }
+        LocationAPI location = locationById(sector, spawn.locationId());
+        if (location == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Cannot spawn coop entity "
+                    + spawn.coopEntityId() + ": unknown location " + spawn.locationId());
+            return;
+        }
+        SectorEntityToken entity = location.addCustomEntity(null, null, spawn.entityType(),
+                Factions.NEUTRAL);
+        entity.getLocation().set(spawn.x(), spawn.y());
+        // Velocity rides the wire because Misc.addCargoPods draws it from Math.random().
+        entity.getVelocity().set(spawn.velocityX(), spawn.velocityY());
+        entity.setSensorProfile(1f);
+        entity.setDiscoverable(null);
+        entity.setDiscoveryXP(null);
+        entity.getMemoryWithoutUpdate().set(CoopWorldEntitySpawn.COOP_ENTITY_TAG, spawn.coopEntityId());
+        if (entity instanceof CustomCampaignEntityAPI custom && custom.getCargo() != null) {
+            for (Map.Entry<String, Integer> entry : spawn.contents().entrySet()) {
+                addSpawnContent(custom.getCargo(), entry.getKey(), entry.getValue());
+            }
+        }
+        // Deliberately no CargoPodsResponse decay script on the mirror copy: decay stays owned by
+        // the creating client, which reports the removal as a CONSUME and takes the pod out on both
+        // sides. Running two independent decay timers would just race to the same outcome.
+        CoopLog.info(CoopCampaignReplicator.class, "Coop materialized entity " + spawn.coopEntityId()
+                + " type=" + spawn.entityType() + " in " + spawn.locationId());
+    }
+
+    /** Adds one {@code KIND:id} content entry back into a materialized pod's cargo. */
+    private void addSpawnContent(CargoAPI cargo, String key, int quantity) {
+        int split = key.indexOf(':');
+        if (split <= 0 || split == key.length() - 1) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Malformed spawn content key: " + key);
+            return;
+        }
+        String id = key.substring(split + 1);
+        CoopWorldEntitySpawn.ItemKind kind;
+        try {
+            kind = CoopWorldEntitySpawn.ItemKind.valueOf(key.substring(0, split));
+        } catch (IllegalArgumentException ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Unknown spawn content kind in key: " + key);
+            return;
+        }
+        try {
+            switch (kind) {
+                case COMMODITY -> cargo.addCommodity(id, quantity);
+                case WEAPON -> cargo.addWeapons(id, quantity);
+                case FIGHTER -> cargo.addFighters(id, quantity);
+                case SHIP -> addMothballedShips(cargo, id, quantity);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // A variant or spec this client cannot resolve: skip that stack rather than lose the pod.
+            CoopLog.warn(CoopCampaignReplicator.class, "Could not restore pod content " + key, ex);
+        }
+    }
+
+    private LocationAPI locationById(SectorAPI sector, String locationId) {
+        if (locationId == null || locationId.isBlank()) {
+            return null;
+        }
+        for (LocationAPI location : sector.getAllLocations()) {
+            if (location != null && locationId.equals(location.getId())) {
+                return location;
+            }
+        }
+        LocationAPI hyperspace = sector.getHyperspace();
+        return hyperspace != null && locationId.equals(hyperspace.getId()) ? hyperspace : null;
     }
 
     private void reportLocalSalvageConsume(String entityId) {

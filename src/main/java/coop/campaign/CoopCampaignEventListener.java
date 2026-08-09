@@ -1,8 +1,12 @@
 package coop.campaign;
 
 import com.fs.starfarer.api.campaign.BaseCampaignEventListener;
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.PlayerMarketTransaction;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
+import com.fs.starfarer.api.campaign.listeners.CargoScreenListener;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.characters.PersonAPI;
 
@@ -18,10 +22,18 @@ import java.util.Objects;
  * replicator, so this class stays a thin, engine-facing adapter (untested directly; the decision
  * logic it feeds is covered by the model unit tests).
  */
-public final class CoopCampaignEventListener extends BaseCampaignEventListener {
+public final class CoopCampaignEventListener extends BaseCampaignEventListener
+        implements CargoScreenListener {
 
     /** Callback surface implemented by {@link CoopCampaignReplicator}. */
     public interface Sink {
+        /**
+         * The local player left cargo pods behind (jettison, or cargo left in stable orbit). Phase
+         * 12d replicates these so the partner can pick them up, which is the only item-transfer
+         * route v1 has.
+         */
+        void onPlayerLeftCargoPods(SectorEntityToken pods);
+
         void onPlayerReputationChange(String factionId, float delta);
 
         void onPlayerReputationChange(PersonAPI person, float delta);
@@ -75,5 +87,25 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener {
     @Override
     public void reportEconomyTick(int iterIndex) {
         sink.onEconomyTick(iterIndex);
+    }
+
+    // ---- CargoScreenListener (Phase 12d) --------------------------------------------------------
+
+    @Override
+    public void reportPlayerLeftCargoPods(SectorEntityToken entity) {
+        sink.onPlayerLeftCargoPods(entity);
+    }
+
+    @Override
+    public void reportCargoScreenOpened() {
+    }
+
+    @Override
+    public void reportPlayerNonMarketTransaction(PlayerMarketTransaction transaction,
+                                                 InteractionDialogAPI dialog) {
+    }
+
+    @Override
+    public void reportSubmarketOpened(SubmarketAPI submarket) {
     }
 }

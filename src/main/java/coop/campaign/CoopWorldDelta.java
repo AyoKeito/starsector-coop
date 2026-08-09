@@ -30,7 +30,18 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
         EXPLORE,
         CONSUME,
         CONSTRUCT,
-        PARLEY
+        PARLEY,
+        /**
+         * A world entity came into existence at runtime and must be materialized on the other client
+         * (Phase 12d). Today that means player-created cargo pods — jettisoned cargo, or cargo left
+         * in stable orbit — which are how two players hand each other anything at all, v1 having no
+         * direct trade UI. The details ride {@link #newStateJson} as a {@link CoopWorldEntitySpawn}.
+         *
+         * <p>Unlike every other kind, the {@code entityId} here is <em>coop-assigned</em> rather than
+         * an engine id: {@code Misc.addCargoPods} calls {@code addCustomEntity(null, ...)}, so the
+         * engine mints an id independently on each client and they never match.
+         */
+        SPAWN
     }
 
     public CoopWorldDelta {
