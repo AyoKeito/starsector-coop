@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
+import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import coop.util.CoopLog;
 
 import java.util.List;
@@ -148,6 +149,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
         mirrorFleet = Global.getFactory().createEmptyFleet(factionId, label, true);
         mirrorFleet.setAIMode(true);
         mirrorFleet.setNoAutoDespawn(true);
+        // INTERIM (Phase 12b): without this flag the engine's fleet-targeting AI can pick a mirror
+        // as a target and run silent autoresolve rounds against it (Battle.doAutoresolveRound has no
+        // veto hook), corrupting a fleet whose real owner was never in a battle. Cost: host NPCs also
+        // stop pursuing the mirror. Phase 14 removes the permanent flag and replaces it with
+        // contact-time protection, restoring vanilla pursuit.
+        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
         mirrorFleet.getMemoryWithoutUpdate().set(PLAYER_MIRROR_TAG, true);
         resetTracking();
         CoopLog.info(CoopFleetMirror.class,
@@ -164,6 +171,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
         mirrorFleet = Global.getFactory().createEmptyFleet(factionId, label, true);
         mirrorFleet.setAIMode(true);
         mirrorFleet.setNoAutoDespawn(true);
+        // See the player-mirror path above: interim Phase 12b protection against the engine's fleet
+        // AI targeting a mirror and silently autoresolving against it. Removed in Phase 14.
+        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
         // Store the host-side fleet id so the per-frame guest suppressor recognizes this as a sanctioned
         // mirror and never sweeps it (see CoopNpcFleetSuppressor).
         mirrorFleet.getMemoryWithoutUpdate().set(NPC_MIRROR_TAG, snapshot.coopFleetId());

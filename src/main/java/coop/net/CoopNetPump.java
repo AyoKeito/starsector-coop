@@ -290,25 +290,38 @@ public class CoopNetPump implements EveryFrameScript {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
             log("inbound", message);
-            switch (message.type()) {
-                case LOBBY_HELLO -> handleLobbyHello(message);
-                case LOBBY_ACCEPT -> handleLobbyAccept(message);
-                case LOBBY_REJECT -> handleLobbyReject(message);
-                case HANDSHAKE_MANIFEST -> handleHandshakeManifest(message);
-                case HANDSHAKE_RESULT -> handleHandshakeResult(message);
-                case SEED_LOCK_REQUEST -> handleSeedLockRequest(message);
-                case SEED_LOCK_ACK -> handleSeedLockAck(message);
-                case SEED_LOCK_REJECT -> handleSeedLockReject(message);
-                case TIME_SNAPSHOT -> handleTimeSnapshot(message);
-                case PAUSE_INTENT -> handlePauseIntent(message);
-                case INTERACTION_CLAIM -> handleInteractionClaim(message);
-                case INTERACTION_ACCEPT -> handleInteractionAccept(message);
-                case INTERACTION_REJECT -> handleInteractionReject(message);
-                case INTERACTION_RELEASE -> handleInteractionRelease(message);
-                case NPC_FLEET_SET -> handleNpcFleetSet(message);
-                case PING -> sendPong(message);
-                default -> campaignReplicator.handle(message);
+            // Log-and-drop guard: handlers throw freely (missing payload fields, unknown enum values,
+            // out-of-order lobby messages). Letting one escape kills EveryFrameScript.advance() and
+            // with it the whole pump, so a version-skewed peer or a stray connection could take the
+            // session down. One bad message is a bug to log, never a peer to disconnect (Phase 12b).
+            try {
+                dispatchInbound(message);
+            } catch (RuntimeException ex) {
+                CoopLog.warn(CoopNetPump.class, "Coop dropped malformed/unexpected message type="
+                        + message.type() + " seq=" + message.seq(), ex);
             }
+        }
+    }
+
+    private void dispatchInbound(CoopMessages.Message message) {
+        switch (message.type()) {
+            case LOBBY_HELLO -> handleLobbyHello(message);
+            case LOBBY_ACCEPT -> handleLobbyAccept(message);
+            case LOBBY_REJECT -> handleLobbyReject(message);
+            case HANDSHAKE_MANIFEST -> handleHandshakeManifest(message);
+            case HANDSHAKE_RESULT -> handleHandshakeResult(message);
+            case SEED_LOCK_REQUEST -> handleSeedLockRequest(message);
+            case SEED_LOCK_ACK -> handleSeedLockAck(message);
+            case SEED_LOCK_REJECT -> handleSeedLockReject(message);
+            case TIME_SNAPSHOT -> handleTimeSnapshot(message);
+            case PAUSE_INTENT -> handlePauseIntent(message);
+            case INTERACTION_CLAIM -> handleInteractionClaim(message);
+            case INTERACTION_ACCEPT -> handleInteractionAccept(message);
+            case INTERACTION_REJECT -> handleInteractionReject(message);
+            case INTERACTION_RELEASE -> handleInteractionRelease(message);
+            case NPC_FLEET_SET -> handleNpcFleetSet(message);
+            case PING -> sendPong(message);
+            default -> campaignReplicator.handle(message);
         }
     }
 
@@ -405,15 +418,24 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void handleLobbyReject(CoopMessages.Message message) {
+        // Parse once: the second parse used to run after guestRejectLobby had already changed state,
+        // so a malformed payload threw from the log line rather than the state transition.
+        String reason = CoopMessages.requiredPayloadString(message, "reason");
         if (service.role() == CoopConnectionRole.GUEST) {
-            sessionState.guestRejectLobby(CoopMessages.requiredPayloadString(message, "reason"));
+            sessionState.guestRejectLobby(reason);
         }
-        CoopLog.warn(CoopNetPump.class,
-                "Coop lobby rejected: " + CoopMessages.requiredPayloadString(message, "reason"));
+        CoopLog.warn(CoopNetPump.class, "Coop lobby rejected: " + reason);
     }
 
     private void handleHandshakeManifest(CoopMessages.Message message) {
         if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        // Explicit out-of-order guard: a manifest arriving before the lobby completes would make
+        // hostAcceptHandshake() throw. Handle it deliberately rather than via the dispatch catch-all.
+        if (sessionState.connectionState() != CoopLobbyState.HOST_CONNECTED) {
+            CoopLog.warn(CoopNetPump.class, "Coop ignoring HANDSHAKE_MANIFEST in state "
+                    + sessionState.connectionState() + " (expected HOST_CONNECTED)");
             return;
         }
 
@@ -494,7 +516,9 @@ public class CoopNetPump implements EveryFrameScript {
                     CoopMessages.requiredPayloadString(message, "manifestJson"));
             return CoopHandshakeDiff.compare(hostManifest, guestManifest).toDisplayString();
         } catch (RuntimeException ex) {
-            return "handshakeManifest: " + ex.getMessage();
+            // toString(), not getMessage(): the latter is null for exceptions thrown without one
+            // (e.g. NullPointerException), which would render the diff as "handshakeManifest: null".
+            return "handshakeManifest: " + ex.toString();
         }
     }
 
@@ -1329,9 +1353,9 @@ public class CoopNetPump implements EveryFrameScript {
                 && !sessionState.handshakeValidated()) {
             return;
         }
-        if (sessionState.handshakeValidated() && sessionState.seedLong() == null) {
-            return;
-        }
+        // No seed-lock-phase suppression: the host holds paused through seed lock, which is exactly
+        // the window where a half-open connection would otherwise stay invisible. Pre-lobby
+        // suppression (above) stays.
 
         long now = clockMillis.getAsLong();
         if (now < nextPingAtMillis) {

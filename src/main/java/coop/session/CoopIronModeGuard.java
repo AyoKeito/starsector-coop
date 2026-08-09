@@ -24,12 +24,19 @@ public final class CoopIronModeGuard {
         }
     }
 
+    /**
+     * Maximum container nesting the scan will walk: the top-level map plus one nested map/collection
+     * level. Deeper data belongs to third-party mods storing their own state, and an unbounded walk
+     * false-positives on any of them that happens to use an {@code isIronMode} key of its own.
+     */
+    private static final int MAX_SCAN_DEPTH = 2;
+
     public static boolean isIronModeActive(boolean activeSectorIronMode, Map<String, ?> persistentData) {
-        return activeSectorIronMode || containsIronModeTrue(persistentData);
+        return activeSectorIronMode || containsIronModeTrue(persistentData, 1);
     }
 
-    private static boolean containsIronModeTrue(Object value) {
-        if (value == null) {
+    private static boolean containsIronModeTrue(Object value, int depth) {
+        if (value == null || depth > MAX_SCAN_DEPTH) {
             return false;
         }
         if (value instanceof Map<?, ?> map) {
@@ -37,7 +44,7 @@ public final class CoopIronModeGuard {
                 if (IRON_MODE_FIELD.equals(String.valueOf(entry.getKey())) && isTrue(entry.getValue())) {
                     return true;
                 }
-                if (containsIronModeTrue(entry.getValue())) {
+                if (containsIronModeTrue(entry.getValue(), depth + 1)) {
                     return true;
                 }
             }
@@ -45,7 +52,7 @@ public final class CoopIronModeGuard {
         }
         if (value instanceof Collection<?> collection) {
             for (Object entry : collection) {
-                if (containsIronModeTrue(entry)) {
+                if (containsIronModeTrue(entry, depth + 1)) {
                     return true;
                 }
             }

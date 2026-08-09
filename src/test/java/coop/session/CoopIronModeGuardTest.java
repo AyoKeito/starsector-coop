@@ -29,4 +29,26 @@ class CoopIronModeGuardTest {
         assertFalse(CoopIronModeGuard.isIronModeActive(false,
                 Map.of("saveDescriptor", Map.of("isIronMode", false))));
     }
+
+    // ---- Phase 12b: depth cap ------------------------------------------------------------------
+
+    @Test
+    void deeplyNestedThirdPartyIronModeKeyNoLongerRejects() {
+        // A third-party mod storing its own isIronMode key three levels down used to false-positive
+        // and block coop entirely. Real save state lives at depth 1 or 2.
+        Map<String, ?> persistent = Map.of(
+                "someOtherMod", Map.of(
+                        "settings", Map.of(
+                                "isIronMode", true)));
+
+        assertFalse(CoopIronModeGuard.isIronModeActive(false, persistent));
+    }
+
+    @Test
+    void depthCapDoesNotBreakTheRealDetectionLevels() {
+        // Top level and one nested level are the levels the engine actually uses; both still reject.
+        assertTrue(CoopIronModeGuard.isIronModeActive(false, Map.of("isIronMode", true)));
+        assertTrue(CoopIronModeGuard.isIronModeActive(false,
+                Map.of("saveDescriptor", Map.of("isIronMode", true))));
+    }
 }

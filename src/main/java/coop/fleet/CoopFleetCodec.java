@@ -9,12 +9,19 @@ import java.util.List;
  * that are framed independently of the flat-JSON {@link coop.net.CoopMessages} envelope (which cannot
  * carry arrays), so they share this delimiter-based, backslash-escaped codec instead.
  *
- * <p>The encoding is pipe-delimited per record with {@code \\}, {@code \|}, {@code \n}, {@code \r}
- * escapes so member names containing those characters round-trip exactly.
+ * <p>The encoding is pipe-delimited per record with {@code \\}, {@code \|}, {@code \n}, {@code \r},
+ * and {@code \s} (for the U+001F unit separator, which the datagram envelope uses as its record
+ * separator) escapes, so member names containing any of those characters round-trip exactly.
+ *
+ * <p>The escape letter for U+001F is {@code s}, not {@code u}: the sequence backslash-u is a unicode
+ * escape to the Java lexer even inside comments and escaped string literals, so it cannot appear in
+ * source at all.
  */
 final class CoopFleetCodec {
     static final char FIELD_SEPARATOR = '|';
     static final int MEMBER_FIELD_COUNT = 7;
+    /** U+001F UNIT SEPARATOR: the datagram envelope's record separator, and player-typeable. */
+    static final char UNIT_SEPARATOR = (char) 0x1F;
 
     private CoopFleetCodec() {
     }
@@ -30,6 +37,9 @@ final class CoopFleetCodec {
                 case '|' -> escaped.append("\\|");
                 case '\n' -> escaped.append("\\n");
                 case '\r' -> escaped.append("\\r");
+                // U+001F is the datagram envelope's record separator and ship/fleet names are
+                // player-editable, so an unescaped one would split a record mid-field on the wire.
+                case UNIT_SEPARATOR -> escaped.append("\\s");
                 default -> escaped.append(c);
             }
         }
@@ -49,6 +59,7 @@ final class CoopFleetCodec {
                     case '|' -> token.append('|');
                     case 'n' -> token.append('\n');
                     case 'r' -> token.append('\r');
+                    case 's' -> token.append(UNIT_SEPARATOR);
                     default -> token.append(c);
                 }
                 escaped = false;

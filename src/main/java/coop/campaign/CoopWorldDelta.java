@@ -54,19 +54,32 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
      * already-consumed entity can never be looted twice.
      */
     public static final class Ledger {
+        /** Consumed entities, keyed by raw entity id (the pre-12b scheme — do not migrate). */
         private final Set<String> consumedEntityIds = new HashSet<>();
+        /**
+         * Non-consuming deltas (CONSTRUCT/PARLEY), keyed {@code KIND:entityId} so a CONSTRUCT on
+         * entity X neither blocks nor is blocked by a later CONSUME on the same X.
+         */
+        private final Set<String> appliedNonConsuming = new HashSet<>();
 
         /**
-         * Applies a delta. Returns {@code true} only the first time an entity is marked consumed
-         * (i.e. when the caller should actually mutate world state); subsequent applies return
-         * {@code false} (already handled — no double-loot, no re-consume).
+         * Applies a delta. Returns {@code true} only the first time a given delta is seen — for a
+         * consuming delta that means the first time the entity is marked consumed, and for a
+         * non-consuming delta (CONSTRUCT/PARLEY) the first time that (kind, entity) pair arrives.
+         * Every later apply returns {@code false} (already handled: no double-loot, no re-consume,
+         * and no double-apply of the host's echo rebroadcast).
          */
         public boolean apply(CoopWorldDelta delta) {
             Objects.requireNonNull(delta, "delta");
             if (!delta.consumed()) {
-                // A non-consuming delta (e.g. a construct that does not remove an entity) is applied
-                // every time it is new; we track by entity id only for the consumed case.
-                return !consumedEntityIds.contains(delta.entityId());
+                // Kind-prefixed: previously these were never recorded at all, so the host's echo
+                // rebroadcast came back to the originator looking like a first apply. Harmless while
+                // only consumed=true deltas touched the engine; a real double-apply the moment a
+                // CONSTRUCT effect (comm relay placement) is wired in.
+                if (consumedEntityIds.contains(delta.entityId())) {
+                    return false;
+                }
+                return appliedNonConsuming.add(delta.kind().name() + ":" + delta.entityId());
             }
             return consumedEntityIds.add(delta.entityId());
         }
@@ -81,6 +94,7 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
 
         public void clear() {
             consumedEntityIds.clear();
+            appliedNonConsuming.clear();
         }
     }
 }

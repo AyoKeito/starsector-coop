@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 class CoopFleetSnapshotTest {
@@ -76,6 +77,38 @@ class CoopFleetSnapshotTest {
         assertEquals(snapshot, decoded);
         assertEquals("ISS Pipe|Wolf", decoded.members().get(0).shipName());
         assertEquals("Line1\nLine2", decoded.members().get(0).captainName());
+    }
+
+    // ---- Phase 12b: U+001F escaping ------------------------------------------------------------
+
+    @Test
+    void unitSeparatorInPlayerEditableNamesRoundTrips() {
+        // U+001F is the datagram envelope's record separator. Ship and captain names are
+        // player-editable, so an unescaped one used to split a record mid-field on the wire.
+        String sep = String.valueOf((char) 0x1F);
+        CoopFleetSnapshot.Member tricky = new CoopFleetSnapshot.Member(
+                "m1", "wolf", "wolf_Assault", "ISS" + sep + "Wolf", "Cpt" + sep + "Ahab", 0.7f, 0.9f);
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "p" + sep + "1", "Ali" + sep + "ce", "cor" + sep + "vus",
+                0f, 0f, 0f, 0f, "play" + sep + "er", true, List.of(tricky));
+
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+
+        assertEquals(snapshot, decoded);
+        assertEquals("ISS" + sep + "Wolf", decoded.members().get(0).shipName());
+        assertEquals("Cpt" + sep + "Ahab", decoded.members().get(0).captainName());
+    }
+
+    @Test
+    void escapedUnitSeparatorDoesNotSurviveIntoTheEncodedForm() {
+        String sep = String.valueOf((char) 0x1F);
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true,
+                List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault",
+                        "ISS" + sep + "Wolf", "Cpt", 0.7f, 0.9f)));
+
+        assertFalse(snapshot.encode().contains(sep),
+                "a raw U+001F in the encoded payload would split the datagram record");
     }
 
     @Test

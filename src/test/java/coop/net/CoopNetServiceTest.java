@@ -3,12 +3,16 @@ package coop.net;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopNetServiceTest {
@@ -160,5 +164,126 @@ class CoopNetServiceTest {
         boolean hostConnected = host.isConnected();
         boolean guestConnected = guest.isConnected();
         return hostConnected && guestConnected;
+    }
+
+    // ---- Phase 12b -------------------------------------------------------------------------------
+
+    @Test
+    void restartInTheSameProcessDoesNotReplayStaleTcpMessages() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            // Queue traffic in both directions, then tear the guest down without draining it.
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1000L));
+            guest.flushOutbound();
+            waitForMessage(host, "host inbound ping");
+            host.send(CoopMessages.pong(null, host.nextSeq(), 1100L, 1L));
+            host.flushOutbound();
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1200L));
+
+            guest.shutdown();
+
+            // A fresh session in the same process must not inherit the previous one's queues.
+            assertNull(guest.pollInbound(), "stale TCP inbound survived shutdown");
+
+            guest.connect("127.0.0.1", port);
+            waitUntil(guest::isConnected, "guest reconnected");
+            assertNull(guest.pollInbound(), "stale TCP inbound replayed into the fresh connection");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
+    void hostIgnoresDatagramsFromANonPeerAddressAndKeepsStreamingToThePeer() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        DatagramSocket intruder = new DatagramSocket();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            // Establish the legitimate return address first.
+            String fromGuest = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "guest-snapshot");
+            guest.sendDatagram(fromGuest);
+            guest.flushOutbound();
+            assertEquals(fromGuest, waitForDatagram(host, "host inbound UDP from guest"));
+
+            // A stray packet from another local socket: same address (loopback gives everyone
+            // 127.0.0.1), different port. Address-only pinning would let this through and re-teach
+            // the host its return address, blackholing the motion stream to the intruder.
+            byte[] payload = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "intruder")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            intruder.send(new DatagramPacket(payload, payload.length,
+                    InetAddress.getByName("127.0.0.1"), port));
+
+            // The intruder's payload must never surface as inbound traffic.
+            Thread.sleep(200L);
+            host.isConnected();
+            CoopMessages.Message leaked = host.pollInbound();
+            assertNull(leaked, "intruder datagram must not be delivered as inbound traffic");
+
+            // And the host still streams to the real guest, not to whoever spoke last.
+            String toGuest = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "host-snapshot");
+            host.sendDatagram(toGuest);
+            host.flushOutbound();
+            assertEquals(toGuest, waitForDatagram(guest, "guest inbound UDP after intruder packet"));
+        } finally {
+            intruder.close();
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
+    void oversizedDatagramIsDiscardedRatherThanDecodedTruncated() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            // Teach the host the guest's return address with a normal datagram.
+            String small = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "small");
+            guest.sendDatagram(small);
+            guest.flushOutbound();
+            assertEquals(small, waitForDatagram(host, "host inbound UDP priming"));
+
+            // Fill the receive buffer exactly: the service cannot tell a full buffer from a
+            // truncated payload, so it must discard rather than decode a partial record.
+            byte[] huge = new byte[64 * 1024];
+            java.util.Arrays.fill(huge, (byte) 'x');
+            try (DatagramSocket sender = new DatagramSocket()) {
+                sender.send(new DatagramPacket(huge, huge.length,
+                        InetAddress.getByName("127.0.0.1"), port));
+            } catch (IOException ignored) {
+                // Some stacks refuse a 64 KB datagram outright; the guard is still what matters.
+            }
+
+            // A subsequent valid datagram still gets through, proving the discard did not wedge
+            // the receive loop.
+            String after = CoopMessages.datagram(
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "after-truncation");
+            guest.sendDatagram(after);
+            guest.flushOutbound();
+            assertEquals(after, waitForDatagram(host, "host inbound UDP after oversized datagram"));
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
     }
 }

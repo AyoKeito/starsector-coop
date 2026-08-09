@@ -151,6 +151,11 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         missionBoard.clear();
         marketSync.clear();
         worldLedger.clear();
+        // Salvage-watcher baseline too: leaving it populated meant that on reconnect in the same
+        // system, every entity consumed last session looked "newly missing" and was re-reported as a
+        // fresh WORLD_DELTA(CONSUME). Clearing forces a silent re-seed on the next tick.
+        trackedSalvageables.clear();
+        watchedLocationId = null;
     }
 
     public boolean isRegistered() {
@@ -704,9 +709,12 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         marketSync.applyTransaction(new CoopMarketSync.Transaction(marketId, kind, itemId, qty,
                 CoopMessages.requiredPayloadFloat(message, "unitPrice")));
         // Apply the delta to the host's canonical engine market so its stock actually changes.
-        applyItemDeltaToEngine(marketId, kind, itemId, qty);
-        CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_TXN market=" + marketId
-                + " " + kind + ":" + itemId + " qty=" + qty);
+        // Only claim "applied" when the engine mutation ran; the previous unconditional log asserted
+        // success over a silent no-op, which is how the propagation bug stayed invisible.
+        if (applyItemDeltaToEngine(marketId, kind, itemId, qty)) {
+            CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_TXN market=" + marketId
+                    + " " + kind + ":" + itemId + " qty=" + qty);
+        }
     }
 
     private void applyMarketSnapshot(CoopMessages.Message message) {
@@ -793,18 +801,36 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
     }
 
-    /** Host/guest: change the canonical open-market stock by a signed delta for any item kind. */
-    private void applyItemDeltaToEngine(String marketId, CoopMarketSync.ItemKind kind, String itemId, int qty) {
+    /**
+     * Host/guest: change the canonical open-market stock by a signed delta for any item kind.
+     * Returns {@code true} only when the engine mutation actually ran, so callers do not claim
+     * success on a no-op.
+     *
+     * <p>Deliberately uses {@code getCargoNullOk()} and gives up when the submarket cargo has not
+     * been materialized (the normal state for a market this client has never docked at). Forcing
+     * materialization with {@code getCargo()} is <em>not</em> the fix: that accessor creates an empty
+     * cargo, and {@link #captureOpenMarketStock} reads the same one, so the next {@code MARKET_OPEN}
+     * would snapshot an empty market to the guest as canonical. Making a guest purchase durable is a
+     * model problem, not an accessor problem: open-market commodity stock is a stockpile the engine
+     * refills toward {@code getStockpileLimit} on every dock, so deltas do not survive regardless.
+     * Tracked as Phase 12c gap 2e.
+     */
+    private boolean applyItemDeltaToEngine(String marketId, CoopMarketSync.ItemKind kind, String itemId, int qty) {
         CargoAPI cargo = openMarketCargo(marketId);
         if (cargo == null) {
-            return;
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_TXN not applied to engine: no"
+                    + " materialized open-market cargo for market=" + marketId + " " + kind + ":" + itemId
+                    + " qty=" + qty + " (this client has not docked there)");
+            return false;
         }
         replayGuard.begin();
         try {
             addItemToEngine(cargo, kind, itemId, qty);
+            return true;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply market delta to engine "
                     + kind + ":" + itemId, ex);
+            return false;
         } finally {
             replayGuard.end();
         }
@@ -1206,6 +1232,11 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     @Override
     public void onPlayerActivatedAbility(AbilityPlugin ability, Object param) {
         if (!isActive() || ability == null) {
+            return;
+        }
+        // Entry guard, matching every other capture path: never re-capture while applying a host
+        // packet. Latent today (no replay path fires abilities) but the odd one out without it.
+        if (replayGuard.isReplaying()) {
             return;
         }
         String abilityId = ability.getId();

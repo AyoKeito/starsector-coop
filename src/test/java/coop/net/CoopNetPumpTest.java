@@ -606,6 +606,91 @@ class CoopNetPumpTest {
                 timeLock.interactionBlocks.get(timeLock.interactionBlocks.size() - 1));
     }
 
+    // ---- Phase 12b: inbound dispatch guard ---------------------------------------------------
+
+    @Test
+    void malformedMessageIsDroppedAndLaterMessagesStillProcess() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = new CoopNetPump(service, () -> 1000L);
+
+        // INTERACTION_RELEASE without the required "entityId" field: the handler's
+        // requiredPayloadString throws, which pre-12b escaped advance() and killed the pump.
+        service.inbound.add(new CoopMessages.Message(
+                CoopMessages.Type.INTERACTION_RELEASE, "session-a", 1L, 1000L, "{}"));
+        service.inbound.add(CoopMessages.ping("session-a", 2L, 1000L));
+
+        pump.advance(0f);
+
+        // The PING queued behind the bad message still produced its PONG.
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.PONG),
+                "expected the message after the malformed one to still be dispatched");
+    }
+
+    @Test
+    void unknownPauseIntentSourceIsDroppedWithoutKillingThePump() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = new CoopNetPump(service, () -> 1000L);
+
+        // PauseSource.valueOf throws IllegalArgumentException on an unknown value.
+        service.inbound.add(new CoopMessages.Message(
+                CoopMessages.Type.PAUSE_INTENT, "session-a", 1L, 1000L,
+                "{\"source\":\"NOT_A_REAL_SOURCE\",\"paused\":\"true\",\"intentSeq\":\"1\"}"));
+        service.inbound.add(CoopMessages.ping("session-a", 2L, 1000L));
+
+        pump.advance(0f);
+
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.PONG),
+                "expected dispatch to continue after an unknown PAUSE_INTENT source");
+    }
+
+    @Test
+    void handshakeManifestOutsideHostConnectedIsIgnored() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = new CoopNetPump(service, () -> 1000L);
+
+        // Host is in HOST_WAITING (no lobby yet); pre-12b this reached hostAcceptHandshake() and
+        // threw IllegalStateException.
+        service.inbound.add(new CoopMessages.Message(
+                CoopMessages.Type.HANDSHAKE_MANIFEST, "session-a", 1L, 1000L,
+                "{\"manifestJson\":\"{}\"}"));
+        service.inbound.add(CoopMessages.ping("session-a", 2L, 1000L));
+
+        pump.advance(0f);
+
+        assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.HANDSHAKE_RESULT),
+                "an out-of-order manifest must not produce a handshake result");
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.PONG),
+                "expected dispatch to continue after an out-of-order manifest");
+    }
+
+    @Test
+    void guestPingsFlowDuringTheSeedLockWindow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        // handshakeValidated == true, seedLong == null: the window the host spends paused waiting
+        // for seed lock, and exactly where a half-open connection used to go unnoticed because
+        // pings were suppressed.
+        assertTrue(session.handshakeValidated());
+        assertNull(session.seedLong());
+
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = new CoopNetPump(service, session, now::get,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-guest",
+                () -> "coop-seed");
+
+        pump.advance(0f);
+        now.set(4001L);
+        pump.advance(0f);
+
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.PING),
+                "pings must flow through the seed-lock window");
+    }
+
     private static final class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();

@@ -2,6 +2,8 @@ package coop;
 
 import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
+import coop.fleet.CoopMirrorOrphanSweeper;
+import coop.handshake.CoopChecksumProbe;
 import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
 import coop.net.CoopNetStartupConfig;
@@ -30,6 +32,11 @@ public class CoopModPlugin extends BaseModPlugin {
             netService.shutdown();
         }
         netService = new CoopNetService();
+        // Before the pump installs: no session can be active yet, so this only ever sees mirrors
+        // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
+        CoopMirrorOrphanSweeper.sweep(Global.getSector());
+        // Dormant unless diagnostics are on; decides whether handshake checksums can ever be real.
+        CoopChecksumProbe.probe();
         CoopNetPumpInstaller.install(Global.getSector(), netService);
         CoopSeedSync.storeCurrentSectorFingerprint();
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");

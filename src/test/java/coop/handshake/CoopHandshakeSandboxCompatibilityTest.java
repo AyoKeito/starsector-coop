@@ -12,6 +12,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopHandshakeSandboxCompatibilityTest {
     private static final Path PROJECT_ROOT = Path.of("").toAbsolutePath();
@@ -53,5 +54,22 @@ class CoopHandshakeSandboxCompatibilityTest {
                 "SettingsAPI file loaders are not proven safe for binary jar checksums in campaign scripts");
         assertFalse(source.contains("openStream("),
                 "Open stream calls trip Starsector's script sandbox");
+    }
+
+    @Test
+    void theOnlySettingsLoaderCallSitsInTheDiagnosticProbeAndIsGated() throws IOException {
+        // Phase 12b spike: whether SettingsAPI.loadText survives the script sandbox can only be
+        // answered in-game, so the call lives in CoopChecksumProbe behind CoopDebug rather than on
+        // the handshake path. This test pins that arrangement: if someone later promotes the call
+        // into the manifest, the test above fails and they have to justify it with a session log.
+        String probe = Files.readString(
+                PROJECT_ROOT.resolve("src/main/java/coop/handshake/CoopChecksumProbe.java"),
+                StandardCharsets.UTF_8);
+
+        assertTrue(probe.contains("loadText("), "the probe is the one sanctioned loadText call site");
+        assertTrue(probe.contains("CoopDebug.diagnosticsEnabled()"),
+                "an unproven sandbox call must never run in a normal session");
+        assertTrue(probe.contains("catch (Throwable"),
+                "a sandbox rejection can surface as an Error, so the probe must catch Throwable");
     }
 }

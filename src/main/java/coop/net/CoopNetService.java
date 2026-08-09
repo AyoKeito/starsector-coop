@@ -2,6 +2,7 @@ package coop.net;
 
 import coop.util.CoopLog;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
@@ -39,6 +40,14 @@ public class CoopNetService {
     private SocketChannel pendingConnectChannel;
     private DatagramChannel udpChannel;
     private SocketAddress udpRemoteAddress;
+    /**
+     * Peer address pinned from the established TCP connection. UDP datagrams are only accepted from
+     * this address, and (on the host) only such a datagram may teach us the UDP return address —
+     * otherwise a stray LAN packet could blackhole the motion stream. The peer's UDP *port* is still
+     * learned from the first valid datagram, since it legitimately differs from the TCP port.
+     */
+    private InetAddress pinnedPeerAddress;
+    private boolean foreignDatagramWarned;
     private ByteBuffer pendingWrite;
     private int inboundFrameLength;
     private String connectHost;
@@ -181,19 +190,74 @@ public class CoopNetService {
             datagramBuffer.clear();
             SocketAddress source = channel.receive(datagramBuffer);
             while (source != null) {
-                if (role == CoopConnectionRole.HOST) {
-                    // Learn (or relearn, on guest reconnect) the guest's UDP return address.
-                    udpRemoteAddress = source;
+                boolean full = !datagramBuffer.hasRemaining();
+                if (!isPinnedPeerLocked(source)) {
+                    // Drop before it can teach us a return address. Warn once per session so a noisy
+                    // LAN cannot flood the log.
+                    if (!foreignDatagramWarned) {
+                        foreignDatagramWarned = true;
+                        CoopLog.warn(CoopNetService.class, "Coop UDP ignoring datagram from non-peer source "
+                                + source + " (pinned peer "
+                                + (pinnedPeerAddress == null ? "<none>" : pinnedPeerAddress.getHostAddress()) + ")");
+                    }
+                } else if (full) {
+                    // Buffer filled to capacity: the datagram was at least as large as the buffer and
+                    // may be truncated. Decoding it would yield a corrupt payload, so discard it.
+                    CoopLog.warn(CoopNetService.class, "Coop UDP discarding truncated datagram from " + source
+                            + " (filled the " + datagramBuffer.capacity() + "-byte buffer)");
+                } else {
+                    if (role == CoopConnectionRole.HOST) {
+                        // Learn (or relearn, on guest reconnect) the guest's UDP return address.
+                        udpRemoteAddress = source;
+                    }
+                    datagramBuffer.flip();
+                    byte[] bytes = new byte[datagramBuffer.remaining()];
+                    datagramBuffer.get(bytes);
+                    inboundDatagrams.add(new String(bytes, StandardCharsets.UTF_8));
                 }
-                datagramBuffer.flip();
-                byte[] bytes = new byte[datagramBuffer.remaining()];
-                datagramBuffer.get(bytes);
-                inboundDatagrams.add(new String(bytes, StandardCharsets.UTF_8));
                 datagramBuffer.clear();
                 source = channel.receive(datagramBuffer);
             }
         } catch (Exception ex) {
             CoopLog.warn(CoopNetService.class, "Coop UDP receive failed", ex);
+        }
+    }
+
+    /**
+     * True when the datagram may be accepted from this source.
+     *
+     * <p>Two stages. The address is pinned when the TCP connection is established. The <em>port</em>
+     * cannot be pinned then (the peer's UDP port legitimately differs from its TCP port), so it is
+     * locked instead by the first datagram that passes the address check; from that point the full
+     * address+port must match.
+     *
+     * <p>Address-only checking is not enough on its own: on loopback — and behind a shared NAT —
+     * any other process has the same address, so a stray packet would still pass and, on the host,
+     * re-teach the return address and blackhole the motion stream. Locking the port after the first
+     * valid datagram closes that. A reconnect re-establishes TCP, which clears both the pin and the
+     * learned address, so the peer is free to come back on a new port.
+     */
+    private boolean isPinnedPeerLocked(SocketAddress source) {
+        if (pinnedPeerAddress == null) {
+            return true;
+        }
+        if (!(source instanceof InetSocketAddress inet) || inet.getAddress() == null) {
+            return false;
+        }
+        if (!pinnedPeerAddress.equals(inet.getAddress())) {
+            return false;
+        }
+        // Address matches. If we already know the peer's UDP port for this connection, require it.
+        return udpRemoteAddress == null || udpRemoteAddress.equals(source);
+    }
+
+    private static InetAddress peerAddressOf(SocketChannel channel) {
+        try {
+            SocketAddress remote = channel.getRemoteAddress();
+            return remote instanceof InetSocketAddress inet ? inet.getAddress() : null;
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop could not read TCP peer address for UDP pinning", ex);
+            return null;
         }
     }
 
@@ -341,7 +405,16 @@ public class CoopNetService {
         activeChannel = channel;
         inboundFrameLength = 0;
         discardingOversizedFrame = false;
-        CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role);
+        pinnedPeerAddress = peerAddressOf(channel);
+        foreignDatagramWarned = false;
+        if (role == CoopConnectionRole.HOST) {
+            // Relearn the guest's UDP port for this connection. The host does not run shutdownLocked
+            // when a guest merely reconnects, so without this the previous guest's port would stay
+            // locked and the new guest's datagrams would be rejected for the rest of the session.
+            udpRemoteAddress = null;
+        }
+        CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role
+                + (pinnedPeerAddress == null ? "" : " (UDP pinned to " + pinnedPeerAddress.getHostAddress() + ")"));
         return true;
     }
 
@@ -472,6 +545,12 @@ public class CoopNetService {
         datagramSendFailureLogged = false;
         inboundDatagrams.clear();
         outboundDatagrams.clear();
+        // TCP queues too: a session restarted inside the same game process would otherwise replay
+        // leftovers (a stale HANDSHAKE_RESULT, say) into the fresh connection.
+        inbound.clear();
+        outbound.clear();
+        pinnedPeerAddress = null;
+        foreignDatagramWarned = false;
         pendingWrite = null;
         connectHost = null;
         connectPort = 0;

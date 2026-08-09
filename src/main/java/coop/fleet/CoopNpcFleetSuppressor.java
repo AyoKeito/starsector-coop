@@ -54,10 +54,14 @@ public final class CoopNpcFleetSuppressor {
         if (!spawnersSuppressed) {
             try {
                 suppressSpawners(sector);
+                // Set inside the try: if suppression throws, the flag stays false and the next tick
+                // retries. Setting it outside meant one failure disabled the spawner-removal layer
+                // for the whole session, silently demoting the per-frame sweep from safety net to
+                // sole mechanism (vanilla spawners keep producing fleets we then delete every frame).
+                spawnersSuppressed = true;
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopNpcFleetSuppressor.class, "Failed to suppress NPC spawner scripts", ex);
             }
-            spawnersSuppressed = true;
         }
         try {
             sweep(sector);

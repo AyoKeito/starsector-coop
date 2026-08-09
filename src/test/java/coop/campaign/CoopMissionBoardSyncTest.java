@@ -127,4 +127,32 @@ class CoopMissionBoardSyncTest {
                 CoopMessages.requiredPayloadString(decodedPool, "pool"));
         assertEquals("m1", back.get(0).missionId());
     }
+
+    // ---- Phase 12b: stale claim purge -----------------------------------------------------------
+
+    @Test
+    void claimsForOffersMissingFromANewSnapshotArePurged() {
+        CoopMissionBoardSync board = new CoopMissionBoardSync();
+        board.applySnapshot(List.of(entry("m1", ""), entry("m2", "")));
+        board.arbitrate("m1", "guest");
+        assertEquals("guest", board.claimHolder("m1"));
+
+        // m1 is gone from the host's canonical pool: its claim is dead bookkeeping. Without the
+        // purge these accumulated for the whole session.
+        board.applySnapshot(List.of(entry("m2", "")));
+
+        assertNull(board.claimHolder("m1"));
+    }
+
+    @Test
+    void claimsForOffersStillInThePoolSurviveASnapshotRefresh() {
+        CoopMissionBoardSync board = new CoopMissionBoardSync();
+        board.applySnapshot(List.of(entry("m1", ""), entry("m2", "")));
+        board.arbitrate("m1", "guest");
+
+        board.applySnapshot(List.of(entry("m1", ""), entry("m2", "")));
+
+        assertEquals("guest", board.claimHolder("m1"),
+                "a live offer's claim must survive a pool refresh, or first-come is lost");
+    }
 }

@@ -71,6 +71,10 @@ public final class CoopMissionBoardSync {
                 poolByMissionId.put(entry.missionId(), entry);
             }
         }
+        // Purge claims for offers that vanished from the pool. The host's pool is canonical, so a
+        // claim on a mission no longer in it is dead bookkeeping; leaving it meant orphan claims
+        // accumulated for the whole session. Host and guest run the same purge.
+        claimsByMissionId.keySet().removeIf(missionId -> !poolByMissionId.containsKey(missionId));
     }
 
     public synchronized List<Entry> pool() {

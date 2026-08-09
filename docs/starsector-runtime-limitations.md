@@ -27,6 +27,37 @@ Current rules:
 - Keep coop networking progressed from `EveryFrameScript.advance()` on the campaign thread.
 - Keep runtime dependencies minimal and covered by sandbox compatibility tests.
 
+### Handshake checksums: open question, deliberately unanswered (Phase 12b, 2026-08-09)
+
+Phase 12b called for a time-boxed spike on whether `SettingsAPI.loadText(String, String modId)` can
+read a mod's `mod_info.json` from inside a campaign script. It is a public engine API rather than a
+raw file read, so it might sidestep the block that killed `CoopChecksum.sha256IfExists()` in Phase 5.
+
+**It was not settled, and it was not wired.** The reason is that it cannot be settled outside a
+running game: the guard lives in the mod classloader, so the call compiles and unit-tests clean
+whether or not it works in-game. There is also a specific hazard beyond the call itself, since
+`loadText` declares a checked `IOException`, and handling it means the verifier must resolve a
+`java.io` type in the calling class — the exact pattern this document already records as blocked.
+
+What exists instead: `coop.handshake.CoopChecksumProbe`, a dormant diagnostic that runs from
+`CoopModPlugin.onGameLoad` only when diagnostics are enabled (`-Dcoop.debug.diagnostics=true` or the
+`$coopDebug` sector flag). It attempts the load, catches `Throwable`, and logs either
+`Coop checksum probe: SUCCESS ...` or `Coop checksum probe: BLOCKED (<class>: <message>)`.
+`CoopHandshakeManifest` still emits `unavailable("script-sandbox")` placeholders and does not depend
+on the outcome.
+
+Resolve it by reading either line out of a diagnostics-enabled session log. On SUCCESS, hashing
+`mod_info.json` for real is a small follow-up; jar checksums stay unavailable regardless, because no
+engine surface hands back jar bytes and the sandbox forbids opening them directly. On BLOCKED, delete
+the probe and treat the placeholders as final.
+
+This ordering is deliberate rather than cautious-by-default. The handshake is the first thing that
+runs on connect, checksums are a diagnostic nicety, and the guards that actually catch a skewed
+install are the git-commit comparison and the Phase 6 sector fingerprint. Risking a throw there to
+gain a nicety is a bad trade, so the probe carries the risk and the handshake carries none.
+`CoopHandshakeSandboxCompatibilityTest` pins the arrangement: the manifest must contain no
+`loadText(` call, and the probe must stay gated and catch `Throwable`.
+
 ## Save Serialization
 
 Persistent campaign scripts are serialized into saves by XStream. Runtime networking objects are not save-safe.
