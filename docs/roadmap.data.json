@@ -457,6 +457,28 @@
       "note": "FIRST in remaining build order — immediate next work; fixes live silent-autoresolve-against-mirror bug"
     },
     {
+      "id": "12d",
+      "num": 12,
+      "title": "World-Entity Spawn Replication",
+      "theme": "economy",
+      "track": "v1",
+      "status": "not-built",
+      "summary": "Replicate player-created world entities (cargo pods) via a new WORLD_DELTA SPAWN kind with coop-assigned ids, and widen the consume watcher past the Tags.SALVAGEABLE allowlist.",
+      "introduces": [
+        "WORLD_DELTA SPAWN kind",
+        "coop-assigned entity ids",
+        "cargo pod replication",
+        "widened consume watcher",
+        "pod contents encoding"
+      ],
+      "residue": [
+        "all steps unchecked",
+        "API verification per surface",
+        "two-instance smoke test"
+      ],
+      "note": "Order slot 2; split from 12c gap 4 on 2026-08-09. Restores player-to-player item transfer, which v1 has none of today."
+    },
+    {
       "id": "12c",
       "num": 12,
       "title": "Close the Phase 12 Extension Points",
@@ -907,6 +929,7 @@
   ],
   "buildOrderFallback": [
     "12b",
+    "12d",
     "6b",
     "13",
     "14",
