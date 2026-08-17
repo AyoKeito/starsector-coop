@@ -1,6 +1,8 @@
 package coop.campaign;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -21,6 +23,11 @@ import java.util.Set;
  * buoy / sensor array), rare shared-world dialog mutations ({@link Kind#PARLEY}: spend SP to make a
  * fleet leave, etc.), and generic consumption ({@link Kind#CONSUME}). Anything not explicitly wired
  * relies on the host self-healing rebroadcast backstop.
+ *
+ * <p>Phase 13 adds the three host&rarr;guest skeleton mutations its runtime-content inventory found
+ * beyond what Phases 9/12 already replicate: {@link Kind#DECIV}, {@link Kind#OBJECTIVE_OWNERSHIP},
+ * and {@link Kind#GATE_ACTIVATED}. These flow host&rarr;guest only (the host owns the sims that
+ * produce them) and are captured by {@link CoopSkeletonMutationWatcher} plus a colony-deciv listener.
  */
 public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
                              String newStateJson, String actingPlayerId) {
@@ -41,7 +48,43 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * an engine id: {@code Misc.addCargoPods} calls {@code addCustomEntity(null, ...)}, so the
          * engine mints an id independently on each client and they never match.
          */
-        SPAWN
+        SPAWN,
+        /**
+         * A market on the host decivilized (Phase 13). {@code entityId} is the market id;
+         * {@link #newStateJson} carries {@code fullDestroy}. Host-only capture, months-to-years
+         * cadence. The guest reproduces the vanilla outcome by calling the same public static
+         * {@code DecivTracker.decivilize} the host's tracker called.
+         */
+        DECIV,
+        /**
+         * A campaign objective (comm relay / nav buoy / sensor array) changed hands in the host's war
+         * sim (Phase 13). {@code entityId} is the objective's engine id — objectives are gen-time
+         * entities, so the id matches across clients — and {@link #newStateJson} is the new owning
+         * faction id.
+         *
+         * <p>{@link #latestWins() Latest-wins}: ownership oscillates (A&rarr;B&rarr;A), which a
+         * set-based (kind, entity) key would swallow after the first flip.
+         */
+        OBJECTIVE_OWNERSHIP,
+        /**
+         * A story gate's activation state changed on the host (Phase 13). {@code entityId} is the
+         * gate's gen-time engine id; {@link #newStateJson} is a
+         * {@link CoopSkeletonMutationWatcher#encodeGateState gate-state} triple carrying the gate's
+         * own {@code $gateScanned} flag plus the two sector-global gate flags.
+         *
+         * <p>{@link #latestWins() Latest-wins}: activation arrives in two steps (a gate is scanned
+         * first, gates become usable later), so the second step must not be deduped away.
+         */
+        GATE_ACTIVATED;
+
+        /**
+         * Whether the {@link Ledger} should dedup this kind by <em>payload</em> rather than by the
+         * plain (kind, entity) pair. True for the Phase 13 kinds whose state is a value that can
+         * change repeatedly — including changing back to a value it already held.
+         */
+        public boolean latestWins() {
+            return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED;
+        }
     }
 
     public CoopWorldDelta {
@@ -72,13 +115,24 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * entity X neither blocks nor is blocked by a later CONSUME on the same X.
          */
         private final Set<String> appliedNonConsuming = new HashSet<>();
+        /**
+         * Last applied payload for the {@link Kind#latestWins() latest-wins} kinds, keyed
+         * {@code KIND:entityId}. These describe a <em>value</em> (who owns this relay, is this gate
+         * usable) rather than a one-shot event, and the value can return to one it already held: a
+         * comm relay flips Hegemony&rarr;pirate&rarr;Hegemony as the war sim swings, and a set-based
+         * key would block every flip after the first, freezing the guest on a stale owner forever.
+         * Comparing against the last payload instead applies each genuinely new state exactly once
+         * while still absorbing the host's verbatim echo rebroadcast.
+         */
+        private final Map<String, String> latestState = new HashMap<>();
 
         /**
          * Applies a delta. Returns {@code true} only the first time a given delta is seen — for a
-         * consuming delta that means the first time the entity is marked consumed, and for a
-         * non-consuming delta (CONSTRUCT/PARLEY) the first time that (kind, entity) pair arrives.
-         * Every later apply returns {@code false} (already handled: no double-loot, no re-consume,
-         * and no double-apply of the host's echo rebroadcast).
+         * consuming delta that means the first time the entity is marked consumed, for a
+         * latest-wins delta the first time that (kind, entity) carries this particular payload, and
+         * for any other non-consuming delta (CONSTRUCT/PARLEY) the first time that (kind, entity)
+         * pair arrives. Every later apply returns {@code false} (already handled: no double-loot, no
+         * re-consume, and no double-apply of the host's echo rebroadcast).
          */
         public boolean apply(CoopWorldDelta delta) {
             Objects.requireNonNull(delta, "delta");
@@ -90,9 +144,20 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
                 if (consumedEntityIds.contains(delta.entityId())) {
                     return false;
                 }
-                return appliedNonConsuming.add(delta.kind().name() + ":" + delta.entityId());
+                String key = delta.kind().name() + ":" + delta.entityId();
+                if (delta.kind().latestWins()) {
+                    String previous = latestState.put(key, delta.newStateJson());
+                    return !Objects.equals(previous, delta.newStateJson());
+                }
+                return appliedNonConsuming.add(key);
             }
             return consumedEntityIds.add(delta.entityId());
+        }
+
+        /** Last payload applied for a latest-wins (kind, entity) pair, or {@code null}. */
+        public String latestState(Kind kind, String entityId) {
+            return latestState.get(Objects.requireNonNull(kind, "kind").name() + ":"
+                    + requireText(entityId, "entityId"));
         }
 
         public boolean isConsumed(String entityId) {
@@ -106,6 +171,7 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
         public void clear() {
             consumedEntityIds.clear();
             appliedNonConsuming.clear();
+            latestState.clear();
         }
     }
 }

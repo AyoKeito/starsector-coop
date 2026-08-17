@@ -15,15 +15,20 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
+import com.fs.starfarer.api.campaign.listeners.ColonyDecivListener;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
+import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
+import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -114,6 +119,15 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     static final long PLAYER_REP_SYNC_INTERVAL_MILLIS = 30000L;
     private long lastPlayerRepSyncMillis;
 
+    // Phase 13 skeleton mutations: the host polls campaign-objective ownership and story-gate
+    // activation on a slow cadence and broadcasts the changes as WORLD_DELTAs. Both are rare
+    // (war-sim swings are days apart; gates activate once a campaign), so the poll is cheap: two
+    // tag lookups per location, every few seconds.
+    static final long SKELETON_POLL_INTERVAL_MILLIS = 5000L;
+    private final CoopSkeletonMutationWatcher skeletonWatcher = new CoopSkeletonMutationWatcher();
+    private long lastSkeletonPollMillis;
+    private DecivCapture decivCapture;
+
     private CoopCampaignEventListener listener;
     private boolean factionRelationsSeeded;
 
@@ -144,6 +158,16 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             CoopLog.warn(CoopCampaignReplicator.class,
                     "Could not register coop cargo-screen listener; pod replication will not fire", ex);
         }
+        // Deciv capture is its own listener interface (ColonyDecivListener), dispatched through the
+        // listener manager rather than the campaign-event list.
+        try {
+            decivCapture = new DecivCapture();
+            sector.getListenerManager().addListener(decivCapture, true);
+        } catch (RuntimeException | LinkageError ex) {
+            decivCapture = null;
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Could not register coop deciv listener; DECIV world-deltas will not fire", ex);
+        }
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
 
@@ -162,9 +186,19 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                         "Failed to remove coop cargo-screen listener", ex);
             }
         }
+        if (sector != null && decivCapture != null) {
+            try {
+                sector.getListenerManager().removeListener(decivCapture);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to remove coop deciv listener", ex);
+            }
+        }
+        decivCapture = null;
         listener = null;
         factionRelationsSeeded = false;
         lastPlayerRepSyncMillis = 0L;
+        lastSkeletonPollMillis = 0L;
+        skeletonWatcher.clear();
         repTable.clear();
         factionRelations.clear();
         missionBoard.clear();
@@ -980,9 +1014,26 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     private void applyWorldDeltaToEngine(CoopWorldDelta delta) {
-        if (delta.kind() == CoopWorldDelta.Kind.SPAWN) {
-            applySpawnToEngine(delta);
-            return;
+        switch (delta.kind()) {
+            case SPAWN -> {
+                applySpawnToEngine(delta);
+                return;
+            }
+            case DECIV -> {
+                applyDecivToEngine(delta);
+                return;
+            }
+            case OBJECTIVE_OWNERSHIP -> {
+                applyObjectiveOwnershipToEngine(delta);
+                return;
+            }
+            case GATE_ACTIVATED -> {
+                applyGateStateToEngine(delta);
+                return;
+            }
+            default -> {
+                // Fall through to the consume path below.
+            }
         }
         if (!delta.consumed()) {
             return;
@@ -999,6 +1050,239 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
     }
 
+    // ---- Phase 13 skeleton mutations (DECIV / OBJECTIVE_OWNERSHIP / GATE_ACTIVATED) ------------
+
+    /**
+     * Host: a market decivilized. Captured through vanilla's own {@code ColonyDecivListener} rather
+     * than a poll — the listener fires exactly once from inside {@code DecivTracker.decivilize}
+     * (api_src {@code intel/deciv/DecivTracker.java:282}), whereas a poll would have to infer deciv
+     * from a market leaving the economy, which also happens when a pirate base ends.
+     */
+    private void captureDeciv(MarketAPI market, boolean fullyDestroyed) {
+        if (!isHost() || !isActive() || market == null || replayGuard.isReplaying()) {
+            return;
+        }
+        try {
+            CoopWorldDelta delta = new CoopWorldDelta(market.getId(), CoopWorldDelta.Kind.DECIV, false,
+                    CoopSkeletonMutationWatcher.encodeDeciv(fullyDestroyed), session.localPlayerId());
+            if (worldLedger.apply(delta)) {
+                reportWorldDelta(delta);
+                CoopLog.info(CoopCampaignReplicator.class, "Coop captured DECIV market="
+                        + market.getId() + " fullDestroy=" + fullyDestroyed);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to capture DECIV", ex);
+        }
+    }
+
+    /**
+     * Guest: reproduce the host's decivilization by calling the same public static routine the host's
+     * tracker called ({@code DecivTracker.decivilize(market, fullDestroy, true)}, api_src
+     * {@code intel/deciv/DecivTracker.java:189}). Re-deriving its twenty-odd steps by hand would be a
+     * second implementation to keep in sync with every engine update; the vanilla call is exact.
+     */
+    private void applyDecivToEngine(CoopWorldDelta delta) {
+        SectorAPI sector = Global.getSector();
+        if (sector == null || sector.getEconomy() == null) {
+            return;
+        }
+        MarketAPI market = sector.getEconomy().getMarket(delta.entityId());
+        CoopSkeletonMutationWatcher.DecivDecision decision = CoopSkeletonMutationWatcher.decideDeciv(
+                market != null,
+                market != null && market.hasCondition(Conditions.DECIVILIZED),
+                market != null && market.getPrimaryEntity() != null);
+        if (decision != CoopSkeletonMutationWatcher.DecivDecision.DECIVILIZE) {
+            CoopLog.warn(CoopCampaignReplicator.class, "DECIV market=" + delta.entityId()
+                    + " skipped: " + decision);
+            return;
+        }
+        DecivTracker.decivilize(market, CoopSkeletonMutationWatcher.decodeDecivFullDestroy(
+                delta.newStateJson()), true);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied DECIV market=" + delta.entityId());
+    }
+
+    /**
+     * Guest: flip a campaign objective's owner the way vanilla's own capture does — {@code setFaction}
+     * plus clearing the non-functional memory flag ({@code rulecmd/salvage/Objectives.control},
+     * api_src lines 304-312).
+     *
+     * <p>Deliberately <em>not</em> mirrored: {@code ListenerUtil.reportObjectiveChangedHands}. Its
+     * only core implementor is {@code WarSimScript} ({@code command/WarSimScript.java:314}), which
+     * answers by spawning response fleets — the exact simulation the guest suppresses. The dialog-only
+     * reputation hit and the comm-sniffer unhack are likewise host-side/player-local concerns.
+     */
+    private void applyObjectiveOwnershipToEngine(CoopWorldDelta delta) {
+        SectorAPI sector = Global.getSector();
+        if (sector == null) {
+            return;
+        }
+        String factionId = delta.newStateJson().trim();
+        if (factionId.isEmpty()) {
+            return;
+        }
+        SectorEntityToken objective = findEntityForDelta(sector, delta.entityId());
+        if (objective == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "OBJECTIVE_OWNERSHIP for unknown entity "
+                    + delta.entityId() + "; skipping");
+            return;
+        }
+        FactionAPI current = objective.getFaction();
+        if (!CoopSkeletonMutationWatcher.shouldSetObjectiveFaction(
+                current == null ? null : current.getId(), factionId)) {
+            return;
+        }
+        objective.setFaction(factionId);
+        MemoryAPI memory = objective.getMemoryWithoutUpdate();
+        if (memory != null) {
+            memory.unset(MemFlags.OBJECTIVE_NON_FUNCTIONAL);
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied OBJECTIVE_OWNERSHIP entity="
+                + delta.entityId() + " faction=" + factionId);
+    }
+
+    /**
+     * Guest: mirror the host's gate state. Vanilla's {@code madeActive} latch is private and derived
+     * ({@code GateEntityPlugin.advance}, api_src lines 274-284, sets it once
+     * {@code canUseGates() && isScanned(entity)}), so setting the two inputs is both sufficient and
+     * reflection-free: the guest's own gate plugin latches on its next frame.
+     *
+     * <p>The sector-global flags are applied even when the gate itself does not resolve — they are
+     * the half that makes every gate usable — and are only ever set, never unset.
+     */
+    private void applyGateStateToEngine(CoopWorldDelta delta) {
+        SectorAPI sector = Global.getSector();
+        if (sector == null) {
+            return;
+        }
+        CoopSkeletonMutationWatcher.GateState state =
+                CoopSkeletonMutationWatcher.decodeGateState(delta.newStateJson());
+        MemoryAPI sectorMemory = sector.getMemoryWithoutUpdate();
+        SectorEntityToken gate = findEntityForDelta(sector, delta.entityId());
+        if (gate == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "GATE_ACTIVATED for unknown entity "
+                    + delta.entityId() + "; applying sector gate flags only");
+        }
+        CoopSkeletonMutationWatcher.GateApply apply = CoopSkeletonMutationWatcher.decideGate(state,
+                sectorMemory != null && sectorMemory.getBoolean(GateEntityPlugin.GATES_ACTIVE),
+                sectorMemory != null && sectorMemory.getBoolean(GateEntityPlugin.PLAYER_CAN_USE_GATES),
+                gate == null || GateEntityPlugin.isScanned(gate));
+        if (apply.isNoOp()) {
+            return;
+        }
+        if (sectorMemory != null) {
+            if (apply.setGatesActive()) {
+                sectorMemory.set(GateEntityPlugin.GATES_ACTIVE, true);
+            }
+            if (apply.setCanUseGates()) {
+                sectorMemory.set(GateEntityPlugin.PLAYER_CAN_USE_GATES, true);
+            }
+        }
+        if (apply.setScanned() && gate.getMemoryWithoutUpdate() != null) {
+            gate.getMemoryWithoutUpdate().set(GateEntityPlugin.GATE_SCANNED, true);
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied GATE_ACTIVATED entity="
+                + delta.entityId() + " " + apply);
+    }
+
+    /**
+     * Host: slow poll for the two skeleton mutations that have no usable capture event — campaign
+     * objective ownership (the war sim's own listener is the sim we suppress guest-side) and story
+     * gate activation (no event at all). Guest-side this is a no-op: the host owns both sims.
+     */
+    private void tickSkeletonMutations() {
+        if (!isHost() || !isActive()) {
+            return;
+        }
+        long nowMillis = now();
+        if (nowMillis - lastSkeletonPollMillis < SKELETON_POLL_INTERVAL_MILLIS) {
+            return;
+        }
+        lastSkeletonPollMillis = nowMillis;
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            MemoryAPI sectorMemory = sector.getMemoryWithoutUpdate();
+            boolean gatesActive = sectorMemory != null
+                    && sectorMemory.getBoolean(GateEntityPlugin.GATES_ACTIVE);
+            boolean canUseGates = sectorMemory != null
+                    && sectorMemory.getBoolean(GateEntityPlugin.PLAYER_CAN_USE_GATES);
+
+            Map<String, String> objectiveOwners = new LinkedHashMap<>();
+            Map<String, String> gateStates = new LinkedHashMap<>();
+            for (LocationAPI location : sector.getAllLocations()) {
+                if (location == null) {
+                    continue;
+                }
+                collectObjectiveOwners(location, objectiveOwners);
+                collectGateStates(location, gatesActive, canUseGates, gateStates);
+            }
+            for (CoopSkeletonMutationWatcher.Flip flip
+                    : skeletonWatcher.diffObjectiveOwners(objectiveOwners)) {
+                emitSkeletonDelta(CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP, flip);
+            }
+            for (CoopSkeletonMutationWatcher.Flip flip : skeletonWatcher.diffGateStates(gateStates)) {
+                emitSkeletonDelta(CoopWorldDelta.Kind.GATE_ACTIVATED, flip);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Skeleton mutation poll failed", ex);
+        }
+    }
+
+    private void collectObjectiveOwners(LocationAPI location, Map<String, String> out) {
+        List<SectorEntityToken> objectives = location.getEntitiesWithTag(Tags.OBJECTIVE);
+        if (objectives == null) {
+            return;
+        }
+        for (SectorEntityToken objective : objectives) {
+            if (objective == null || objective.getId() == null || objective.getFaction() == null) {
+                continue;
+            }
+            out.put(objective.getId(), objective.getFaction().getId());
+        }
+    }
+
+    private void collectGateStates(LocationAPI location, boolean gatesActive, boolean canUseGates,
+                                   Map<String, String> out) {
+        List<SectorEntityToken> gates = location.getEntitiesWithTag(Tags.GATE);
+        if (gates == null) {
+            return;
+        }
+        for (SectorEntityToken gate : gates) {
+            if (gate == null || gate.getId() == null) {
+                continue;
+            }
+            out.put(gate.getId(), CoopSkeletonMutationWatcher.encodeGateState(
+                    GateEntityPlugin.isScanned(gate), gatesActive, canUseGates));
+        }
+    }
+
+    /** Record the host's own capture in the ledger (so the guest's echo is inert) and broadcast it. */
+    private void emitSkeletonDelta(CoopWorldDelta.Kind kind, CoopSkeletonMutationWatcher.Flip flip) {
+        CoopWorldDelta delta = new CoopWorldDelta(flip.entityId(), kind, false, flip.state(),
+                session.localPlayerId());
+        if (worldLedger.apply(delta)) {
+            reportWorldDelta(delta);
+            CoopLog.info(CoopCampaignReplicator.class, "Coop captured " + kind + " entity="
+                    + flip.entityId() + " state=" + flip.state());
+        }
+    }
+
+    /** Vanilla colony-deciv hook; the only capture point for {@link CoopWorldDelta.Kind#DECIV}. */
+    private final class DecivCapture implements ColonyDecivListener {
+        @Override
+        public void reportColonyAboutToBeDecivilized(MarketAPI market, boolean fullyDestroyed) {
+            // No-op: the market still holds its pre-deciv state here, and the guest reproduces the
+            // whole transition from the completed report below.
+        }
+
+        @Override
+        public void reportColonyDecivilized(MarketAPI market, boolean fullyDestroyed) {
+            captureDeciv(market, fullyDestroyed);
+        }
+    }
+
     /**
      * Per-frame salvage watcher: when a salvageable entity at the local player's location disappears
      * (salvaged/disassembled), report it as a CONSUME world-delta so the other client removes the
@@ -1008,6 +1292,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         if (!isActive()) {
             return;
         }
+        // Host-only, self-throttled, and deliberately ahead of the hyperspace early-return below:
+        // objectives and gates flip whether or not the host is sitting in a star system.
+        tickSkeletonMutations();
         try {
             SectorAPI sector = Global.getSector();
             CampaignFleetAPI player = sector == null ? null : sector.getPlayerFleet();
@@ -1720,5 +2007,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
 
     public CoopWorldDelta.Ledger worldLedger() {
         return worldLedger;
+    }
+
+    public CoopSkeletonMutationWatcher skeletonWatcher() {
+        return skeletonWatcher;
     }
 }

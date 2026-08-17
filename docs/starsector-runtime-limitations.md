@@ -218,3 +218,43 @@ powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradle
 ```
 
 Then deploy to both test clients and verify PING/PONG in both logs.
+
+## Phase 13 — Accepted Runtime Divergences
+
+Runtime randomness cannot be fixed by seeding or forking an RNG. A shared seed only guarantees identical draw sequences while both clients execute the same code in lockstep, and that lockstep breaks the moment the campaign runs: the guest sim is suppressed, frame timing differs between clients, and call order diverges after the first runtime draw. The bar-offer experiment proved this empirically — offers diverged despite a synced seed (memory `bar-mission-seed-sync`). Every runtime-random site gets one of three treatments: replicate the outcome, suppress the generator, or accept the divergence. This section covers the accepted cases, plus one item (sensor ghosts) where suppression itself is the permanent answer rather than a step toward replication.
+
+### Hyperspace storm cells
+
+`HyperspaceTerrainPlugin` + `HyperspaceAutomaton`: cell evolution is a deterministic automaton, but generation reseeds use `new Random()` (`HyperspaceAutomaton.java:150`) and strike timing/damage use `Math.random()` (`HyperspaceTerrainPlugin.java:1472,1485`). Not suppressible — it is a terrain plugin, not a script, so the suppressor has no hook into it.
+
+Accepted: a storm strike only hits the fleet inside its cell. Own fleets are owner-authoritative and NPC mirrors are position-forced echoes, so a strike never touches shared state. Each player just sees their own weather.
+
+### Star-corona / pulsar flares
+
+`FlareManager`, `new Random()` at line ~307. Same ownership argument as storm cells — a flare only affects the fleet it hits, no shared state involved. Accepted.
+
+### Officer pools at markets
+
+`OfficerManagerEvent`, `Math.random()`. Each player hires from their own pool, so there is nothing to desync. Accepted for v1; a shared pool would need a market-officer sync layered on top of the existing Phase 12 snapshot-on-open.
+
+### Bar events, smuggling scans, patrol hassles of the local player
+
+Per-player by design — these are local dialog interactions against a player's own cargo and rep, with no shared state touched. Already proven unfixable by seeding: bar offer selection draws from `Math.random()`, not the shared campaign seed, so offers diverged even with both clients on identical seeds (memory `bar-mission-seed-sync`). Accepted.
+
+### Slipstream networks
+
+`SlipstreamManager.random` (~`SlipstreamManager.java:442`) is `new Random()` — unseeded wall-clock entropy, minted per client when the manager is constructed and serialized into each save. The `Misc.random` fork does not cover it: `random = Misc.random` only happens under `DebugFlags.SLIPSTREAM_DEBUG` (~line 460). Monthly layout draws (config pick, `addStream` placement, month-6/12 despawn timing) fire from the `interval.intervalElapsed()` branch of `advance()`, and the interval itself has a random phase (`IntervalUtil(1f, 2f)`), so the number and timing of draws differ per client even from identical RNG state.
+
+No fork closes this gap. Per the gen-time-only principle, a per-month-reseed fork (`CoopRandom.of("Slipstream", cycle, month)`) was considered and rejected: outcomes would still depend on per-client `addStream` call counts and days, and removing that dependence means restructuring gameplay logic, which the fork rules forbid. Accepted for v1: fleets stay owner-authoritative (Phase 8/9 mirroring), so positions never desync — players just see different slipstream maps (one fleet can appear to burn impossibly fast through empty hyperspace) and get different travel opportunities.
+
+Deferred fix, Phase 26 milestone 1: suppress the guest's `SlipstreamManager` via the same `removeScript`/`addScript`-at-`onGameLoad` mechanism used for the base managers, and replicate the host's finished stream segment polylines. Not the placement params — the builder itself consumes RNG, so RNG alignment is not attempted.
+
+### Abyss partial parity
+
+EP placement comes from each client's own unseeded `HyperspaceAbyssPluginImpl.random` (~line 59), so the encounter-point sets differ per client by construction. The `AbyssalRogueStellarObjectEPEC` fork makes generated systems deterministic per encounter-point id once an EP exists, but placement itself is not forkable. With the guest's `EncounterManager` suppressed (unseeded `new Random()`, `EncounterManager.java:66`), abyssal temporary star systems exist host-side only. Guests can travel the abyss, but deep abyssal content — rogue stellar objects, lights, Threat encounters — is host-experienced only.
+
+Full fix, Phase 26 milestone 2: replicate each encounter's outcome (EPs are transient per-player probe points, not shared entities) and let the forked EPEC regenerate identical content guest-side; the fork was built cheap enough to support this.
+
+### Sensor ghosts — suppressed, not accepted
+
+`SensorGhostManager` seeds from `new Random(Misc.genRandomSeed())` (`SensorGhostManager.java:79`). Unlike the items above, this one is not left to diverge — it is suppressed guest-side, so hyperspace sensor ghosts do not spawn on the guest at all. Several ghost types spawn real encounters or fleets (EncounterTrickster, ShipGhost) or touch story state (Ziggurat/guide ghosts), so an independent guest-side roll risks story-state or NPC-authority conflicts, not just a visual mismatch. The suppressor nulls the cached sector-memory handle after removal. The loss is cosmetic only: the guest never sees ghosts, host or otherwise.
