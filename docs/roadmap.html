@@ -99,6 +99,10 @@ html,body{background:var(--plane)}
 /* bands + cards */
 .band{background:var(--surf);border:1px solid var(--border);border-radius:13px;padding:8px 6px 4px;margin:0 0 14px;position:relative;overflow:hidden}
 .band>.stripe{position:absolute;left:0;top:0;bottom:0;width:6px}
+details.band>summary{list-style:none;cursor:pointer}
+details.band>summary::-webkit-details-marker{display:none}
+.band-h .caret{margin-left:8px;color:var(--muted);font-size:11px;transition:transform .15s}
+details.band[open] .band-h .caret{transform:rotate(90deg)}
 .band-h{display:flex;gap:9px;align-items:center;padding:8px 12px 10px 16px;flex-wrap:wrap}
 .band-dot{width:22px;height:22px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:12px;flex:0 0 auto}
 .band-h .t{font-size:13px;font-weight:800;letter-spacing:.4px}
@@ -168,7 +172,8 @@ table.rm .trk{font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:
   var root = document.getElementById('rm');
   var BK = {}; D.buckets.forEach(function(b){BK[b.key]=b;});
   var PH = {}; D.phases.forEach(function(p){PH[p.id]=p;});
-  var state = {view:'roadmap', stages:new Set(D.buckets.map(function(b){return b.key;})), track:'all'};
+  // 'built' starts collapsed: it is the largest bucket and the least actionable.
+  var state = {view:'roadmap', stages:new Set(D.buckets.map(function(b){return b.key;})), track:'all', collapsed:new Set(['built'])};
   var tip = document.createElement('div'); tip.className='tip'; document.body.appendChild(tip);
 
   function el(tag, cls, txt){var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e;}
@@ -240,13 +245,19 @@ table.rm .trk{font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:
       var ph=D.phases.filter(function(p){return p.bucket===b.key && trackPass(p);});
       if(!ph.length) return;
       ph.sort(function(a,z){ if(a.order&&z.order) return a.order-z.order; if(a.order) return -1; if(z.order) return 1; return a.num-z.num || a.id.localeCompare(z.id); });
-      var band=el('div','band'); band.appendChild(stripe(b.key));
+      var band=el('details','band'); band.open=!state.collapsed.has(b.key);
+      band.appendChild(stripe(b.key));
+      var sm=el('summary');
       var h=el('div','band-h');
       var dot=el('span','band-dot', b.icon); dot.style.background='var(--'+b.key+')'; h.appendChild(dot);
       h.appendChild(el('span','t', b.label.toUpperCase()));
       h.appendChild(el('span','n', '· '+b.note));
       h.appendChild(el('span','cnt', ph.length+(ph.length===1?' phase':' phases')));
-      band.appendChild(h);
+      h.appendChild(el('span','caret','▶'));
+      sm.appendChild(h); band.appendChild(sm);
+      band.addEventListener('toggle', function(){
+        if(band.open) state.collapsed.delete(b.key); else state.collapsed.add(b.key);
+      });
       ph.forEach(function(p){band.appendChild(card(p));});
       wrap.appendChild(band);
     });
@@ -381,8 +392,9 @@ table.rm .trk{font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:
   }
   function stripeBO(bk){var s=el('span','strip'); s.style.background='var(--'+bk+')'; return s;}
   function jumpTo(p){
-    // ensure its stage + track visible
+    // ensure its stage + track visible, and its band expanded
     if(!state.stages.has(p.bucket)){state.stages.add(p.bucket); syncStageChips();}
+    state.collapsed.delete(p.bucket);
     if(state.track==='postv1' && p.track==='v1'){state.track='all'; syncTrackChips();}
     if(state.view!=='roadmap'){state.view='roadmap'; syncViewSeg();}
     view();
