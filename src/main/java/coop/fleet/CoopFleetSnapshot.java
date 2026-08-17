@@ -34,8 +34,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
 
     /**
      * Per-ship record. {@code variantId} is the hull-variant id used to recreate the ship on the
-     * remote client; {@code cr} and {@code hullFraction} are rounded into the {@link #fleetHash} so
-     * roster equality is insensitive to sub-percent drift.
+     * remote client; {@code cr} and {@code hullFraction} ride alongside for display but are
+     * deliberately NOT part of the {@link #fleetHash} — see {@link #computeFleetHash}.
      */
     public record Member(String fleetMemberId, String hullId, String variantId, String shipName,
                          String captainName, float cr, float hullFraction) {
@@ -59,9 +59,16 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
     }
 
     /**
-     * SHA-256 over the member records sorted by {@code fleetMemberId}, using the fields named in the
-     * Phase 8 plan with CR and hull fraction rounded to whole percent. Independent of iteration
-     * order; changes when any member's hull/variant/identity/rounded-state changes.
+     * SHA-256 over the member records sorted by {@code fleetMemberId}. <b>Structural fields only</b>
+     * (identity, hull, variant, names): the hash gates a full mirror-roster teardown and rebuild on
+     * the remote client, so it must flip only when the ship set actually changes.
+     *
+     * <p>CR and hull fraction used to be included rounded to a whole percent, and that was a
+     * measured performance defect: at 10 game-seconds per real second, a repairing or CR-recovering
+     * ship crosses a percent boundary every real second or two, and a loaded save full of
+     * battle-damaged NPC fleets turned every one-second {@code NPC_FLEET_SET} into ~10 full roster
+     * rebuilds (guest at 39 fps with rubber-banding, 2026-08-17). The mirror now applies CR/hull
+     * in place on the existing members instead ({@code CoopFleetMirror#updateMemberState}).
      */
     public static String computeFleetHash(List<Member> members) {
         List<Member> sorted = new ArrayList<>(members == null ? List.of() : members);
@@ -80,9 +87,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .append('|').append(member.hullId())
                     .append('|').append(member.variantId())
                     .append('|').append(member.shipName())
-                    .append('|').append(member.captainName())
-                    .append('|').append(Math.round(member.cr() * 100f))
-                    .append('|').append(Math.round(member.hullFraction() * 100f));
+                    .append('|').append(member.captainName());
         }
         return CoopChecksum.sha256Text(canonical.toString());
     }

@@ -105,6 +105,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     // small clock-drift offset that makes shared systems' planets/jumps appear at different angles.
     static final long ORBIT_SYNC_INTERVAL_MILLIS = 1000L;
     private long lastOrbitSyncMillis;
+    private int lastOrbitBodyCount = -1;
 
     // Player faction standings: host re-broadcasts the full set on a slow cadence and the guest
     // force-matches it. Event-driven REP_DELTA covers host-side changes immediately; this snapshot is
@@ -1107,15 +1108,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             if (location == null || location.isHyperspace()) {
                 return;
             }
-            List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>();
-            for (SectorEntityToken e : location.getAllEntities()) {
-                if (!isSyncableOrbit(e)) {
-                    continue;
-                }
+            List<SectorEntityToken> bodies = syncableOrbitBodies(location);
+            List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
+            for (SectorEntityToken e : bodies) {
                 String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
                 entries.add(new CoopOrbitSync.OrbitEntry(e.getId(), focusId, e.getCircularOrbitRadius(),
                         e.getCircularOrbitPeriod(), e.getCircularOrbitAngle()));
             }
+            maybeDumpOrbitBreakdown(bodies);
             if (!entries.isEmpty()) {
                 send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
                         location.getId(), CoopOrbitSync.encode(entries)));
@@ -1158,10 +1158,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             // doesn't resolve. (focus|radius|period; consumed entries are removed to break co-orbit
             // ties like the planet 'barad' sharing an orbit with the hex-id nav buoy.)
             Map<String, List<SectorEntityToken>> bySignature = new HashMap<>();
-            for (SectorEntityToken e : location.getAllEntities()) {
-                if (!isSyncableOrbit(e)) {
-                    continue;
-                }
+            for (SectorEntityToken e : syncableOrbitBodies(location)) {
                 String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
                 bySignature.computeIfAbsent(
                         CoopOrbitSync.signature(focusId, e.getCircularOrbitRadius(), e.getCircularOrbitPeriod()),
@@ -1227,11 +1224,59 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      * — its hundreds of near-identical orbits collide on signature and would starve the jump-point
      * match (the symptom: every named body aligned but the fringe jump-point still drifting).
      */
+    /**
+     * The orbit-sync body set for a location: planets/moons, jump points, and stable-id custom
+     * entities (stations, relays, buoys) — the landmarks players navigate by.
+     *
+     * <p>Enumerated by inclusion from the engine's typed lists, NOT via {@code getAllEntities()}.
+     * The all-entities sweep was a measured defect (2026-08-17): with the host's fleet parked in an
+     * asteroid belt, the engine's materialized asteroids and ring-band segments passed the old
+     * per-entity filter and ballooned the 1 Hz snapshot from 13 entries to 358, none of which the
+     * guest could match (per-instance ids, and cosmetic anyway). The typed lists exclude asteroid
+     * and ring entities structurally, whatever classes or ids the engine gives them.
+     */
+    private List<SectorEntityToken> syncableOrbitBodies(LocationAPI location) {
+        List<SectorEntityToken> bodies = new ArrayList<>();
+        addSyncableOrbitBodies(bodies, location.getPlanets());
+        addSyncableOrbitBodies(bodies, location.getJumpPoints());
+        addSyncableOrbitBodies(bodies, location.getCustomEntities());
+        return bodies;
+    }
+
+    private void addSyncableOrbitBodies(List<SectorEntityToken> out,
+                                        List<? extends SectorEntityToken> candidates) {
+        if (candidates == null) {
+            return;
+        }
+        for (SectorEntityToken e : candidates) {
+            if (e != null && isSyncableOrbit(e)) {
+                out.add(e);
+            }
+        }
+    }
+
     private boolean isSyncableOrbit(SectorEntityToken e) {
         if (e instanceof CampaignFleetAPI || e.getOrbit() == null || e.getCircularOrbitRadius() <= 0f) {
             return false;
         }
         return CoopOrbitSync.isStableId(e.getId()) || e instanceof JumpPointAPI || e instanceof PlanetAPI;
+    }
+
+    /**
+     * Diagnostics only: logs the orbit-sync body count with a per-class breakdown whenever the count
+     * changes, so a future stream balloon names its culprit class directly in the log.
+     */
+    private void maybeDumpOrbitBreakdown(List<SectorEntityToken> bodies) {
+        if (!CoopDebug.diagnosticsEnabled() || bodies.size() == lastOrbitBodyCount) {
+            return;
+        }
+        lastOrbitBodyCount = bodies.size();
+        Map<String, Integer> byClass = new LinkedHashMap<>();
+        for (SectorEntityToken e : bodies) {
+            byClass.merge(e.getClass().getSimpleName(), 1, Integer::sum);
+        }
+        CoopLog.info(CoopCampaignReplicator.class,
+                "Coop orbit-sync bodies=" + bodies.size() + " byClass=" + byClass);
     }
 
     private void removeFromSignaturePool(Map<String, List<SectorEntityToken>> bySignature,

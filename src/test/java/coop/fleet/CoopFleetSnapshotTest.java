@@ -41,17 +41,21 @@ class CoopFleetSnapshotTest {
     }
 
     @Test
-    void fleetHashChangesWhenRoundedCrOrHullFractionChanges() {
+    void fleetHashIgnoresCrAndHullFractionEntirely() {
+        // The hash gates a full mirror-roster teardown/rebuild, so it must be structural only.
+        // CR/hull were originally hashed rounded to a whole percent, and at 10 game-seconds per real
+        // second a repairing fleet crossed a percent boundary every second or two: a save full of
+        // damaged NPC fleets rebuilt ~10 rosters per second and dropped the guest to 39 fps
+        // (measured 2026-08-17). Repair state is applied in place by the mirror instead.
         List<CoopFleetSnapshot.Member> base = List.of(
                 new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela", 0.70f, 0.90f));
         String baseHash = CoopFleetSnapshot.computeFleetHash(base);
 
-        // Sub-percent drift collapses to the same rounded bucket -> same hash.
         assertEquals(baseHash, CoopFleetSnapshot.computeFleetHash(List.of(
-                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela", 0.704f, 0.902f))));
-        // A whole-percent change flips the hash.
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela", 0.10f, 0.25f))));
+        // Structural identity still flips it.
         assertNotEquals(baseHash, CoopFleetSnapshot.computeFleetHash(List.of(
-                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela", 0.80f, 0.90f))));
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Renamed", 0.70f, 0.90f))));
     }
 
     @Test

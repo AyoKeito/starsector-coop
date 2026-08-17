@@ -257,10 +257,36 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private void refreshRosterIfChanged(String fleetHash, List<CoopFleetSnapshot.Member> members) {
         if (Objects.equals(fleetHash, lastFleetHash)) {
+            // Same ship set: keep the roster and track the slow-moving repair state in place. The
+            // hash is structural on purpose — CR/hull recovery used to flip it every second or two
+            // per damaged fleet and the resulting rebuild storm dropped the guest to 39 fps
+            // (2026-08-17); see CoopFleetSnapshot.computeFleetHash.
+            updateMemberState(members);
             return;
         }
         rebuildRoster(members, fleetHash);
         lastFleetHash = fleetHash;
+    }
+
+    /**
+     * Applies CR/hull onto the existing mirror members without a rebuild. Members are matched by
+     * list position: both sides preserve fleet order (the roster was built in snapshot order and the
+     * structural hash pins the same ship set), and a transient order mismatch merely paints repair
+     * state onto a same-set sibling until the next structural rebuild.
+     */
+    private void updateMemberState(List<CoopFleetSnapshot.Member> members) {
+        List<FleetMemberAPI> current = mirrorFleet.getFleetData().getMembersListCopy();
+        if (current.size() != members.size()) {
+            return;
+        }
+        for (int i = 0; i < current.size(); i++) {
+            try {
+                current.get(i).getRepairTracker().setCR(members.get(i).cr());
+                current.get(i).getStatus().setHullFraction(members.get(i).hullFraction());
+            } catch (RuntimeException ignored) {
+                // repair state on a mirror is display-only; never abort the update over it
+            }
+        }
     }
 
     private void rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
