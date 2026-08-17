@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete — Phases 1–12 (P9/P10/P12 await a manual smoke test)"
+      "note": "code-complete and smoke-verified in-game (P1–12, 12b, 12d, 6b)"
     },
     {
       "key": "partial",
@@ -37,14 +37,14 @@
       "note": "after the private soak / public release"
     }
   ],
-  "here": "Phases <b>8–12</b> are code-complete, but the <b>P9 (NPC fleet replication)</b> and <b>P12 (campaign state)</b> work reached the repo through a 2026-06-10 catch-up commit and has not yet been verified across two live game instances. The immediate next action is <b>yours</b>: deploy with <code>scripts/deploy-to-test-clients.ps1</code>, launch a host + guest, and walk the P9 / P12 smoke steps (shown on their cards). Once that passes, the next build is <b>Phase 12b — QA Hardening</b> (first in the hardening-first order; it also fixes a live silent-autoresolve-against-mirror bug).",
+  "here": "The 2026-08-17 drill sessions smoke-verified <b>12b</b> (all five hardening drills; the reconnect drill failed live and was fixed in-session), <b>12d</b> (cargo-pod item transfer + the widened consume watcher), and <b>6b</b> (campaign identity: the replay-reject drill failed live and was fixed with the mint signal; real <code>mod_info.json</code> handshake checksums are wired). Two performance defects found by the first save-loaded session (mirror roster-rebuild storm, orbit-stream balloon) were fixed the same day. The next build is <b>Phase 13</b> — finishing the PARTIAL: suppressor extension to base/encounter/deciv/war managers, the new <code>WORLD_DELTA</code> subtypes, and host-authoritative pirate/Pather bases.",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Manual smoke test pending — Phases 9 & 12 (and 10)",
+      "head": "Next build: finish Phase 13",
       "state": "you are here",
-      "body": "The NPC-fleet-replication (P9) and campaign-state (P12) work landed via the 2026-06-10 catch-up commit and has <b>not been human-verified in two live instances yet</b>. Deploy with <code>scripts/deploy-to-test-clients.ps1</code>, launch host + guest, and run the P9/P12 smoke steps (on <span class=\"rp\" data-jump=\"9\">P9</span>, <span class=\"rp\" data-jump=\"10\">P10</span>, <span class=\"rp\" data-jump=\"12\">P12</span> cards). This is the gate before <span class=\"rp\" data-jump=\"12b\">Phase 12b</span> — the next build."
+      "body": "Everything up through <span class=\"rp\" data-jump=\"6b\">6b</span> is built and smoke-verified in live two-instance sessions (2026-08-17). The build order continues with <span class=\"rp\" data-jump=\"13\">Phase 13</span> — the remaining world-authority half of the PARTIAL."
     },
     {
       "sev": "revisit",
@@ -61,11 +61,11 @@
       "body": "Shared-faction colonies, industries, and raids are now <b>V1 scope</b> — one shared player faction (separate per-player factions stay out). It slots at build-order position 10, after 12c; raids (milestone 1) need no colony-lifecycle work. See <span class=\"rp\" data-jump=\"24\">P24</span>."
     },
     {
-      "sev": "gap",
-      "sevLabel": "known gap",
-      "head": "Phase 5 handshake checksums are placeholders",
-      "state": "deferred to 12b",
-      "body": "File checksums are inert (the script sandbox blocks <code>java.io</code> hashing). Two installs with matching version metadata but differing jar contents connect silently. Real <code>loadText</code>-based hashing is a <span class=\"rp\" data-jump=\"12b\">Phase 12b</span> item."
+      "sev": "note",
+      "sevLabel": "resolved",
+      "head": "Handshake checksums are real now (mod_info.json)",
+      "state": "resolved in 6b",
+      "body": "The 12b probe proved <code>SettingsAPI.loadText</code> survives the script sandbox (SUCCESS on both clients, 2026-08-17), and 6b wired real <code>mod_info.json</code> SHA-256 checksums into the manifest. Jar checksums stay <code>UNAVAILABLE</code> permanently — no engine surface hands back jar bytes."
     },
     {
       "sev": "gap",
@@ -212,7 +212,7 @@
       "title": "Seed Lock Hardening",
       "theme": "seed",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Adds a host-minted per-campaign UUID to the seed lock plus full canonical fingerprint dumps so mismatches are identifiable.",
       "introduces": [
         "campaignId UUID",
