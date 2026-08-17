@@ -105,6 +105,26 @@ public final class CoopSeedSync {
         }
     }
 
+    /**
+     * True when the loaded sector carries seed data stored by a previous coop session. Used by the
+     * 6b campaign-identity check to recognize a pre-6b coop save (markers present, campaign id
+     * absent) and let it migrate via adoption, while a genuinely fresh campaign (no markers at all)
+     * is rejected from joining an in-flight campaign.
+     */
+    public static boolean hasStoredSeedData() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return false;
+            }
+            Object seedString = sector.getPersistentData().get(PERSISTENT_SEED_STRING);
+            return seedString != null && !String.valueOf(seedString).trim().isEmpty();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSeedSync.class, "Unable to read coop stored seed data marker", ex);
+            return false;
+        }
+    }
+
     /** Stored campaign id for the loaded sector, or empty when absent / no sector. */
     public static String currentCampaignId() {
         try {

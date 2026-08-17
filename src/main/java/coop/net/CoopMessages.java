@@ -113,14 +113,22 @@ public final class CoopMessages {
                         + "\"diff\":\"" + escapeJson(diff == null ? "" : diff) + "\"}");
     }
 
+    /**
+     * {@code campaignIdMinted} distinguishes a campaign being born (host minted the id at this very
+     * seed lock) from an in-flight campaign (id pre-existing). The guest needs it to tell a
+     * legitimate first-ever session apart from a fresh same-seed re-roll trying to join a campaign
+     * it was never part of — both present as "guest has no stored id" (Phase 6b).
+     */
     public static Message seedLockRequest(String sessionId, long seq, long sentAtMillis, long seedLong,
-                                          String seedString, String sectorFingerprint, String campaignId) {
+                                          String seedString, String sectorFingerprint, String campaignId,
+                                          boolean campaignIdMinted) {
         return new Message(Type.SEED_LOCK_REQUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"seedLong\":" + seedLong + ","
                         + "\"seedString\":\"" + escapeJson(requireText(seedString, "seedString")) + "\","
                         + "\"sectorFingerprint\":\""
                         + escapeJson(requireText(sectorFingerprint, "sectorFingerprint")) + "\","
-                        + "\"campaignId\":\"" + escapeJson(requireText(campaignId, "campaignId")) + "\"}");
+                        + "\"campaignId\":\"" + escapeJson(requireText(campaignId, "campaignId")) + "\","
+                        + "\"campaignIdMinted\":\"" + campaignIdMinted + "\"}");
     }
 
     public static Message seedLockAck(String sessionId, long seq, long sentAtMillis, String sectorFingerprint) {

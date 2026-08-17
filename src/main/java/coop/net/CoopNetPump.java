@@ -85,6 +85,7 @@ public class CoopNetPump implements EveryFrameScript {
     private final Consumer<String> campaignIdStore;
     private final BooleanSupplier adoptCampaignIdSupplier;
     private final Supplier<String> canonicalFingerprintSupplier;
+    private final BooleanSupplier priorCoopSessionSupplier;
     private final CoopTimeLock timeLock;
     private final CoopSharedPauseCoordinator pauseCoordinator = new CoopSharedPauseCoordinator();
     // Host: the effective pause we applied last frame, used to detect vanilla auto-pause edges (the
@@ -139,7 +140,8 @@ public class CoopNetPump implements EveryFrameScript {
                 CoopSeedSync::currentCampaignId,
                 CoopSeedSync::storeCampaignId,
                 () -> Boolean.parseBoolean(System.getProperty(ADOPT_CAMPAIGN_ID_PROPERTY)),
-                CoopSeedSync::currentSectorFingerprintCanonical);
+                CoopSeedSync::currentSectorFingerprintCanonical,
+                CoopSeedSync::hasStoredSeedData);
     }
 
     public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
@@ -151,7 +153,8 @@ public class CoopNetPump implements EveryFrameScript {
                        Supplier<String> storedCampaignIdSupplier,
                        Consumer<String> campaignIdStore,
                        BooleanSupplier adoptCampaignIdSupplier,
-                       Supplier<String> canonicalFingerprintSupplier) {
+                       Supplier<String> canonicalFingerprintSupplier,
+                       BooleanSupplier priorCoopSessionSupplier) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
@@ -164,6 +167,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.campaignIdStore = Objects.requireNonNull(campaignIdStore, "campaignIdStore");
         this.adoptCampaignIdSupplier = Objects.requireNonNull(adoptCampaignIdSupplier, "adoptCampaignIdSupplier");
         this.canonicalFingerprintSupplier = Objects.requireNonNull(canonicalFingerprintSupplier, "canonicalFingerprintSupplier");
+        this.priorCoopSessionSupplier = Objects.requireNonNull(priorCoopSessionSupplier, "priorCoopSessionSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
         this.timeLock.setPauseCoordinator(pauseCoordinator);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
@@ -552,7 +556,7 @@ public class CoopNetPump implements EveryFrameScript {
                     ? sectorFingerprintSupplier.get()
                     : seed.sectorFingerprint();
             CoopSeedSync.SeedData lockedSeed = seed.withFingerprint(fingerprint);
-            String campaignId = resolveHostCampaignId();
+            CampaignIdResolution campaignId = resolveHostCampaignId();
             sessionState.recordSeedLock(lockedSeed.seedLong(), lockedSeed.seedString(), lockedSeed.sectorFingerprint());
             CoopSeedSync.storeCurrentSectorPersistentData(lockedSeed);
 
@@ -563,7 +567,8 @@ public class CoopNetPump implements EveryFrameScript {
                     lockedSeed.seedLong(),
                     lockedSeed.seedString(),
                     lockedSeed.sectorFingerprint(),
-                    campaignId);
+                    campaignId.id(),
+                    campaignId.minted());
             service.send(request);
             seedLockRequestSent = true;
             log("outbound", request);
@@ -571,7 +576,8 @@ public class CoopNetPump implements EveryFrameScript {
                     "Coop seed lock requested seedLong=" + lockedSeed.seedLong()
                             + " seedString=" + lockedSeed.seedString()
                             + " sectorFingerprint=" + lockedSeed.sectorFingerprint()
-                            + " campaignId=" + campaignId);
+                            + " campaignId=" + campaignId.id()
+                            + " minted=" + campaignId.minted());
         } catch (RuntimeException ex) {
             sessionState.rejectHandshake("seedLock: " + ex.getMessage());
             CoopLog.warn(CoopNetPump.class, "Failed to create coop seed lock request", ex);
@@ -585,15 +591,19 @@ public class CoopNetPump implements EveryFrameScript {
      * resumed" from "a fresh re-roll of the same seed", which the seed string and structural
      * fingerprint cannot (both are pure functions of the seed).
      */
-    private String resolveHostCampaignId() {
+    private CampaignIdResolution resolveHostCampaignId() {
         String stored = storedCampaignIdSupplier.get();
         if (stored != null && !stored.trim().isEmpty()) {
-            return stored.trim();
+            return new CampaignIdResolution(stored.trim(), false);
         }
         String minted = UUID.randomUUID().toString();
         campaignIdStore.accept(minted);
         CoopLog.info(CoopNetPump.class, "Coop campaign id minted campaignId=" + minted);
-        return minted;
+        return new CampaignIdResolution(minted, true);
+    }
+
+    /** {@code minted} = the id was created at this very seed lock, i.e. the campaign is being born. */
+    private record CampaignIdResolution(String id, boolean minted) {
     }
 
     /**
@@ -666,6 +676,8 @@ public class CoopNetPump implements EveryFrameScript {
         String seedString = CoopMessages.requiredPayloadString(message, "seedString");
         String hostFingerprint = CoopMessages.requiredPayloadString(message, "sectorFingerprint");
         String hostCampaignId = CoopMessages.requiredPayloadString(message, "campaignId");
+        boolean hostCampaignIdMinted = Boolean.parseBoolean(
+                CoopMessages.requiredPayloadString(message, "campaignIdMinted"));
         String guestSeedString = sectorSeedStringSupplier.get();
         String guestFingerprint = sectorFingerprintSupplier.get();
         CoopLog.info(CoopNetPump.class,
@@ -679,7 +691,7 @@ public class CoopNetPump implements EveryFrameScript {
         // wrong save produces the clear "not this campaign" message instead of a confusing state
         // diff. The id distinguishes this campaign from a fresh re-roll of the same seed, which
         // passes both downstream checks identically.
-        if (!checkOrAdoptCampaignId(message, hostCampaignId)) {
+        if (!checkOrAdoptCampaignId(message, hostCampaignId, hostCampaignIdMinted)) {
             return;
         }
 
@@ -729,21 +741,54 @@ public class CoopNetPump implements EveryFrameScript {
 
     /**
      * Guest half of the campaign-identity check. Returns true when the seed-lock flow may continue.
-     * No stored id (first session, or a pre-6b save) adopts the host's and continues; a matching
-     * stored id continues; a mismatch rejects unless the explicit-consent override
-     * {@code -Dcoop.adoptCampaignId=true} is set — no silent adoption, because a differing id means
-     * the saves genuinely belong to different campaigns.
+     *
+     * <ul>
+     *   <li>Stored id matches the host's: continue.</li>
+     *   <li>No stored id and the host <em>minted the id at this seed lock</em>: the campaign is
+     *   being born — adopt and continue.</li>
+     *   <li>No stored id, host id pre-existing, but this save carries pre-6b coop seed markers:
+     *   a save from before campaign ids existed — adopt as migration and continue.</li>
+     *   <li>No stored id, host id pre-existing, no markers: a fresh same-seed campaign trying to
+     *   join a campaign already in flight — the replay hole this phase closes. Reject unless the
+     *   explicit-consent override is set. (This is also the deliberate save-less-guest rejoin
+     *   path: launch-guest.ps1 -AdoptCampaign sets the override.)</li>
+     *   <li>Stored id differs: the save belongs to a different campaign — reject unless the
+     *   override is set. Never adopt silently.</li>
+     * </ul>
      */
-    private boolean checkOrAdoptCampaignId(CoopMessages.Message message, String hostCampaignId) {
+    private boolean checkOrAdoptCampaignId(CoopMessages.Message message, String hostCampaignId,
+                                           boolean hostCampaignIdMinted) {
         String stored = storedCampaignIdSupplier.get();
         stored = stored == null ? "" : stored.trim();
         if (stored.equals(hostCampaignId)) {
             return true;
         }
         if (stored.isEmpty()) {
-            campaignIdStore.accept(hostCampaignId);
-            CoopLog.info(CoopNetPump.class, "Coop campaign id adopted campaignId=" + hostCampaignId);
-            return true;
+            if (hostCampaignIdMinted) {
+                campaignIdStore.accept(hostCampaignId);
+                CoopLog.info(CoopNetPump.class,
+                        "Coop campaign id adopted at campaign birth campaignId=" + hostCampaignId);
+                return true;
+            }
+            if (priorCoopSessionSupplier.getAsBoolean()) {
+                campaignIdStore.accept(hostCampaignId);
+                CoopLog.info(CoopNetPump.class, "Coop campaign id adopted by pre-6b save migration"
+                        + " campaignId=" + hostCampaignId);
+                return true;
+            }
+            if (adoptCampaignIdSupplier.getAsBoolean()) {
+                campaignIdStore.accept(hostCampaignId);
+                CoopLog.warn(CoopNetPump.class, "Coop campaign id adopted by explicit override ("
+                        + ADOPT_CAMPAIGN_ID_PROPERTY + "=true): fresh guest campaign joins in-flight"
+                        + " campaignId=" + hostCampaignId + "; fresh-start divergence knowingly accepted");
+                return true;
+            }
+            return rejectCampaignId(message,
+                    "campaignId: host=" + hostCampaignId + " guest=<none>"
+                            + "; this campaign is already in flight and this guest campaign is brand new"
+                            + " (a fresh same-seed roll cannot silently rejoin it). To join anyway with a"
+                            + " fresh start, relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY
+                            + "=true (launch-guest.ps1 -AdoptCampaign)");
         }
         if (adoptCampaignIdSupplier.getAsBoolean()) {
             campaignIdStore.accept(hostCampaignId);
@@ -752,9 +797,13 @@ public class CoopNetPump implements EveryFrameScript {
                     + " replaced stored=" + stored + "; state divergence is knowingly accepted");
             return true;
         }
-        String reason = "campaignId: host=" + hostCampaignId + " guest=" + stored
-                + "; guest save is not from this coop campaign. To adopt the host campaign anyway,"
-                + " relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true";
+        return rejectCampaignId(message,
+                "campaignId: host=" + hostCampaignId + " guest=" + stored
+                        + "; guest save is not from this coop campaign. To adopt the host campaign anyway,"
+                        + " relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true");
+    }
+
+    private boolean rejectCampaignId(CoopMessages.Message message, String reason) {
         sessionState.rejectHandshake(reason);
         CoopMessages.Message reject = CoopMessages.seedLockReject(
                 message.sessionId(),

@@ -5,6 +5,9 @@ param(
     [int] $Port = 7777,
     [string] $SeedString = 'MN-1234567890123456789',
     [switch] $Diagnostics,
+    # Explicit consent to join an in-flight campaign with a save that does not belong to it
+    # (fresh re-roll or wrong save). This is the supported save-less-guest rejoin path.
+    [switch] $AdoptCampaign,
     [switch] $PatchOnly
 )
 
@@ -32,6 +35,7 @@ function Set-CoopVmParams {
     $content = $content -replace '\s-Dcoop\.connectPort=\S+', ''
     $content = $content -replace '\s-Dcoop\.newGameSeed=\S+', ''
     $content = $content -replace '\s-Dcoop\.debug\.diagnostics=\S+', ''
+    $content = $content -replace '\s-Dcoop\.adoptCampaignId=\S+', ''
     # Remove any prior coop-forks classpath entry so re-patching stays idempotent.
     $content = $content -replace '\.\.\\mods\\coop\\jars\\coop-forks\.jar;', ''
 
@@ -78,10 +82,14 @@ if (-not [string]::IsNullOrWhiteSpace($SeedString)) {
 if ($Diagnostics) {
     $jvmProperties += "-Dcoop.debug.diagnostics=true"
 }
+if ($AdoptCampaign) {
+    $jvmProperties += "-Dcoop.adoptCampaignId=true"
+}
 
 Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties $jvmProperties
 
 $diagNote = if ($Diagnostics) { ' diagnostics=ON' } else { '' }
+if ($AdoptCampaign) { $diagNote += ' adoptCampaign=ON' }
 
 if ($PatchOnly) {
     Write-Host "Patched guest vmparams for coop.connectHost=$HostAddress coop.connectPort=$Port coop.newGameSeed=$SeedString$diagNote"

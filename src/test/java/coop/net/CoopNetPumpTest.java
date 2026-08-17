@@ -215,7 +215,7 @@ class CoopNetPumpTest {
         session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
         session.guestAcceptHandshake("session-a");
         service.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-1"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-1", true));
         CoopNetPump pump = new CoopNetPump(service, session, () -> 14000L,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
@@ -242,7 +242,7 @@ class CoopNetPumpTest {
         session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
         session.guestAcceptHandshake("session-a");
         service.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "MN-host", "fingerprint-host", "campaign-1"));
+                "session-a", 4L, 13000L, 123456789L, "MN-host", "fingerprint-host", "campaign-1", true));
         CoopNetPump pump = new CoopNetPump(service, session, () -> 14000L,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
@@ -776,30 +776,90 @@ class CoopNetPumpTest {
 
         RecordingNetService first = new RecordingNetService(CoopConnectionRole.HOST);
         pumpForHostSeedLock(first, hostSessionReadyForSeedLock("session-a"), stored).advance(0f);
-        String minted = CoopMessages.requiredPayloadString(seedLockRequestIn(first), "campaignId");
+        CoopMessages.Message firstRequest = seedLockRequestIn(first);
+        String minted = CoopMessages.requiredPayloadString(firstRequest, "campaignId");
         assertFalse(minted.isBlank());
         assertEquals(minted, stored.get(), "the minted id must be stored for the campaign's lifetime");
+        assertEquals("true", CoopMessages.requiredPayloadString(firstRequest, "campaignIdMinted"),
+                "the birth seed lock must announce the id as freshly minted");
 
         // A later session of the same campaign (fresh pump + session state) reuses the stored id.
         RecordingNetService second = new RecordingNetService(CoopConnectionRole.HOST);
         pumpForHostSeedLock(second, hostSessionReadyForSeedLock("session-b"), stored).advance(0f);
-        assertEquals(minted, CoopMessages.requiredPayloadString(seedLockRequestIn(second), "campaignId"));
+        CoopMessages.Message secondRequest = seedLockRequestIn(second);
+        assertEquals(minted, CoopMessages.requiredPayloadString(secondRequest, "campaignId"));
+        assertEquals("false", CoopMessages.requiredPayloadString(secondRequest, "campaignIdMinted"),
+                "an in-flight campaign must not present as being born");
     }
 
     @Test
-    void guestAdoptsHostCampaignIdWhenItHasNoneStored() {
+    void guestAdoptsHostCampaignIdAtCampaignBirth() {
         java.util.concurrent.atomic.AtomicReference<String> stored = new java.util.concurrent.atomic.AtomicReference<>("");
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopSessionState session = guestSessionReadyForSeedLock();
         service.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", true));
 
-        pumpForGuestSeedLock(service, session, stored, false, "fingerprint-host", () -> "").advance(0f);
+        pumpForGuestSeedLock(service, session, stored, false, false, "fingerprint-host", () -> "").advance(0f);
 
-        assertEquals("campaign-host", stored.get(), "no stored id: adopt the host's and continue");
+        assertEquals("campaign-host", stored.get(), "campaign being born: adopt the host's id and continue");
         assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.SEED_LOCK_ACK),
                 "adoption must not block the seed lock");
         assertEquals(123456789L, session.seedLong());
+    }
+
+    @Test
+    void freshCampaignCannotSilentlyJoinAnInFlightCampaign() {
+        // The replay hole itself, found live in the 6b smoke test: a fresh same-seed New Game has no
+        // stored id, and the original adopt-on-absent policy waved it straight into a mid-flight
+        // campaign it was never part of.
+        java.util.concurrent.atomic.AtomicReference<String> stored = new java.util.concurrent.atomic.AtomicReference<>("");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
+
+        pumpForGuestSeedLock(service, session, stored, false, false, "fingerprint-host", () -> "").advance(0f);
+
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertEquals("", stored.get(), "a rejected fresh campaign must not adopt the id");
+        CoopMessages.Message reject = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.SEED_LOCK_REJECT).findFirst().orElseThrow();
+        String reason = CoopMessages.requiredPayloadString(reject, "reason");
+        assertTrue(reason.startsWith("campaignId: host=campaign-host guest=<none>"), reason);
+        assertTrue(reason.contains("-Dcoop.adoptCampaignId=true"), reason);
+        assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.SEED_LOCK_ACK));
+    }
+
+    @Test
+    void adoptFlagLetsAFreshCampaignJoinInFlightAsTheSavelessRejoinPath() {
+        java.util.concurrent.atomic.AtomicReference<String> stored = new java.util.concurrent.atomic.AtomicReference<>("");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
+
+        pumpForGuestSeedLock(service, session, stored, true, false, "fingerprint-host", () -> "").advance(0f);
+
+        assertEquals("campaign-host", stored.get());
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.SEED_LOCK_ACK),
+                "the explicit-consent flag is the sanctioned save-less rejoin path");
+    }
+
+    @Test
+    void pre6bCoopSaveMigratesByAdoption() {
+        // Markers-without-id = a save from before campaign ids existed; it joins by adoption
+        // without needing the consent flag.
+        java.util.concurrent.atomic.AtomicReference<String> stored = new java.util.concurrent.atomic.AtomicReference<>("");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
+
+        pumpForGuestSeedLock(service, session, stored, false, true, "fingerprint-host", () -> "").advance(0f);
+
+        assertEquals("campaign-host", stored.get());
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.SEED_LOCK_ACK));
     }
 
     @Test
@@ -808,9 +868,9 @@ class CoopNetPumpTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopSessionState session = guestSessionReadyForSeedLock();
         service.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
 
-        pumpForGuestSeedLock(service, session, stored, false, "fingerprint-host", () -> "").advance(0f);
+        pumpForGuestSeedLock(service, session, stored, false, false, "fingerprint-host", () -> "").advance(0f);
 
         assertEquals(CoopLobbyState.REJECTED, session.connectionState());
         assertEquals("campaign-old", stored.get(), "no silent adoption on mismatch");
@@ -829,9 +889,9 @@ class CoopNetPumpTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopSessionState session = guestSessionReadyForSeedLock();
         service.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
 
-        pumpForGuestSeedLock(service, session, stored, true, "fingerprint-host", () -> "").advance(0f);
+        pumpForGuestSeedLock(service, session, stored, true, false, "fingerprint-host", () -> "").advance(0f);
 
         assertEquals("campaign-host", stored.get(), "the adopt flag overwrites the stored id");
         assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.SEED_LOCK_ACK));
@@ -846,9 +906,9 @@ class CoopNetPumpTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopSessionState session = guestSessionReadyForSeedLock();
         service.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
 
-        pumpForGuestSeedLock(service, session, stored, false, "fingerprint-guest", () -> "").advance(0f);
+        pumpForGuestSeedLock(service, session, stored, false, false, "fingerprint-guest", () -> "").advance(0f);
 
         CoopMessages.Message reject = service.sent.stream()
                 .filter(m -> m.type() == CoopMessages.Type.SEED_LOCK_REJECT).findFirst().orElseThrow();
@@ -866,9 +926,9 @@ class CoopNetPumpTest {
         // Fingerprint mismatch: the guest dumps its canonical text for log diffing.
         RecordingNetService mismatch = new RecordingNetService(CoopConnectionRole.GUEST);
         mismatch.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", true));
         pumpForGuestSeedLock(mismatch, guestSessionReadyForSeedLock(),
-                new java.util.concurrent.atomic.AtomicReference<>(""), false, "fingerprint-guest", canonical)
+                new java.util.concurrent.atomic.AtomicReference<>(""), false, false, "fingerprint-guest", canonical)
                 .advance(0f);
         assertEquals(1L, canonicalReads.get(), "a fingerprint mismatch must dump the canonical text");
 
@@ -876,9 +936,9 @@ class CoopNetPumpTest {
         canonicalReads.set(0L);
         RecordingNetService match = new RecordingNetService(CoopConnectionRole.GUEST);
         match.inbound.add(CoopMessages.seedLockRequest(
-                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host"));
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", true));
         pumpForGuestSeedLock(match, guestSessionReadyForSeedLock(),
-                new java.util.concurrent.atomic.AtomicReference<>(""), false, "fingerprint-host", canonical)
+                new java.util.concurrent.atomic.AtomicReference<>(""), false, false, "fingerprint-host", canonical)
                 .advance(0f);
         assertEquals(0L, canonicalReads.get(), "a clean seed lock must not spam the canonical text");
     }
@@ -907,12 +967,13 @@ class CoopNetPumpTest {
                 () -> "fingerprint-host",
                 () -> "coop-seed",
                 new CoopTimeLock(),
-                campaignIdStore::get, campaignIdStore::set, () -> false, () -> "");
+                campaignIdStore::get, campaignIdStore::set, () -> false, () -> "", () -> false);
     }
 
     private static CoopNetPump pumpForGuestSeedLock(RecordingNetService service, CoopSessionState session,
                                                     java.util.concurrent.atomic.AtomicReference<String> campaignIdStore,
-                                                    boolean adoptFlag, String guestFingerprint,
+                                                    boolean adoptFlag, boolean priorCoopSession,
+                                                    String guestFingerprint,
                                                     Supplier<String> canonicalSupplier) {
         return new CoopNetPump(service, session, () -> 14000L,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
@@ -920,7 +981,8 @@ class CoopNetPumpTest {
                 () -> guestFingerprint,
                 () -> "coop-seed",
                 new CoopTimeLock(),
-                campaignIdStore::get, campaignIdStore::set, () -> adoptFlag, canonicalSupplier);
+                campaignIdStore::get, campaignIdStore::set, () -> adoptFlag, canonicalSupplier,
+                () -> priorCoopSession);
     }
 
     private static CoopMessages.Message seedLockRequestIn(RecordingNetService service) {
