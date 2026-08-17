@@ -214,7 +214,7 @@ Keep these tests aligned with the rules above:
 Before declaring runtime networking safe, run:
 
 ```powershell
-rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"
+powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"
 ```
 
 Then deploy to both test clients and verify PING/PONG in both logs.

@@ -21,7 +21,7 @@
 **Steps:**
 
 - [ ] Write tests for host, guest, empty, and invalid property parsing.
-- [ ] Run `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat test --tests coop.net.CoopNetStartupConfigTest"` and confirm tests fail because the class is missing.
+- [ ] Run `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat test --tests coop.net.CoopNetStartupConfigTest"` and confirm tests fail because the class is missing.
 - [ ] Implement `CoopNetStartupConfig` as a small immutable parser over `Properties`.
 - [ ] Update `CoopNetPump` to apply JVM startup config before checking memory flags.
 - [ ] Re-run the focused tests and confirm they pass.
@@ -50,8 +50,8 @@
 
 **Steps:**
 
-- [ ] Run `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
-- [ ] Run `rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\setup-two-client-test.ps1' -WhatIfOnly`.
-- [ ] Run `rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\deploy-to-test-clients.ps1' -SkipBuild -WhatIfOnly`.
+- [ ] Run `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
+- [ ] Run `powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\setup-two-client-test.ps1' -WhatIfOnly`.
+- [ ] Run `powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\deploy-to-test-clients.ps1' -SkipBuild -WhatIfOnly`.
 - [ ] If preflight passes, run setup for real if the test root is outside the development install.
 - [ ] Commit with `git add . && git commit -m "test: add two-client coop harness"`.

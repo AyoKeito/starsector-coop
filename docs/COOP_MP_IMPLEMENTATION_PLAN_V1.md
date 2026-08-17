@@ -20,9 +20,8 @@
 - Work directly on `main` unless the user explicitly asks for a separate branch or worktree.
 - Implement exactly one phase, verify it, then stop with a summary and changed files.
 - Do not start the next phase until the current phase builds, loads in Starsector when applicable, and passes its smoke test.
-- Keep each phase independently reviewable and **commit after each phase** with the message listed in that phase. The repo roots at `K:\Starsector\mods\coop` (origin = `github.com/AyoKeito/starsector-coop`, private) — run git from inside it: `rtk git -C K:\Starsector\mods\coop add . && rtk git -C K:\Starsector\mods\coop commit -m "<message>"`, then `rtk git -C K:\Starsector\mods\coop push`. Older phase steps write the command as `git add mods/coop && git commit ...` — that form assumed a `K:\Starsector`-rooted repo that never existed; use the form above. *(History note: sessions before 2026-06-10 concluded "not a git repo" from running git outside the repo root and deferred their commits; a catch-up commit on 2026-06-10 covered Phases 9+12.)*
+- Keep each phase independently reviewable and **commit after each phase** with the message listed in that phase. The repo roots at `K:\Starsector\mods\coop` (origin = `github.com/AyoKeito/starsector-coop`, private) — run git from inside it: `git -C K:\Starsector\mods\coop add . && git -C K:\Starsector\mods\coop commit -m "<message>"`, then `git -C K:\Starsector\mods\coop push`. Older phase steps write the command as `git add mods/coop && git commit ...` — that form assumed a `K:\Starsector`-rooted repo that never existed; use the form above. *(History note: sessions before 2026-06-10 concluded "not a git repo" from running git outside the repo root and deferred their commits; a catch-up commit on 2026-06-10 covered Phases 9+12.)*
 - Preserve v1 scope. Do not add CMC, joint piloting, direct trade UI, relaunch-from-save rejoin, PvP, or 3+ player support. (Colonies, raids, and industries were **rescoped INTO v1** as Phase 24 on 2026-06-10 — shared player faction only; separate per-player factions remain out.)
-- In this workspace, shell commands should be prefixed with `rtk`.
 - If a phase exposes a missing Starsector API assumption, document the exact API path and stop. Do not patch around unknown engine behavior blindly.
 
 ## Implementation Order (decided 2026-06-10)
@@ -164,7 +163,7 @@ Core Java modules must keep these names unless a later phase explicitly changes 
 Use these commands unless a phase gives a narrower command.
 
 ```powershell
-rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"
+powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"
 ```
 
 Expected build result:
@@ -176,7 +175,7 @@ BUILD SUCCESSFUL
 Starsector load smoke test:
 
 ```powershell
-rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector'; .\starsector.exe"
+powershell -NoProfile -Command "Set-Location 'K:\Starsector'; .\starsector.exe"
 ```
 
 Expected manual result:
@@ -210,7 +209,7 @@ Implement Phase 1 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Create the Starsector 
 - [ ] Implement `CoopLog` as a small wrapper around `Global.getLogger(...)`.
 - [ ] Implement `CoopModPlugin extends BaseModPlugin` and log `CoopModPlugin loaded` in `onApplicationLoad()`.
 - [ ] Add a scaffold unit test that asserts the plugin class and module package are loadable by the test JVM.
-- [ ] Run `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
+- [ ] Run `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
 - [ ] Launch Starsector once and confirm the mod loads without a coop stack trace.
 - [ ] Commit with `git add mods/coop && git commit -m "chore: scaffold coop mod"`.
 
@@ -241,8 +240,8 @@ Implement Phase 2 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Add repeatable local b
 - [ ] Add `scripts/build.ps1` that runs `.\gradlew.bat clean test build` from `mods/coop`.
 - [ ] Add `scripts/clean.ps1` that removes only `mods/coop/build` and `mods/coop/jars/coop.jar`.
 - [ ] Add Gradle manifest attributes: `Implementation-Title`, `Implementation-Version`, and `Coop-Build-Time`.
-- [ ] Run `rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\build.ps1'`.
-- [ ] Run `rtk powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\clean.ps1'`.
+- [ ] Run `powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\build.ps1'`.
+- [ ] Run `powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\clean.ps1'`.
 - [ ] Run the build script again and confirm `jars/coop.jar` is restored.
 - [ ] Commit with `git add mods/coop && git commit -m "chore: document coop build loop"`.
 
@@ -455,7 +454,7 @@ Implement Phase 6b from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Add a per-campaign co
 - [x] Tests: host mints once and reuses the stored id across pump restarts; guest adopts when absent; guest rejects on mismatch with reason prefix `campaignId:` naming the flag; adopt flag overrides; campaignId mismatch wins over a simultaneous fingerprint mismatch (check order); canonical dump fires on fingerprint mismatch and not on success; `seedLockRequest` round-trips `campaignId`.
 - [x] **Real handshake checksums (moved in from 12b, verdict 2026-08-17):** the `CoopChecksumProbe` drill run logged `SUCCESS` on both clients with identical hashes — `SettingsAPI.loadText("mod_info.json", modId)` works inside the sandbox. Wire it: `CoopHandshakeManifest.capture` hashes each enabled mod's `mod_info.json` via `loadText` + `CoopChecksum.sha256Text` (keep the `UNAVAILABLE:script-sandbox` placeholder as the per-mod fallback when `loadText` throws, so one unreadable mod degrades that entry instead of failing capture); jar checksums stay `UNAVAILABLE` (no file API). Delete `CoopChecksumProbe` and its `CoopModPlugin` call site; update `CoopHandshakeSandboxCompatibilityTest` (it currently pins the probe arrangement) and `docs/starsector-runtime-limitations.md`. Mind the known hazard: catch `Throwable`, not `IOException` — naming the checked exception type makes the verifier resolve a `java.io` type in the calling class.
 - [x] Docs: append to `mods/coop/docs/phase11-rng-determinism.md`: (a) the finding-5 mutability contract, verbatim enough that a future phase author trips over it; (b) a pointer to the gen-time-only principle now stated in Phase 13.
-- [x] Run `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`. *(2026-08-17: green, first run.)*
+- [x] Run `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`. *(2026-08-17: green, first run.)*
 - [x] Deploy with `scripts\deploy-to-test-clients.ps1`, relaunch both games, run the smoke test below.
 - [x] Commit deferred until repo init; message: `feat: add coop campaign identity + diagnosable seed-lock fingerprint`. *(Landed as three commits: `b3246f2` (implementation), `6c45fea` (perf fixes found by the smoke session), `0d35349` (mint-signal policy amendment found by smoke step 3).)*
 
@@ -570,7 +569,7 @@ These facts were established 2026-06-10 by disassembling `starsector-core/starfa
   - `CoopFastForwardLockTest`: enforce-while-active forces toggle flag + 2x mult; unavailable → forces 1x mult instead (fallback); `restoreDefaults` restores the remembered original toggle value exactly once; `writeFastForward` writes only on change; `-Dcoop.ff.disable` honored; a resolve `Throwable` flips `available` sticky-false and never throws out.
   - Update `CoopTimeSnapshotTest`: `apply()` must no longer touch `setInFastAdvance`; it must route the snapshot's `fastForward` to the lock.
   - Keep `CoopSectorProcGenTest` green with the inverted settings.json assertion.
-  - Run the full suite: `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
+  - Run the full suite: `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
 - [ ] **Update `mods/coop/docs/starsector-runtime-limitations.md`:** mark the `### Fast-forward has no public on/off setter` and `### Resolution adopted for v1` sections as **superseded for toggle mode** with a pointer to this phase (the hold-mode facts in them remain true and should stay — they explain why toggle mode is forced).
 - [ ] **Deploy with `scripts\deploy-to-test-clients.ps1`** (full mod including `data/` — the settings.json change matters; never hand-copy jars) and relaunch both games.
 - [ ] **Two-instance smoke test** (host + guest connected, session active, both fleets flying in the same system):
@@ -658,7 +657,7 @@ Established 2026-06-10 from `javap` disassembly of `starsector-core/starfarer_ob
   - Big-drift snap: > 2 days behind → forward snap even while unpaused.
   - Median filter: one outlier snapshot among five does not move the estimate.
   - Sticky failure: a `Throwable` from the port → `available=false` forever, no propagation; `-Dcoop.clock.disable` honored.
-  - Run the full suite: `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
+  - Run the full suite: `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"`.
 - [ ] **Update `mods/coop/docs/starsector-runtime-limitations.md`:** add a superseded-in-part banner to `### Connect-time clock alignment` — the "no public clock-setter" claim is wrong on 0.98a-RC8 (`getCal()` is public; `timestamp` is MethodHandles-settable); the host-pause-hold during connect REMAINS correct and primary (prevention beats correction), with Phase 7c reconciliation now handling accumulated in-session drift.
 - [ ] **Deploy with `scripts\deploy-to-test-clients.ps1`** and relaunch both games.
 - [ ] **Two-instance smoke test** (host + guest connected, session active):
@@ -1031,10 +1030,10 @@ Implement Phase 12b from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Apply the batched ro
 - [x] **Mirror AI-protection flag** (`CoopFleetMirror`): set `MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS` at both creation sites; unit test asserts the flag on freshly created mirrors.
 - [x] **Iron-mode depth cap** (`CoopIronModeGuard`): depth-2 limit; test that a depth-3 third-party `isIronMode:true` no longer rejects while a top-level one still does.
 - [x] **Checksum spike** (time-boxed): attempt the `SettingsAPI` text-load of `mod_info.json`; wire `sha256Text` if it works, otherwise document. Update `docs/starsector-runtime-limitations.md` either way. *(**Outcome 2026-08-09: not settled, deliberately not wired.** It cannot be settled outside a running game — the guard lives in the mod classloader, so the call compiles and unit-tests clean either way. There is also a specific hazard: `loadText` declares a checked `IOException`, so handling it makes the verifier resolve a `java.io` type in the calling class, the exact pattern already documented as blocked. Shipped instead as `coop.handshake.CoopChecksumProbe`, a dormant `CoopDebug`-gated probe called from `onGameLoad` that logs `SUCCESS`/`BLOCKED`; the manifest keeps its placeholders and depends on nothing. **Read the verdict off the drill-session log** (diagnostics on) and either wire the real hash or delete the probe. `CoopHandshakeSandboxCompatibilityTest` pins the arrangement.)* ***(Verdict 2026-08-17: SUCCESS on both clients** — "Coop checksum probe: SUCCESS, mod_info.json hashed to a35cede3… (275 chars)", identical hash host and guest. The sandbox does NOT block `SettingsAPI.loadText`. Real `mod_info.json` checksums are viable; the wiring is slotted into Phase 6b (next in the build order) alongside its other handshake hardening, after which the probe is deleted.)*
-- [x] Run `rtk powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"` → `BUILD SUCCESSFUL`. *(2026-08-09: green, 240 tests, up from 219.)*
+- [x] Run `powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"` → `BUILD SUCCESSFUL`. *(2026-08-09: green, 240 tests, up from 219.)*
 - [x] Deploy with `scripts\deploy-to-test-clients.ps1` and relaunch both games.
 - [x] **Two-instance smoke test:** *(**Run 2026-08-17.** Drills 1, 3, 4 passed as specced; drill 2 FAILED and was fixed live — see the follow-up step below; drill 5 verified by unit test, see note.)*
-  1. **Garbage-resilience drill:** with the host waiting for a guest, send a junk line to its TCP port from a third terminal (`rtk powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient('127.0.0.1',7777); $s=$c.GetStream(); $b=[Text.Encoding]::UTF8.GetBytes('{\"garbage\":1}'+\"`n\"); $s.Write($b,0,$b.Length); $c.Close()"`) → host logs a dropped-message warning, keeps running, and a real guest still connects and reaches seed lock afterwards. *(**Pass**, and stronger than specced: the junk arrived while a guest was already connected, so the connection-level defense fired first — "Coop TCP rejected extra connection with lobby reject" — and the payload never reached the message parser. The session was unaffected.)*
+  1. **Garbage-resilience drill:** with the host waiting for a guest, send a junk line to its TCP port from a third terminal (`powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient('127.0.0.1',7777); $s=$c.GetStream(); $b=[Text.Encoding]::UTF8.GetBytes('{\"garbage\":1}'+\"`n\"); $s.Write($b,0,$b.Length); $c.Close()"`) → host logs a dropped-message warning, keeps running, and a real guest still connects and reaches seed lock afterwards. *(**Pass**, and stronger than specced: the junk arrived while a guest was already connected, so the connection-level defense fired first — "Coop TCP rejected extra connection with lobby reject" — and the payload never reached the message parser. The session was unaffected.)*
   2. **Reconnect hygiene:** connect, play a minute, quit the guest, reconnect the guest (fresh launch) → session re-establishes cleanly; no stale-message log lines, no spurious `WORLD_DELTA(CONSUME)` re-reports in the system where salvage happened pre-disconnect (run with `-Dcoop.debug.diagnostics=true` to see the delta log). *(**Failed first run, fixed, re-verified pass** — see the follow-up step below for the three stacked defects.)*
   3. **Orphan sweep:** guest saves mid-session in a busy system, both instances quit; guest loads that save solo → log shows the sweep's removed-count line, and no frozen NPC mirrors or partner fleet are visible in the system. *(**Pass:** "Coop removed 35 orphaned mirror fleet(s) left by a previous session"; on screen, no host fleet and no frozen mirrors. The system is otherwise empty of NPC traffic because the suppressor removed the spawner scripts and that state is baked into the save — the documented guest-save-is-coop-only policy, re-accepted by the user during the drill.)*
   4. **UDP pinning:** while connected, send one UDP packet to the host's port from a third terminal → host logs the ignored-source warning once; guest-side fleet motion continues unaffected. *(**Pass:** "Coop UDP ignoring datagram from non-peer source /127.0.0.1:49273 (pinned peer 127.0.0.1)" — the port-lock caught a same-address loopback intruder, exactly the case address-only pinning could not.)*
@@ -1145,7 +1144,7 @@ Implement Phase 12d from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Add a SPAWN kind to 
 - [x] Unit tests: spawn round-trip with contents; re-applied `SPAWN` is idempotent; a pod consumed on one client is gone on both and not double-reported; a makeshift-structure disassembly now emits a `CONSUME`; the widened watcher still ignores the local player fleet and Phase 8/9 mirror fleets. Full `gradlew clean test build` green.
 - [x] Deploy with `scripts\deploy-to-test-clients.ps1` and relaunch both games.
 - [x] **Two-instance smoke test:** (a) host jettisons cargo, guest sees the pod with the same contents and can loot it; (b) guest places cargo in stable orbit, host sees it and loots it, and it is consumed on both; (c) hand a ship across and confirm it arrives intact; (d) disassemble a makeshift nav buoy on one client and confirm it disappears on the other; (e) a derelict-ship salvage still works (Phase 12 regression). *(**Run 2026-08-17: pass.** (a)/(b) pods replicated both directions with matching contents, and the loot-back `CONSUME` applied once with the host echo deduped by the ledger; (d) nav buoy disassembly propagated — the exact case that failed pre-12d; (e) derelict salvage propagated (its on-screen orbit position differed between clients — that is the Phase 7c clock drift, not a 12d defect). (c) was not separately exercised in-game; ship stacks in the payload are covered by unit tests and the pristine-arrival limitation is documented above.)*
-- [x] Commit with `rtk git -C K:\Starsector\mods\coop add . && rtk git -C K:\Starsector\mods\coop commit -m "feat: replicate player-created world entities and widen the consume watcher"`.
+- [x] Commit with `git -C K:\Starsector\mods\coop add . && git -C K:\Starsector\mods\coop commit -m "feat: replicate player-created world entities and widen the consume watcher"`.
 
 **Acceptance:**
 
