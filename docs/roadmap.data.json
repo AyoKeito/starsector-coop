@@ -435,7 +435,7 @@
       "title": "QA Hardening",
       "theme": "qa",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Batched cross-phase robustness fixes from the QA pass, including the live silent-autoresolve-against-mirror bug and inbound dispatch guarding.",
       "introduces": [
         "dispatch log-and-drop guard",
@@ -448,13 +448,8 @@
         "U+001F codec escape",
         "iron-mode depth cap"
       ],
-      "residue": [
-        "all steps unchecked",
-        "two-instance smoke test",
-        "checksum spike time-boxed",
-        "garbage-resilience/reconnect/orphan/UDP/keepalive drills"
-      ],
-      "note": "FIRST in remaining build order — immediate next work; fixes live silent-autoresolve-against-mirror bug"
+      "residue": [],
+      "note": "Smoke-verified in-game 2026-08-17. Reconnect drill failed → fixed in-session (session-state disconnect transition + pre-session traffic gate). Checksum probe SUCCESS → wiring moved to 6b."
     },
     {
       "id": "12d",
@@ -462,7 +457,7 @@
       "title": "World-Entity Spawn Replication",
       "theme": "economy",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Replicate player-created world entities (cargo pods) via a new WORLD_DELTA SPAWN kind with coop-assigned ids, and widen the consume watcher past the Tags.SALVAGEABLE allowlist.",
       "introduces": [
         "WORLD_DELTA SPAWN kind",
@@ -472,11 +467,9 @@
         "pod contents encoding"
       ],
       "residue": [
-        "all steps unchecked",
-        "API verification per surface",
-        "two-instance smoke test"
+        "SHIP handover arrives pristine (variant id only; shares fix with 12c gap 2a)"
       ],
-      "note": "Order slot 2; split from 12c gap 4 on 2026-08-09. Restores player-to-player item transfer, which v1 has none of today."
+      "note": "Smoke-verified in-game 2026-08-17: pods both directions, nav buoy disassembly, derelict regression. Restores player-to-player item transfer."
     },
     {
       "id": "12c",

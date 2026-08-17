@@ -663,6 +663,108 @@ class CoopNetPumpTest {
                 "expected dispatch to continue after an out-of-order manifest");
     }
 
+    // ---- Phase 12b: reconnect hygiene --------------------------------------------------------
+
+    @Test
+    void hostAcceptsRejoinAfterGuestChannelDies() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a", "session-b"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+        pump.advance(0f);
+
+        // The in-game failure: guest quit, host detected the dead channel, but the guest slot was
+        // never freed, so the rejoin's LOBBY_HELLO got "Lobby already has a guest" forever.
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+        assertNull(session.remotePlayerId());
+        assertNull(session.sessionId());
+        assertFalse(session.handshakeValidated());
+        assertNull(session.seedLong());
+
+        service.connected = true;
+        service.inbound.add(CoopMessages.lobbyHello(1L, 2000L, new CoopPlayerInfo("guest-b", "Guest B")));
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+        assertEquals("guest-b", session.remotePlayerId());
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.LOBBY_ACCEPT),
+                "the rejoining guest must be accepted, not rejected");
+        assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.LOBBY_REJECT));
+    }
+
+    @Test
+    void guestResendsLobbyHelloAfterChannelDropAndReconnect() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+        pump.advance(0f);
+        service.sent.clear();
+
+        // Network blip: the service auto-reconnects TCP, but pre-fix the pump never resent the
+        // hello (lobbyHelloSent stayed true) and the session state stayed post-lock, deadlocking
+        // both sides.
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, session.connectionState());
+        assertNull(session.sessionId());
+
+        service.connected = true;
+        pump.advance(0f);
+
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.LOBBY_HELLO),
+                "the reconnected guest must restart the lobby sequence");
+    }
+
+    @Test
+    void preSessionCampaignTrafficIsIgnored() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
+
+        // The in-game failure's second half: a lobby-rejected peer (or any unauthenticated socket)
+        // streaming session traffic. Pre-fix this WORLD_DELTA reached the replicator and poisoned
+        // the consume ledger of what is effectively a solo campaign.
+        service.inbound.add(CoopMessages.worldDelta("stale-session", 5L, 1000L,
+                "entity-1", "CONSUME", true, "", "guest-a"));
+        service.inbound.add(CoopMessages.ping("stale-session", 6L, 1000L));
+        pump.advance(0f);
+
+        // Establish a real session afterwards and report the same entity consumed: if the ledger
+        // had been poisoned, this first legitimate apply would come back false.
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-b", "Guest B"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        service.inbound.add(CoopMessages.worldDelta("session-a", 7L, 2000L,
+                "entity-1", "CONSUME", true, "", "guest-b"));
+        pump.advance(0f);
+
+        // The post-session delta is a first apply, so the host echoes it back out.
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.WORLD_DELTA),
+                "a fresh session's first consume must still apply (ledger was not poisoned pre-session)");
+    }
+
     @Test
     void guestPingsFlowDuringTheSeedLockWindow() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
@@ -695,6 +797,7 @@ class CoopNetPumpTest {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
         private final List<CoopMessages.Message> sent = new ArrayList<>();
+        private boolean connected = true;
 
         private RecordingNetService(CoopConnectionRole role) {
             this.role = role;
@@ -707,7 +810,7 @@ class CoopNetPumpTest {
 
         @Override
         public boolean isConnected() {
-            return true;
+            return connected;
         }
 
         @Override

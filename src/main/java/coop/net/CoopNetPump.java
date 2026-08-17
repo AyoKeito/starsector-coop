@@ -56,6 +56,8 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean lobbyHelloSent;
     private boolean handshakeManifestSent;
     private boolean seedLockRequestSent;
+    private boolean channelWasConnected;
+    private boolean preSessionCampaignDropWarned;
     private long nextTimeSnapshotAtMillis;
     private long nextFleetSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
@@ -157,6 +159,7 @@ public class CoopNetPump implements EveryFrameScript {
         maybeStartFromSystemProperties();
         maybeStartFromMemoryFlags();
         service.flushOutbound();
+        detectPeerDisconnect();
         syncGuestInputBlocker();
         maybeSendLobbyHello();
         drainInbound();
@@ -286,6 +289,34 @@ public class CoopNetPump implements EveryFrameScript {
         return port;
     }
 
+    /**
+     * Connected&rarr;disconnected edge (12b reconnect hygiene). Rewinds the lobby/session so a
+     * reconnecting peer can rerun the full lobby/handshake/seed-lock on the new connection. Without
+     * this the host kept the dead guest's slot and answered every rejoin with "Lobby already has a
+     * guest" — while resuming its snapshot streams down the new, never-handshaken socket the moment
+     * it attached, because the stale session state still read as active. All session-scoped
+     * machinery (fleet mirror, NPC replication, campaign replicator, interaction gate, shared
+     * pause) tears itself down on the same frame because {@link #isGameplaySessionActive()} goes
+     * false; the host's connect-time pause hold also re-engages, so the world stops advancing while
+     * the partner is gone.
+     */
+    private void detectPeerDisconnect() {
+        boolean connected = service.isConnected();
+        if (channelWasConnected && !connected && service.role() != CoopConnectionRole.NONE) {
+            boolean changed = sessionState.onChannelDisconnected();
+            lobbyHelloSent = false;
+            handshakeManifestSent = false;
+            seedLockRequestSent = false;
+            latestTimeSnapshot = null;
+            preSessionCampaignDropWarned = false;
+            if (changed) {
+                CoopLog.warn(CoopNetPump.class, "Coop peer disconnected; session reset, awaiting reconnect as "
+                        + service.role());
+            }
+        }
+        channelWasConnected = connected;
+    }
+
     private void drainInbound() {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
@@ -321,7 +352,21 @@ public class CoopNetPump implements EveryFrameScript {
             case INTERACTION_RELEASE -> handleInteractionRelease(message);
             case NPC_FLEET_SET -> handleNpcFleetSet(message);
             case PING -> sendPong(message);
-            default -> campaignReplicator.handle(message);
+            default -> {
+                // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
+                // the world ledger unless the full lobby/handshake/seed-lock pipeline has run on
+                // THIS connection. The 12b reconnect drill caught a lobby-rejected guest still
+                // applying the host's ORBIT_SNAPSHOT stream to what was effectively a solo campaign.
+                if (!isGameplaySessionActive()) {
+                    if (message.type() != CoopMessages.Type.PONG && !preSessionCampaignDropWarned) {
+                        preSessionCampaignDropWarned = true;
+                        CoopLog.warn(CoopNetPump.class,
+                                "Coop ignoring pre-session campaign message type=" + message.type());
+                    }
+                    return;
+                }
+                campaignReplicator.handle(message);
+            }
         }
     }
 

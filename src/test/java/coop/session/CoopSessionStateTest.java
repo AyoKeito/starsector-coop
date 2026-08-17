@@ -38,6 +38,87 @@ class CoopSessionStateTest {
     }
 
     @Test
+    void hostFreesGuestSlotWhenChannelDisconnects() {
+        CoopSessionState state = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a"));
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        state.hostAcceptHandshake();
+        state.recordSeedLock(42L, "coop-seed", "fingerprint");
+
+        assertTrue(state.onChannelDisconnected());
+
+        // Back to accepting, with the host's own identity intact across the reconnect.
+        assertEquals(CoopLobbyState.HOST_WAITING, state.connectionState());
+        assertTrue(state.canAcceptGuest());
+        assertEquals("host-player", state.localPlayerId());
+        assertEquals("lobby-a", state.provisionalLobbyId());
+        assertNull(state.remotePlayerId());
+        assertNull(state.sessionId());
+        assertFalse(state.handshakeValidated());
+        assertNull(state.seedLong());
+
+        // A different guest can now join.
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-b", "Guest B"));
+        assertEquals("guest-b", state.remotePlayerId());
+    }
+
+    @Test
+    void guestRewindsToConnectingWhenChannelDisconnects() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("guest-player"));
+        state.startGuest("Guest");
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        state.guestAcceptHandshake("session-a");
+        state.recordSeedLock(42L, "coop-seed", "fingerprint");
+
+        assertTrue(state.onChannelDisconnected());
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, state.connectionState());
+        assertEquals("guest-player", state.localPlayerId());
+        assertNull(state.provisionalLobbyId());
+        assertNull(state.remotePlayerId());
+        assertNull(state.sessionId());
+        assertFalse(state.handshakeValidated());
+        assertNull(state.seedLong());
+
+        // The rewound guest can run the full sequence again.
+        state.guestAcceptLobby("lobby-b", new CoopPlayerInfo("host-player", "Host"));
+        assertEquals(CoopLobbyState.GUEST_CONNECTED, state.connectionState());
+    }
+
+    @Test
+    void disconnectRecoversFromRejectedSoACorrectedPeerCanRetry() {
+        CoopSessionState state = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player"));
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        state.rejectHandshake("gameVersion: host=0.98a guest=0.97a");
+        assertEquals(CoopLobbyState.REJECTED, state.connectionState());
+
+        assertTrue(state.onChannelDisconnected());
+
+        assertEquals(CoopLobbyState.HOST_WAITING, state.connectionState());
+        assertTrue(state.canAcceptGuest());
+    }
+
+    @Test
+    void disconnectIsANoOpBeforeAnyRoleIsChosen() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds());
+
+        assertFalse(state.onChannelDisconnected());
+        assertEquals(CoopLobbyState.NONE, state.connectionState());
+    }
+
+    @Test
+    void disconnectWhileAlreadyWaitingReportsNothingDropped() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        state.startHost("Host");
+
+        assertFalse(state.onChannelDisconnected());
+        assertEquals(CoopLobbyState.HOST_WAITING, state.connectionState());
+    }
+
+    @Test
     void guestTransitionsFromNoneToConnectingThenConnectedWithoutCanonicalSession() {
         CoopSessionState state = new CoopSessionState(new SequencedIds("guest-player"));
 

@@ -95,6 +95,37 @@ public class CoopSessionState {
         clearCanonicalSession();
     }
 
+    /**
+     * The transport channel to the peer died (peer quit, network drop). Frees the peer slot and
+     * rewinds to this role's pre-lobby state so a reconnecting peer runs the full
+     * lobby/handshake/seed-lock sequence again on the new connection. The 12b reconnect drill found
+     * the host answering every rejoin with "Lobby already has a guest" forever, because nothing ever
+     * released the slot. Local identity survives (stable player id across reconnects); the canonical
+     * session and seed lock are dropped because they belonged to the dead connection. Also recovers
+     * from {@link CoopLobbyState#REJECTED}: the rejected peer is gone, and staying dead would block
+     * a corrected peer (e.g. fixed mod list) from ever retrying. Returns true when any state was
+     * actually dropped.
+     */
+    public synchronized boolean onChannelDisconnected() {
+        if (role == CoopConnectionRole.NONE) {
+            return false;
+        }
+        CoopLobbyState target = role == CoopConnectionRole.HOST
+                ? CoopLobbyState.HOST_WAITING
+                : CoopLobbyState.GUEST_CONNECTING;
+        boolean changed = remotePlayerId != null || sessionId != null
+                || handshakeValidated || seedLong != null || connectionState != target;
+        remotePlayerId = null;
+        remoteName = null;
+        if (role == CoopConnectionRole.GUEST) {
+            // Host-minted; the next lobby accept supplies a fresh one.
+            provisionalLobbyId = null;
+        }
+        connectionState = target;
+        clearCanonicalSession();
+        return changed;
+    }
+
     public synchronized String hostAcceptHandshake() {
         if (role != CoopConnectionRole.HOST || connectionState != CoopLobbyState.HOST_CONNECTED) {
             throw new IllegalStateException("Host lobby is not ready for handshake acceptance");
