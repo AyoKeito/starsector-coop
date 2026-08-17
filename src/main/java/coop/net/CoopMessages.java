@@ -44,6 +44,7 @@ public final class CoopMessages {
         ORBIT_SNAPSHOT,
         NPC_FLEET_SET,
         NPC_FLEET_MOTION,
+        BASE_SET,
         PING,
         PONG,
         DISCONNECT
@@ -330,6 +331,18 @@ public final class CoopMessages {
     public static Message npcFleetSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
         return new Message(Type.NPC_FLEET_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"set\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    /**
+     * Phase 13 host&rarr;guest full authoritative set of dynamic pirate / Luddic-Path bases (reliable
+     * TCP). The body is a {@link coop.campaign.CoopBaseRecord#encodeSet} blob — one
+     * {@code kind|systemId|factionId|attr} record per line, because the flat envelope parser has no
+     * arrays. Rebroadcast whenever the order-independent set hash changes; the guest reconciles
+     * idempotently by {@code (kind, systemId)}.
+     */
+    public static Message baseSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
+        return new Message(Type.BASE_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {

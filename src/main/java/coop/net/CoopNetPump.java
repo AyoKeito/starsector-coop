@@ -7,6 +7,7 @@ import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopCampaignReplicator;
 import coop.fleet.CoopFleetMirror;
 import coop.fleet.CoopFleetMirrorRegistry;
@@ -69,7 +70,9 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopFleetMirrorRegistry npcFleetRegistry = new CoopFleetMirrorRegistry();
     private final CoopNpcFleetSuppressor npcFleetSuppressor = new CoopNpcFleetSuppressor();
     private final CoopNpcFleetReplicator npcFleetReplicator;
+    private final CoopBaseAuthority baseAuthority;
     private boolean npcReplicationStreaming;
+    private boolean baseReplicationStreaming;
     private String lastNpcDebug;
     private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
@@ -172,6 +175,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.timeLock.setPauseCoordinator(pauseCoordinator);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis);
+        this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
@@ -207,6 +211,7 @@ public class CoopNetPump implements EveryFrameScript {
         drainFleetDatagrams();
         maybeSendFleetSnapshot();
         syncNpcReplication();
+        syncBaseReplication();
         syncInteractionGate();
         debugDialogState();
         syncCampaignReplicator();
@@ -385,6 +390,7 @@ public class CoopNetPump implements EveryFrameScript {
             case INTERACTION_REJECT -> handleInteractionReject(message);
             case INTERACTION_RELEASE -> handleInteractionRelease(message);
             case NPC_FLEET_SET -> handleNpcFleetSet(message);
+            case BASE_SET -> handleBaseSet(message);
             case PING -> sendPong(message);
             default -> {
                 // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
@@ -1205,6 +1211,49 @@ public class CoopNetPump implements EveryFrameScript {
             maybeDumpNpcDiagnostics();
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync NPC fleet replication", ex);
+        }
+    }
+
+    /**
+     * Phase 13 host-authoritative pirate / Luddic-Path bases. The host polls the two pollable base
+     * managers and broadcasts {@code BASE_SET} on set-hash change; the guest reconciles its own intel
+     * manager against the last received set (idempotently, on a low-rate tick as well as on arrival).
+     *
+     * <p>Session-edge behaviour mirrors {@link #syncNpcReplication()}: a (re)start re-arms the host
+     * rebroadcast so the guest always gets a full set on a fresh connection. Nothing is torn down when
+     * the session ends — unlike NPC mirrors, mirrored bases are ordinary campaign content the guest
+     * keeps, and the suppressor's session-start cleanup handles them on the next connect.
+     */
+    private void syncBaseReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !baseReplicationStreaming) {
+            baseAuthority.reset();
+            baseReplicationStreaming = true;
+        } else if (!active && baseReplicationStreaming) {
+            baseReplicationStreaming = false;
+        }
+        if (!active) {
+            return;
+        }
+        try {
+            if (service.role() == CoopConnectionRole.HOST) {
+                baseAuthority.tickHost();
+            } else if (CoopBaseAuthority.reconcilesForRole(service.role())) {
+                baseAuthority.tickGuest();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync host-authoritative bases", ex);
+        }
+    }
+
+    private void handleBaseSet(CoopMessages.Message message) {
+        if (!CoopBaseAuthority.reconcilesForRole(service.role()) || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            baseAuthority.applySet(CoopMessages.requiredPayloadString(message, "bases"));
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply BASE_SET", ex);
         }
     }
 
