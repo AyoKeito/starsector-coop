@@ -63,3 +63,24 @@ from the new-game seed and should be covered by later host-authoritative replica
   phases.
 - If later gameplay parity testing finds additional dynamic RNG divergence, add narrowly
   scoped forks under `forks/`, not under `data/scripts/`.
+
+## Fingerprint Mutability Contract (Phase 6b)
+
+The fingerprint includes two fields of **mutable campaign state**: `marketSize` and `factionId`.
+That is deliberate. The fingerprint is re-validated on every session start, including loaded-save
+reconnects, so those fields are the tripwire proving both saves evolved identically.
+
+The contract this creates for every future phase: **any feature that mutates market size, faction
+ownership, or market existence must ship with replication of that mutation to the guest's save, or
+the next reconnect hard-rejects with no heal path.** Player colonization is the first realistic
+vector (Phase 24); decivilization is the second (Phase 13's `WORLD_DELTA(DECIV)`). The fix for a
+tripped fingerprint is always to add the missing replication, never to relax the check — splitting
+structural vs mutable fingerprints was considered in 6b and rejected for exactly that reason.
+
+On a mismatch, both sides log their full canonical fingerprint text (one line per entry, the exact
+SHA input), so the diverged entry is found by diffing the two log files. There is no diff protocol
+on purpose: the framed transport has a fixed buffer and the canonical text is ~11 KB.
+
+Related principle: seeds are **gen-time only** — runtime RNG must be replicated, never re-seeded.
+The full statement and per-script audit live in plan Phase 13; the Phase 6 audit that established it
+is folded into the plan's Phase 6b section.

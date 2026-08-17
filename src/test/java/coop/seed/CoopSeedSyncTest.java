@@ -12,11 +12,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopSeedSyncTest {
     @Test
-    void seedDataFormatsLongAsStableSeedString() {
-        CoopSeedSync.SeedData seed = CoopSeedSync.seedData(123456789L);
-
-        assertEquals(123456789L, seed.seedLong());
-        assertEquals("coop-00000000075bcd15", seed.seedString());
+    void formatSeedStringIsStableHexOfTheLong() {
+        // Direct formatSeedString coverage; the old seedData(long) factory was deleted in 6b
+        // because it built a self-inconsistent pair (everywhere else the long is SHA-derived FROM
+        // the string, so round-tripping its output produced a different long).
+        assertEquals("coop-00000000075bcd15", CoopSeedSync.formatSeedString(123456789L));
     }
 
     @Test

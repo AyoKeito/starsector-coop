@@ -14,6 +14,14 @@ public final class CoopSeedSync {
     public static final String PERSISTENT_SEED_LONG = "coop.seedLong";
     public static final String PERSISTENT_SEED_STRING = "coop.seedString";
     public static final String PERSISTENT_SECTOR_FINGERPRINT = "coop.sectorFingerprint";
+    /**
+     * Per-campaign identity (Phase 6b). Host-minted once at first seed lock, adopted by the guest,
+     * and carried in every {@code SEED_LOCK_REQUEST} for the life of the campaign. This is what
+     * distinguishes "the same campaign, resumed" from "a fresh re-roll of the same seed" — the
+     * seed string and structural fingerprint are pure functions of the seed and pass identically
+     * for both.
+     */
+    public static final String PERSISTENT_CAMPAIGN_ID = "coop.campaignId";
 
     private CoopSeedSync() {
     }
@@ -27,10 +35,6 @@ public final class CoopSeedSync {
         public SeedData withFingerprint(String fingerprint) {
             return new SeedData(seedLong, seedString, fingerprint);
         }
-    }
-
-    public static SeedData seedData(long seedLong) {
-        return new SeedData(seedLong, formatSeedString(seedLong), "");
     }
 
     public static SeedData seedDataFromSeedString(String seedString) {
@@ -97,6 +101,56 @@ public final class CoopSeedSync {
             return CoopSectorFingerprint.fingerprint(sector);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopSeedSync.class, "Unable to compute coop sector fingerprint", ex);
+            return "";
+        }
+    }
+
+    /** Stored campaign id for the loaded sector, or empty when absent / no sector. */
+    public static String currentCampaignId() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return "";
+            }
+            Object id = sector.getPersistentData().get(PERSISTENT_CAMPAIGN_ID);
+            return id == null ? "" : String.valueOf(id).trim();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSeedSync.class, "Unable to read coop campaign id", ex);
+            return "";
+        }
+    }
+
+    public static void storeCampaignId(String campaignId) {
+        String normalized = campaignId == null ? "" : campaignId.trim();
+        if (normalized.isEmpty()) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            sector.getPersistentData().put(PERSISTENT_CAMPAIGN_ID, normalized);
+            CoopLog.info(CoopSeedSync.class, "Coop campaign id stored campaignId=" + normalized);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSeedSync.class, "Unable to store coop campaign id", ex);
+        }
+    }
+
+    /**
+     * Full canonical fingerprint text for the loaded sector (one line per entry — the exact input
+     * to the SHA), or empty on failure. Dumped to the log on fingerprint mismatch so the two sides'
+     * logs can be diffed to find the diverged entry (Phase 6b).
+     */
+    public static String currentSectorFingerprintCanonical() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return "";
+            }
+            return CoopSectorFingerprint.canonical(sector);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSeedSync.class, "Unable to compute coop canonical fingerprint", ex);
             return "";
         }
     }

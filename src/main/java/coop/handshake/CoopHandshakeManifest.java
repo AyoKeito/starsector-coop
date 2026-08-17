@@ -91,7 +91,7 @@ public record CoopHandshakeManifest(
 
     private static ModEntry fromModSpec(ModSpecAPI spec) {
         LinkedHashMap<String, String> checksums = new LinkedHashMap<>();
-        checksums.put("mod_info.json", CoopChecksum.unavailable("script-sandbox"));
+        checksums.put("mod_info.json", modInfoChecksum(spec.getId()));
 
         List<String> jars = spec.getJars() == null ? List.of() : spec.getJars().stream()
                 .map(CoopHandshakeManifest::normalizePath)
@@ -109,6 +109,29 @@ public record CoopHandshakeManifest(
                 spec.getPath(),
                 jars,
                 checksums);
+    }
+
+    /**
+     * Real per-mod {@code mod_info.json} checksum via the engine's own text loader — proven safe
+     * in-game by the Phase 12b probe (drill session 2026-08-17: SUCCESS on both clients, identical
+     * hashes). One unreadable mod degrades to its own placeholder entry rather than failing the
+     * whole capture. Jar checksums stay unavailable: no engine surface hands back jar bytes and the
+     * sandbox forbids opening them directly.
+     */
+    private static String modInfoChecksum(String modId) {
+        try {
+            String text = Global.getSettings().loadText("mod_info.json", modId);
+            if (text == null || text.isBlank()) {
+                return CoopChecksum.unavailable("empty-mod-info");
+            }
+            // Normalize line endings so a CRLF/LF checkout difference does not read as a mismatch.
+            return CoopChecksum.sha256Text(text.replace("\r\n", "\n").replace('\r', '\n'));
+        } catch (Throwable ex) {
+            // Throwable, and never name the loader's checked exception type: catching it by name
+            // makes the verifier resolve a blocked i/o class in this class (the documented sandbox
+            // pattern). A throw here means this mod's file is unreadable, not that capture failed.
+            return CoopChecksum.unavailable("script-sandbox");
+        }
     }
 
     private static String captureBuildVersion() {

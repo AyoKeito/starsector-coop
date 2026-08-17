@@ -45,31 +45,25 @@ class CoopHandshakeSandboxCompatibilityTest {
     }
 
     @Test
-    void runtimeHandshakeCaptureDoesNotCallSettingsFileLoaders() throws IOException {
+    void settingsTextLoaderIsWrappedSoOneUnreadableModCannotFailCapture() throws IOException {
+        // Phase 6b: the 12b CoopChecksumProbe drill run (2026-08-17) logged SUCCESS on both clients,
+        // so SettingsAPI.loadText is proven in-game and the real mod_info.json hash is wired into
+        // the manifest; the probe itself was deleted. This test pins the safety conditions the
+        // wiring must keep: the call catches Throwable (a sandbox rejection surfaces as an Error,
+        // and naming the loader's checked exception type would make the verifier resolve a blocked
+        // i/o class), and a per-mod failure degrades to a placeholder instead of throwing out of
+        // capture().
         String source = Files.readString(
                 PROJECT_ROOT.resolve("src/main/java/coop/handshake/CoopHandshakeManifest.java"),
                 StandardCharsets.UTF_8);
 
-        assertFalse(source.contains("loadText("),
-                "SettingsAPI file loaders are not proven safe for binary jar checksums in campaign scripts");
+        assertTrue(source.contains("loadText("),
+                "the manifest is the sanctioned loadText call site since the 6b promotion");
+        assertTrue(source.contains("catch (Throwable"),
+                "the loadText call must catch Throwable, never a named checked exception");
+        assertFalse(source.contains("IOException"),
+                "naming the checked exception type resolves a blocked i/o class in the verifier");
         assertFalse(source.contains("openStream("),
                 "Open stream calls trip Starsector's script sandbox");
-    }
-
-    @Test
-    void theOnlySettingsLoaderCallSitsInTheDiagnosticProbeAndIsGated() throws IOException {
-        // Phase 12b spike: whether SettingsAPI.loadText survives the script sandbox can only be
-        // answered in-game, so the call lives in CoopChecksumProbe behind CoopDebug rather than on
-        // the handshake path. This test pins that arrangement: if someone later promotes the call
-        // into the manifest, the test above fails and they have to justify it with a session log.
-        String probe = Files.readString(
-                PROJECT_ROOT.resolve("src/main/java/coop/handshake/CoopChecksumProbe.java"),
-                StandardCharsets.UTF_8);
-
-        assertTrue(probe.contains("loadText("), "the probe is the one sanctioned loadText call site");
-        assertTrue(probe.contains("CoopDebug.diagnosticsEnabled()"),
-                "an unproven sandbox call must never run in a normal session");
-        assertTrue(probe.contains("catch (Throwable"),
-                "a sandbox rejection can surface as an Error, so the probe must catch Throwable");
     }
 }

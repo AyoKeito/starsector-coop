@@ -132,9 +132,10 @@ class CoopMessagesTest {
     }
 
     @Test
-    void seedLockRequestCarriesSeedAndHostFingerprint() {
+    void seedLockRequestCarriesSeedHostFingerprintAndCampaignId() {
         CoopMessages.Message request = CoopMessages.seedLockRequest(
-                "session-a", 9L, 10000L, 123456789L, "coop-00000000075bcd15", "fingerprint-host");
+                "session-a", 9L, 10000L, 123456789L, "coop-00000000075bcd15", "fingerprint-host",
+                "campaign-uuid-1");
 
         CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(request));
         Map<String, Object> payload = CoopMessages.decodePayload(decoded);
@@ -144,6 +145,8 @@ class CoopMessagesTest {
         assertEquals(123456789L, payload.get("seedLong"));
         assertEquals("coop-00000000075bcd15", payload.get("seedString"));
         assertEquals("fingerprint-host", payload.get("sectorFingerprint"));
+        assertEquals("campaign-uuid-1", payload.get("campaignId"));
+        assertEquals("campaign-uuid-1", CoopMessages.requiredPayloadString(decoded, "campaignId"));
         assertEquals(123456789L, CoopMessages.requiredPayloadLong(decoded, "seedLong"));
     }
 

@@ -114,12 +114,13 @@ public final class CoopMessages {
     }
 
     public static Message seedLockRequest(String sessionId, long seq, long sentAtMillis, long seedLong,
-                                          String seedString, String sectorFingerprint) {
+                                          String seedString, String sectorFingerprint, String campaignId) {
         return new Message(Type.SEED_LOCK_REQUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"seedLong\":" + seedLong + ","
                         + "\"seedString\":\"" + escapeJson(requireText(seedString, "seedString")) + "\","
                         + "\"sectorFingerprint\":\""
-                        + escapeJson(requireText(sectorFingerprint, "sectorFingerprint")) + "\"}");
+                        + escapeJson(requireText(sectorFingerprint, "sectorFingerprint")) + "\","
+                        + "\"campaignId\":\"" + escapeJson(requireText(campaignId, "campaignId")) + "\"}");
     }
 
     public static Message seedLockAck(String sessionId, long seq, long sentAtMillis, String sectorFingerprint) {

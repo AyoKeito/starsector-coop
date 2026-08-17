@@ -33,7 +33,9 @@ import coop.util.CoopLog;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -46,6 +48,8 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String CONNECT_HOST_FLAG = "coop.connectHost";
     private static final String CONNECT_PORT_FLAG = "coop.connectPort";
     private static final String PLAYER_NAME_PROPERTY = "coop.playerName";
+    /** Explicit-consent override: adopt the host's campaign id over a mismatching stored one (6b). */
+    static final String ADOPT_CAMPAIGN_ID_PROPERTY = "coop.adoptCampaignId";
 
     private final CoopNetService service;
     private final CoopSessionState sessionState;
@@ -77,6 +81,10 @@ public class CoopNetPump implements EveryFrameScript {
     private final Supplier<CoopSeedSync.SeedData> hostSeedSupplier;
     private final Supplier<String> sectorFingerprintSupplier;
     private final Supplier<String> sectorSeedStringSupplier;
+    private final Supplier<String> storedCampaignIdSupplier;
+    private final Consumer<String> campaignIdStore;
+    private final BooleanSupplier adoptCampaignIdSupplier;
+    private final Supplier<String> canonicalFingerprintSupplier;
     private final CoopTimeLock timeLock;
     private final CoopSharedPauseCoordinator pauseCoordinator = new CoopSharedPauseCoordinator();
     // Host: the effective pause we applied last frame, used to detect vanilla auto-pause edges (the
@@ -126,6 +134,24 @@ public class CoopNetPump implements EveryFrameScript {
                        Supplier<String> sectorFingerprintSupplier,
                        Supplier<String> sectorSeedStringSupplier,
                        CoopTimeLock timeLock) {
+        this(service, sessionState, clockMillis, manifestSupplier, ironModeSupplier,
+                hostSeedSupplier, sectorFingerprintSupplier, sectorSeedStringSupplier, timeLock,
+                CoopSeedSync::currentCampaignId,
+                CoopSeedSync::storeCampaignId,
+                () -> Boolean.parseBoolean(System.getProperty(ADOPT_CAMPAIGN_ID_PROPERTY)),
+                CoopSeedSync::currentSectorFingerprintCanonical);
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
+                       Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier,
+                       Supplier<CoopSeedSync.SeedData> hostSeedSupplier,
+                       Supplier<String> sectorFingerprintSupplier,
+                       Supplier<String> sectorSeedStringSupplier,
+                       CoopTimeLock timeLock,
+                       Supplier<String> storedCampaignIdSupplier,
+                       Consumer<String> campaignIdStore,
+                       BooleanSupplier adoptCampaignIdSupplier,
+                       Supplier<String> canonicalFingerprintSupplier) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
@@ -134,6 +160,10 @@ public class CoopNetPump implements EveryFrameScript {
         this.hostSeedSupplier = Objects.requireNonNull(hostSeedSupplier, "hostSeedSupplier");
         this.sectorFingerprintSupplier = Objects.requireNonNull(sectorFingerprintSupplier, "sectorFingerprintSupplier");
         this.sectorSeedStringSupplier = Objects.requireNonNull(sectorSeedStringSupplier, "sectorSeedStringSupplier");
+        this.storedCampaignIdSupplier = Objects.requireNonNull(storedCampaignIdSupplier, "storedCampaignIdSupplier");
+        this.campaignIdStore = Objects.requireNonNull(campaignIdStore, "campaignIdStore");
+        this.adoptCampaignIdSupplier = Objects.requireNonNull(adoptCampaignIdSupplier, "adoptCampaignIdSupplier");
+        this.canonicalFingerprintSupplier = Objects.requireNonNull(canonicalFingerprintSupplier, "canonicalFingerprintSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
         this.timeLock.setPauseCoordinator(pauseCoordinator);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
@@ -522,6 +552,7 @@ public class CoopNetPump implements EveryFrameScript {
                     ? sectorFingerprintSupplier.get()
                     : seed.sectorFingerprint();
             CoopSeedSync.SeedData lockedSeed = seed.withFingerprint(fingerprint);
+            String campaignId = resolveHostCampaignId();
             sessionState.recordSeedLock(lockedSeed.seedLong(), lockedSeed.seedString(), lockedSeed.sectorFingerprint());
             CoopSeedSync.storeCurrentSectorPersistentData(lockedSeed);
 
@@ -531,17 +562,58 @@ public class CoopNetPump implements EveryFrameScript {
                     clockMillis.getAsLong(),
                     lockedSeed.seedLong(),
                     lockedSeed.seedString(),
-                    lockedSeed.sectorFingerprint());
+                    lockedSeed.sectorFingerprint(),
+                    campaignId);
             service.send(request);
             seedLockRequestSent = true;
             log("outbound", request);
             CoopLog.info(CoopNetPump.class,
                     "Coop seed lock requested seedLong=" + lockedSeed.seedLong()
                             + " seedString=" + lockedSeed.seedString()
-                            + " sectorFingerprint=" + lockedSeed.sectorFingerprint());
+                            + " sectorFingerprint=" + lockedSeed.sectorFingerprint()
+                            + " campaignId=" + campaignId);
         } catch (RuntimeException ex) {
             sessionState.rejectHandshake("seedLock: " + ex.getMessage());
             CoopLog.warn(CoopNetPump.class, "Failed to create coop seed lock request", ex);
+        }
+    }
+
+    /**
+     * The campaign's identity for the seed lock (Phase 6b): the stored id when the campaign has one,
+     * otherwise minted once and stored. The same id then rides every {@code SEED_LOCK_REQUEST} for
+     * the life of the campaign, across sessions and saves — it is what distinguishes "this campaign,
+     * resumed" from "a fresh re-roll of the same seed", which the seed string and structural
+     * fingerprint cannot (both are pure functions of the seed).
+     */
+    private String resolveHostCampaignId() {
+        String stored = storedCampaignIdSupplier.get();
+        if (stored != null && !stored.trim().isEmpty()) {
+            return stored.trim();
+        }
+        String minted = UUID.randomUUID().toString();
+        campaignIdStore.accept(minted);
+        CoopLog.info(CoopNetPump.class, "Coop campaign id minted campaignId=" + minted);
+        return minted;
+    }
+
+    /**
+     * Logs the full canonical fingerprint text (one line per entry, the exact SHA input) so the two
+     * sides' logs can be diffed to find which entry diverged. Deliberately unconditional — a failed
+     * session start is rare and this is the only diagnosable artifact it leaves (Phase 6b; no diff
+     * protocol on purpose: the framed transport has a fixed buffer and the canonical is ~11 KB).
+     */
+    private void dumpCanonicalFingerprint(String context) {
+        try {
+            String canonical = canonicalFingerprintSupplier.get();
+            if (canonical == null || canonical.trim().isEmpty()) {
+                CoopLog.warn(CoopNetPump.class, "Coop fingerprint canonical unavailable (" + context + ")");
+                return;
+            }
+            int entries = canonical.split("\n").length;
+            CoopLog.info(CoopNetPump.class,
+                    "Coop fingerprint canonical (" + context + ", " + entries + " entries):\n" + canonical);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to dump coop canonical fingerprint", ex);
         }
     }
 
@@ -593,13 +665,24 @@ public class CoopNetPump implements EveryFrameScript {
         long seedLong = CoopMessages.requiredPayloadLong(message, "seedLong");
         String seedString = CoopMessages.requiredPayloadString(message, "seedString");
         String hostFingerprint = CoopMessages.requiredPayloadString(message, "sectorFingerprint");
+        String hostCampaignId = CoopMessages.requiredPayloadString(message, "campaignId");
         String guestSeedString = sectorSeedStringSupplier.get();
         String guestFingerprint = sectorFingerprintSupplier.get();
         CoopLog.info(CoopNetPump.class,
                 "Coop seed lock comparing hostSeedString=" + seedString
                         + " guestSeedString=" + guestSeedString
                         + " hostFingerprint=" + hostFingerprint
-                        + " guestFingerprint=" + guestFingerprint);
+                        + " guestFingerprint=" + guestFingerprint
+                        + " hostCampaignId=" + hostCampaignId);
+
+        // Identity first (Phase 6b check order: campaignId -> seedString -> fingerprint), so a
+        // wrong save produces the clear "not this campaign" message instead of a confusing state
+        // diff. The id distinguishes this campaign from a fresh re-roll of the same seed, which
+        // passes both downstream checks identically.
+        if (!checkOrAdoptCampaignId(message, hostCampaignId)) {
+            return;
+        }
+
         String seedMismatch = CoopSeedSync.seedStringMismatch(seedString, guestSeedString);
         if (!seedMismatch.isEmpty()) {
             sessionState.rejectHandshake(seedMismatch);
@@ -625,6 +708,7 @@ public class CoopNetPump implements EveryFrameScript {
             service.send(reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + mismatch);
+            dumpCanonicalFingerprint("guest fingerprint comparison failed");
             return;
         }
 
@@ -641,6 +725,46 @@ public class CoopNetPump implements EveryFrameScript {
                 "Coop seed lock accepted seedLong=" + seedLong
                         + " seedString=" + seedString
                         + " sectorFingerprint=" + hostFingerprint);
+    }
+
+    /**
+     * Guest half of the campaign-identity check. Returns true when the seed-lock flow may continue.
+     * No stored id (first session, or a pre-6b save) adopts the host's and continues; a matching
+     * stored id continues; a mismatch rejects unless the explicit-consent override
+     * {@code -Dcoop.adoptCampaignId=true} is set — no silent adoption, because a differing id means
+     * the saves genuinely belong to different campaigns.
+     */
+    private boolean checkOrAdoptCampaignId(CoopMessages.Message message, String hostCampaignId) {
+        String stored = storedCampaignIdSupplier.get();
+        stored = stored == null ? "" : stored.trim();
+        if (stored.equals(hostCampaignId)) {
+            return true;
+        }
+        if (stored.isEmpty()) {
+            campaignIdStore.accept(hostCampaignId);
+            CoopLog.info(CoopNetPump.class, "Coop campaign id adopted campaignId=" + hostCampaignId);
+            return true;
+        }
+        if (adoptCampaignIdSupplier.getAsBoolean()) {
+            campaignIdStore.accept(hostCampaignId);
+            CoopLog.warn(CoopNetPump.class, "Coop campaign id adopted by explicit override ("
+                    + ADOPT_CAMPAIGN_ID_PROPERTY + "=true): host=" + hostCampaignId
+                    + " replaced stored=" + stored + "; state divergence is knowingly accepted");
+            return true;
+        }
+        String reason = "campaignId: host=" + hostCampaignId + " guest=" + stored
+                + "; guest save is not from this coop campaign. To adopt the host campaign anyway,"
+                + " relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true";
+        sessionState.rejectHandshake(reason);
+        CoopMessages.Message reject = CoopMessages.seedLockReject(
+                message.sessionId(),
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                reason);
+        service.send(reject);
+        log("outbound", reject);
+        CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
+        return false;
     }
 
     private void handleSeedLockAck(CoopMessages.Message message) {
@@ -660,6 +784,7 @@ public class CoopNetPump implements EveryFrameScript {
             service.send(reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected after guest ACK: " + mismatch);
+            dumpCanonicalFingerprint("host rejecting after guest ack");
             return;
         }
 
@@ -671,6 +796,10 @@ public class CoopNetPump implements EveryFrameScript {
         String reason = CoopMessages.requiredPayloadString(message, "reason");
         sessionState.rejectHandshake(reason);
         CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
+        // Both sides dump on a fingerprint reject so the two logs can be diffed entry-for-entry.
+        if (reason.contains("sectorFingerprint")) {
+            dumpCanonicalFingerprint("received seed-lock reject");
+        }
     }
 
     private void handleTimeSnapshot(CoopMessages.Message message) {
