@@ -43,6 +43,7 @@ public final class CoopNpcFleetReplicator {
     private final CoopNetService service;
     private final CoopSessionState sessionState;
     private final LongSupplier clockMillis;
+    private final CoopGuestRouteMaterializer guestRoutes = new CoopGuestRouteMaterializer();
 
     private long nextSetAtMillis;
     private long nextMotionAtMillis;
@@ -63,6 +64,11 @@ public final class CoopNpcFleetReplicator {
         if (sector == null) {
             return;
         }
+        // Before sampling the population: vanilla only turns RouteManager routes into real fleets near
+        // the *player* fleet, which on the host is never the guest. Extend that presence to the guest
+        // mirror so a guest-only system is actually populated (and so the fleets survive the host's
+        // distance-based despawn) before this tick snapshots and ships the set.
+        guestRoutes.tick(sector, now);
         if (now >= nextSetAtMillis) {
             try {
                 sendSetIfChanged(sector, now);
@@ -87,6 +93,7 @@ public final class CoopNpcFleetReplicator {
     public void reset() {
         lastSetHash = "";
         lastFleetCount = 0;
+        guestRoutes.reset();
     }
 
     public String lastSetHash() {
