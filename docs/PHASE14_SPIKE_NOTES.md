@@ -183,10 +183,59 @@ if the pre-0.8 reading is right.
   host-side presence extension so route materialization also happens around the guest mirror (needs
   RouteManager surface research). Owner: post-spike fix, Phase 9/13 code.
 
-## Verdict pending in-game test
+## Verdicts (in-game, 2026-08-19, two-instance session, new-game seed MN-1234567890123456789)
 
-Nothing below has run in a live session yet. Each subsection lists the log lines to grep and the
-pass/fail call.
+- **Spike (a) customs dialog against a mirror: PASS.** `toff` variant, Hegemony "Fast Picket" mirror,
+  dist 34.8 su. `showInteractionDialog returned=true`, `plugin=FleetInteractionDialogPluginImpl`; the
+  full vanilla running-dark confrontation rendered on the guest (hail text, rep −2 faction / −3
+  commander applied, Allow-the-scan / story-point / refuse options); the cargo scan ran against the
+  guest's real cargo and closed cleanly. Bonus: the faction rep penalty propagated guest→host through
+  the existing Phase 12 `GUEST_REP_DELTA` path and converged on both sides — the shared-rep half of the
+  customs acceptance already works with no new code.
+- **Spike (b) `startBattle` versus a mirror: PASS.** Guest opened a battle against a 12-ship pirate
+  "Raiders" mirror via `BattleCreationContext(player, ATTACK, mirror, ATTACK)`: real deployment screen,
+  pilotable battle (user fought and retreated), clean return to campaign. The coop session survived the
+  ~2.3-minute combat gap — the TCP backlog (5 rep snapshots) flushed in one burst on return, no
+  disconnect. (Harness note: the "back in campaign after 33ms" line was one queued-transition frame
+  early; fixed by deferring the report 2 s.)
+- **Spike (c) battle-eject timing: MOOT — superseded by a larger engine finding.** Vanilla never forms
+  an NPC-vs-mirror battle at all:
+  - Hostiles *see* the mirror (`seesMirror=true`) and *judge* it normally
+    (`pickEncounterOption(null, mirror, true)` returns ENGAGE/HOLD/DISENGAGE tracking fleet strength),
+    but never retask to hunt it — assignments stay PATROL_SYSTEM/GO_TO_LOCATION, never
+    INTERCEPT→mirror. Vanilla detect→chase retasking is player-fleet machinery, not generic hostility.
+  - An ENGAGE-picking hostile Scout crossed the mirror at 10–14 su: no battle formed.
+  - The `hunt` probe injected `addAssignmentAtStart(INTERCEPT, mirror, 2f, null)` on an ENGAGE-picking
+    Corsair: it genuinely hunted (`targetingMirror=true`, closed 389→17 su at up to 151 su/s), reached
+    the mirror, the assignment completed, and it reverted to patrol. **No battle, no autoresolve, zero
+    ejects across the whole session.** Likely cause: NPC-vs-NPC encounter formation is negotiated by
+    both fleets' AIs, and the mirror's AI is inert.
+  - `battle.leave()` timing therefore remains unverified and does not need to be verified: the race the
+    plan worried about (autoresolve beating the handoff) cannot occur.
+  - Numbers harvested for the trigger threshold: observed closing speeds 57–193 su/s for pirate
+    chasers (up to 340 su/s for a burn-17 patrol); no engine contact range exists vs the mirror, so the
+    ENGAGE_GUEST trigger distance is a design choice, not a race — ~2 s at max observed closing speed
+    suggests a 400–700 su default, Phase 20 re-derive note unchanged.
+
+### Design consequences for Phase 14 (fold into the plan before implementing)
+
+1. **The pre-contact handoff race, contact backstop, and battle-window shielding shrink to almost
+   nothing.** No engine battle can form against the mirror, so silent autoresolve is a non-threat.
+   Keep a cheap `getBattle() != null → leave()` assertion in the watcher as belt-and-braces, but it is
+   not load-bearing and needs no timing guarantee.
+2. **The watcher becomes the initiator, not a supervisor.** `CoopNpcThreatWatcher` detects hostile +
+   proximity + `pickEncounterOption(...) == ENGAGE` (all three proven available and correct) and fires
+   `ENGAGE_GUEST` itself at a chosen trigger distance.
+3. **Visible pursuit must be synthesized and is proven to work:** injecting
+   `INTERCEPT→mirror` makes a vanilla hostile genuinely chase (and the completed intercept is harmless).
+   The watcher injects the chase for fidelity, then fires `ENGAGE_GUEST` at the trigger distance.
+4. **12b's permanent ignore flag is removable with less risk than planned** — its main job (preventing
+   autoresolve contact) protects against a threat that empirically does not exist. Its removal still
+   needs the customs/hassle interaction checked (spike a cleared the flag manually before opening).
+
+## Log-line reference (what each spike greps for)
+
+The subsections below list the log lines and the original pass/fail calls, kept for re-runs.
 
 ### Spike (a): customs/inspection rules dialog, guest side
 
