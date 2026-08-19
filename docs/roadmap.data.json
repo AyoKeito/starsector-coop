@@ -42,16 +42,9 @@
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next build: finish Phase 13",
+      "head": "Next build: Phase 14",
       "state": "you are here",
-      "body": "Everything up through <span class=\"rp\" data-jump=\"6b\">6b</span> is built and smoke-verified in live two-instance sessions (2026-08-17). The build order continues with <span class=\"rp\" data-jump=\"13\">Phase 13</span> — the remaining world-authority half of the PARTIAL."
-    },
-    {
-      "sev": "revisit",
-      "sevLabel": "revisit",
-      "head": "Phase 13 is PARTIAL",
-      "state": "needs a revisit",
-      "body": "Procgen RNG forks, <code>CoopRandom</code>, and deep-space determinism are <b>DONE</b>. Remaining: extend the suppressor to base / encounter / deciv / war managers, add <code>WORLD_DELTA</code> subtypes (DECIV / OBJECTIVE_OWNERSHIP / GATE_ACTIVATED), host-authoritative pirate/Pather bases (<code>CoopBaseAuthority</code>), and write <code>docs/starsector-runtime-limitations.md</code>. See <span class=\"rp\" data-jump=\"13\">P13</span>."
+      "body": "Everything up through <span class=\"rp\" data-jump=\"13\">Phase 13</span> is built and smoke-verified in live two-instance sessions (13 on 2026-08-19: month-long soak, extended suppression, world-delta skeleton mutations incl. a live A&rarr;B&rarr;A objective re-flip, host-authoritative bases with full reconstruction). The build order continues with <span class=\"rp\" data-jump=\"14\">Phase 14</span> — solo own-fleet combat + the battle-status spectator bridge."
     },
     {
       "sev": "scope",
@@ -504,7 +497,7 @@
       "title": "Dynamic Terrain Authority + Random Fork List",
       "theme": "terrain",
       "track": "v1",
-      "status": "partial",
+      "status": "built",
       "summary": "Makes world content deterministic via RNG forks, then extends guest suppression and host-authoritative bases for the remaining runtime-random managers.",
       "introduces": [
         "CoopRandom",
