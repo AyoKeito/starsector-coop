@@ -189,6 +189,20 @@ if the pre-0.8 reading is right.
   `DisposablePirateFleetManager`) and `SourceBasedFleetManager` spawn near the player by design and
   still ignore the guest — guest-only systems get route traffic (patrols/traders/raids) but not
   player-proximity ambient spawns.
+- **2026-08-19, follow-up: materialized fleets teleported erratically (60-frame stride).** Root cause
+  (decompile-confirmed, `CampaignEngine.advance` ~line 1062): every location that is not the player's
+  current location advances only once per 60 frames with dt×60 — ~1-second movement strides, and the
+  single-step integrator overshoots turns, which reads as random-direction jumps. NOT fixable at the
+  source: the stride is a local constant, and detaching the system (`removeStarSystem` + manual
+  advance) risks writing saves with the system missing. Fixed as a degraded mode (commit 2404617):
+  `CoopNpcFleetMotionSmoother` interpolates host-side across the measured stride for non-current
+  locations only (host-current locations bypass it); guest sees continuous motion ~1 stride behind
+  truth. Residual: coarse-polygon orbits at ~1 s integration remain. Churn diagnostic added
+  (`Coop route-fleet churn ... goneSinceLastPass=K`, debug-gated) — persistent K>0 would indicate the
+  separate respawn-recycling cause (RouteFleetAssignmentAI randomizes placement up to 1000 su).
+  **Latent gaps found on the way:** `BaseAssignmentAI.canTakeAction()` gates on
+  `RouteManager.isPlayerInSpawnRange` — patrols near the guest never raid, capture objectives, or
+  build; and `CampaignFleet` view state stays cleared for never-host-visible fleets (cosmetic).
 
 ## Verdicts (in-game, 2026-08-19, two-instance session, new-game seed MN-1234567890123456789)
 
