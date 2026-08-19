@@ -42,16 +42,16 @@
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next build: Phase 15",
+      "head": "Next build: Phase 16",
       "state": "you are here",
-      "body": "Everything up through <span class=\"rp\" data-jump=\"14\">Phase 14</span> is built and smoke-verified in live two-instance sessions (14 on 2026-08-19: all five combat scenarios, plus the same-day RouteManager fork, full-fidelity guest-system drive, and engagement hardening). The build order continues with <span class=\"rp\" data-jump=\"15\">Phase 15</span> — combat results + campaign reconciliation. Until it lands there is a known transient: fleets the guest defeats stay undamaged in the host's authoritative set, so survivors re-engage with unearned confidence (the ENGAGE_GUEST pacing now relies on per-scan <code>pickEncounterOption</code>, which only sobers up once battle results reconcile)."
+      "body": "Everything up through <span class=\"rp\" data-jump=\"15\">Phase 15</span> plus the Phase 14b pursuit/sensor-fidelity package is built and smoke-verified in live two-instance sessions (2026-08-19: battle reconciliation both directions incl. the direct host-local path, vanilla-signal pursuit, customs cat-and-mouse, post-defeat grace, and the mirror-roster fix — engine-inflated fleets no longer mirror as placeholder Nebulas). The build order continues with <span class=\"rp\" data-jump=\"16\">Phase 16</span> — coordinated saves + guest snapshot. One deferred smoke item rides along: the pursuit-<em>escape</em> scenario (outrun a hostile until it gives up) was not run on 2026-08-19; run it during the Phase 16 smoke."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Parked Phase 14 fallout (cosmetic/UX)",
       "state": "documented, deferred",
-      "body": "Intermittent grey (unidentified) fleets on the guest after the detectability operand fix (user chose to document, not dig); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); the <code>MARKET_OPEN for unknown market</code> warn on uncolonized/procgen planets (skip quietly — 12c follow-up); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). Full list with suspects: <code>PHASE14_SPIKE_NOTES.md</code> \"Known issues\"."
+      "body": "Synthesized customs pursuit reads below vanilla quality (works — chase/give-up/stand-down/catch all pass — but motion is coarser than the engine's own steering); mirrors wear clean stock loadouts where the host's fleet is D-modded (slightly stronger guest battles); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). Grey-fleet flicker and the unknown-market warn were fixed 2026-08-19 by 14b. Full list with suspects: <code>PHASE14_SPIKE_NOTES.md</code> \"Known issues\"."
     },
     {
       "sev": "risk",
@@ -554,12 +554,35 @@
       "note": "No rendered spectator, no 60Hz stream, no combat speed lock, no joint combat (those cancelled/deferred to Phase 22)"
     },
     {
+      "id": "14b",
+      "num": "14b",
+      "title": "Vanilla Pursuit + Sensor Fidelity",
+      "theme": "combat",
+      "track": "v1",
+      "status": "built",
+      "summary": "Hostiles hunt the guest only when vanilla's own pursuit AI decides to (INTERCEPT injection deleted; near-contact catch); full sensor-profile streaming makes stealth work in both directions; synthesized patrol customs cat-and-mouse; post-defeat doNotAttack grace; mirror-roster fix (engine-inflated fleets no longer mirror as placeholder Nebulas).",
+      "introduces": [
+        "vanilla-signal pursuit gate",
+        "CoopSensorSync profile streaming",
+        "customs inspection pursuit",
+        "post-defeat doNotAttack grace",
+        "roster-diff diagnostic",
+        "stock-variant-id streaming"
+      ],
+      "residue": [
+        "pursuit-escape smoke scenario (deferred by user; run with Phase 16 smoke)",
+        "customs pursuit motion reads below vanilla quality (parked)",
+        "mirrors wear clean stock loadouts vs host D-mods (parked)"
+      ],
+      "note": "Fallback synthesized-pursuit model exists behind -Dcoop.pursuit.synthesized (never needed in smoke); also fixed grey-fleet flicker (double-applied terrain mods) and the presence indicator's profile clobber that made stealth arithmetically impossible"
+    },
+    {
       "id": "15",
       "num": 15,
       "title": "Combat Results + Campaign Reconciliation",
       "theme": "combat",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Engaging client keeps its own spoils; battle campaign deltas (dead NPC fleets, shared rep) reconcile back into host authoritative state.",
       "introduces": [
         "CoopBattleResultReconciler",
