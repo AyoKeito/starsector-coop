@@ -9,6 +9,7 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopCampaignReplicator;
+import coop.combat.CoopCombatSpike;
 import coop.fleet.CoopFleetMirror;
 import coop.fleet.CoopFleetMirrorRegistry;
 import coop.fleet.CoopFleetSnapshot;
@@ -76,6 +77,7 @@ public class CoopNetPump implements EveryFrameScript {
     private String lastNpcDebug;
     private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
+    private final CoopCombatSpike combatSpike = new CoopCombatSpike();
     private final CoopCampaignReplicator campaignReplicator;
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
@@ -214,6 +216,7 @@ public class CoopNetPump implements EveryFrameScript {
         syncBaseReplication();
         syncInteractionGate();
         debugDialogState();
+        tickCombatSpike();
         syncCampaignReplicator();
         campaignReplicator.tickWorldDeltas();
         campaignReplicator.tickOrbitSync();
@@ -1572,6 +1575,20 @@ public class CoopNetPump implements EveryFrameScript {
             }
         } catch (RuntimeException | LinkageError ex) {
             // diagnostics must never disrupt the pump
+        }
+    }
+
+    /**
+     * Phase 14 spike harness (throwaway). Inert unless {@link CoopDebug#diagnosticsEnabled()} and one
+     * of the per-spike sector memory flags is set; see {@link CoopCombatSpike} and
+     * {@code docs/PHASE14_SPIKE_NOTES.md}.
+     */
+    private void tickCombatSpike() {
+        try {
+            combatSpike.maybeRun(Global.getSector(), service.role() == CoopConnectionRole.HOST,
+                    isGameplaySessionActive(), clockMillis.getAsLong());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Phase 14 spike harness failed", ex);
         }
     }
 
