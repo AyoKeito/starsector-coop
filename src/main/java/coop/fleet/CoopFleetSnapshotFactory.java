@@ -302,6 +302,11 @@ public final class CoopFleetSnapshotFactory {
         }
     }
 
+    /**
+     * {@code SettingsAPI} has no {@code doesHullExist} counterpart to {@code doesVariantExist}, and
+     * {@code getHullSpec} <em>throws</em> {@code "Ship hull spec [x] not found!"} for an unknown id
+     * rather than returning null — so the catch is the existence test, not defensive padding.
+     */
     private static boolean hullExists(String hullId) {
         try {
             return Global.getSettings().getHullSpec(hullId) != null;

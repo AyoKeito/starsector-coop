@@ -59,29 +59,32 @@ class CoopFleetMirrorTest {
     @Test
     void aResolvableVariantIsUsedDirectly() {
         assertEquals("falcon_Assault", CoopFleetMirror.resolveCreationId("falcon_Assault",
-                "falcon_default_D", installHas("falcon_Assault"), installHas("falcon")));
+                "falcon_default_D", installHas("falcon_Assault", "falcon_Hull")));
     }
 
     @Test
     void anUnknownVariantFallsToTheHullInsteadOfBeingAskedFor() {
         // Asking for it is the bug: createFleetMember does not reject an unknown variant id, it
-        // substitutes a placeholder ship, so the exception-driven fallback chain never fired.
+        // substitutes settings.json's errorShipVariant, so the exception-driven chain never fired.
         assertEquals("falcon_default_D_Hull", CoopFleetMirror.resolveCreationId("905d_3",
-                "falcon_default_D", installHas("falcon_Assault"),
-                installHas("falcon", "falcon_default_D")));
+                "falcon_default_D", installHas("falcon_Hull", "falcon_default_D_Hull")));
     }
 
     @Test
-    void anUnknownDHullFallsToItsNonDParent() {
+    void aDHullWithNoHullVariantFallsToItsNonDParent() {
+        // ShipHullSpecLoader registers the generated <id>_default_D HULL but builds the auto
+        // "<id>_Hull" VARIANT from the parent spec only, so falcon_default_D_Hull does not exist
+        // even though the falcon_default_D hull does. Gating this branch on the hull spec instead of
+        // the variant id would ask for it and get another silent placeholder.
         assertEquals("falcon_Hull", CoopFleetMirror.resolveCreationId("905d_3", "falcon_default_D",
-                installHas(), installHas("falcon")));
+                installHas("falcon_Hull")));
     }
 
     @Test
     void nothingResolvableMeansNoShipRatherThanAPlaceholder() {
         assertEquals("", CoopFleetMirror.resolveCreationId("905d_3", "falcon_default_D",
-                installHas(), installHas()));
-        assertEquals("", CoopFleetMirror.resolveCreationId("", "", installHas(), installHas()));
+                installHas()));
+        assertEquals("", CoopFleetMirror.resolveCreationId("", "", installHas()));
     }
 
     @Test

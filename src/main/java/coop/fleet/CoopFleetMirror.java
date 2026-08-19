@@ -595,7 +595,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
      */
     private FleetMemberAPI createMember(CoopFleetSnapshot.Member member) {
         String creationId = resolveCreationId(member.variantId(), member.hullId(),
-                CoopFleetMirror::variantExists, CoopFleetMirror::hullExists);
+                CoopFleetMirror::variantExists);
         if (creationId.isEmpty()) {
             CoopLog.warn(CoopFleetMirror.class, "Coop mirror member has no variant or hull id this"
                     + " install can resolve, skipping it: coopFleetId=" + coopFleetId
@@ -633,23 +633,32 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * Which id to hand {@code createFleetMember}: the streamed variant if this install has it, else
      * the streamed hull's empty {@code "_Hull"} variant, else the hull's non-D parent's, else nothing.
      *
-     * <p>The hull branches check the <em>hull spec</em>, not the {@code "_Hull"} variant id: those
-     * empty variants are synthesised on demand and are not in the spec store to be looked up.
+     * <p><b>Every candidate is checked as a <em>variant</em> id, including the {@code "_Hull"} ones.</b>
+     * That is not belt-and-braces: the auto {@code "<hullId>_Hull"} variants are built at load time
+     * and, critically, a generated D hull does <em>not</em> get one. {@code ShipHullSpecLoader} clones
+     * the parent spec into {@code <id>_default_D} and registers the hull
+     * ({@code ShipHullSpecLoader.o00000}, CFR :113-128) but both call sites build the auto
+     * {@code "_Hull"} variant from the <em>parent</em> spec (CFR :405 and
+     * {@code ShipHullSpreadsheetLoader} CFR :190). So {@code falcon_default_D} is a real hull with no
+     * {@code falcon_default_D_Hull} variant behind it — asking for one is another silent Nebula.
+     * Checking the hull spec instead would happily wave that through; checking
+     * {@code doesVariantExist} is what {@code FleetMember} itself will look up.
      */
     static String resolveCreationId(String variantId, String hullId,
-                                    java.util.function.Predicate<String> variantExists,
-                                    java.util.function.Predicate<String> hullExists) {
+                                    java.util.function.Predicate<String> variantExists) {
         if (variantId != null && !variantId.isEmpty() && variantExists.test(variantId)) {
             return variantId;
         }
         if (hullId == null || hullId.isEmpty()) {
             return "";
         }
-        if (hullExists.test(hullId)) {
-            return hullId + "_Hull";
+        for (String candidate : List.of(hullId, CoopFleetSnapshotFactory.baseHullId(hullId))) {
+            String hullVariantId = candidate + "_Hull";
+            if (!candidate.isEmpty() && variantExists.test(hullVariantId)) {
+                return hullVariantId;
+            }
         }
-        String base = CoopFleetSnapshotFactory.baseHullId(hullId);
-        return !base.equals(hullId) && hullExists.test(base) ? base + "_Hull" : "";
+        return "";
     }
 
     /**
@@ -679,17 +688,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
     }
 
+    /**
+     * {@code doesVariantExist} is a plain null-check over the spec store plus the campaign's saved
+     * variants and never throws for a missing id — unlike {@code getHullSpec}, which throws
+     * {@code "Ship hull spec [x] not found!"}. The catch is for the campaign-less case: the lookup
+     * dereferences {@code CampaignEngine.getInstance()} unconditionally.
+     */
     private static boolean variantExists(String variantId) {
         try {
             return Global.getSettings().doesVariantExist(variantId);
-        } catch (RuntimeException | LinkageError ignored) {
-            return false;
-        }
-    }
-
-    private static boolean hullExists(String hullId) {
-        try {
-            return Global.getSettings().getHullSpec(hullId) != null;
         } catch (RuntimeException | LinkageError ignored) {
             return false;
         }

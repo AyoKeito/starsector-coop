@@ -316,6 +316,18 @@ if the pre-0.8 reading is right.
   came back (`isPlausibleHull`, compared on the base hull so losing only the `_default_D` suffix is
   fine), discarding and loudly logging any member the engine substituted.
 
+  **Trap inside the fallback, worth knowing before touching this code.** Every candidate is validated
+  as a *variant* id, including the `"<hullId>_Hull"` ones, and the obvious-looking alternative — check
+  the hull spec — is wrong. `ShipHullSpecLoader` clones a parent spec into `<id>_default_D` and
+  registers the **hull** (CFR `:113-128`), but both call sites build the auto `"_Hull"` **variant**
+  from the *parent* spec (`ShipHullSpecLoader` CFR `:405`, `ShipHullSpreadsheetLoader` CFR `:190`). So
+  `falcon_default_D` is a real registered hull with no `falcon_default_D_Hull` variant behind it, and
+  gating the branch on `getHullSpec` would wave through an id that lands right back on the Nebula.
+  Relevant API asymmetry while you are here: `doesVariantExist` is a null-check that never throws,
+  whereas `getHullSpec` **throws** `"Ship hull spec [x] not found!"` for an unknown id, and
+  `SettingsAPI` offers no `doesHullExist`; both variant lookups also dereference
+  `CampaignEngine.getInstance()` unconditionally, so they NPE outside a loaded campaign.
+
   Ruled out on the way: fleet-id reuse — `CampaignEngine.genUID()` is a persisted monotonic hex
   counter and the only `setId` on a fleet in the whole engine is `CampaignTutorialScript:518`.
 
