@@ -149,12 +149,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
         mirrorFleet = Global.getFactory().createEmptyFleet(factionId, label, true);
         mirrorFleet.setAIMode(true);
         mirrorFleet.setNoAutoDespawn(true);
-        // INTERIM (Phase 12b): without this flag the engine's fleet-targeting AI can pick a mirror
-        // as a target and run silent autoresolve rounds against it (Battle.doAutoresolveRound has no
-        // veto hook), corrupting a fleet whose real owner was never in a battle. Cost: host NPCs also
-        // stop pursuing the mirror. Phase 14 removes the permanent flag and replaces it with
-        // contact-time protection, restoring vanilla pursuit.
-        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
+        // Phase 14 removed 12b's interim FLEET_IGNORED_BY_OTHER_FLEETS here. That flag only suppresses
+        // other fleets' AI target SELECTION ($cfai_ignoredByOtherFleets) and is never consulted by
+        // battle formation, so it bought no protection against autoresolve while it did cost the
+        // mirror all hostile attention. The real protections are the per-frame engagement shield
+        // (assertEngagementShield -> canBeEngaged() false) plus the flag below, with
+        // CoopNpcThreatWatcher's battle-eject as the recovery for the pull-in path.
         // The battle PULL-IN path bypasses canBeEngaged() entirely: FleetInteractionDialogPluginImpl
         // .pullInNearbyFleets runs whenever the host opens any fleet dialog and joins nearby fleets
         // honoring only THIS flag (the ignoredByOtherFleets one above is never consulted there).
@@ -178,9 +178,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         mirrorFleet = Global.getFactory().createEmptyFleet(factionId, label, true);
         mirrorFleet.setAIMode(true);
         mirrorFleet.setNoAutoDespawn(true);
-        // See the player-mirror path above: interim Phase 12b protection against the engine's fleet
-        // AI targeting a mirror and silently autoresolving against it. Removed in Phase 14.
-        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
+        // See the player-mirror path above: 12b's interim FLEET_IGNORED_BY_OTHER_FLEETS was removed
+        // in Phase 14 (it gates AI target selection, never battle formation).
         // See the player-mirror path: only this flag is honored by the dialog battle pull-in
         // (FleetInteractionDialogPluginImpl.pullInNearbyFleets), which never calls canBeEngaged().
         mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);

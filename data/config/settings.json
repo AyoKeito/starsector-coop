@@ -1,6 +1,8 @@
 {
 	"plugins":{
-		"newGameSectorProcGen":"coop.seed.CoopSectorProcGen"
+		"newGameSectorProcGen":"coop.seed.CoopSectorProcGen",
+		"comment_coopBattleStatusPlugin":"Phase 14: the only mod code that runs inside a battle. Campaign EveryFrameScripts do not advance in the COMBAT state, so this EveryFrameCombatPlugin is what detects battle start, captures BATTLE_STATUS at 2.5 Hz, and flushes the outbound TCP queue while the pump is frozen. Inert unless a coop session is active (see CoopBattleBridge.onCombatFrame).",
+		"coopBattleStatusPlugin":"coop.combat.CoopBattleStatusCombatPlugin"
 	},
 	"comment_campaignSpeedupMult":"Coop time-lock: campaign fast-forward (hold-Shift) is a local 2x clock loop inside obfuscated CampaignState that cannot be mirrored to the guest or blocked via public API (verified Phase 7). Overriding the engine's campaignSpeedupMult (default 2) to 1 neutralizes fast-forward for all clients running this mod, keeping host and guest clocks aligned at 1x. Pause is synced separately. NOTE: this also disables fast-forward in any solo game while the coop mod is enabled.",
 	"campaignSpeedupMult":1

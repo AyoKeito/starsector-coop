@@ -1,6 +1,8 @@
 package coop.campaign;
 
 import com.fs.starfarer.api.campaign.BaseCampaignEventListener;
+import com.fs.starfarer.api.campaign.BattleAPI;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.PlayerMarketTransaction;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
@@ -9,6 +11,7 @@ import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.listeners.CargoScreenListener;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.combat.EngagementResultAPI;
 
 import java.util.Objects;
 
@@ -45,6 +48,18 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener
         void onPlayerActivatedAbility(AbilityPlugin ability, Object param);
 
         void onEconomyTick(int iterIndex);
+
+        /**
+         * A battle the local player took part in resolved (Phase 14). Enrichment only: the coop
+         * battle window is opened and closed by {@code CoopBattleBridge}'s combat-frame / campaign-
+         * resume seams, because neither of these callbacks fires for an engagement the player
+         * disengaged from before contact. This only supplies the outcome string for
+         * {@code BATTLE_END}.
+         */
+        void onBattleOccurred(boolean playerWon);
+
+        /** Same, from {@code reportPlayerEngagement}: the engagement ran through to a result. */
+        void onPlayerEngagement(boolean playerWon, boolean playerOutBeforeEnd);
     }
 
     private final Sink sink;
@@ -87,6 +102,30 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener
     @Override
     public void reportEconomyTick(int iterIndex) {
         sink.onEconomyTick(iterIndex);
+    }
+
+    // ---- Battle lifecycle enrichment (Phase 14) -------------------------------------------------
+
+    @Override
+    public void reportBattleOccurred(CampaignFleetAPI primaryWinner, BattleAPI battle) {
+        if (battle == null || !battle.isPlayerInvolved()) {
+            return;
+        }
+        boolean playerWon;
+        try {
+            playerWon = primaryWinner != null && battle.isPlayerSide(battle.getSideFor(primaryWinner));
+        } catch (RuntimeException | LinkageError ex) {
+            playerWon = false;
+        }
+        sink.onBattleOccurred(playerWon);
+    }
+
+    @Override
+    public void reportPlayerEngagement(EngagementResultAPI result) {
+        if (result == null) {
+            return;
+        }
+        sink.onPlayerEngagement(result.didPlayerWin(), result.isPlayerOutBeforeEnd());
     }
 
     // ---- CargoScreenListener (Phase 12d) --------------------------------------------------------

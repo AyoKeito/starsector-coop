@@ -254,6 +254,25 @@ if the pre-0.8 reading is right.
    autoresolve contact) protects against a threat that empirically does not exist. Its removal still
    needs the customs/hassle interaction checked (spike a cleared the flag manually before opening).
 
+## Where each verdict landed in the implementation (2026-08-19)
+
+Phase 14 was implemented directly on these verdicts; the harness (`coop.combat.CoopCombatSpike`) is
+kept as the historical record and is not called from production code.
+
+- Verdict (a) &rarr; `coop.combat.CoopCustomsDialogStaging`. The `toff` flag set, the `$sourceMarket`
+  pick, and the precondition logging were re-derived here rather than reused from the spike; the one
+  behavioural difference is that only `FLEET_IGNORES_OTHER_FLEETS` is cleared for the encounter
+  (12b's `FLEET_IGNORED_BY_OTHER_FLEETS` no longer exists on mirrors).
+- Verdict (b) &rarr; `CoopBattleBridge.drivePendingEngage`, which runs the same
+  `BattleCreationContext(player, ATTACK, mirror, ATTACK)` call after the pre-battle autosave, with
+  `BATTLE_BEGIN` flushed before the state transition. The spike's "TCP backlog survives the combat
+  gap" observation is now the fallback rather than the mechanism: the battle-status combat plugin
+  flushes the outbound queue every 400 ms from inside combat.
+- Verdict (c) &rarr; `CoopNpcThreatWatcher`. The watcher is the initiator; the `INTERCEPT` injection
+  is the proven chase; the harvested 57-340 su/s closing speeds set `ENGAGE_TRIGGER_SU = 500`; and
+  `getBattle() != null → leave()` survives as a *recovery* path for the pull-in route, with a loud
+  warning rather than a silent assertion.
+
 ## Log-line reference (what each spike greps for)
 
 The subsections below list the log lines and the original pass/fail calls, kept for re-runs.

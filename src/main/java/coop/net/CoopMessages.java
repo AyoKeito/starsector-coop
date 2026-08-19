@@ -45,6 +45,11 @@ public final class CoopMessages {
         NPC_FLEET_SET,
         NPC_FLEET_MOTION,
         BASE_SET,
+        BATTLE_BEGIN,
+        BATTLE_STATUS,
+        BATTLE_END,
+        ENGAGE_GUEST,
+        DIALOG_BEGIN,
         PING,
         PONG,
         DISCONNECT
@@ -343,6 +348,95 @@ public final class CoopMessages {
     public static Message baseSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
         return new Message(Type.BASE_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    // ---- Phase 14: solo own-fleet combat + spectator bridge ------------------------------------
+    // All five ride reliable TCP. There is no UDP combat stream and no disconnect protocol: combat
+    // is entirely local to whoever fights, and a dropped connection is detected locally by each side.
+
+    /** Which client-side path opened a coop battle (diagnostics + spectator wording). */
+    public enum BattleKind {
+        /** The local player engaged through the normal vanilla interaction dialog. */
+        PLAYER,
+        /** The host's threat watcher pushed {@code ENGAGE_GUEST} and the guest opened it. */
+        ENGAGE_GUEST
+    }
+
+    /** What a host-synthesized {@code DIALOG_BEGIN} wants the guest to stage locally. */
+    public enum DialogKind {
+        CUSTOMS,
+        INSPECTION
+    }
+
+    /**
+     * Engaging client &rarr; spectator: a coop battle just started, and the sender is its authority.
+     * {@code npcFleetIds} is a comma-joined list of host-owned {@code coopFleetId}s taking part (the
+     * envelope parser has no arrays), empty when none could be resolved.
+     */
+    public static Message battleBegin(String sessionId, long seq, long sentAtMillis,
+                                      String battleId, String playerId, String locationName,
+                                      String enemySummary, String npcFleetIds, BattleKind kind) {
+        Objects.requireNonNull(kind, "kind");
+        return new Message(Type.BATTLE_BEGIN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"battleId\":\"" + escapeJson(requireText(battleId, "battleId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(playerId == null ? "" : playerId) + "\","
+                        + "\"locationName\":\"" + escapeJson(locationName == null ? "" : locationName) + "\","
+                        + "\"enemySummary\":\"" + escapeJson(enemySummary == null ? "" : enemySummary) + "\","
+                        + "\"npcFleetIds\":\"" + escapeJson(npcFleetIds == null ? "" : npcFleetIds) + "\","
+                        + "\"kind\":\"" + kind.name() + "\"}");
+    }
+
+    /**
+     * Engaging client &rarr; spectator, 2-5 Hz: the current ship states + kill feed. Stateless and
+     * latest-wins by {@code statusSeq} ({@link coop.combat.CoopBattleStatus#isNewer}), so a dropped
+     * or reordered frame costs nothing. {@code ships} is the self-contained delimited body from
+     * {@link coop.combat.CoopBattleStatus#encodeBody()}.
+     */
+    public static Message battleStatus(String sessionId, long seq, long sentAtMillis,
+                                       String battleId, long statusSeq, long elapsedMillis, String ships) {
+        return new Message(Type.BATTLE_STATUS, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"battleId\":\"" + escapeJson(requireText(battleId, "battleId")) + "\","
+                        + "\"statusSeq\":" + statusSeq + ","
+                        + "\"elapsedMillis\":" + elapsedMillis + ","
+                        + "\"ships\":\"" + escapeJson(ships == null ? "" : ships) + "\"}");
+    }
+
+    /** Engaging client &rarr; spectator: the battle is over; release the combat pause, close the panel. */
+    public static Message battleEnd(String sessionId, long seq, long sentAtMillis,
+                                    String battleId, String playerId, String outcome) {
+        return new Message(Type.BATTLE_END, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"battleId\":\"" + escapeJson(requireText(battleId, "battleId")) + "\","
+                        + "\"playerId\":\"" + escapeJson(playerId == null ? "" : playerId) + "\","
+                        + "\"outcome\":\"" + escapeJson(outcome == null ? "" : outcome) + "\"}");
+    }
+
+    /**
+     * Host &rarr; guest: a hostile host-owned NPC fleet has closed on the guest mirror and picked
+     * ENGAGE. The guest opens and pilots that battle locally against its own mirror of
+     * {@code coopFleetId} (never PvP). See {@link coop.combat.CoopNpcThreatWatcher}.
+     */
+    public static Message engageGuest(String sessionId, long seq, long sentAtMillis,
+                                      String coopFleetId, String fleetName, String factionId) {
+        return new Message(Type.ENGAGE_GUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"coopFleetId\":\"" + escapeJson(requireText(coopFleetId, "coopFleetId")) + "\","
+                        + "\"fleetName\":\"" + escapeJson(fleetName == null ? "" : fleetName) + "\","
+                        + "\"factionId\":\"" + escapeJson(factionId == null ? "" : factionId) + "\","
+                        + "\"kind\":\"COMBAT\"}");
+    }
+
+    /**
+     * Host &rarr; guest: a host-owned patrol wants to stop the guest (running dark / contraband
+     * suspicion). The guest stages the vanilla posture flags on its own mirror of
+     * {@code coopFleetId} and opens the standard fleet interaction against it, so vanilla rules run
+     * the scan against the guest's own cargo. This is the Phase 9 transponder-reactions gap fix.
+     */
+    public static Message dialogBegin(String sessionId, long seq, long sentAtMillis,
+                                      String coopFleetId, String factionId, DialogKind kind) {
+        Objects.requireNonNull(kind, "kind");
+        return new Message(Type.DIALOG_BEGIN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"coopFleetId\":\"" + escapeJson(requireText(coopFleetId, "coopFleetId")) + "\","
+                        + "\"factionId\":\"" + escapeJson(factionId == null ? "" : factionId) + "\","
+                        + "\"kind\":\"" + kind.name() + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {

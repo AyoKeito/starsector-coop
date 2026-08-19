@@ -1150,6 +1150,11 @@ class CoopNetPumpTest {
                         if ("getInteractionTarget".equals(method.getName())) {
                             return entity.proxy();
                         }
+                        // Phase 14: the interaction gate asks the dialog for its plugin so it can skip
+                        // the coop battle status panel. A vanilla dialog's plugin is not a coop one.
+                        if ("getPlugin".equals(method.getName())) {
+                            return null;
+                        }
                         throw new UnsupportedOperationException(method.getName());
                     });
         }

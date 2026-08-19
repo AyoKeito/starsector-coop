@@ -482,6 +482,40 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         captureFactionRelationChanges();
     }
 
+    // ---- Phase 14 battle-outcome enrichment ----------------------------------------------------
+    // Pure pass-through to whoever is observing battles (CoopBattleBridge). Deliberately no policy
+    // here: the coop battle window is opened/closed by the bridge's own seams, and these callbacks
+    // only supply a nicer outcome string than "UNKNOWN".
+
+    /** Observer of the vanilla battle-result callbacks; wired to the Phase 14 battle bridge. */
+    public interface BattleObserver {
+        void onBattleOccurred(boolean playerWon);
+
+        void onPlayerEngagement(String outcome);
+    }
+
+    private BattleObserver battleObserver;
+
+    public void setBattleObserver(BattleObserver observer) {
+        this.battleObserver = observer;
+    }
+
+    @Override
+    public void onBattleOccurred(boolean playerWon) {
+        if (battleObserver != null) {
+            battleObserver.onBattleOccurred(playerWon);
+        }
+    }
+
+    @Override
+    public void onPlayerEngagement(boolean playerWon, boolean playerOutBeforeEnd) {
+        if (battleObserver == null) {
+            return;
+        }
+        battleObserver.onPlayerEngagement(
+                playerOutBeforeEnd ? "DISENGAGED" : (playerWon ? "WIN" : "LOSS"));
+    }
+
     private void captureFactionRelationChanges() {
         try {
             SectorAPI sector = Global.getSector();

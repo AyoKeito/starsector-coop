@@ -9,7 +9,9 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopCampaignReplicator;
+import coop.combat.CoopBattleBridge;
 import coop.combat.CoopCombatSpike;
+import coop.combat.CoopNpcThreatWatcher;
 import coop.fleet.CoopFleetMirror;
 import coop.fleet.CoopFleetMirrorRegistry;
 import coop.fleet.CoopFleetSnapshot;
@@ -78,6 +80,8 @@ public class CoopNetPump implements EveryFrameScript {
     private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
     private final CoopCombatSpike combatSpike = new CoopCombatSpike();
+    private final CoopBattleBridge battleBridge;
+    private final CoopNpcThreatWatcher npcThreatWatcher;
     private final CoopCampaignReplicator campaignReplicator;
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
@@ -176,6 +180,21 @@ public class CoopNetPump implements EveryFrameScript {
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
         this.timeLock.setPauseCoordinator(pauseCoordinator);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
+        this.battleBridge = new CoopBattleBridge(service, sessionState, clockMillis, pauseCoordinator);
+        this.npcThreatWatcher = new CoopNpcThreatWatcher(service, sessionState, clockMillis);
+        // Phase 14: vanilla's battle-result callbacks only enrich the outcome string; the coop battle
+        // window itself is opened/closed by the bridge's combat-frame and campaign-resume seams.
+        this.campaignReplicator.setBattleObserver(new CoopCampaignReplicator.BattleObserver() {
+            @Override
+            public void onBattleOccurred(boolean playerWon) {
+                battleBridge.onBattleOccurred(playerWon);
+            }
+
+            @Override
+            public void onPlayerEngagement(String outcome) {
+                battleBridge.onPlayerEngagement(outcome);
+            }
+        });
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis);
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
         long now = clockMillis.getAsLong();
@@ -207,6 +226,9 @@ public class CoopNetPump implements EveryFrameScript {
         maybeSendHandshakeManifest();
         maybeSendSeedLockRequest();
         maybeHoldHostPausedUntilSessionReady();
+        // Phase 14 runs before syncSharedPause so a battle that began (or ended) this frame is already
+        // reflected in the combat intent when the host computes its effective pause.
+        tickBattleBridge();
         syncSharedPause();
         maybeApplyTimeSnapshot();
         maybeSendTimeSnapshot();
@@ -214,6 +236,7 @@ public class CoopNetPump implements EveryFrameScript {
         drainFleetDatagrams();
         maybeSendFleetSnapshot();
         syncNpcReplication();
+        tickNpcThreatWatcher();
         syncBaseReplication();
         syncInteractionGate();
         debugDialogState();
@@ -395,6 +418,8 @@ public class CoopNetPump implements EveryFrameScript {
             case INTERACTION_RELEASE -> handleInteractionRelease(message);
             case NPC_FLEET_SET -> handleNpcFleetSet(message);
             case BASE_SET -> handleBaseSet(message);
+            case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
+                    handleBattleMessage(message);
             case PING -> sendPong(message);
             default -> {
                 // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
@@ -1210,6 +1235,7 @@ public class CoopNetPump implements EveryFrameScript {
             // (Re)starting: rebroadcast the full set and re-arm the guest suppressor.
             npcFleetReplicator.reset();
             npcFleetSuppressor.reset();
+            npcThreatWatcher.reset();
             npcReplicationStreaming = true;
         } else if (!active && npcReplicationStreaming) {
             // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
@@ -1432,7 +1458,10 @@ public class CoopNetPump implements EveryFrameScript {
         CampaignUIAPI ui = sector.getCampaignUI();
         if (ui != null) {
             InteractionDialogAPI dialog = ui.getCurrentInteractionDialog();
-            if (dialog != null) {
+            // The Phase 14 spectator panel is an interaction dialog on the local player's own fleet.
+            // Claiming it would lock the PARTNER out of every interaction while they are the one
+            // fighting — exactly backwards — so it is excluded from the gate entirely.
+            if (dialog != null && !battleBridge.isStatusPanel(dialog.getPlugin())) {
                 SectorEntityToken target = dialog.getInteractionTarget();
                 if (target != null) {
                     currentEntityId = target.getId();
@@ -1607,6 +1636,46 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    /**
+     * Phase 14 solo own-fleet combat. Drives the battle lifecycle on the engaging client, the shared
+     * combat pause intent on the host, and the spectator status panel on whichever client is not
+     * fighting. Runs while paused (the spectator's world is paused by definition) and while the
+     * session is down, so the bridge can log a discarded battle result and release the panel.
+     */
+    private void tickBattleBridge() {
+        try {
+            battleBridge.tickCampaign(Global.getSector(), isGameplaySessionActive(), clockMillis.getAsLong());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to tick coop battle bridge", ex);
+        }
+    }
+
+    private void handleBattleMessage(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            CoopLog.warn(CoopNetPump.class,
+                    "Coop ignoring pre-session battle message type=" + message.type());
+            return;
+        }
+        battleBridge.handle(message);
+    }
+
+    /**
+     * Phase 14 host-side synthesis against the guest mirror: the {@code ENGAGE_GUEST} handoff, the
+     * injected {@code INTERCEPT} chase, the customs {@code DIALOG_BEGIN}, and the load-bearing
+     * battle-eject recovery. Host-only; the guest has no mirror of itself to defend.
+     */
+    private void tickNpcThreatWatcher() {
+        if (!shouldStreamFleet() || service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        try {
+            npcThreatWatcher.tick(Global.getSector(), clockMillis.getAsLong(),
+                    battleBridge.isAnyCoopBattleActive());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to tick coop NPC threat watcher", ex);
+        }
+    }
+
     private void syncCampaignReplicator() {
         // Register the Phase 12 campaign event listener once the session is active and tear it down
         // (clearing all replicated state) when the session ends, mirroring the fleet-mirror lifecycle.
@@ -1709,6 +1778,7 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.PONG
                 || type == CoopMessages.Type.TIME_SNAPSHOT
                 || type == CoopMessages.Type.FLEET_SNAPSHOT
-                || type == CoopMessages.Type.NPC_FLEET_MOTION;
+                || type == CoopMessages.Type.NPC_FLEET_MOTION
+                || type == CoopMessages.Type.BATTLE_STATUS;
     }
 }
