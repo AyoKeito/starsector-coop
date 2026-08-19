@@ -229,6 +229,18 @@ if the pre-0.8 reading is right.
 
 ## Known issues accepted for later (2026-08-19)
 
+- **Synthesized customs pursuit reads as lower-quality than vanilla** (user verdict, 2026-08-19
+  smoke of Phase 14b `56b025f`: all four scenarios — chase-from-detection, outrun/give-up,
+  transponder-on stand-down, catch-and-hail — **pass**, but the motion/pacing is "visibly lower
+  quality compared to vanilla"). Expected ceiling of the current mechanism: vanilla's inspection
+  pursuit of a dark fleet is hardcoded player-only, so the mod drives the patrol with a re-issued
+  0.5-day `INTERCEPT` assignment plus a 250 ms scan cadence instead of the engine's own per-tactical-
+  interval steering (`setMoveDestination`) — coarser turn-in, no speed matching, no vanilla
+  micro-behaviors (sensor bursts, hail posturing). Improving it means either finer-grained steering
+  (shorter assignment slices at the vanilla tactical interval) or making the mirror satisfy the
+  engine's player-only checks (a fork of `TacticalModule`'s inspection clauses — a real fork
+  decision). Maybe-pursue-later; not v1 acceptance-blocking.
+
 - **`data/campaign/rules.csv` ships one release blocker.** The `coopZiggurat` test start (option 6 in
   character creation: Ziggurat + 1,000,000 credits) must be gated behind a dev/debug flag or deleted
   before public release. Owner: Phase 23 packaging. The mod's `ngcDifficulty` row — which replaces the
