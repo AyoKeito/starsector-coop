@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.BattleAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.FleetAssignment;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
@@ -62,6 +63,7 @@ public final class CoopCombatSpike {
     private static final String FLAG_ENGAGE = "$coopSpikeEngage";
     private static final String FLAG_EJECT = "$coopSpikeEject";
     private static final String FLAG_EJECT_STOP = "$coopSpikeEjectStop";
+    private static final String FLAG_HUNT = "$coopSpikeHunt";
 
     /** rules.csv:2755 {@code customsInspectionScan} keys off this on the interaction target's memory. */
     private static final String CUSTOMS_INSPECTION_FLAG = "$doingCustomsInspection";
@@ -127,6 +129,9 @@ public final class CoopCombatSpike {
             if (host) {
                 if (consumeFlag(sector, FLAG_EJECT)) {
                     startEjectWatcher(sector);
+                }
+                if (consumeFlag(sector, FLAG_HUNT)) {
+                    runHuntSpike(sector);
                 }
                 if (ejectWatcherActive) {
                     tickEjectWatcher(sector, nowMillis);
@@ -588,6 +593,68 @@ public final class CoopCombatSpike {
         }
     }
 
+    /**
+     * Spike c follow-up (2026-08-19): hostiles see the mirror and pick ENGAGE but never retask to
+     * intercept it, and an ENGAGE-picker crossing at 10 su formed no battle. This probe answers the
+     * remaining design question: does an <em>ordered</em> intercept consummate contact into a real
+     * battle? Injects an INTERCEPT assignment toward the guest mirror on the nearest hostile,
+     * preferring one whose own {@code pickEncounterOption} says ENGAGE. Run with the eject watcher
+     * active so a formed battle is caught and ejected.
+     */
+    private void runHuntSpike(SectorAPI sector) {
+        CampaignFleetAPI mirror = findPlayerMirror(sector);
+        if (mirror == null) {
+            CoopLog.warn(CoopCombatSpike.class, C + "HUNT FAIL no guest player mirror "
+                    + mirrorInventory(sector));
+            return;
+        }
+        LocationAPI location = containingLocation(mirror);
+        if (location == null) {
+            CoopLog.warn(CoopCombatSpike.class, C + "HUNT FAIL mirror has no location");
+            return;
+        }
+        CampaignFleetAPI best = null;
+        float bestDist = Float.MAX_VALUE;
+        boolean bestEngages = false;
+        for (CampaignFleetAPI fleet : fleetsIn(location)) {
+            if (fleet == null || fleet == mirror || isAnyMirror(fleet) || isPlayer(sector, fleet)
+                    || !"true".equals(hostileTo(fleet, mirror))) {
+                continue;
+            }
+            float dist = distance(fleet, mirror);
+            if (dist < 0f) {
+                continue;
+            }
+            boolean engages = "ENGAGE".equals(encounterOptionFor(fleet, mirror));
+            // Prefer any ENGAGE-picker over any non-picker; among equals, prefer the nearest.
+            if (best == null || (engages && !bestEngages) || (engages == bestEngages && dist < bestDist)) {
+                best = fleet;
+                bestDist = dist;
+                bestEngages = engages;
+            }
+        }
+        if (best == null) {
+            CoopLog.warn(CoopCombatSpike.class, C + "HUNT FAIL no hostile fleet in " + locId(mirror));
+            return;
+        }
+        try {
+            CampaignFleetAIAPI ai = best.getAI();
+            if (ai == null) {
+                CoopLog.warn(CoopCombatSpike.class, C + "HUNT FAIL chosen fleet has no AI "
+                        + describe(best));
+                return;
+            }
+            ai.addAssignmentAtStart(FleetAssignment.INTERCEPT, mirror, 2f, null);
+            CoopLog.info(CoopCombatSpike.class, C + "HUNT injected INTERCEPT->mirror on "
+                    + describe(best)
+                    + " dist=" + fmt(bestDist)
+                    + " pick=" + encounterOptionFor(best, mirror)
+                    + " assignmentNow=" + assignmentOf(best));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCombatSpike.class, C + "HUNT FAIL addAssignmentAtStart threw", ex);
+        }
+    }
+
     // ---- trigger file --------------------------------------------------------------------------
 
     /**
@@ -631,6 +698,7 @@ public final class CoopCombatSpike {
             case "engage" -> flag = FLAG_ENGAGE;
             case "eject" -> flag = FLAG_EJECT;
             case "ejectstop" -> flag = FLAG_EJECT_STOP;
+            case "hunt" -> flag = FLAG_HUNT;
             default -> {
                 CoopLog.warn(CoopCombatSpike.class, "SPIKE14 trigger file: unknown command \""
                         + command.trim() + "\"");
