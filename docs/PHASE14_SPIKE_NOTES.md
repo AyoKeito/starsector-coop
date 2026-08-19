@@ -229,8 +229,7 @@ if the pre-0.8 reading is right.
 
 ## Known issues accepted for later (2026-08-19)
 
-- **Guest NPC mirrors wear the wrong ship roster** — **partially root-caused, hardened + instrumented
-  2026-08-19; the specific substitution is still open.** Reported on `56b025f`: a host "Patrol"
+- **Guest NPC mirrors wear the wrong ship roster** — **RESOLVED 2026-08-19.** Reported on `56b025f`: a host "Patrol"
   (7 varied ships, danger 3, burn 9) appeared on the guest as six identical `nebula_Standard`
   freighters (danger 1, burn 8), confirmed by opening the encounter dialog against the mirror; a
   "Fast Picket" showed the same shape. Stable across minutes and across `NPC_FLEET_SET` reapplies.
@@ -259,17 +258,66 @@ if the pre-0.8 reading is right.
   practice, since the set-level escape doubles the backslash, but the set encoder escapes an
   already-escaped block and the two have to agree.
 
-  **Not proven:** why a patrol's snapshot would carry a *convoy-shaped* roster (N identical civilian
-  freighters) rather than a truncated version of its own. Fleet-id reuse was ruled out —
-  `CampaignEngine.genUID()` is a persisted monotonic hex counter (`ce_dec/.../CampaignEngine.java:313`)
-  and the only `setId` on a fleet in the whole engine is `CampaignTutorialScript:518`. Two live
-  candidates remain, both to be settled from the logs rather than by guessing: `Battle.genCombined`
-  (`nb/.../fleet/Battle.java:838-895`) builds a synthetic fleet holding **every** member of every
-  fleet on a side, sharing the primary fleet's name, `Memory` object and containing location — and
-  `FleetData.addFleetMember` never unlinks a member from its previous owner (`:470-490`), so a member
-  can legitimately sit in two or three `members` lists at once; and `RouteManager.spawnAndDespawn`'s
-  unguarded `data.activeFleet = data.spawner.spawnFleet(data)` (`api_pristine:640`, mirrored in our
-  fork at `:700`) can orphan a spawned fleet under re-entry, leaving a live fleet no route owns.
+  **The Nebulas: caught live by the diagnostic below and root-caused the same day.** Fleet `905d`
+  (independent Smuggler) at `t=43017` streamed
+  `ships=10 [falcon x1, manticore x1, buffalo2 x1, vanguard x1, lasher x1, wolf x1, kite x2, hermes x1, mudskipper x1]`
+  and the guest built exactly that. At `t=76261` the *same fleet* streamed
+  `[falcon_default_D x1, manticore_default_D x1, … mudskipper_default_D x1]` and the guest reported
+  `snapshot=10 [falcon_default_D …] built=10 [nebula x10]`. Same shape for `9143` (`built=8 [nebula x8]`).
+  The chain:
+
+  1. **Fleet inflation.** When a player fleet comes near an NPC fleet the engine inflates it.
+     `DefaultFleetInflater.inflate` autofits every ship onto a brand-new variant it names
+     `Global.getSettings().createEmptyVariant(fleet.getId() + "_" + memberIndex, target.getHullSpec())`
+     (`api_pristine/com/fs/starfarer/api/impl/campaign/fleets/DefaultFleetInflater.java:476`), marks it
+     `VariantSource.REFIT` (`:497`), assigns it with `member.setVariant(currVariant, false, false)`
+     (`:498`), and then rolls d-mods: `DModManager.setDHull(currVariant)` (`:513`) swaps the hull spec
+     for `Misc.getDHullId(spec)` — literally `hullId + "_default_D"`
+     (`Misc.java:3552-3556`, `DModManager.java:38-49`). That is where both halves of the observed id
+     change come from: `falcon` → `falcon_default_D`, and the variant id → `905d_3`.
+  2. **The runtime variant id is meaningless off-host.** `905d_3` is derived from the *host's* fleet
+     id, is never persisted and is never registered in the guest's spec store.
+  3. **The engine substitutes an "error ship" and never throws.** `FleetMember.updateSpecIfNeeded`
+     (`tmp_ff_analysis/probe/FleetMember.java:177-182`) for `FleetMemberType.SHIP`:
+
+     ```java
+     this.variant = SpecStore.get(HullVariantSpec.class, this.specId);
+     if (this.variant == null) {
+         new RuntimeException(String.format("[%s] is not a valid ship variant id", this.specId))
+                 .printStackTrace();                                   // constructed, printed, NOT thrown
+         this.variant = SpecStore.get(HullVariantSpec.class,
+                 StarfarerSettings.get("errorShipVariant"));           // <- the substitution
+     }
+     ```
+
+     and `starsector-core/data/config/settings.json:143` is `"errorShipVariant":"nebula_Standard"`.
+     There is the Nebula, by name, in a config file. Note the `FIGHTER_WING` branch two lines above
+     *does* throw — only ships get the silent swap.
+
+     This explains every part of the silence. The exception is **constructed and printed, not
+     thrown**, so `CoopFleetMirror.createMember`'s `catch (RuntimeException)` could never fire and the
+     hull fallback — which would have worked, `falcon_default_D_Hull` resolves on both installs — was
+     never reached. And `printStackTrace()` goes to **stderr**, which Starsector does not route into
+     `starsector.log`: a grep of the whole 21 MB guest log for `is not a valid ship variant id`
+     returns **zero** hits while ten wrong ships were being attached. Worth remembering generally —
+     *engine complaints that arrive via `printStackTrace` are invisible to the log-based smoke
+     workflow.*
+
+  The inflater does record the stock variant it autofit from — `currVariant.setOriginalVariant(target
+  .getHullVariantId())` when the target was stock (`DefaultFleetInflater.java:480-482`) — which is the
+  install-stock id both sides share. **Fix, two-sided.** Host: `CoopFleetSnapshotFactory` prefers
+  `getOriginalVariant()`, then `getHullVariantId()`, then `getSpecId()`, and streams the *first that
+  the host's own spec store actually contains* (`doesVariantExist`), or `""` if none do; hull ids are
+  validated the same way and fall back to the non-D parent. Sound cross-install because the handshake
+  already requires an identical mod manifest. `CoopFleetSnapshot.Member`'s javadoc now carries the
+  contract: **ids on the wire are install-stock ids, never runtime ids.** Guest:
+  `CoopFleetMirror.createMember` stops trusting exceptions — it checks existence before asking
+  (`resolveCreationId`: variant → `<hull>_Hull` → `<baseHull>_Hull` → nothing) and cross-checks what
+  came back (`isPlausibleHull`, compared on the base hull so losing only the `_default_D` suffix is
+  fine), discarding and loudly logging any member the engine substituted.
+
+  Ruled out on the way: fleet-id reuse — `CampaignEngine.genUID()` is a persisted monotonic hex
+  counter and the only `setId` on a fleet in the whole engine is `CampaignTutorialScript:518`.
 
   **Diagnostic shipped** (both `CoopDebug`-gated, dormant otherwise), designed to be read as a pair:
   - host, once per fleet whose `fleetHash` changes:
@@ -280,6 +328,16 @@ if the pre-0.8 reading is right.
   Grep both logs for the same `coopFleetId`: matching `[...]` summaries with a wrong roster on screen
   means the host captured the wrong ships; diverging summaries mean the guest failed to build the right
   ones. The always-on `roster refreshed to X of Y ship(s)` line now carries the `coopFleetId` too.
+
+- **Mirrors of inflated fleets are built on clean stock variants — d-mods and autofit loadout are
+  lost** (future polish, 2026-08-19). Deliberate: the host streams the stock variant the inflater
+  autofit *from*, because the variant it autofit *to* is a runtime id that cannot exist on the guest.
+  So a battered host `falcon_default_D` with three d-mods and a scavenged loadout mirrors as a clean
+  `falcon_Assault`. Visual and stat delta only — CR and hull fraction are replicated per member, and
+  battle outcomes are host-authoritative (Phase 15) — but a guest sizing up a target reads it as
+  slightly stronger than it is. Closing it means replicating the variant *contents* (hull spec id +
+  d-mod hullmod ids + weapon slots + fighter bays) and rebuilding the variant on the guest via
+  `createEmptyVariant` + `setHullSpecAPI`, not just naming it. Not v1-blocking.
 
 - **Synthesized customs pursuit reads as lower-quality than vanilla** (user verdict, 2026-08-19
   smoke of Phase 14b `56b025f`: all four scenarios — chase-from-detection, outrun/give-up,

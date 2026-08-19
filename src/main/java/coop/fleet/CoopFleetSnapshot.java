@@ -49,6 +49,19 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * Per-ship record. {@code variantId} is the hull-variant id used to recreate the ship on the
      * remote client; {@code cr} and {@code hullFraction} ride alongside for display but are
      * deliberately NOT part of the {@link #fleetHash} — see {@link #computeFleetHash}.
+     *
+     * <p><b>Contract (2026-08-19): {@code variantId} and {@code hullId} must be install-stock ids,
+     * never runtime ids.</b> The receiving client resolves them against its own spec store, and a
+     * spec store only ever contains what was loaded from data files. Runtime ids exist and are
+     * routinely attached to live ships: {@code DefaultFleetInflater} autofits every ship of an NPC
+     * fleet the moment a player fleet comes near it, onto a variant it names
+     * {@code fleet.getId() + "_" + memberIndex} — an id derived from the <em>sender's</em> fleet and
+     * meaningless anywhere else. Putting one of those on the wire is worse than sending nothing,
+     * because {@code Global.getFactory().createFleetMember} does not reject an unknown variant id: it
+     * substitutes a placeholder ship, so the receiver silently builds the wrong hull with no error to
+     * catch. {@code CoopFleetSnapshotFactory#streamableVariantId} / {@code #streamableHullId} enforce
+     * the contract by validating every id against the sender's own spec store before it is sent —
+     * sound because the handshake already requires an identical mod manifest on both sides.
      */
     public record Member(String fleetMemberId, String hullId, String variantId, String shipName,
                          String captainName, float cr, float hullFraction) {

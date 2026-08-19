@@ -50,6 +50,58 @@ class CoopFleetMirrorTest {
         assertFalse(CoopFleetMirror.shouldCommitRoster(false, "hash-b", "hash-a"));
     }
 
+    /** Stands in for this install's spec store. */
+    private static java.util.function.Predicate<String> installHas(String... ids) {
+        java.util.Set<String> known = new java.util.HashSet<>(java.util.Arrays.asList(ids));
+        return known::contains;
+    }
+
+    @Test
+    void aResolvableVariantIsUsedDirectly() {
+        assertEquals("falcon_Assault", CoopFleetMirror.resolveCreationId("falcon_Assault",
+                "falcon_default_D", installHas("falcon_Assault"), installHas("falcon")));
+    }
+
+    @Test
+    void anUnknownVariantFallsToTheHullInsteadOfBeingAskedFor() {
+        // Asking for it is the bug: createFleetMember does not reject an unknown variant id, it
+        // substitutes a placeholder ship, so the exception-driven fallback chain never fired.
+        assertEquals("falcon_default_D_Hull", CoopFleetMirror.resolveCreationId("905d_3",
+                "falcon_default_D", installHas("falcon_Assault"),
+                installHas("falcon", "falcon_default_D")));
+    }
+
+    @Test
+    void anUnknownDHullFallsToItsNonDParent() {
+        assertEquals("falcon_Hull", CoopFleetMirror.resolveCreationId("905d_3", "falcon_default_D",
+                installHas(), installHas("falcon")));
+    }
+
+    @Test
+    void nothingResolvableMeansNoShipRatherThanAPlaceholder() {
+        assertEquals("", CoopFleetMirror.resolveCreationId("905d_3", "falcon_default_D",
+                installHas(), installHas()));
+        assertEquals("", CoopFleetMirror.resolveCreationId("", "", installHas(), installHas()));
+    }
+
+    @Test
+    void losingTheDHullSuffixIsAcceptableButGettingANebulaIsNot() {
+        // Building the stock falcon_Assault for a host ship whose live hull was falcon_default_D is
+        // the accepted d-mod-fidelity trade.
+        assertTrue(CoopFleetMirror.isPlausibleHull("falcon", "falcon_default_D"));
+        assertTrue(CoopFleetMirror.isPlausibleHull("falcon_default_D", "falcon"));
+        assertTrue(CoopFleetMirror.isPlausibleHull("falcon", "falcon"));
+        // The 2026-08-19 failure: every inflated ship came back as the engine's placeholder.
+        assertFalse(CoopFleetMirror.isPlausibleHull("nebula", "falcon_default_D"));
+        assertFalse(CoopFleetMirror.isPlausibleHull("nebula", "manticore"));
+    }
+
+    @Test
+    void aMemberWithNoStreamedHullIsNotDiscardedOverTheCrossCheck() {
+        assertTrue(CoopFleetMirror.isPlausibleHull("nebula", ""));
+        assertTrue(CoopFleetMirror.isPlausibleHull("nebula", null));
+    }
+
     @Test
     void theCodecUnescapeIsTheInverseOfEscape() {
         // CoopNpcFleetSetSnapshot escapes an already-escaped per-fleet block, so escape/unescape have

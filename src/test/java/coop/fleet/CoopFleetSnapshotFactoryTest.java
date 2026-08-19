@@ -3,7 +3,11 @@ package coop.fleet;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -88,5 +92,54 @@ class CoopFleetSnapshotFactoryTest {
                 new FakeSource(List.of("hound", "talon_wing", "mule"), List.of(), List.of(1)));
         assertEquals(0, skipped);
         assertEquals("hound x1, mule x1", CoopRosterSummary.ofMembers(out));
+    }
+
+    // ---- Resolvable-by-construction ship ids ---------------------------------------------------
+
+    /** Stands in for this install's spec store. */
+    private static Predicate<String> installHas(String... ids) {
+        Set<String> known = new HashSet<>(Arrays.asList(ids));
+        return known::contains;
+    }
+
+    @Test
+    void anInflatedShipStreamsTheStockVariantItWasAutofitFrom() {
+        // The live variant id of an inflated ship is DefaultFleetInflater's
+        // createEmptyVariant(fleet.getId() + "_" + memberIndex, ...) — "905d_3" here — which exists
+        // only inside the host's engine. The inflater records where it autofit from in
+        // getOriginalVariant(); that is the id both installs share.
+        assertEquals("falcon_Assault", CoopFleetSnapshotFactory.streamableVariantId(
+                "falcon_Assault", "905d_3", "905d_3", installHas("falcon_Assault")));
+    }
+
+    @Test
+    void aRuntimeVariantIdIsNeverPutOnTheWire() {
+        // Nothing resolvable: send "" so the receiver takes the hull path, rather than an id that
+        // makes createFleetMember substitute a placeholder ship without complaining.
+        assertEquals("", CoopFleetSnapshotFactory.streamableVariantId(
+                "", "905d_3", "905d_3", installHas("falcon_Assault")));
+    }
+
+    @Test
+    void aStockVariantIsStreamedUnchangedWhenThereIsNoOriginal() {
+        assertEquals("falcon_Assault", CoopFleetSnapshotFactory.streamableVariantId(
+                "", "falcon_Assault", "falcon_Assault", installHas("falcon_Assault")));
+    }
+
+    @Test
+    void aDHullIsKeptWhenItResolvesAndStrippedWhenItDoesNot() {
+        // D hulls are generated at load from the same ship data on both installs, so normally they
+        // resolve and the mirror keeps the damaged hull; the strip is the safety net.
+        assertEquals("falcon_default_D", CoopFleetSnapshotFactory.streamableHullId(
+                "falcon_default_D", installHas("falcon", "falcon_default_D")));
+        assertEquals("falcon", CoopFleetSnapshotFactory.streamableHullId(
+                "falcon_default_D", installHas("falcon")));
+    }
+
+    @Test
+    void baseHullIdIsTheInverseOfMiscGetDHullId() {
+        assertEquals("falcon", CoopFleetSnapshotFactory.baseHullId("falcon_default_D"));
+        assertEquals("falcon", CoopFleetSnapshotFactory.baseHullId("falcon"));
+        assertEquals("", CoopFleetSnapshotFactory.baseHullId(null));
     }
 }

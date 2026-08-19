@@ -1,9 +1,11 @@
 package coop.fleet;
 
+import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
@@ -20,6 +22,10 @@ import java.util.Objects;
  * snapshot supersedes it).
  */
 public final class CoopFleetSnapshotFactory {
+
+    /** {@code Misc.D_HULL_SUFFIX}: the suffix {@code DModManager.setDHull} appends to a hull id. */
+    static final String D_HULL_SUFFIX = "_default_D";
+
     private CoopFleetSnapshotFactory() {
     }
 
@@ -162,17 +168,18 @@ public final class CoopFleetSnapshotFactory {
     }
 
     private static CoopFleetSnapshot.Member captureMember(FleetMemberAPI member) {
-        String variantId = "";
+        ShipVariantAPI variant = null;
         try {
-            if (member.getVariant() != null) {
-                variantId = member.getVariant().getHullVariantId();
-            }
+            variant = member.getVariant();
         } catch (RuntimeException ignored) {
-            variantId = "";
+            variant = null;
         }
-        if (variantId == null || variantId.isEmpty()) {
-            variantId = member.getSpecId();
-        }
+        String variantId = streamableVariantId(
+                originalVariantId(variant),
+                variant == null ? "" : variant.getHullVariantId(),
+                specIdOrEmpty(member),
+                CoopFleetSnapshotFactory::variantExists);
+        String hullId = streamableHullId(hullIdOrEmpty(member), CoopFleetSnapshotFactory::hullExists);
 
         String captainName = "";
         try {
@@ -189,12 +196,118 @@ public final class CoopFleetSnapshotFactory {
 
         return new CoopFleetSnapshot.Member(
                 member.getId(),
-                member.getHullId(),
+                hullId,
                 variantId,
                 member.getShipName(),
                 captainName,
                 cr,
                 hullFraction);
+    }
+
+    // ---- Resolvable-by-construction ship ids (2026-08-19) --------------------------------------
+
+    /**
+     * Picks the variant id to put on the wire: the first candidate that actually exists in this
+     * install's spec store, or {@code ""} when none do (the receiver then falls back to the hull).
+     *
+     * <p><b>Why validation and not just {@code getHullVariantId()}.</b> When a player fleet comes near
+     * an NPC fleet the engine <em>inflates</em> it: {@code DefaultFleetInflater.inflate} autofits every
+     * ship onto a brand-new variant whose id is literally
+     * {@code Global.getSettings().createEmptyVariant(fleet.getId() + "_" + memberIndex, ...)}
+     * ({@code api_pristine/.../fleets/DefaultFleetInflater.java:476}) and marks it
+     * {@code VariantSource.REFIT} ({@code :497}). That id — {@code "905d_3"} — is derived from the
+     * <em>host's</em> fleet id, is never persisted and never exists in the guest's spec store. The
+     * inflater does record where it autofit from, though: {@code setOriginalVariant(target
+     * .getHullVariantId())} when the target was a stock variant ({@code :480-482}), which is the
+     * install-stock id both sides share. Prefer it.
+     *
+     * <p>Validating against the local spec store is sound for the remote side because the handshake
+     * already requires an identical mod manifest, so "resolvable here" means "resolvable there".
+     */
+    static String streamableVariantId(String originalVariantId, String hullVariantId, String specId,
+                                      java.util.function.Predicate<String> variantExists) {
+        for (String candidate : List.of(normalize(originalVariantId), normalize(hullVariantId),
+                normalize(specId))) {
+            if (!candidate.isEmpty() && variantExists.test(candidate)) {
+                return candidate;
+            }
+        }
+        return "";
+    }
+
+    /**
+     * The hull id to put on the wire: the live one when it resolves, otherwise its non-D parent.
+     *
+     * <p>Inflation also swaps the hull spec itself — {@code DModManager.setDHull}
+     * ({@code api_pristine/.../DModManager.java:38-49}) replaces it with
+     * {@code Misc.getDHullId(spec)}, which is just {@code hullId + "_default_D"}
+     * ({@code Misc.java:3552-3556}). Those D hulls are generated at load from the same ship data on
+     * both installs, so they normally resolve fine and are kept — the fallback only matters for a hull
+     * this install cannot name, where the base hull is still better than nothing.
+     */
+    static String streamableHullId(String hullId, java.util.function.Predicate<String> hullExists) {
+        String live = normalize(hullId);
+        if (live.isEmpty() || hullExists.test(live)) {
+            return live;
+        }
+        String base = baseHullId(live);
+        return !base.equals(live) && hullExists.test(base) ? base : live;
+    }
+
+    /**
+     * Strips the auto-generated D-hull suffix, the exact inverse of {@code Misc.getDHullId}. Kept as a
+     * literal rather than reading {@code Misc.D_HULL_SUFFIX} so this stays a pure function the tests
+     * can drive without the engine on the classpath.
+     */
+    static String baseHullId(String hullId) {
+        String value = normalize(hullId);
+        return value.endsWith(D_HULL_SUFFIX)
+                ? value.substring(0, value.length() - D_HULL_SUFFIX.length())
+                : value;
+    }
+
+    private static String normalize(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String originalVariantId(ShipVariantAPI variant) {
+        try {
+            return variant == null ? "" : normalize(variant.getOriginalVariant());
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static String specIdOrEmpty(FleetMemberAPI member) {
+        try {
+            return normalize(member.getSpecId());
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static String hullIdOrEmpty(FleetMemberAPI member) {
+        try {
+            return normalize(member.getHullId());
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static boolean variantExists(String variantId) {
+        try {
+            return Global.getSettings().doesVariantExist(variantId);
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
+    }
+
+    private static boolean hullExists(String hullId) {
+        try {
+            return Global.getSettings().getHullSpec(hullId) != null;
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
     }
 
     private static String locationId(LocationAPI location) {

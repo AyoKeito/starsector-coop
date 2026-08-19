@@ -572,31 +572,127 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
     }
 
+    /**
+     * Builds one mirror ship, <b>checking that the id exists before asking for it</b> and checking
+     * what came back afterwards.
+     *
+     * <p>This used to lean on exceptions — try the variant id, catch, try {@code hullId + "_Hull"},
+     * catch, give up — and that is exactly why the 2026-08-19 failure was silent. The engine does not
+     * reject an unknown variant id. {@code FleetMember.updateSpecIfNeeded}
+     * ({@code tmp_ff_analysis/probe/FleetMember.java:177-182}) <em>constructs and prints</em> a
+     * {@code RuntimeException} ("[x] is not a valid ship variant id") without throwing it, then
+     * substitutes {@code settings.json}'s {@code "errorShipVariant"} — which vanilla sets to
+     * {@code nebula_Standard} ({@code data/config/settings.json:143}). So a fleet the host had just
+     * inflated (every ship autofit onto a runtime variant named after the <em>host's</em> fleet id,
+     * see {@link CoopFleetSnapshot.Member}) arrived here, hit the first branch, threw nothing, and
+     * became N copies of the placeholder hull — a patrol wearing six identical civilian freighters,
+     * with no warning in the log because nothing had failed as far as this code could tell.
+     *
+     * <p>Two rules now. Ask only for ids this install actually has ({@link #resolveCreationId}), and
+     * verify the ship that comes back is the ship that was asked for ({@link #isPlausibleHull}) —
+     * belt and braces, because the substitution is silent by design and the sender's spec store is
+     * only guaranteed to match ours by the handshake's manifest check.
+     */
     private FleetMemberAPI createMember(CoopFleetSnapshot.Member member) {
-        try {
-            if (!member.variantId().isEmpty()) {
-                return Global.getFactory().createFleetMember(FleetMemberType.SHIP, member.variantId());
-            }
-        } catch (RuntimeException ignored) {
-            // Unknown variant id (e.g. a custom/empty variant); fall back to a hull default below.
-        }
-        try {
-            if (!member.hullId().isEmpty()) {
-                return Global.getFactory().createFleetMember(
-                        FleetMemberType.SHIP, member.hullId() + "_Hull");
-            }
-        } catch (RuntimeException ex) {
-            CoopLog.warn(CoopFleetMirror.class,
-                    "Failed to create coop mirror member for hull " + member.hullId(), ex);
+        String creationId = resolveCreationId(member.variantId(), member.hullId(),
+                CoopFleetMirror::variantExists, CoopFleetMirror::hullExists);
+        if (creationId.isEmpty()) {
+            CoopLog.warn(CoopFleetMirror.class, "Coop mirror member has no variant or hull id this"
+                    + " install can resolve, skipping it: coopFleetId=" + coopFleetId
+                    + " fleetMemberId=" + member.fleetMemberId()
+                    + " variantId=" + member.variantId() + " hullId=" + member.hullId());
             return null;
         }
-        // Both ids were empty (or the variant id resolved to nothing and there was no hull to fall
-        // back to). Silence here is what let short rosters pass unnoticed: say so once per attempt.
-        CoopLog.warn(CoopFleetMirror.class, "Coop mirror member has neither a usable variant nor hull"
-                + " id, skipping it: coopFleetId=" + coopFleetId
-                + " fleetMemberId=" + member.fleetMemberId()
-                + " variantId=" + member.variantId() + " hullId=" + member.hullId());
-        return null;
+        FleetMemberAPI created;
+        try {
+            created = Global.getFactory().createFleetMember(FleetMemberType.SHIP, creationId);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopFleetMirror.class, "Failed to create coop mirror member from "
+                    + creationId + " (coopFleetId=" + coopFleetId + ")", ex);
+            return null;
+        }
+        if (created == null) {
+            CoopLog.warn(CoopFleetMirror.class, "Coop mirror member came back null from " + creationId
+                    + " (coopFleetId=" + coopFleetId + ")");
+            return null;
+        }
+        String createdHullId = safeHullId(created);
+        if (!isPlausibleHull(createdHullId, member.hullId())) {
+            CoopLog.warn(CoopFleetMirror.class, "Coop mirror member SUBSTITUTED by the engine and"
+                    + " discarded: asked for " + creationId + " (hullId=" + member.hullId()
+                    + ") and got hullId=" + createdHullId + " — coopFleetId=" + coopFleetId
+                    + " fleetMemberId=" + member.fleetMemberId()
+                    + " variantId=" + member.variantId()
+                    + ". A placeholder ship reached the roster; the mirror will be short by one.");
+            return null;
+        }
+        return created;
+    }
+
+    /**
+     * Which id to hand {@code createFleetMember}: the streamed variant if this install has it, else
+     * the streamed hull's empty {@code "_Hull"} variant, else the hull's non-D parent's, else nothing.
+     *
+     * <p>The hull branches check the <em>hull spec</em>, not the {@code "_Hull"} variant id: those
+     * empty variants are synthesised on demand and are not in the spec store to be looked up.
+     */
+    static String resolveCreationId(String variantId, String hullId,
+                                    java.util.function.Predicate<String> variantExists,
+                                    java.util.function.Predicate<String> hullExists) {
+        if (variantId != null && !variantId.isEmpty() && variantExists.test(variantId)) {
+            return variantId;
+        }
+        if (hullId == null || hullId.isEmpty()) {
+            return "";
+        }
+        if (hullExists.test(hullId)) {
+            return hullId + "_Hull";
+        }
+        String base = CoopFleetSnapshotFactory.baseHullId(hullId);
+        return !base.equals(hullId) && hullExists.test(base) ? base + "_Hull" : "";
+    }
+
+    /**
+     * Whether the ship the engine built is the ship that was asked for.
+     *
+     * <p>Compared on the base hull, because a legitimate build can differ by exactly the D-hull
+     * suffix: the host streams the live hull ({@code falcon_default_D}, swapped in by
+     * {@code DModManager.setDHull} during inflation) alongside the stock variant it was autofit from
+     * ({@code falcon_Assault}), whose hull is the clean {@code falcon}. Losing the d-mods is the
+     * accepted trade; getting a Nebula is not.
+     */
+    static boolean isPlausibleHull(String createdHullId, String requestedHullId) {
+        String created = CoopFleetSnapshotFactory.baseHullId(createdHullId == null ? "" : createdHullId);
+        String requested =
+                CoopFleetSnapshotFactory.baseHullId(requestedHullId == null ? "" : requestedHullId);
+        // Nothing to check against: the sender could not name a hull either, so accept what we got
+        // rather than discard a ship over a missing cross-check.
+        return requested.isEmpty() || created.equals(requested);
+    }
+
+    private static String safeHullId(FleetMemberAPI member) {
+        try {
+            String hullId = member.getHullId();
+            return hullId == null ? "" : hullId;
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static boolean variantExists(String variantId) {
+        try {
+            return Global.getSettings().doesVariantExist(variantId);
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
+    }
+
+    private static boolean hullExists(String hullId) {
+        try {
+            return Global.getSettings().getHullSpec(hullId) != null;
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
     }
 
     /** Removes the mirror fleet from the world. Idempotent. */
