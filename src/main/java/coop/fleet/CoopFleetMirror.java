@@ -155,6 +155,13 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // stop pursuing the mirror. Phase 14 removes the permanent flag and replaces it with
         // contact-time protection, restoring vanilla pursuit.
         mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
+        // The battle PULL-IN path bypasses canBeEngaged() entirely: FleetInteractionDialogPluginImpl
+        // .pullInNearbyFleets runs whenever the host opens any fleet dialog and joins nearby fleets
+        // honoring only THIS flag (the ignoredByOtherFleets one above is never consulted there).
+        // Player-faction fleets get a 700 su join radius, so without it the guest mirror is dragged
+        // into host battles in ordinary play. Costs nothing: it only affects the mirror's own target
+        // selection, which the snapshot driving overrides anyway.
+        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
         mirrorFleet.getMemoryWithoutUpdate().set(PLAYER_MIRROR_TAG, true);
         resetTracking();
         CoopLog.info(CoopFleetMirror.class,
@@ -174,6 +181,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // See the player-mirror path above: interim Phase 12b protection against the engine's fleet
         // AI targeting a mirror and silently autoresolving against it. Removed in Phase 14.
         mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
+        // See the player-mirror path: only this flag is honored by the dialog battle pull-in
+        // (FleetInteractionDialogPluginImpl.pullInNearbyFleets), which never calls canBeEngaged().
+        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
         // Store the host-side fleet id so the per-frame guest suppressor recognizes this as a sanctioned
         // mirror and never sweeps it (see CoopNpcFleetSuppressor).
         mirrorFleet.getMemoryWithoutUpdate().set(NPC_MIRROR_TAG, snapshot.coopFleetId());
@@ -215,6 +225,29 @@ public class CoopFleetMirror implements CoopNpcMirror {
             } catch (RuntimeException ignored) {
                 // transponder state is best-effort for the mirror
             }
+        }
+    }
+
+    /**
+     * Re-asserts the ~1 s {@code noCombat} fader that keeps the mirror out of engine-formed battles.
+     *
+     * <p>NPC-vs-NPC battle initiation lives only in {@code BaseLocation.advance}'s pair loop, whose
+     * first gate is {@code CampaignFleet.canBeEngaged()} — false while that fader is live. But
+     * {@link #driveMovement} only refreshes it as a <em>side effect of applying a snapshot</em>, and
+     * every apply path returns early before that when the sector or the snapshot's location cannot be
+     * resolved. Any gap over a second (network stall, location transition, unresolvable location)
+     * therefore opens a window in which the mirror is engageable. The pump calls this unconditionally
+     * once per frame — including while paused — so the shield never depends on traffic arriving.
+     */
+    @Override
+    public void assertEngagementShield() {
+        if (mirrorFleet == null) {
+            return;
+        }
+        try {
+            mirrorFleet.setNoEngaging(1f);
+        } catch (RuntimeException ignored) {
+            // hot path, once per frame: never abort the frame over the shield
         }
     }
 

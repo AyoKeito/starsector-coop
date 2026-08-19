@@ -16,8 +16,14 @@ class CoopFleetMirrorRegistryTest {
     private static final class FakeMirror implements CoopNpcMirror {
         int snapshotApplies;
         int motionApplies;
+        int shieldAsserts;
         boolean disposed;
         CoopNpcFleetSnapshot lastSnapshot;
+
+        @Override
+        public void assertEngagementShield() {
+            shieldAsserts++;
+        }
 
         @Override
         public void applySnapshot(CoopNpcFleetSnapshot snapshot) {
@@ -121,6 +127,30 @@ class CoopFleetMirrorRegistryTest {
 
         assertEquals(1, mirrorA.motionApplies);
         assertEquals(1, registry.size(), "motion for an unknown fleet does not create a mirror");
+    }
+
+    @Test
+    void assertEngagementShieldsHitsEveryMirrorEveryCall() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+
+        registry.assertEngagementShields();
+        registry.assertEngagementShields();
+
+        assertEquals(2, creationOrder.get(0).shieldAsserts);
+        assertEquals(2, creationOrder.get(1).shieldAsserts, "shield does not depend on traffic arriving");
+    }
+
+    @Test
+    void disposedMirrorNoLongerGetsTheShield() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")));
+
+        registry.assertEngagementShields();
+
+        assertEquals(1, creationOrder.get(0).shieldAsserts);
+        assertEquals(0, creationOrder.get(1).shieldAsserts);
     }
 
     @Test

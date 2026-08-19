@@ -203,6 +203,7 @@ public class CoopNetPump implements EveryFrameScript {
         syncGuestInputBlocker();
         maybeSendLobbyHello();
         drainInbound();
+        assertMirrorEngagementShields();
         maybeSendHandshakeManifest();
         maybeSendSeedLockRequest();
         maybeHoldHostPausedUntilSessionReady();
@@ -1097,6 +1098,20 @@ public class CoopNetPump implements EveryFrameScript {
         return service.role() != CoopConnectionRole.NONE
                 && service.isConnected()
                 && isGameplaySessionActive();
+    }
+
+    /**
+     * Keeps every live mirror unengageable, every frame, regardless of traffic. The engine's only
+     * NPC-vs-NPC battle gate is {@code canBeEngaged()}, driven by the ~1 s {@code noCombat} fader that
+     * the mirrors previously refreshed only when a snapshot arrived <em>and</em> its location
+     * resolved; a stall or a transition left a window in which a mirror could be pulled into a real
+     * battle. This runs while paused too ({@link #runWhilePaused()} is true), which is required: the
+     * shield must hold across dialogs and pauses. Both roles are covered — {@code fleetMirror} is the
+     * remote player's mirror on host and guest alike, and the registry holds the guest's NPC mirrors.
+     */
+    private void assertMirrorEngagementShields() {
+        fleetMirror.assertEngagementShield();
+        npcFleetRegistry.assertEngagementShields();
     }
 
     private void syncFleetMirror() {

@@ -74,6 +74,17 @@ public final class CoopFleetMirrorRegistry {
         }
     }
 
+    /**
+     * Re-asserts every mirror's engagement shield. Driven unconditionally once per frame by the pump:
+     * the shield is a ~1 s fader that {@code applySnapshot}/{@code applyMotion} only refresh as a side
+     * effect, so a gap in the host's stream would otherwise leave the mirrors engageable.
+     */
+    public void assertEngagementShields() {
+        for (CoopNpcMirror mirror : mirrors.values()) {
+            mirror.assertEngagementShield();
+        }
+    }
+
     /** Disposes every mirror and clears the registry (session end / teardown). */
     public void disposeAll() {
         for (CoopNpcMirror mirror : mirrors.values()) {
