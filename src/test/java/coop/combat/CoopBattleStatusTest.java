@@ -154,30 +154,6 @@ class CoopBattleStatusTest {
         assertEquals(status.killFeed(), decoded.killFeed());
     }
 
-    // ---- panel formatting -------------------------------------------------------------------------
-
-    @Test
-    void hullBarFillsProportionally() {
-        assertEquals("[............]", CoopBattleStatusPanel.bar(0f));
-        assertEquals("[||||||||||||]", CoopBattleStatusPanel.bar(1f));
-        assertEquals("[||||||......]", CoopBattleStatusPanel.bar(0.5f));
-    }
-
-    @Test
-    void destroyedShipsRenderWithoutBars() {
-        String line = CoopBattleStatusPanel.shipLine(
-                ship("s", "lasher", "Lasher", true, 0f, 0f, CoopBattleStatus.ShipState.DESTROYED));
-
-        assertEquals("[X] Lasher  destroyed", line);
-    }
-
-    @Test
-    void elapsedTimeRendersAsMinutesAndSeconds() {
-        assertEquals("0:00", CoopBattleStatusPanel.formatElapsed(0L));
-        assertEquals("1:05", CoopBattleStatusPanel.formatElapsed(65000L));
-        assertEquals("0:00", CoopBattleStatusPanel.formatElapsed(-5L));
-    }
-
     private static CoopBattleStatus.ShipRecord ship(String id, String hullId, String name, boolean enemy,
                                                     float hull, float flux,
                                                     CoopBattleStatus.ShipState state) {

@@ -2,6 +2,7 @@ package coop.net;
 
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -1126,17 +1127,50 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     /**
-     * Keeps every live mirror unengageable, every frame, regardless of traffic. The engine's only
-     * NPC-vs-NPC battle gate is {@code canBeEngaged()}, driven by the ~1 s {@code noCombat} fader that
-     * the mirrors previously refreshed only when a snapshot arrived <em>and</em> its location
-     * resolved; a stall or a transition left a window in which a mirror could be pulled into a real
-     * battle. This runs while paused too ({@link #runWhilePaused()} is true), which is required: the
-     * shield must hold across dialogs and pauses. Both roles are covered — {@code fleetMirror} is the
-     * remote player's mirror on host and guest alike, and the registry holds the guest's NPC mirrors.
+     * Keeps the mirrors unengageable, every frame, regardless of traffic. The engine's battle gate is
+     * {@code canBeEngaged()}, driven by the ~1 s {@code noCombat} fader; the mirror driving paths
+     * deliberately do not touch it, so this pass is the whole shield. It runs while paused too
+     * ({@link #runWhilePaused()} is true), which is required: the shield must hold across dialogs and
+     * pauses.
+     *
+     * <p>{@code fleetMirror} — the remote <em>player's</em> mirror, present on host and guest alike —
+     * is shielded unconditionally: that is the PvP block, and on the host it also keeps the guest's
+     * mirror out of NPC battles. The guest's NPC mirrors get the same treatment except for the single
+     * fleet the player has explicitly targeted, which is released so the encounter can open at all
+     * (see {@link CoopFleetMirror#assertEngagementShield(Object)}).
      */
     private void assertMirrorEngagementShields() {
         fleetMirror.assertEngagementShield();
-        npcFleetRegistry.assertEngagementShields();
+        if (npcFleetRegistry.size() == 0) {
+            // Host (or a guest before the first NPC_FLEET_SET): nothing to shield, so skip the sector
+            // read entirely rather than paying for it every frame.
+            return;
+        }
+        npcFleetRegistry.assertEngagementShields(playerEngagementTargetOrNull());
+    }
+
+    /**
+     * The fleet the local player is walking into, or null. Read here rather than in the mirrors so
+     * they stay engine-dumb. Returns null while any dialog owns the screen: by then the encounter has
+     * already been constructed and vanilla's {@code FleetInteractionDialogPluginImpl} — which never
+     * consults the fader — drives the battle, so the shield can go straight back up.
+     */
+    private Object playerEngagementTargetOrNull() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return null;
+            }
+            CampaignUIAPI ui = sector.getCampaignUI();
+            if (ui != null && (ui.isShowingDialog() || ui.getCurrentInteractionDialog() != null)) {
+                return null;
+            }
+            CampaignFleetAPI player = sector.getPlayerFleet();
+            return player == null ? null : player.getInteractionTarget();
+        } catch (RuntimeException | LinkageError ex) {
+            // Hot path, once per frame: an unreadable sector just means "no target this frame".
+            return null;
+        }
     }
 
     private void syncFleetMirror() {
@@ -1458,10 +1492,12 @@ public class CoopNetPump implements EveryFrameScript {
         CampaignUIAPI ui = sector.getCampaignUI();
         if (ui != null) {
             InteractionDialogAPI dialog = ui.getCurrentInteractionDialog();
-            // The Phase 14 spectator panel is an interaction dialog on the local player's own fleet.
-            // Claiming it would lock the PARTNER out of every interaction while they are the one
-            // fighting — exactly backwards — so it is excluded from the gate entirely.
-            if (dialog != null && !battleBridge.isStatusPanel(dialog.getPlugin())) {
+            // Every open dialog claims its target, including the fleet dialog the guest opens by
+            // engaging an NPC mirror: the mirror is a local entity with its own id, so the claim can
+            // never collide with the host's claim on the real fleet and the gate stays out of the
+            // engagement's way. (The Phase 14 spectator panel used to be excluded here; it was
+            // replaced by banners on 2026-08-19, so there is nothing left to exclude.)
+            if (dialog != null) {
                 SectorEntityToken target = dialog.getInteractionTarget();
                 if (target != null) {
                     currentEntityId = target.getId();

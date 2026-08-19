@@ -27,8 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Headless coverage of the Phase 14 battle bridge. The engine is reached only through {@code Proxy}
  * stubs of {@code CombatEngineAPI} / {@code ShipAPI} (the pattern {@code CoopNetPumpTest} uses), and
  * every campaign tick is called with a null sector, which the bridge treats as "no UI to drive" —
- * the panel and pending-action paths need a live engine and are covered by the two-instance smoke
- * test instead.
+ * the banner-posting and pending-action paths need a live engine and are covered by the two-instance
+ * smoke test instead. What is asserted here is the queue the banners are posted from.
  */
 class CoopBattleBridgeTest {
 
@@ -120,12 +120,99 @@ class CoopBattleBridgeTest {
         assertTrue(CoopBattleBridge.combatPauseIntent(true, true));
     }
 
+    // ---- spectator banners (the panel was cancelled 2026-08-19) -----------------------------------
+
     @Test
-    void theSpectatorIsHeldWhileConnectedAndReleasedWhenTheSessionDies() {
-        assertFalse(CoopBattleBridge.canDismissPanel(true, 1000L));
-        assertTrue(CoopBattleBridge.canDismissPanel(false, 0L));
-        assertTrue(CoopBattleBridge.canDismissPanel(true,
-                CoopBattleBridge.REMOTE_BATTLE_ESCAPE_HATCH_MILLIS + 1));
+    void thePartnersBattleQueuesABeginBannerAndThenAnOutcomeBanner() {
+        Fixture fixture = Fixture.host();
+
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L,
+                "battle-g", "guest-player", "Corvus", "Pirate Raiders", "", CoopMessages.BattleKind.PLAYER));
+
+        assertEquals(List.of("Coop: Guest is fighting Pirate Raiders in Corvus."),
+                pendingBannersOf(fixture.bridge));
+
+        fixture.bridge.handle(CoopMessages.battleEnd("session-a", 2L, 0L, "battle-g", "guest-player", "WIN"));
+
+        assertEquals(List.of("Coop: Guest is fighting Pirate Raiders in Corvus.",
+                        "Coop: Guest won the battle."),
+                pendingBannersOf(fixture.bridge));
+    }
+
+    @Test
+    void theOutcomeBannerCarriesTheSurvivorsFromTheLastStatusReceived() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L,
+                "battle-g", "guest-player", "", "Raiders", "", CoopMessages.BattleKind.PLAYER));
+        fixture.bridge.handle(statusMessage(new CoopBattleStatus("battle-g", 1L, 1000L, List.of(
+                new CoopBattleStatus.ShipRecord("s1", "wolf", "Wolf", false, 1f, 0f,
+                        CoopBattleStatus.ShipState.ALIVE),
+                new CoopBattleStatus.ShipRecord("s2", "kite", "Kite", false, 0f, 1f,
+                        CoopBattleStatus.ShipState.DISABLED),
+                new CoopBattleStatus.ShipRecord("e1", "lasher", "Lasher", true, 0.5f, 0f,
+                        CoopBattleStatus.ShipState.ALIVE)),
+                List.of())));
+
+        fixture.bridge.handle(CoopMessages.battleEnd("session-a", 3L, 0L, "battle-g", "guest-player",
+                "DISENGAGED"));
+
+        assertEquals("Coop: Guest disengaged (last report: 1 of 2 ships standing).",
+                pendingBannersOf(fixture.bridge).get(1));
+    }
+
+    @Test
+    void aDisconnectMidSpectateStillQueuesTheConnectionLostBanner() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L,
+                "battle-g", "guest-player", "Corvus", "Raiders", "", CoopMessages.BattleKind.PLAYER));
+
+        fixture.bridge.tickCampaign(null, false, 1000L);
+
+        List<String> banners = pendingBannersOf(fixture.bridge);
+        assertEquals(2, banners.size());
+        assertTrue(banners.get(1).contains("connection lost"));
+        assertFalse(fixture.bridge.isAnyCoopBattleActive());
+    }
+
+    @Test
+    void bannersSurviveFramesWithNoCampaignUiAndNeverGrowWithoutBound() {
+        Fixture fixture = Fixture.host();
+        for (int i = 0; i < CoopBattleBridge.MAX_PENDING_BANNERS + 4; i++) {
+            fixture.bridge.handle(CoopMessages.battleBegin("session-a", i + 1, 0L,
+                    "battle-" + i, "guest-player", "Corvus", "Raiders " + i, "",
+                    CoopMessages.BattleKind.PLAYER));
+            // A sector-less frame cannot post them; they must stay queued rather than be dropped.
+            fixture.bridge.tickCampaign(null, true, 1000L + i);
+        }
+
+        List<String> banners = pendingBannersOf(fixture.bridge);
+        assertEquals(CoopBattleBridge.MAX_PENDING_BANNERS, banners.size());
+        assertTrue(banners.get(banners.size() - 1).contains("Raiders "
+                + (CoopBattleBridge.MAX_PENDING_BANNERS + 3)), "the newest banner is always kept");
+    }
+
+    @Test
+    void bannerTextDegradesGracefullyOnMissingDetail() {
+        assertEquals("Coop: Your partner is fighting an enemy fleet.",
+                CoopBattleBridge.battleBeginBanner("Your partner", "", ""));
+        assertEquals("Coop: Ayo finished the battle.",
+                CoopBattleBridge.battleEndBanner("Ayo", "UNKNOWN", ""));
+        assertEquals("Coop: Ayo lost the battle.",
+                CoopBattleBridge.battleEndBanner("Ayo", "LOSS", ""));
+        assertEquals("", CoopBattleBridge.survivorSummary(null));
+    }
+
+    @Test
+    void theRetainedStatusStreamDigestsToOneChangeDetectedLine() {
+        CoopBattleStatus status = new CoopBattleStatus("b", 3L, 0L, List.of(
+                new CoopBattleStatus.ShipRecord("s1", "wolf", "Wolf", false, 1f, 0f,
+                        CoopBattleStatus.ShipState.ALIVE),
+                new CoopBattleStatus.ShipRecord("e1", "lasher", "Lasher", true, 0f, 0f,
+                        CoopBattleStatus.ShipState.DESTROYED)),
+                List.of());
+
+        assertEquals("battleId=b partner 1/1 enemy 0/1", CoopBattleBridge.statusDigest(status));
+        assertEquals("", CoopBattleBridge.statusDigest(null));
     }
 
     // ---- disconnect mid-combat ----------------------------------------------------------------------
@@ -304,6 +391,18 @@ class CoopBattleBridgeTest {
                 feed.addAll(status.killFeed());
             }
             return feed;
+        }
+    }
+
+    /** Reads the bridge's queued spectator banners without widening its public surface. */
+    @SuppressWarnings("unchecked")
+    private static List<String> pendingBannersOf(CoopBattleBridge bridge) {
+        try {
+            java.lang.reflect.Field field = CoopBattleBridge.class.getDeclaredField("pendingBanners");
+            field.setAccessible(true);
+            return new ArrayList<>((java.util.Collection<String>) field.get(bridge));
+        } catch (ReflectiveOperationException ex) {
+            throw new AssertionError(ex);
         }
     }
 

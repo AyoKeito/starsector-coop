@@ -527,10 +527,10 @@
       "theme": "combat",
       "track": "v1",
       "status": "not-built",
-      "summary": "Solo own-fleet combat where the engaging player pilots locally while the other is paused and follows via a 2-5 Hz battle-status panel.",
+      "summary": "Solo own-fleet combat where the engaging player pilots locally while the other is paused and follows via begin/end banners (2026-08-19: the live status panel was cancelled; the 2-5 Hz BATTLE_STATUS stream is retained for Phase 22).",
       "introduces": [
         "CoopBattleBridge",
-        "CoopBattleStatusPanel",
+        "spectator battle banners",
         "CoopNpcThreatWatcher",
         "CoopPreBattleAutosave",
         "BATTLE_STATUS codec",

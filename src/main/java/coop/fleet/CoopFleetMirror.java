@@ -26,10 +26,11 @@ import java.util.function.Supplier;
  *       the high-frequency UDP position updates between full-set applies.</li>
  * </ul>
  *
- * <p>Both roles share the driving contract: {@code setAIMode(true)}, {@code setNoEngaging(1f)} every
- * tick (the mirror never autonomously starts combat — real engagements happen on the host's
- * authoritative copy), {@code setMoveDestinationOverride} plus a periodic {@code setLocation} snap to
- * correct interpolation drift, and a roster rebuild only when the snapshot's {@code fleetHash} changes.
+ * <p>Both roles share the driving contract: {@code setAIMode(true)}, the per-frame engagement shield
+ * ({@link #assertEngagementShield()}, driven by the pump — the mirror never autonomously starts
+ * combat, because real engagements happen on the host's authoritative copy),
+ * {@code setMoveDestinationOverride} plus a periodic {@code setLocation} snap to correct interpolation
+ * drift, and a roster rebuild only when the snapshot's {@code fleetHash} changes.
  */
 public class CoopFleetMirror implements CoopNpcMirror {
     // 10 Hz snapshots; snap the absolute position roughly once per second to correct interpolation
@@ -47,6 +48,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private String lastFleetHash;
     private String lastLocationId;
     private int applyCount;
+    /** True while the shield is deliberately down for the player's interaction target (edge-tracked). */
+    private boolean shieldReleased;
 
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
@@ -217,7 +220,10 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private void driveMovement(float x, float y, float velocityX, float velocityY, Boolean transponderOn) {
         mirrorFleet.setMoveDestinationOverride(x, y);
         mirrorFleet.setVelocity(velocityX, velocityY);
-        mirrorFleet.setNoEngaging(1f);
+        // No shield assert here on purpose: the per-frame pump pass (assertEngagementShield) is the
+        // single authoritative shield. Asserting it from the driving path as well would fight the
+        // targeted release below every time a snapshot or motion record arrived (10 Hz), leaving the
+        // fleet the player explicitly targeted permanently unengageable.
         if (transponderOn != null) {
             try {
                 mirrorFleet.setTransponderOn(transponderOn);
@@ -230,15 +236,17 @@ public class CoopFleetMirror implements CoopNpcMirror {
     /**
      * Re-asserts the ~1 s {@code noCombat} fader that keeps the mirror out of engine-formed battles.
      *
-     * <p>NPC-vs-NPC battle initiation lives only in {@code BaseLocation.advance}'s pair loop, whose
-     * first gate is {@code CampaignFleet.canBeEngaged()} — false while that fader is live. But
-     * {@link #driveMovement} only refreshes it as a <em>side effect of applying a snapshot</em>, and
-     * every apply path returns early before that when the sector or the snapshot's location cannot be
-     * resolved. Any gap over a second (network stall, location transition, unresolvable location)
-     * therefore opens a window in which the mirror is engageable. The pump calls this unconditionally
-     * once per frame — including while paused — so the shield never depends on traffic arriving.
+     * <p>Battle initiation between AI fleets lives only in {@code BaseLocation.advance}'s pair loop,
+     * whose first gate is {@code CampaignFleet.canBeEngaged()} — false while that fader is live. The
+     * mirror driving path deliberately does <em>not</em> refresh it (see {@link #driveMovement}), so
+     * the pump calling this unconditionally once per frame — including while paused — is the whole
+     * shield: it never depends on traffic arriving, and it survives network stalls, location
+     * transitions and unresolvable locations that make the apply paths return early.
+     *
+     * <p>This unconditional form is what the <b>partner player mirror</b> gets on both roles: it is
+     * the PvP block (neither player can engage the other's mirror) and, on the host, the block that
+     * keeps the guest's mirror out of NPC battles. It is never released.
      */
-    @Override
     public void assertEngagementShield() {
         if (mirrorFleet == null) {
             return;
@@ -247,6 +255,79 @@ public class CoopFleetMirror implements CoopNpcMirror {
             mirrorFleet.setNoEngaging(1f);
         } catch (RuntimeException ignored) {
             // hot path, once per frame: never abort the frame over the shield
+        }
+        shieldReleased = false;
+    }
+
+    /**
+     * The NPC-mirror form of the shield: asserted every frame as above, <em>except</em> for the one
+     * mirror the local player has explicitly picked as their interaction target, whose shield is
+     * cleared so the player can actually engage it.
+     *
+     * <p>Why the release is needed: player-initiated encounters run through {@code BaseLocation
+     * .advance}'s "player combat initiation" block, which requires both the player fleet and the
+     * target to pass {@code canBeEngaged()}. With the shield up the block silently skips the mirror —
+     * the interaction dialog is never constructed and the right-click appears to do nothing.
+     *
+     * <p>Why the other mirrors keep it: not because mirror-initiated battles are likely on the guest
+     * (the mirrors' AI is suppressed and they are driven entirely by host snapshots), but as
+     * defense-in-depth against any engine path that forms a battle around them. The release is scoped
+     * as narrowly as it can be — the player's own explicit engagement intent, one fleet at a time.
+     *
+     * @param playerInteractionTarget the local player fleet's current interaction target, or null when
+     *                                there is none (or a dialog already owns the screen, in which case
+     *                                the vanilla dialog — which never reads the fader — takes over)
+     */
+    @Override
+    public void assertEngagementShield(Object playerInteractionTarget) {
+        if (mirrorFleet == null) {
+            return;
+        }
+        if (shouldReleaseShield(mirrorFleet, playerInteractionTarget)) {
+            releaseEngagementShield();
+            return;
+        }
+        assertEngagementShield();
+    }
+
+    /**
+     * The pure decision behind {@link #assertEngagementShield(Object)}: release only for the exact
+     * fleet instance the player is walking into. Static and identity-based so the registry's headless
+     * fakes decide the same way the real mirror does.
+     */
+    static boolean shouldReleaseShield(Object mirrorFleet, Object playerInteractionTarget) {
+        return mirrorFleet != null && mirrorFleet == playerInteractionTarget;
+    }
+
+    /**
+     * Clears the shield with the vanilla idiom: {@code setNoEngaging(0f)} builds a zero-duration fader,
+     * whose {@code fadeIn()} forces it straight to IDLE, so the engine nulls it on the mirror's next
+     * advance and {@code canBeEngaged()} is true a frame later.
+     *
+     * <p>Edge-triggered on purpose. {@code setNoEngaging} also re-pulses the engine's {@code
+     * noCombatPulse} fader, which drives the "cannot be engaged" flicker; calling it every frame while
+     * the player closes in would keep that pulse lit for the whole approach.
+     */
+    private void releaseEngagementShield() {
+        if (shieldReleased) {
+            return;
+        }
+        shieldReleased = true;
+        try {
+            mirrorFleet.setNoEngaging(0f);
+        } catch (RuntimeException ignored) {
+            // hot path: never abort the frame over the shield
+        }
+        CoopLog.info(CoopFleetMirror.class, "Coop NPC mirror engagement shield released for the"
+                + " player's interaction target: " + safeMirrorName());
+    }
+
+    private String safeMirrorName() {
+        try {
+            String name = mirrorFleet.getName();
+            return name == null ? "" : name;
+        } catch (RuntimeException ex) {
+            return "";
         }
     }
 
@@ -399,6 +480,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         lastFleetHash = null;
         lastLocationId = null;
         applyCount = 0;
+        shieldReleased = false;
     }
 
     private LocationAPI resolveLocation(SectorAPI sector, String locationId) {

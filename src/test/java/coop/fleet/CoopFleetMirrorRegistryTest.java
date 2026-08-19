@@ -14,15 +14,23 @@ class CoopFleetMirrorRegistryTest {
 
     /** Records what the registry asks of each mirror, without touching the engine. */
     private static final class FakeMirror implements CoopNpcMirror {
+        /** Stands in for the engine fleet: the shield decision is identity-based on it. */
+        final Object fleet = new Object();
         int snapshotApplies;
         int motionApplies;
         int shieldAsserts;
+        int shieldReleases;
         boolean disposed;
         CoopNpcFleetSnapshot lastSnapshot;
 
         @Override
-        public void assertEngagementShield() {
-            shieldAsserts++;
+        public void assertEngagementShield(Object playerInteractionTarget) {
+            // Same call the real mirror makes, so the fake cannot drift from the production decision.
+            if (CoopFleetMirror.shouldReleaseShield(fleet, playerInteractionTarget)) {
+                shieldReleases++;
+            } else {
+                shieldAsserts++;
+            }
         }
 
         @Override
@@ -134,11 +142,65 @@ class CoopFleetMirrorRegistryTest {
         CoopFleetMirrorRegistry registry = newRegistry();
         registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
 
-        registry.assertEngagementShields();
-        registry.assertEngagementShields();
+        registry.assertEngagementShields(null);
+        registry.assertEngagementShields(null);
 
         assertEquals(2, creationOrder.get(0).shieldAsserts);
         assertEquals(2, creationOrder.get(1).shieldAsserts, "shield does not depend on traffic arriving");
+        assertEquals(0, creationOrder.get(0).shieldReleases);
+    }
+
+    @Test
+    void onlyThePlayersOwnInteractionTargetHasItsShieldReleased() {
+        // Without this release the engine's player-combat-initiation block skips the mirror entirely
+        // (it needs target.canBeEngaged()), so right-clicking a mirror does nothing at all.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        FakeMirror targeted = creationOrder.get(0);
+        FakeMirror other = creationOrder.get(1);
+
+        registry.assertEngagementShields(targeted.fleet);
+
+        assertEquals(1, targeted.shieldReleases, "the targeted mirror must become engageable");
+        assertEquals(0, targeted.shieldAsserts);
+        assertEquals(1, other.shieldAsserts, "every other mirror keeps the shield");
+        assertEquals(0, other.shieldReleases);
+    }
+
+    @Test
+    void aTargetThatIsNotAMirrorLeavesEveryShieldUp() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")));
+
+        registry.assertEngagementShields(new Object());
+
+        assertEquals(1, creationOrder.get(0).shieldAsserts);
+        assertEquals(0, creationOrder.get(0).shieldReleases);
+    }
+
+    @Test
+    void theShieldGoesBackUpWhenThePlayerPicksAnotherTarget() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        FakeMirror mirror = creationOrder.get(0);
+
+        registry.assertEngagementShields(mirror.fleet);
+        registry.assertEngagementShields(null);
+
+        assertEquals(1, mirror.shieldReleases);
+        assertEquals(1, mirror.shieldAsserts);
+    }
+
+    @Test
+    void theReleaseDecisionIsFleetIdentityAndNothingElse() {
+        Object fleet = new Object();
+
+        assertTrue(CoopFleetMirror.shouldReleaseShield(fleet, fleet));
+        assertFalse(CoopFleetMirror.shouldReleaseShield(fleet, new Object()));
+        assertFalse(CoopFleetMirror.shouldReleaseShield(fleet, null),
+                "no interaction target means no release");
+        assertFalse(CoopFleetMirror.shouldReleaseShield(null, null),
+                "a mirror with no engine fleet is never released");
     }
 
     @Test
@@ -147,7 +209,7 @@ class CoopFleetMirrorRegistryTest {
         registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
         registry.applySet(set(fleet("a", "corvus", "wolf")));
 
-        registry.assertEngagementShields();
+        registry.assertEngagementShields(null);
 
         assertEquals(1, creationOrder.get(0).shieldAsserts);
         assertEquals(0, creationOrder.get(1).shieldAsserts);

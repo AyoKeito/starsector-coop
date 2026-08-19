@@ -4,8 +4,6 @@ import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
-import com.fs.starfarer.api.campaign.InteractionDialogAPI;
-import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
@@ -20,9 +18,12 @@ import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.util.CoopLog;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.LongSupplier;
@@ -33,9 +34,19 @@ import java.util.function.LongSupplier;
  * <ul>
  *   <li><b>Engaging side</b> — detects battle start/end, becomes that battle's authority, and streams
  *       {@code BATTLE_BEGIN} / {@code BATTLE_STATUS} / {@code BATTLE_END} over reliable TCP.</li>
- *   <li><b>Spectator side</b> — asserts the shared combat pause, opens {@link CoopBattleStatusPanel},
- *       and closes it when the battle ends or the session dies.</li>
+ *   <li><b>Spectator side</b> — asserts the shared combat pause and posts campaign banners for the
+ *       partner's battle beginning and ending.</li>
  * </ul>
+ *
+ * <h2>Spectator UX: banners, not a panel (revised 2026-08-19)</h2>
+ * The original spectator was a live-refreshing {@code CoopBattleStatusPanel} interaction dialog. It
+ * was cancelled by user decision: the redraw-on-change rebuild still blinked, and in practice
+ * spectating happens out of band (Discord screen-share) where a full-screen dialog on the watching
+ * client is in the way. The spectator now gets a {@code CampaignUIAPI.addMessage} banner on
+ * {@code BATTLE_BEGIN} and another on {@code BATTLE_END}, and is held by the shared combat pause
+ * exactly as before. The {@code BATTLE_STATUS} stream, codec and kill feed are deliberately kept —
+ * they are cheap, they work, and they are the raw material for the Phase 22 tactical-map observer;
+ * the spectator just logs them at debug level now.
  *
  * <h2>Chosen detection seams (and why)</h2>
  * <ul>
@@ -71,9 +82,9 @@ import java.util.function.LongSupplier;
  * <h2>Disconnect mid-combat</h2>
  * Finish locally, reconcile by authority. If the session dies while a local battle is running, the
  * {@code BATTLE_END} never sends; that is safe (the host's authoritative state resurrects whatever it
- * would have changed) and is logged loudly by {@link #discardedResultMessage}. The spectator's panel
- * flips to a dismissable "connection lost" state. No freeze, no countdown, no rollback — the
- * cancelled protocol depended on programmatic save-loading that does not exist.
+ * would have changed) and is logged loudly by {@link #discardedResultMessage}. The spectator gets the
+ * "connection lost" banner. No freeze, no countdown, no rollback — the cancelled protocol depended on
+ * programmatic save-loading that does not exist.
  */
 public final class CoopBattleBridge {
 
@@ -92,11 +103,10 @@ public final class CoopBattleBridge {
      */
     static final long BATTLE_START_TIMEOUT_MILLIS = 15000L;
     /**
-     * Escape hatch for the spectator: if a remote battle somehow never ends while the connection
-     * stays up (TCP guarantees {@code BATTLE_END} delivery, so this should be unreachable), let the
-     * spectator out rather than trapping them in an optionless dialog forever.
+     * Banners waiting for a campaign frame with a live UI. Bounded because a client that never gets a
+     * UI (title screen, teardown) must not accumulate them; the oldest are dropped.
      */
-    static final long REMOTE_BATTLE_ESCAPE_HATCH_MILLIS = 10L * 60L * 1000L;
+    static final int MAX_PENDING_BANNERS = 8;
     /** A queued host-pushed action that cannot be honoured for this long is dropped. */
     static final long PENDING_ACTION_TIMEOUT_MILLIS = 60000L;
 
@@ -132,16 +142,10 @@ public final class CoopBattleBridge {
     // ---- spectator side ----
     private boolean remoteBattleActive;
     private String remoteBattleId = "";
-    private String remoteHeader = "";
     private CoopBattleStatus remoteStatus;
-    private long remoteBattleBeganAtMillis;
-    private CoopBattleStatusPanel panel;
-    private String panelOpenedForBattleId = "";
-    private boolean panelBannerShown;
-    private boolean panelFailureLogged;
-    private long nextPanelAttemptAtMillis;
-    private boolean sessionLost;
-    private boolean connectionLostBannerPending;
+    /** Last logged status digest, so the debug line is change-detected rather than per snapshot. */
+    private String remoteStatusDigest = "";
+    private final Deque<String> pendingBanners = new ArrayDeque<>();
 
     // ---- host-pushed actions queued on the guest ----
     private PendingEngage pendingEngage;
@@ -176,11 +180,6 @@ public final class CoopBattleBridge {
                 + " (" + (enemySummary == null || enemySummary.isEmpty() ? "unknown enemy" : enemySummary)
                 + ") was still running. BATTLE_END was never sent; the battle finishes locally and the"
                 + " host's authoritative state reconciles it on the next session (Phase 15).";
-    }
-
-    /** The spectator may leave the panel only when the session is gone or the battle is impossibly long. */
-    public static boolean canDismissPanel(boolean sessionActive, long remoteBattleAgeMillis) {
-        return !sessionActive || remoteBattleAgeMillis > REMOTE_BATTLE_ESCAPE_HATCH_MILLIS;
     }
 
     /** A local battle that never reached a combat frame within the timeout was rejected by the engine. */
@@ -248,16 +247,15 @@ public final class CoopBattleBridge {
                     onSessionEnded();
                     sessionWasActive = false;
                 }
-                syncPanel(sector, nowMillis);
+                flushBanners(sector);
                 return;
             }
             sessionWasActive = true;
-            sessionLost = false;
             autosave.tick(sector);
             maybeEndLocalBattle(nowMillis);
             drivePendingEngage(sector, nowMillis);
             drivePendingDialog(sector, nowMillis);
-            syncPanel(sector, nowMillis);
+            flushBanners(sector);
             if (service.role() == CoopConnectionRole.HOST) {
                 pauseCoordinator.setEitherInCombat(combatPauseIntent(localBattleActive, remoteBattleActive));
             }
@@ -269,11 +267,6 @@ public final class CoopBattleBridge {
     /** True while this client is piloting a coop battle (used by the threat watcher's gate). */
     public boolean isAnyCoopBattleActive() {
         return localBattleActive || remoteBattleActive;
-    }
-
-    /** The status panel plugin currently open, or null. Lets the pump skip it in the interaction gate. */
-    public boolean isStatusPanel(InteractionDialogPlugin plugin) {
-        return plugin instanceof CoopBattleStatusPanel;
     }
 
     // ---- inbound -------------------------------------------------------------------------------
@@ -299,13 +292,8 @@ public final class CoopBattleBridge {
         remoteBattleActive = true;
         remoteBattleId = battleId;
         remoteStatus = null;
-        remoteBattleBeganAtMillis = clock.getAsLong();
-        panelOpenedForBattleId = "";
-        panelBannerShown = false;
-        remoteHeader = (session.remoteName() == null || session.remoteName().isEmpty()
-                ? "Your partner" : session.remoteName())
-                + " is fighting " + (enemy.isEmpty() ? "an enemy fleet" : enemy)
-                + (location.isEmpty() ? "" : " in " + location) + ".";
+        remoteStatusDigest = "";
+        queueBanner(battleBeginBanner(partnerName(), enemy, location));
         CoopLog.info(CoopBattleBridge.class, "Coop BATTLE_BEGIN received battleId=" + battleId
                 + " enemy=" + enemy + " location=" + location);
     }
@@ -320,18 +308,55 @@ public final class CoopBattleBridge {
                 CoopMessages.requiredPayloadLong(message, "elapsedMillis"),
                 CoopMessages.requiredPayloadString(message, "ships"));
         if (!remoteBattleActive) {
-            // Defensive: status without a begin (should be impossible over TCP) still opens the panel.
+            // Defensive: status without a begin (should be impossible over TCP) still counts as a
+            // battle in progress, so the shared combat pause is asserted.
             remoteBattleActive = true;
             remoteBattleId = battleId;
-            remoteBattleBeganAtMillis = clock.getAsLong();
         }
+        logStatusIfChanged(remoteStatus);
+    }
+
+    /**
+     * The stream is kept for the Phase 22 tactical-map observer but has no UI any more, so it lands as
+     * a change-detected debug line. Never per snapshot: 2.5 Hz of unchanged lines is noise.
+     */
+    private void logStatusIfChanged(CoopBattleStatus status) {
+        String digest = statusDigest(status);
+        if (digest.equals(remoteStatusDigest)) {
+            return;
+        }
+        remoteStatusDigest = digest;
+        CoopLog.debug(CoopBattleBridge.class, "Coop BATTLE_STATUS " + digest);
+    }
+
+    /** Package-private + pure: the one-line summary of a snapshot ("partner 3/4 alive, enemy 1/5"). */
+    static String statusDigest(CoopBattleStatus status) {
+        if (status == null) {
+            return "";
+        }
+        return "battleId=" + status.battleId()
+                + " partner " + aliveCount(status.ownShips()) + "/" + status.ownShips().size()
+                + " enemy " + aliveCount(status.enemyShips()) + "/" + status.enemyShips().size();
+    }
+
+    private static int aliveCount(List<CoopBattleStatus.ShipRecord> ships) {
+        int alive = 0;
+        for (CoopBattleStatus.ShipRecord ship : ships) {
+            if (ship.state() == CoopBattleStatus.ShipState.ALIVE) {
+                alive++;
+            }
+        }
+        return alive;
     }
 
     private void handleBattleEnd(CoopMessages.Message message) {
         String battleId = CoopMessages.requiredPayloadString(message, "battleId");
         String outcome = CoopMessages.requiredPayloadString(message, "outcome");
+        // The survivor line rides on the last status that arrived — no new message fields.
+        queueBanner(battleEndBanner(partnerName(), outcome, survivorSummary(remoteStatus)));
         remoteBattleActive = false;
         remoteStatus = null;
+        remoteStatusDigest = "";
         remoteBattleId = "";
         CoopLog.info(CoopBattleBridge.class, "Coop BATTLE_END received battleId=" + battleId
                 + " outcome=" + outcome);
@@ -602,94 +627,88 @@ public final class CoopBattleBridge {
         }
     }
 
-    // ---- spectator panel -------------------------------------------------------------------------
+    // ---- spectator banners -----------------------------------------------------------------------
 
-    private void syncPanel(SectorAPI sector, long nowMillis) {
-        if (sector == null) {
+    /**
+     * Posts every queued banner as soon as a campaign UI exists. Banners are queued rather than sent
+     * from the inbound handler because messages arrive on pump frames that may have no sector yet
+     * (load, teardown), and {@code addMessage} on a half-built UI is not worth the risk.
+     */
+    private void flushBanners(SectorAPI sector) {
+        if (pendingBanners.isEmpty() || sector == null) {
             return;
         }
         CampaignUIAPI ui = sector.getCampaignUI();
         if (ui == null) {
             return;
         }
-        // Forget the panel once the player (or the engine) closed it.
-        if (panel != null && !isPanelCurrentDialog(ui)) {
-            panel = null;
+        String banner;
+        while ((banner = pendingBanners.poll()) != null) {
+            addMessage(ui, banner);
         }
-        if (!remoteBattleActive) {
-            if (panel != null) {
-                panel.requestDismiss();
-                panel = null;
-            }
-            if (connectionLostBannerPending) {
-                connectionLostBannerPending = false;
-                addMessage(ui, "Coop: connection lost. Your partner's battle finishes on their machine;"
-                        + " the host's authoritative state reconciles it next session.");
-            }
-            panelOpenedForBattleId = "";
-            panelBannerShown = false;
-            panelFailureLogged = false;
-            return;
-        }
-        if (panel != null || panelOpenedForBattleId.equals(remoteBattleId)) {
-            return;
-        }
-        if (ui.getCurrentInteractionDialog() != null || ui.isShowingDialog()) {
-            // Another dialog owns the screen (docked at a market, mid-encounter). Fall back to the
-            // banner the plan names, and try again on a later frame — the local dialog will close.
-            if (!panelBannerShown) {
-                panelBannerShown = true;
-                addMessage(ui, remoteHeader);
-            }
-            return;
-        }
-        if (nowMillis < nextPanelAttemptAtMillis) {
-            return;
-        }
-        nextPanelAttemptAtMillis = nowMillis + 1000L;
-        openPanel(sector, ui);
     }
 
-    private void openPanel(SectorAPI sector, CampaignUIAPI ui) {
-        CampaignFleetAPI player = playerFleetOrNull(sector);
-        if (player == null) {
+    private void queueBanner(String text) {
+        if (text == null || text.isEmpty()) {
             return;
         }
-        CoopBattleStatusPanel created = new CoopBattleStatusPanel(
-                () -> remoteStatus,
-                () -> remoteHeader,
-                () -> !remoteBattleActive,
-                () -> canDismissPanel(isSessionActive() && service.isConnected(),
-                        clock.getAsLong() - remoteBattleBeganAtMillis),
-                () -> sessionLost
-                        ? "Connection to your partner was lost. The battle finishes on their machine."
-                        : "This engagement has run unusually long; you may close this panel.");
-        boolean shown;
-        try {
-            shown = ui.showInteractionDialog(created, player);
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopBattleBridge.class, "Coop battle status panel failed to open", ex);
-            shown = false;
+        while (pendingBanners.size() >= MAX_PENDING_BANNERS) {
+            pendingBanners.poll();
         }
-        if (shown) {
-            panel = created;
-            panelOpenedForBattleId = remoteBattleId;
-            CoopLog.info(CoopBattleBridge.class, "Coop battle status panel opened for battleId="
-                    + remoteBattleId);
-            return;
+        pendingBanners.add(text);
+    }
+
+    /** "Coop: Ayo is fighting Pirate Raiders in Corvus." */
+    static String battleBeginBanner(String partnerName, String enemySummary, String locationName) {
+        String enemy = enemySummary == null || enemySummary.isEmpty() ? "an enemy fleet" : enemySummary;
+        String location = locationName == null || locationName.isEmpty() ? "" : " in " + locationName;
+        return "Coop: " + partnerName + " is fighting " + enemy + location + ".";
+    }
+
+    /** "Coop: Ayo won the battle (last report: 3 of 4 ships standing)." */
+    static String battleEndBanner(String partnerName, String outcome, String survivorSummary) {
+        String tail = survivorSummary == null || survivorSummary.isEmpty()
+                ? "" : " (last report: " + survivorSummary + ")";
+        return "Coop: " + partnerName + " " + outcomePhrase(outcome) + tail + ".";
+    }
+
+    /**
+     * The outcome string is whatever vanilla's engagement callbacks produced ({@code WIN} /
+     * {@code LOSS} from {@code reportBattleOccurred}, an {@code EngagementOutcome} name from
+     * {@code reportPlayerEngagement}) or one of the bridge's own fallbacks; anything unrecognised
+     * degrades to a neutral phrase rather than printing an enum at the player.
+     */
+    private static String outcomePhrase(String outcome) {
+        String normalized = outcome == null ? "" : outcome.trim().toUpperCase(Locale.ROOT);
+        if (normalized.contains("DISENGAGE")) {
+            return "disengaged";
         }
-        // Deliberately NOT marked as opened: the refusal is usually transient (a screen took the UI
-        // between the check and the call), so the 1 Hz retry above gets another go. The banner and the
-        // warning are one-shot so a permanent refusal cannot spam either.
-        if (!panelBannerShown) {
-            panelBannerShown = true;
-            addMessage(ui, remoteHeader);
+        if (normalized.contains("WIN") || normalized.contains("VICTOR")) {
+            return "won the battle";
         }
-        if (!panelFailureLogged) {
-            panelFailureLogged = true;
-            CoopLog.warn(CoopBattleBridge.class, "Coop battle status panel refused to open; fell back"
-                    + " to the message banner for battleId=" + remoteBattleId);
+        if (normalized.contains("LOSS") || normalized.contains("LOSE") || normalized.contains("DEFEAT")) {
+            return "lost the battle";
         }
+        return "finished the battle";
+    }
+
+    /**
+     * Partner-fleet survivors as of the newest {@code BATTLE_STATUS} that arrived — deliberately
+     * approximate (the last snapshot is up to {@link #STATUS_INTERVAL_MILLIS} old and destroyed ships
+     * leave the capture entirely), which is why the banner labels it "last report". Empty when no
+     * status ever arrived.
+     */
+    static String survivorSummary(CoopBattleStatus status) {
+        if (status == null || status.ownShips().isEmpty()) {
+            return "";
+        }
+        List<CoopBattleStatus.ShipRecord> own = status.ownShips();
+        return aliveCount(own) + " of " + own.size() + " ships standing";
+    }
+
+    private String partnerName() {
+        String name = session.remoteName();
+        return name == null || name.isEmpty() ? "Your partner" : name;
     }
 
     private static void addMessage(CampaignUIAPI ui, String text) {
@@ -697,15 +716,6 @@ public final class CoopBattleBridge {
             ui.addMessage(text);
         } catch (RuntimeException | LinkageError ignored) {
             // banner is best-effort
-        }
-    }
-
-    private boolean isPanelCurrentDialog(CampaignUIAPI ui) {
-        try {
-            InteractionDialogAPI dialog = ui.getCurrentInteractionDialog();
-            return dialog != null && dialog.getPlugin() == panel;
-        } catch (RuntimeException | LinkageError ex) {
-            return false;
         }
     }
 
@@ -722,11 +732,13 @@ public final class CoopBattleBridge {
         pendingEngage = null;
         pendingDialog = null;
         if (remoteBattleActive) {
-            sessionLost = true;
             remoteBattleActive = false;
-            connectionLostBannerPending = true;
+            remoteStatus = null;
+            remoteStatusDigest = "";
+            queueBanner("Coop: connection lost. Your partner's battle finishes on their machine;"
+                    + " the host's authoritative state reconciles it next session.");
             CoopLog.warn(CoopBattleBridge.class, "Coop session lost while the partner was fighting"
-                    + " battleId=" + remoteBattleId + "; spectator panel released");
+                    + " battleId=" + remoteBattleId + "; spectator released");
         }
         pauseCoordinator.setEitherInCombat(false);
     }

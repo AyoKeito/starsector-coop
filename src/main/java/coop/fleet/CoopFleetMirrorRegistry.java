@@ -75,13 +75,18 @@ public final class CoopFleetMirrorRegistry {
     }
 
     /**
-     * Re-asserts every mirror's engagement shield. Driven unconditionally once per frame by the pump:
-     * the shield is a ~1 s fader that {@code applySnapshot}/{@code applyMotion} only refresh as a side
-     * effect, so a gap in the host's stream would otherwise leave the mirrors engageable.
+     * Re-asserts every mirror's engagement shield. Driven once per frame by the pump: the shield is a
+     * ~1 s fader that nothing else refreshes, so skipping a frame would leave the mirrors engageable.
+     *
+     * <p>The one exception is the mirror the local player has targeted for interaction, whose shield
+     * is cleared instead so the engine's player-combat-initiation block will actually open the
+     * encounter. The decision is threaded in from the pump — the mirrors never read the sector.
+     *
+     * @param playerInteractionTarget the local player fleet's interaction target, or null for none
      */
-    public void assertEngagementShields() {
+    public void assertEngagementShields(Object playerInteractionTarget) {
         for (CoopNpcMirror mirror : mirrors.values()) {
-            mirror.assertEngagementShield();
+            mirror.assertEngagementShield(playerInteractionTarget);
         }
     }
 
