@@ -37,14 +37,14 @@
       "note": "after the private soak / public release"
     }
   ],
-  "here": "The 2026-08-17 drill sessions smoke-verified <b>12b</b> (all five hardening drills; the reconnect drill failed live and was fixed in-session), <b>12d</b> (cargo-pod item transfer + the widened consume watcher), and <b>6b</b> (campaign identity: the replay-reject drill failed live and was fixed with the mint signal; real <code>mod_info.json</code> handshake checksums are wired). Two performance defects found by the first save-loaded session (mirror roster-rebuild storm, orbit-stream balloon) were fixed the same day. The next build is <b>Phase 13</b> — finishing the PARTIAL: suppressor extension to base/encounter/deciv/war managers, the new <code>WORLD_DELTA</code> subtypes, and host-authoritative pirate/Pather bases.",
+  "here": "Phase 14 was built and smoke-verified in one marathon day (2026-08-19): spike-first verification rewrote the engine facts (no NPC-vs-mirror battles can form; the threat watcher is the initiator, not a supervisor), and the live sessions verified all five combat scenarios — host engages (banners + hold), guest engages (engagement-shield release), the ENGAGE_GUEST chase handoff, the running-dark customs stop, and the mid-battle disconnect drill. The same day shipped the fallout fixes the sessions surfaced: guest-first market stocking, the RouteManager guest-presence fork, the full-fidelity guest-system drive, the detectability operand fix, and the pull-in engagement hardening. The next build is <b>Phase 15</b> — combat results + campaign reconciliation (BATTLE_RESULT, NPC-set integration, idempotency).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next build: Phase 14",
+      "head": "Next build: Phase 15",
       "state": "you are here",
-      "body": "Everything up through <span class=\"rp\" data-jump=\"13\">Phase 13</span> is built and smoke-verified in live two-instance sessions (13 on 2026-08-19: month-long soak, extended suppression, world-delta skeleton mutations incl. a live A&rarr;B&rarr;A objective re-flip, host-authoritative bases with full reconstruction). The build order continues with <span class=\"rp\" data-jump=\"14\">Phase 14</span> — solo own-fleet combat + the battle-status spectator bridge."
+      "body": "Everything up through <span class=\"rp\" data-jump=\"14\">Phase 14</span> is built and smoke-verified in live two-instance sessions (14 on 2026-08-19: all five combat scenarios, plus the same-day RouteManager fork, full-fidelity guest-system drive, and engagement hardening). The build order continues with <span class=\"rp\" data-jump=\"15\">Phase 15</span> — combat results + campaign reconciliation."
     },
     {
       "sev": "scope",
@@ -61,11 +61,11 @@
       "body": "The 12b probe proved <code>SettingsAPI.loadText</code> survives the script sandbox (SUCCESS on both clients, 2026-08-17), and 6b wired real <code>mod_info.json</code> SHA-256 checksums into the manifest. Jar checksums stay <code>UNAVAILABLE</code> permanently — no engine surface hands back jar bytes."
     },
     {
-      "sev": "gap",
-      "sevLabel": "known gap",
-      "head": "Guest transponder-off reactions regressed",
-      "state": "deferred to Phase 14",
-      "body": "Phase 9’s NPC suppressor removed the guest’s local NPC sim, so fleets no longer react to the guest running dark. Not a bug in isolation — a documented gap; host-authoritative triggering returns with <span class=\"rp\" data-jump=\"14\">Phase 14</span>."
+      "sev": "note",
+      "sevLabel": "resolved",
+      "head": "Guest transponder-off reactions restored",
+      "state": "resolved in 14",
+      "body": "Phase 14 restored the running-dark confrontation (smoke-verified 2026-08-19): the host-side threat watcher synthesizes the customs stop, and removing the 12b ignore flag may additionally have re-enabled vanilla-native patrol hassling on the guest engine (see PHASE14_SPIKE_NOTES known issues). Rep penalties propagate via the existing GUEST_REP_DELTA path."
     },
     {
       "sev": "note",
@@ -526,7 +526,7 @@
       "title": "Own-Fleet Combat + Spectator Bridge",
       "theme": "combat",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Solo own-fleet combat where the engaging player pilots locally while the other is paused and follows via begin/end banners (2026-08-19: the live status panel was cancelled; the 2-5 Hz BATTLE_STATUS stream is retained for Phase 22).",
       "introduces": [
         "CoopBattleBridge",
