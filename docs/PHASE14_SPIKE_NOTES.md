@@ -229,17 +229,16 @@ if the pre-0.8 reading is right.
 
 ## Known issues accepted for later (2026-08-19)
 
-- **`data/campaign/rules.csv` ships two release blockers.** The `coopZiggurat` test start (option 6 in
+- **`data/campaign/rules.csv` ships one release blocker.** The `coopZiggurat` test start (option 6 in
   character creation: Ziggurat + 1,000,000 credits) must be gated behind a dev/debug flag or deleted
-  before public release. The second is the mod's `ngcDifficulty` row, which replaces the vanilla row of
-  the same id (mod rows win id collisions at CSV merge time) and so deletes the difficulty question
-  outright, forcing **Normal** *and* the tutorial skip for every start option in one script. Both are
-  correct for coop and wrong for solo: difficulty is stored per client
-  (`SectorAPI.setDifficulty`, persisted as `<difficulty>` in `descriptor.xml`) and read through
-  `Misc.isEasy()`, so a host/guest mismatch would give a host-difficulty-shaped shared world (salvage
-  value, generated NPC officer levels, hostile-activity pacing) with per-client combat and sensor
-  modifiers on top; and the tutorial rewrites Galatia state, which would diverge host from guest. Solo
-  players will want both choices back. Owner: Phase 23 packaging.
+  before public release. Owner: Phase 23 packaging. The mod's `ngcDifficulty` row — which replaces the
+  vanilla row of the same id (mod rows win id collisions at CSV merge time), deleting the difficulty
+  question and forcing **Normal** plus the tutorial skip for every start option — is **permanent mod
+  behavior, not a blocker** (decided 2026-08-19): difficulty is per client (`SectorAPI.setDifficulty`,
+  read through `Misc.isEasy()`), so a host/guest mismatch would give a host-difficulty-shaped shared
+  world (salvage value, generated NPC officer levels, hostile-activity pacing) with per-client combat
+  and sensor modifiers on top; the tutorial rewrites Galatia state, which would diverge host from
+  guest; and solo play with the mod enabled is unsupported by policy — solo players disable the mod.
 
 - **`Coop MARKET_OPEN for unknown market=<procgen id>` warns on the host** when the guest interacts
   with an uncolonized/procgen planet whose placeholder market is not in the economy registry

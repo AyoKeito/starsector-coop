@@ -63,9 +63,9 @@
     {
       "sev": "scope",
       "sevLabel": "before release",
-      "head": "Dev conveniences to gate at Phase 23 packaging",
+      "head": "Ziggurat test start to remove at Phase 23 packaging",
       "state": "deliberate, temporary",
-      "body": "The COOP TEST Ziggurat start (option 6) must be removed or dev-gated before any public build. The forced tutorial skip and forced Normal difficulty stay <em>for coop sessions</em> (the tutorial rewrites Galatia and Easy's per-client sensor bonus would desync fleet views), but solo players of the released mod may want the vanilla choices back — needs a session-aware gate at <span class=\"rp\" data-jump=\"23\">Phase 23</span>."
+      "body": "The COOP TEST Ziggurat start (option 6) must be removed or dev-gated before any public build (<span class=\"rp\" data-jump=\"23\">Phase 23</span>). The forced tutorial skip and forced Normal difficulty are <em>permanent</em> mod behavior, not dev conveniences: the tutorial rewrites Galatia and Easy's per-client sensor bonus would desync fleet views, and solo play with the mod enabled is unsupported by policy — solo players disable the mod (decided 2026-08-19)."
     },
     {
       "sev": "scope",
