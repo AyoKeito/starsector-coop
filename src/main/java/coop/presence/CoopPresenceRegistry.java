@@ -1,5 +1,6 @@
 package coop.presence;
 
+import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 
 /**
@@ -22,12 +23,75 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
  * <p>The slot holds a live engine entity, so it must be cleared when the session ends; it is
  * re-asserted every tick and released on the first frame the assert stops arriving. It is deliberately
  * <em>not</em> persisted anywhere: nothing here is written to a save.
+ *
+ * <p>This class also owns the <b>pinned-version guard</b> every presence fork shares
+ * ({@link #getForFork(String)}). The guard lives here rather than in any one fork so that a version
+ * bump has exactly one constant to change and the forks can never disagree about which build they were
+ * taken from.
  */
 public final class CoopPresenceRegistry {
 
+    /**
+     * The Starsector build every guest-presence fork in {@code coop-forks.jar} was taken from, line for
+     * line. If the running game is not this build, {@link #getForFork(String)} returns null forever, so
+     * every fork falls back to the vanilla logic it was copied from rather than running a stale copy of
+     * that logic with co-op behaviour bolted on.
+     */
+    public static final String PINNED_VERSION = "0.98a-RC8";
+
     private static volatile SectorEntityToken presence;
 
+    /** Tri-state: null = not checked yet, TRUE/FALSE = the pinned-version verdict for this process. */
+    private static Boolean versionOk;
+
     private CoopPresenceRegistry() {
+    }
+
+    /**
+     * The presence entity for a forked engine class, or null when the fork must behave exactly as
+     * vanilla. Null is returned when there is no co-op session, when the guest mirror does not exist
+     * yet, when coop.jar never registered anything, when coop-forks.jar is on the classpath without the
+     * mod, and when the running game is not {@link #PINNED_VERSION}.
+     *
+     * @param forkName the simple name of the calling fork, used only in the version-mismatch warning.
+     */
+    public static SectorEntityToken getForFork(String forkName) {
+        SectorEntityToken current = presence;
+        if (current == null) {
+            return null;
+        }
+        if (!versionMatches(forkName)) {
+            return null;
+        }
+        return current;
+    }
+
+    /** Checked once per process, on the first use of the presence term by any fork. */
+    private static synchronized boolean versionMatches(String forkName) {
+        if (versionOk != null) {
+            return versionOk;
+        }
+
+        String version;
+        try {
+            version = Global.getSettings().getVersionString();
+        } catch (Throwable t) {
+            version = null;
+        }
+        versionOk = version != null && version.contains(PINNED_VERSION);
+        if (versionOk) {
+            Global.getLogger(CoopPresenceRegistry.class).info(
+                    "[COOP-FORK] guest-presence forks active (version " + version + "); first user: "
+                            + forkName);
+        } else {
+            Global.getLogger(CoopPresenceRegistry.class).warn(
+                    "[COOP-FORK] the guest-presence forks were taken from Starsector " + PINNED_VERSION
+                            + " but this game reports '" + version + "'. The co-op guest-presence term is"
+                            + " DISABLED for this process (vanilla spawning only, so NPC fleets will not"
+                            + " materialise around the guest). Re-fork against the new version. First"
+                            + " user: " + forkName);
+        }
+        return versionOk;
     }
 
     /**

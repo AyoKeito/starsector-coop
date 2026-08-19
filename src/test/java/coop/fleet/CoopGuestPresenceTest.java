@@ -36,6 +36,21 @@ class CoopGuestPresenceTest {
         assertNull(CoopPresenceRegistry.get());
     }
 
+    /**
+     * The guard every presence fork calls. With an empty slot it must answer null without touching the
+     * game at all -- that is what makes "no session -> exactly vanilla" hold in a solo game, where the
+     * forked classes are loaded but no presence is ever registered.
+     */
+    @Test
+    void forkAccessorIsNullAndInertWhenNothingIsRegistered() {
+        assertNull(CoopPresenceRegistry.getForFork("test"));
+    }
+
+    @Test
+    void pinnedVersionMatchesTheBuildTheForksWereTakenFrom() {
+        assertEquals("0.98a-RC8", CoopPresenceRegistry.PINNED_VERSION);
+    }
+
     @Test
     void registrySetAndClearRoundTrip() {
         SectorEntityToken entity = FakeFleet.withMemory(Map.of()).proxy();

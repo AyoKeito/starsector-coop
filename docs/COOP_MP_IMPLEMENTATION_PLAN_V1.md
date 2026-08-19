@@ -1183,6 +1183,13 @@ Implement the remaining Phase 13 work from COOP_MP_IMPLEMENTATION_PLAN_V1.md (th
 - Create fork `mods/coop/forks/com/fs/starfarer/api/impl/campaign/world/GateHaulerLocation.java` (one-time deep-space content — compiled into `jars/coop-forks.jar`) — **DONE**
 - Create fork `mods/coop/forks/com/fs/starfarer/api/impl/campaign/world/NamelessRock.java` (one-time deep-space content — compiled into `jars/coop-forks.jar`) — **DONE**
 - Create fork `mods/coop/forks/com/fs/starfarer/api/impl/campaign/enc/AbyssalRogueStellarObjectEPEC.java` (abyss-exploration content — compiled into `jars/coop-forks.jar`) — **DONE**
+- **Guest-presence fork family** (added 2026-08-19, out of the Phase 14 spike; not RNG forks — these teach the engine's player-proximity spawners that the guest is a player). All six share one accessor shape and one pinned-version guard, which lives in `coop.presence.CoopPresenceRegistry` (`PINNED_VERSION` + `getForFork(String)`) so a version bump has exactly one constant to change. Every edit is additive and guarded on `presence != null`; none adds an instance field (all of these are `EveryFrameScript`s XStream-serialised into saves, so a new field would change the save shape), so with no session registered every path is exactly vanilla's. — **DONE**
+  - `forks/com/fs/starfarer/api/impl/campaign/fleets/RouteManager.java` — route materialisation/despawn around the guest.
+  - `forks/com/fs/starfarer/api/impl/campaign/fleets/PlayerVisibleFleetManager.java` — a fleet visible to the guest is not culled.
+  - `forks/com/fs/starfarer/api/impl/campaign/fleets/DisposableFleetManager.java` — `currSpawnLoc` picked by distance to the *nearest* player, so ambient pirate/Pather traffic appears in a guest-only system.
+  - `forks/com/fs/starfarer/api/impl/campaign/fleets/SourceBasedFleetManager.java` — Remnant/tutorial garrison count ramp and despawn gate take the nearest player.
+  - `forks/com/fs/starfarer/api/impl/campaign/intel/events/DisposableHostileActivityFleetManager.java` — overrides the picker with its own copy of the loop; same treatment.
+  - `forks/com/fs/starfarer/api/impl/combat/threat/DisposableThreatFleetManager.java` — same, for abyssal Threat fleets.
 - Create `mods/coop/src/main/java/coop/campaign/CoopBaseAuthority.java` (host-authoritative pirate/Luddic-Path bases)
 - Create `mods/coop/src/main/java/coop/campaign/CoopBaseRecord.java`
 - Create `mods/coop/src/test/java/coop/campaign/CoopBaseAuthorityTest.java`

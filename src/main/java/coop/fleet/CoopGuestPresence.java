@@ -24,9 +24,12 @@ import java.util.Set;
  * <p><b>How it is fixed now.</b> Not here. {@code RouteManager} is forked (see
  * {@code forks/com/fs/starfarer/api/impl/campaign/fleets/RouteManager.java}) so that its own
  * {@code shouldSpawn} / {@code isPlayerInSpawnRange} / {@code shouldDespawn} consider a second
- * "presence" entity alongside the player fleet. Vanilla's own {@code spawnAndDespawn()} then spawns,
- * owns and despawns those fleets natively -- no force-spawn, no field writes, no adoption bookkeeping,
- * no duplicate-spawn window. All this class does is publish which entity that presence is.
+ * "presence" entity alongside the player fleet, and the player-proximity ambient spawners
+ * ({@code PlayerVisibleFleetManager} / {@code DisposableFleetManager} / {@code SourceBasedFleetManager}
+ * and the two subclasses overriding their own system picker) are forked the same way. Vanilla's own
+ * spawn/despawn passes then spawn, own and despawn those fleets natively -- no force-spawn, no field
+ * writes, no adoption bookkeeping, no duplicate-spawn window. All this class does is publish which
+ * entity that presence is.
  *
  * <p>The registry slot ({@code coop.presence.CoopPresenceRegistry}) lives in {@code coop-forks.jar} on
  * the system classloader, because that is the only place the forked engine class can see it from. The
@@ -41,12 +44,16 @@ import java.util.Set;
  * covers session end -- the same always-on-observer pattern
  * {@link CoopFullFidelitySystemDriver#frameBoundary(float)} uses.
  *
- * <p><b>Scope.</b> The presence term covers the {@code RouteManager} population only: market patrols
- * ({@code MilitaryBase}), trade fleets ({@code EconomyFleetRouteManager}), smugglers, mercs,
- * pilgrimages, raid/inspection/expedition fleets, Luddic Path cells. Managers that spawn relative to
- * the player without going through a route -- {@code DisposableFleetManager} /
- * {@code PlayerVisibleFleetManager} subclasses such as {@code DisposablePirateFleetManager}, and
- * {@code SourceBasedFleetManager} -- still key off the host player fleet and are out of scope.
+ * <p><b>Scope.</b> The presence term covers two spawner families, six forks in all, each reading this
+ * same slot. {@code RouteManager} covers the route population: market patrols ({@code MilitaryBase}),
+ * trade fleets ({@code EconomyFleetRouteManager}), smugglers, mercs, pilgrimages,
+ * raid/inspection/expedition fleets, Luddic Path cells. The player-proximity ambient spawners cover the
+ * rest: {@code PlayerVisibleFleetManager} (visibility-based culling), {@code DisposableFleetManager}
+ * plus the two subclasses that override its system picker ({@code DisposableHostileActivityFleetManager},
+ * {@code DisposableThreatFleetManager}), and {@code SourceBasedFleetManager} (Remnant station garrisons).
+ * Known limitation of the ambient family: it tracks one spawn system at a time in a save-serialised
+ * field, so when the two players are parked in different populated systems only one of them gets ambient
+ * spawns.
  */
 public final class CoopGuestPresence {
 
@@ -201,7 +208,7 @@ public final class CoopGuestPresence {
             registryUnavailable = true;
             CoopLog.warn(CoopGuestPresence.class,
                     "Coop guest presence unavailable: coop-forks.jar is not on the JVM classpath, so"
-                            + " the RouteManager fork cannot be reached. NPC fleets will only spawn"
+                            + " the spawner forks cannot be reached. NPC fleets will only spawn"
                             + " near the host. Re-run scripts/launch-host.ps1 to patch vmparams.", ex);
         }
     }

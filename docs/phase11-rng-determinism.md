@@ -47,6 +47,28 @@ canonical entries, including deep-space systems.
     hyperspace coordinates. This is for later abyss parity; it is not needed for the
     session-start seed-lock fingerprint.
 
+## Other Forks In `coop-forks.jar` (not RNG)
+
+Added 2026-08-19 by the Phase 14 spike follow-up. These use the same classpath-shadow mechanism
+and the same classloader rules as the RNG forks above, but a different helper: the guest-presence
+slot `coop.presence.CoopPresenceRegistry`, which also owns the shared pinned-version guard
+(`PINNED_VERSION` + `getForFork(String)`) — one constant to change on a Starsector version bump,
+one verdict logged once per process, and on a mismatch every presence term goes silent and the
+forks behave as stock. Every edit in them is additive and guarded on `presence != null`, and none
+adds an instance field (all are save-serialised `EveryFrameScript`s).
+
+- `com.fs.starfarer.api.impl.campaign.fleets.RouteManager`
+- `com.fs.starfarer.api.impl.campaign.fleets.PlayerVisibleFleetManager`
+- `com.fs.starfarer.api.impl.campaign.fleets.DisposableFleetManager`
+- `com.fs.starfarer.api.impl.campaign.fleets.SourceBasedFleetManager`
+- `com.fs.starfarer.api.impl.campaign.intel.events.DisposableHostileActivityFleetManager`
+- `com.fs.starfarer.api.impl.combat.threat.DisposableThreatFleetManager`
+
+Re-fork procedure for any of them: copy the new vanilla source over the fork byte-identically,
+diff to confirm, then re-apply only the `COOP FORK`-tagged hunks listed in the file's header
+banner. `diff` will also show whitespace-only blank-line hunks; those are editor normalisation and
+carry no meaning.
+
 ## Fingerprint Scope
 
 `CoopSectorFingerprint` is a session-start tripwire, not a full world equality proof.

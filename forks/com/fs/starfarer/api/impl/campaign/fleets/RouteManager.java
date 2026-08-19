@@ -29,11 +29,16 @@
  *   - line ~747  : shouldDespawn(RouteData)         - presence-colocated fleets are not
  *                                                     despawnable; distance tests take the
  *                                                     minimum over {player, presence}
- *   - new static : coopPresence() + the pinned-version guard
+ *   - new static : coopPresence()
  *
  * Version drift guard: this fork mirrors 0.98a-RC8 line for line. On first use of the presence
- * term the running game version is checked against COOP_PINNED_VERSION; on a mismatch one loud
- * warning is logged and the presence term is disabled for the process, leaving stock behaviour.
+ * term the running game version is checked against CoopPresenceRegistry.PINNED_VERSION; on a
+ * mismatch one loud warning is logged and the presence term is disabled for the process, leaving
+ * stock behaviour. The guard is shared by every presence fork (see the registry class).
+ *
+ * Sibling presence forks (same mechanism, same guard): PlayerVisibleFleetManager,
+ * DisposableFleetManager, SourceBasedFleetManager, DisposableHostileActivityFleetManager,
+ * DisposableThreatFleetManager.
  * ==========================================================================================
  */
 package com.fs.starfarer.api.impl.campaign.fleets;
@@ -78,52 +83,16 @@ public class RouteManager implements FleetEventListener {
 	// ---- COOP FORK: guest presence ---------------------------------------------------------------
 
 	/**
-	 * COOP FORK. The Starsector build this fork was taken from, line for line. If the running game is
-	 * not this build the presence term switches itself off (see {@link #coopPresence()}) so a version
-	 * bump can never silently ship a stale copy of vanilla's spawn logic with co-op behaviour bolted on.
-	 */
-	public static final String COOP_PINNED_VERSION = "0.98a-RC8";
-
-	/** COOP FORK. Tri-state: null = not checked yet, TRUE/FALSE = the pinned-version verdict. */
-	private static Boolean coopVersionOk = null;
-
-	/**
 	 * COOP FORK. The co-op guest's presence entity (its mirror fleet on the host), or null.
 	 *
 	 * <p>Returns null - and therefore leaves every caller at exact vanilla behaviour - when there is no
 	 * co-op session, when the guest mirror does not exist yet, when coop.jar never registered anything,
 	 * when coop-forks.jar is on the classpath without the mod (registry stays at its null default), and
-	 * when the running game is not {@link #COOP_PINNED_VERSION}.
+	 * when the running game is not the pinned Starsector build. The pinned-version guard itself lives in
+	 * coop.presence.CoopPresenceRegistry so that every presence fork shares one constant and one verdict.
 	 */
 	protected static SectorEntityToken coopPresence() {
-		SectorEntityToken presence = coop.presence.CoopPresenceRegistry.get();
-		if (presence == null) return null;
-		if (!coopVersionMatches()) return null;
-		return presence;
-	}
-
-	/** COOP FORK. Checked once per process, on the first use of the presence term. */
-	private static boolean coopVersionMatches() {
-		if (coopVersionOk != null) return coopVersionOk;
-
-		String version = null;
-		try {
-			version = Global.getSettings().getVersionString();
-		} catch (Throwable t) {
-			version = null;
-		}
-		coopVersionOk = version != null && version.contains(COOP_PINNED_VERSION);
-		if (coopVersionOk) {
-			Global.getLogger(RouteManager.class).info(
-					"[COOP-FORK] RouteManager guest-presence fork active (version " + version + ")");
-		} else {
-			Global.getLogger(RouteManager.class).warn(
-					"[COOP-FORK] RouteManager fork was taken from Starsector " + COOP_PINNED_VERSION
-					+ " but this game reports '" + version + "'. The co-op guest-presence term is"
-					+ " DISABLED for this process (vanilla route spawning only, so NPC fleets will not"
-					+ " materialise around the guest). Re-fork RouteManager against the new version.");
-		}
-		return coopVersionOk;
+		return coop.presence.CoopPresenceRegistry.getForFork("RouteManager");
 	}
 
 	// ---- end COOP FORK block ---------------------------------------------------------------------

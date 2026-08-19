@@ -185,10 +185,23 @@ if the pre-0.8 reading is right.
   (`CoopGuestRouteMaterializer`, commit c735ecd): force-spawns routes in the guest's system via the
   public spawner call, adopts fleets into `RouteData.activeFleet` via MethodHandles (duplicate-spawn
   guard), pins `daysSinceSeenByPlayer` (self-expiring despawn guard); fails safe to stock behavior.
-  **Residual gap (follow-up):** `DisposableFleetManager`/`PlayerVisibleFleetManager` subclasses (e.g.
-  `DisposablePirateFleetManager`) and `SourceBasedFleetManager` spawn near the player by design and
-  still ignore the guest — guest-only systems get route traffic (patrols/traders/raids) but not
-  player-proximity ambient spawns.
+  **Residual gap (follow-up) — FIXED 2026-08-19 by the presence-fork family.** The gap was:
+  `DisposableFleetManager`/`PlayerVisibleFleetManager` subclasses (e.g. `DisposablePirateFleetManager`)
+  and `SourceBasedFleetManager` spawn near the player by design and still ignored the guest, so
+  guest-only systems got route traffic (patrols/traders/raids) but no player-proximity ambient spawns —
+  observed as zero pirate hunters around a guest-only Askonia until the host closed to ~1.6 LY. Fixed by
+  forking the same way, with the same registry and the same pinned-version guard: `PlayerVisibleFleetManager`
+  (`isVisibleToPlayer` ORs in the guest, so a fleet the guest is watching is not culled),
+  `DisposableFleetManager` (`pickNearestPopulatedSystem` picks `currSpawnLoc` by distance to the *nearest*
+  player, both the candidate loop and the stick-with-current fallback), `SourceBasedFleetManager` (both
+  `advance` terms — the `distFromSource` count ramp and the `distFromPlayer` despawn gate), plus the two
+  subclasses that override the picker with their own copy of the loop rather than inheriting it:
+  `DisposableHostileActivityFleetManager` and `DisposableThreatFleetManager`. Spawn *geometry* needed no
+  edit — these managers place fleets relative to `currSpawnLoc` (or fly them in from hyperspace toward it),
+  never relative to the player fleet, so fixing the system choice puts the fleets around the guest by
+  construction. Known limitation: `currSpawnLoc` is a single field and the no-new-instance-fields rule
+  (save shape) forbids a second, so with both players parked in different populated systems only one of
+  them gets ambient spawns — stable, not flip-flopping, and strictly better than "only the host counts".
   **Superseded 2026-08-19 by the RouteManager fork.** `CoopGuestRouteMaterializer` is deleted.
   `com.fs.starfarer.api.impl.campaign.fleets.RouteManager` is forked into `forks/` (classpath-shadow,
   same mechanism as the `Misc` RNG fork) with four additive disjunctions guarded on a presence entity
