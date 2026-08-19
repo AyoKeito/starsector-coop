@@ -214,6 +214,22 @@ if the pre-0.8 reading is right.
   `RouteManager.isPlayerInSpawnRange` — patrols near the guest never raid, capture objectives, or
   build; and `CampaignFleet` view state stays cleared for never-host-visible fleets (cosmetic).
 
+## Known issues accepted for later (2026-08-19)
+
+- **Intermittent grey (unidentified) pirate fleets on the guest** persist after the detectability
+  operand fix (commit e0d9b21) removed the host-state contamination. User decision: document, do not
+  dig further now. Remaining suspects: per-fleet `sensorStrength` alternating between streamed and
+  roster-derived values between 10 Hz re-asserts (flagged "cosmetic" in the e0d9b21 report), motion
+  datagrams not carrying transponder, or genuine vanilla identification thresholds reading differently
+  against replicated profiles. Revisit if it bothers gameplay.
+- **Customs hail observed WITHOUT the watcher sending DIALOG_BEGIN** (the watcher was muzzled by the
+  sentinel-overflow bug at the time, fixed in 360c02b): the running-dark hail the user saw likely came
+  from vanilla natively on the guest engine — patrol mirrors lost `FLEET_IGNORED_BY_OTHER_FLEETS` in
+  Phase 14, so their local AI may now hassle the guest player directly. If confirmed, the host-pushed
+  DIALOG_BEGIN synthesis may be redundant on the guest's own engine (keep it — it covers patrols that
+  exist only host-side — but expect occasional double-source hails; dedupe via `$tOff_didAlready` is
+  vanilla-native).
+
 ## Verdicts (in-game, 2026-08-19, two-instance session, new-game seed MN-1234567890123456789)
 
 - **Spike (a) customs dialog against a mirror: PASS.** `toff` variant, Hegemony "Fast Picket" mirror,
