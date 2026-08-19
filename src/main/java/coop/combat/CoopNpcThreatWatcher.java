@@ -84,8 +84,16 @@ public final class CoopNpcThreatWatcher {
     /** Duration of an injected INTERCEPT assignment, in campaign days. */
     static final float CHASE_ASSIGNMENT_DAYS = 2f;
 
-    /** One handoff per fleet per two minutes: the guest must not be re-dropped into the same fight. */
-    static final long ENGAGE_COOLDOWN_MILLIS = 120000L;
+    /**
+     * Per-fleet handoff cooldown, tuned to vanilla re-engagement pacing (revised 2026-08-19 from
+     * 120 s after user review): vanilla grants only ~3 s of post-encounter unengageability
+     * ({@code FleetEncounterContext.setNoEngaging(3f)}) and everything else is physics — a hostile
+     * that still wants you and stays on top of you re-engages immediately. 15 s covers the handoff
+     * round trip (dialog-free frame, autosave, dialog) without adding un-vanilla safety. Real pacing
+     * comes from the per-scan {@code pickEncounterOption} re-check: once Phase 15 reconciles battle
+     * results into the host's fleet set, a beaten survivor stops picking ENGAGE on its own.
+     */
+    static final long ENGAGE_COOLDOWN_MILLIS = 15000L;
     /** A chase assignment lasts days of campaign time; re-injecting sooner just churns the AI. */
     static final long CHASE_COOLDOWN_MILLIS = 30000L;
     /** Customs is effectively once per encounter; vanilla's own latch ({@code $tOff_didAlready}) agrees. */
