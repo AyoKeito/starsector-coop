@@ -668,7 +668,11 @@ public final class CoopNpcThreatWatcher {
         // and DIALOG_BEGIN this class exists to send (found in-game 2026-08-19).
         boolean handedOff = lastHandoffAtMillis != Long.MIN_VALUE
                 && nowMillis - lastHandoffAtMillis < HANDOFF_GRACE_MILLIS;
-        Set<String> seenThisScan = customsPursuits.isEmpty() ? Set.of() : new HashSet<>();
+        // Always mutable: the Set.of() "optimization" this used to have made the unconditional
+        // add() below throw UnsupportedOperationException on the first fleet of every scan whenever
+        // no chase was live — which is every scan from session start, killing the whole watcher
+        // (found in-game 2026-08-19: every fleet ignored the guest).
+        Set<String> seenThisScan = new HashSet<>();
         for (CampaignFleetAPI fleet : fleetsIn(location)) {
             if (fleet == null || fleet == mirror || isMirror(fleet) || isPlayerFleet(sector, fleet)) {
                 continue;
