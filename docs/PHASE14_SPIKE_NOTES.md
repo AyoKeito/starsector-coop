@@ -246,12 +246,22 @@ if the pre-0.8 reading is right.
   uncolonized world (survey/salvage are per-player) — but the handler should recognize non-economy
   markets and skip quietly instead of warning. Owner: Phase 12c follow-up.
 
-- **Intermittent grey (unidentified) pirate fleets on the guest** persist after the detectability
-  operand fix (commit e0d9b21) removed the host-state contamination. User decision: document, do not
-  dig further now. Remaining suspects: per-fleet `sensorStrength` alternating between streamed and
-  roster-derived values between 10 Hz re-asserts (flagged "cosmetic" in the e0d9b21 report), motion
-  datagrams not carrying transponder, or genuine vanilla identification thresholds reading differently
-  against replicated profiles. Revisit if it bothers gameplay.
+- **Intermittent grey (unidentified) pirate fleets on the guest** — **unparked 2026-08-19, being fixed
+  in Phase 14b.** Root cause found in the decompile: the grey is `VisibilityLevel.COMPOSITION_DETAILS`,
+  which `SensorContactIndicatorManager.advance` paints with a hardcoded `Color(125,125,125,255)`, i.e.
+  the fleet sat between 10% and 50% of the guest's detection range to it when the host had it inside
+  10%. Phase 9 streamed one folded "effective detectability" float that already contained the host's
+  `detectedRangeMod` — including the host's terrain — and the guest's own terrain plugins then applied
+  *their* detectability mods to the mirror on top of it, every frame, as 0.1-day temporary mods
+  (`NebulaTerrainPlugin:253`, `AsteroidBeltTerrainPlugin:159`, `RingSystemTerrainPlugin:75`,
+  `DebrisFieldTerrainPlugin:314`). A nebula's x0.5 became x0.25 and the fleet dropped a band; terrain is
+  patchy, so the grey came and went. The second suspect from the parked note is also confirmed real but
+  is a different symptom: `CampaignFleet.updateCounts()` rewrites `sensorStrength` from the roster every
+  frame with no opt-out flag (`CampaignFleet.java:1029`, called from `advance` at `:794`), so the
+  streamed value survived less than a frame and the detection-range ring flickered. 14b replaces the fold
+  with `CoopSensorSync` (raw profile + the three `detectedRangeMod` aggregates, applied as a correction
+  against whatever the local engine put there) and pins strength through `getSensorStrengthMod()`.
+  Outcome: pending the 14b smoke session.
 - **Customs hail observed WITHOUT the watcher sending DIALOG_BEGIN** (the watcher was muzzled by the
   sentinel-overflow bug at the time, fixed in 360c02b): the running-dark hail the user saw likely came
   from vanilla natively on the guest engine — patrol mirrors lost `FLEET_IGNORED_BY_OTHER_FLEETS` in

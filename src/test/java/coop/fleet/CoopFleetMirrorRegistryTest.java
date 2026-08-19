@@ -61,7 +61,7 @@ class CoopFleetMirrorRegistryTest {
     }
 
     private static CoopNpcFleetSnapshot fleet(String id, String location, String hull) {
-        return CoopNpcFleetSnapshot.create(id, "pirates", "Name " + id, location, 0f, 0f, 0f, 0f, true, 150f, 90f, "",
+        return CoopNpcFleetSnapshot.create(id, "pirates", "Name " + id, location, 0f, 0f, 0f, 0f, true, sensors(150f, 90f), "",
                 List.of(new CoopFleetSnapshot.Member("m-" + id, hull, hull + "_Standard",
                         "Ship", "Cpt", 0.8f, 1.0f)));
     }
@@ -130,8 +130,8 @@ class CoopFleetMirrorRegistryTest {
         FakeMirror mirrorA = creationOrder.get(0);
 
         registry.applyMotion(List.of(
-                new CoopNpcFleetMotion("a", "corvus", 1f, 2f, 0f, 0f, 150f, 90f),
-                new CoopNpcFleetMotion("ghost", "corvus", 9f, 9f, 0f, 0f, 150f, 90f)));
+                new CoopNpcFleetMotion("a", "corvus", 1f, 2f, 0f, 0f, sensors(150f, 90f)),
+                new CoopNpcFleetMotion("ghost", "corvus", 9f, 9f, 0f, 0f, sensors(150f, 90f))));
 
         assertEquals(1, mirrorA.motionApplies);
         assertEquals(1, registry.size(), "motion for an unknown fleet does not create a mirror");
@@ -296,7 +296,7 @@ class CoopFleetMirrorRegistryTest {
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
-        registry.applyMotion(List.of(new CoopNpcFleetMotion("a", "corvus", 5f, 5f, 1f, 1f, 150f, 90f)));
+        registry.applyMotion(List.of(new CoopNpcFleetMotion("a", "corvus", 5f, 5f, 1f, 1f, sensors(150f, 90f))));
 
         assertEquals(1, mirror.motionApplies);
     }
@@ -356,5 +356,10 @@ class CoopFleetMirrorRegistryTest {
         assertFalse(CoopFleetMirrorRegistry.shouldDeferReassert("hash-1", 0L, "hash-1",
                         CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS),
                 "the freeze expires so it can never diverge permanently");
+    }
+
+    /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */
+    private static CoopSensorSync.Profile sensors(float profile, float strength) {
+        return new CoopSensorSync.Profile(profile, 0f, 0f, 1f, strength);
     }
 }

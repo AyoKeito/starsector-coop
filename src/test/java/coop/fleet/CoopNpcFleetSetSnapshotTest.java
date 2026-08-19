@@ -15,7 +15,7 @@ class CoopNpcFleetSetSnapshotTest {
     private static CoopNpcFleetSnapshot fleet(String id, String faction, String location, String hullId,
                                               boolean transponderOn) {
         return CoopNpcFleetSnapshot.create(id, faction, "Name " + id, location, 1f, 2f, 0f, 0f,
-                transponderOn, 150f, 90f, "",
+                transponderOn, sensors(150f, 90f), "",
                 List.of(new CoopFleetSnapshot.Member("m-" + id, hullId, hullId + "_Standard",
                         "Ship", "Cpt", 0.8f, 1.0f)));
     }
@@ -91,8 +91,8 @@ class CoopNpcFleetSetSnapshotTest {
     @Test
     void motionBatchRoundTrips() {
         List<CoopNpcFleetMotion> motions = List.of(
-                new CoopNpcFleetMotion("f1", "corvus", 10.5f, -20.25f, 1.5f, -0.5f, 220.5f, 90f),
-                new CoopNpcFleetMotion("f|2", "hyper\nspace", 0f, 0f, 0f, 0f, 0f, 0f));
+                new CoopNpcFleetMotion("f1", "corvus", 10.5f, -20.25f, 1.5f, -0.5f, sensors(220.5f, 90f)),
+                new CoopNpcFleetMotion("f|2", "hyper\nspace", 0f, 0f, 0f, 0f, CoopSensorSync.Profile.UNKNOWN));
 
         List<CoopNpcFleetMotion> decoded = CoopNpcFleetMotion.decodeBatch(
                 CoopNpcFleetMotion.encodeBatch(motions));
@@ -103,5 +103,10 @@ class CoopNpcFleetSetSnapshotTest {
     @Test
     void emptyMotionBatchRoundTrips() {
         assertEquals(List.of(), CoopNpcFleetMotion.decodeBatch(CoopNpcFleetMotion.encodeBatch(List.of())));
+    }
+
+    /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */
+    private static CoopSensorSync.Profile sensors(float profile, float strength) {
+        return new CoopSensorSync.Profile(profile, 0f, 0f, 1f, strength);
     }
 }

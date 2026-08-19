@@ -13,24 +13,24 @@ import java.util.Objects;
  * <p>Identity is the same {@code coopFleetId} as {@link CoopNpcFleetSnapshot}; {@code locationId} lets
  * the guest detect (and apply) a cross-location move that arrives via motion before the next set.
  *
- * <p>{@code sensorProfile} is streamed live (not just in the set) because a fleet's detectability
- * swings with its current burn/speed: a fleet burning hard is detected far away on the host, but a
- * guest mirror stuck on the fleet's idle profile from the last set would drop below the guest's
- * detection range and vanish. Carrying it at 10 Hz keeps guest detection in lock-step with the host.
- *
- * <p>{@code sensorStrength} is likewise streamed live so the fleet's detection-range ring (the radius a
- * hidden player reads to judge safe distance) stays correct as the fleet's sensor reach changes with
- * terrain (nebulae) and abilities (sensor burst), not just on roster/location change.
+ * <p>{@code sensors} ({@link CoopSensorSync.Profile}) is streamed live rather than only in the set
+ * because a fleet's detectability swings with its abilities and terrain within a second: sustained burn
+ * is +100% detected range, going dark is x0.5, an active sensor burst is +5000 flat, and terrain
+ * re-applies its own 0.1-day temporary mods every frame. A mirror stuck on the fleet's last-set values
+ * would drift in and out of the identification bands. The strength term rides along so the fleet's
+ * detection-range ring — the radius a hidden player reads to judge safe distance — stays correct too.
  */
 public record CoopNpcFleetMotion(String coopFleetId, String locationId,
                                  float x, float y, float velocityX, float velocityY,
-                                 float sensorProfile, float sensorStrength) {
+                                 CoopSensorSync.Profile sensors) {
 
-    private static final int FIELD_COUNT = 8;
+    private static final int FIELD_COUNT = 6 + CoopSensorSync.FIELD_COUNT;
+    private static final int SENSOR_FIELD_OFFSET = 6;
 
     public CoopNpcFleetMotion {
         coopFleetId = coopFleetId == null ? "" : coopFleetId;
         locationId = locationId == null ? "" : locationId;
+        sensors = sensors == null ? CoopSensorSync.Profile.UNKNOWN : sensors;
     }
 
     public static String encodeBatch(List<CoopNpcFleetMotion> motions) {
@@ -44,9 +44,8 @@ public record CoopNpcFleetMotion(String coopFleetId, String locationId,
                     .append('|').append(Float.toString(motion.x()))
                     .append('|').append(Float.toString(motion.y()))
                     .append('|').append(Float.toString(motion.velocityX()))
-                    .append('|').append(Float.toString(motion.velocityY()))
-                    .append('|').append(Float.toString(motion.sensorProfile()))
-                    .append('|').append(Float.toString(motion.sensorStrength()));
+                    .append('|').append(Float.toString(motion.velocityY()));
+            CoopSensorSync.append(out, motion.sensors());
         }
         return out.toString();
     }
@@ -72,7 +71,7 @@ public record CoopNpcFleetMotion(String coopFleetId, String locationId,
             motions.add(new CoopNpcFleetMotion(fields.get(0), fields.get(1),
                     Float.parseFloat(fields.get(2)), Float.parseFloat(fields.get(3)),
                     Float.parseFloat(fields.get(4)), Float.parseFloat(fields.get(5)),
-                    Float.parseFloat(fields.get(6)), Float.parseFloat(fields.get(7))));
+                    CoopSensorSync.parse(fields, SENSOR_FIELD_OFFSET)));
         }
         return motions;
     }

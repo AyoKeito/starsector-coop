@@ -200,11 +200,15 @@ public final class CoopFleetMirrorRegistry {
      * is cleared instead so the engine's player-combat-initiation block will actually open the
      * encounter. The decision is threaded in from the pump — the mirrors never read the sector.
      *
+     * <p>Phase 14b folds the per-frame sensor re-assert into the same pass, for the same reason and at
+     * the same cost profile: {@link CoopNpcMirror#assertSensorState()}.
+     *
      * @param playerInteractionTarget the local player fleet's interaction target, or null for none
      */
     public void assertEngagementShields(Object playerInteractionTarget) {
         for (CoopNpcMirror mirror : mirrors.values()) {
             mirror.assertEngagementShield(playerInteractionTarget);
+            mirror.assertSensorState();
         }
     }
 

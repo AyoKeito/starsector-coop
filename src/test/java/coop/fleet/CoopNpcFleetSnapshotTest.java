@@ -15,7 +15,7 @@ class CoopNpcFleetSnapshotTest {
     void encodeDecodeRoundTripsHeaderAndMembers() {
         CoopNpcFleetSnapshot snapshot = CoopNpcFleetSnapshot.create(
                 "fleet-7", "pirates", "Pirate Raiders", "corvus", 12.5f, -3.25f, 0.5f, -1.5f, false,
-                180.5f, 95.5f, "INTERCEPT player", List.of(member("m1", "wolf", "wolf_Assault"),
+                sensors(180.5f, 95.5f), "INTERCEPT player", List.of(member("m1", "wolf", "wolf_Assault"),
                         member("m2", "lasher", "lasher_CS")));
 
         CoopNpcFleetSnapshot decoded = CoopNpcFleetSnapshot.decode(snapshot.encode());
@@ -29,7 +29,7 @@ class CoopNpcFleetSnapshotTest {
                 "m|1", "wolf", "wolf_Assault", "ISS Pipe|Wolf", "Line1\nLine2", 0.5f, 0.5f);
         CoopNpcFleetSnapshot snapshot = CoopNpcFleetSnapshot.create(
                 "fl|eet\n7", "pi|rates", "Na\nme|Break", "loc\nid", 0f, 0f, 0f, 0f, true,
-                250f, 130f, "go to|then\nwait", List.of(tricky));
+                sensors(250f, 130f), "go to|then\nwait", List.of(tricky));
 
         CoopNpcFleetSnapshot decoded = CoopNpcFleetSnapshot.decode(snapshot.encode());
 
@@ -43,7 +43,7 @@ class CoopNpcFleetSnapshotTest {
     void createReusesPhase8FleetHash() {
         List<CoopFleetSnapshot.Member> members = List.of(member("m1", "wolf", "wolf_Assault"));
         CoopNpcFleetSnapshot snapshot = CoopNpcFleetSnapshot.create(
-                "fleet-1", "hegemony", "Patrol", "corvus", 0f, 0f, 0f, 0f, true, 120f, 70f, "", members);
+                "fleet-1", "hegemony", "Patrol", "corvus", 0f, 0f, 0f, 0f, true, sensors(120f, 70f), "", members);
 
         assertEquals(CoopFleetSnapshot.computeFleetHash(members), snapshot.fleetHash());
     }
@@ -51,8 +51,13 @@ class CoopNpcFleetSnapshotTest {
     @Test
     void emptyFleetRoundTrips() {
         CoopNpcFleetSnapshot snapshot = CoopNpcFleetSnapshot.create(
-                "fleet-empty", "independent", "Trader", "hyperspace", 1f, 2f, 3f, 4f, true, 60f, 40f, "", List.of());
+                "fleet-empty", "independent", "Trader", "hyperspace", 1f, 2f, 3f, 4f, true, sensors(60f, 40f), "", List.of());
 
         assertEquals(snapshot, CoopNpcFleetSnapshot.decode(snapshot.encode()));
+    }
+
+    /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */
+    private static CoopSensorSync.Profile sensors(float profile, float strength) {
+        return new CoopSensorSync.Profile(profile, 0f, 0f, 1f, strength);
     }
 }

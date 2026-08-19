@@ -25,6 +25,15 @@ public interface CoopNpcMirror {
     default void assertEngagementShield(Object playerInteractionTarget) {
     }
 
+    /**
+     * Re-asserts the mirror's replicated sensor identity (Phase 14b). Like the shield this has to run
+     * every frame, because the engine rewrites a fleet's sensor strength from its roster every frame
+     * and the local terrain plugins re-apply their own detectability mods every frame — see
+     * {@link CoopSensorSync}. Defaults to a no-op for headless fakes.
+     */
+    default void assertSensorState() {
+    }
+
     /** Removes the mirror fleet from the world. Idempotent. */
     void dispose();
 }

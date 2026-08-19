@@ -50,6 +50,9 @@ public final class CoopFleetSnapshotFactory {
                 velocity == null ? 0f : velocity.y,
                 factionId,
                 transponderOn,
+                // Phase 14b: the remote client pins this onto the mirror so its NPC AI detects the
+                // remote player at vanilla ranges — transponder, Go Dark, burns, sensor burst, terrain.
+                CoopSensorSync.capture(fleet),
                 captureMembers(fleet));
     }
 

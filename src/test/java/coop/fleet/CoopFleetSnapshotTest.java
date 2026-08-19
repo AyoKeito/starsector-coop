@@ -62,6 +62,7 @@ class CoopFleetSnapshotTest {
     void encodeDecodeRoundTripsHeaderAndMembers() {
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
                 "player-1", "Alice", "corvus", 123.5f, -42.25f, 1.5f, -2.5f, "player", true,
+                sensors(650f, 420f),
                 List.of(member("m1", "wolf", "wolf_Assault"), member("m2", "lasher", "lasher_CS")));
 
         CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
@@ -74,7 +75,7 @@ class CoopFleetSnapshotTest {
         CoopFleetSnapshot.Member tricky = new CoopFleetSnapshot.Member(
                 "m|1", "wolf", "wolf_Assault", "ISS Pipe|Wolf", "Line1\nLine2", 0.5f, 0.5f);
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
-                "p|id", "Na|me\nBreak", "loc\nid", 0f, 0f, 0f, 0f, "fac|tion", false, List.of(tricky));
+                "p|id", "Na|me\nBreak", "loc\nid", 0f, 0f, 0f, 0f, "fac|tion", false, sensors(650f, 420f), List.of(tricky));
 
         CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
 
@@ -94,7 +95,7 @@ class CoopFleetSnapshotTest {
                 "m1", "wolf", "wolf_Assault", "ISS" + sep + "Wolf", "Cpt" + sep + "Ahab", 0.7f, 0.9f);
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
                 "p" + sep + "1", "Ali" + sep + "ce", "cor" + sep + "vus",
-                0f, 0f, 0f, 0f, "play" + sep + "er", true, List.of(tricky));
+                0f, 0f, 0f, 0f, "play" + sep + "er", true, sensors(650f, 420f), List.of(tricky));
 
         CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
 
@@ -107,7 +108,7 @@ class CoopFleetSnapshotTest {
     void escapedUnitSeparatorDoesNotSurviveIntoTheEncodedForm() {
         String sep = String.valueOf((char) 0x1F);
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
-                "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true,
+                "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true, sensors(650f, 420f),
                 List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault",
                         "ISS" + sep + "Wolf", "Cpt", 0.7f, 0.9f)));
 
@@ -119,8 +120,13 @@ class CoopFleetSnapshotTest {
     void createComputesMatchingFleetHash() {
         List<CoopFleetSnapshot.Member> members = List.of(member("m1", "wolf", "wolf_Assault"));
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
-                "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true, members);
+                "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true, sensors(650f, 420f), members);
 
         assertEquals(CoopFleetSnapshot.computeFleetHash(members), snapshot.fleetHash());
+    }
+
+    /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */
+    private static CoopSensorSync.Profile sensors(float profile, float strength) {
+        return new CoopSensorSync.Profile(profile, 0f, 0f, 1f, strength);
     }
 }

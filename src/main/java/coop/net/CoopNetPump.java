@@ -1171,6 +1171,10 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void assertMirrorEngagementShields() {
         fleetMirror.assertEngagementShield();
+        // Phase 14b: the remote player's sensor identity has to be re-pinned every frame — the engine
+        // rewrites sensor strength from the roster each frame and local terrain re-applies its own
+        // detectability mods each frame. See CoopSensorSync.
+        fleetMirror.assertSensorState();
         if (npcFleetRegistry.size() == 0) {
             // Host (or a guest before the first NPC_FLEET_SET): nothing to shield, so skip the sector
             // read entirely rather than paying for it every frame.

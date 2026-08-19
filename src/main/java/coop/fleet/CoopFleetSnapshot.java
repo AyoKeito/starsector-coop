@@ -12,7 +12,14 @@ import java.util.Objects;
  *
  * <p>This DTO carries the exact fields named in {@code COOP_MP_IMPLEMENTATION_PLAN_V1.md} Phase 8:
  * {@code playerId, username, locationId, x, y, velocityX, velocityY, factionId, transponderOn,
- * fleetHash} plus the per-member records. It defines its own compact, self-contained text encoding
+ * fleetHash} plus the per-member records, and — added by Phase 14b — the sender's live
+ * {@link CoopSensorSync.Profile}. The sensor identity is what makes the receiving client's <em>NPC
+ * AI</em> see (or fail to see) the remote player exactly as vanilla would: on the host, hostile fleets
+ * decide whether to hunt the guest mirror from {@code getVisibilityLevelTo}, and patrols only synthesize
+ * a customs stop against a mirror they can actually detect. Without it a mirror carried a fabricated
+ * profile and stealth was impossible in either direction.
+ *
+ * <p>It defines its own compact, self-contained text encoding
  * rather than reusing {@link coop.net.CoopMessages}'s flat JSON envelope: the envelope parser does
  * not support arrays (it is a flat key/value parser), and UDP datagrams are framed independently of
  * the TCP line protocol. The encoding is delimiter based with backslash escaping so member names
@@ -20,8 +27,13 @@ import java.util.Objects;
  */
 public record CoopFleetSnapshot(String playerId, String username, String locationId,
                                 float x, float y, float velocityX, float velocityY,
-                                String factionId, boolean transponderOn, String fleetHash,
+                                String factionId, boolean transponderOn,
+                                CoopSensorSync.Profile sensors, String fleetHash,
                                 List<Member> members) {
+
+    private static final int HEADER_FIELD_COUNT = 10 + CoopSensorSync.FIELD_COUNT + 1;
+    private static final int SENSOR_FIELD_OFFSET = 9;
+    private static final int MEMBER_COUNT_INDEX = HEADER_FIELD_COUNT - 1;
 
     public CoopFleetSnapshot {
         playerId = normalize(playerId);
@@ -29,6 +41,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         locationId = normalize(locationId);
         factionId = normalize(factionId);
         fleetHash = normalize(fleetHash);
+        sensors = sensors == null ? CoopSensorSync.Profile.UNKNOWN : sensors;
         members = members == null ? List.of() : List.copyOf(members);
     }
 
@@ -52,10 +65,11 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
     public static CoopFleetSnapshot create(String playerId, String username, String locationId,
                                            float x, float y, float velocityX, float velocityY,
                                            String factionId, boolean transponderOn,
+                                           CoopSensorSync.Profile sensors,
                                            List<Member> members) {
         List<Member> safeMembers = members == null ? List.of() : members;
         return new CoopFleetSnapshot(playerId, username, locationId, x, y, velocityX, velocityY,
-                factionId, transponderOn, computeFleetHash(safeMembers), safeMembers);
+                factionId, transponderOn, sensors, computeFleetHash(safeMembers), safeMembers);
     }
 
     /**
@@ -102,8 +116,9 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                 .append('|').append(Float.toString(velocityX))
                 .append('|').append(Float.toString(velocityY))
                 .append('|').append(CoopFleetCodec.escape(factionId))
-                .append('|').append(transponderOn ? '1' : '0')
-                .append('|').append(CoopFleetCodec.escape(fleetHash))
+                .append('|').append(transponderOn ? '1' : '0');
+        CoopSensorSync.append(out, sensors);
+        out.append('|').append(CoopFleetCodec.escape(fleetHash))
                 .append('|').append(Integer.toString(members.size()));
         for (Member member : members) {
             out.append('\n');
@@ -119,10 +134,11 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             throw new IllegalArgumentException("Empty fleet snapshot");
         }
         List<String> header = CoopFleetCodec.split(lines[0]);
-        if (header.size() != 11) {
-            throw new IllegalArgumentException("Expected 11 header fields, got " + header.size());
+        if (header.size() != HEADER_FIELD_COUNT) {
+            throw new IllegalArgumentException("Expected " + HEADER_FIELD_COUNT
+                    + " header fields, got " + header.size());
         }
-        int memberCount = Integer.parseInt(header.get(10));
+        int memberCount = Integer.parseInt(header.get(MEMBER_COUNT_INDEX));
         if (lines.length - 1 < memberCount) {
             throw new IllegalArgumentException("Declared " + memberCount + " members but only "
                     + (lines.length - 1) + " member lines present");
@@ -134,7 +150,9 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         return new CoopFleetSnapshot(header.get(0), header.get(1), header.get(2),
                 Float.parseFloat(header.get(3)), Float.parseFloat(header.get(4)),
                 Float.parseFloat(header.get(5)), Float.parseFloat(header.get(6)),
-                header.get(7), "1".equals(header.get(8)), header.get(9), members);
+                header.get(7), "1".equals(header.get(8)),
+                CoopSensorSync.parse(header, SENSOR_FIELD_OFFSET),
+                header.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), members);
     }
 
     private static String normalize(String value) {

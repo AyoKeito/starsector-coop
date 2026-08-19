@@ -5,7 +5,6 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
-import com.fs.starfarer.api.combat.StatBonus;
 import org.lwjgl.util.vector.Vector2f;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -133,8 +132,7 @@ public final class CoopNpcFleetReplicator {
     private void sendSetIfChanged(SectorAPI sector, long now) {
         List<CoopNpcFleetSnapshot> fleets = new ArrayList<>();
         LocationAPI hostLocation = hostCurrentLocation(sector);
-        float reference = referenceSensorStrength(CoopGuestPresence.findGuestMirror(sector), sector);
-        forEachReplicatedFleet(sector, fleet -> fleets.add(toSnapshot(fleet, hostLocation, reference, now)));
+        forEachReplicatedFleet(sector, fleet -> fleets.add(toSnapshot(fleet, hostLocation, now)));
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
         if (set.setHash().equals(lastSetHash)) {
             return;
@@ -153,7 +151,6 @@ public final class CoopNpcFleetReplicator {
         if (playerLocations.isEmpty()) {
             return;
         }
-        float reference = referenceSensorStrength(guestMirror, sector);
         List<CoopNpcFleetMotion> motions = new ArrayList<>();
         LocationAPI hostLocation = hostCurrentLocation(sector);
         forEachReplicatedFleet(sector, fleet -> {
@@ -164,7 +161,7 @@ public final class CoopNpcFleetReplicator {
             CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
             motions.add(new CoopNpcFleetMotion(fleet.getId(), loc.getId(),
                     motion.x(), motion.y(), motion.velocityX(), motion.velocityY(),
-                    effectiveDetectability(fleet, reference), sensorStrength(fleet)));
+                    CoopSensorSync.capture(fleet)));
         });
         if (motions.isEmpty()) {
             return;
@@ -173,8 +170,7 @@ public final class CoopNpcFleetReplicator {
                 CoopMessages.Type.NPC_FLEET_MOTION, CoopNpcFleetMotion.encodeBatch(motions)));
     }
 
-    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation,
-                                            float referenceStrength, long now) {
+    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now) {
         LocationAPI loc = fleet.getContainingLocation();
         CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
         return CoopNpcFleetSnapshot.create(
@@ -185,8 +181,7 @@ public final class CoopNpcFleetReplicator {
                 motion.x(), motion.y(),
                 motion.velocityX(), motion.velocityY(),
                 transponderOn(fleet),
-                effectiveDetectability(fleet, referenceStrength),
-                sensorStrength(fleet),
+                CoopSensorSync.capture(fleet),
                 "",
                 CoopFleetSnapshotFactory.captureMembers(fleet));
     }
@@ -318,89 +313,6 @@ public final class CoopNpcFleetReplicator {
             return fleet.isTransponderOn();
         } catch (RuntimeException ignored) {
             return false;
-        }
-    }
-
-    /**
-     * The value to assign the guest mirror's sensor profile so the guest identifies and detects the
-     * mirror at the same range the host does the real fleet.
-     *
-     * <p><b>What the engine actually computes.</b> {@code BaseCampaignEntity.getMaxSensorRangeToDetect
-     * (observer, target)} is
-     * {@code (target.profile + observer.strength) * target.detectedRangeMod * observer.sensorRangeMod}
-     * (flat/percent/mult, engine line 1130-1158), and
-     * {@code getVisibilityLevelTo(observer)} then buckets the distance against that range: full faction
-     * identification inside 10% of it (or the <em>whole</em> range when the target's transponder is on),
-     * composition-only inside 50%, and a grey {@code SENSOR_CONTACT} beyond that. So the guest's red vs
-     * grey rendering of a mirror is a direct function of the {@code sensorProfile} we put on the wire.
-     *
-     * <p>We replicate the raw {@code sensorProfile} but the mirror has none of the real fleet's
-     * <em>target-side</em> {@code detectedRangeMod} bonuses — transponder on (+1000 flat, and it also
-     * unlocks the full-range identification tier), sustained burn (+100%), Remnant/derelict generation
-     * flats, phase-field mults, terrain. Without folding those in, a mirror is detected and identified
-     * far later than the real fleet is on the host.
-     *
-     * <p>So the fold is done against the fleet's own {@code getDetectedRangeMod()}:
-     * {@code StatBonus.computeEffective(base)} is {@code (base + base*pct/100 + flat) * mult}, i.e.
-     * exactly the engine's expression with the observer's {@code sensorRangeMod} left at identity.
-     * Applying it to {@code profile + referenceStrength} and subtracting the reference strength again
-     * yields the profile the guest must give the mirror for its own detection range to come out right.
-     * Never returns below the raw profile.
-     *
-     * <p><b>Do not reintroduce {@code fleet.getMaxSensorRangeToDetect(hostPlayer)} here.</b> That reads
-     * observer-first — it is the range at which the <em>NPC fleet</em> detects the <em>host player</em>
-     * — so it folds the host player's own detectability into every mirror's profile. Every mirror on
-     * the guest then changed identification tier whenever the host toggled the transponder (±1000
-     * flat), engaged sustained burn (x2) or entered a hyperspace cloud (x0.5): fleets rendered
-     * faction-red while the host was in the system and grey once he left. Fixed 2026-08-19.
-     */
-    static float effectiveDetectability(CampaignFleetAPI fleet, float referenceStrength) {
-        try {
-            float profile = fleet.getSensorProfile();
-            StatBonus detectedRange = fleet.getDetectedRangeMod();
-            if (detectedRange == null) {
-                return profile;
-            }
-            float effective = detectedRange.computeEffective(profile + referenceStrength) - referenceStrength;
-            return effective > profile ? effective : profile;
-        } catch (RuntimeException | LinkageError ignored) {
-            return 0f;
-        }
-    }
-
-    /**
-     * The observer sensor strength {@link #effectiveDetectability} folds the percent/mult terms
-     * against. The guest is the observer that matters, and on the host the guest's real sensor strength
-     * is carried by its Phase 8 mirror (built from the guest's actual ships). Falls back to the host
-     * player, then to zero — a wrong reference only mis-scales the percent/mult part of the fold; the
-     * flat part, which carries the transponder and generation bonuses, is exact either way.
-     */
-    private static float referenceSensorStrength(CampaignFleetAPI guestMirror, SectorAPI sector) {
-        float strength = sensorStrength(guestMirror);
-        if (strength > 0f) {
-            return strength;
-        }
-        try {
-            return Math.max(0f, sensorStrength(sector.getPlayerFleet()));
-        } catch (RuntimeException | LinkageError ex) {
-            return 0f;
-        }
-    }
-
-    /**
-     * The fleet's sensor reach as an observer, replicated so the guest renders its detection-range ring
-     * (the radius a hidden player reads to judge safe approach) at the correct size. Unlike profile this
-     * is taken verbatim — it is the observer-side term in the detection formula, so no bonus folding is
-     * needed; the ring radius is recomputed on the guest against the guest's own real sensor profile.
-     */
-    private static float sensorStrength(CampaignFleetAPI fleet) {
-        if (fleet == null) {
-            return 0f;
-        }
-        try {
-            return fleet.getSensorStrength();
-        } catch (RuntimeException ignored) {
-            return 0f;
         }
     }
 

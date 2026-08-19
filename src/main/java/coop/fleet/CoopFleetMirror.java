@@ -50,6 +50,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private int applyCount;
     /** True while the shield is deliberately down for the player's interaction target (edge-tracked). */
     private boolean shieldReleased;
+    /**
+     * Last sensor identity received for this mirror (Phase 14b). Held rather than applied once because
+     * the engine rewrites the mirror's profile/strength fields every frame and local terrain re-applies
+     * its own detectability mods every frame — see {@link #assertSensorState()}.
+     */
+    private CoopSensorSync.Profile sensors = CoopSensorSync.Profile.UNKNOWN;
 
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
@@ -79,6 +85,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
             placeInLocation(location, snapshot.x(), snapshot.y());
             driveMovement(snapshot.x(), snapshot.y(), snapshot.velocityX(), snapshot.velocityY(),
                     snapshot.transponderOn());
+            acceptSensors(snapshot.sensors());
             refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
             presenceIndicator.apply(mirrorFleet, snapshot.username());
             applyCount++;
@@ -105,8 +112,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
             placeInLocation(location, snapshot.x(), snapshot.y());
             driveMovement(snapshot.x(), snapshot.y(), snapshot.velocityX(), snapshot.velocityY(),
                     snapshot.transponderOn());
-            applySensorProfile(snapshot.sensorProfile());
-            applySensorStrength(snapshot.sensorStrength());
+            acceptSensors(snapshot.sensors());
             refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
             applyCount++;
         } catch (RuntimeException ex) {
@@ -133,8 +139,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         try {
             placeInLocation(location, motion.x(), motion.y());
             driveMovement(motion.x(), motion.y(), motion.velocityX(), motion.velocityY(), null);
-            applySensorProfile(motion.sensorProfile());
-            applySensorStrength(motion.sensorStrength());
+            acceptSensors(motion.sensors());
             applyCount++;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop NPC fleet motion", ex);
@@ -332,40 +337,35 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     /**
-     * Replicates the host fleet's real detectability onto the mirror, frozen so the engine's per-tick
-     * recompute can't drop it back to the tiny default that would make the fleet visible only at
-     * point-blank range on the guest. Without this the guest's sensor range to NPC mirrors is far
-     * shorter than the host's to the real fleets (the same effect the player presence mirror avoids by
-     * forcing a large profile).
+     * Records the sensor identity that arrived with a snapshot or motion record and applies it
+     * immediately. A record from a peer that could not read its own fleet ({@code !isKnown()}) is
+     * ignored rather than applied, so one bad read never blanks a mirror's detectability.
      */
-    private void applySensorProfile(float sensorProfile) {
-        if (sensorProfile <= 0f) {
+    private void acceptSensors(CoopSensorSync.Profile incoming) {
+        if (incoming == null || !incoming.isKnown()) {
             return;
         }
-        try {
-            mirrorFleet.setForceNoSensorProfileUpdate(true);
-            mirrorFleet.setSensorProfile(sensorProfile);
-        } catch (RuntimeException ignored) {
-            // detectability is best-effort; never abort the mirror update over it
-        }
+        sensors = incoming;
+        CoopSensorSync.apply(mirrorFleet, sensors);
     }
 
     /**
-     * Replicates the host fleet's sensor reach (as an observer) onto the mirror so the engine renders
-     * the fleet's detection-range ring at the correct radius — the ring a hidden player reads to judge
-     * safe approach. Re-asserted every apply (no force-freeze flag exists for strength) so the engine
-     * can't recompute it away. The radius itself is resolved by the engine against the guest's own real
-     * sensor profile, so the ring correctly shrinks when the guest runs dark.
+     * Re-asserts the last replicated sensor identity, once per frame from the pump's mirror pass
+     * (Phase 14b). This is not belt-and-braces: {@code CampaignFleet.updateCounts()} rewrites the
+     * mirror's {@code sensorStrength} from its roster <em>every frame</em> with no opt-out
+     * ({@code CampaignFleet.java:1029}, called unconditionally from {@code advance} at :794), and the
+     * local terrain plugins re-apply their own 0.1-day detectability mods to the mirror every frame
+     * because it sits exactly where the fleet it mirrors sits. Applying only on the 10 Hz driving path
+     * left the mirror carrying engine-derived values five frames out of six — which is what made NPC
+     * mirrors flicker between faction-red and grey on the guest. Cheap: three stat reads when nothing
+     * has moved. See {@link CoopSensorSync}.
      */
-    private void applySensorStrength(float sensorStrength) {
-        if (sensorStrength <= 0f) {
+    @Override
+    public void assertSensorState() {
+        if (mirrorFleet == null || !sensors.isKnown()) {
             return;
         }
-        try {
-            mirrorFleet.setSensorStrength(sensorStrength);
-        } catch (RuntimeException ignored) {
-            // detection-ring radius is best-effort; never abort the mirror update over it
-        }
+        CoopSensorSync.apply(mirrorFleet, sensors);
     }
 
     private void refreshRosterIfChanged(String fleetHash, List<CoopFleetSnapshot.Member> members) {
@@ -386,6 +386,21 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * list position: both sides preserve fleet order (the roster was built in snapshot order and the
      * structural hash pins the same ship set), and a transient order mismatch merely paints repair
      * state onto a same-set sibling until the next structural rebuild.
+     *
+     * <p><b>The CR write must be followed by {@code setStatUpdateNeeded(true)} (Phase 14b).</b>
+     * {@code RepairTracker.setCR(float)} is a bare field assignment — it invalidates nothing — while
+     * {@code FleetMember.getMemberStrength()} caches its CR-derived result in a {@code cachedStrength}
+     * field cleared only by {@code setStatUpdateNeeded(true)}, {@code updateStats()} or
+     * {@code readResolve()} ({@code probe/FleetMember.java:278-284, 640-661}). Without the
+     * invalidation a mirror's engine-visible strength stayed frozen at roster-build time, so
+     * {@code Misc.getMemberStrength} — and through it every {@code pickEncounterOption} strength
+     * comparison a hostile makes about the guest — judged a wrecked fleet as if it were fresh. Hull
+     * fraction needs no invalidation: {@code Misc.getMemberStrength} reads
+     * {@code getStatus().getHullFraction()} live on every call.
+     *
+     * <p>Invalidation is gated on an actual change so the deferred {@code updateStats()} (a full
+     * per-member stat rebuild, which then cascades into one fleet sync) does not run on every 10 Hz
+     * apply for a fleet whose CR is not moving.
      */
     private void updateMemberState(List<CoopFleetSnapshot.Member> members) {
         List<FleetMemberAPI> current = mirrorFleet.getFleetData().getMembersListCopy();
@@ -394,12 +409,23 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
         for (int i = 0; i < current.size(); i++) {
             try {
-                current.get(i).getRepairTracker().setCR(members.get(i).cr());
-                current.get(i).getStatus().setHullFraction(members.get(i).hullFraction());
+                FleetMemberAPI member = current.get(i);
+                float cr = members.get(i).cr();
+                boolean crChanged = crDiffers(member.getRepairTracker().getCR(), cr);
+                member.getRepairTracker().setCR(cr);
+                member.getStatus().setHullFraction(members.get(i).hullFraction());
+                if (crChanged) {
+                    member.setStatUpdateNeeded(true);
+                }
             } catch (RuntimeException ignored) {
                 // repair state on a mirror is display-only; never abort the update over it
             }
         }
+    }
+
+    /** CR is a 0..1 fraction; half a percent is below anything the strength formula reacts to. */
+    static boolean crDiffers(float current, float incoming) {
+        return Math.abs(current - incoming) > 0.005f;
     }
 
     private void rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
@@ -481,6 +507,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         lastLocationId = null;
         applyCount = 0;
         shieldReleased = false;
+        sensors = CoopSensorSync.Profile.UNKNOWN;
     }
 
     private LocationAPI resolveLocation(SectorAPI sector, String locationId) {
