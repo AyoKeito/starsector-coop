@@ -173,12 +173,18 @@ public final class CoopBaseAuthority {
         }
     }
 
-    /** Forget the last-sent hash so the next host tick rebroadcasts the full set (session start). */
+    /**
+     * Session (re)start: forget the last-sent hash so the next host tick rebroadcasts the full set.
+     *
+     * <p>The guest's stored desired set deliberately <em>survives</em> reset. The host rebroadcasts
+     * the full set on its own session edge, so a stale set is short-lived and self-correcting — but a
+     * wiped set is unrecoverable until the host's set-hash happens to change (it never resends an
+     * unchanged set mid-session). The session-start frame can order dispatch before the lazy edge in
+     * the pump, which made the old wipe-on-reset lose a just-arrived set (caught live 2026-08-19).
+     */
     public void reset() {
         lastSetHash = "";
         lastBaseCount = 0;
-        desiredSet = List.of();
-        desiredSetReceived = false;
         nextGuestReconcileAtMillis = 0L;
         constructionFailures.clear();
     }
@@ -193,13 +199,23 @@ public final class CoopBaseAuthority {
 
     // ---- Guest --------------------------------------------------------------------------------
 
-    /** Applies an inbound {@code BASE_SET} payload; safe to call with a byte-identical repeat. */
+    /**
+     * Stores an inbound {@code BASE_SET} payload; safe to call with a byte-identical repeat.
+     *
+     * <p>Deliberately does <em>not</em> reconcile here. Inbound dispatch runs early in the pump's
+     * {@code advance()}, before {@code syncNpcReplication()} — so on the session-start frame an
+     * immediate reconcile builds mirrors that the suppressor's once-per-session base-intel cleanup
+     * (which runs later that same frame) then destroys. Caught live 2026-08-19: the guest ended the
+     * frame with zero bases. Storing here and reconciling from {@link #tickGuest()} — which the pump
+     * calls after {@code syncNpcReplication()} — guarantees cleanup-before-build ordering.
+     */
     public void applySet(String encodedSet) {
         desiredSet = CoopBaseRecord.decodeSet(encodedSet == null ? "" : encodedSet);
         desiredSetReceived = true;
         // A new authoritative set is a fresh chance for a base whose construction failed before.
         constructionFailures.clear();
-        reconcileNow();
+        // Reconcile on the very next tick rather than waiting out the low-rate interval.
+        nextGuestReconcileAtMillis = 0L;
     }
 
     /**

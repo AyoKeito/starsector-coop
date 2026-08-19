@@ -1251,6 +1251,15 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         try {
+            // Take the session edge eagerly. Inbound dispatch runs before syncBaseReplication() in
+            // advance(), so on the session-start frame a BASE_SET can arrive while
+            // baseReplicationStreaming is still false — the lazy edge in syncBaseReplication() would
+            // then reset() AFTER this apply and wipe the freshly stored set (and the host, whose set
+            // hash hasn't changed, never resends). Caught live 2026-08-19.
+            if (shouldStreamFleet() && !baseReplicationStreaming) {
+                baseAuthority.reset();
+                baseReplicationStreaming = true;
+            }
             baseAuthority.applySet(CoopMessages.requiredPayloadString(message, "bases"));
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply BASE_SET", ex);
