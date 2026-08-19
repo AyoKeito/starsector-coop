@@ -57,9 +57,11 @@ import java.util.function.LongSupplier;
  *       {@code reportPlayerEngagement} fires inside {@code processEngagementResults}, i.e. <em>after</em>
  *       the battle, which is far too late to pause the partner. The combat plugin is the only seam
  *       that runs on the first frame of combat, and it hands over the {@code CombatEngineAPI} the
- *       status capture needs anyway. For the host-pushed {@code ENGAGE_GUEST} path the mod owns the
- *       moment before {@code startBattle}, so {@code BATTLE_BEGIN} goes out there instead — earlier
- *       still, and after the pre-battle autosave.</li>
+ *       status capture needs anyway. It is also the seam for the host-pushed {@code ENGAGE_GUEST}
+ *       handoff, which since 2026-08-19 opens the <em>vanilla encounter dialog</em> rather than a
+ *       battle ({@link #drivePendingEngage}): the guest may disengage or leave instead of fighting,
+ *       so nothing can be announced until combat actually starts. Only the {@code startBattle}
+ *       fallback, which forces a battle, still sends {@code BATTLE_BEGIN} up front.</li>
  *   <li><b>End = the first campaign frame after combat</b> ({@link #tickCampaign}), gated on having
  *       actually seen a combat frame. This catches every exit — victory, defeat, retreat, disengage —
  *       without depending on which engagement-result callback vanilla chose to fire.
@@ -150,6 +152,17 @@ public final class CoopBattleBridge {
     // ---- host-pushed actions queued on the guest ----
     private PendingEngage pendingEngage;
     private PendingDialog pendingDialog;
+    /**
+     * The {@code coopFleetId} of an {@code ENGAGE_GUEST} encounter whose vanilla dialog is on screen
+     * (or about to be), empty when none. It is the handoff's "in progress" marker: it suppresses a
+     * second handoff while the guest is still choosing — the host's 15 s {@code HANDOFF_GRACE} window
+     * is sized for the old fire-and-fight path and lapses while a player reads an encounter — and it
+     * is what tags the resulting battle {@code ENGAGE_GUEST}.
+     */
+    private String engageDialogFleetId = "";
+    private String engageDialogFleetName = "";
+    /** Set on the combat frame that the encounter produced, so its close needs no "no battle" line. */
+    private boolean engageDialogBecameBattle;
 
     private boolean sessionWasActive;
 
@@ -212,7 +225,16 @@ public final class CoopBattleBridge {
                 return;
             }
             if (!localBattleActive) {
-                beginLocalBattle(engine, CoopMessages.BattleKind.PLAYER, describeEnemy(engine), "");
+                // The kind cannot be read off the engine — a handoff battle and a right-click battle
+                // enter combat through the identical dialog seam — so it is carried in from the
+                // encounter this client was pushed into, if any.
+                boolean fromHandoff = !engageDialogFleetId.isEmpty();
+                String enemy = describeEnemy(engine);
+                beginLocalBattle(engine,
+                        fromHandoff ? CoopMessages.BattleKind.ENGAGE_GUEST : CoopMessages.BattleKind.PLAYER,
+                        enemy.isEmpty() ? engageDialogFleetName : enemy,
+                        fromHandoff ? engageDialogFleetId : "");
+                engageDialogBecameBattle |= fromHandoff;
             }
             sawCombatFrame = true;
             if (nowMillis < nextStatusAtMillis) {
@@ -243,7 +265,8 @@ public final class CoopBattleBridge {
                 // Not a pure edge: a battle can be opened from the combat frame without this method
                 // ever having seen an active session, and that battle still has to be released.
                 if (sessionWasActive || localBattleActive || remoteBattleActive
-                        || pendingEngage != null || pendingDialog != null) {
+                        || pendingEngage != null || pendingDialog != null
+                        || !engageDialogFleetId.isEmpty()) {
                     onSessionEnded();
                     sessionWasActive = false;
                 }
@@ -253,6 +276,7 @@ public final class CoopBattleBridge {
             sessionWasActive = true;
             autosave.tick(sector);
             maybeEndLocalBattle(nowMillis);
+            driveEngageDialog(sector);
             drivePendingEngage(sector, nowMillis);
             drivePendingDialog(sector, nowMillis);
             flushBanners(sector);
@@ -368,9 +392,9 @@ public final class CoopBattleBridge {
         }
         String coopFleetId = CoopMessages.requiredPayloadString(message, "coopFleetId");
         String fleetName = CoopMessages.requiredPayloadString(message, "fleetName");
-        if (localBattleActive || pendingEngage != null) {
-            CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST ignored (battle already pending/active)"
-                    + " coopFleetId=" + coopFleetId);
+        if (localBattleActive || pendingEngage != null || !engageDialogFleetId.isEmpty()) {
+            CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST ignored (battle already pending/active,"
+                    + " or an earlier handoff's encounter is still open) coopFleetId=" + coopFleetId);
             return;
         }
         pendingEngage = new PendingEngage(coopFleetId, fleetName, clock.getAsLong());
@@ -544,6 +568,37 @@ public final class CoopBattleBridge {
 
     // ---- host-pushed guest actions ---------------------------------------------------------------
 
+    /**
+     * The host-pushed handoff opens the <b>vanilla encounter dialog</b> against the guest's local
+     * mirror, not a battle (revised 2026-08-19). Being caught by a pirate is a conversation in
+     * vanilla — "the fleet moves to engage", then engage / attempt to disengage / the story-point
+     * clean getaway / comm link — and the previous {@code startBattle} call skipped all of it and
+     * dropped the guest onto the deployment screen with no choice, which is not the same game.
+     *
+     * <p>{@code showInteractionDialog(SectorEntityToken)} runs the plugin picker, which lands a plain
+     * {@code CampaignFleetAPI} on {@code FleetInteractionDialogPluginImpl}
+     * ({@code CoreCampaignPluginImpl}:109-111) — the same one-argument overload the customs path has
+     * used in production since the Phase 14 spike. Posture staging is
+     * {@link CoopEngageDialogStaging}; from there every option, every disengage roll and the pursuit
+     * round are vanilla's, in vanilla's own dialog instance.
+     *
+     * <p><b>The engagement shield needs nothing here.</b> The pump re-asserts it the moment any
+     * dialog owns the screen ({@code CoopNetPump.playerEngagementTargetOrNull} returns null), and
+     * that is fine: {@code FleetInteractionDialogPluginImpl} never calls {@code canBeEngaged()} or
+     * reads the {@code noCombat} fader anywhere, and its disengage/pursuit rounds are option-panel
+     * swaps inside the same plugin instance ({@code ATTEMPT_TO_DISENGAGE} flips the fleet goals and
+     * falls through to {@code CONTINUE_INTO_BATTLE} &rarr; {@code dialog.startBattle}) — the dialog
+     * never closes and re-enters through {@code BaseLocation}'s gated initiation block. This is the
+     * identical path the guest's own right-click engagement already takes in production.
+     *
+     * <p><b>No {@code BATTLE_BEGIN} is sent here</b>, unlike the fallback: the guest may well not
+     * fight. The combat plugin's first frame sends it if a battle happens, tagged
+     * {@code ENGAGE_GUEST} via {@link #engageDialogFleetId}. That also means the 15 s
+     * {@link #BATTLE_START_TIMEOUT_MILLIS} watchdog cannot fire spuriously while the guest reads the
+     * encounter — no local battle is open to time out. The host is held throughout by the guest's
+     * screen-pause intent (an interaction dialog is a blocking screen), and if the guest fights, the
+     * combat intent takes over on the same {@code BATTLE_BEGIN}.
+     */
     private void drivePendingEngage(SectorAPI sector, long nowMillis) {
         if (pendingEngage == null || sector == null) {
             return;
@@ -577,11 +632,47 @@ public final class CoopBattleBridge {
             return;
         }
         String fleetName = pendingEngage.fleetName();
+        String coopFleetId = pendingEngage.coopFleetId();
         pendingEngage = null;
-        // BATTLE_BEGIN goes out (and is flushed) BEFORE the state transition, so the partner is paused
-        // and watching for the whole battle rather than from the moment it happens to end.
-        beginLocalBattle(null, CoopMessages.BattleKind.ENGAGE_GUEST, fleetName,
-                mirrorCoopFleetId(mirror));
+
+        String staged = CoopEngageDialogStaging.stage(mirror);
+        CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST staging "
+                + CoopEngageDialogStaging.describePreconditions(mirror, player)
+                + " flags: " + staged);
+        boolean shown = false;
+        String failure = "showInteractionDialog returned false";
+        try {
+            shown = ui.showInteractionDialog(mirror);
+        } catch (RuntimeException | LinkageError ex) {
+            failure = "showInteractionDialog threw: " + ex;
+            CoopLog.warn(CoopBattleBridge.class, "Coop ENGAGE_GUEST showInteractionDialog threw", ex);
+        }
+        if (shown) {
+            engageDialogFleetId = coopFleetId;
+            engageDialogFleetName = fleetName;
+            engageDialogBecameBattle = false;
+            CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST opened the vanilla encounter dialog"
+                    + " vs " + fleetName + " coopFleetId=" + coopFleetId
+                    + "; the guest chooses from here (no battle is forced)");
+            return;
+        }
+        startBattleFallback(ui, player, mirror, fleetName, coopFleetId, failure);
+    }
+
+    /**
+     * Explicit, loud fallback for a handoff whose encounter dialog will not open. It is the pre-2026-08-19
+     * behaviour — a direct {@code startBattle} onto the deployment screen — kept precisely so the
+     * handoff never dies silently: the host has already decided this fleet caught the guest, and a
+     * dropped handoff would leave a hostile sitting on top of the guest with nothing happening.
+     */
+    private void startBattleFallback(CampaignUIAPI ui, CampaignFleetAPI player, CampaignFleetAPI mirror,
+                                     String fleetName, String coopFleetId, String failure) {
+        CoopLog.warn(CoopBattleBridge.class, "Coop ENGAGE_GUEST could not open the vanilla encounter"
+                + " dialog vs " + fleetName + " (" + failure + "); falling back to a direct startBattle"
+                + " — the guest gets the deployment screen with no encounter options");
+        // On this path BATTLE_BEGIN goes out (and is flushed) BEFORE the state transition, so the
+        // partner is paused and watching for the whole battle rather than from the moment it ends.
+        beginLocalBattle(null, CoopMessages.BattleKind.ENGAGE_GUEST, fleetName, coopFleetId);
         try {
             ui.startBattle(new BattleCreationContext(player, FleetGoal.ATTACK, mirror, FleetGoal.ATTACK));
             CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST startBattle issued vs " + fleetName);
@@ -589,6 +680,37 @@ public final class CoopBattleBridge {
             CoopLog.warn(CoopBattleBridge.class, "Coop ENGAGE_GUEST startBattle threw", ex);
             endLocalBattle("START_FAILED");
         }
+    }
+
+    /**
+     * Watches the handoff encounter to its end. There are only two outcomes and neither needs a
+     * message of its own: the guest fought (the combat seam already sent
+     * {@code BATTLE_BEGIN}/{@code BATTLE_END} and tagged them {@code ENGAGE_GUEST}), or it did not —
+     * it disengaged cleanly, was let go, or picked Leave. The second case resolves the handoff
+     * silently, which is correct: the host sent an invitation, not an order, and its per-fleet 120 s
+     * cooldown re-arms on its own so the same hostile can catch the guest again later.
+     */
+    private void driveEngageDialog(SectorAPI sector) {
+        if (engageDialogFleetId.isEmpty()) {
+            return;
+        }
+        if (localBattleActive || isDialogOpen(sector) || currentGameState() != GameState.CAMPAIGN) {
+            // Still on screen, or the battle it produced is running / about to run.
+            return;
+        }
+        if (engageDialogBecameBattle) {
+            CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST encounter resolved into a battle"
+                    + " coopFleetId=" + engageDialogFleetId);
+        } else {
+            String cleared = CoopEngageDialogStaging.clear(findNpcMirror(sector, engageDialogFleetId));
+            CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST handoff resolved without a battle"
+                    + " (disengaged or left) coopFleetId=" + engageDialogFleetId
+                    + " fleet=" + engageDialogFleetName + "; no battle messages were sent, posture"
+                    + " cleared: " + cleared);
+        }
+        engageDialogFleetId = "";
+        engageDialogFleetName = "";
+        engageDialogBecameBattle = false;
     }
 
     private void drivePendingDialog(SectorAPI sector, long nowMillis) {
@@ -731,6 +853,9 @@ public final class CoopBattleBridge {
         killFeed.clear();
         pendingEngage = null;
         pendingDialog = null;
+        engageDialogFleetId = "";
+        engageDialogFleetName = "";
+        engageDialogBecameBattle = false;
         if (remoteBattleActive) {
             remoteBattleActive = false;
             remoteStatus = null;

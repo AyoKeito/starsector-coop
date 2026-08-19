@@ -1,5 +1,10 @@
 package coop.combat;
 
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
@@ -15,7 +20,9 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.function.Supplier;
 
@@ -323,7 +330,127 @@ class CoopBattleBridgeTest {
         assertEquals(List.of("newer"), fixture.latestRemoteKillFeed());
     }
 
+    // ---- ENGAGE_GUEST: the vanilla encounter dialog, not a forced battle --------------------------
+
+    @Test
+    void aHandoffOpensTheVanillaEncounterDialogAgainstTheMirrorAndForcesNoBattle() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened,
+                "the handoff opens the vanilla fleet interaction against the local mirror");
+        assertEquals(0, engine.battlesStarted, "no battle is forced — the guest still gets to choose");
+        assertTrue(fixture.service.sent.isEmpty(),
+                "nothing is announced until the guest actually fights");
+        assertFalse(fixture.bridge.isAnyCoopBattleActive());
+    }
+
+    @Test
+    void aBattleTheGuestChoosesInThatEncounterIsTaggedEngageGuest() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        // The guest picked "engage": the dialog transitions straight into combat, and the combat
+        // seam is the only thing that ever sees it. The kind has to be carried in from the handoff.
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 2000L);
+
+        CoopMessages.Message begin = fixture.service.sent.get(0);
+        assertEquals(CoopMessages.Type.BATTLE_BEGIN, begin.type());
+        assertEquals(CoopMessages.BattleKind.ENGAGE_GUEST.name(),
+                CoopMessages.requiredPayloadString(begin, "kind"));
+        assertEquals("npc-7", CoopMessages.requiredPayloadString(begin, "npcFleetIds"));
+        assertEquals("Pirate Raiders", CoopMessages.requiredPayloadString(begin, "enemySummary"));
+    }
+
+    @Test
+    void aHandoffWhoseEncounterCannotOpenFallsBackToStartBattleRatherThanDyingSilently() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.dialogRefuses = true;
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertTrue(engine.dialogsOpened.isEmpty());
+        CoopMessages.Message begin = fixture.service.sent.get(0);
+        assertEquals(CoopMessages.Type.BATTLE_BEGIN, begin.type());
+        assertEquals(CoopMessages.BattleKind.ENGAGE_GUEST.name(),
+                CoopMessages.requiredPayloadString(begin, "kind"),
+                "the fallback still announces the battle up front, exactly as before the dialog path");
+        // BattleCreationContext initialises fields from Global.getSettings(), so it cannot be built
+        // headless: the call throws, the bridge's guard catches it and releases the shared clock
+        // rather than stranding the partner. That release is the assertion worth making here; that
+        // startBattle itself works against a mirror is spike-verified in-game (PHASE14_SPIKE_NOTES b).
+        assertEquals("START_FAILED", CoopMessages.requiredPayloadString(
+                fixture.service.sent.get(1), "outcome"));
+        assertFalse(fixture.bridge.isAnyCoopBattleActive());
+    }
+
+    @Test
+    void anEncounterTheGuestWalksAwayFromResolvesWithNoMessagesAndReArmsTheHandoff() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        engine.dialogOpen = true;
+
+        // Reading the encounter: still open, still nothing to say.
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+        // Disengaged cleanly / picked Leave: the dialog closes and no combat ever happens.
+        engine.dialogOpen = false;
+        fixture.bridge.tickCampaign(engine.sector, true, 3000L);
+
+        assertTrue(fixture.service.sent.isEmpty(), "a handoff that produced no battle sends nothing");
+        assertFalse(fixture.bridge.isAnyCoopBattleActive());
+
+        // The marker is cleared, so the host's next handoff (after its 120 s per-fleet cooldown) lands.
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 4000L);
+        assertEquals(2, engine.dialogsOpened.size());
+    }
+
+    @Test
+    void aSecondHandoffIsIgnoredWhileTheGuestIsStillInsideTheFirstEncounter() {
+        // The host's 15 s HANDOFF_GRACE is sized for the old fire-and-fight path; a player reading an
+        // encounter outlasts it easily, and BATTLE_BEGIN (which would hold the host) may never come.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        engine.dialogOpen = true;
+
+        fixture.bridge.handle(engageGuest("npc-9", "Pirate Wolfpack"));
+        engine.dialogOpen = false;
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened,
+                "the guest is never queued into two encounters at once");
+        assertEquals(0, engine.battlesStarted);
+    }
+
+    @Test
+    void aHandoffWithNoLocalMirrorIsStillDroppedWithAWarning() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+
+        fixture.bridge.handle(engageGuest("npc-missing", "Ghost Fleet"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertTrue(engine.dialogsOpened.isEmpty());
+        assertEquals(0, engine.battlesStarted);
+        assertTrue(fixture.service.sent.isEmpty());
+    }
+
     // ---- helpers -----------------------------------------------------------------------------------
+
+    private static CoopMessages.Message engageGuest(String coopFleetId, String fleetName) {
+        return CoopMessages.engageGuest("session-a", 1L, 0L, coopFleetId, fleetName, "pirates");
+    }
 
     private static CoopMessages.Message statusMessage(CoopBattleStatus status) {
         return CoopMessages.battleStatus("session-a", 1L, 0L, status.battleId(), status.statusSeq(),
@@ -372,6 +499,10 @@ class CoopBattleBridgeTest {
 
         private static Fixture host() {
             return new Fixture(CoopConnectionRole.HOST);
+        }
+
+        private static Fixture guest() {
+            return new Fixture(CoopConnectionRole.GUEST);
         }
 
         private CombatEngineAPI engine(List<Object> ships) {
@@ -460,6 +591,134 @@ class CoopBattleBridgeTest {
         @Override
         public void flushOutbound() {
         }
+    }
+
+    // ---- campaign proxies (ENGAGE_GUEST paths) -----------------------------------------------------
+
+    /**
+     * The smallest campaign the {@code ENGAGE_GUEST} paths touch: a sector holding one location, the
+     * player fleet, one NPC mirror tagged with a {@code coopFleetId}, and a campaign UI that records
+     * whether the mod opened a dialog or a battle. Same {@code Proxy} approach as the combat stubs —
+     * the real classes are engine-only, and nothing here needs behaviour beyond returning values.
+     */
+    private static final class Engine {
+        private final Object mirror;
+        private final Object playerFleet;
+        private final SectorAPI sector;
+        private final List<String> dialogsOpened = new ArrayList<>();
+        private int battlesStarted;
+        /** Flipped by the test to model the encounter being on screen across frames. */
+        private boolean dialogOpen;
+        /** Makes {@code showInteractionDialog} refuse, which is the fallback's trigger. */
+        private boolean dialogRefuses;
+
+        private Engine(String mirrorCoopFleetId) {
+            mirror = fleet("Pirate Raiders", mirrorCoopFleetId);
+            playerFleet = fleet("Player Fleet", null);
+            sector = sector(this);
+        }
+    }
+
+    private static SectorAPI sector(Engine engine) {
+        Object location = Proxy.newProxyInstance(
+                LocationAPI.class.getClassLoader(),
+                new Class<?>[]{LocationAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getFleets" -> List.of(engine.mirror, engine.playerFleet);
+                    case "getName" -> "Corvus";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "locationProxy";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        Object ui = Proxy.newProxyInstance(
+                CampaignUIAPI.class.getClassLoader(),
+                new Class<?>[]{CampaignUIAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "isShowingDialog" -> engine.dialogOpen;
+                    case "getCurrentInteractionDialog" -> null;
+                    case "showInteractionDialog" -> {
+                        if (engine.dialogRefuses) {
+                            yield false;
+                        }
+                        engine.dialogsOpened.add(nameOf(args[args.length - 1]));
+                        yield true;
+                    }
+                    case "startBattle" -> {
+                        engine.battlesStarted++;
+                        yield null;
+                    }
+                    case "autosave", "addMessage" -> null;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "campaignUiProxy";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return (SectorAPI) Proxy.newProxyInstance(
+                SectorAPI.class.getClassLoader(),
+                new Class<?>[]{SectorAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getCampaignUI" -> ui;
+                    case "getPlayerFleet" -> engine.playerFleet;
+                    case "getAllLocations" -> List.of(location);
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "sectorProxy";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    /**
+     * A campaign fleet whose memory is a real map, so the posture staging's
+     * {@code Misc.setFlagWithReason} writes land somewhere observable rather than throwing. Engine
+     * reads the mod guards individually (faction, commander, hostility) are left unimplemented on
+     * purpose — the proxy throws, the guards catch, and the log line degrades exactly as in-game.
+     */
+    private static Object fleet(String name, String coopFleetId) {
+        Map<String, Object> memory = new LinkedHashMap<>();
+        if (coopFleetId != null) {
+            memory.put("$coopNpcFleetId", coopFleetId);
+        }
+        Object mem = Proxy.newProxyInstance(
+                MemoryAPI.class.getClassLoader(),
+                new Class<?>[]{MemoryAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "contains" -> memory.containsKey((String) args[0]);
+                    case "get" -> memory.get((String) args[0]);
+                    case "getString" -> (String) memory.get((String) args[0]);
+                    case "getBoolean" -> Boolean.TRUE.equals(memory.get((String) args[0]));
+                    case "set" -> {
+                        memory.put((String) args[0], args[1]);
+                        yield null;
+                    }
+                    case "unset" -> {
+                        memory.remove((String) args[0]);
+                        yield null;
+                    }
+                    case "addRequired", "getRequired" -> method.getReturnType() == void.class
+                            ? null : java.util.Set.of();
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "memoryProxy";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return Proxy.newProxyInstance(
+                CampaignFleetAPI.class.getClassLoader(),
+                new Class<?>[]{CampaignFleetAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getMemoryWithoutUpdate" -> mem;
+                    case "getName" -> name;
+                    case "getFaction", "getCommander" -> null;
+                    case "isHostileTo" -> true;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "fleetProxy:" + name;
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static String nameOf(Object fleet) {
+        return ((CampaignFleetAPI) fleet).getName();
     }
 
     // ---- engine proxies ---------------------------------------------------------------------------
