@@ -6,7 +6,20 @@ other in this phase"). Engine-facts block: lines 1318-1326.
 Harness: `src/main/java/coop/combat/CoopCombatSpike.java`, called once per frame from
 `CoopNetPump.advance` via `tickCombatSpike()`. Every spike is gated twice: `CoopDebug.diagnosticsEnabled()`
 (JVM arg `-Dcoop.debug.diagnostics=true` or sector memory `$coopDebug`) plus a per-spike sector memory
-flag that the harness unsets when it fires. One console command arms one run.
+flag that the harness unsets when it fires.
+
+**Arming (no console exists in the test environment):** the test profiles run no Console Commands mod,
+so the harness polls a trigger file at 1 Hz through the sandbox-legal `SettingsAPI` common-file surface
+(`fileExistsInCommon` / `readTextFileFromCommon` / `deleteTextFileFromCommon`, filename `coop_spike`,
+which the engine stores as `saves\common\coop_spike.data`, plain text). Writing a command into that file
+sets the same one-shot sector memory flag a console would; the file is consumed on read. Commands:
+`customs [toff|smuggle|legacy]`, `engage`, `eject`, `ejectstop`. Per test profile, the file to write is:
+
+- host: `K:\Starsector-coop-test\host\saves\common\coop_spike.data`
+- guest: `K:\Starsector-coop-test\guest\saves\common\coop_spike.data`
+
+The `SetMemoryKey $coopSpike...` console commands below remain valid wherever a console mod is present;
+in the standing test environment the file is the way.
 
 ## Scope deviation from the plan text
 
@@ -243,19 +256,28 @@ SPIKE14c EJECT #1 leave=ok stillInBattle=false membersAfter=... damaged=false
 
 ## Manual test procedure
 
-Both instances need diagnostics on: launch with `-Dcoop.debug.diagnostics=true`, or run
-`SetMemoryKey $coopDebug true` in the console. All spike flags are consumed on use, so re-arming means
-re-running the command.
+Both instances need diagnostics on: launch with `-Dcoop.debug.diagnostics=true` (already in the test
+profiles' vmparams on the host; verify the guest). All spike triggers are consumed on use, so re-arming
+means re-writing the trigger file.
+
+Arming is done from a shell by writing the command into the profile's trigger file, e.g. (PowerShell):
+
+```powershell
+Set-Content K:\Starsector-coop-test\guest\saves\common\coop_spike.data "customs"
+Set-Content K:\Starsector-coop-test\guest\saves\common\coop_spike.data "engage"
+Set-Content K:\Starsector-coop-test\host\saves\common\coop_spike.data  "eject"
+Set-Content K:\Starsector-coop-test\host\saves\common\coop_spike.data  "ejectstop"
+```
 
 1. Start a coop session normally and let the handshake complete (`isGameplaySessionActive()` must be true
-   or the harness does nothing).
+   or the harness does nothing — including the trigger-file poll).
 2. Fly the guest next to a host-owned NPC fleet so an NPC mirror exists in the guest's own location. The
    harness only considers mirrors in the player's location; a battle or dialog needs co-location.
-3. **Spike a**, guest console: `SetMemoryKey $coopSpikeCustoms true`. Watch the four `SPIKE14a` lines and
-   the screen.
-4. **Spike b**, guest console, after closing any dialog: `SetMemoryKey $coopSpikeEngage true`.
-5. **Spike c**, host console: `SetMemoryKey $coopSpikeEject true`. Then, on the guest, fly the guest fleet
-   toward a hostile pirate or Remnant fleet with the transponder off until it gives chase. Let time pass
-   until the `CONTACT` line appears. Stop with `SetMemoryKey $coopSpikeEjectStop true`.
+3. **Spike a**, guest trigger file: `customs` (or `customs smuggle` / `customs legacy`). Watch the four
+   `SPIKE14a` lines and the screen.
+4. **Spike b**, guest trigger file, after closing any dialog: `engage`.
+5. **Spike c**, host trigger file: `eject`. Then, on the guest, fly the guest fleet toward a hostile
+   pirate or Remnant fleet with the transponder off until it gives chase. Let time pass until the
+   `CONTACT` line appears. Stop with `ejectstop` in the host trigger file.
 
 Record each verdict in the sections above before starting any Phase 14 implementation step.

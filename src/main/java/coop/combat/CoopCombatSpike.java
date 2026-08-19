@@ -73,6 +73,19 @@ public final class CoopCombatSpike {
     private static final String B = "SPIKE14b ";
     private static final String C = "SPIKE14c ";
 
+    /**
+     * Trigger file in the engine's common folder ({@code saves\common\coop_spike.data} on disk — the
+     * engine appends {@code .data}). The test environment has no console mod, so spikes are armed by
+     * writing a command into that file externally; the harness polls it at 1 Hz via the sandbox-legal
+     * {@code SettingsAPI} common-file surface, consumes it, and translates it into the same sector
+     * memory flags the console path would set. Commands: {@code customs [toff|smuggle|legacy]},
+     * {@code engage}, {@code eject}, {@code ejectstop}.
+     */
+    private static final String TRIGGER_FILE = "coop_spike";
+    private static final long TRIGGER_POLL_INTERVAL_MILLIS = 1000L;
+
+    private long nextTriggerPollAtMillis;
+
     /** Chaser proximity below which the watcher starts sampling even without an assignment match. */
     private static final float SAMPLE_RANGE = 2000f;
     /** ~2 Hz sampling so the log stays readable but still resolves the contact-formation distance. */
@@ -110,6 +123,7 @@ public final class CoopCombatSpike {
                 }
                 return;
             }
+            pollTriggerFile(sector, nowMillis);
             if (host) {
                 if (consumeFlag(sector, FLAG_EJECT)) {
                     startEjectWatcher(sector);
@@ -531,6 +545,67 @@ public final class CoopCombatSpike {
                 + " targetingMirror=" + targeting
                 + " assignment=" + assignmentOf(chaser)
                 + " hostile=" + hostileTo(chaser, mirror);
+    }
+
+    // ---- trigger file --------------------------------------------------------------------------
+
+    /**
+     * Consumes {@code saves\common\coop_spike.data} and sets the corresponding spike memory flag, so
+     * the file path and the (absent) console path arm the exact same one-shot logic. The read/delete
+     * calls declare a checked {@code IOException}; caught as {@code Exception} so this class never
+     * references {@code java.io} (the script classloader blocks it).
+     */
+    private void pollTriggerFile(SectorAPI sector, long nowMillis) {
+        if (nowMillis < nextTriggerPollAtMillis) {
+            return;
+        }
+        nextTriggerPollAtMillis = nowMillis + TRIGGER_POLL_INTERVAL_MILLIS;
+        String command;
+        try {
+            if (!Global.getSettings().fileExistsInCommon(TRIGGER_FILE)) {
+                return;
+            }
+            command = Global.getSettings().readTextFileFromCommon(TRIGGER_FILE);
+            Global.getSettings().deleteTextFileFromCommon(TRIGGER_FILE);
+        } catch (Exception | LinkageError ex) {
+            CoopLog.warn(CoopCombatSpike.class, "SPIKE14 trigger file read failed", ex);
+            return;
+        }
+        if (command == null) {
+            return;
+        }
+        String[] parts = command.trim().toLowerCase().split("\\s+");
+        if (parts.length == 0 || parts[0].isEmpty()) {
+            return;
+        }
+        String flag;
+        Object value = Boolean.TRUE;
+        switch (parts[0]) {
+            case "customs" -> {
+                flag = FLAG_CUSTOMS;
+                if (parts.length > 1) {
+                    value = parts[1];
+                }
+            }
+            case "engage" -> flag = FLAG_ENGAGE;
+            case "eject" -> flag = FLAG_EJECT;
+            case "ejectstop" -> flag = FLAG_EJECT_STOP;
+            default -> {
+                CoopLog.warn(CoopCombatSpike.class, "SPIKE14 trigger file: unknown command \""
+                        + command.trim() + "\"");
+                return;
+            }
+        }
+        try {
+            MemoryAPI memory = sector.getMemoryWithoutUpdate();
+            if (memory == null) {
+                return;
+            }
+            memory.set(flag, value);
+            CoopLog.info(CoopCombatSpike.class, "SPIKE14 trigger file: armed " + flag + "=" + value);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCombatSpike.class, "SPIKE14 trigger file arm failed", ex);
+        }
     }
 
     // ---- lookup helpers ------------------------------------------------------------------------
