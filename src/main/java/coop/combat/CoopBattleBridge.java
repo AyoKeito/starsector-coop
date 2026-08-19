@@ -95,9 +95,16 @@ import java.util.function.LongSupplier;
  * fleets are actually despawned and rosters finalised. Reading the mirror before that reports a dead
  * fleet as a survivor. So {@link #endLocalBattle} parks a {@link PendingResult} and
  * {@link #drivePendingResult} builds and dispatches it on the first campaign frame with no dialog
- * open (with the usual {@link #PENDING_ACTION_TIMEOUT_MILLIS} escape hatch, so a dialog that never
- * closes cannot swallow the report). The partner is held by the guest's screen-pause intent for that
- * whole window, so nothing races it.
+ * open. <b>An open dialog is not a timeout condition:</b> a player picking through salvage and ship
+ * recovery can hold the encounter dialog open for minutes, so while one is on screen the parked
+ * result's clock is renewed every frame and {@link #notifyBattleConcluded} is re-fired on a
+ * {@link #FREEZE_REFRESH_INTERVAL_MILLIS} cadence — keeping the guest's mirror freeze and the host's
+ * engage cooldown alive for as long as the dialog actually lasts (otherwise the ~1 s
+ * {@code NPC_FLEET_SET} stream would thaw and resurrect the kill mid-dialog, and the result built
+ * afterwards would report it as a full-strength survivor). The
+ * {@link #PENDING_ACTION_TIMEOUT_MILLIS} escape hatch therefore only measures the genuinely wedged
+ * states — no dialog but the battle flag or game state never settled, or no sector to read. The
+ * partner is held by the guest's screen-pause intent for that whole window, so nothing races it.
  *
  * <h2>Disconnect mid-combat</h2>
  * Finish locally, reconcile by authority. If the session dies while a local battle is running, the
@@ -129,6 +136,11 @@ public final class CoopBattleBridge {
     static final int MAX_PENDING_BANNERS = 8;
     /** A queued host-pushed action that cannot be honoured for this long is dropped. */
     static final long PENDING_ACTION_TIMEOUT_MILLIS = 60000L;
+    /**
+     * How often the parked battle result re-fires {@link #notifyBattleConcluded} while the post-battle
+     * dialog is open, keeping the mirror freeze and engage cooldown renewed (class doc, Phase 15).
+     */
+    static final long FREEZE_REFRESH_INTERVAL_MILLIS = 2000L;
 
     private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
 
@@ -162,6 +174,8 @@ public final class CoopBattleBridge {
     private final List<String> localBattleNpcFleetIds = new ArrayList<>();
     /** The finished battle whose campaign result is waiting for the encounter dialog to close. */
     private PendingResult pendingResult;
+    /** Last {@link #notifyBattleConcluded} re-fire while the post-battle dialog held the result. */
+    private long lastFreezeRefreshMillis;
 
     // ---- spectator side ----
     private boolean remoteBattleActive;
@@ -276,6 +290,27 @@ public final class CoopBattleBridge {
     public static boolean isLocalBattleOver(boolean localBattleActive, boolean sawCombatFrame,
                                             boolean inCampaignState) {
         return localBattleActive && sawCombatFrame && inCampaignState;
+    }
+
+    /** What {@code drivePendingResult} does with the parked result this frame (Phase 15). */
+    enum PendingResultAction { HOLD_AND_RENEW, WAIT, BUILD, BUILD_TIMED_OUT }
+
+    /**
+     * Pure wait/build decision for the parked battle result, split out for tests. An open dialog
+     * always holds-and-renews — it is never a timeout condition (class doc); the timeout only expires
+     * against the genuinely wedged states (battle flag stuck, game state never back to campaign).
+     */
+    static PendingResultAction pendingResultAction(boolean dialogOpen, boolean battleActive,
+                                                   boolean inCampaign, long queuedAtMillis,
+                                                   long nowMillis) {
+        if (dialogOpen) {
+            return PendingResultAction.HOLD_AND_RENEW;
+        }
+        boolean timedOut = nowMillis - queuedAtMillis > PENDING_ACTION_TIMEOUT_MILLIS;
+        if (!timedOut && (battleActive || !inCampaign)) {
+            return PendingResultAction.WAIT;
+        }
+        return timedOut ? PendingResultAction.BUILD_TIMED_OUT : PendingResultAction.BUILD;
     }
 
     // ---- combat-thread entry point ---------------------------------------------------------------
@@ -592,6 +627,7 @@ public final class CoopBattleBridge {
         // Phase 15: tell the world the fight is over now (cooldowns / mirror freeze), and park the
         // campaign result until vanilla has finished applying it behind the encounter dialog.
         notifyBattleConcluded(npcFleetIds, true);
+        lastFreezeRefreshMillis = clock.getAsLong();
         pendingResult = new PendingResult(battleId, outcome, npcFleetIds, clock.getAsLong());
     }
 
@@ -604,25 +640,40 @@ public final class CoopBattleBridge {
         if (pendingResult == null) {
             return;
         }
-        boolean timedOut = nowMillis - pendingResult.queuedAtMillis() > PENDING_ACTION_TIMEOUT_MILLIS;
         if (sector == null) {
             // No world to read. Never build on the timeout path here: every fleet would look missing
             // and the host would despawn a set of live fleets on the strength of a null sector.
-            if (timedOut) {
+            if (nowMillis - pendingResult.queuedAtMillis() > PENDING_ACTION_TIMEOUT_MILLIS) {
                 CoopLog.warn(CoopBattleBridge.class, "Coop discarded the battle result for battleId="
                         + pendingResult.battleId() + ": no sector to read the outcome from");
                 pendingResult = null;
             }
             return;
         }
-        if (!timedOut && (localBattleActive || isDialogOpen(sector)
-                || currentGameState() != GameState.CAMPAIGN)) {
-            return;
-        }
-        if (timedOut) {
-            CoopLog.warn(CoopBattleBridge.class, "Coop building the battle result for battleId="
-                    + pendingResult.battleId() + " on the timeout path (the encounter dialog never"
-                    + " closed); the reported rosters may be pre-finalisation");
+        PendingResultAction action = pendingResultAction(isDialogOpen(sector), localBattleActive,
+                currentGameState() == GameState.CAMPAIGN, pendingResult.queuedAtMillis(), nowMillis);
+        switch (action) {
+            case HOLD_AND_RENEW:
+                // The post-battle dialog is on screen — not a stuck state, however long the player
+                // browses salvage. Renew the parked clock so the timeout only measures what happens
+                // after the dialog closes, and keep the freeze/cooldown alive (class doc).
+                pendingResult = new PendingResult(pendingResult.battleId(), pendingResult.outcome(),
+                        pendingResult.npcFleetIds(), nowMillis);
+                if (nowMillis - lastFreezeRefreshMillis >= FREEZE_REFRESH_INTERVAL_MILLIS) {
+                    lastFreezeRefreshMillis = nowMillis;
+                    notifyBattleConcluded(pendingResult.npcFleetIds(), true);
+                }
+                return;
+            case WAIT:
+                return;
+            case BUILD_TIMED_OUT:
+                CoopLog.warn(CoopBattleBridge.class, "Coop building the battle result for battleId="
+                        + pendingResult.battleId() + " on the timeout path (no dialog open, but the"
+                        + " battle flag or game state never settled); the reported rosters may be"
+                        + " pre-finalisation");
+                break;
+            case BUILD:
+                break;
         }
         PendingResult parked = pendingResult;
         pendingResult = null;

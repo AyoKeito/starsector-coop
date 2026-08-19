@@ -39,9 +39,13 @@ import java.util.function.Supplier;
  *   <li>the id arrives with a <b>different {@code fleetHash}</b> than it had when the mark went on —
  *       the host applied the reported post-battle roster, so this snapshot is the truth and is
  *       applied;</li>
- *   <li>{@link #PENDING_RECONCILE_TIMEOUT_MILLIS} elapses — the result was lost (disconnect), and the
- *       host's authoritative state legitimately resurrects the unreported kill, exactly as the Phase
- *       14 disconnect rule says it should. A freeze can never become permanent divergence.</li>
+ *   <li>{@link #PENDING_RECONCILE_TIMEOUT_MILLIS} elapses since the <em>last</em> mark — the result
+ *       was lost (disconnect), and the host's authoritative state legitimately resurrects the
+ *       unreported kill, exactly as the Phase 14 disconnect rule says it should. A freeze can never
+ *       become permanent divergence. The battle bridge re-marks on a ~2 s cadence for as long as the
+ *       fight and then the post-battle dialog actually last (a player can browse salvage for
+ *       minutes), so in practice the timeout only starts counting once the bridge stops renewing —
+ *       i.e. once the result has been sent or genuinely abandoned.</li>
  * </ul>
  *
  * <p>The freeze costs nothing visually: the 10 Hz {@code NPC_FLEET_MOTION} datagrams are deliberately
@@ -52,10 +56,11 @@ import java.util.function.Supplier;
 public final class CoopFleetMirrorRegistry {
 
     /**
-     * How long a mirror may stay frozen waiting for the host to confirm a battle outcome. Sized to
-     * match the battle bridge's own {@code PENDING_ACTION_TIMEOUT_MILLIS}: the result is not built
-     * until the encounter dialog closes, and a player picking through salvage and ship recovery can
-     * easily hold that dialog open for tens of seconds.
+     * How long a mirror may stay frozen after the battle bridge's <em>last</em> re-mark. The bridge
+     * renews the mark on a ~2 s cadence through the whole fight and the post-battle dialog, so this
+     * does not need to outlast a slow salvage screen — it only needs to cover the {@code
+     * BATTLE_RESULT} round trip after the dialog closes, with a wide margin for a lost result
+     * (disconnect) to thaw into the documented Phase 14 resurrection behavior.
      */
     static final long PENDING_RECONCILE_TIMEOUT_MILLIS = 60000L;
 

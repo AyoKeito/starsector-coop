@@ -119,6 +119,43 @@ class CoopBattleBridgeTest {
         assertFalse(CoopBattleBridge.isStartTimedOut(true, Long.MAX_VALUE));
     }
 
+    // ---- Phase 15: the parked result survives a long post-battle dialog ---------------------------
+
+    @Test
+    void anOpenDialogHoldsAndRenewsHoweverLongItLasts() {
+        // 3 minutes inside the salvage screen — far past the timeout — must never build or expire:
+        // the freeze thawing mid-dialog would let the ~1 s set stream resurrect the kill and the
+        // result would then report it as a full-strength survivor.
+        long queuedAt = 1000L;
+        for (long now = queuedAt; now <= 1000L + 180_000L; now += 1000L) {
+            assertEquals(CoopBattleBridge.PendingResultAction.HOLD_AND_RENEW,
+                    CoopBattleBridge.pendingResultAction(true, false, true, queuedAt, now));
+            queuedAt = now; // what HOLD_AND_RENEW does: the parked clock is refreshed every frame
+        }
+        // The dialog closes: the renewed clock means a clean, non-timeout build.
+        assertEquals(CoopBattleBridge.PendingResultAction.BUILD,
+                CoopBattleBridge.pendingResultAction(false, false, true, queuedAt, queuedAt + 1000L));
+    }
+
+    @Test
+    void theTimeoutOnlyMeasuresTheGenuinelyWedgedStates() {
+        long queuedAt = 1000L;
+        long window = CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS;
+        // Battle flag stuck / game state never back to campaign: wait inside the window, force-build
+        // past it so a wedged state can never swallow the report.
+        assertEquals(CoopBattleBridge.PendingResultAction.WAIT,
+                CoopBattleBridge.pendingResultAction(false, true, true, queuedAt, queuedAt + window));
+        assertEquals(CoopBattleBridge.PendingResultAction.BUILD_TIMED_OUT,
+                CoopBattleBridge.pendingResultAction(false, true, true, queuedAt, queuedAt + window + 1));
+        assertEquals(CoopBattleBridge.PendingResultAction.WAIT,
+                CoopBattleBridge.pendingResultAction(false, false, false, queuedAt, queuedAt + window));
+        assertEquals(CoopBattleBridge.PendingResultAction.BUILD_TIMED_OUT,
+                CoopBattleBridge.pendingResultAction(false, false, false, queuedAt, queuedAt + window + 1));
+        // A dialog on screen holds even arbitrarily far past the deadline — never a timeout condition.
+        assertEquals(CoopBattleBridge.PendingResultAction.HOLD_AND_RENEW,
+                CoopBattleBridge.pendingResultAction(true, false, true, queuedAt, queuedAt + window * 10));
+    }
+
     @Test
     void combatPauseIntentIsTheOrOfBothSides() {
         assertFalse(CoopBattleBridge.combatPauseIntent(false, false));

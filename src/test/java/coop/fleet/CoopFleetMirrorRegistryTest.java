@@ -320,6 +320,25 @@ class CoopFleetMirrorRegistryTest {
     }
 
     @Test
+    void aTwoSecondReMarkCadenceKeepsTheFreezeAliveThroughAThreeMinuteDialog() {
+        // The battle bridge renews the mark on its FREEZE_REFRESH_INTERVAL_MILLIS cadence for as long
+        // as the post-battle dialog is open; interleaved with the host's ~1 s set stream, the stale
+        // pre-battle roster must never re-assert, however long the player browses salvage.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        for (long now = 2000L; now <= 2000L + 180_000L; now += 2000L) {
+            registry.markPendingReconcile("a", now);
+            registry.applySet(set(fleet("a", "corvus", "wolf")), now + 1000L);
+        }
+
+        assertEquals(1, mirror.snapshotApplies, "the stale pre-battle roster never re-asserts");
+        assertEquals(List.of("a"), new ArrayList<>(registry.pendingReconcileIds()));
+    }
+
+    @Test
     void markingAnUnknownFleetIsANoOp() {
         CoopFleetMirrorRegistry registry = newRegistry();
 
