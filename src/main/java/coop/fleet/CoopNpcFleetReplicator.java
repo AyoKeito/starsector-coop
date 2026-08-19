@@ -70,6 +70,11 @@ public final class CoopNpcFleetReplicator {
         if (sector == null) {
             return;
         }
+        // First, before anything samples a position: run the guest's star system at the host's real
+        // frame rate instead of the engine's once-per-60-frames stride, so what we ship below is a
+        // full-fidelity simulation rather than a 1 Hz one. Falls back silently to the stride (and the
+        // smoother in replicatedMotion) whenever it cannot or should not run.
+        CoopFullFidelitySystemDriver.tick(sector);
         // Before sampling the population: vanilla only turns RouteManager routes into real fleets near
         // the *player* fleet, which on the host is never the guest. Extend that presence to the guest
         // mirror so a guest-only system is actually populated (and so the fleets survive the host's
@@ -101,6 +106,7 @@ public final class CoopNpcFleetReplicator {
         lastFleetCount = 0;
         guestRoutes.reset();
         motionSmoother.reset();
+        CoopFullFidelitySystemDriver.reset();
     }
 
     public String lastSetHash() {
@@ -177,6 +183,12 @@ public final class CoopNpcFleetReplicator {
      * once every 60 frames with a 60x timestep (see {@link CoopNpcFleetMotionSmoother}), which is
      * what makes NPC fleets teleport on a guest standing in a system the host is not in — those go
      * through the smoother.
+     *
+     * <p>A system {@link CoopFullFidelitySystemDriver} is currently driving is reported verbatim for
+     * the same reason the host's own location is: it is being advanced every frame at the real
+     * timestep, so there is no staircase left to interpolate away and smoothing would only cost a
+     * stride of latency. The smoother stays in place for every case the driver does not cover — kill
+     * switch off, resolve failure, guest in hyperspace, or any other non-current location.
      */
     private CoopNpcFleetMotionSmoother.Motion replicatedMotion(CampaignFleetAPI fleet, LocationAPI loc,
                                                                LocationAPI hostLocation, long now) {
@@ -186,7 +198,7 @@ public final class CoopNpcFleetReplicator {
         float y = pos == null ? 0f : pos.y;
         float vx = vel == null ? 0f : vel.x;
         float vy = vel == null ? 0f : vel.y;
-        if (loc == null || (hostLocation != null && loc == hostLocation)) {
+        if (loc == null || (hostLocation != null && loc == hostLocation) || isFullFidelityDriven(loc)) {
             return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
         }
         try {
@@ -194,6 +206,12 @@ public final class CoopNpcFleetReplicator {
         } catch (RuntimeException | LinkageError ex) {
             return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
         }
+    }
+
+    /** True while {@link CoopFullFidelitySystemDriver} is advancing this location at the real rate. */
+    private static boolean isFullFidelityDriven(LocationAPI loc) {
+        String driven = CoopFullFidelitySystemDriver.drivenLocationId();
+        return !driven.isEmpty() && driven.equals(loc.getId());
     }
 
     private static LocationAPI hostCurrentLocation(SectorAPI sector) {
