@@ -24,13 +24,38 @@ import coop.util.CoopLog;
  * combat plugin's first frame) the state transition has already happened. No request is made on that
  * path: an autosave that could only run <em>after</em> the battle is not insurance, it is a
  * multi-second freeze for nothing.
+ *
+ * <p><b>Throttled (2026-08-19, user review).</b> The save is a multi-second hitch right as a hostile
+ * bears down — un-vanilla, and per-battle frequency buys little extra insurance. A request is skipped
+ * when this class performed an autosave within the last {@link #MIN_INTERVAL_MILLIS}. Imprecision
+ * accepted: a manual save doesn't reset the timer (no cheap hook here), so at worst one redundant
+ * autosave runs early. Revisit when Phase 16's coordinated saves provide the regular cadence.
  */
 public final class CoopPreBattleAutosave {
 
+    /** Skip a requested autosave when one ran this recently. */
+    static final long MIN_INTERVAL_MILLIS = 10L * 60L * 1000L;
+
     private String pendingReason;
+    private long lastAutosaveAtMillis = Long.MIN_VALUE;
+
+    /** Pure throttle predicate, split out for tests; the MIN_VALUE sentinel means "never saved". */
+    public static boolean isRecentEnough(long lastAtMillis, long nowMillis) {
+        return lastAtMillis != Long.MIN_VALUE && nowMillis - lastAtMillis < MIN_INTERVAL_MILLIS;
+    }
 
     /** Queue an autosave. Repeat requests before the save runs collapse into one. */
     public void request(String reason) {
+        request(reason, System.currentTimeMillis());
+    }
+
+    /** Clock-injectable form: skipped entirely while the throttle window is open. */
+    public void request(String reason, long nowMillis) {
+        if (isRecentEnough(lastAutosaveAtMillis, nowMillis)) {
+            CoopLog.info(CoopPreBattleAutosave.class,
+                    "Coop pre-battle autosave skipped (saved recently): " + reason);
+            return;
+        }
         pendingReason = reason == null || reason.trim().isEmpty() ? "coop battle" : reason.trim();
     }
 
@@ -70,6 +95,7 @@ public final class CoopPreBattleAutosave {
             String reason = pendingReason;
             pendingReason = null;
             ui.autosave();
+            lastAutosaveAtMillis = System.currentTimeMillis();
             CoopLog.info(CoopPreBattleAutosave.class, "Coop pre-battle autosave performed: " + reason);
             return true;
         } catch (RuntimeException | LinkageError ex) {
