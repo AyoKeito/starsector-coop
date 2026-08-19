@@ -44,7 +44,28 @@
       "sevLabel": "action",
       "head": "Next build: Phase 15",
       "state": "you are here",
-      "body": "Everything up through <span class=\"rp\" data-jump=\"14\">Phase 14</span> is built and smoke-verified in live two-instance sessions (14 on 2026-08-19: all five combat scenarios, plus the same-day RouteManager fork, full-fidelity guest-system drive, and engagement hardening). The build order continues with <span class=\"rp\" data-jump=\"15\">Phase 15</span> — combat results + campaign reconciliation."
+      "body": "Everything up through <span class=\"rp\" data-jump=\"14\">Phase 14</span> is built and smoke-verified in live two-instance sessions (14 on 2026-08-19: all five combat scenarios, plus the same-day RouteManager fork, full-fidelity guest-system drive, and engagement hardening). The build order continues with <span class=\"rp\" data-jump=\"15\">Phase 15</span> — combat results + campaign reconciliation. Until it lands there is a known transient: fleets the guest defeats stay undamaged in the host's authoritative set, so survivors re-engage with unearned confidence (the ENGAGE_GUEST pacing now relies on per-scan <code>pickEncounterOption</code>, which only sobers up once battle results reconcile)."
+    },
+    {
+      "sev": "gap",
+      "sevLabel": "known gap",
+      "head": "Parked Phase 14 fallout (cosmetic/UX)",
+      "state": "documented, deferred",
+      "body": "Intermittent grey (unidentified) fleets on the guest after the detectability operand fix (user chose to document, not dig); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); the <code>MARKET_OPEN for unknown market</code> warn on uncolonized/procgen planets (skip quietly — 12c follow-up); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). Full list with suspects: <code>PHASE14_SPIKE_NOTES.md</code> \"Known issues\"."
+    },
+    {
+      "sev": "risk",
+      "sevLabel": "maintenance",
+      "head": "Six vanilla classes are forked (pinned 0.98a-RC8)",
+      "state": "guarded, re-fork on game update",
+      "body": "The guest-presence family (<code>RouteManager</code>, <code>PlayerVisibleFleetManager</code>, <code>DisposableFleetManager</code> + two subclasses, <code>SourceBasedFleetManager</code>) plus the pre-existing <code>Misc</code>/procgen forks ride the coop-forks.jar classpath shadow. A Starsector update requires re-extracting each file and re-applying the small additive diffs; the shared runtime guard (<code>CoopPresenceRegistry.getForFork</code>) loudly disables the presence terms on a version mismatch instead of drifting silently. Re-fork procedure: <code>phase11-rng-determinism.md</code>."
+    },
+    {
+      "sev": "scope",
+      "sevLabel": "before release",
+      "head": "Dev conveniences to gate at Phase 23 packaging",
+      "state": "deliberate, temporary",
+      "body": "The COOP TEST Ziggurat start (option 6) must be removed or dev-gated before any public build. The forced tutorial skip and forced Normal difficulty stay <em>for coop sessions</em> (the tutorial rewrites Galatia and Easy's per-client sensor bonus would desync fleet views), but solo players of the released mod may want the vanilla choices back — needs a session-aware gate at <span class=\"rp\" data-jump=\"23\">Phase 23</span>."
     },
     {
       "sev": "scope",
@@ -52,20 +73,6 @@
       "head": "Phase 24 rescoped INTO V1 (2026-06-10)",
       "state": "scope change",
       "body": "Shared-faction colonies, industries, and raids are now <b>V1 scope</b> — one shared player faction (separate per-player factions stay out). It slots at build-order position 10, after 12c; raids (milestone 1) need no colony-lifecycle work. See <span class=\"rp\" data-jump=\"24\">P24</span>."
-    },
-    {
-      "sev": "note",
-      "sevLabel": "resolved",
-      "head": "Handshake checksums are real now (mod_info.json)",
-      "state": "resolved in 6b",
-      "body": "The 12b probe proved <code>SettingsAPI.loadText</code> survives the script sandbox (SUCCESS on both clients, 2026-08-17), and 6b wired real <code>mod_info.json</code> SHA-256 checksums into the manifest. Jar checksums stay <code>UNAVAILABLE</code> permanently — no engine surface hands back jar bytes."
-    },
-    {
-      "sev": "note",
-      "sevLabel": "resolved",
-      "head": "Guest transponder-off reactions restored",
-      "state": "resolved in 14",
-      "body": "Phase 14 restored the running-dark confrontation (smoke-verified 2026-08-19): the host-side threat watcher synthesizes the customs stop, and removing the 12b ignore flag may additionally have re-enabled vanilla-native patrol hassling on the guest engine (see PHASE14_SPIKE_NOTES known issues). Rep penalties propagate via the existing GUEST_REP_DELTA path."
     },
     {
       "sev": "note",
