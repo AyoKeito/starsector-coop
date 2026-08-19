@@ -13,6 +13,7 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.campaign.SubmarketPlugin;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.listeners.ColonyDecivListener;
@@ -579,6 +580,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
 
     /** Host: capture the canonical open-market stock (all item kinds) and broadcast it. */
     private void broadcastMarketSnapshot(MarketAPI market) {
+        // The host is canonical, so it must be *stocked* before it is canonical: a market the host has
+        // never docked at has never had its stock generated, and snapshotting it would hand the guest
+        // an empty shop. See ensureOpenMarketStocked.
+        ensureOpenMarketStocked(market);
         List<CoopMarketSync.StockItem> items = captureOpenMarketStock(market);
         marketSync.applySnapshot(market.getId(), items);
         send(CoopMessages.marketSnapshot(session.sessionId(), service.nextSeq(), now(),
@@ -860,12 +865,12 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      * success on a no-op.
      *
      * <p>Deliberately uses {@code getCargoNullOk()} and gives up when the submarket cargo has not
-     * been materialized (the normal state for a market this client has never docked at). Forcing
-     * materialization with {@code getCargo()} is <em>not</em> the fix: that accessor creates an empty
-     * cargo, and {@link #captureOpenMarketStock} reads the same one, so the next {@code MARKET_OPEN}
-     * would snapshot an empty market to the guest as canonical. Making a guest purchase durable is a
-     * model problem, not an accessor problem: open-market commodity stock is a stockpile the engine
-     * refills toward {@code getStockpileLimit} on every dock, so deltas do not survive regardless.
+     * been materialized (the normal state for a market this client has never docked at). Bare
+     * {@code getCargo()} is <em>not</em> the fix: that accessor only creates an empty cargo, so the
+     * delta would land on stock that was never generated. {@link #ensureOpenMarketStocked} is what
+     * materializes it properly, and it runs on the snapshot path where it belongs. Making a guest
+     * purchase durable is a model problem regardless: open-market commodity stock is a stockpile the
+     * engine refills toward {@code getStockpileLimit} on every interaction, so deltas do not survive.
      * Tracked as Phase 12c gap 2e.
      */
     private boolean applyItemDeltaToEngine(String marketId, CoopMarketSync.ItemKind kind, String itemId, int qty) {
@@ -1919,6 +1924,58 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             return null;
         }
         return member.getVariant().getHullVariantId();
+    }
+
+    /**
+     * Host: run the same stock generation a physical dock runs, before the market is snapshotted.
+     *
+     * <p>Vanilla only stocks a submarket when a player is about to interact with it: the core trade UI
+     * calls {@link SubmarketPlugin#updateCargoPrePlayerInteraction()} on the way in, and that call is
+     * what actually fills the open market with commodities, weapons, fighters and hulls (see
+     * {@code OpenMarketPlugin} in api_src; vanilla's own {@code PK_CMD} stocks a market off-screen by
+     * calling exactly this on {@code SUBMARKET_OPEN}). For a market the host has never docked at that
+     * call has never run, so {@code getCargoNullOk()} is null and {@link #captureOpenMarketStock}
+     * would publish an empty market as canonical — which is what the guest then rendered.
+     *
+     * <p>Re-roll frequency stays vanilla-equivalent because the plugin self-limits and we add no
+     * guard of our own: commodity restock is proportional to {@code sinceLastCargoUpdate} (zeroed on
+     * every call, and vanilla explicitly refuses the sub-one-unit add so repeated re-checking cannot
+     * accelerate it), and the ship/weapon re-roll is gated by {@code okToUpdateShipsAndWeapons()},
+     * i.e. once per 30 campaign days. A guest opening a market N times costs what a player docking N
+     * times costs, no more.
+     *
+     * <p>Open submarket only: that is the only submarket {@link #captureOpenMarketStock} captures and
+     * the only one {@link #applySnapshotToEngine} replaces. Stocking the military/black submarkets
+     * here would spend their re-roll windows on contents nobody reads (Phase 12c follow-up).
+     */
+    private void ensureOpenMarketStocked(MarketAPI market) {
+        if (market == null || !market.hasSubmarket(Submarkets.SUBMARKET_OPEN)) {
+            return;
+        }
+        SubmarketAPI open = market.getSubmarket(Submarkets.SUBMARKET_OPEN);
+        SubmarketPlugin plugin = open == null ? null : open.getPlugin();
+        if (plugin == null) {
+            return;
+        }
+        boolean neverStocked = open.getCargoNullOk() == null;
+        replayGuard.begin();
+        try {
+            plugin.updateCargoPrePlayerInteraction();
+            CoopLog.info(CoopCampaignReplicator.class, "Coop pre-snapshot stock update market="
+                    + market.getId() + " submarkets=[" + Submarkets.SUBMARKET_OPEN + "]"
+                    + " neverStockedBefore=" + neverStocked
+                    + " stacks=" + stackCount(open.getCargoNullOk()));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to update open-market stock before"
+                    + " snapshot market=" + market.getId(), ex);
+        } finally {
+            replayGuard.end();
+        }
+    }
+
+    private int stackCount(CargoAPI cargo) {
+        List<CargoStackAPI> stacks = cargo == null ? null : cargo.getStacksCopy();
+        return stacks == null ? 0 : stacks.size();
     }
 
     private CargoAPI openMarketCargo(String marketId) {
