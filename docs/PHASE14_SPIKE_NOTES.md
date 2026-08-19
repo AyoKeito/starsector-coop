@@ -181,7 +181,14 @@ if the pre-0.8 reading is right.
   distant fleets as RouteManager routes and only materializes fleet objects near the player fleet; the
   host-side guest mirror is not a player fleet, so guest-only systems never materialize. Fix direction:
   host-side presence extension so route materialization also happens around the guest mirror (needs
-  RouteManager surface research). Owner: post-spike fix, Phase 9/13 code.
+  RouteManager surface research). Owner: post-spike fix, Phase 9/13 code. **Fixed 2026-08-19**
+  (`CoopGuestRouteMaterializer`, commit c735ecd): force-spawns routes in the guest's system via the
+  public spawner call, adopts fleets into `RouteData.activeFleet` via MethodHandles (duplicate-spawn
+  guard), pins `daysSinceSeenByPlayer` (self-expiring despawn guard); fails safe to stock behavior.
+  **Residual gap (follow-up):** `DisposableFleetManager`/`PlayerVisibleFleetManager` subclasses (e.g.
+  `DisposablePirateFleetManager`) and `SourceBasedFleetManager` spawn near the player by design and
+  still ignore the guest — guest-only systems get route traffic (patrols/traders/raids) but not
+  player-proximity ambient spawns.
 
 ## Verdicts (in-game, 2026-08-19, two-instance session, new-game seed MN-1234567890123456789)
 
