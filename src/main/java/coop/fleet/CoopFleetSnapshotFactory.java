@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
@@ -60,21 +61,104 @@ public final class CoopFleetSnapshotFactory {
      * Captures a fleet's ship roster as replicable members, shared by the Phase 8 player snapshot and
      * the Phase 9 NPC fleet snapshots ({@link CoopNpcFleetReplicator}). Best-effort: a member that
      * fails to report a field is skipped rather than aborting the whole roster.
+     *
+     * <p><b>The per-member catch is load-bearing (2026-08-19).</b> It used to be a single try around
+     * the whole loop, which meant one ship that threw while being read truncated the roster at that
+     * point — and a throw on the <em>first</em> ship replicated the fleet as zero ships. That is not a
+     * dropped frame: {@code CoopFleetSnapshot#computeFleetHash} of the truncated list is perfectly
+     * stable, so the guest's {@code CoopFleetMirror#refreshRosterIfChanged} gate accepts it once and
+     * then never rebuilds until the host fleet's real roster changes. The guest log for build 56b025f
+     * shows the end state directly: 20 "roster refreshed to 0 ship(s)" lines, six of them inside a
+     * single set apply.
      */
     public static List<CoopFleetSnapshot.Member> captureMembers(CampaignFleetAPI fleet) {
         Objects.requireNonNull(fleet, "fleet");
         List<CoopFleetSnapshot.Member> members = new ArrayList<>();
+        List<FleetMemberAPI> source;
         try {
-            for (FleetMemberAPI member : fleet.getFleetData().getMembersListCopy()) {
-                if (member == null || member.isFighterWing()) {
-                    continue;
-                }
-                members.add(captureMember(member));
-            }
-        } catch (RuntimeException ignored) {
-            // Keep whatever members were captured before the failure.
+            source = fleet.getFleetData().getMembersListCopy();
+        } catch (RuntimeException ex) {
+            // The fleet itself cannot report a roster: nothing to salvage.
+            CoopLog.warn(CoopFleetSnapshotFactory.class,
+                    "Coop could not read the fleet data of " + safeName(fleet), ex);
+            return members;
+        }
+        if (source == null) {
+            return members;
+        }
+        int skipped = captureInto(members, engineSource(source));
+        if (skipped > 0) {
+            CoopLog.warn(CoopFleetSnapshotFactory.class, "Coop skipped " + skipped
+                    + " unreadable ship(s) while capturing the roster of " + safeName(fleet)
+                    + "; the mirror will be short by that many");
         }
         return members;
+    }
+
+    /**
+     * The resilience rule on its own, behind a seam so it can be unit-tested without an engine: read
+     * every slot, keep every slot that reads, and let a slot that throws cost exactly itself.
+     *
+     * @return how many members were skipped because reading them threw.
+     */
+    static int captureInto(List<CoopFleetSnapshot.Member> out, MemberSource source) {
+        int skipped = 0;
+        for (int i = 0; i < source.size(); i++) {
+            boolean wing;
+            try {
+                wing = source.isFighterWing(i);
+            } catch (RuntimeException ignored) {
+                // A member that cannot answer "am I a wing?" is treated as one, i.e. not replicated.
+                wing = true;
+            }
+            if (wing) {
+                continue;
+            }
+            try {
+                out.add(source.capture(i));
+            } catch (RuntimeException ignored) {
+                skipped++;
+            }
+        }
+        return skipped;
+    }
+
+    /** One fleet's replicable ship slots. {@link #captureInto} assumes any call here can throw. */
+    interface MemberSource {
+        int size();
+
+        boolean isFighterWing(int index);
+
+        CoopFleetSnapshot.Member capture(int index);
+    }
+
+    private static MemberSource engineSource(List<FleetMemberAPI> members) {
+        return new MemberSource() {
+            @Override
+            public int size() {
+                return members.size();
+            }
+
+            @Override
+            public boolean isFighterWing(int index) {
+                FleetMemberAPI member = members.get(index);
+                return member == null || member.isFighterWing();
+            }
+
+            @Override
+            public CoopFleetSnapshot.Member capture(int index) {
+                return captureMember(members.get(index));
+            }
+        };
+    }
+
+    private static String safeName(CampaignFleetAPI fleet) {
+        try {
+            String name = fleet.getName();
+            return name == null ? "?" : name;
+        } catch (RuntimeException ignored) {
+            return "?";
+        }
     }
 
     private static CoopFleetSnapshot.Member captureMember(FleetMemberAPI member) {

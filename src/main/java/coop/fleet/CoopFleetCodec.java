@@ -94,6 +94,9 @@ final class CoopFleetCodec {
                     case '|' -> out.append('|');
                     case 'n' -> out.append('\n');
                     case 'r' -> out.append('\r');
+                    // Must mirror escape()'s full alphabet, including the U+001F case, or this is not
+                    // the inverse of escape() and a field could survive one round trip but not two.
+                    case 's' -> out.append(UNIT_SEPARATOR);
                     default -> out.append(c);
                 }
                 escaped = false;

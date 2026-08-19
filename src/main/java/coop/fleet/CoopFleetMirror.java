@@ -7,8 +7,10 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -46,7 +48,19 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private CampaignFleetAPI mirrorFleet;
     private String lastFleetHash;
+    /**
+     * A structural hash whose roster could not be built completely (an unresolvable variant/hull), kept
+     * so {@link #refreshRosterIfChanged} retries it exactly <em>once</em> and then stops. Without the
+     * retry a single failed rebuild latched forever — the gate commits the hash and only a change on
+     * the host would ever flip it. Without the "once" it would rebuild the same unbuildable roster on
+     * every set for the life of the fleet.
+     */
+    private String retriedFleetHash;
     private String lastLocationId;
+    /** The host-side fleet id this mirror stands for; "" for the Phase 8 player mirror. Diagnostics. */
+    private String coopFleetId = "";
+    private String appliedName = "";
+    private String appliedFactionId = "";
     private int applyCount;
     /** True while the shield is deliberately down for the player's interaction target (edge-tracked). */
     private boolean shieldReleased;
@@ -172,17 +186,21 @@ public class CoopFleetMirror implements CoopNpcMirror {
         mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
         mirrorFleet.getMemoryWithoutUpdate().set(PLAYER_MIRROR_TAG, true);
         resetTracking();
+        coopFleetId = "player:" + snapshot.playerId();
+        appliedName = label;
+        appliedFactionId = factionId;
         CoopLog.info(CoopFleetMirror.class,
                 "Created coop mirror fleet for playerId=" + snapshot.playerId()
                         + " username=" + label + " faction=" + factionId);
     }
 
     private void ensureNpcFleet(CoopNpcFleetSnapshot snapshot) {
-        if (mirrorFleet != null && mirrorFleet.isAlive()) {
-            return;
-        }
         String factionId = snapshot.factionId().isEmpty() ? DEFAULT_NPC_FACTION : snapshot.factionId();
         String label = snapshot.name().isEmpty() ? DEFAULT_NPC_NAME : snapshot.name();
+        if (mirrorFleet != null && mirrorFleet.isAlive()) {
+            refreshIdentity(label, factionId);
+            return;
+        }
         mirrorFleet = Global.getFactory().createEmptyFleet(factionId, label, true);
         mirrorFleet.setAIMode(true);
         mirrorFleet.setNoAutoDespawn(true);
@@ -195,9 +213,45 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // mirror and never sweeps it (see CoopNpcFleetSuppressor).
         mirrorFleet.getMemoryWithoutUpdate().set(NPC_MIRROR_TAG, snapshot.coopFleetId());
         resetTracking();
+        coopFleetId = snapshot.coopFleetId();
+        appliedName = label;
+        appliedFactionId = factionId;
         CoopLog.info(CoopFleetMirror.class,
                 "Created coop NPC mirror fleet coopFleetId=" + snapshot.coopFleetId()
                         + " name=" + label + " faction=" + factionId);
+    }
+
+    /**
+     * Keeps a live mirror's name and faction following the host's, instead of freezing them at
+     * creation. Name and faction used to be write-once, which meant any host-side rename — or a mirror
+     * that outlived the fleet it was created for — kept advertising an identity its roster no longer
+     * matched. That is the exact shape of the 2026-08-19 report (a mirror labelled "Patrol" carrying a
+     * convoy's ships), so the two now travel together on every snapshot.
+     *
+     * <p>Gated on an actual change: {@code setFaction} rebuilds the fleet's faction-derived display
+     * state, and this runs on every 1 Hz set apply for every mirrored fleet in the sector.
+     */
+    private void refreshIdentity(String label, String factionId) {
+        if (!label.equals(appliedName)) {
+            try {
+                mirrorFleet.setName(label);
+                CoopLog.info(CoopFleetMirror.class, "Coop NPC mirror renamed coopFleetId=" + coopFleetId
+                        + " from=" + appliedName + " to=" + label);
+                appliedName = label;
+            } catch (RuntimeException ignored) {
+                // Display state only: never abort an apply over it.
+            }
+        }
+        if (!factionId.equals(appliedFactionId)) {
+            try {
+                mirrorFleet.setFaction(factionId);
+                CoopLog.info(CoopFleetMirror.class, "Coop NPC mirror re-factioned coopFleetId="
+                        + coopFleetId + " from=" + appliedFactionId + " to=" + factionId);
+                appliedFactionId = factionId;
+            } catch (RuntimeException ignored) {
+                // As above.
+            }
+        }
     }
 
     // ---- Shared driving ----------------------------------------------------------------------
@@ -368,6 +422,17 @@ public class CoopFleetMirror implements CoopNpcMirror {
         CoopSensorSync.apply(mirrorFleet, sensors);
     }
 
+    /**
+     * The roster gate. A structural hash equal to the last one applied means "same ship set", so the
+     * roster stands and only the repair state moves.
+     *
+     * <p><b>The gate is also a latch, which is why a bad rebuild has to be retried (2026-08-19).</b>
+     * Whatever roster this commits is what the mirror wears until the <em>host</em> fleet's own roster
+     * changes — a partial build (an unresolvable variant that {@link #createMember} could not turn into
+     * a ship) hashes exactly the same as the good snapshot it came from, so committing it means the
+     * mirror never gets another chance. One retry costs a single extra rebuild and covers the transient
+     * causes; after that the hash is accepted so an genuinely unbuildable roster cannot rebuild forever.
+     */
     private void refreshRosterIfChanged(String fleetHash, List<CoopFleetSnapshot.Member> members) {
         if (Objects.equals(fleetHash, lastFleetHash)) {
             // Same ship set: keep the roster and track the slow-moving repair state in place. The
@@ -377,8 +442,22 @@ public class CoopFleetMirror implements CoopNpcMirror {
             updateMemberState(members);
             return;
         }
-        rebuildRoster(members, fleetHash);
-        lastFleetHash = fleetHash;
+        boolean complete = rebuildRoster(members, fleetHash);
+        if (shouldCommitRoster(complete, fleetHash, retriedFleetHash)) {
+            lastFleetHash = fleetHash;
+            retriedFleetHash = null;
+        } else {
+            lastFleetHash = null;
+            retriedFleetHash = fleetHash;
+        }
+    }
+
+    /**
+     * The pure half of the gate above: commit a rebuilt roster (so the mirror stops rebuilding it) if
+     * it came out complete, or if this hash has already had its one retry.
+     */
+    static boolean shouldCommitRoster(boolean complete, String fleetHash, String retriedFleetHash) {
+        return complete || Objects.equals(fleetHash, retriedFleetHash);
     }
 
     /**
@@ -428,23 +507,55 @@ public class CoopFleetMirror implements CoopNpcMirror {
         return Math.abs(current - incoming) > 0.005f;
     }
 
-    private void rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
+    /** @return true when every member in the snapshot was actually built and attached. */
+    private boolean rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
         for (FleetMemberAPI existing : mirrorFleet.getFleetData().getMembersListCopy()) {
             mirrorFleet.getFleetData().removeFleetMember(existing);
         }
+        int built = 0;
         for (CoopFleetSnapshot.Member member : members) {
-            addMirrorMember(member);
+            if (addMirrorMember(member)) {
+                built++;
+            }
         }
         mirrorFleet.getFleetData().setSyncNeeded();
         CoopLog.info(CoopFleetMirror.class,
-                "Coop mirror fleet roster refreshed to " + members.size()
-                        + " ship(s) fleetHash=" + fleetHash);
+                "Coop mirror fleet roster refreshed to " + built + " of " + members.size()
+                        + " ship(s) coopFleetId=" + coopFleetId + " fleetHash=" + fleetHash);
+        reportRoster(members, fleetHash);
+        return built == members.size();
     }
 
-    private void addMirrorMember(CoopFleetSnapshot.Member member) {
+    /**
+     * {@link CoopDebug}-gated counterpart to the host's "Coop host fleet roster" line: what the
+     * snapshot <em>claimed</em> next to what this client actually created, post-fallback. The pair of
+     * lines is the whole diagnostic — it separates "the host captured the wrong ships" from "the guest
+     * failed to build the right ones", which is otherwise only visible by opening two saves.
+     */
+    private void reportRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
+        if (!CoopDebug.diagnosticsEnabled()) {
+            return;
+        }
+        try {
+            List<String> builtHullIds = new ArrayList<>();
+            for (FleetMemberAPI member : mirrorFleet.getFleetData().getMembersListCopy()) {
+                builtHullIds.add(member == null ? "" : member.getHullId());
+            }
+            CoopLog.info(CoopFleetMirror.class, "Coop mirror roster rebuilt coopFleetId=" + coopFleetId
+                    + " name=" + appliedName + " faction=" + appliedFactionId
+                    + " snapshot=" + members.size() + " [" + CoopRosterSummary.ofMembers(members) + "]"
+                    + " built=" + builtHullIds.size() + " [" + CoopRosterSummary.ofHullIds(builtHullIds)
+                    + "] fleetHash=" + fleetHash);
+        } catch (RuntimeException ignored) {
+            // A diagnostic must never be able to break the apply it is reporting on.
+        }
+    }
+
+    /** @return true when the member was created and attached. */
+    private boolean addMirrorMember(CoopFleetSnapshot.Member member) {
         FleetMemberAPI created = createMember(member);
         if (created == null) {
-            return;
+            return false;
         }
         try {
             mirrorFleet.getFleetData().addFleetMember(created);
@@ -453,9 +564,11 @@ public class CoopFleetMirror implements CoopNpcMirror {
             }
             created.getRepairTracker().setCR(member.cr());
             created.getStatus().setHullFraction(member.hullFraction());
+            return true;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class,
                     "Failed to attach coop mirror member " + member.fleetMemberId(), ex);
+            return false;
         }
     }
 
@@ -475,7 +588,14 @@ public class CoopFleetMirror implements CoopNpcMirror {
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class,
                     "Failed to create coop mirror member for hull " + member.hullId(), ex);
+            return null;
         }
+        // Both ids were empty (or the variant id resolved to nothing and there was no hull to fall
+        // back to). Silence here is what let short rosters pass unnoticed: say so once per attempt.
+        CoopLog.warn(CoopFleetMirror.class, "Coop mirror member has neither a usable variant nor hull"
+                + " id, skipping it: coopFleetId=" + coopFleetId
+                + " fleetMemberId=" + member.fleetMemberId()
+                + " variantId=" + member.variantId() + " hullId=" + member.hullId());
         return null;
     }
 
@@ -504,7 +624,11 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private void resetTracking() {
         lastFleetHash = null;
+        retriedFleetHash = null;
         lastLocationId = null;
+        coopFleetId = "";
+        appliedName = "";
+        appliedFactionId = "";
         applyCount = 0;
         shieldReleased = false;
         sensors = CoopSensorSync.Profile.UNKNOWN;

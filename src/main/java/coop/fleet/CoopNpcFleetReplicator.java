@@ -9,11 +9,14 @@ import org.lwjgl.util.vector.Vector2f;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
+import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -55,6 +58,8 @@ public final class CoopNpcFleetReplicator {
     private long nextMotionAtMillis;
     private String lastSetHash = "";
     private int lastFleetCount;
+    /** Per-fleet {@code fleetHash} last printed by the {@link CoopDebug} roster diagnostic. */
+    private final Map<String, String> loggedFleetHashes = new HashMap<>();
 
     public CoopNpcFleetReplicator(CoopNetService service, CoopSessionState sessionState,
                                   LongSupplier clockMillis) {
@@ -104,6 +109,7 @@ public final class CoopNpcFleetReplicator {
     public void reset() {
         lastSetHash = "";
         lastFleetCount = 0;
+        loggedFleetHashes.clear();
         guestPresence.reset();
         motionSmoother.reset();
         CoopFullFidelitySystemDriver.reset();
@@ -143,6 +149,42 @@ public final class CoopNpcFleetReplicator {
         lastFleetCount = fleets.size();
         CoopLog.info(CoopNpcFleetReplicator.class,
                 "Coop sent NPC_FLEET_SET fleets=" + fleets.size());
+        reportRosterChanges(fleets);
+    }
+
+    /**
+     * {@link CoopDebug}-gated roster diagnostic: one line per fleet whose {@code fleetHash} changed
+     * (and one on first capture), naming what the host actually read off the live {@code FleetData}.
+     * The guest prints the matching line from {@code CoopFleetMirror#rebuildRoster}, so a divergence
+     * between "what the host says the fleet is" and "what the guest built" is a two-line diff in the
+     * logs rather than an in-game errand.
+     *
+     * <p>Cheap by construction: it only runs on the branch that just decided the whole set changed,
+     * and inside that it only prints the fleets whose own roster moved. Dormant otherwise — the
+     * per-fleet hash map is not even maintained when diagnostics are off.
+     */
+    private void reportRosterChanges(List<CoopNpcFleetSnapshot> fleets) {
+        if (!CoopDebug.diagnosticsEnabled()) {
+            if (!loggedFleetHashes.isEmpty()) {
+                loggedFleetHashes.clear();
+            }
+            return;
+        }
+        Set<String> present = new HashSet<>();
+        for (CoopNpcFleetSnapshot fleet : fleets) {
+            String id = fleet.coopFleetId();
+            present.add(id);
+            String previous = loggedFleetHashes.put(id, fleet.fleetHash());
+            if (fleet.fleetHash().equals(previous)) {
+                continue;
+            }
+            CoopLog.info(CoopNpcFleetReplicator.class, "Coop host fleet roster coopFleetId=" + id
+                    + " name=" + fleet.name() + " faction=" + fleet.factionId()
+                    + " ships=" + fleet.members().size()
+                    + " [" + CoopRosterSummary.ofMembers(fleet.members()) + "]"
+                    + " fleetHash=" + fleet.fleetHash());
+        }
+        loggedFleetHashes.keySet().retainAll(present);
     }
 
     private void sendMotion(SectorAPI sector, long now) {

@@ -229,6 +229,58 @@ if the pre-0.8 reading is right.
 
 ## Known issues accepted for later (2026-08-19)
 
+- **Guest NPC mirrors wear the wrong ship roster** — **partially root-caused, hardened + instrumented
+  2026-08-19; the specific substitution is still open.** Reported on `56b025f`: a host "Patrol"
+  (7 varied ships, danger 3, burn 9) appeared on the guest as six identical `nebula_Standard`
+  freighters (danger 1, burn 8), confirmed by opening the encounter dialog against the mirror; a
+  "Fast Picket" showed the same shape. Stable across minutes and across `NPC_FLEET_SET` reapplies.
+
+  **Proven, and fixed:** two independent ways a *wrong* roster reaches the guest and then sticks.
+  1. `CoopFleetSnapshotFactory.captureMembers` wrapped the whole member loop in one `try`, so the
+     first ship that threw while being read truncated the roster from that point — a throw on ship
+     zero replicated the fleet as **zero ships**. The engine makes this reachable: `getMembersListCopy`
+     → `getMembers` → `FleetData.syncIfNeeded` (`nb/.../fleet/FleetData.java:630-637`) *empties*
+     `membersWithoutNull` outright when `isInInvalidStateDueToGameLoadOrder()` holds (`:893-902`,
+     any live member whose `getRepairTracker()` is still null), and returns the stale list when
+     `fleet.getStats() == null`. The guest log shows the end state: **20** `roster refreshed to 0
+     ship(s)` lines in one run, six of them inside a single set apply. Fixed: per-member `try`, plus
+     a warn naming the fleet and the skip count.
+  2. The guest's structural-hash gate is a **latch**. `CoopFleetMirror.refreshRosterIfChanged`
+     commits `lastFleetHash` whatever the rebuild produced, and a truncated/partially-built roster
+     hashes identically to the good snapshot it came from — so nothing short of the *host* fleet's own
+     roster changing ever triggers another rebuild. That is exactly the reported "they never changed
+     their type". Fixed: `rebuildRoster` now reports whether every member was built, and an incomplete
+     build is retried exactly once (`CoopFleetMirror.shouldCommitRoster`) before being accepted.
+
+  **Also fixed on the way:** mirror name and faction were write-once at `ensureNpcFleet`, so a mirror
+  could advertise an identity its roster no longer matched (they now follow the snapshot, on change
+  only); `createMember` returning null was silent (now warns with the ids); `CoopFleetCodec.unescape`
+  did not reverse the `\s` (U+001F) escape, so it was not the inverse of `escape` — harmless in
+  practice, since the set-level escape doubles the backslash, but the set encoder escapes an
+  already-escaped block and the two have to agree.
+
+  **Not proven:** why a patrol's snapshot would carry a *convoy-shaped* roster (N identical civilian
+  freighters) rather than a truncated version of its own. Fleet-id reuse was ruled out —
+  `CampaignEngine.genUID()` is a persisted monotonic hex counter (`ce_dec/.../CampaignEngine.java:313`)
+  and the only `setId` on a fleet in the whole engine is `CampaignTutorialScript:518`. Two live
+  candidates remain, both to be settled from the logs rather than by guessing: `Battle.genCombined`
+  (`nb/.../fleet/Battle.java:838-895`) builds a synthetic fleet holding **every** member of every
+  fleet on a side, sharing the primary fleet's name, `Memory` object and containing location — and
+  `FleetData.addFleetMember` never unlinks a member from its previous owner (`:470-490`), so a member
+  can legitimately sit in two or three `members` lists at once; and `RouteManager.spawnAndDespawn`'s
+  unguarded `data.activeFleet = data.spawner.spawnFleet(data)` (`api_pristine:640`, mirrored in our
+  fork at `:700`) can orphan a spawned fleet under re-entry, leaving a live fleet no route owns.
+
+  **Diagnostic shipped** (both `CoopDebug`-gated, dormant otherwise), designed to be read as a pair:
+  - host, once per fleet whose `fleetHash` changes:
+    `Coop host fleet roster coopFleetId=<id> name=<n> faction=<f> ships=<n> [hound x2, nebula x3] fleetHash=<h>`
+  - guest, after every `rebuildRoster`:
+    `Coop mirror roster rebuilt coopFleetId=<id> name=<n> faction=<f> snapshot=<n> [...] built=<m> [...] fleetHash=<h>`
+
+  Grep both logs for the same `coopFleetId`: matching `[...]` summaries with a wrong roster on screen
+  means the host captured the wrong ships; diverging summaries mean the guest failed to build the right
+  ones. The always-on `roster refreshed to X of Y ship(s)` line now carries the `coopFleetId` too.
+
 - **Synthesized customs pursuit reads as lower-quality than vanilla** (user verdict, 2026-08-19
   smoke of Phase 14b `56b025f`: all four scenarios — chase-from-detection, outrun/give-up,
   transponder-on stand-down, catch-and-hail — **pass**, but the motion/pacing is "visibly lower
