@@ -405,6 +405,14 @@ public final class CoopCombatSpike {
         if (!awaitingBattleReturn) {
             return;
         }
+        // The state transition is queued, so the pump can run one more campaign frame before combat
+        // actually starts (observed: a premature "back in campaign after 33ms" while the deployment
+        // screen was opening). Skip frames until enough wall time has passed for a real battle.
+        if (nowMillis - battleOpenedAtMillis < 2000L) {
+            CoopLog.info(CoopCombatSpike.class, B + "pre-transition frame elapsed="
+                    + (nowMillis - battleOpenedAtMillis) + "ms — waiting for the combat round trip");
+            return;
+        }
         awaitingBattleReturn = false;
         CampaignFleetAPI player = sector.getPlayerFleet();
         CampaignFleetAPI mirror = nearestNpcMirror(sector, player);
@@ -544,7 +552,40 @@ public final class CoopCombatSpike {
                 + " burn=" + fmt(burnLevel(chaser))
                 + " targetingMirror=" + targeting
                 + " assignment=" + assignmentOf(chaser)
-                + " hostile=" + hostileTo(chaser, mirror);
+                + " hostile=" + hostileTo(chaser, mirror)
+                + " pick=" + encounterOptionFor(chaser, mirror)
+                + " seesMirror=" + visibleTo(mirror, chaser)
+                + " fp=" + fleetPoints(chaser) + "v" + fleetPoints(mirror);
+    }
+
+    /** The engine's own engage-or-not answer, via the side-effect-free pureCheck overload. */
+    private static String encounterOptionFor(CampaignFleetAPI chaser, CampaignFleetAPI mirror) {
+        try {
+            CampaignFleetAIAPI ai = chaser.getAI();
+            if (ai == null) {
+                return "noAI";
+            }
+            CampaignFleetAIAPI.EncounterOption option = ai.pickEncounterOption(null, mirror, true);
+            return option == null ? "null" : option.name();
+        } catch (RuntimeException | LinkageError ex) {
+            return "THREW:" + ex.getClass().getSimpleName();
+        }
+    }
+
+    private static String visibleTo(CampaignFleetAPI target, CampaignFleetAPI observer) {
+        try {
+            return String.valueOf(target.isVisibleToSensorsOf(observer));
+        } catch (RuntimeException | LinkageError ex) {
+            return "?";
+        }
+    }
+
+    private static String fleetPoints(CampaignFleetAPI fleet) {
+        try {
+            return String.valueOf(fleet.getFleetPoints());
+        } catch (RuntimeException | LinkageError ex) {
+            return "?";
+        }
     }
 
     // ---- trigger file --------------------------------------------------------------------------

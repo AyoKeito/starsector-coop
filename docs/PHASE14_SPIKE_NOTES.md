@@ -166,6 +166,23 @@ and `$sawPlayerTransponderOff = true`. Variant `smuggle` adds `$pursuePlayer_smu
 `$doingCustomsInspection` and `$isCustomsInspector`, and is expected to produce the plain encounter menu
 if the pre-0.8 reading is right.
 
+## Regressions observed during the spike session (not spike failures)
+
+- **2026-08-19, guest-first market open is empty (Phase 12 gap):** if the guest opens a market the host
+  player has never visited, the open-market tab arrives empty except mod specs; other submarkets showed
+  stock. Once the host physically opens the same market, the guest's next open shows full contents.
+  Root-cause hypothesis: the host-side snapshot-on-open captures the engine market as-is, but vanilla
+  only generates submarket stock on player interaction (`updateCargoPrePlayerInteraction`), which never
+  ran for a host-unvisited market. Fix: on the guest's market-open request, host must invoke the vanilla
+  stock-update path per submarket before capturing the snapshot. Owner: post-spike fix, Phase 12 code.
+
+- **2026-08-19, no NPC spawns in guest-only systems (Phase 9 gap):** the guest sat near Umbra for
+  minutes with zero pirate fleets; ~3 materialized the moment the host entered the system. Vanilla keeps
+  distant fleets as RouteManager routes and only materializes fleet objects near the player fleet; the
+  host-side guest mirror is not a player fleet, so guest-only systems never materialize. Fix direction:
+  host-side presence extension so route materialization also happens around the guest mirror (needs
+  RouteManager surface research). Owner: post-spike fix, Phase 9/13 code.
+
 ## Verdict pending in-game test
 
 Nothing below has run in a live session yet. Each subsection lists the log lines to grep and the
