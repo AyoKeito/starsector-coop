@@ -89,12 +89,13 @@ sourceSets {
             srcDir generatedBuildInfoDir
         }
     }
-    // Forked engine classes (com.fs.starfarer.api.*) plus coop.rng.CoopRandom, which MUST share
-    // the same classloader as the forks (the system loader) - so it is built into coop-forks.jar,
-    // not coop.jar. See CoopRandom's classloader contract.
+    // Forked engine classes (com.fs.starfarer.api.*) plus coop.rng.CoopRandom and
+    // coop.presence.CoopPresenceRegistry, which MUST share the same classloader as the forks (the
+    // system loader) - so they are built into coop-forks.jar, not coop.jar. See CoopRandom's and
+    // CoopPresenceRegistry's classloader contracts.
     forks {
         java {
-            srcDirs = ['forks', 'src/main/java/coop/rng']
+            srcDirs = ['forks', 'src/main/java/coop/rng', 'src/main/java/coop/presence']
         }
         compileClasspath = forksCompileClasspath
     }
@@ -114,9 +115,12 @@ test {
 jar {
     archiveFileName = 'coop.jar'
     destinationDirectory = file('jars')
-    // coop.rng.CoopRandom lives in coop-forks.jar (system classloader). Keep it out of coop.jar
-    // (mod classloader) so there is a single canonical copy resolvable by the forked engine classes.
+    // coop.rng.CoopRandom and coop.presence.CoopPresenceRegistry live in coop-forks.jar (system
+    // classloader). Keep them out of coop.jar (mod classloader) so there is a single canonical copy
+    // resolvable by the forked engine classes -- and, for the presence registry, so the copy coop.jar
+    // code writes to is the same one the forked RouteManager reads.
     exclude 'coop/rng/**'
+    exclude 'coop/presence/**'
     manifest {
         attributes(
             'Implementation-Title': 'Starsector Coop V1',

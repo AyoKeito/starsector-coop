@@ -189,6 +189,16 @@ if the pre-0.8 reading is right.
   `DisposablePirateFleetManager`) and `SourceBasedFleetManager` spawn near the player by design and
   still ignore the guest — guest-only systems get route traffic (patrols/traders/raids) but not
   player-proximity ambient spawns.
+  **Superseded 2026-08-19 by the RouteManager fork.** `CoopGuestRouteMaterializer` is deleted.
+  `com.fs.starfarer.api.impl.campaign.fleets.RouteManager` is forked into `forks/` (classpath-shadow,
+  same mechanism as the `Misc` RNG fork) with four additive disjunctions guarded on a presence entity
+  published through `coop.presence.CoopPresenceRegistry` (in `coop-forks.jar`, written each tick by
+  `coop.fleet.CoopGuestPresence`): `shouldSpawn` and `isPlayerInSpawnRange` OR in the guest's distance;
+  `shouldDespawn` takes the minimum distance over {host player, guest} and never despawns a fleet
+  sharing the guest's star system. Vanilla's own `spawnAndDespawn` now owns the fleets, so the
+  force-spawn, the `RouteData` MethodHandles writes and the `daysSinceSeenByPlayer` pin are all gone.
+  This also closes the `BaseAssignmentAI.canTakeAction()` latent gap noted below (patrols near the
+  guest can raid/build again) and materialises fleets already in transit toward the guest's system.
 - **2026-08-19, follow-up: materialized fleets teleported erratically (60-frame stride).** Root cause
   (decompile-confirmed, `CampaignEngine.advance` ~line 1062): every location that is not the player's
   current location advances only once per 60 frames with dt×60 — ~1-second movement strides, and the

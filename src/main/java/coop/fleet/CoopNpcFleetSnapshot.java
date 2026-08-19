@@ -10,10 +10,14 @@ import java.util.Objects;
  * (Phase 9). Identity is the host-side {@code coopFleetId} ({@code fleet.getId()}), which is stable
  * for the lifetime of the fleet; the guest keys its mirror registry on it.
  *
- * <p>{@code sensorProfile} is the host fleet's effective detectability (raw profile + detected-range
- * bonus). The guest applies it to the mirror (frozen, see {@link CoopFleetMirror}) so the guest detects
- * the fleet at the same range the host does — without it, a freshly built mirror gets the engine's tiny
- * default profile and is only visible at point-blank range.
+ * <p>{@code sensorProfile} is the host fleet's effective detectability: the raw profile with the
+ * fleet's own {@code detectedRangeMod} folded in (transponder, sustained burn, generation flats, phase
+ * fields, terrain). The guest applies it to the mirror (frozen, see {@link CoopFleetMirror}) so the
+ * guest detects <em>and identifies</em> the fleet at the same range the host does — without the fold, a
+ * mirror carries only the engine's raw profile and both its grey sensor-contact range and its
+ * faction-identification range come out far too short. It must be derived from the fleet's own stats
+ * only: anything computed against the host player fleet leaks host state into guest rendering (see
+ * {@code CoopNpcFleetReplicator.effectiveDetectability}).
  *
  * <p>{@code sensorStrength} is the host fleet's sensor reach as an <em>observer</em>. The guest applies
  * it to the mirror so the engine renders the fleet's detection-range ring at the correct radius — the

@@ -9,7 +9,13 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 class CoopNpcFleetSetSnapshotTest {
     private static CoopNpcFleetSnapshot fleet(String id, String faction, String location, String hullId) {
-        return CoopNpcFleetSnapshot.create(id, faction, "Name " + id, location, 1f, 2f, 0f, 0f, true, 150f, 90f, "",
+        return fleet(id, faction, location, hullId, true);
+    }
+
+    private static CoopNpcFleetSnapshot fleet(String id, String faction, String location, String hullId,
+                                              boolean transponderOn) {
+        return CoopNpcFleetSnapshot.create(id, faction, "Name " + id, location, 1f, 2f, 0f, 0f,
+                transponderOn, 150f, 90f, "",
                 List.of(new CoopFleetSnapshot.Member("m-" + id, hullId, hullId + "_Standard",
                         "Ship", "Cpt", 0.8f, 1.0f)));
     }
@@ -49,6 +55,18 @@ class CoopNpcFleetSetSnapshotTest {
         // Same fleet, different roster.
         assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeSetHash(
                 List.of(fleet("f1", "hegemony", "corvus", "onslaught"))));
+    }
+
+    @Test
+    void setHashChangesOnTransponderToggle() {
+        // The set is the only carrier of transponder state (the 10 Hz motion datagram omits it), and on
+        // the guest that flag decides whether a mirror is faction-identified across its whole detection
+        // range or only inside 10% of it. If a toggle does not move the hash, the guest never learns.
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(
+                        fleet("f1", "hegemony", "corvus", "lasher", true))),
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(
+                        fleet("f1", "hegemony", "corvus", "lasher", false))));
     }
 
     @Test

@@ -51,5 +51,9 @@ public final class CoopSystemDriveFrameHook implements EveryFrameScript {
     @Override
     public void advance(float amount) {
         CoopFullFidelitySystemDriver.frameBoundary(amount);
+        // Same always-on-observer job for the guest-presence registration: nothing else would notice
+        // a session ending, and a stale presence entity would keep the forked RouteManager spawning
+        // fleets around a mirror that no longer belongs to anyone.
+        CoopGuestPresence.frameBoundary();
     }
 }

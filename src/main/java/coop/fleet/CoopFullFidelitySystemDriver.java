@@ -51,7 +51,7 @@ import java.util.List;
  * {@code frame}, and the two-argument {@code advance} pair whose second parameter is the obfuscated
  * class {@code com.fs.starfarer.util.A.new}) is resolved lazily on first use; {@code java.lang.reflect}
  * is blocked by the script classloader, which is why this goes through {@code java.lang.invoke} -- the
- * proven {@code CoopBarSync} / {@link CoopGuestRouteMaterializer} pattern. A resolve failure, or any
+ * proven {@code CoopBarSync} pattern. A resolve failure, or any
  * throw out of the drive, disables the feature permanently for the process after one warning and the
  * game falls back to stock stride advance plus the motion smoother. The kill switch
  * {@code -Dcoop.fullFidelityGuestSystem=false} does the same without a rebuild.
@@ -367,7 +367,7 @@ public final class CoopFullFidelitySystemDriver {
 
     private static LocationAPI guestLocation(SectorAPI sector) {
         try {
-            CampaignFleetAPI mirror = CoopGuestRouteMaterializer.findGuestMirror(sector);
+            CampaignFleetAPI mirror = CoopGuestPresence.findGuestMirror(sector);
             return mirror == null ? null : mirror.getContainingLocation();
         } catch (RuntimeException | LinkageError ex) {
             return null;
