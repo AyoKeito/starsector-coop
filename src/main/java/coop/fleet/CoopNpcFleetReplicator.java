@@ -31,6 +31,11 @@ import java.util.function.LongSupplier;
  *       currently is (bounded bandwidth; off-screen mirrors keep their last set position).</li>
  * </ul>
  *
+ * <p>Positions leaving here are run through {@link CoopNpcFleetMotionSmoother} unless the fleet is in
+ * the host's own current location. The engine advances every other location once per 60 frames with a
+ * 60x timestep, so raw positions from a guest-only system arrive as a once-a-second staircase; the
+ * smoother turns that back into continuous motion at the cost of one stride of latency.
+ *
  * <p>Stations are skipped: they are deterministic worldgen tied to markets and already exist
  * identically on the guest (the guest suppressor likewise preserves them).
  */
@@ -44,6 +49,7 @@ public final class CoopNpcFleetReplicator {
     private final CoopSessionState sessionState;
     private final LongSupplier clockMillis;
     private final CoopGuestRouteMaterializer guestRoutes = new CoopGuestRouteMaterializer();
+    private final CoopNpcFleetMotionSmoother motionSmoother = new CoopNpcFleetMotionSmoother();
 
     private long nextSetAtMillis;
     private long nextMotionAtMillis;
@@ -94,6 +100,7 @@ public final class CoopNpcFleetReplicator {
         lastSetHash = "";
         lastFleetCount = 0;
         guestRoutes.reset();
+        motionSmoother.reset();
     }
 
     public String lastSetHash() {
@@ -106,7 +113,8 @@ public final class CoopNpcFleetReplicator {
 
     private void sendSetIfChanged(SectorAPI sector, long now) {
         List<CoopNpcFleetSnapshot> fleets = new ArrayList<>();
-        forEachReplicatedFleet(sector, fleet -> fleets.add(toSnapshot(fleet)));
+        LocationAPI hostLocation = hostCurrentLocation(sector);
+        forEachReplicatedFleet(sector, fleet -> fleets.add(toSnapshot(fleet, hostLocation, now)));
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
         if (set.setHash().equals(lastSetHash)) {
             return;
@@ -125,16 +133,15 @@ public final class CoopNpcFleetReplicator {
             return;
         }
         List<CoopNpcFleetMotion> motions = new ArrayList<>();
+        LocationAPI hostLocation = hostCurrentLocation(sector);
         forEachReplicatedFleet(sector, fleet -> {
             LocationAPI loc = fleet.getContainingLocation();
             if (loc == null || !playerLocations.contains(loc.getId())) {
                 return;
             }
-            Vector2f pos = fleet.getLocation();
-            Vector2f vel = fleet.getVelocity();
+            CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
             motions.add(new CoopNpcFleetMotion(fleet.getId(), loc.getId(),
-                    pos == null ? 0f : pos.x, pos == null ? 0f : pos.y,
-                    vel == null ? 0f : vel.x, vel == null ? 0f : vel.y,
+                    motion.x(), motion.y(), motion.velocityX(), motion.velocityY(),
                     effectiveDetectability(fleet), sensorStrength(fleet)));
         });
         if (motions.isEmpty()) {
@@ -144,22 +151,57 @@ public final class CoopNpcFleetReplicator {
                 CoopMessages.Type.NPC_FLEET_MOTION, CoopNpcFleetMotion.encodeBatch(motions)));
     }
 
-    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet) {
-        Vector2f pos = fleet.getLocation();
-        Vector2f vel = fleet.getVelocity();
+    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now) {
         LocationAPI loc = fleet.getContainingLocation();
+        CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
         return CoopNpcFleetSnapshot.create(
                 fleet.getId(),
                 factionId(fleet),
                 fleet.getName() == null ? "" : fleet.getName(),
                 loc == null ? "" : loc.getId(),
-                pos == null ? 0f : pos.x, pos == null ? 0f : pos.y,
-                vel == null ? 0f : vel.x, vel == null ? 0f : vel.y,
+                motion.x(), motion.y(),
+                motion.velocityX(), motion.velocityY(),
                 transponderOn(fleet),
                 effectiveDetectability(fleet),
                 sensorStrength(fleet),
                 "",
                 CoopFleetSnapshotFactory.captureMembers(fleet));
+    }
+
+    /**
+     * The position/velocity to put on the wire for one fleet.
+     *
+     * <p>Fleets in the host's current location are reported verbatim: the engine advances that
+     * location every frame at the real timestep, so the raw values are already smooth and adding an
+     * interpolation delay would only cost latency. Everywhere else the engine advances the location
+     * once every 60 frames with a 60x timestep (see {@link CoopNpcFleetMotionSmoother}), which is
+     * what makes NPC fleets teleport on a guest standing in a system the host is not in — those go
+     * through the smoother.
+     */
+    private CoopNpcFleetMotionSmoother.Motion replicatedMotion(CampaignFleetAPI fleet, LocationAPI loc,
+                                                               LocationAPI hostLocation, long now) {
+        Vector2f pos = fleet.getLocation();
+        Vector2f vel = fleet.getVelocity();
+        float x = pos == null ? 0f : pos.x;
+        float y = pos == null ? 0f : pos.y;
+        float vx = vel == null ? 0f : vel.x;
+        float vy = vel == null ? 0f : vel.y;
+        if (loc == null || (hostLocation != null && loc == hostLocation)) {
+            return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
+        }
+        try {
+            return motionSmoother.smooth(fleet.getId(), loc.getId(), x, y, vx, vy, now);
+        } catch (RuntimeException | LinkageError ex) {
+            return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
+        }
+    }
+
+    private static LocationAPI hostCurrentLocation(SectorAPI sector) {
+        try {
+            return sector.getCurrentLocation();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
     }
 
     private Set<String> playerOccupiedLocationIds(SectorAPI sector) {

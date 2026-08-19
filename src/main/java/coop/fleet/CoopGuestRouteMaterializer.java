@@ -6,12 +6,15 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.fleets.RouteManager;
 import com.fs.starfarer.api.impl.campaign.fleets.RouteManager.RouteData;
+import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Host-side fix for "NPC fleets never appear in a system where only the guest is": vanilla keeps
@@ -82,6 +85,13 @@ public final class CoopGuestRouteMaterializer {
     private long nextPassAtMillis;
     private String armedSystemId = "";
 
+    /**
+     * Ids of the route fleets adopted in the armed system as of the previous pass. Only used by the
+     * {@link CoopDebug} churn line below -- it answers "are these fleets cycling?" from the log
+     * instead of from someone watching the screen, which is the one thing the spawn count cannot say.
+     */
+    private Set<String> lastAdoptedFleetIds = new LinkedHashSet<>();
+
     // ---- Per-pass entry point --------------------------------------------------------------------
 
     /**
@@ -105,6 +115,7 @@ public final class CoopGuestRouteMaterializer {
     public void reset() {
         armedSystemId = "";
         nextPassAtMillis = 0L;
+        lastAdoptedFleetIds = new LinkedHashSet<>();
     }
 
     /** The system id the pass is currently extending presence into, or "" when idle. Diagnostics. */
@@ -135,6 +146,7 @@ public final class CoopGuestRouteMaterializer {
         String systemId = String.valueOf(system.getId());
         if (!systemId.equals(armedSystemId)) {
             armedSystemId = systemId;
+            lastAdoptedFleetIds = new LinkedHashSet<>();
             CoopLog.info(CoopGuestRouteMaterializer.class,
                     "Coop guest-presence route materialization armed for " + system.getName()
                             + " routes=" + routes.size());
@@ -157,6 +169,36 @@ public final class CoopGuestRouteMaterializer {
                     "Coop force-materialized " + spawned + " route fleet(s) for guest presence in "
                             + system.getName());
         }
+        reportChurn(routes, system.getName());
+    }
+
+    /**
+     * Diagnostics only ({@link CoopDebug}-gated, silent otherwise). Logs how many previously adopted
+     * route fleets are gone since the last pass, which distinguishes "the fleets are alive and the
+     * motion is bad" from "the fleets are being recycled underneath us" without an in-game errand.
+     */
+    private void reportChurn(List<RouteData> routes, String systemName) {
+        Set<String> current = new LinkedHashSet<>();
+        for (RouteData route : routes) {
+            CampaignFleetAPI fleet = route == null ? null : route.getActiveFleet();
+            if (fleet != null && fleet.getId() != null) {
+                current.add(fleet.getId());
+            }
+        }
+        if (CoopDebug.diagnosticsEnabled()) {
+            int gone = 0;
+            for (String id : lastAdoptedFleetIds) {
+                if (!current.contains(id)) {
+                    gone++;
+                }
+            }
+            if (gone > 0 || !lastAdoptedFleetIds.isEmpty()) {
+                CoopLog.info(CoopGuestRouteMaterializer.class,
+                        "Coop route-fleet churn in " + systemName + ": adopted=" + current.size()
+                                + " routes=" + routes.size() + " goneSinceLastPass=" + gone);
+            }
+        }
+        lastAdoptedFleetIds = current;
     }
 
     /**
