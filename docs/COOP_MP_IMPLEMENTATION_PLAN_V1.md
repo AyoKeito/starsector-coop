@@ -26,7 +26,7 @@
 
 ## Implementation Order (decided 2026-06-10)
 
-Remaining work proceeds **hardening-first** (the stability rubric): **12b → 12d → 6b → 13-remainder → 14 (its spikes first) → 15 → 16 → 17 → 18 → 12c → 24 (colonies/industries/raids) → 7b → 7c → 20 (incl. 20.6) → 19 (final sign-off)**. Rationale: 12b fixes a live bug (silent autoresolve against mirror fleets) and Phase 13's suppressor extension stops the guest spawning its own pirate/Pather bases today — both protect every later test session. Phase 12d (split out of 12c on 2026-08-09) sits at slot 2 because it restores player-to-player item transfer, which v1 has none of today — every private soak session before it lands runs with no way for the two players to hand each other fuel, supplies, or a ship, which makes the soak unrepresentative of real co-op play. It has no dependency on Phases 13–18; only Phase 19's QA lines pinned the *rest* of 12c late. Phase 12c (extension-point closure) must land before Phase 19, whose bar-pool and market-contents QA lines depend on it; Phase 24 (rescoped into V1 on 2026-06-10) slots right after its 12c prerequisite — its milestone 1 (raids) needs no colony-lifecycle work and can start any time after 12c; 7b/7c are QoL and slot after the core gameplay phases; Phase 20 precedes the Phase 19 sign-off per its own ordering note.
+Remaining work proceeds **hardening-first** (the stability rubric): **12b → 12d → 6b → 13-remainder → 14 (its spikes first) → 15 → 16 → 17 → 18 → 12c → 24 (colonies/industries/raids) → 7b → 7c → 20 (incl. 20.6) → 19 (final sign-off)**. Rationale: 12b fixes a live bug (silent autoresolve against mirror fleets) and Phase 13's suppressor extension stops the guest spawning its own pirate/Pather bases today — both protect every later test session. Phase 12d (split out of 12c on 2026-08-09) sits at slot 2 because it restores player-to-player item transfer, which v1 has none of today — every private soak session before it lands runs with no way for the two players to hand each other fuel, supplies, or a ship, which makes the soak unrepresentative of real co-op play. It has no dependency on Phases 13–18; only Phase 19's QA lines pinned the *rest* of 12c late. Phase 12c (extension-point closure) must land before Phase 19, whose bar-pool and market-contents QA lines depend on it; Phase 24 (rescoped into V1 on 2026-06-10) slots right after its 12c prerequisite — its milestone 1 (raids) needs no colony-lifecycle work and can start any time after 12c; 7b/7c are QoL and slot after the core gameplay phases; Phase 20 precedes the Phase 19 sign-off per its own ordering note. 2026-08-20: Phases 17 and 18 were rescoped and both shrank to small hardening passes (see their banners); their order slots are unchanged.
 
 **Post-V1 priority** (decided 2026-06-10, "public after soak"): V1 ships privately first (host + one friend); the public forum/Nexus release is the goal after the private soak. Order: **21 (Multiplayer UX) → 23 (Release Packaging) → public release**, with 22 (co-op piloted battles), 25 (guest time-control polish: `coop.allowGuestPause` toggle + consensual fast-forward; needs 7b, promoted from the pause Maybe 2026-06-10), 26 (hyperspace ambient-world replication: slipstreams as outcome polylines + abyssal encounters as keyed re-execution; needs 13, promoted from two replication Maybe bullets 2026-06-10), 27 (multi-guest enablement, host + 2–3 guests: gameplay arbitration + QA matrix on Phase 20's N-ready transport; needs 20, promoted from the multi-guest Maybe 2026-06-10), and 28 (coop options & player-facing configuration: typed registry + settings-file stack + host-policy sync + intel options page; its milestone 1 delivers Phase 23's settings-file item and should land with 23; created 2026-06-10), and 29 (campaign motion smoothness: mirror interpolation/dead-reckoning + adaptive QA'd-tier cadence — the link picks the rate, never the player; M2 needs 20; created 2026-06-10) after or alongside as appetite allows. (Phase 24 — shared-faction colonies/industries/raids — was sketched here post-V1 on 2026-06-10 and **rescoped into V1 the same day**; it now sits in the V1 sequence above.)
 
@@ -48,7 +48,7 @@ Authoritative build status per phase. Checkbox state inside the early phases pre
 | 14 | **BUILT** | Smoke-verified in-game 2026-08-19, all five scenarios: host engages (banners + hold), guest engages (shield release fix 57bcf5b), ENGAGE_GUEST chase (sentinel-overflow fix 360c02b), customs (possibly vanilla-native on guest — see spike notes known issues), disconnect drill (discard + clean reset). Spectator panel cancelled for banners by user decision; BATTLE_STATUS stream retained for Phase 22. Same-day fallout fixes: RouteManager fork presence, full-fidelity system drive, detectability operand, engagement-shield hardening. |
 | 14b | **BUILT** | Smoke-verified in-game 2026-08-19 on the **primary (vanilla-signal) pursuit model** — the fallback flag was never needed. Verified: stealth pass-by, customs cat-and-mouse (chase-from-detection `d35459a` after the collision-distance report; watcher-killing immutable-set crash fixed `56b025f`; user notes pursuit motion reads below vanilla — parked in spike notes), pursuit-catch at contact, post-defeat grace (log-verified 0.88–1.21 day stamps). **Pursuit-escape scenario DEFERRED by user** — untested surface, run it in the Phase 16 smoke. Same-session fallout: mirror rosters wore placeholder Nebulas for engine-inflated fleets (runtime variant ids + silent engine substitution) — root-caused via the new roster-diff diagnostic and fixed in `837f63e`+`22b7f4b`+`1b71735` (stock-id streaming, capture truncation, hash latch, live name/faction). |
 | 15 | **BUILT** | Smoke-verified in-game 2026-08-19, both directions: guest-fights (BATTLE_RESULT over TCP → host despawn/roster apply, e.g. `lost=7 remaining=4` partial outcome) and host-fights (three `applied` with no inbound message — direct local reconciler call confirmed). Mirror freeze/release cycle observed; salvage-dialog freeze-expiry hole closed pre-smoke (`c23558f`). BATTLE_RESULT carries no rep by design (Phase 12 GUEST_REP_DELTA already covers it — dated note in the phase section). |
-| 16–19 | NOT BUILT | V1. 19 is the final sign-off and runs last, after 20. |
+| 16–19 | NOT BUILT | V1. 17 + 18 rescoped 2026-08-20 and both shrank (17: harden the vanilla wipe respawn, no respawn build; 18: interaction-gate WAN race, lock system cancelled — see the phase banners). 19 is the final sign-off and runs last, after 20. |
 | 20 | NOT BUILT | V1; includes 20.6; precedes 19. |
 | 21–29 | NOT BUILT | Post-V1. 21/22/24-siblings have executable specs; 23 is scope-level; 25–29 are design-complete sketches. |
 
@@ -133,8 +133,8 @@ Core Java modules must keep these names unless a later phase explicitly changes 
 - `coop.fleet.CoopMirrorOrphanSweeper` *(Phase 12b: solo-load orphan sweep)*
 - `coop.campaign.CoopBaseRecord` *(Phase 13: base-authority record)*
 - `coop.save.CoopGuestSnapshot` *(Phase 16: guest fleet/cargo/credits DTO in host save persistentData)*
-- `coop.fleet.CoopFleetWipeRespawn` + `coop.fleet.CoopRespawnPointTracker` *(Phase 17)*
-- `coop.interaction.CoopDockUiLocks` + `coop.interaction.CoopUiLock` *(Phase 18)*
+- `coop.fleet.CoopRespawnNotifier` *(Phase 17, rescoped 2026-08-20: observe the vanilla shuttle respawn + notify the partner; ~~`CoopFleetWipeRespawn`~~/~~`CoopRespawnPointTracker`~~ cancelled with the old spec — see the phase banner)*
+- ~~`coop.interaction.CoopDockUiLocks` + `coop.interaction.CoopUiLock`~~ — **cancelled 2026-08-20** *(Phase 18 rescoped to interaction-gate WAN hardening inside `CoopNetPump`; no lock classes — see the phase banner)*
 - `coop.colony.CoopColonySync` *(Phase 24, V1: colony lifecycle + management deltas)*
 - `coop.colony.CoopRaidOutcomeSync` *(Phase 24, V1: hostile-act listener capture + apply)*
 - `coop.colony.CoopExpeditionWarningIntel` *(Phase 24, V1: coop-owned mirrored expedition-warning intel entry)*
@@ -927,7 +927,7 @@ Implement Phase 12 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Replicate the v1 camp
 **Market contents + transactions (host-authoritative):**
 
 - [x] **Host-authoritative market contents** (`CoopMarketSync`): the submarket ship/weapon/fighter stock and the hireable officer/mercenary pool at a market are host-owned. When either player opens a market, the host snapshots its contents and the guest renders the host's snapshot instead of generating its own (reuses the `MISSION_POOL_SNAPSHOT` pattern). This closes the "host and guest see different shop/officer stock" divergence. (Model supports `COMMODITY/SHIP/WEAPON/FIGHTER/OFFICER/MERC`; `captureMarketContents` reads submarket commodity stacks + mothballed ships from the engine. **In-game extension point:** weapon/fighter/officer/merc capture extends the same submarket loop and is wired in-game.)
-- [x] **Transaction replication:** buy/sell/hire applies to the host's canonical market. The acting client sends a `MARKET_TXN` (`marketId`, kind ∈ `COMMODITY`/`SHIP`/`WEAPON`/`OFFICER`/`MERC`, item id, qty, unit price); the host applies it to the authoritative market (stock/price/availability) and re-broadcasts the resulting market delta. Credits/cargo/ships/officers land in the *acting* player's own per-player state. Simultaneous same-market use stays mutexed by Phase 18. (`onPlayerMarketTransaction` → host applies locally + rebroadcasts `MARKET_SNAPSHOT`; guest sends `MARKET_TXN`, host `applyTransaction` decrements/removes stock.)
+- [x] **Transaction replication:** buy/sell/hire applies to the host's canonical market. The acting client sends a `MARKET_TXN` (`marketId`, kind ∈ `COMMODITY`/`SHIP`/`WEAPON`/`OFFICER`/`MERC`, item id, qty, unit price); the host applies it to the authoritative market (stock/price/availability) and re-broadcasts the resulting market delta. Credits/cargo/ships/officers land in the *acting* player's own per-player state. Simultaneous same-market use cannot arise: the Phase 10 gate is a global one-dialog-at-a-time lockout *(2026-08-20 correction — this line originally said "mutexed by Phase 18"; the rescoped Phase 18 instead closes the WAN-latency race in that gate, and the per-submarket lock system is cancelled)*. (`onPlayerMarketTransaction` → host applies locally + rebroadcasts `MARKET_SNAPSHOT`; guest sends `MARKET_TXN`, host `applyTransaction` decrements/removes stock.)
 
 **Salvage / exploration outcomes (own-action model):**
 
@@ -1697,84 +1697,79 @@ Implement Phase 16 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (read the 2026-06-10 r
 - No runtime code touches `java.io.*`/`java.nio.file.*`; no custom save-file artifacts exist outside the two vanilla saves (the common-folder API remains documented as the only legal escape hatch if one is ever needed).
 - The resume-from-saves flow works end to end after a coordinated save pair.
 
-## Phase 17: Fleet Wipe Respawn
+## Phase 17: Fleet Wipe — Harden the Vanilla Respawn for Coop
+
+> **Rescoped 2026-08-20 (user decision, research session).** The original spec (inject a `wolf_Starting` in `reportPlayerEngagement` so the defeat check never fires, then grant 5,000 credits at the last friendly station) is **cancelled — do not build it**. It rested on a wrong engine-facts block: vanilla 0.98a has a full fleet-wipe respawn, and both of its call sites are gated on `!isValidPlayerFleet()`, so the injection would have *suppressed* a vanilla flow that is strictly better than its replacement (two ships vs one, 80% of credits vs a 5,000 floor, officers/abilities/mission cargo carried, narrated dialog, bounty-level rollback). Decisions locked 2026-08-20: keep vanilla's random respawn market (no `setRespawnLocation` override, `CoopRespawnPointTracker` cancelled); the pre-battle autosave stays `ENGAGE_GUEST`-only (a `kind=PLAYER` battle gets no rollback point — accepted, since wipes are survivable).
 
 **Agent prompt:**
 
 ```text
-Implement Phase 17 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Detect player fleet wipe and respawn that player at the last friendly station with a Wolf-class frigate and 5,000 credits. Read the engine-facts block first: the injection point is the reportPlayerEngagement listener (before the dialog's defeat check), skills/rep preservation is automatic, and the empirical injection-timing test comes before everything else.
+Implement Phase 17 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Vanilla already respawns a wiped player (read the corrected engine-facts block); build no respawn mechanics and do not touch the defeat path. Deliver the two coop gaps: the empty-roster guard in CoopFleetMirror and the RESPAWN_PLAYER partner notification.
 ```
 
-**Engine facts (bytecode/API verification, 2026-06-10):**
+**Engine facts (corrected 2026-08-20 — the 2026-06-10 block was wrong on its central claim; bytecode + live-log verified):**
 
-- **There is no engine game-over state for non-iron play.** Defeat is handled inside `FleetInteractionDialogPluginImpl`: when `isValidPlayerFleet()` is false post-battle (~line 1977) it shows the "no ships left" text and a LEAVE option; back in the campaign, a member-less player fleet is eventually despawned by `CampaignFleet.advance()`. There is no modal to intercept — which is good: prevent the condition instead.
-- **Injection point:** `CampaignEventListener.reportPlayerEngagement(EngagementResultAPI)` fires synchronously inside `FleetEncounterContext.processEngagementResults`, *before* the dialog's defeat-text check. Re-adding a ship there makes `isValidPlayerFleet()` true again and the defeat path never triggers. The sequencing is synchronous and should hold, but it is **empirically unverified — smoke-test this first**, before building the rest of the phase.
-- **Vanilla has respawn scaffolding but it is story-event-driven** (`CampaignEngine.respawnLocation`/`respawnCoordinates` + setters) — not a general mechanic; the mod builds its own flow.
-- **Materials confirmed:** variant `wolf_Starting` exists (`starsector-core\data\variants\wolf\wolf_Starting.variant`, hull `wolf`). Create via `Global.getFactory().createFleetMember(FleetMemberType.SHIP, "wolf_Starting")` (or the `SettingsAPI` twin), add via `playerFleet.getFleetData().addFleetMember(...)`, credits via `getCargo().getCredits().add(...)`, teleport via `setContainingLocation(...)` + `CampaignFleetAPI.setLocation(x, y)` (never mutate `getLocation()` in place — API javadoc forbids it).
-- **"Preserve skills/rep" is automatic:** character skills/XP live on `CharacterDataAPI`/`MutableCharacterStatsAPI` and faction rep on `FactionAPI` — neither is touched by fleet-member loss (verified `FleetData.clear()` clears only `members`). **Officers also survive** in `FleetData.officers`, but post-wipe they are unassigned; reassigning them to newly bought ships is the player's job (vanilla behavior after losing a ship).
+- **Vanilla 0.98a-RC8 has an unconditional fleet-wipe respawn, iron and non-iron alike:** `CampaignState.showShuttleDialog()`. It fires when the player clicks LEAVE on the "no ships left" screen, and from `CampaignState.advance()` if an invalid player fleet exists outside a dialog. The old claims ("no engine respawn for non-iron play", "respawn scaffolding is story-event-driven", "the member-less fleet is despawned by `CampaignFleet.advance()`") traced the defeat path one step short: `showShuttleDialog` removes and replaces the player fleet before any despawn can run. `pickRespawnPlugin()` returning null outside the tutorial is exactly what routes into this built-in flow.
+- Synchronous effects, single method: old player fleet removed; new fleet built from the player-faction stock fleet `"shuttle"` = `wayfarer_Starting` + `kite_Starting` (`starsector-core\data\world\factions\player.faction:322-346`); officers, skills, abilities, reputation and `mission_item` cargo carried by the engine; teleport to a size-weighted random friendly market (`SectorAPI.setRespawnLocation()`/`setRespawnCoordinates()` would override the pick — deliberately unused, see the banner); credits become `max(old * 0.8, 2000)`; max CR on the new members; transponder re-activated; campaign paused.
+- Live confirmation: guest full wipe 2026-08-19 18:05:35 (pirate Smuggler, Askonia; respawn in Naraka ~4 s later). Host-side log signature: `roster refreshed to 0 ship(s) fleetHash=e3b0c442…` (the empty-roster hash, host log.2:60346) then `Coop mirror fleet moved to location naraka` + a new 2-ship hash (host log.2:60434-60435). The partner mirror recovered clean.
+- The mod already tolerates the fleet-object swap from `setPlayerFleet()`: every `getPlayerFleet()` call site re-reads per use, and mirrors key on player id (`player:<uuid>`), not fleet id, so the cross-system teleport propagates without surgery.
+- **The one defect to fix:** the wiped client streams 0-member `FLEET_SNAPSHOT`s during the wipe window (`maybeSendFleetSnapshot` has no empty-fleet guard) and the partner's mirror commits the empty roster. `CampaignFleet.advance()` despawns a 0-member fleet with `FleetDespawnReason.NO_MEMBERS`, and `setNoAutoDespawn(true)` does **not** cover that branch (it checks only `fadeAndExpire`). The 2026-08-19 event stayed clean only because the shared pause held for the whole 4 s window; at WAN latency the pause lands 200 ms + RTT late, so unpaused frames can despawn/recreate the empty mirror in a loop, spraying spurious `reportFleetDespawned` events at vanilla listeners.
 
 **Files:**
 
-- Create `mods/coop/src/main/java/coop/fleet/CoopFleetWipeRespawn.java`
-- Create `mods/coop/src/main/java/coop/fleet/CoopRespawnPointTracker.java`
-- Create `mods/coop/src/test/java/coop/fleet/CoopFleetWipeRespawnTest.java`
-- Modify `mods/coop/src/main/java/coop/campaign/CoopCampaignReplicator.java`
-- Modify `mods/coop/src/main/java/coop/net/CoopMessages.java`
+- Modify `mods/coop/src/main/java/coop/fleet/CoopFleetMirror.java`
+- Create `mods/coop/src/main/java/coop/fleet/CoopRespawnNotifier.java`
+- Create `mods/coop/src/test/java/coop/fleet/CoopRespawnNotifierTest.java`
+- Modify `mods/coop/src/main/java/coop/net/CoopMessages.java` (+ `CoopNetPump` wiring)
 
 **Steps:**
 
-- [ ] **Spike first — injection timing:** dev-force a defeat and confirm that adding a fleet member inside `reportPlayerEngagement` suppresses the dialog's "no ships left" path (engine-facts block). If the timing does not hold, find the earliest post-battle hook that runs before campaign-side despawn (`reportBattleFinished`) and respawn there instead, accepting that the defeat text shows once.
-- [ ] Track last visited friendly market/station id for each player when docked (each client tracks its own; respawn of the own fleet is owner-authoritative).
-- [ ] Detect the wipe in `reportPlayerEngagement`: result applied and the local player fleet has no valid members. Guard against double-injection (flag per battle id; also skip if the fleet already has a valid member).
-- [ ] Respawn locally: inject `wolf_Starting` via `createFleetMember` + `addFleetMember`, top credits up to at least 5,000, then after the dialog closes (one-shot `EveryFrameScript`) teleport to the last friendly market via `setContainingLocation` + `setLocation`, repair/recrew the starter to flyable.
-- [ ] Add `RESPAWN_PLAYER` notification message (player id, market id) — informational for the other client's log/UI; the partner's view of the fleet self-heals through the normal 10 Hz mirror snapshots, so no mirror surgery is needed.
-- [ ] Do **not** write code to "preserve" skills/rep/officers — automatic (engine-facts block); instead add a smoke-test assertion that they survived.
-- [ ] Add tests for: choosing the last friendly market, the wipe predicate, double-injection guard, and minimum-credits top-up logic.
-- [ ] Run smoke test by forcing a wipe through a debug command or controlled test hook (both directions: host wipe and guest wipe; partner observes the respawned mirror).
-- [ ] Commit with `git add mods/coop && git commit -m "feat: add coop fleet wipe respawn"`.
+- [ ] **Empty-roster guard:** `CoopFleetMirror` never commits a 0-member roster — skip the apply, keep the last non-empty roster, log once per episode. Unit tests: an empty snapshot leaves the roster unchanged; the next non-empty snapshot applies normally.
+- [ ] **Respawn detection (wiped client, local):** detect the `getPlayerFleet()` object-identity swap (per-frame check in the pump path). Send `RESPAWN_PLAYER` (player id, destination market/system display name) over TCP.
+- [ ] **Partner banner:** on `RESPAWN_PLAYER`, show via `CampaignUIAPI.addMessage` (existing `CoopNetPump` pattern) that the partner's fleet was destroyed and where it respawned — without this the survivor's only cue is the mirror teleporting across the sector.
+- [ ] Build **no** respawn mechanics: no ship grant, no credit top-up, no skill/rep/officer preservation code (the engine carries them), no `setRespawnLocation` writes, nothing on the defeat path.
+- [ ] Smoke test (cheap since the Ziggurat preset): deliberate wipe in both directions — the vanilla shuttle dialog fires; the partner sees the banner; the partner's log shows no 0-roster commit and no despawn/recreate churn; skills/officers/rep survive.
+- [ ] Commit with `git add mods/coop && git commit -m "feat: harden vanilla wipe respawn for coop"`.
 
 **Acceptance:**
 
-- Wiped player continues the session with Wolf + 5,000 credits.
-- Shared reputation and character progression are not reset.
+- A wiped player continues the session through the vanilla shuttle respawn, both directions.
+- The partner gets the `RESPAWN_PLAYER` banner with the destination, and their mirror never commits an empty roster.
 
-## Phase 18: Same-Dock Shared UI Locks
+## Phase 18: Interaction-Gate WAN Race Hardening
+
+> **Rescoped 2026-08-20 (user decision, research session).** The original "Same-Dock Shared UI Locks" (per-submarket `UI_LOCK_*` mutex, `CoopDockUiLocks`/`CoopUiLock`) is **cancelled — do not build it**. Its premise was never the shipped behavior: the Phase 10 gate is a *global* first-come lockout (`CoopInteractionGate.blockingClaimFor` returns the earliest claim held by any other player on **any** entity), so two players cannot hold dialogs at once anywhere in the sector, let alone share a shop — and Phase 24's diff-on-close colony model relies on exactly that ("no concurrent-edit conflicts by construction"). The design aspiration "both players docked at the same market" (`COOP_MP_DESIGN.md` §8.14) is deferred post-V1: if serialized docking feels bad during the soak, the follow-up is entity-scoping `blockingClaimFor`, and only then does a shop mutex earn its keep. Note the pause is not the mechanism and never was: the shared pause rides the 200 ms `TIME_SNAPSHOT` cadence, while the gate's claim goes out on the dialog-open frame over TCP.
+>
+> What survives is the one reachable defect, previously Phase 20's inherited item and now owned here: the guest opens its dialog **optimistically** before the claim round-trip completes, so at WAN RTT the both-in-the-same-shop state is hittable (window ≈ host frame + TCP one-way + guest frame ≈ 40–110 ms at 50–150 ms RTT), and there the market model genuinely breaks — host purchases are never pushed to an already-open guest screen (`onPlayerMarketTransaction` early-returns on the host, so a unique hull bought by both duplicates), and a guest market-open re-rolls the host's open shop underneath the host's UI (`broadcastMarketSnapshot` → `ensureOpenMarketStocked` → `updateCargoPrePlayerInteraction`). Kept as its own small phase rather than merged into 20 so it is reproducible and testable on localhost with induced latency before any WAN work exists. The 2026-06-10 API-verification notes on submarket listeners are kept below only for the `reportPlayerClosedMarket` sink gap, which is still real.
 
 **Agent prompt:**
 
 ```text
-Implement Phase 18 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Allow both players to dock at the same market, but mutex the shared-state screens (shop/submarkets, which carry host-authoritative market contents from Phase 12). Storage is per-player and therefore a private screen, not a shared mutex. Private screens remain available.
+Implement Phase 18 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Close the interaction-gate WAN race: force-close the local player's already-open dialog on INTERACTION_REJECT, stop the reject re-claim loop, add the debug latency lever, and fence storage against market-snapshot regressions. Do not build any UI lock system.
 ```
 
 **Files:**
 
-- Create `mods/coop/src/main/java/coop/interaction/CoopDockUiLocks.java`
-- Create `mods/coop/src/main/java/coop/interaction/CoopUiLock.java`
-- Create `mods/coop/src/test/java/coop/interaction/CoopDockUiLocksTest.java`
-- Modify `mods/coop/src/main/java/coop/interaction/CoopInteractionGate.java`
-- Modify `mods/coop/src/main/java/coop/net/CoopMessages.java`
+- Modify `mods/coop/src/main/java/coop/net/CoopNetPump.java`
+- Modify `mods/coop/src/main/java/coop/campaign/CoopCampaignEventListener.java`
+- Add/extend tests (reject handling; storage fence)
 
 **Steps:**
 
-**API verification (2026-06-10):** the listener surface covers this cleanly. Open events at *submarket* granularity: `SubmarketInteractionListener.reportPlayerOpenedSubmarket(SubmarketAPI, type)` (+ `CargoScreenListener.reportSubmarketOpened` as a second route); close events only at *market* granularity: `CampaignEventListener.reportPlayerClosedMarket(MarketAPI)` — there is no per-submarket close, so a lock acquired on tab-open releases on market-close (or on switching to a different submarket tab, which fires a new open event). Bar entry is observable via the shown-interaction-dialog path. Gap in mod code: `CoopCampaignEventListener.Sink` does not currently forward `reportPlayerClosedMarket` — add it. Denial toast: `CampaignUIAPI.addMessage(String, Color)`, the pattern already used in `CoopNetPump` (~line 1189). Storage privacy needs **no work**: verified the Phase 12 snapshot path touches only `SUBMARKET_OPEN` (`CoopCampaignReplicator.openMarketCargo`, ~line 1305), so each player's storage stash is naturally local to their own save — just fence it against regressions.
-
-- [ ] Define lock keys `<marketId>:<submarketSpecId>` (e.g. `ancyra:black_market`) plus `<marketId>:bar`. A new tab-open while holding a lock swaps the held key. (No storage lock — storage is per-player, see below.)
-- [ ] Treat refit, officers, cargo, intel, character, **and storage** screens as private screens with no shared lock. **Storage is per-player** (each player's stash lives in their own market copy and own save — verified, see above), so it needs no mutex and never shows the other player's stored items.
-- [ ] Add `onPlayerClosedMarket(MarketAPI)` to `CoopCampaignEventListener.Sink` and register a `SubmarketInteractionListener` via the listener manager; wire both into the lock lifecycle.
-- [ ] Add messages `UI_LOCK_REQUEST`, `UI_LOCK_GRANTED`, `UI_LOCK_DENIED`, and `UI_LOCK_RELEASED`.
-- [ ] Host grants at most one shared lock per key; grants are advisory-blocking on the guest (deny → close/refuse the tab) and the host's own opens self-grant.
-- [ ] Denied player sees `Player <name> is using <screen>` via `addMessage` (existing pattern).
-- [ ] Release locks on market close, disconnect, and session end (per-submarket close does not exist — market-close is the release point; document this granularity).
-- [ ] **Storage regression fence:** add the explicit exclusion comment at the snapshot capture site naming the non-open submarkets (storage/black/military/local_resources), and a test asserting `SUBMARKET_STORAGE` cargo is untouched by a market snapshot apply.
-- [ ] Add tests for grant, denial, key-swap on tab switch, release, and disconnect cleanup.
-- [ ] Run two-instance smoke test at the same market (both dock; one in the open market blocks the other's open market but not refit/storage; bar mutex; disconnect releases).
-- [ ] Commit with `git add mods/coop && git commit -m "feat: lock shared dock screens"`.
+- [ ] **Forced close on reject:** `handleInteractionReject` (`CoopNetPump` ~1485) dismisses the local player's open dialog for the rejected entity; if mid-frame dismissal is unsafe, re-assert the block and dismiss via a one-shot `EveryFrameScript`. Show `Player <name> is using this` via `addMessage` (existing pattern, ~line 1189).
+- [ ] **Reject re-claim loop:** today the reject handler nulls `localInteractionEntityId` while the dialog is still open, so `detectLocalInteraction` re-claims every frame — a claim/reject ping-pong at up to 60 msg/s over TCP plus a warn per frame. Track the rejected entity until its dialog actually closes; no re-claim, no log spam.
+- [ ] **Debug latency lever:** `-Dcoop.debug.interactionDelayMs=<n>` (dormant by default, `CoopDebug` pattern) delays inbound claim processing on the host so the race reproduces on localhost.
+- [ ] **Storage regression fence:** the explicit exclusion comment at the market-snapshot capture site naming the never-snapshotted submarkets (storage/black/military/local_resources — the Phase 12 path touches only `SUBMARKET_OPEN` via `CoopCampaignReplicator.openMarketCargo`, ~line 1305), plus a test asserting a snapshot apply leaves `SUBMARKET_STORAGE` cargo untouched.
+- [ ] Forward `reportPlayerClosedMarket(MarketAPI)` into `CoopCampaignEventListener.Sink` (verified 2026-06-10 as not forwarded) — used by the reject bookkeeping here and required later by Phase 24's diff-on-close.
+- [ ] Unit tests: a reject marks the entity non-reclaimable while its dialog is open; close/release/disconnect clears it; the storage fence.
+- [ ] Two-instance smoke with the latency lever: both dock the same market inside the widened window — the loser's dialog closes with the message; the log shows exactly one claim/reject pair.
+- [ ] Commit with `git add mods/coop && git commit -m "feat: close interaction-gate WAN race"`.
 
 **Acceptance:**
 
-- Both players can dock at the same market.
-- Only one player can use a shared shop/submarket at a time.
-- Storage is per-player (private, never mutexed) and private screens are not blocked by shared locks.
+- With induced latency, a lost claim force-closes the loser's dialog; no claim/reject loop appears in the log.
+- A market snapshot apply never touches `SUBMARKET_STORAGE` (test-enforced).
+- No `UI_LOCK_*` messages or lock classes exist.
 
 ## Phase 19: Two-Instance QA Pass
 
@@ -1810,6 +1805,7 @@ Implement Phase 19 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. PREREQUISITE: every o
 - [ ] Run orphan-sweep test (Phase 12b): save mid-session in a busy system, quit both instances, load the guest save solo → the log shows the sweep's removed-count line and no frozen NPC mirrors or partner fleet are visible.
 - [ ] Run out-of-sensor presence indicator test.
 - [ ] Run interaction gate test.
+- [ ] Run WAN claim-race test (Phase 18): with `-Dcoop.debug.interactionDelayMs` (or under the Phase 20 latency matrix), both players dock the same market inside the widened window → the loser's dialog force-closes with the in-use message and the log shows exactly one claim/reject pair (no ping-pong).
 - [ ] Run shared mission/bar first-come claim test.
 - [ ] Run market-contents test: both clients see identical shop stock across **all kinds — commodities, ships, weapons, fighters** (the 12c extension) — plus hireable officers/mercenaries, and a purchase/hire of every kind by either updates the host's canonical market.
 - [ ] Run salvage/exploration test: one client salvages a derelict; confirm it is consumed (not re-lootable) on the other and loot landed only in the acting player's cargo.
@@ -1823,6 +1819,7 @@ Implement Phase 19 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. PREREQUISITE: every o
 - [ ] Run both-players-in-one-battle test: trigger a single engagement that includes both player fleets and confirm the host pilots the combined battle while the guest spectates (guest fleet host/AI-controlled), with results reconciling back.
 - [ ] Run either-player-disconnects-mid-combat test: engaging side finishes the battle locally and logs the discarded unsent result; spectator side closes the panel and ends the session cleanly; next session reconciles (resurrected NPC logged).
 - [ ] Run combat result reconciliation test: solo fighter keeps own spoils, destroyed NPC fleets disappear on both clients, shared rep converges.
+- [ ] Run fleet-wipe respawn test (Phase 17): deliberate full wipe in both directions → the vanilla shuttle respawn fires, the partner sees the `RESPAWN_PLAYER` banner with the destination, the partner's log shows no empty-roster commit and no mirror despawn/recreate churn, and skills/officers/rep survive.
 - [ ] Run coordinated-save/resume test: host save triggers guest autosave; quit both; resume the session from the two saves (seed lock + campaign UUID accept, mirrors rebuilt).
 - [ ] Run raid test (Phase 24 M1): each player raids the same NPC colony once; disruption/stability/rep converge on both clients, loot stays with the raider.
 - [ ] Run colony lifecycle test (Phase 24 M2): one player colonizes; the colony exists with matching size/conditions/industries on both clients and survives the coordinated save/resume cycle.
@@ -1843,7 +1840,7 @@ Implement Phase 19 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. PREREQUISITE: every o
 >
 > **Ordering note:** implement Phase 20 *before* the final Phase 19 sign-off run; Phase 19's checklist gains a WAN line that depends on this phase.
 >
-> **Inherited item from Phase 10 (added 2026-08-09):** the interaction-gate reject path is effectively dead on localhost — a simultaneous same-entity claim needs both dialogs to open inside the round-trip window (~1 ms), which the `setDisallowPlayerInteractionsForOneFrame` guard closes first. At WAN RTT (50–150 ms) that window becomes wide enough to hit in normal play, so Phase 10's deferred **forced-close of the guest's already-open dialog on `INTERACTION_REJECT`** (`CoopNetPump.handleInteractionReject`) stops being cosmetic. Decide here whether to implement it or accept "both players briefly in the same dialog" as a WAN-visible wart; if implemented, add a claim-race line to the Phase 19 WAN checklist.
+> **Inherited item from Phase 10 (added 2026-08-09; re-homed 2026-08-20):** the forced-close of the already-open dialog on `INTERACTION_REJECT` is now owned by the rescoped Phase 18, which lands before this phase and includes a localhost latency lever for reproducing the race. Phase 20's remaining duty here: exercise the claim race at real WAN RTT in its matrix, and Phase 19 carries the checklist line.
 
 **Verified transport facts (2026-06-10, from `CoopNetService.java` / `CoopNetPump.java` / `CoopMessages.java`):**
 
@@ -2323,7 +2320,7 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 
 **Milestone 4 — The QA matrix (the real cost, run at 4 players where applicable):**
 
-- Pairwise contention: two guests claim the same NPC interaction; two guests open the same market/submarket; two guests dock at the same colony (Phase 18 locks); two guests near the same hostile NPC (`ENGAGE_GUEST` award + eject backstop).
+- Pairwise contention: two guests claim the same NPC interaction; two guests open the same market/submarket; two guests dock at the same colony (Phase 10 global gate serializes; Phase 18 forced-close covers the race); two guests near the same hostile NPC (`ENGAGE_GUEST` award + eject backstop).
 - Mixed activity: guest A in a local battle while guest B trades and guest C travels; host saves mid-battle (checkpoint defers per the Phase 16 dialog rule); pause storms (rapid conflicting intents from 3 players).
 - Membership churn: one guest drops and resumes within grace (others held, then released); grace expiry removes one guest while the session continues; serial reconnects of different guests.
 - Long soak: 30+ minute 4-player session on localhost, then the same with one link WAN-shaped (clumsy profile from Phase 20) — the other links must not degrade with it.

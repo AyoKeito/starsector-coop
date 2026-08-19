@@ -75,7 +75,7 @@ This document is the canonical source for the design. Any earlier files / memory
 | Spectator behavior | The non-engaged player spectates live (60 Hz stream sourced from the engaging client). **Joint combat** (both in one battle) is a v2/v3 stretch |
 | Spoils (XP, salvage, credits, recoveries) | **Solo fighter keeps their own** XP, salvage, credits, and recoveries — the engaging client applies its own `EngagementResultAPI` locally (vanilla). There is **no 50/50 split in v1**, because every v1 battle has exactly one piloting player; a `CoopRewardSplitter` is only needed once **joint combat** lands in v2/v3 |
 | Faction reputation deltas | The engaging (piloting) player's combat rep changes apply to the shared table. The spectator gets 0 rep delta (no participation) |
-| Fleet wipe | Respawn at last visited friendly station with Wolf-class frigate + 5,000 credits. Officers, skills, reputation (shared) preserved. Session continues |
+| Fleet wipe | Vanilla respawn (corrected 2026-08-20: 0.98a `CampaignState.showShuttleDialog()` handles wipes natively — Wayfarer + Kite stock fleet at a size-weighted random friendly market, credits `max(old*0.8, 2000)`, officers/skills/rep carried by the engine). The mod adds only a partner notification and an empty-roster mirror guard (plan Phase 17). Session continues |
 | Iron mode | Disabled in coop sessions. Cannot be enabled at session start; mod refuses to convert existing iron saves (moot since fresh games only in v1) |
 | Combat speed multiplier | Forced to vanilla 1.0x in coop. Combat-speed settings/mods ignored |
 | Host disconnects mid-combat | Combat freezes immediately. 5s banner countdown. Then "Save & Exit" dialog. Guest's fleet rolls back to last campaign-side autosave (pre-battle) |
@@ -87,7 +87,7 @@ This document is the canonical source for the design. Any earlier files / memory
 | Starting a session (v1) | Fresh New Coop Game only. Both players do character creation. Seed shared at session start. Existing solo saves remain solo, no conversion |
 | Version handshake | Exact match: Starsector version + runtime enabled mod manifest + checksums + this coop mod's commit hash. Any mismatch → refuse to connect, show diff |
 | Save file | Host owns canonical save. On session end, host serializes guest's fleet state via XStream and sends it back to guest as a `GuestFleetExport` blob. Guest writes to `saves/coop_player_<uuid>.dat` for next session |
-| Same-market dock UI | Both players can dock simultaneously. **Private screens** (own refit, own officers, own cargo, own per-player storage) allow concurrent access. **Shared-state screens** (shop/submarkets, which carry host-authoritative market contents) are mutually exclusive — only one player at a time |
+| Same-market dock UI | Serialized in v1 (decided 2026-08-20): the global interaction gate admits one player to any dialog at a time, so shared-screen conflicts cannot arise; the WAN claim race is force-closed (plan Phase 18). Concurrent docking (private screens parallel + shop mutex) deferred post-V1 — requires entity-scoping the gate first; see §8.14 |
 | Concurrent interaction with same entity | First-click wins per packet timestamp. Other player sees "Player X is interacting with this" + wait/move-on options |
 | Player-to-player trade | Out of scope for v1. Cargo-dump-and-pickup is the workaround. Direct trade UI deferred to v2 |
 | In-game text chat | None in v1. Players use Discord/voice |
@@ -685,14 +685,18 @@ Confidence: ★★★.
 
 ### 8.13 Fleet wipe / respawn
 
-- Detect when a player's fleet is empty (all ships destroyed/lost)
-- Apply respawn: Wolf-class frigate + 5k credits, place at last visited friendly station
-- Preserve: officers, character skills, shared rep (intact)
-- Session continues
+> **Corrected 2026-08-20.** The bullets below assumed the mod must build a respawn; vanilla 0.98a already has one (`CampaignState.showShuttleDialog()`, fires on LEAVE after "no ships left", iron and non-iron alike): removes the wiped fleet, grants the `"shuttle"` stock fleet (Wayfarer + Kite), teleports to a size-weighted random friendly market, credits `max(old*0.8, 2000)`, carries officers/skills/abilities/rep/mission cargo. Confirmed live in the 2026-08-19 session (guest wipe, partner mirror recovered clean). Building the planned Wolf + 5k injection would have suppressed this flow, since its call sites gate on `!isValidPlayerFleet()`. Decided 2026-08-20: ride vanilla unchanged, keep the random destination (no `setRespawnLocation` override). The mod's remaining work is coop plumbing only — see plan Phase 17: an empty-roster mirror guard (a 0-member mirror despawns as `NO_MEMBERS` on any unpaused frame; `setNoAutoDespawn` does not cover that branch) and a `RESPAWN_PLAYER` banner so the partner learns where the wiped player reappeared.
 
-Confidence: ★★★★.
+- ~~Detect when a player's fleet is empty (all ships destroyed/lost)~~ vanilla detects
+- ~~Apply respawn: Wolf-class frigate + 5k credits, place at last visited friendly station~~ vanilla respawns (Wayfarer + Kite, random friendly market)
+- Preserve: officers, character skills, shared rep — vanilla carries all of these
+- Session continues; partner is notified and the mirror never commits an empty roster
+
+Confidence: ★★★★★ (observed live).
 
 ### 8.14 Same-dock concurrent UI
+
+> **Deferred post-V1 (decided 2026-08-20).** V1 ships serialized docking instead: the plan's Phase 10 gate is a global one-dialog-at-a-time lockout, so no two players are ever inside dock UI at once, and the market sync model depends on that (host purchases are not pushed to an already-open guest screen). The rescoped plan Phase 18 closes the WAN-latency race where a rejected dialog stayed open. The bullets below remain the design for the post-V1 follow-up, which starts by entity-scoping the gate.
 
 - Both players can be docked at the same station simultaneously
 - Private screens (own refit, own officers, own cargo, own intel) concurrent — no conflicts
