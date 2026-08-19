@@ -276,7 +276,11 @@ public final class CoopNpcThreatWatcher {
         }
         boolean transponderOn = transponderOn(mirror);
         // The handoff round trip has not closed yet: treat it as "a coop battle is starting".
-        boolean handedOff = nowMillis - lastHandoffAtMillis < HANDOFF_GRACE_MILLIS;
+        // The never-fired sentinel must be checked explicitly: nowMillis - Long.MIN_VALUE overflows
+        // negative, which read as "inside the grace window" forever and muzzled every ENGAGE_GUEST
+        // and DIALOG_BEGIN this class exists to send (found in-game 2026-08-19).
+        boolean handedOff = lastHandoffAtMillis != Long.MIN_VALUE
+                && nowMillis - lastHandoffAtMillis < HANDOFF_GRACE_MILLIS;
         for (CampaignFleetAPI fleet : fleetsIn(location)) {
             if (fleet == null || fleet == mirror || isMirror(fleet) || isPlayerFleet(sector, fleet)) {
                 continue;
