@@ -1651,10 +1651,23 @@ Implement Phase 15 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. The engaging client a
 
 > **Redesigned 2026-06-10.** Two findings forced it. (1) **The original file-export design is sandbox-illegal:** the guest writing `coop_player_<uuid>.dat` with a `.tmp`/`.bak` rename dance is raw `java.io`/`java.nio.file`, which the script classloader hard-blocks at runtime; the only sanctioned file surface is the `SettingsAPI` *common-folder* API (verified: `writeTextFileToCommon`/`readTextFileFromCommon`/`fileExistsInCommon`/`deleteTextFileFromCommon`, plus `writeJSONToCommon`/`readJSONFromCommon`; files land in `saves\common\`, text writes capped at 1 MB, no arbitrary paths exist — there is no `getSaveFolder()`). (2) **The export is mostly redundant under the v1 save policy:** the guest owns a real coop save (Design Alignment Notes) — guest progress already persists as a full save, strictly better than a fleet-only export file. What actually protects against "host crash loses session progress" is keeping the two saves *temporally aligned*, and `CampaignUIAPI.autosave()` is public (Phase 14 engine facts), so the guest can simply be told to autosave whenever the host saves. `CoopPaths`/`GuestFleetExportStore` and the `.dat` artifact are cancelled.
 
+> **Fold-in (2026-08-19, user decision): D-mod replication for mirror rosters.** Phase 14b's
+> stock-id streaming deliberately mirrors D-modded host fleets as clean stock loadouts (see
+> `PHASE14_SPIKE_NOTES.md` known issues). Build the fidelity fix as part of this phase: (1) capture —
+> per member, stream the variant's D-mod hullmod ids (stock ids, resolvable on both installs; one new
+> delimited field on `CoopFleetSnapshot.Member`, bump `MEMBER_FIELD_COUNT`); (2) apply — on the guest,
+> after building the stock ship, **clone the variant first** (a created member's variant can be the
+> shared global spec — mutating it un-cloned would D-mod every clean hull in the guest's universe),
+> set it as a runtime copy, re-add the D-mods, and run the engine's own damaged-hull swap via the
+> public `DModManager` impl API; (3) tests for capture round-trip and the clone-before-mutate
+> invariant. Verify in this phase's smoke: a D-modded host fleet shows damaged hulls on the guest
+> (roster-diff diagnostic lines will show the dmod field). The deferred 14b pursuit-escape scenario
+> also runs in this phase's smoke session.
+
 **Agent prompt:**
 
 ```text
-Implement Phase 16 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (read the 2026-06-10 redesign note first). Host owns the canonical save; implement (1) the guest fleet snapshot stored in the host save's persistentData with XStream aliases, and (2) coordinated saves: after every host save, send SAVE_CHECKPOINT so the guest triggers its own vanilla autosave when no dialog is open. There is NO file export — raw file I/O is sandbox-blocked; if a guest-side artifact beyond the guest's own save ever proves necessary, the only legal channel is the SettingsAPI common-folder API (saves\common\, 1 MB text cap).
+Implement Phase 16 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (read the 2026-06-10 redesign note first, then the 2026-08-19 D-mod fold-in note). Host owns the canonical save; implement (1) the guest fleet snapshot stored in the host save's persistentData with XStream aliases, and (2) coordinated saves: after every host save, send SAVE_CHECKPOINT so the guest triggers its own vanilla autosave when no dialog is open. There is NO file export — raw file I/O is sandbox-blocked; if a guest-side artifact beyond the guest's own save ever proves necessary, the only legal channel is the SettingsAPI common-folder API (saves\common\, 1 MB text cap).
 ```
 
 **Files:**

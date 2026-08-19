@@ -347,9 +347,11 @@ if the pre-0.8 reading is right.
   So a battered host `falcon_default_D` with three d-mods and a scavenged loadout mirrors as a clean
   `falcon_Assault`. Visual and stat delta only — CR and hull fraction are replicated per member, and
   battle outcomes are host-authoritative (Phase 15) — but a guest sizing up a target reads it as
-  slightly stronger than it is. Closing it means replicating the variant *contents* (hull spec id +
-  d-mod hullmod ids + weapon slots + fighter bays) and rebuilding the variant on the guest via
-  `createEmptyVariant` + `setHullSpecAPI`, not just naming it. Not v1-blocking.
+  slightly stronger than it is. **Unparked 2026-08-19 (user decision): the d-mod half is folded into
+  Phase 16** — stream d-mod hullmod ids per member, clone-then-mutate the variant on the guest, run
+  `DModManager`'s damaged-hull swap (see the Phase 16 fold-in note in the plan). Full loadout
+  replication (weapon slots + fighter bays via `createEmptyVariant` + `setHullSpecAPI`) stays future
+  polish; not v1-blocking.
 
 - **Synthesized customs pursuit reads as lower-quality than vanilla** (user verdict, 2026-08-19
   smoke of Phase 14b `56b025f`: all four scenarios — chase-from-detection, outrun/give-up,

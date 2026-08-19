@@ -51,7 +51,7 @@
       "sevLabel": "known gap",
       "head": "Parked Phase 14 fallout (cosmetic/UX)",
       "state": "documented, deferred",
-      "body": "Synthesized customs pursuit reads below vanilla quality (works — chase/give-up/stand-down/catch all pass — but motion is coarser than the engine's own steering); mirrors wear clean stock loadouts where the host's fleet is D-modded (slightly stronger guest battles); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). Grey-fleet flicker and the unknown-market warn were fixed 2026-08-19 by 14b. Full list with suspects: <code>PHASE14_SPIKE_NOTES.md</code> \"Known issues\"."
+      "body": "Synthesized customs pursuit reads below vanilla quality (works — chase/give-up/stand-down/catch all pass — but motion is coarser than the engine's own steering); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). D-mod replication for mirrors was folded into <span class=\"rp\" data-jump=\"16\">Phase 16</span> (2026-08-19); full loadout replication stays parked. Grey-fleet flicker and the unknown-market warn were fixed by 14b. Full list with suspects: <code>PHASE14_SPIKE_NOTES.md</code> \"Known issues\"."
     },
     {
       "sev": "risk",
@@ -572,7 +572,7 @@
       "residue": [
         "pursuit-escape smoke scenario (deferred by user; run with Phase 16 smoke)",
         "customs pursuit motion reads below vanilla quality (parked)",
-        "mirrors wear clean stock loadouts vs host D-mods (parked)"
+        "D-mod replication folded into Phase 16 (2026-08-19); full loadout replication stays parked"
       ],
       "note": "Fallback synthesized-pursuit model exists behind -Dcoop.pursuit.synthesized (never needed in smoke); also fixed grey-fleet flicker (double-applied terrain mods) and the presence indicator's profile clobber that made stealth arithmetically impossible"
     },
