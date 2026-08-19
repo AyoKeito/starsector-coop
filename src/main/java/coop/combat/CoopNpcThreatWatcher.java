@@ -1,11 +1,15 @@
 package coop.combat;
 
+import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.BattleAPI;
+import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FleetAssignment;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.ai.CampaignFleetAIAPI;
+import com.fs.starfarer.api.campaign.ai.FleetAssignmentDataAPI;
 import com.fs.starfarer.api.campaign.ai.ModularFleetAIAPI;
 import com.fs.starfarer.api.campaign.ai.StrategicModulePlugin;
 import com.fs.starfarer.api.campaign.ai.TacticalModulePlugin;
@@ -19,10 +23,12 @@ import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
@@ -102,12 +108,26 @@ import java.util.function.LongSupplier;
  * ordinary host play and a silently autoresolved mirror corrupts a fleet whose owner was never in a
  * battle. It runs every frame; everything else runs on {@link #SCAN_INTERVAL_MILLIS}.
  *
- * <h2>Customs</h2>
- * A non-hostile patrol next to a transponder-off guest mirror pushes {@code DIALOG_BEGIN}, which the
- * guest resolves locally against its own cargo ({@link CoopCustomsDialogStaging}). 14b adds the
- * visibility gate this always needed: no hail unless the patrol can actually see the mirror. With the
- * mirror now carrying the guest's real sensor identity ({@code coop.fleet.CoopSensorSync}), a guest
- * running dark at range stops being hailed — which is the whole point of running dark.
+ * <h2>Customs: a synthesized inspection chase</h2>
+ * A patrol that detects a transponder-off guest mirror now closes on it and pushes
+ * {@code DIALOG_BEGIN} on contact; the guest resolves the stop locally against its own cargo
+ * ({@link CoopCustomsDialogStaging}).
+ *
+ * <p><b>Why this has to be synthesized (added 2026-08-19 after the 14b smoke).</b> Vanilla's
+ * inspection pursuit is player-only, in three separate places: {@code StrategicModule}'s
+ * {@code ORBIT_PASSIVE}/{@code FOLLOW} clause allows an engage only when the target
+ * <em>is the player fleet</em> and the chaser is {@code $isPatrol} (:617-625); the whole
+ * transponder-suspicion block in {@code TacticalModule.advance} sits behind
+ * {@code campaignFleet2.isPlayerFleet()} (:282-314) and is what sets {@code $cfai_makeAggressive}
+ * and {@code $sawPlayerTransponderOff}; and {@code Misc.isPlayerOrCombinedPlayerPrimary} is false for
+ * a mirror. No native patrol will ever hunt it. The first 14b build only hailed inside a flat 600 su,
+ * which the smoke session reported as patrols ignoring a dark guest until it nearly collided with them.
+ *
+ * <p>The start gate is detection and nothing else — from the moment
+ * {@code mirror.getVisibilityLevelTo(patrol) != NONE} the patrol closes, so it chases from wherever it
+ * spotted the guest, and going dark or outrunning it works. Every exit (patience spent, contact lost,
+ * transponder back on, the stop fired, turn to hostility) runs through the one method that removes the
+ * assignment and stamps the cooldown, so the chase cannot outlive its reason.
  *
  * <p>The trigger logic is a pure function ({@link #decide}) over a {@link FleetView}, so every gate is
  * unit-tested without an engine, in the same shape as {@code CoopGuestRouteMaterializer.RouteView}.
@@ -145,8 +165,21 @@ public final class CoopNpcThreatWatcher {
      */
     static final float PURSUIT_ACQUIRE_SU = 2000f;
 
-    /** Patrols only hassle at close range; well inside the range at which the spike's stop worked (34 su). */
-    static final float CUSTOMS_TRIGGER_SU = 600f;
+    /**
+     * How long one issued inspection-chase {@code INTERCEPT} lasts before the engine drops it, in
+     * campaign days. Deliberately far shorter than the patience budget it serves (3 days) and
+     * re-issued while the chase is live, so the worst case if the watcher ever loses track of a patrol
+     * — it leaves the mirror's location mid-chase and is never scanned again — is half a day of
+     * orphaned assignment rather than the ten-minute siege the deleted hostile-chase injection produced.
+     */
+    static final float CUSTOMS_PURSUIT_ASSIGNMENT_DAYS = 0.5f;
+
+    /**
+     * How many consecutive scans a patrol may fail to see the mirror before it gives up. Twelve scans
+     * is 3 s at {@link #SCAN_INTERVAL_MILLIS}, which is long enough to ride out a fleet clipping the
+     * edge of a nebula and short enough that going dark shakes a tail promptly.
+     */
+    static final int CUSTOMS_UNSEEN_SCAN_LIMIT = 12;
 
     /** Duration of a fallback-model priority target, in campaign days. */
     static final float PURSUIT_PRIORITY_DAYS = 2f;
@@ -218,8 +251,12 @@ public final class CoopNpcThreatWatcher {
         ENGAGE_GUEST,
         /** Fallback model only: point the chaser at the mirror via {@code setPriorityTarget}. */
         STEER_PURSUIT,
-        /** Host-synthesized patrol stop: {@code DIALOG_BEGIN}. */
-        CUSTOMS_DIALOG
+        /** Start or sustain a patrol's synthesized inspection chase of the dark mirror. */
+        CUSTOMS_PURSUE,
+        /** Host-synthesized patrol stop: {@code DIALOG_BEGIN}. Ends the chase. */
+        CUSTOMS_DIALOG,
+        /** Abandon an inspection chase and stand the patrol down. */
+        CUSTOMS_GIVE_UP
     }
 
     /**
@@ -233,14 +270,29 @@ public final class CoopNpcThreatWatcher {
      *                       hunt, with every gate already applied. The primary model's whole trigger.
      * @param allowedToEngage {@code getStrategicModule().isAllowedToEngage(mirror)} — fallback model only
      * @param pursuitDays    {@code getTacticalModule().getPursuitDays()} — fallback model only
-     * @param pursuitBudgetDays vanilla's patience for this chaser — fallback model only
+     * @param pursuitBudgetDays vanilla's patience for this chaser: the fallback model's give-up timer
+     *                          and the inspection chase's give-up timer both read it
      * @param contactDistance the chaser's radius + the mirror's radius + {@link #CONTACT_MARGIN_SU}
+     * @param customsPursuing whether this patrol is already running a synthesized inspection chase
+     * @param customsPursuitDays campaign days elapsed since that chase started
+     * @param customsUnseenScans consecutive scans of that chase in which the mirror was undetectable
      */
     public record FleetView(String coopFleetId, String fleetName, String factionId,
                             boolean hostile, boolean engagePick, boolean patrol,
                             boolean combatCapable, boolean visible, boolean huntingMirror,
                             boolean allowedToEngage, float pursuitDays, float pursuitBudgetDays,
-                            float distance, float contactDistance) {
+                            float distance, float contactDistance,
+                            boolean customsPursuing, float customsPursuitDays, int customsUnseenScans) {
+    }
+
+    /** Live state of one patrol's synthesized inspection chase. Mutable; owned by the watcher. */
+    private static final class CustomsPursuit {
+        private final long startedAtTimestamp;
+        private int unseenScans;
+
+        private CustomsPursuit(long startedAtTimestamp) {
+            this.startedAtTimestamp = startedAtTimestamp;
+        }
     }
 
     /** Cooldown state per (fleet, action). Split out so the throttle is unit-testable. */
@@ -272,6 +324,8 @@ public final class CoopNpcThreatWatcher {
     private final Cooldowns cooldowns = new Cooldowns();
     /** coopFleetId -> deadline for applying the post-battle do-not-attack window. */
     private final Map<String, Long> pendingPostDefeatGrace = new HashMap<>();
+    /** coopFleetId -> live synthesized inspection chase of the dark guest mirror. */
+    private final Map<String, CustomsPursuit> customsPursuits = new HashMap<>();
     private final Map<String, Long> lastDiagnosticAtMillis = new HashMap<>();
     private long nextScanAtMillis;
     private long lastHandoffAtMillis = Long.MIN_VALUE;
@@ -302,22 +356,93 @@ public final class CoopNpcThreatWatcher {
     public static Action decide(FleetView view, boolean synthesizedPursuit, boolean mirrorTransponderOn,
                                 boolean coopBattleActive, boolean engageReady, boolean pursuitReady,
                                 boolean customsReady) {
-        if (view == null || !view.combatCapable() || view.distance() < 0f) {
+        if (view == null) {
             return Action.NONE;
+        }
+        if (!view.combatCapable() || view.distance() < 0f) {
+            // A chase whose quarry or chaser has become unreadable still has to be cleaned up.
+            return view.customsPursuing() ? Action.CUSTOMS_GIVE_UP : Action.NONE;
+        }
+        // An inspection chase in flight outranks everything, including a turn to hostility: it owns an
+        // assignment on the patrol, so its exit has to run before any other branch can claim the fleet.
+        if (view.customsPursuing()) {
+            return decideCustomsPursuit(view, mirrorTransponderOn, coopBattleActive);
         }
         if (view.hostile()) {
             return decideHostile(view, synthesizedPursuit, coopBattleActive, engageReady, pursuitReady);
         }
-        // Non-hostile posture: the only synthesis left is the patrol stop against a dark guest. The
-        // visibility gate is what makes running dark actually work — an undetected mirror is not hailed.
+        return decideCustomsStart(view, mirrorTransponderOn, coopBattleActive, customsReady);
+    }
+
+    /**
+     * Should this patrol start hunting the dark mirror? The gate is detection and nothing else: from
+     * the moment a patrol can see a transponder-off guest it starts closing, exactly as vanilla's
+     * inspection pursuit does against the real player fleet. There is deliberately no distance constant
+     * here — the flat 600 su trigger this replaced was what made patrols read as "hails you only if you
+     * bump into them" (in-game report, 2026-08-19).
+     */
+    private static Action decideCustomsStart(FleetView view, boolean mirrorTransponderOn,
+                                             boolean coopBattleActive, boolean customsReady) {
         if (coopBattleActive || mirrorTransponderOn || !view.patrol() || view.engagePick()
-                || !view.visible()) {
+                || !view.visible() || !customsReady) {
             return Action.NONE;
         }
-        if (view.distance() <= CUSTOMS_TRIGGER_SU && customsReady) {
+        // Already on top of the guest: skip straight to the stop rather than issuing a chase to a
+        // destination the patrol is standing on.
+        return view.distance() <= view.contactDistance() ? Action.CUSTOMS_DIALOG : Action.CUSTOMS_PURSUE;
+    }
+
+    /**
+     * Every exit from an inspection chase. Vanilla's patrols stand down when the suspicion goes away
+     * (transponder back on), when they lose the contact, and when their patience runs out; the budget
+     * is vanilla's own — 3 days for a {@code $isPatrol} fleet plus 0.1 per burn level
+     * ({@code StrategicModule.java:554-588}), already computed into {@code pursuitBudgetDays}.
+     */
+    private static Action decideCustomsPursuit(FleetView view, boolean mirrorTransponderOn,
+                                               boolean coopBattleActive) {
+        if (coopBattleActive || mirrorTransponderOn || view.hostile() || !view.patrol()
+                || view.engagePick()
+                || view.customsPursuitDays() > view.pursuitBudgetDays()
+                || view.customsUnseenScans() > CUSTOMS_UNSEEN_SCAN_LIMIT) {
+            return Action.CUSTOMS_GIVE_UP;
+        }
+        if (view.distance() <= view.contactDistance()) {
             return Action.CUSTOMS_DIALOG;
         }
-        return Action.NONE;
+        return Action.CUSTOMS_PURSUE;
+    }
+
+    /**
+     * Why an inspection chase gave up, for the log line the smoke test greps. Pure, so the reason a
+     * test asserts on is the reason the log prints.
+     */
+    public static String customsGiveUpReason(FleetView view, boolean mirrorTransponderOn,
+                                             boolean coopBattleActive) {
+        if (view == null) {
+            return "gone";
+        }
+        if (!view.combatCapable() || view.distance() < 0f) {
+            return "gone";
+        }
+        if (coopBattleActive) {
+            return "coopBattle";
+        }
+        if (mirrorTransponderOn) {
+            return "transponderOn";
+        }
+        if (view.hostile() || view.engagePick()) {
+            return "turnedHostile";
+        }
+        if (!view.patrol()) {
+            return "noLongerPatrol";
+        }
+        if (view.customsUnseenScans() > CUSTOMS_UNSEEN_SCAN_LIMIT) {
+            return "lostContact";
+        }
+        if (view.customsPursuitDays() > view.pursuitBudgetDays()) {
+            return "outOfPatience";
+        }
+        return "other";
     }
 
     private static Action decideHostile(FleetView view, boolean synthesizedPursuit,
@@ -388,7 +513,7 @@ public final class CoopNpcThreatWatcher {
             return true;
         }
         try {
-            SectorAPI sector = com.fs.starfarer.api.Global.getSector();
+            SectorAPI sector = Global.getSector();
             MemoryAPI memory = sector == null ? null : sector.getMemoryWithoutUpdate();
             return memory != null && memory.getBoolean("$coopSynthesizedPursuit");
         } catch (RuntimeException | LinkageError ex) {
@@ -402,6 +527,7 @@ public final class CoopNpcThreatWatcher {
     public void reset() {
         cooldowns.clear();
         pendingPostDefeatGrace.clear();
+        customsPursuits.clear();
         lastDiagnosticAtMillis.clear();
         nextScanAtMillis = 0L;
         lastHandoffAtMillis = Long.MIN_VALUE;
@@ -457,6 +583,16 @@ public final class CoopNpcThreatWatcher {
     /** Fleet ids still waiting for their post-battle do-not-attack window (test seam). */
     public boolean isPostDefeatGracePending(String coopFleetId) {
         return pendingPostDefeatGrace.containsKey(coopFleetId);
+    }
+
+    /** True while this patrol is running a synthesized inspection chase (test seam). */
+    public boolean isCustomsPursuing(String coopFleetId) {
+        return customsPursuits.containsKey(coopFleetId);
+    }
+
+    /** How many patrols are currently chasing the dark guest mirror (test seam). */
+    public int customsPursuitCount() {
+        return customsPursuits.size();
     }
 
     /** Host-only, once per pump frame while the session is streaming. Never throws. */
@@ -532,16 +668,22 @@ public final class CoopNpcThreatWatcher {
         // and DIALOG_BEGIN this class exists to send (found in-game 2026-08-19).
         boolean handedOff = lastHandoffAtMillis != Long.MIN_VALUE
                 && nowMillis - lastHandoffAtMillis < HANDOFF_GRACE_MILLIS;
+        Set<String> seenThisScan = customsPursuits.isEmpty() ? Set.of() : new HashSet<>();
         for (CampaignFleetAPI fleet : fleetsIn(location)) {
             if (fleet == null || fleet == mirror || isMirror(fleet) || isPlayerFleet(sector, fleet)) {
                 continue;
             }
-            FleetView view = viewOf(fleet, mirror);
+            String coopFleetId = safeId(fleet);
+            seenThisScan.add(coopFleetId);
+            boolean visible = canSee(fleet, mirror);
+            CustomsPursuit pursuit = trackCustomsVisibility(coopFleetId, visible);
+            FleetView view = viewOf(fleet, mirror, coopFleetId, visible, pursuit, elapsedDaysSince(pursuit));
             applyPendingGraceIfQueued(fleet, mirror, view);
+            boolean battleBusy = coopBattleActive || handedOff;
             if (diagnostics) {
                 dumpPursuitState(view, synthesized, nowMillis);
             }
-            Action action = decide(view, synthesized, transponderOn, coopBattleActive || handedOff,
+            Action action = decide(view, synthesized, transponderOn, battleBusy,
                     cooldowns.isReady(cooldownKey(view.coopFleetId(), Action.ENGAGE_GUEST),
                             nowMillis, ENGAGE_COOLDOWN_MILLIS),
                     cooldowns.isReady(cooldownKey(view.coopFleetId(), Action.STEER_PURSUIT),
@@ -554,10 +696,55 @@ public final class CoopNpcThreatWatcher {
                     handedOff = true;
                 }
                 case STEER_PURSUIT -> steerPursuit(fleet, mirror, view, nowMillis);
-                case CUSTOMS_DIALOG -> fireCustomsDialog(view, nowMillis);
+                case CUSTOMS_PURSUE -> pursueForInspection(fleet, mirror, view);
+                case CUSTOMS_DIALOG -> {
+                    endCustomsPursuit(fleet, mirror, view, nowMillis, "caught");
+                    fireCustomsDialog(view, nowMillis);
+                }
+                case CUSTOMS_GIVE_UP -> endCustomsPursuit(fleet, mirror, view, nowMillis,
+                        customsGiveUpReason(view, transponderOn, battleBusy));
                 case NONE -> {
                     // nothing to synthesize for this fleet this scan
                 }
+            }
+        }
+        forgetUnscannedCustomsPursuits(seenThisScan);
+    }
+
+    /**
+     * Advances (or seeds) the lost-contact counter for a live inspection chase. Runs before
+     * {@link #decide} so the count the decision reads is this scan's, not the previous one's.
+     */
+    private CustomsPursuit trackCustomsVisibility(String coopFleetId, boolean visible) {
+        CustomsPursuit pursuit = customsPursuits.get(coopFleetId);
+        if (pursuit == null) {
+            return null;
+        }
+        if (visible) {
+            pursuit.unseenScans = 0;
+        } else {
+            pursuit.unseenScans++;
+        }
+        return pursuit;
+    }
+
+    /**
+     * Drops chase state for a patrol that was not in the mirror's location this scan — it jumped out,
+     * despawned, or the guest left. There is no fleet handle left to cancel the assignment through, so
+     * this relies on {@link #CUSTOMS_PURSUIT_ASSIGNMENT_DAYS} bounding it instead.
+     */
+    private void forgetUnscannedCustomsPursuits(Set<String> seenThisScan) {
+        if (customsPursuits.isEmpty()) {
+            return;
+        }
+        Iterator<Map.Entry<String, CustomsPursuit>> it = customsPursuits.entrySet().iterator();
+        while (it.hasNext()) {
+            String id = it.next().getKey();
+            if (!seenThisScan.contains(id)) {
+                it.remove();
+                CoopLog.info(CoopNpcThreatWatcher.class, "Coop customs pursuit gaveUp reason=outOfScan"
+                        + " coopFleetId=" + id + " (the assignment expires on its own within "
+                        + CUSTOMS_PURSUIT_ASSIGNMENT_DAYS + " campaign days)");
             }
         }
     }
@@ -580,6 +767,147 @@ public final class CoopNpcThreatWatcher {
                 + " dist=" + String.format("%.1f", view.distance())
                 + " contact=" + String.format("%.1f", view.contactDistance())
                 + " vanillaHunting=" + view.huntingMirror());
+    }
+
+    /**
+     * Starts or sustains a patrol's inspection chase of the dark mirror.
+     *
+     * <h3>Why an assignment and not {@code setPriorityTarget}</h3>
+     * {@code setPriorityTarget} is the right tool for a <em>hostile</em> chaser and the wrong one here,
+     * and the decompile is unambiguous about why. The priority target is only promoted to
+     * {@code this.target} <em>after</em> the candidate loop ({@code TacticalModule.java:461-466}); on
+     * the next tactical interval that same loop walks the mirror again, and because a patrol is not
+     * hostile to it the mirror falls through to the loop's tail, which reads
+     * {@code if (campaignFleet2 != this.target) continue; this.setTarget(null); this.priorityTarget =
+     * null;} ({@code :485-487}). A non-hostile priority target therefore erases itself within one
+     * interval (0.05–0.1 days, {@code :207-209}) and no chase happens.
+     *
+     * <p>An {@code INTERCEPT} assignment steers through the assignment/navigation modules instead,
+     * which the Phase 14 spike proved works against a mirror (closed 389 &rarr; 17 su at 151 su/s).
+     * This is the same call the Phase 14b hostile path deleted, and it is safe <em>here</em> for two
+     * reasons the hostile case did not have: a non-hostile patrol cannot turn the
+     * {@code isAllowedToEngage} short-circuit ({@code StrategicModule.java:551-553}) into an
+     * engagement licence, because no battle can form against the mirror and the stop is our own
+     * synthesized {@code DIALOG_BEGIN}; and every exit path in {@link #decideCustomsPursuit} routes
+     * through {@link #endCustomsPursuit}, which removes the assignment. The ten-minute siege came from
+     * a chase with no exit, not from the assignment.
+     *
+     * <p>Idempotent: the assignment is only issued when the patrol is not already running ours.
+     */
+    private void pursueForInspection(CampaignFleetAPI patrol, CampaignFleetAPI mirror, FleetView view) {
+        boolean starting = !customsPursuits.containsKey(view.coopFleetId());
+        if (starting) {
+            customsPursuits.put(view.coopFleetId(), new CustomsPursuit(clockTimestamp()));
+            CoopLog.info(CoopNpcThreatWatcher.class, "Coop customs pursuit starting coopFleetId="
+                    + view.coopFleetId() + " fleet=" + view.fleetName() + " (" + view.factionId() + ")"
+                    + " dist=" + String.format("%.1f", view.distance())
+                    + " patienceDays=" + String.format("%.1f", view.pursuitBudgetDays()));
+        }
+        if (hasOurInterceptAssignment(patrol, mirror)) {
+            return;
+        }
+        try {
+            CampaignFleetAIAPI ai = patrol.getAI();
+            if (ai == null) {
+                return;
+            }
+            ai.addAssignmentAtStart(FleetAssignment.INTERCEPT, mirror,
+                    CUSTOMS_PURSUIT_ASSIGNMENT_DAYS, null);
+            CoopLog.info(CoopNpcThreatWatcher.class, "Coop customs pursuit chasing coopFleetId="
+                    + view.coopFleetId() + " fleet=" + view.fleetName()
+                    + " dist=" + String.format("%.1f", view.distance())
+                    + " elapsedDays=" + String.format("%.2f", view.customsPursuitDays()));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNpcThreatWatcher.class, "Coop failed to issue an inspection chase for"
+                    + " coopFleetId=" + view.coopFleetId(), ex);
+        }
+    }
+
+    /**
+     * Ends an inspection chase: drops the state, removes every {@code INTERCEPT} we pointed at the
+     * mirror, and stamps the customs cooldown so the patrol does not immediately re-acquire. The
+     * cooldown is stamped on <em>every</em> exit, the stop included, which is what keeps a patrol that
+     * just hailed the guest from turning round and hailing again.
+     */
+    private void endCustomsPursuit(CampaignFleetAPI patrol, CampaignFleetAPI mirror, FleetView view,
+                                   long nowMillis, String reason) {
+        boolean wasPursuing = customsPursuits.remove(view.coopFleetId()) != null;
+        cooldowns.mark(cooldownKey(view.coopFleetId(), Action.CUSTOMS_DIALOG), nowMillis);
+        int removed = removeOurInterceptAssignments(patrol, mirror);
+        if (!wasPursuing && removed == 0) {
+            return;
+        }
+        CoopLog.info(CoopNpcThreatWatcher.class, "Coop customs pursuit " + reason + " coopFleetId="
+                + view.coopFleetId() + " fleet=" + view.fleetName()
+                + " dist=" + String.format("%.1f", view.distance())
+                + " elapsedDays=" + String.format("%.2f", view.customsPursuitDays())
+                + " unseenScans=" + view.customsUnseenScans()
+                + " assignmentsCleared=" + removed);
+    }
+
+    private static boolean hasOurInterceptAssignment(CampaignFleetAPI patrol, CampaignFleetAPI mirror) {
+        try {
+            CampaignFleetAIAPI ai = patrol.getAI();
+            if (ai == null) {
+                return false;
+            }
+            FleetAssignmentDataAPI current = ai.getCurrentAssignment();
+            return current != null && current.getAssignment() == FleetAssignment.INTERCEPT
+                    && current.getTarget() == mirror;
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    /**
+     * Removes every {@code INTERCEPT} on this fleet that points at the mirror. Scans the whole queue
+     * rather than only the current assignment: ours is added at the start, so a chase that gets
+     * re-issued while an earlier one is still queued would otherwise leave a second copy behind and
+     * the patrol would resume chasing the moment the first expired.
+     */
+    private static int removeOurInterceptAssignments(CampaignFleetAPI patrol, CampaignFleetAPI mirror) {
+        try {
+            CampaignFleetAIAPI ai = patrol.getAI();
+            if (ai == null) {
+                return 0;
+            }
+            int removed = 0;
+            for (FleetAssignmentDataAPI assignment : ai.getAssignmentsCopy()) {
+                if (assignment == null || assignment.getAssignment() != FleetAssignment.INTERCEPT
+                        || assignment.getTarget() != mirror) {
+                    continue;
+                }
+                ai.removeAssignment(assignment);
+                removed++;
+            }
+            return removed;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNpcThreatWatcher.class, "Coop failed to clear an inspection chase"
+                    + " assignment", ex);
+            return 0;
+        }
+    }
+
+    /** Campaign days a chase has been running, from the engine clock. Zero when nothing is running. */
+    private static float elapsedDaysSince(CustomsPursuit pursuit) {
+        if (pursuit == null) {
+            return 0f;
+        }
+        try {
+            CampaignClockAPI clock = Global.getSector() == null ? null : Global.getSector().getClock();
+            return clock == null ? 0f : clock.getElapsedDaysSince(pursuit.startedAtTimestamp);
+        } catch (RuntimeException | LinkageError ex) {
+            return 0f;
+        }
+    }
+
+    private static long clockTimestamp() {
+        try {
+            CampaignClockAPI clock = Global.getSector() == null ? null : Global.getSector().getClock();
+            return clock == null ? 0L : clock.getTimestamp();
+        } catch (RuntimeException | LinkageError ex) {
+            return 0L;
+        }
     }
 
     private void fireCustomsDialog(FleetView view, long nowMillis) {
@@ -666,30 +994,38 @@ public final class CoopNpcThreatWatcher {
                 + " pursuitDays=" + String.format("%.2f", view.pursuitDays())
                 + "/" + String.format("%.2f", view.pursuitBudgetDays())
                 + " dist=" + String.format("%.1f", view.distance())
-                + " contact=" + String.format("%.1f", view.contactDistance()));
+                + " contact=" + String.format("%.1f", view.contactDistance())
+                + " patrol=" + view.patrol()
+                + " customsPursuit=" + (view.customsPursuing() ? "chasing" : "idle")
+                + " customsDays=" + String.format("%.2f", view.customsPursuitDays())
+                + " customsUnseen=" + view.customsUnseenScans());
     }
 
     // ---- engine reads (all best-effort) ----------------------------------------------------------
 
-    private static FleetView viewOf(CampaignFleetAPI fleet, CampaignFleetAPI mirror) {
+    private static FleetView viewOf(CampaignFleetAPI fleet, CampaignFleetAPI mirror, String coopFleetId,
+                                    boolean visible, CustomsPursuit pursuit, float customsPursuitDays) {
         TacticalModulePlugin tactical = tacticalModule(fleet);
         StrategicModulePlugin strategic = strategicModule(fleet);
         boolean patrol = isPatrol(fleet);
         return new FleetView(
-                safeId(fleet),
+                coopFleetId,
                 safeName(fleet),
                 factionOf(fleet),
                 isHostileTo(fleet, mirror),
                 picksEngage(fleet, mirror),
                 patrol,
                 isCombatCapable(fleet),
-                canSee(fleet, mirror),
+                visible,
                 tactical != null && tactical.getTarget() == mirror,
                 isAllowedToEngage(strategic, mirror),
                 pursuitDays(tactical),
                 pursuitBudgetDays(patrol, burnLevel(fleet)),
                 distance(fleet, mirror),
-                contactDistance(radius(fleet), radius(mirror)));
+                contactDistance(radius(fleet), radius(mirror)),
+                pursuit != null,
+                customsPursuitDays,
+                pursuit == null ? 0 : pursuit.unseenScans);
     }
 
     /**

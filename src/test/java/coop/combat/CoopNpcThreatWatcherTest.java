@@ -23,6 +23,10 @@ class CoopNpcThreatWatcherTest {
 
     /** Contact for the fixtures below: two 150 su fleets plus the 100 su scan margin. */
     private static final float CONTACT = 400f;
+    /** Vanilla's patrol pursuit patience with no burn bonus (StrategicModule:554-588). */
+    private static final float PATROL_PATIENCE_DAYS = 3f;
+    private static final boolean PURSUING = true;
+    private static final boolean NOT_PURSUING = false;
 
     // ---- primary model: vanilla decides the hunt --------------------------------------------------
 
@@ -108,7 +112,7 @@ class CoopNpcThreatWatcherTest {
     void theFallbackRespectsTheVisibilityGate() {
         // A guest running dark is invisible; a chaser that cannot see it must not acquire it.
         FleetView blind = new FleetView("fleet-a", "Raiders", "pirates", true, true, false, true,
-                false, false, true, 0f, 1.5f, 800f, CONTACT);
+                false, false, true, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 blind, SYNTHESIZED_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -118,7 +122,7 @@ class CoopNpcThreatWatcherTest {
     void theFallbackRespectsIsAllowedToEngage() {
         // This is the do-not-attack tracker, the ignore flags and the assignment vetoes in one read.
         FleetView vetoed = new FleetView("fleet-a", "Raiders", "pirates", true, true, false, true,
-                true, false, false, 0f, 1.5f, 800f, CONTACT);
+                true, false, false, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 vetoed, SYNTHESIZED_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -156,50 +160,167 @@ class CoopNpcThreatWatcherTest {
                 COOLING, COOLING, READY));
     }
 
-    // ---- customs synthesis ------------------------------------------------------------------------
+    // ---- customs: starting the inspection chase ---------------------------------------------------
 
     @Test
-    void nonHostilePatrolStopsTheTransponderOffGuest() {
+    void aPatrolThatDetectsTheDarkGuestStartsChasingItFromThere() {
+        // The fix for "patrols only hail you if you nearly collide with them" (in-game, 2026-08-19):
+        // detection is the whole start gate, so the chase begins wherever the patrol spotted the guest.
         Action action = CoopNpcThreatWatcher.decide(
-                patrol(300f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY);
+                patrol(4000f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY);
 
-        assertEquals(Action.CUSTOMS_DIALOG, action);
+        assertEquals(Action.CUSTOMS_PURSUE, action);
     }
 
     @Test
-    void aPatrolThatCannotSeeTheDarkGuestDoesNotHailIt() {
-        // The Phase 14b stealth requirement in one assertion: no detection, no customs stop.
+    void aPatrolAlreadyOnTopOfTheDarkGuestSkipsStraightToTheStop() {
+        assertEquals(Action.CUSTOMS_DIALOG, CoopNpcThreatWatcher.decide(
+                patrol(CONTACT - 1f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE,
+                READY, READY, READY));
+    }
+
+    @Test
+    void aPatrolThatCannotSeeTheDarkGuestDoesNotChaseOrHailIt() {
+        // The Phase 14b stealth requirement in one assertion: no detection, no interest.
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 patrol(300f, false), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
     }
 
     @Test
-    void aTransponderOnGuestIsNotStopped() {
+    void aTransponderOnGuestIsNeitherChasedNorStopped() {
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 patrol(300f, true), VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
+        assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
+                patrol(4000f, true), VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
     }
 
     @Test
     void aNonPatrolCivilianFleetNeverStopsTheGuest() {
         FleetView trader = new FleetView("f", "Trader", "independent", false, false, false, true,
-                true, false, true, 0f, 1.5f, 100f, CONTACT);
+                true, false, true, 0f, 1.5f, 100f, CONTACT, NOT_PURSUING, 0f, 0);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 trader, VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
     }
 
     @Test
-    void aDistantPatrolDoesNotStopTheGuest() {
+    void aFreshChaseIsSuppressedDuringACoopBattleAndByTheCustomsCooldown() {
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
-                patrol(1200f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+                patrol(2000f, true), VANILLA_MODEL, TRANSPONDER_OFF, IN_BATTLE, READY, READY, READY));
+        assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
+                patrol(2000f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, COOLING));
+    }
+
+    // ---- customs: sustaining and ending the chase -------------------------------------------------
+
+    @Test
+    void aChaseInFlightKeepsClosingWhileEveryGateHolds() {
+        assertEquals(Action.CUSTOMS_PURSUE, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, true, 1.0f, 0), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE,
+                READY, READY, COOLING));
     }
 
     @Test
-    void customsIsSuppressedDuringACoopBattleAndByItsCooldown() {
-        assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
-                patrol(100f, true), VANILLA_MODEL, TRANSPONDER_OFF, IN_BATTLE, READY, READY, READY));
-        assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
-                patrol(100f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, COOLING));
+    void aChaseInFlightIgnoresTheCustomsCooldownItsOwnEndWillStamp() {
+        // The cooldown gates acquisition, not continuation: stamping it at the stop is what stops a
+        // patrol re-hailing, so reading it mid-chase would cancel the chase the instant it started.
+        assertEquals(Action.CUSTOMS_DIALOG, CoopNpcThreatWatcher.decide(
+                chasingPatrol(CONTACT, true, 1.0f, 0), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE,
+                READY, READY, COOLING));
+    }
+
+    @Test
+    void aChaseEndsWhenVanillasPatrolPatienceIsSpent() {
+        assertEquals(Action.CUSTOMS_PURSUE, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, true, PATROL_PATIENCE_DAYS, 0), VANILLA_MODEL, TRANSPONDER_OFF,
+                NO_BATTLE, READY, READY, READY));
+        assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, true, PATROL_PATIENCE_DAYS + 0.01f, 0), VANILLA_MODEL,
+                TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+    }
+
+    @Test
+    void aChaseSurvivesABriefContactLossAndEndsOnASustainedOne() {
+        assertEquals(Action.CUSTOMS_PURSUE, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, false, 0.2f, CoopNpcThreatWatcher.CUSTOMS_UNSEEN_SCAN_LIMIT),
+                VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+        assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, false, 0.2f, CoopNpcThreatWatcher.CUSTOMS_UNSEEN_SCAN_LIMIT + 1),
+                VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+    }
+
+    @Test
+    void turningTheTransponderBackOnStandsThePatrolDown() {
+        assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, true, 0.2f, 0), VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE,
+                READY, READY, READY));
+    }
+
+    @Test
+    void aCoopBattleEndsTheChaseRatherThanPausingIt() {
+        assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                chasingPatrol(1200f, true, 0.2f, 0), VANILLA_MODEL, TRANSPONDER_OFF, IN_BATTLE,
+                READY, READY, READY));
+    }
+
+    @Test
+    void aChasingPatrolThatTurnsHostileReleasesItsAssignmentBeforeAnythingElseClaimsIt() {
+        // The chase owns an INTERCEPT on the patrol. If the hostile branch could claim the fleet while
+        // that assignment was still live, nothing would ever remove it — the permanent-siege shape.
+        FleetView turned = new FleetView("fleet-p", "Fast Picket", "hegemony", true, true, true, true,
+                true, true, true, 0f, PATROL_PATIENCE_DAYS, 50f, CONTACT, PURSUING, 0.2f, 0);
+
+        assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                turned, VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+    }
+
+    @Test
+    void aChaseWhoseQuarryBecameUnreadableIsStillCleanedUp() {
+        assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                chasingPatrol(-1f, true, 0.2f, 0), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE,
+                READY, READY, READY));
+    }
+
+    @Test
+    void everyGiveUpReasonIsNamedForTheLogLineTheSmokeGreps() {
+        assertEquals("transponderOn", CoopNpcThreatWatcher.customsGiveUpReason(
+                chasingPatrol(1200f, true, 0.2f, 0), TRANSPONDER_ON, NO_BATTLE));
+        assertEquals("coopBattle", CoopNpcThreatWatcher.customsGiveUpReason(
+                chasingPatrol(1200f, true, 0.2f, 0), TRANSPONDER_OFF, IN_BATTLE));
+        assertEquals("lostContact", CoopNpcThreatWatcher.customsGiveUpReason(
+                chasingPatrol(1200f, false, 0.2f, CoopNpcThreatWatcher.CUSTOMS_UNSEEN_SCAN_LIMIT + 1),
+                TRANSPONDER_OFF, NO_BATTLE));
+        assertEquals("outOfPatience", CoopNpcThreatWatcher.customsGiveUpReason(
+                chasingPatrol(1200f, true, PATROL_PATIENCE_DAYS + 0.01f, 0),
+                TRANSPONDER_OFF, NO_BATTLE));
+        assertEquals("gone", CoopNpcThreatWatcher.customsGiveUpReason(
+                chasingPatrol(-1f, true, 0.2f, 0), TRANSPONDER_OFF, NO_BATTLE));
+        assertEquals("gone", CoopNpcThreatWatcher.customsGiveUpReason(null, TRANSPONDER_OFF, NO_BATTLE));
+    }
+
+    @Test
+    void theReasonAlwaysMatchesAnActualGiveUpDecision() {
+        // Guard against a give-up path acquiring a condition the reason function does not know about,
+        // which would log "other" and leave the smoke test with nothing to grep.
+        FleetView[] endings = {
+                chasingPatrol(1200f, true, PATROL_PATIENCE_DAYS + 1f, 0),
+                chasingPatrol(1200f, false, 0.2f, CoopNpcThreatWatcher.CUSTOMS_UNSEEN_SCAN_LIMIT + 5),
+                chasingPatrol(-1f, true, 0.2f, 0),
+        };
+        for (FleetView ending : endings) {
+            assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
+                    ending, VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+            assertNotEquals("other",
+                    CoopNpcThreatWatcher.customsGiveUpReason(ending, TRANSPONDER_OFF, NO_BATTLE));
+        }
+    }
+
+    @Test
+    void theChaseAssignmentIsBoundedWellInsideThePatienceItServes() {
+        // If the watcher ever loses sight of a patrol the assignment is the only thing left to expire.
+        assertTrue(CoopNpcThreatWatcher.CUSTOMS_PURSUIT_ASSIGNMENT_DAYS
+                < CoopNpcThreatWatcher.PURSUIT_BUDGET_DAYS_PATROL);
+        assertTrue(CoopNpcThreatWatcher.CUSTOMS_PURSUIT_ASSIGNMENT_DAYS > 0f);
     }
 
     // ---- general gates ----------------------------------------------------------------------------
@@ -207,9 +328,9 @@ class CoopNpcThreatWatcherTest {
     @Test
     void nonCombatFleetsAndUnresolvedDistancesAreSkipped() {
         FleetView station = new FleetView("f", "Station", "hegemony", true, true, false, false,
-                true, true, true, 0f, 1.5f, 10f, CONTACT);
+                true, true, true, 0f, 1.5f, 10f, CONTACT, NOT_PURSUING, 0f, 0);
         FleetView elsewhere = new FleetView("f", "Ghost", "pirates", true, true, false, true,
-                true, true, true, 0f, 1.5f, -1f, CONTACT);
+                true, true, true, 0f, 1.5f, -1f, CONTACT, NOT_PURSUING, 0f, 0);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 station, VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -390,7 +511,7 @@ class CoopNpcThreatWatcherTest {
         // Vanilla is not hunting, but every synthesized gate passes: the fallback chases, the primary
         // model stays out of it. This is the flag's whole behavioural difference.
         FleetView notHunted = new FleetView("fleet-a", "Raiders", "pirates", true, true, false, true,
-                true, false, true, 0f, 1.5f, 800f, CONTACT);
+                true, false, true, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 notHunted, VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -425,11 +546,25 @@ class CoopNpcThreatWatcherTest {
     private static FleetView hostile(float distance, boolean visible, boolean huntingMirror,
                                      boolean engagePick, boolean allowedToEngage, float pursuitDays) {
         return new FleetView("fleet-a", "Raiders", "pirates", true, engagePick, false, true,
-                visible, huntingMirror, allowedToEngage, pursuitDays, 1.5f, distance, CONTACT);
+                visible, huntingMirror, allowedToEngage, pursuitDays, 1.5f, distance, CONTACT,
+                NOT_PURSUING, 0f, 0);
     }
 
+    /** A patrol that has not started an inspection chase yet. */
     private static FleetView patrol(float distance, boolean visible) {
+        return patrol(distance, visible, NOT_PURSUING, 0f, 0);
+    }
+
+    /** A patrol mid-chase: the give-up gates read the last three fields. */
+    private static FleetView chasingPatrol(float distance, boolean visible, float pursuitDays,
+                                           int unseenScans) {
+        return patrol(distance, visible, PURSUING, pursuitDays, unseenScans);
+    }
+
+    private static FleetView patrol(float distance, boolean visible, boolean pursuing,
+                                    float pursuitDays, int unseenScans) {
         return new FleetView("fleet-p", "Fast Picket", "hegemony", false, false, true, true,
-                visible, false, true, 0f, 3f, distance, CONTACT);
+                visible, false, true, 0f, PATROL_PATIENCE_DAYS, distance, CONTACT,
+                pursuing, pursuitDays, unseenScans);
     }
 }
