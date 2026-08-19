@@ -446,6 +446,45 @@ class CoopBattleBridgeTest {
         assertTrue(fixture.service.sent.isEmpty());
     }
 
+    // ---- Phase 15: the battle's fleet-id list on the wire -----------------------------------------
+
+    @Test
+    void fleetIdsRoundTripThroughTheCommaJoinedEnvelopeField() {
+        List<String> ids = List.of("fleet_alpha", "fleet_beta");
+
+        assertEquals("fleet_alpha,fleet_beta", CoopBattleBridge.joinIds(ids));
+        assertEquals(ids, CoopBattleBridge.splitIds(CoopBattleBridge.joinIds(ids)));
+    }
+
+    @Test
+    void anEmptyOrBlankFleetIdListSurvivesTheRoundTrip() {
+        assertEquals("", CoopBattleBridge.joinIds(List.of()));
+        assertEquals("", CoopBattleBridge.joinIds(null));
+        assertEquals(List.of(), CoopBattleBridge.splitIds(""));
+        assertEquals(List.of(), CoopBattleBridge.splitIds(null));
+        assertEquals("fleet_alpha", CoopBattleBridge.joinIds(List.of("", "fleet_alpha")));
+    }
+
+    @Test
+    void duplicateAndPaddedFleetIdsAreNormalisedOnTheWayIn() {
+        assertEquals(List.of("fleet_alpha", "fleet_beta"),
+                CoopBattleBridge.splitIds(" fleet_alpha , fleet_beta ,fleet_alpha,, "));
+    }
+
+    @Test
+    void aBattleBeginNowNamesTheFleetsItsResultWillReportOn() {
+        Fixture fixture = Fixture.host();
+
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);
+
+        CoopMessages.Message begin = fixture.service.sent.get(0);
+        assertEquals(CoopMessages.Type.BATTLE_BEGIN, begin.type());
+        // The proxy engine has no campaign context, so the list is legitimately empty; the field must
+        // still be present and parseable rather than absent.
+        assertEquals(List.of(),
+                CoopBattleBridge.splitIds(CoopMessages.requiredPayloadString(begin, "npcFleetIds")));
+    }
+
     // ---- helpers -----------------------------------------------------------------------------------
 
     private static CoopMessages.Message engageGuest(String coopFleetId, String fleetName) {

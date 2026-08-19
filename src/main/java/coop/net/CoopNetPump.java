@@ -11,6 +11,8 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopCampaignReplicator;
 import coop.combat.CoopBattleBridge;
+import coop.combat.CoopBattleResult;
+import coop.combat.CoopBattleResultReconciler;
 import coop.combat.CoopCombatSpike;
 import coop.combat.CoopNpcThreatWatcher;
 import coop.fleet.CoopFleetMirror;
@@ -71,7 +73,12 @@ public class CoopNetPump implements EveryFrameScript {
     private long nextFleetSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
-    private final CoopFleetMirrorRegistry npcFleetRegistry = new CoopFleetMirrorRegistry();
+    /**
+     * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
+     * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
+     * measured inside {@code applySet}, and two different clocks there would silently break it.
+     */
+    private final CoopFleetMirrorRegistry npcFleetRegistry;
     private final CoopNpcFleetSuppressor npcFleetSuppressor = new CoopNpcFleetSuppressor();
     private final CoopNpcFleetReplicator npcFleetReplicator;
     private final CoopBaseAuthority baseAuthority;
@@ -83,6 +90,7 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopCombatSpike combatSpike = new CoopCombatSpike();
     private final CoopBattleBridge battleBridge;
     private final CoopNpcThreatWatcher npcThreatWatcher;
+    private final CoopBattleResultReconciler battleResultReconciler;
     private final CoopCampaignReplicator campaignReplicator;
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
@@ -180,6 +188,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.priorCoopSessionSupplier = Objects.requireNonNull(priorCoopSessionSupplier, "priorCoopSessionSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
         this.timeLock.setPauseCoordinator(pauseCoordinator);
+        this.npcFleetRegistry = new CoopFleetMirrorRegistry(CoopFleetMirror::new, clockMillis);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
         this.battleBridge = new CoopBattleBridge(service, sessionState, clockMillis, pauseCoordinator);
         this.npcThreatWatcher = new CoopNpcThreatWatcher(service, sessionState, clockMillis);
@@ -198,6 +207,26 @@ public class CoopNetPump implements EveryFrameScript {
         });
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis);
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
+        // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
+        // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
+        this.battleResultReconciler = new CoopBattleResultReconciler(
+                new CoopBattleResultReconciler.EngineFleets(
+                        CoopNetPump::sectorOrNull,
+                        npcFleetReplicator::forceResendSet,
+                        coopFleetId -> npcThreatWatcher.noteBattleConcluded(
+                                coopFleetId, clockMillis.getAsLong())));
+        this.battleBridge.setBattleResultSink(this::onLocalBattleResult);
+        this.battleBridge.setBattleFleetSink(new CoopBattleBridge.BattleFleetListener() {
+            @Override
+            public void onLocalBattleBegun(List<String> coopFleetIds) {
+                CoopNetPump.this.onLocalBattleBegun(coopFleetIds);
+            }
+
+            @Override
+            public void onBattleConcluded(List<String> coopFleetIds, boolean localBattle) {
+                CoopNetPump.this.onBattleConcluded(coopFleetIds, localBattle);
+            }
+        });
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
@@ -421,6 +450,7 @@ public class CoopNetPump implements EveryFrameScript {
             case BASE_SET -> handleBaseSet(message);
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
+            case BATTLE_RESULT -> handleBattleResult(message);
             case PING -> sendPong(message);
             default -> {
                 // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
@@ -1270,6 +1300,7 @@ public class CoopNetPump implements EveryFrameScript {
             npcFleetReplicator.reset();
             npcFleetSuppressor.reset();
             npcThreatWatcher.reset();
+            battleResultReconciler.reset();
             npcReplicationStreaming = true;
         } else if (!active && npcReplicationStreaming) {
             // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
@@ -1693,6 +1724,113 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         battleBridge.handle(message);
+    }
+
+    /**
+     * Phase 15 host side: the guest fought a battle and is reporting its campaign consequences. Only
+     * the host integrates — {@code BATTLE_RESULT} is a guest&rarr;host report, never a broadcast.
+     */
+    private void handleBattleResult(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            CoopBattleResult result = CoopBattleResult.decode(
+                    CoopMessages.requiredPayloadString(message, "battleId"),
+                    CoopMessages.requiredPayloadString(message, "engagingPlayerId"),
+                    CoopMessages.requiredPayloadString(message, "outcome"),
+                    (int) CoopMessages.requiredPayloadLong(message, "engagingFleetSize"),
+                    CoopMessages.requiredPayloadString(message, "body"));
+            battleResultReconciler.apply(result);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply BATTLE_RESULT", ex);
+        }
+    }
+
+    /**
+     * The local client just finished piloting a battle. The host integrates it in-process; the guest
+     * freezes the mirrors it beat and reports to the host. There is deliberately no path where a
+     * client sends itself a {@code BATTLE_RESULT}.
+     */
+    private void onLocalBattleResult(CoopBattleResult result) {
+        try {
+            if (service.role() == CoopConnectionRole.HOST) {
+                battleResultReconciler.apply(result);
+                return;
+            }
+            long now = clockMillis.getAsLong();
+            for (String coopFleetId : result.involvedFleetIds()) {
+                npcFleetRegistry.markPendingReconcile(coopFleetId, now);
+            }
+            service.send(CoopMessages.battleResult(sessionState.sessionId(), service.nextSeq(), now,
+                    result.battleId(), result.engagingPlayerId(), result.outcome(),
+                    result.engagingFleetSize(), result.encodeBody()));
+            service.flushOutbound();
+            CoopLog.info(CoopNetPump.class, "Coop BATTLE_RESULT sent battleId=" + result.battleId()
+                    + " destroyed=" + result.destroyedFleetIds().size()
+                    + " survivors=" + result.survivingFleets().size());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to dispatch the local coop battle result", ex);
+        }
+    }
+
+    /**
+     * The local client has just started piloting a battle against these host fleets. The guest
+     * freezes their mirrors immediately — see {@code CoopBattleBridge.BattleFleetListener} for the
+     * drain-ordering reason this cannot wait for the battle to end. The host has nothing to do here:
+     * it fights the real fleets and vanilla keeps them correct.
+     */
+    private void onLocalBattleBegun(List<String> coopFleetIds) {
+        if (service.role() == CoopConnectionRole.HOST) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        for (String coopFleetId : coopFleetIds) {
+            try {
+                npcFleetRegistry.markPendingReconcile(coopFleetId, now);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopNetPump.class,
+                        "Failed to freeze the mirror of coopFleetId=" + coopFleetId, ex);
+            }
+        }
+    }
+
+    /**
+     * A battle just ended, with the host {@code coopFleetId}s it involved. Fired well ahead of the
+     * result itself so neither side acts on stale pacing state while reconciliation is in flight.
+     *
+     * <p>The host restarts those fleets' engage cooldowns whichever side fought — a fleet the guest
+     * just beat must not re-fire {@code ENGAGE_GUEST} into the reconciliation gap. The guest freezes
+     * mirrors only for battles <em>it</em> fought: a fleet the host fought is already reconciled in
+     * the host's own world, so its next {@code NPC_FLEET_SET} is the truth and must be applied, not
+     * held back.
+     */
+    private void onBattleConcluded(List<String> coopFleetIds, boolean localBattle) {
+        long now = clockMillis.getAsLong();
+        boolean host = service.role() == CoopConnectionRole.HOST;
+        if (!host && !localBattle) {
+            return;
+        }
+        for (String coopFleetId : coopFleetIds) {
+            try {
+                if (host) {
+                    npcThreatWatcher.noteBattleConcluded(coopFleetId, now);
+                } else {
+                    npcFleetRegistry.markPendingReconcile(coopFleetId, now);
+                }
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopNetPump.class,
+                        "Failed to note the end of a coop battle for coopFleetId=" + coopFleetId, ex);
+            }
+        }
+    }
+
+    private static SectorAPI sectorOrNull() {
+        try {
+            return Global.getSector();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
     }
 
     /**

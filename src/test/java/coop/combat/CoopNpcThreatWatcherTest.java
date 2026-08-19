@@ -170,6 +170,70 @@ class CoopNpcThreatWatcherTest {
         assertTrue(cooldowns.isReady("x", 2L, 5000L));
     }
 
+    // ---- Phase 15: cooldown restart at battle end -------------------------------------------------
+
+    @Test
+    void aBattleEndRestartsThatFleetsEngageCooldown() {
+        CoopNpcThreatWatcher watcher = watcher();
+        long battleEnd = 100_000L;
+
+        watcher.noteBattleConcluded("fleet-a", battleEnd);
+
+        assertFalse(watcher.isEngageReady("fleet-a", battleEnd));
+        assertFalse(watcher.isEngageReady("fleet-a",
+                battleEnd + CoopNpcThreatWatcher.ENGAGE_COOLDOWN_MILLIS - 1));
+        assertTrue(watcher.isEngageReady("fleet-a",
+                battleEnd + CoopNpcThreatWatcher.ENGAGE_COOLDOWN_MILLIS));
+    }
+
+    @Test
+    void theRestartedClockRunsFromTheBattleEndNotTheHandoff() {
+        // A fight lasting longer than the cooldown used to leave the beaten fleet already re-armed
+        // the moment the guest came back, while its reconciliation was still in flight.
+        CoopNpcThreatWatcher watcher = watcher();
+        long handoff = 0L;
+        long battleEnd = handoff + 90_000L;
+
+        watcher.noteBattleConcluded("fleet-a", handoff);
+        assertTrue(watcher.isEngageReady("fleet-a", battleEnd));
+
+        watcher.noteBattleConcluded("fleet-a", battleEnd);
+
+        assertFalse(watcher.isEngageReady("fleet-a", battleEnd + 1000L));
+    }
+
+    @Test
+    void theCooldownBaseIsUnchangedVanillaPacing() {
+        // Phase 15 restarts the clock; it does not lengthen it (memory: 15 s, tuned 2026-08-19).
+        assertEquals(15000L, CoopNpcThreatWatcher.ENGAGE_COOLDOWN_MILLIS);
+    }
+
+    @Test
+    void concludingAnUnknownOrBlankFleetIsANoOp() {
+        CoopNpcThreatWatcher watcher = watcher();
+
+        watcher.noteBattleConcluded("", 1000L);
+        watcher.noteBattleConcluded(null, 1000L);
+
+        assertTrue(watcher.isEngageReady("fleet-a", 1000L));
+    }
+
+    @Test
+    void resetForgetsTheBattleEndRestart() {
+        CoopNpcThreatWatcher watcher = watcher();
+        watcher.noteBattleConcluded("fleet-a", 1000L);
+
+        watcher.reset();
+
+        assertTrue(watcher.isEngageReady("fleet-a", 1000L));
+    }
+
+    private static CoopNpcThreatWatcher watcher() {
+        // Neither the service nor the session is touched by the cooldown bookkeeping under test.
+        return new CoopNpcThreatWatcher(new coop.net.CoopNetService(),
+                new coop.session.CoopSessionState(), () -> 0L);
+    }
+
     // ---- threshold provenance ---------------------------------------------------------------------
 
     @Test

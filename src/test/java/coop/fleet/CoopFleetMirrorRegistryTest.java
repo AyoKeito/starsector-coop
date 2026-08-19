@@ -226,4 +226,116 @@ class CoopFleetMirrorRegistryTest {
         assertTrue(creationOrder.get(0).disposed);
         assertTrue(creationOrder.get(1).disposed);
     }
+
+    // ---- Phase 15: post-battle freeze --------------------------------------------------------------
+
+    @Test
+    void aFrozenMirrorIsNotResurrectedByTheHostsStaleSet() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        // The host has not heard about the battle yet, so it keeps reporting the pre-battle roster.
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 3000L);
+
+        assertEquals(1, mirror.snapshotApplies, "the beaten mirror must not be re-asserted");
+        assertFalse(mirror.disposed);
+        assertEquals(List.of("a"), new ArrayList<>(registry.pendingReconcileIds()));
+    }
+
+    @Test
+    void theFreezeReleasesWhenTheHostReportsTheNewRoster() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        // Reconciled: the fleet lost a ship, so its roster hash is different now.
+        registry.applySet(set(fleet("a", "corvus", "lasher")), 3000L);
+
+        assertEquals(2, mirror.snapshotApplies);
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+    }
+
+    @Test
+    void theFreezeReleasesWhenTheHostDropsTheFleetEntirely() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 1000L);
+        FakeMirror killed = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        registry.applySet(set(fleet("b", "magec", "lasher")), 3000L);
+
+        assertTrue(killed.disposed, "the host confirmed the kill");
+        assertEquals(1, registry.size());
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+    }
+
+    @Test
+    void theFreezeCannotBecomePermanentDivergence() {
+        // A BATTLE_RESULT that never arrives (disconnect) must not leave a mirror frozen forever;
+        // the host's authoritative set legitimately resurrects the unreported kill.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        registry.applySet(set(fleet("a", "corvus", "wolf")),
+                2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS);
+
+        assertEquals(2, mirror.snapshotApplies);
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+    }
+
+    @Test
+    void motionKeepsDrivingAFrozenMirror() {
+        // The freeze is a roster freeze, not a position freeze: a beaten survivor still flees.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        registry.applyMotion(List.of(new CoopNpcFleetMotion("a", "corvus", 5f, 5f, 1f, 1f, 150f, 90f)));
+
+        assertEquals(1, mirror.motionApplies);
+    }
+
+    @Test
+    void reMarkingRefreshesTheClockWithoutForgettingThePreBattleRoster() {
+        // The freeze is refreshed on the battle's status cadence so a fight longer than the timeout
+        // does not come back to an already-thawed mirror.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+        registry.markPendingReconcile("a",
+                2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS - 1);
+
+        registry.applySet(set(fleet("a", "corvus", "wolf")),
+                2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS + 1000L);
+
+        assertEquals(1, mirror.snapshotApplies, "the refreshed freeze still holds");
+        assertEquals(List.of("a"), new ArrayList<>(registry.pendingReconcileIds()));
+    }
+
+    @Test
+    void markingAnUnknownFleetIsANoOp() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+
+        registry.markPendingReconcile("ghost", 1000L);
+        registry.markPendingReconcile("", 1000L);
+
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+    }
+
+    @Test
+    void theFreezePredicateIsPureAndTimeBounded() {
+        assertTrue(CoopFleetMirrorRegistry.shouldDeferReassert("hash-1", 0L, "hash-1", 5000L));
+        assertFalse(CoopFleetMirrorRegistry.shouldDeferReassert("hash-1", 0L, "hash-2", 5000L),
+                "a changed roster means the host reconciled");
+        assertFalse(CoopFleetMirrorRegistry.shouldDeferReassert("hash-1", 0L, "hash-1",
+                        CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS),
+                "the freeze expires so it can never diverge permanently");
+    }
 }

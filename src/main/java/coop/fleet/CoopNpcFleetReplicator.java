@@ -110,6 +110,18 @@ public final class CoopNpcFleetReplicator {
         CoopFullFidelitySystemDriver.reset();
     }
 
+    /**
+     * Phase 15: forget the last-sent hash so the next tick rebroadcasts the full set even if nothing
+     * structural changed. Called after a {@code BATTLE_RESULT} is reconciled — a set that still
+     * hashes the same (a clean disengage with no losses) is exactly the signal the guest needs to
+     * release the mirrors it froze pending reconciliation
+     * ({@link CoopFleetMirrorRegistry#markPendingReconcile}), so the send must not be optimised away.
+     */
+    public void forceResendSet() {
+        lastSetHash = "";
+        nextSetAtMillis = 0L;
+    }
+
     public String lastSetHash() {
         return lastSetHash;
     }

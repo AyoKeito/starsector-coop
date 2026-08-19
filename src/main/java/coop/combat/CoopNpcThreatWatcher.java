@@ -228,6 +228,36 @@ public final class CoopNpcThreatWatcher {
         return ejectCount;
     }
 
+    /**
+     * Phase 15 fold-in: restart a fleet's {@code ENGAGE_GUEST} cooldown clock because the battle it
+     * was in has just ended.
+     *
+     * <p>This is <b>not</b> a longer cooldown — {@link #ENGAGE_COOLDOWN_MILLIS} is unchanged at 15 s,
+     * which is vanilla pacing. It is about <em>when the 15 s starts</em>. The cooldown was previously
+     * stamped when the handoff was <em>sent</em>, so a fight lasting longer than 15 s left the fleet
+     * already re-armed the instant the guest came back — and the reconciliation that would have told
+     * the watcher the fleet is now a beaten wreck ({@code pickEncounterOption} would stop returning
+     * ENGAGE) is still in flight at that moment. Restarting the clock at battle end covers the whole
+     * {@code BATTLE_END} &rarr; {@code BATTLE_RESULT} &rarr; {@code NPC_FLEET_SET} round trip.
+     *
+     * <p>Called for both directions: the host's own battles (via the reconciler) and the guest's (via
+     * the {@code BATTLE_END} the bridge receives, which carries the battle's {@code coopFleetId}s).
+     */
+    public void noteBattleConcluded(String coopFleetId, long nowMillis) {
+        if (coopFleetId == null || coopFleetId.isEmpty()) {
+            return;
+        }
+        cooldowns.mark(cooldownKey(coopFleetId, Action.ENGAGE_GUEST), nowMillis);
+        CoopLog.debug(CoopNpcThreatWatcher.class, "Coop restarted the ENGAGE_GUEST cooldown at battle"
+                + " end coopFleetId=" + coopFleetId);
+    }
+
+    /** True when this fleet may be handed off again (test seam for {@link #noteBattleConcluded}). */
+    public boolean isEngageReady(String coopFleetId, long nowMillis) {
+        return cooldowns.isReady(cooldownKey(coopFleetId, Action.ENGAGE_GUEST), nowMillis,
+                ENGAGE_COOLDOWN_MILLIS);
+    }
+
     /** Host-only, once per pump frame while the session is streaming. Never throws. */
     public void tick(SectorAPI sector, long nowMillis, boolean coopBattleActive) {
         if (sector == null) {

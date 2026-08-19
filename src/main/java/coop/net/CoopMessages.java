@@ -48,6 +48,7 @@ public final class CoopMessages {
         BATTLE_BEGIN,
         BATTLE_STATUS,
         BATTLE_END,
+        BATTLE_RESULT,
         ENGAGE_GUEST,
         DIALOG_BEGIN,
         PING,
@@ -350,8 +351,8 @@ public final class CoopMessages {
                 "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
     }
 
-    // ---- Phase 14: solo own-fleet combat + spectator bridge ------------------------------------
-    // All five ride reliable TCP. There is no UDP combat stream and no disconnect protocol: combat
+    // ---- Phase 14/15: solo own-fleet combat + spectator bridge + result reconciliation -----------
+    // All of them ride reliable TCP. There is no UDP combat stream and no disconnect protocol: combat
     // is entirely local to whoever fights, and a dropped connection is detected locally by each side.
 
     /** Which client-side path opened a coop battle (diagnostics + spectator wording). */
@@ -408,6 +409,31 @@ public final class CoopMessages {
                 "{\"battleId\":\"" + escapeJson(requireText(battleId, "battleId")) + "\","
                         + "\"playerId\":\"" + escapeJson(playerId == null ? "" : playerId) + "\","
                         + "\"outcome\":\"" + escapeJson(outcome == null ? "" : outcome) + "\"}");
+    }
+
+    /**
+     * Phase 15 engaging client &rarr; host: the <em>campaign-level</em> consequences of a finished
+     * battle, so the host's authoritative Phase 9 NPC fleet set can absorb them. Reliable TCP,
+     * one-shot per battle, idempotent on {@code battleId}.
+     *
+     * <p>{@code body} is the self-contained delimited blob from
+     * {@link coop.combat.CoopBattleResult#encodeBody()} (destroyed {@code coopFleetId}s + surviving
+     * fleets with their post-battle rosters) — the envelope parser has no arrays.
+     *
+     * <p><b>It deliberately carries no reputation and no spoils.</b> Faction rep already reaches the
+     * host on the Phase 12 {@code GUEST_REP_DELTA} path, and spoils are the fighter's own by the v1
+     * reward rule; see {@link coop.combat.CoopBattleResult} for the full argument.
+     */
+    public static Message battleResult(String sessionId, long seq, long sentAtMillis,
+                                       String battleId, String engagingPlayerId, String outcome,
+                                       int engagingFleetSize, String body) {
+        return new Message(Type.BATTLE_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"battleId\":\"" + escapeJson(requireText(battleId, "battleId")) + "\","
+                        + "\"engagingPlayerId\":\""
+                        + escapeJson(engagingPlayerId == null ? "" : engagingPlayerId) + "\","
+                        + "\"outcome\":\"" + escapeJson(outcome == null ? "" : outcome) + "\","
+                        + "\"engagingFleetSize\":" + engagingFleetSize + ","
+                        + "\"body\":\"" + escapeJson(body == null ? "" : body) + "\"}");
     }
 
     /**

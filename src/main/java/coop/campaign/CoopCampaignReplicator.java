@@ -606,7 +606,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         String marketId = CoopMessages.requiredPayloadString(message, "marketId");
         MarketAPI market = findMarket(marketId);
         if (market == null) {
-            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_OPEN for unknown market=" + marketId);
+            // Expected, not an anomaly: the guest opens uncolonized/procgen entities (derelicts,
+            // survey targets, ruins) whose "market" is a local, unregistered MarketAPI with no
+            // counterpart in the host's economy. There is nothing canonical to snapshot, so the
+            // guest's own local one stands. Debug level so a routine exploration run does not spam
+            // warnings.
+            CoopLog.debug(CoopCampaignReplicator.class,
+                    "Coop MARKET_OPEN skipped: no host-side market for id=" + marketId
+                            + " (uncolonized/procgen entity; the guest keeps its local one)");
             return;
         }
         broadcastMarketSnapshot(market);
