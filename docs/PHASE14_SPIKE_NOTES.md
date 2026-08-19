@@ -216,6 +216,8 @@ if the pre-0.8 reading is right.
 
 ## Known issues accepted for later (2026-08-19)
 
+- **`data/campaign/rules.csv` ships two release blockers.** The `coopZiggurat` test start (option 6 in character creation: Ziggurat + 1,000,000 credits) must be gated behind a dev/debug flag or deleted before public release, and the forced tutorial skip (`coopNgcEasyPicked` / `coopNgcNormalPicked` overriding the vanilla difficulty rows) has to be revisited alongside it — solo players will want the vanilla tutorial choice back, while a coop campaign must keep it forced-skip because the tutorial rewrites Galatia state and would diverge host from guest. Owner: Phase 23 packaging.
+
 - **`Coop MARKET_OPEN for unknown market=<procgen id>` warns on the host** when the guest interacts
   with an uncolonized/procgen planet whose placeholder market is not in the economy registry
   (observed: `market_system_184c:planet_2` in Cymenemon). Likely benign — nothing real to sync on an

@@ -1,0 +1,40 @@
+id,trigger,conditions,script,text,options,notes
+"# Coop mod rule additions. Starsector merges a mod's data/campaign/rules.csv onto the vanilla",,,,,,
+"# ruleset, so only the added/overriding rows live here.",,,,,,
+,,,,,,
+"# (1) COOP TEST START -- a 6th option in the ""Your most recent occupation was as..."" list.",,,,,,
+"# Grants a Ziggurat + 1,000,000 credits + crew/supplies/fuel so two clients can get into a",,,,,,
+"# real fight without grinding an early game first. Chains into NGCDifficultyOptions, exactly",,,,,,
+"# like the vanilla explorer/merc/freelancer options, so the rest of creation is unchanged.",,,,,,
+"# MUST be gated or removed before any public release -- see docs/PHASE14_SPIKE_NOTES.md.",,,,,,
+coopZigguratStart,AddNewGameChoices,,"SetTooltip coopZiggurat ""COOP TEST START - not intended for normal play.\n\nA Ziggurat-class phase battleship (Experimental variant), 1,000,000 credits, and a full complement of crew, supplies and fuel.\n\nExists so a coop session can start with something worth fighting over.""",,"6:coopZiggurat:COOP TEST - a phase experiment survivor, commanding a Ziggurat (1,000,000 credits)",
+coopZigguratPicked,NewGameOptionSelected,$option == coopZiggurat,"NGCAddShip ziggurat_Experimental
+NGCAddCredits 1000000
+NGCAddCargo RESOURCES crew 50
+NGCAddCargo RESOURCES supplies 100
+NGCAddCargo RESOURCES fuel 150
+FireAll NGCDifficultyOptions",,,
+,,,,,,
+"# (2) FORCED TUTORIAL SKIP -- for every start option, not just the coop test start.",,,,,,
+"# The vanilla tutorial rewrites Galatia system state (TutorialMissionIntel, respawn flags, the",,,,,,
+"# Ancyra/Jangala contacts), which would diverge host and guest in a seed-locked coop campaign.",,,,,,
+"# Skipping is correct coop behaviour, not just a test shortcut.",,,,,,
+"# These two rows outscore the vanilla ngcEasyPicked/ngcNormalPicked rows (NewGameOptionSelected",,,,,,
+"# is dispatched via FireBest, so highest condition score wins) and replace their",,,,,,
+"# ""FireAll NGCTutorialOptions"" with the body of the vanilla ngcSkipTutorialPicked rule. Nothing",,,,,,
+"# else fires NGCTutorialOptions, so the tutorial question is never asked. This also bypasses the",,,,,,
+"# vanilla NGCCanSkipTutorial gate, which is intended -- a fresh profile can still start coop.",,,,,,
+"# The spacer start (option 5) already skips the tutorial on its own path and is untouched.",,,,,,
+"# Revisit at Phase 23 packaging -- see docs/PHASE14_SPIKE_NOTES.md.",,,,,,
+coopNgcEasyPicked,NewGameOptionSelected,$option == ngcEasy score:1000,"NGCSetDifficulty easy
+$ngcSkipTutorial = true
+NGCAddCharacterPoints 1
+NGCSetStartingLocation Corvus -2500 3000
+NGCAddStandardStartingScript
+NGCDone",,,
+coopNgcNormalPicked,NewGameOptionSelected,$option == ngcNormal score:1000,"NGCSetDifficulty normal
+$ngcSkipTutorial = true
+NGCAddCharacterPoints 1
+NGCSetStartingLocation Corvus -2500 3000
+NGCAddStandardStartingScript
+NGCDone",,,
