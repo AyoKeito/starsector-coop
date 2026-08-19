@@ -216,6 +216,12 @@ if the pre-0.8 reading is right.
 
 ## Known issues accepted for later (2026-08-19)
 
+- **`Coop MARKET_OPEN for unknown market=<procgen id>` warns on the host** when the guest interacts
+  with an uncolonized/procgen planet whose placeholder market is not in the economy registry
+  (observed: `market_system_184c:planet_2` in Cymenemon). Likely benign — nothing real to sync on an
+  uncolonized world (survey/salvage are per-player) — but the handler should recognize non-economy
+  markets and skip quietly instead of warning. Owner: Phase 12c follow-up.
+
 - **Intermittent grey (unidentified) pirate fleets on the guest** persist after the detectability
   operand fix (commit e0d9b21) removed the host-state contamination. User decision: document, do not
   dig further now. Remaining suspects: per-fleet `sensorStrength` alternating between streamed and
