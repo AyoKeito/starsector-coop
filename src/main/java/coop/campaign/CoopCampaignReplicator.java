@@ -1497,11 +1497,23 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                         CoopOrbitSync.signature(focusId, e.getCircularOrbitRadius(), e.getCircularOrbitPeriod()),
                         k -> new ArrayList<>()).add(e);
             }
+            // Id index of the target location's entities, built in one pass. The old code called
+            // sector.getEntityById() per entry — a sector-wide scan across every location — and at
+            // ~70 entries/s that was a measured 67-82 ms frame stall once per second on the guest
+            // (2026-08-20 frame-profiler session). Every body in the snapshot lives in one host
+            // location, and under the seed-lock fingerprint the guest's same-id bodies live in the
+            // same system, so bounding the lookup to the resolved location is also the safer match.
+            Map<String, SectorEntityToken> localById = new HashMap<>();
+            for (SectorEntityToken e : location.getAllEntities()) {
+                if (e != null && e.getId() != null) {
+                    localById.putIfAbsent(e.getId(), e);
+                }
+            }
             int snapped = 0;
             for (CoopOrbitSync.OrbitEntry entry : entries) {
-                SectorEntityToken local = resolveLocalBody(entry, sector, bySignature);
+                SectorEntityToken local = resolveLocalBody(entry, localById, bySignature);
                 if (local != null) {
-                    applyOrbitTo(local, entry, sector);
+                    applyOrbitTo(local, entry, localById, sector);
                     snapped++;
                 }
             }
@@ -1520,9 +1532,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      * orbit itself differs — which is exactly why a signature-only match misses it. Falls back to the
      * orbit signature for any body whose id doesn't resolve.
      */
-    private SectorEntityToken resolveLocalBody(CoopOrbitSync.OrbitEntry entry, SectorAPI sector,
+    private SectorEntityToken resolveLocalBody(CoopOrbitSync.OrbitEntry entry,
+                                               Map<String, SectorEntityToken> localById,
                                                Map<String, List<SectorEntityToken>> bySignature) {
-        SectorEntityToken byId = sector.getEntityById(entry.entityId());
+        SectorEntityToken byId = localById.get(entry.entityId());
         if (byId != null && isSyncableOrbit(byId)) {
             removeFromSignaturePool(bySignature, byId);
             return byId;
@@ -1538,11 +1551,17 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      * — a non-deterministically generated orbit like the fringe jump-point — reset the whole circular
      * orbit so distance and angle both match the host.
      */
-    private void applyOrbitTo(SectorEntityToken local, CoopOrbitSync.OrbitEntry entry, SectorAPI sector) {
+    private void applyOrbitTo(SectorEntityToken local, CoopOrbitSync.OrbitEntry entry,
+                              Map<String, SectorEntityToken> localById, SectorAPI sector) {
         boolean orbitGeometryDiffers = Math.abs(local.getCircularOrbitRadius() - entry.radius()) > 1f
                 || Math.abs(local.getCircularOrbitPeriod() - entry.period()) > 0.5f;
         if (orbitGeometryDiffers) {
-            SectorEntityToken focus = sector.getEntityById(entry.focusId());
+            // Rare branch (non-deterministic orbit like the fringe jump-point), so the sector-wide
+            // lookup fallback is affordable here; the location map still catches the common case.
+            SectorEntityToken focus = localById.get(entry.focusId());
+            if (focus == null && entry.focusId() != null) {
+                focus = sector.getEntityById(entry.focusId());
+            }
             if (focus != null) {
                 local.setCircularOrbit(focus, entry.angle(), entry.radius(), entry.period());
                 return;
