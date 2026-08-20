@@ -615,8 +615,8 @@
         "CoopShipMods D-mod/S-mod replication"
       ],
       "residue": [
-        "pursuit-escape scenario deferred again → Phase 17 smoke",
-        "NPC deflate/inflate capture latch (post-smoke fallout fix)"
+        "pursuit-escape verified 2026-08-20 follow-up session",
+        "NPC deflate/inflate capture latch + TCP frame cap raise (post-smoke fallout fixes)"
       ],
       "note": "Smoke-verified 2026-08-20. File export cancelled (sandbox-blocked I/O); snapshot is write-only disaster-recovery in v1; host save now mod-dependent (user decision)"
     },
