@@ -40,6 +40,7 @@ import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
 import coop.util.CoopDebug;
+import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
 
 import java.util.List;
@@ -67,6 +68,54 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String PLAYER_NAME_PROPERTY = "coop.playerName";
     /** Explicit-consent override: adopt the host's campaign id over a mismatching stored one (6b). */
     static final String ADOPT_CAMPAIGN_ID_PROPERTY = "coop.adoptCampaignId";
+
+    // CoopFrameProfiler section keys. Compile-time constants so the hot path never builds a string.
+    private static final String SECTION_CFG_PROPERTIES = "cfg.systemProperties";
+    private static final String SECTION_CFG_MEMORY_FLAGS = "cfg.memoryFlags";
+    private static final String SECTION_FLUSH_OUTBOUND_PRE = "net.flushOutbound.pre";
+    private static final String SECTION_DETECT_DISCONNECT = "net.detectPeerDisconnect";
+    private static final String SECTION_GUEST_INPUT_BLOCKER = "input.guestBlocker";
+    private static final String SECTION_LOBBY_HELLO = "lobby.hello";
+    private static final String SECTION_DRAIN_INBOUND = "net.drainInbound";
+    private static final String SECTION_MIRROR_SHIELDS = "fleet.mirrorShields";
+    private static final String SECTION_HANDSHAKE_MANIFEST = "handshake.manifest";
+    private static final String SECTION_SEED_LOCK_REQUEST = "seed.lockRequest";
+    private static final String SECTION_HOLD_HOST_PAUSED = "session.holdHostPaused";
+    private static final String SECTION_BATTLE_BRIDGE = "battle.bridge";
+    private static final String SECTION_SHARED_PAUSE = "time.sharedPause";
+    private static final String SECTION_TIME_APPLY = "time.applySnapshot";
+    private static final String SECTION_TIME_SEND = "time.sendSnapshot";
+    private static final String SECTION_FLEET_MIRROR = "fleet.syncMirror";
+    private static final String SECTION_FLEET_DATAGRAMS = "fleet.drainDatagrams";
+    private static final String SECTION_FLEET_SNAPSHOT_SEND = "fleet.sendSnapshot";
+    private static final String SECTION_GUEST_SNAPSHOT_SEND = "save.sendGuestSnapshot";
+    private static final String SECTION_SAVE_CHECKPOINT = "save.tickCheckpoint";
+    private static final String SECTION_NPC_REPLICATION = "npc.syncReplication";
+    private static final String SECTION_NPC_THREAT_WATCHER = "npc.threatWatcher";
+    private static final String SECTION_BASE_REPLICATION = "base.syncReplication";
+    private static final String SECTION_INTERACTION_GATE = "interaction.gate";
+    private static final String SECTION_DEBUG_DIALOG_STATE = "debug.dialogState";
+    private static final String SECTION_COMBAT_SPIKE = "combat.spike";
+    private static final String SECTION_REPLICATOR_SYNC = "replicator.sync";
+    private static final String SECTION_REPLICATOR_WORLD_DELTAS = "replicator.worldDeltas";
+    private static final String SECTION_REPLICATOR_ORBIT_SYNC = "replicator.orbitSync";
+    private static final String SECTION_REPLICATOR_REP_SYNC = "replicator.playerRepSync";
+    private static final String SECTION_PING = "net.sendPing";
+    private static final String SECTION_FLUSH_OUTBOUND_POST = "net.flushOutbound.post";
+    /**
+     * Per-message-type section keys, precomputed so the inbound drain never concatenates a string:
+     * indexed by {@link CoopMessages.Type#ordinal()}.
+     */
+    private static final String[] SECTION_BY_MESSAGE_TYPE = buildMessageTypeSections();
+
+    private static String[] buildMessageTypeSections() {
+        CoopMessages.Type[] types = CoopMessages.Type.values();
+        String[] names = new String[types.length];
+        for (int i = 0; i < types.length; i++) {
+            names[i] = "msg." + types[i].name();
+        }
+        return names;
+    }
 
     private final CoopNetService service;
     private final CoopSessionState sessionState;
@@ -122,6 +171,12 @@ public class CoopNetPump implements EveryFrameScript {
     // host pause key itself is captured by CoopHostPauseInputListener, not here).
     private boolean hostEffectivePauseApplied;
     private boolean hostSharedPauseInitialized;
+    /**
+     * Frame profiler (diagnostic only, dormant unless {@code coop.debug.frameProfile} is on). Freshly
+     * installed per pump so a game reload starts from clean accumulators rather than folding a dead
+     * session's numbers into the new one.
+     */
+    private final CoopFrameProfiler profiler = CoopFrameProfiler.installFresh();
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -263,40 +318,78 @@ public class CoopNetPump implements EveryFrameScript {
 
     @Override
     public void advance(float amount) {
+        // Instrumentation only (CoopFrameProfiler): dormant unless -Dcoop.debug.frameProfile=true or
+        // the $coopFrameProfile memory flag is set, in which case each split() below is one clock read.
+        // Disabled, every call here is a static boolean read and a return.
+        profiler.beginFrame();
+        long t = profiler.start();
         maybeStartFromSystemProperties();
+        t = profiler.split(SECTION_CFG_PROPERTIES, t);
         maybeStartFromMemoryFlags();
+        t = profiler.split(SECTION_CFG_MEMORY_FLAGS, t);
         service.flushOutbound();
+        t = profiler.split(SECTION_FLUSH_OUTBOUND_PRE, t);
         detectPeerDisconnect();
+        t = profiler.split(SECTION_DETECT_DISCONNECT, t);
         syncGuestInputBlocker();
+        t = profiler.split(SECTION_GUEST_INPUT_BLOCKER, t);
         maybeSendLobbyHello();
+        t = profiler.split(SECTION_LOBBY_HELLO, t);
         drainInbound();
+        t = profiler.split(SECTION_DRAIN_INBOUND, t);
         assertMirrorEngagementShields();
+        t = profiler.split(SECTION_MIRROR_SHIELDS, t);
         maybeSendHandshakeManifest();
+        t = profiler.split(SECTION_HANDSHAKE_MANIFEST, t);
         maybeSendSeedLockRequest();
+        t = profiler.split(SECTION_SEED_LOCK_REQUEST, t);
         maybeHoldHostPausedUntilSessionReady();
+        t = profiler.split(SECTION_HOLD_HOST_PAUSED, t);
         // Phase 14 runs before syncSharedPause so a battle that began (or ended) this frame is already
         // reflected in the combat intent when the host computes its effective pause.
         tickBattleBridge();
+        t = profiler.split(SECTION_BATTLE_BRIDGE, t);
         syncSharedPause();
+        t = profiler.split(SECTION_SHARED_PAUSE, t);
         maybeApplyTimeSnapshot();
+        t = profiler.split(SECTION_TIME_APPLY, t);
         maybeSendTimeSnapshot();
+        t = profiler.split(SECTION_TIME_SEND, t);
         syncFleetMirror();
+        t = profiler.split(SECTION_FLEET_MIRROR, t);
         drainFleetDatagrams();
+        t = profiler.split(SECTION_FLEET_DATAGRAMS, t);
         maybeSendFleetSnapshot();
+        t = profiler.split(SECTION_FLEET_SNAPSHOT_SEND, t);
         maybeSendGuestSnapshot();
+        t = profiler.split(SECTION_GUEST_SNAPSHOT_SEND, t);
         tickSaveCheckpoint();
+        t = profiler.split(SECTION_SAVE_CHECKPOINT, t);
         syncNpcReplication();
+        t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();
+        t = profiler.split(SECTION_NPC_THREAT_WATCHER, t);
         syncBaseReplication();
+        t = profiler.split(SECTION_BASE_REPLICATION, t);
         syncInteractionGate();
+        t = profiler.split(SECTION_INTERACTION_GATE, t);
         debugDialogState();
+        t = profiler.split(SECTION_DEBUG_DIALOG_STATE, t);
         tickCombatSpike();
+        t = profiler.split(SECTION_COMBAT_SPIKE, t);
         syncCampaignReplicator();
+        t = profiler.split(SECTION_REPLICATOR_SYNC, t);
         campaignReplicator.tickWorldDeltas();
+        t = profiler.split(SECTION_REPLICATOR_WORLD_DELTAS, t);
         campaignReplicator.tickOrbitSync();
+        t = profiler.split(SECTION_REPLICATOR_ORBIT_SYNC, t);
         campaignReplicator.tickPlayerRepSync();
+        t = profiler.split(SECTION_REPLICATOR_REP_SYNC, t);
         maybeSendPing();
+        t = profiler.split(SECTION_PING, t);
         service.flushOutbound();
+        profiler.record(SECTION_FLUSH_OUTBOUND_POST, t);
+        profiler.endFrame();
     }
 
     private void maybeStartFromSystemProperties() {
@@ -441,12 +534,16 @@ public class CoopNetPump implements EveryFrameScript {
             // out-of-order lobby messages). Letting one escape kills EveryFrameScript.advance() and
             // with it the whole pump, so a version-skewed peer or a stray connection could take the
             // session down. One bad message is a bug to log, never a peer to disconnect (Phase 12b).
+            long dispatchStart = profiler.start();
             try {
                 dispatchInbound(message);
             } catch (RuntimeException ex) {
                 CoopLog.warn(CoopNetPump.class, "Coop dropped malformed/unexpected message type="
                         + message.type() + " seq=" + message.seq(), ex);
             }
+            // Per-type so one expensive handler stands out in the summary rather than hiding inside
+            // the aggregate drain cost. Runs on the throwing path too: the catch above swallows.
+            profiler.record(SECTION_BY_MESSAGE_TYPE[message.type().ordinal()], dispatchStart);
         }
     }
 
@@ -1414,7 +1511,13 @@ public class CoopNetPump implements EveryFrameScript {
         }
         try {
             String encoded = CoopMessages.requiredPayloadString(message, "set");
-            npcFleetRegistry.applySet(CoopNpcFleetSetSnapshot.decode(encoded));
+            // Split-stamped so the profiler can separate decode cost from apply cost; both stamps are
+            // 0 and noteNpcSetApply is a no-op when profiling is off.
+            long decodeStart = profiler.start();
+            CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.decode(encoded);
+            long applyStart = profiler.start();
+            npcFleetRegistry.applySet(set);
+            profiler.noteNpcSetApply(encoded.length(), decodeStart, applyStart);
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply NPC_FLEET_SET", ex);
         }

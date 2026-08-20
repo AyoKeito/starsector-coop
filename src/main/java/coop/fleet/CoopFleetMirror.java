@@ -11,6 +11,7 @@ import com.fs.starfarer.api.impl.campaign.DModManager;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.loading.VariantSource;
 import coop.util.CoopDebug;
+import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
@@ -512,6 +513,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     /** @return true when every member in the snapshot was actually built and attached. */
     private boolean rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
+        // Diagnostic counter only; a no-op unless the frame profiler is enabled.
+        CoopFrameProfiler.noteRosterRebuild();
         for (FleetMemberAPI existing : mirrorFleet.getFleetData().getMembersListCopy()) {
             mirrorFleet.getFleetData().removeFleetMember(existing);
         }
