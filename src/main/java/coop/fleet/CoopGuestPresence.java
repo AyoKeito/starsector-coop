@@ -3,7 +3,6 @@ package coop.fleet;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
-import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.fleets.RouteManager;
 import com.fs.starfarer.api.impl.campaign.fleets.RouteManager.RouteData;
 import coop.util.CoopDebug;
@@ -128,7 +127,10 @@ public final class CoopGuestPresence {
     }
 
     private void runPass(SectorAPI sector) {
-        CampaignFleetAPI mirror = findGuestMirror(sector);
+        // The mod's single authoritative mirror scan (see CoopGuestMirrorHandle): this pass needed one
+        // anyway, and publishing its result here is what bounds how long a stale handle can survive to
+        // one interval. Every other consumer reads the O(1) handle instead of scanning.
+        CampaignFleetAPI mirror = CoopGuestMirrorHandle.reresolve(sector);
         LocationAPI system = mirror == null ? null : mirror.getContainingLocation();
         if (system == null) {
             if (!armedSystemId.isEmpty()) {
@@ -225,45 +227,4 @@ public final class CoopGuestPresence {
         }
     }
 
-    // ---- Engine lookups --------------------------------------------------------------------------
-
-    /** The Phase 8 guest-player mirror, identified by its {@code $coopMirrorFleet} memory flag. */
-    static CampaignFleetAPI findGuestMirror(SectorAPI sector) {
-        if (sector == null) {
-            return null;
-        }
-        for (LocationAPI location : allLocations(sector)) {
-            List<CampaignFleetAPI> fleets = location.getFleets();
-            if (fleets == null) {
-                continue;
-            }
-            for (CampaignFleetAPI fleet : fleets) {
-                if (fleet == null) {
-                    continue;
-                }
-                MemoryAPI memory = fleet.getMemoryWithoutUpdate();
-                if (memory != null && memory.getBoolean(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG)) {
-                    return fleet;
-                }
-            }
-        }
-        return null;
-    }
-
-    private static List<LocationAPI> allLocations(SectorAPI sector) {
-        List<LocationAPI> locations = new ArrayList<>();
-        List<LocationAPI> all = sector.getAllLocations();
-        if (all != null) {
-            for (LocationAPI location : all) {
-                if (location != null) {
-                    locations.add(location);
-                }
-            }
-        }
-        LocationAPI hyperspace = sector.getHyperspace();
-        if (hyperspace != null && !locations.contains(hyperspace)) {
-            locations.add(hyperspace);
-        }
-        return locations;
-    }
 }

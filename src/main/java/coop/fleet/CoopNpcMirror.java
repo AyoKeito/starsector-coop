@@ -20,9 +20,14 @@ public interface CoopNpcMirror {
      * <p>{@code playerInteractionTarget} is the local player fleet's current interaction target,
      * supplied by the pump (the mirrors never read {@code Global} themselves). The one mirror that
      * <em>is</em> that target has its shield cleared instead of asserted, which is what lets the guest
-     * engage a host-owned NPC fleet at all; see {@link CoopFleetMirror#assertEngagementShield(Object)}.
+     * engage a host-owned NPC fleet at all; see
+     * {@link CoopFleetMirror#assertEngagementShield(Object, long)}.
+     *
+     * <p>{@code nowMillis} is the pump's wall clock. The pass runs every frame; the engine call it
+     * makes is rate-limited against this clock, because the fader it refreshes lasts ~1 s and building
+     * a new one every frame per mirror is pure allocation.
      */
-    default void assertEngagementShield(Object playerInteractionTarget) {
+    default void assertEngagementShield(Object playerInteractionTarget, long nowMillis) {
     }
 
     /**

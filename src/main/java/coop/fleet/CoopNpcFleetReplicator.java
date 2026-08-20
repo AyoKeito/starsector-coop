@@ -10,6 +10,7 @@ import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
 import coop.util.CoopDebug;
+import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
@@ -48,6 +49,13 @@ public final class CoopNpcFleetReplicator {
     private static final long SET_SYNC_INTERVAL_MILLIS = 1000L;
     private static final long MOTION_INTERVAL_MILLIS = 100L;
 
+    // CoopFrameProfiler section keys, compile-time constants so the hot path never builds a string.
+    // Together these account for the pump's npc.syncReplication total on the host.
+    private static final String SECTION_SYSTEM_DRIVER = "npc.systemDriver";
+    private static final String SECTION_GUEST_PRESENCE = "npc.guestPresence";
+    private static final String SECTION_SEND_SET = "npc.sendSet";
+    private static final String SECTION_SEND_MOTION = "npc.sendMotion";
+
     private final CoopNetService service;
     private final CoopSessionState sessionState;
     private final LongSupplier clockMillis;
@@ -68,39 +76,53 @@ public final class CoopNpcFleetReplicator {
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
     }
 
-    /** Called every frame on the host while the session is streaming. */
+    /**
+     * Called every frame on the host while the session is streaming.
+     *
+     * <p>The four steps are separately profiled through {@link CoopFrameProfiler}'s static seam: the
+     * pump can only time the whole call, and "NPC replication costs 6 ms" is not an actionable
+     * measurement when the four things inside it have nothing to do with each other. Every
+     * {@code section*} call below is a static boolean read and a return when profiling is off.
+     */
     public void tick() {
         long now = clockMillis.getAsLong();
         SectorAPI sector = sectorOrNull();
         if (sector == null) {
             return;
         }
+        long t = CoopFrameProfiler.sectionStart();
         // First, before anything samples a position: run the guest's star system at the host's real
         // frame rate instead of the engine's once-per-60-frames stride, so what we ship below is a
         // full-fidelity simulation rather than a 1 Hz one. Falls back silently to the stride (and the
         // smoother in replicatedMotion) whenever it cannot or should not run.
         CoopFullFidelitySystemDriver.tick(sector);
+        t = CoopFrameProfiler.sectionSplit(SECTION_SYSTEM_DRIVER, t);
         // Before sampling the population: vanilla only turns RouteManager routes into real fleets near
         // the *player* fleet, which on the host is never the guest. Publish the guest mirror as a
         // second presence so the forked RouteManager spawns (and keeps) fleets around it natively,
         // before this tick snapshots and ships the set.
         guestPresence.tick(sector, now);
+        CoopFrameProfiler.sectionRecord(SECTION_GUEST_PRESENCE, t);
         if (now >= nextSetAtMillis) {
+            long setStart = CoopFrameProfiler.sectionStart();
             try {
                 sendSetIfChanged(sector, now);
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopNpcFleetReplicator.class, "Failed to send NPC_FLEET_SET", ex);
             } finally {
                 nextSetAtMillis = now + SET_SYNC_INTERVAL_MILLIS;
+                CoopFrameProfiler.sectionRecord(SECTION_SEND_SET, setStart);
             }
         }
         if (now >= nextMotionAtMillis) {
+            long motionStart = CoopFrameProfiler.sectionStart();
             try {
                 sendMotion(sector, now);
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopNpcFleetReplicator.class, "Failed to send NPC_FLEET_MOTION", ex);
             } finally {
                 nextMotionAtMillis = now + MOTION_INTERVAL_MILLIS;
+                CoopFrameProfiler.sectionRecord(SECTION_SEND_MOTION, motionStart);
             }
         }
     }
@@ -188,7 +210,9 @@ public final class CoopNpcFleetReplicator {
     }
 
     private void sendMotion(SectorAPI sector, long now) {
-        CampaignFleetAPI guestMirror = CoopGuestPresence.findGuestMirror(sector);
+        // O(1) handle, not a sector scan: this runs at 10 Hz and wants the same fleet the presence
+        // pass already resolved (see CoopGuestMirrorHandle).
+        CampaignFleetAPI guestMirror = CoopGuestMirrorHandle.current();
         Set<String> playerLocations = playerOccupiedLocationIds(sector, guestMirror);
         if (playerLocations.isEmpty()) {
             return;
@@ -300,7 +324,7 @@ public final class CoopNpcFleetReplicator {
     /** Iterates every real NPC fleet: not the local player, not a coop mirror, not a station. */
     private void forEachReplicatedFleet(SectorAPI sector, Consumer<CampaignFleetAPI> consumer) {
         CampaignFleetAPI player = sector.getPlayerFleet();
-        forEachLocation(sector, loc -> {
+        CoopLocations.forEach(sector, loc -> {
             for (CampaignFleetAPI fleet : loc.getFleets()) {
                 if (fleet == null || fleet == player) {
                     continue;
@@ -311,18 +335,6 @@ public final class CoopNpcFleetReplicator {
                 consumer.accept(fleet);
             }
         });
-    }
-
-    private void forEachLocation(SectorAPI sector, Consumer<LocationAPI> consumer) {
-        for (LocationAPI loc : sector.getAllLocations()) {
-            if (loc != null) {
-                consumer.accept(loc);
-            }
-        }
-        LocationAPI hyperspace = sector.getHyperspace();
-        if (hyperspace != null && !sector.getAllLocations().contains(hyperspace)) {
-            consumer.accept(hyperspace);
-        }
     }
 
     private static boolean isCoopMirror(CampaignFleetAPI fleet) {

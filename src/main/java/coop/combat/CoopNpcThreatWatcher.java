@@ -15,6 +15,7 @@ import com.fs.starfarer.api.campaign.ai.StrategicModulePlugin;
 import com.fs.starfarer.api.campaign.ai.TacticalModulePlugin;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import coop.fleet.CoopGuestMirrorHandle;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
@@ -601,7 +602,11 @@ public final class CoopNpcThreatWatcher {
             return;
         }
         try {
-            CampaignFleetAPI mirror = findGuestMirror(sector);
+            // O(1) handle rather than a sector-wide scan (see CoopGuestMirrorHandle). This used to be
+            // the first statement of every frame — a full location+fleet walk, above the scan throttle
+            // below, with no early exit on a host whose guest had not connected yet. It stays above the
+            // throttle because the battle eject under it is load-bearing per frame; it is just free now.
+            CampaignFleetAPI mirror = CoopGuestMirrorHandle.current();
             if (mirror == null) {
                 return;
             }
@@ -1153,35 +1158,12 @@ public final class CoopNpcThreatWatcher {
         }
     }
 
-    private static CampaignFleetAPI findGuestMirror(SectorAPI sector) {
-        for (LocationAPI location : sector.getAllLocations()) {
-            if (location == null) {
-                continue;
-            }
-            for (CampaignFleetAPI fleet : fleetsIn(location)) {
-                if (fleet != null && isPlayerMirror(fleet)) {
-                    return fleet;
-                }
-            }
-        }
-        return null;
-    }
-
     private static List<CampaignFleetAPI> fleetsIn(LocationAPI location) {
         try {
             List<CampaignFleetAPI> fleets = location.getFleets();
             return fleets == null ? List.of() : fleets;
         } catch (RuntimeException | LinkageError ex) {
             return List.of();
-        }
-    }
-
-    private static boolean isPlayerMirror(CampaignFleetAPI fleet) {
-        try {
-            MemoryAPI memory = fleet.getMemoryWithoutUpdate();
-            return memory != null && memory.getBoolean(PLAYER_MIRROR_TAG);
-        } catch (RuntimeException | LinkageError ex) {
-            return false;
         }
     }
 

@@ -53,7 +53,9 @@ class CoopMirrorOrphanSweeperTest {
     }
 
     @Test
-    void sweepCoversHyperspaceWhenItIsNotInAllLocations() {
+    void sweepCoversHyperspace() {
+        // getAllLocations() already contains hyperspace (0.98a engine bytecode), which is why the
+        // shared walk in CoopLocations needs no second pass for it.
         FakeFleet strandedMirror = FakeFleet.withMemory(Map.of(CoopMirrorOrphanSweeper.PLAYER_MIRROR_TAG, true));
         FakeLocation hyperspace = new FakeLocation(strandedMirror);
         FakeSector sector = new FakeSector(List.of(), hyperspace);
@@ -63,13 +65,13 @@ class CoopMirrorOrphanSweeperTest {
     }
 
     @Test
-    void sweepDoesNotDoubleVisitHyperspaceListedInAllLocations() {
+    void sweepVisitsEachLocationOnce() {
         FakeFleet mirror = FakeFleet.withMemory(Map.of(CoopMirrorOrphanSweeper.NPC_MIRROR_TAG, "x"));
         FakeLocation hyperspace = new FakeLocation(mirror);
         FakeSector sector = new FakeSector(List.of(hyperspace), hyperspace);
 
         assertEquals(1, CoopMirrorOrphanSweeper.sweep(sector.proxy()),
-                "a location present in both lists must be swept once, not twice");
+                "one pass over one list: nothing is swept twice");
     }
 
     @Test
@@ -183,10 +185,14 @@ class CoopMirrorOrphanSweeperTest {
                         case "toString" -> "FakeSector";
                         case "hashCode" -> System.identityHashCode(this);
                         case "equals" -> proxy == args[0];
+                        // The engine's list already contains hyperspace, so the fake's does too.
                         case "getAllLocations" -> {
                             List<LocationAPI> out = new ArrayList<>();
                             for (FakeLocation location : locations) {
                                 out.add(proxyFor(location));
+                            }
+                            if (hyperspace != null && !out.contains(proxyFor(hyperspace))) {
+                                out.add(proxyFor(hyperspace));
                             }
                             yield out;
                         }

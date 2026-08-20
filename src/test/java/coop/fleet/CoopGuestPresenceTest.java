@@ -25,6 +25,7 @@ class CoopGuestPresenceTest {
     @AfterEach
     void clearRegistry() {
         CoopPresenceRegistry.clear();
+        CoopGuestMirrorHandle.clear();
         CoopGuestPresence.frameBoundary();
         CoopGuestPresence.frameBoundary();
     }
@@ -60,38 +61,24 @@ class CoopGuestPresenceTest {
         assertNull(CoopPresenceRegistry.get());
     }
 
-    // ---- Finding the guest mirror -----------------------------------------------------------------
-
-    @Test
-    void findsTheFleetTaggedAsThePlayerMirror() {
-        FakeFleet npc = FakeFleet.withMemory(Map.of());
-        FakeFleet mirror = FakeFleet.withMemory(Map.of(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG, true));
-        FakeLocation askonia = new FakeLocation(npc, mirror);
-        FakeSector sector = new FakeSector(List.of(askonia), null);
-
-        assertSame(askonia.proxyFor(mirror), CoopGuestPresence.findGuestMirror(sector.proxy()));
-    }
-
-    @Test
-    void findsAMirrorParkedInHyperspaceOutsideAllLocations() {
-        FakeFleet mirror = FakeFleet.withMemory(Map.of(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG, true));
-        FakeLocation hyperspace = new FakeLocation(mirror);
-        FakeSector sector = new FakeSector(List.of(), hyperspace);
-
-        assertSame(hyperspace.proxyFor(mirror), CoopGuestPresence.findGuestMirror(sector.proxy()));
-    }
-
-    @Test
-    void noMirrorInTheSectorYieldsNull() {
-        FakeLocation corvus = new FakeLocation(FakeFleet.withMemory(Map.of(
-                CoopNpcFleetReplicator.NPC_MIRROR_TAG, "abc")));
-        FakeSector sector = new FakeSector(List.of(corvus), null);
-
-        assertNull(CoopGuestPresence.findGuestMirror(sector.proxy()));
-        assertNull(CoopGuestPresence.findGuestMirror(null));
-    }
-
     // ---- Registration lifecycle ---------------------------------------------------------------------
+
+    /**
+     * The pass is the mod's one authoritative mirror scan: what it finds becomes the handle every
+     * per-frame consumer reads (see {@link CoopGuestMirrorHandle}), which is what bounds how long a
+     * stale handle can survive to one interval.
+     */
+    @Test
+    void tickRepublishesTheMirrorHandle() {
+        FakeFleet mirror = FakeFleet.withMemory(Map.of(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG, true));
+        FakeLocation askonia = new FakeLocation(mirror);
+        FakeSector sector = new FakeSector(List.of(askonia), null);
+        CoopGuestMirrorHandle.publish(null);
+
+        new CoopGuestPresence().tick(sector.proxy(), 0L);
+
+        assertSame(askonia.proxyFor(mirror), CoopGuestMirrorHandle.current());
+    }
 
     @Test
     void tickRegistersTheMirrorAsThePresenceEntity() {
@@ -180,6 +167,7 @@ class CoopGuestPresenceTest {
                         case "hashCode" -> System.identityHashCode(this);
                         case "equals" -> proxy == args[0];
                         case "getMemoryWithoutUpdate" -> memoryProxy();
+                        case "isAlive" -> Boolean.TRUE;
                         case "getContainingLocation" -> location == null ? null : location.proxy();
                         default -> null;
                     });
@@ -261,10 +249,15 @@ class CoopGuestPresenceTest {
                         case "hashCode" -> System.identityHashCode(this);
                         case "equals" -> proxy == args[0];
                         case "isPaused" -> Boolean.FALSE;
+                        // Hyperspace is in the engine's own getAllLocations() list (0.98a bytecode),
+                        // so the fake puts it there too — the walk has no separate hyperspace pass.
                         case "getAllLocations" -> {
                             List<LocationAPI> out = new ArrayList<>();
                             for (FakeLocation location : locations) {
                                 out.add(location.proxy());
+                            }
+                            if (hyperspace != null && !out.contains(hyperspace.proxy())) {
+                                out.add(hyperspace.proxy());
                             }
                             yield out;
                         }

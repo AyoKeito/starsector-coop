@@ -4,6 +4,8 @@ import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
 import coop.fleet.CoopFullFidelitySystemDriver;
+import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorOrphanSweeper;
 import coop.fleet.CoopSystemDriveFrameHook;
 import coop.net.CoopNetPumpInstaller;
@@ -44,6 +46,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // The held guest snapshot belongs to the session that just ended; the copy already written
         // into the previous save is untouched, which is the point of it.
         CoopGuestSnapshotStore.clear();
+        // Process-wide caches keyed to the game that just ended: the location id map (ids are only
+        // unique within a campaign) and the handle on the previous session's mirror fleet.
+        CoopLocations.invalidate();
+        CoopGuestMirrorHandle.clear();
         netService = new CoopNetService();
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).

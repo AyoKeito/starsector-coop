@@ -20,17 +20,24 @@ class CoopFleetMirrorRegistryTest {
         int motionApplies;
         int shieldAsserts;
         int shieldReleases;
+        long shieldAssertedAtMillis = CoopFleetMirror.NEVER_ASSERTED;
         boolean disposed;
         CoopNpcFleetSnapshot lastSnapshot;
 
         @Override
-        public void assertEngagementShield(Object playerInteractionTarget) {
-            // Same call the real mirror makes, so the fake cannot drift from the production decision.
+        public void assertEngagementShield(Object playerInteractionTarget, long nowMillis) {
+            // Same calls the real mirror makes, so the fake cannot drift from the production
+            // decisions: release for the targeted fleet, otherwise assert on the re-assert timer.
             if (CoopFleetMirror.shouldReleaseShield(fleet, playerInteractionTarget)) {
                 shieldReleases++;
-            } else {
-                shieldAsserts++;
+                shieldAssertedAtMillis = CoopFleetMirror.NEVER_ASSERTED;
+                return;
             }
+            if (!CoopFleetMirror.shouldReassertShield(shieldAssertedAtMillis, nowMillis)) {
+                return;
+            }
+            shieldAssertedAtMillis = nowMillis;
+            shieldAsserts++;
         }
 
         @Override
@@ -138,16 +145,35 @@ class CoopFleetMirrorRegistryTest {
     }
 
     @Test
-    void assertEngagementShieldsHitsEveryMirrorEveryCall() {
+    void assertEngagementShieldsHitsEveryMirrorOnTheReassertCadence() {
+        // The pass runs every frame and never depends on traffic arriving; the engine call it makes is
+        // what is rate-limited, because setNoEngaging allocates a fader that lasts ~1 s.
         CoopFleetMirrorRegistry registry = newRegistry();
         registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
 
-        registry.assertEngagementShields(null);
-        registry.assertEngagementShields(null);
+        registry.assertEngagementShields(null, 1_000L);
+        registry.assertEngagementShields(null, 1_016L);
+        registry.assertEngagementShields(null, 1_000L + CoopFleetMirror.SHIELD_REASSERT_INTERVAL_MILLIS);
 
         assertEquals(2, creationOrder.get(0).shieldAsserts);
-        assertEquals(2, creationOrder.get(1).shieldAsserts, "shield does not depend on traffic arriving");
+        assertEquals(2, creationOrder.get(1).shieldAsserts, "every mirror is on the same cadence");
         assertEquals(0, creationOrder.get(0).shieldReleases);
+    }
+
+    @Test
+    void aReleasedShieldGoesBackUpOnTheNextFrameNotTheNextInterval() {
+        // Releasing clears the stamp, so the frame after the player stops targeting the mirror puts
+        // the shield straight back up instead of leaving it engageable for up to an interval.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        FakeMirror mirror = creationOrder.get(0);
+
+        registry.assertEngagementShields(null, 1_000L);
+        registry.assertEngagementShields(mirror.fleet, 1_016L);
+        registry.assertEngagementShields(null, 1_032L);
+
+        assertEquals(1, mirror.shieldReleases);
+        assertEquals(2, mirror.shieldAsserts);
     }
 
     @Test

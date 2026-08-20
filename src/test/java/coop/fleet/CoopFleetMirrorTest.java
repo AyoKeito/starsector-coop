@@ -105,6 +105,42 @@ class CoopFleetMirrorTest {
         assertTrue(CoopFleetMirror.isPlausibleHull("nebula", null));
     }
 
+    // ---- The engagement-shield re-assert timer ---------------------------------------------------
+
+    @Test
+    void theShieldIsAssertedOnTheFirstPass() {
+        // Sentinel-checked explicitly rather than by arithmetic: now - Long.MIN_VALUE overflows.
+        assertTrue(CoopFleetMirror.shouldReassertShield(CoopFleetMirror.NEVER_ASSERTED, 0L));
+        assertTrue(CoopFleetMirror.shouldReassertShield(CoopFleetMirror.NEVER_ASSERTED, 5_000L));
+    }
+
+    @Test
+    void theShieldIsNotRebuiltEveryFrame() {
+        // setNoEngaging allocates a fresh Fader per call and the fader it builds does not expire for
+        // ~1 s, so re-asserting every frame for every mirror was 2580 allocations/s at 43 mirrors.
+        long last = 10_000L;
+        assertFalse(CoopFleetMirror.shouldReassertShield(last, last));
+        assertFalse(CoopFleetMirror.shouldReassertShield(last, last + 16L));
+        assertFalse(CoopFleetMirror.shouldReassertShield(last,
+                last + CoopFleetMirror.SHIELD_REASSERT_INTERVAL_MILLIS - 1L));
+    }
+
+    @Test
+    void theShieldIsRefreshedWellInsideTheFadersLifetime() {
+        // The fader lasts ~1 s; a 250 ms cadence holds it with a 4x margin even if a frame is late.
+        long last = 10_000L;
+        assertTrue(CoopFleetMirror.shouldReassertShield(last,
+                last + CoopFleetMirror.SHIELD_REASSERT_INTERVAL_MILLIS));
+        assertTrue(CoopFleetMirror.shouldReassertShield(last, last + 900L));
+        assertTrue(CoopFleetMirror.SHIELD_REASSERT_INTERVAL_MILLIS * 4 <= 1000L,
+                "the interval must stay comfortably inside the fader's ~1 s lifetime");
+    }
+
+    @Test
+    void aBackwardsClockReassertsRatherThanLeavingTheShieldDown() {
+        assertTrue(CoopFleetMirror.shouldReassertShield(10_000L, 9_000L));
+    }
+
     @Test
     void theCodecUnescapeIsTheInverseOfEscape() {
         // CoopNpcFleetSetSnapshot escapes an already-escaped per-fleet block, so escape/unescape have

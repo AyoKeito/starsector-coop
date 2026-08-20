@@ -206,8 +206,18 @@ public final class CoopFleetMirrorRegistry {
      * @param playerInteractionTarget the local player fleet's interaction target, or null for none
      */
     public void assertEngagementShields(Object playerInteractionTarget) {
+        assertEngagementShields(playerInteractionTarget, clockMillis.getAsLong());
+    }
+
+    /**
+     * Clock-injected form; the pump drives this one so the whole frame shares one clock read, and
+     * tests drive it to pin the mirrors' re-assert cadence.
+     *
+     * @param nowMillis the pump's wall clock (see {@link CoopNpcMirror#assertEngagementShield})
+     */
+    public void assertEngagementShields(Object playerInteractionTarget, long nowMillis) {
         for (CoopNpcMirror mirror : mirrors.values()) {
-            mirror.assertEngagementShield(playerInteractionTarget);
+            mirror.assertEngagementShield(playerInteractionTarget, nowMillis);
             mirror.assertSensorState();
         }
     }

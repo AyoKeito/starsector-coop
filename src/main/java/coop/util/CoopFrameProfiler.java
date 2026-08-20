@@ -134,6 +134,39 @@ public final class CoopFrameProfiler {
         }
     }
 
+    /**
+     * Static form of {@link #start()}, for sections that live outside the pump and have no handle on
+     * it — the same minimal seam {@link #noteRosterRebuild()} uses. Returns 0 (and reads no clock)
+     * when profiling is off or no pump has installed a profiler yet.
+     */
+    public static long sectionStart() {
+        if (!enabled) {
+            return 0L;
+        }
+        CoopFrameProfiler profiler = active;
+        return profiler == null ? 0L : profiler.nanoClock.getAsLong();
+    }
+
+    /** Static form of {@link #split(String, long)}. */
+    public static long sectionSplit(String section, long startNanos) {
+        if (!enabled) {
+            return 0L;
+        }
+        CoopFrameProfiler profiler = active;
+        return profiler == null ? 0L : profiler.split(section, startNanos);
+    }
+
+    /** Static form of {@link #record(String, long)}. */
+    public static void sectionRecord(String section, long startNanos) {
+        if (!enabled) {
+            return;
+        }
+        CoopFrameProfiler profiler = active;
+        if (profiler != null) {
+            profiler.record(section, startNanos);
+        }
+    }
+
     /** Frame entry: stamps the whole-frame timer and polls the in-game toggle. */
     public void beginFrame() {
         if (++togglePollFrames >= TOGGLE_POLL_FRAMES) {

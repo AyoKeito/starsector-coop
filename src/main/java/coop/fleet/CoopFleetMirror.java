@@ -42,6 +42,14 @@ public class CoopFleetMirror implements CoopNpcMirror {
     // 10 Hz snapshots; snap the absolute position roughly once per second to correct interpolation
     // drift without fighting the per-tick move-destination override every frame.
     private static final int LOCATION_CORRECTION_EVERY = 10;
+    /**
+     * How often the {@code noEngaging} fader is refreshed. The fader the engine builds expires ~1 s
+     * after the last {@code setNoEngaging} call, so 250 ms holds it with a 4x margin while cutting the
+     * per-frame Fader allocation the shield used to make for every mirror.
+     */
+    static final long SHIELD_REASSERT_INTERVAL_MILLIS = 250L;
+    /** Sentinel for "the shield has never been asserted", checked explicitly to dodge overflow. */
+    static final long NEVER_ASSERTED = Long.MIN_VALUE;
     private static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
     private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
     private static final String DEFAULT_NPC_FACTION = "independent";
@@ -68,6 +76,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private int applyCount;
     /** True while the shield is deliberately down for the player's interaction target (edge-tracked). */
     private boolean shieldReleased;
+    /** When {@code setNoEngaging(1f)} was last called, or {@link #NEVER_ASSERTED}. */
+    private long shieldAssertedAtMillis = NEVER_ASSERTED;
     /**
      * Last sensor identity received for this mirror (Phase 14b). Held rather than applied once because
      * the engine rewrites the mirror's profile/strength fields every frame and local terrain re-applies
@@ -189,6 +199,10 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // selection, which the snapshot driving overrides anyway.
         mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
         mirrorFleet.getMemoryWithoutUpdate().set(PLAYER_MIRROR_TAG, true);
+        // This is the only thing in the mod that creates a player mirror, so publishing it here is
+        // what lets the host's per-frame consumers stop scanning the sector for it. See
+        // CoopGuestMirrorHandle.
+        CoopGuestMirrorHandle.publish(mirrorFleet);
         resetTracking();
         coopFleetId = "player:" + snapshot.playerId();
         appliedName = label;
@@ -302,24 +316,49 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * <p>Battle initiation between AI fleets lives only in {@code BaseLocation.advance}'s pair loop,
      * whose first gate is {@code CampaignFleet.canBeEngaged()} — false while that fader is live. The
      * mirror driving path deliberately does <em>not</em> refresh it (see {@link #driveMovement}), so
-     * the pump calling this unconditionally once per frame — including while paused — is the whole
-     * shield: it never depends on traffic arriving, and it survives network stalls, location
-     * transitions and unresolvable locations that make the apply paths return early.
+     * the pump calling this from every frame — including while paused — is the whole shield: it never
+     * depends on traffic arriving, and it survives network stalls, location transitions and
+     * unresolvable locations that make the apply paths return early.
+     *
+     * <p><b>The call is rate-limited, the pass is not.</b> {@code setNoEngaging(1f)} allocates a fresh
+     * {@code Fader} every time, and the fader it builds does not expire until ~1 s after the last call
+     * — so doing it every frame for every mirror bought nothing and cost 43 allocations per frame in a
+     * busy system (2580/s). Re-asserting every {@link #SHIELD_REASSERT_INTERVAL_MILLIS} keeps the
+     * fader live with a 4x margin. The release path stays edge-triggered and, because it clears the
+     * stamp, the shield goes back up on the very next frame rather than waiting out an interval.
      *
      * <p>This unconditional form is what the <b>partner player mirror</b> gets on both roles: it is
      * the PvP block (neither player can engage the other's mirror) and, on the host, the block that
      * keeps the guest's mirror out of NPC battles. It is never released.
+     *
+     * @param nowMillis the pump's wall clock — the same one the rest of the frame is timed on, and
+     *                  one that keeps running while the campaign is paused (as this must)
      */
-    public void assertEngagementShield() {
+    public void assertEngagementShield(long nowMillis) {
         if (mirrorFleet == null) {
             return;
         }
+        shieldReleased = false;
+        if (!shouldReassertShield(shieldAssertedAtMillis, nowMillis)) {
+            return;
+        }
+        shieldAssertedAtMillis = nowMillis;
         try {
             mirrorFleet.setNoEngaging(1f);
         } catch (RuntimeException ignored) {
-            // hot path, once per frame: never abort the frame over the shield
+            // hot path: never abort the frame over the shield
         }
-        shieldReleased = false;
+    }
+
+    /**
+     * The re-assert gate, pure so the timing is unit-tested rather than reasoned about: assert on the
+     * first call and whenever the last one is at least an interval old. A clock that moved backwards
+     * re-asserts rather than stalling with the shield down.
+     */
+    static boolean shouldReassertShield(long lastAssertAtMillis, long nowMillis) {
+        return lastAssertAtMillis == NEVER_ASSERTED
+                || nowMillis < lastAssertAtMillis
+                || nowMillis - lastAssertAtMillis >= SHIELD_REASSERT_INTERVAL_MILLIS;
     }
 
     /**
@@ -342,7 +381,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
      *                                the vanilla dialog — which never reads the fader — takes over)
      */
     @Override
-    public void assertEngagementShield(Object playerInteractionTarget) {
+    public void assertEngagementShield(Object playerInteractionTarget, long nowMillis) {
         if (mirrorFleet == null) {
             return;
         }
@@ -350,7 +389,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
             releaseEngagementShield();
             return;
         }
-        assertEngagementShield();
+        assertEngagementShield(nowMillis);
     }
 
     /**
@@ -376,6 +415,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
             return;
         }
         shieldReleased = true;
+        // Clear the stamp so re-asserting is immediate when the player stops targeting this mirror,
+        // instead of leaving it engageable for up to one re-assert interval.
+        shieldAssertedAtMillis = NEVER_ASSERTED;
         try {
             mirrorFleet.setNoEngaging(0f);
         } catch (RuntimeException ignored) {
@@ -807,6 +849,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to remove coop mirror fleet", ex);
         } finally {
+            // Only if this instance is the one that published it: the NPC mirrors dispose constantly
+            // and must never drop the player mirror's handle.
+            CoopGuestMirrorHandle.clearIfSame(mirrorFleet);
             mirrorFleet = null;
             resetTracking();
         }
@@ -814,6 +859,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     public boolean hasMirrorFleet() {
         return mirrorFleet != null;
+    }
+
+    /**
+     * The live engine fleet this mirror drives, or null. Exposed so callers that need to <em>find</em>
+     * the mirror can hold the reference the mirror already has instead of scanning the sector for its
+     * memory tag; {@link CoopGuestMirrorHandle} is the static slot that does exactly that.
+     */
+    public CampaignFleetAPI mirrorFleetOrNull() {
+        return mirrorFleet;
     }
 
     private void resetTracking() {
@@ -825,27 +879,39 @@ public class CoopFleetMirror implements CoopNpcMirror {
         appliedFactionId = "";
         applyCount = 0;
         shieldReleased = false;
+        shieldAssertedAtMillis = NEVER_ASSERTED;
         sensors = CoopSensorSync.Profile.UNKNOWN;
     }
 
+    /**
+     * The location an incoming snapshot or motion record names.
+     *
+     * <p>Two short-circuits, in cost order. The common case by a wide margin is "the same location as
+     * last time": this runs once per mirrored fleet per motion record (10 Hz) and the fleet the mirror
+     * stands for changes system on the scale of minutes, so when the id matches the location the mirror
+     * is already sitting in, that <em>is</em> the answer — no lookup at all. Everything else goes to
+     * {@link CoopLocations#byId}, which is a map hit rather than the linear scan over
+     * {@code getAllLocations()} this used to do (~130 systems, two fresh ArrayLists per call).
+     */
     private LocationAPI resolveLocation(SectorAPI sector, String locationId) {
         if (locationId == null || locationId.isEmpty()) {
             return null;
         }
         try {
-            LocationAPI hyperspace = sector.getHyperspace();
-            if (hyperspace != null && locationId.equals(hyperspace.getId())) {
-                return hyperspace;
-            }
-            for (LocationAPI location : sector.getAllLocations()) {
-                if (location != null && locationId.equals(location.getId())) {
-                    return location;
+            if (locationId.equals(lastLocationId) && mirrorFleet != null) {
+                LocationAPI current = mirrorFleet.getContainingLocation();
+                // Id-checked, not assumed: if the engine moved the mirror out from under us the
+                // containing location is not the one the record names, and the lookup below is what
+                // puts it back.
+                if (current != null && locationId.equals(current.getId())) {
+                    return current;
                 }
             }
+            return CoopLocations.byId(sector, locationId);
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to resolve coop mirror location " + locationId, ex);
+            return null;
         }
-        return null;
     }
 
     private SectorAPI sectorOrNull() {

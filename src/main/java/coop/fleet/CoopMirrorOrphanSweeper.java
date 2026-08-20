@@ -1,13 +1,11 @@
 package coop.fleet;
 
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
-import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Removes coop mirror fleets left behind in a save (Phase 12b).
@@ -37,50 +35,34 @@ public final class CoopMirrorOrphanSweeper {
     }
 
     /**
-     * Scans every location plus hyperspace and removes any fleet tagged as a coop mirror. Returns the
-     * number removed; logs one line when that is non-zero and stays silent otherwise (this runs on
-     * every load, including for players who have never used coop).
+     * Scans every location (hyperspace included — see {@link CoopLocations}) and removes any fleet
+     * tagged as a coop mirror. Returns the number removed; logs one line when that is non-zero and
+     * stays silent otherwise (this runs on every load, including for players who have never used coop).
      */
     public static int sweep(SectorAPI sector) {
         if (sector == null) {
             return 0;
         }
-        int removed = 0;
+        int[] removedRef = {0};
         try {
-            for (LocationAPI location : allLocations(sector)) {
+            CoopLocations.forEach(sector, location -> {
                 for (CampaignFleetAPI fleet : new ArrayList<>(location.getFleets())) {
                     if (isCoopMirror(fleet)) {
                         location.removeEntity(fleet);
-                        removed++;
+                        removedRef[0]++;
                     }
                 }
-            }
+            });
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopMirrorOrphanSweeper.class,
-                    "Coop orphan mirror sweep failed after removing " + removed + " fleet(s)", ex);
+                    "Coop orphan mirror sweep failed after removing " + removedRef[0] + " fleet(s)", ex);
         }
+        int removed = removedRef[0];
         if (removed > 0) {
             CoopLog.info(CoopMirrorOrphanSweeper.class,
                     "Coop removed " + removed + " orphaned mirror fleet(s) left by a previous session");
         }
         return removed;
-    }
-
-    private static List<LocationAPI> allLocations(SectorAPI sector) {
-        List<LocationAPI> locations = new ArrayList<>();
-        List<LocationAPI> all = sector.getAllLocations();
-        if (all != null) {
-            for (LocationAPI location : all) {
-                if (location != null) {
-                    locations.add(location);
-                }
-            }
-        }
-        LocationAPI hyperspace = sector.getHyperspace();
-        if (hyperspace != null && !locations.contains(hyperspace)) {
-            locations.add(hyperspace);
-        }
-        return locations;
     }
 
     private static boolean isCoopMirror(CampaignFleetAPI fleet) {

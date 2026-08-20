@@ -181,7 +181,14 @@ public final class CoopFullFidelitySystemDriver {
 
     private static void runTick(SectorAPI sector) throws Throwable {
         boolean enabled = Boolean.parseBoolean(System.getProperty(ENABLED_PROPERTY, "true"));
-        LocationAPI guestSystem = enabled && !permanentlyDisabled ? guestLocation(sector) : null;
+        // The cheap hard stops gate the location resolve, in the same precedence order
+        // CoopSystemDriveState.classify uses (kill switch, then save, then fast advance), so a frame
+        // that cannot drive anything does not go looking for the guest. Ordering is load-bearing only
+        // in that a stop condition must not be overtaken; the decision below still runs unchanged and
+        // still emits the release transition, because beginSave() and the classifier own that.
+        boolean fastAdvance = inFastAdvance(sector);
+        boolean canDrive = enabled && !permanentlyDisabled && !saveInProgress && !fastAdvance;
+        LocationAPI guestSystem = canDrive ? guestLocation() : null;
         boolean hyperspace = guestSystem != null && guestSystem.isHyperspace();
         String guestId = guestSystem == null || hyperspace ? "" : String.valueOf(guestSystem.getId());
         boolean engineAdvanced = !guestId.isEmpty() && activeThisFrame(guestSystem);
@@ -191,7 +198,7 @@ public final class CoopFullFidelitySystemDriver {
                 permanentlyDisabled,
                 true,
                 saveInProgress,
-                inFastAdvance(sector),
+                fastAdvance,
                 guestId,
                 hyperspace,
                 currentLocationId(sector),
@@ -365,9 +372,14 @@ public final class CoopFullFidelitySystemDriver {
 
     // ---- Engine reads (all best-effort) -----------------------------------------------------------
 
-    private static LocationAPI guestLocation(SectorAPI sector) {
+    /**
+     * Where the guest is. Reads the O(1) mirror handle rather than scanning the sector: this runs
+     * every frame, and the scan it replaces ran even on a host with no guest connected (see
+     * {@link CoopGuestMirrorHandle}).
+     */
+    private static LocationAPI guestLocation() {
         try {
-            CampaignFleetAPI mirror = CoopGuestPresence.findGuestMirror(sector);
+            CampaignFleetAPI mirror = CoopGuestMirrorHandle.current();
             return mirror == null ? null : mirror.getContainingLocation();
         } catch (RuntimeException | LinkageError ex) {
             return null;

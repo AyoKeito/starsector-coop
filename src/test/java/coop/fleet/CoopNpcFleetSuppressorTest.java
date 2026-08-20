@@ -1,6 +1,7 @@
 package coop.fleet;
 
 import com.fs.starfarer.api.EveryFrameScript;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
@@ -174,7 +175,7 @@ class CoopNpcFleetSuppressorTest {
         sector.scripts.add(new SlipstreamManager());
         sector.memory.put("$ghostManager", "stale-handle");
 
-        new CoopNpcFleetSuppressor().tick(sector.proxy());
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 0L);
 
         assertEquals(2, sector.removed.size(), "only the two spawners are removed");
         assertEquals(1, sector.scripts.size());
@@ -193,15 +194,15 @@ class CoopNpcFleetSuppressorTest {
 
         // First tick: getScripts() throws, so suppression fails. Pre-12b the "done" flag was set
         // outside the try, permanently demoting the per-frame sweep to sole mechanism.
-        suppressor.tick(sector.proxy());
+        suppressor.tick(sector.proxy(), 0L);
         assertEquals(1, sector.scriptAccessAttempts);
 
         // Second tick retries and succeeds.
-        suppressor.tick(sector.proxy());
+        suppressor.tick(sector.proxy(), 0L);
         assertEquals(2, sector.scriptAccessAttempts);
 
         // Third tick: already suppressed, so no further attempts.
-        suppressor.tick(sector.proxy());
+        suppressor.tick(sector.proxy(), 0L);
         assertEquals(2, sector.scriptAccessAttempts,
                 "suppression should run once successfully, then stop retrying");
     }
@@ -211,14 +212,14 @@ class CoopNpcFleetSuppressorTest {
         CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
         FailingSector sector = new FailingSector(0);
 
-        suppressor.tick(sector.proxy());
-        suppressor.tick(sector.proxy());
+        suppressor.tick(sector.proxy(), 0L);
+        suppressor.tick(sector.proxy(), 0L);
         assertEquals(1, sector.scriptAccessAttempts, "suppression runs once per session");
 
         // Vanilla's addScriptsIfNeeded re-registers every spawner on each onGameLoad, so the pump
         // calls reset() at session (re)start and suppression must run again.
         suppressor.reset();
-        suppressor.tick(sector.proxy());
+        suppressor.tick(sector.proxy(), 0L);
         assertEquals(2, sector.scriptAccessAttempts, "reset() re-arms suppression");
     }
 
@@ -267,6 +268,76 @@ class CoopNpcFleetSuppressorTest {
         FakeIntelCleanup cleanup = new FakeIntelCleanup();
         cleanup.nullLists = true;
         assertEquals(0, CoopNpcFleetSuppressor.endGuestBaseIntel(cleanup));
+    }
+
+    // ---- The sweep gate ------------------------------------------------------------------------
+
+    @Test
+    void theFirstSweepOfASessionIsImmediate() {
+        assertTrue(CoopNpcFleetSuppressor.shouldSweep(Long.MIN_VALUE, 0L));
+        assertTrue(CoopNpcFleetSuppressor.shouldSweep(Long.MIN_VALUE, 1_000_000L));
+    }
+
+    @Test
+    void sweepsAtMostOncePerInterval() {
+        long last = 10_000L;
+        assertFalse(CoopNpcFleetSuppressor.shouldSweep(last, last));
+        assertFalse(CoopNpcFleetSuppressor.shouldSweep(last, last + 16L));
+        assertFalse(CoopNpcFleetSuppressor.shouldSweep(last,
+                last + CoopNpcFleetSuppressor.SWEEP_INTERVAL_MILLIS - 1L));
+        assertTrue(CoopNpcFleetSuppressor.shouldSweep(last,
+                last + CoopNpcFleetSuppressor.SWEEP_INTERVAL_MILLIS));
+    }
+
+    @Test
+    void aBackwardsClockSweepsRatherThanStalling() {
+        assertTrue(CoopNpcFleetSuppressor.shouldSweep(10_000L, 9_000L));
+    }
+
+    @Test
+    void tickSweepsOnTheGateAndNotEveryFrame() {
+        SweepSector sector = new SweepSector();
+        CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+
+        suppressor.tick(sector.proxy(), 1_000L);
+        assertEquals(1, sector.corvus.removed.size(), "the first tick sweeps");
+
+        sector.corvus.fleets.add(FakeSweptFleet.plain());
+        suppressor.tick(sector.proxy(), 1_016L);
+        suppressor.tick(sector.proxy(), 1_100L);
+        assertEquals(1, sector.corvus.removed.size(), "frames inside the interval do not sweep");
+
+        suppressor.tick(sector.proxy(), 1_000L + CoopNpcFleetSuppressor.SWEEP_INTERVAL_MILLIS);
+        assertEquals(2, sector.corvus.removed.size(), "the interval elapsed, so the net catches it");
+    }
+
+    @Test
+    void resetReArmsTheSweepForTheNextSession() {
+        SweepSector sector = new SweepSector();
+        CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+
+        suppressor.tick(sector.proxy(), 1_000L);
+        sector.corvus.fleets.add(FakeSweptFleet.plain());
+        suppressor.reset();
+        suppressor.tick(sector.proxy(), 1_016L);
+
+        assertEquals(2, sector.corvus.removed.size(),
+                "a session (re)start sweeps immediately rather than an interval later");
+    }
+
+    @Test
+    void aLocationWithNothingToRemoveIsNotCopied() {
+        // The whole point of the gate plus the detect-before-copy pass: on a suppressed guest almost
+        // every location is empty or holds only sanctioned mirrors, and the old form allocated an
+        // ArrayList copy of each one's fleet list on every frame to discover that.
+        SweepSector sector = new SweepSector();
+        sector.corvus.fleets.clear();
+        sector.corvus.fleets.add(FakeSweptFleet.mirror());
+
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 1_000L);
+
+        assertTrue(sector.corvus.removed.isEmpty());
+        assertEquals(1, sector.corvus.fleetListReads, "one read to check, no second read to copy");
     }
 
     @Test
@@ -339,6 +410,112 @@ class CoopNpcFleetSuppressorTest {
     }
 
     private static final class SlipstreamManager extends NoOpScript {
+    }
+
+    /** A fleet the sweep either culls or preserves, depending on its coop memory tag. */
+    private static final class FakeSweptFleet {
+        private final Map<String, Object> memory;
+
+        private FakeSweptFleet(Map<String, Object> memory) {
+            this.memory = new HashMap<>(memory);
+        }
+
+        private static FakeSweptFleet plain() {
+            return new FakeSweptFleet(Map.of());
+        }
+
+        private static FakeSweptFleet mirror() {
+            return new FakeSweptFleet(Map.of(CoopNpcFleetSuppressor.NPC_MIRROR_TAG, "abc"));
+        }
+
+        private CampaignFleetAPI proxy() {
+            return (CampaignFleetAPI) Proxy.newProxyInstance(
+                    CampaignFleetAPI.class.getClassLoader(),
+                    new Class<?>[]{CampaignFleetAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "toString" -> "FakeSweptFleet" + memory;
+                        case "hashCode" -> System.identityHashCode(this);
+                        case "equals" -> proxy == args[0];
+                        case "isStationMode" -> Boolean.FALSE;
+                        case "getMemoryWithoutUpdate" -> Proxy.newProxyInstance(
+                                MemoryAPI.class.getClassLoader(),
+                                new Class<?>[]{MemoryAPI.class},
+                                (m, mm, margs) -> switch (mm.getName()) {
+                                    case "toString" -> "mem";
+                                    case "hashCode" -> System.identityHashCode(m);
+                                    case "equals" -> m == margs[0];
+                                    case "getBoolean" ->
+                                            Boolean.TRUE.equals(memory.get(String.valueOf(margs[0])));
+                                    case "contains" -> memory.containsKey(String.valueOf(margs[0]));
+                                    default -> null;
+                                });
+                        default -> null;
+                    });
+        }
+    }
+
+    /** One location whose fleet list the sweep walks, counting reads and recording removals. */
+    private static final class SweepLocation {
+        private final List<FakeSweptFleet> fleets = new ArrayList<>();
+        private final List<FakeSweptFleet> removed = new ArrayList<>();
+        private final Map<CampaignFleetAPI, FakeSweptFleet> proxies = new IdentityHashMap<>();
+        private LocationAPI proxy;
+        private int fleetListReads;
+
+        private LocationAPI proxy() {
+            if (proxy == null) {
+                proxy = (LocationAPI) Proxy.newProxyInstance(
+                        LocationAPI.class.getClassLoader(),
+                        new Class<?>[]{LocationAPI.class},
+                        (p, method, args) -> switch (method.getName()) {
+                            case "toString" -> "SweepLocation";
+                            case "hashCode" -> System.identityHashCode(this);
+                            case "equals" -> p == args[0];
+                            case "getId" -> "corvus";
+                            case "getFleets" -> {
+                                fleetListReads++;
+                                List<CampaignFleetAPI> out = new ArrayList<>();
+                                for (FakeSweptFleet fleet : fleets) {
+                                    CampaignFleetAPI fleetProxy = fleet.proxy();
+                                    proxies.put(fleetProxy, fleet);
+                                    out.add(fleetProxy);
+                                }
+                                yield out;
+                            }
+                            case "removeEntity" -> {
+                                FakeSweptFleet fleet = proxies.get((CampaignFleetAPI) args[0]);
+                                fleets.remove(fleet);
+                                removed.add(fleet);
+                                yield null;
+                            }
+                            default -> null;
+                        });
+            }
+            return proxy;
+        }
+    }
+
+    /** SectorAPI with one sweepable location and no spawner scripts. */
+    private static final class SweepSector {
+        private final SweepLocation corvus = new SweepLocation();
+
+        private SweepSector() {
+            corvus.fleets.add(FakeSweptFleet.plain());
+        }
+
+        private SectorAPI proxy() {
+            return (SectorAPI) Proxy.newProxyInstance(
+                    SectorAPI.class.getClassLoader(),
+                    new Class<?>[]{SectorAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "toString" -> "SweepSector";
+                        case "hashCode" -> System.identityHashCode(this);
+                        case "equals" -> proxy == args[0];
+                        case "getScripts", "getTransientScripts" -> new ArrayList<EveryFrameScript>();
+                        case "getAllLocations" -> new ArrayList<>(List.of(corvus.proxy()));
+                        default -> null;
+                    });
+        }
     }
 
     /** SectorAPI recording script removals and sector-memory writes. */

@@ -19,7 +19,6 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Consumer;
 
 /**
  * Guest-side Phase 9 enforcement that the guest runs <b>no</b> native NPC simulation; the only fleets
@@ -36,9 +35,9 @@ import java.util.function.Consumer;
  *   <li><b>Session-start base-intel cleanup (Phase 13):</b> the guest spawned its own pirate/Pather
  *       bases before the base managers joined the suppression set; any that survive in a loaded save
  *       are ended and removed here.</li>
- *   <li><b>Per-frame sweep (the robust net):</b> removes any fleet that is not protected by the rules
+ *   <li><b>Periodic sweep (the robust net):</b> removes any fleet that is not protected by the rules
  *       above — robust because enumerating every spawner is fragile, so anything that slips through is
- *       still culled.</li>
+ *       still culled. Runs on a {@link #SWEEP_INTERVAL_MILLIS} timer rather than every frame.</li>
  * </ol>
  *
  * <p>This must only run on the guest; the host runs vanilla NPC simulation unchanged. The pump
@@ -112,10 +111,27 @@ public final class CoopNpcFleetSuppressor {
             Map.entry("FactionHostilityManager", new ManagerHandle("$core_factionHostilityManager", false)),
             Map.entry("PunitiveExpeditionManager", new ManagerHandle("$core_punitiveExpeditionManager", false)));
 
-    private boolean spawnersSuppressed;
+    /**
+     * How often the per-frame net actually sweeps. The sweep is a backstop for fleets that slip past
+     * the spawner suppression, not a gate anything depends on for correctness: a native fleet that
+     * exists for a quarter of a second before being culled is exactly what happened anyway before the
+     * Phase 9 hardening, since a sweep always raced the spawn that produced it. What the old per-frame
+     * cadence did cost was a walk of every location in the sector, every frame, on the client that can
+     * least afford it.
+     */
+    static final long SWEEP_INTERVAL_MILLIS = 250L;
 
-    /** Runs all layers; call every frame on the guest while the session is active. */
-    public void tick(SectorAPI sector) {
+    private boolean spawnersSuppressed;
+    /** Sentinel: the first tick of a session sweeps immediately (see {@link #shouldSweep}). */
+    private long lastSweepAtMillis = Long.MIN_VALUE;
+
+    /**
+     * Runs all layers; call every frame on the guest while the session is active.
+     *
+     * @param nowMillis the pump's wall clock, so the sweep interval is the same clock everything else
+     *                  in the frame is timed against
+     */
+    public void tick(SectorAPI sector, long nowMillis) {
         if (sector == null) {
             return;
         }
@@ -131,6 +147,10 @@ public final class CoopNpcFleetSuppressor {
                 CoopLog.warn(CoopNpcFleetSuppressor.class, "Failed to suppress NPC spawner scripts", ex);
             }
         }
+        if (!shouldSweep(lastSweepAtMillis, nowMillis)) {
+            return;
+        }
+        lastSweepAtMillis = nowMillis;
         try {
             sweep(sector);
         } catch (RuntimeException | LinkageError ex) {
@@ -138,9 +158,25 @@ public final class CoopNpcFleetSuppressor {
         }
     }
 
-    /** Re-arm the once-per-session spawner suppression (session (re)start). */
+    /**
+     * The sweep gate, pure so it is unit-tested rather than reasoned about: sweep on the first tick
+     * after a (re)start, then once per {@link #SWEEP_INTERVAL_MILLIS}. A clock that moved backwards
+     * sweeps rather than stalling.
+     */
+    static boolean shouldSweep(long lastSweepAtMillis, long nowMillis) {
+        return lastSweepAtMillis == Long.MIN_VALUE
+                || nowMillis < lastSweepAtMillis
+                || nowMillis - lastSweepAtMillis >= SWEEP_INTERVAL_MILLIS;
+    }
+
+    /**
+     * Re-arm the once-per-session spawner suppression (session (re)start). Also re-arms the sweep, so
+     * the first tick of a new session culls whatever the previous one left behind immediately rather
+     * than up to an interval later.
+     */
     public void reset() {
         spawnersSuppressed = false;
+        lastSweepAtMillis = Long.MIN_VALUE;
     }
 
     private void suppressSpawners(SectorAPI sector) {
@@ -238,14 +274,33 @@ public final class CoopNpcFleetSuppressor {
 
     private void sweep(SectorAPI sector) {
         CampaignFleetAPI player = sector.getPlayerFleet();
-        forEachLocation(sector, loc -> {
-            // Copy first: removeEntity mutates the live fleet list.
-            for (CampaignFleetAPI fleet : new ArrayList<>(loc.getFleets())) {
+        CoopLocations.forEach(sector, loc -> {
+            List<CampaignFleetAPI> fleets = loc.getFleets();
+            if (fleets == null || fleets.isEmpty()) {
+                return;
+            }
+            // Detect first, copy second. The overwhelmingly common case on a suppressed guest is a
+            // location with nothing to remove — usually with no fleets at all — and the old form paid
+            // for an ArrayList copy of every location's fleet list on every pass to discover that.
+            if (!containsRemovable(fleets, player)) {
+                return;
+            }
+            // Copy before removing: removeEntity mutates the live fleet list.
+            for (CampaignFleetAPI fleet : new ArrayList<>(fleets)) {
                 if (shouldRemove(fleet, player)) {
                     loc.removeEntity(fleet);
                 }
             }
         });
+    }
+
+    private boolean containsRemovable(List<CampaignFleetAPI> fleets, CampaignFleetAPI player) {
+        for (int i = 0; i < fleets.size(); i++) {
+            if (shouldRemove(fleets.get(i), player)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean shouldRemove(CampaignFleetAPI fleet, CampaignFleetAPI player) {
@@ -256,18 +311,6 @@ public final class CoopNpcFleetSuppressor {
         boolean playerMirror = memory != null && memory.getBoolean(PLAYER_MIRROR_TAG);
         boolean npcMirror = memory != null && memory.contains(NPC_MIRROR_TAG);
         return shouldRemoveFleet(fleet == player, fleet.isStationMode(), playerMirror, npcMirror);
-    }
-
-    private void forEachLocation(SectorAPI sector, Consumer<LocationAPI> consumer) {
-        for (LocationAPI loc : sector.getAllLocations()) {
-            if (loc != null) {
-                consumer.accept(loc);
-            }
-        }
-        LocationAPI hyperspace = sector.getHyperspace();
-        if (hyperspace != null && !sector.getAllLocations().contains(hyperspace)) {
-            consumer.accept(hyperspace);
-        }
     }
 
     // ---- Pure decision functions (unit-tested) ----------------------------------------------

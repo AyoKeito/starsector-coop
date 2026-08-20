@@ -90,7 +90,13 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_FLEET_SNAPSHOT_SEND = "fleet.sendSnapshot";
     private static final String SECTION_GUEST_SNAPSHOT_SEND = "save.sendGuestSnapshot";
     private static final String SECTION_SAVE_CHECKPOINT = "save.tickCheckpoint";
+    /**
+     * The whole NPC replication step. Its components are timed separately: the guest's sweep as
+     * {@link #SECTION_NPC_SUPPRESSOR} here, the host's four steps from inside
+     * {@link CoopNpcFleetReplicator} through the profiler's static seam.
+     */
     private static final String SECTION_NPC_REPLICATION = "npc.syncReplication";
+    private static final String SECTION_NPC_SUPPRESSOR = "npc.suppressor";
     private static final String SECTION_NPC_THREAT_WATCHER = "npc.threatWatcher";
     private static final String SECTION_BASE_REPLICATION = "base.syncReplication";
     private static final String SECTION_INTERACTION_GATE = "interaction.gate";
@@ -1289,7 +1295,10 @@ public class CoopNetPump implements EveryFrameScript {
      * (see {@link CoopFleetMirror#assertEngagementShield(Object)}).
      */
     private void assertMirrorEngagementShields() {
-        fleetMirror.assertEngagementShield();
+        // One clock read for the whole pass: the mirrors rate-limit their engine call against it (the
+        // noEngaging fader lasts ~1 s, so refreshing it every frame per mirror was pure allocation).
+        long now = clockMillis.getAsLong();
+        fleetMirror.assertEngagementShield(now);
         // Phase 14b: the remote player's sensor identity has to be re-pinned every frame — the engine
         // rewrites sensor strength from the roster each frame and local terrain re-applies its own
         // detectability mods each frame. See CoopSensorSync.
@@ -1299,7 +1308,7 @@ public class CoopNetPump implements EveryFrameScript {
             // read entirely rather than paying for it every frame.
             return;
         }
-        npcFleetRegistry.assertEngagementShields(playerEngagementTargetOrNull());
+        npcFleetRegistry.assertEngagementShields(playerEngagementTargetOrNull(), now);
     }
 
     /**
@@ -1549,9 +1558,13 @@ public class CoopNetPump implements EveryFrameScript {
         }
         try {
             if (service.role() == CoopConnectionRole.HOST) {
+                // Sub-sections (npc.systemDriver / npc.guestPresence / npc.sendSet / npc.sendMotion)
+                // are recorded from inside the replicator through the profiler's static seam.
                 npcFleetReplicator.tick();
             } else if (CoopNpcFleetSuppressor.activeForRole(service.role())) {
-                npcFleetSuppressor.tick(Global.getSector());
+                long suppressorStart = profiler.start();
+                npcFleetSuppressor.tick(Global.getSector(), clockMillis.getAsLong());
+                profiler.record(SECTION_NPC_SUPPRESSOR, suppressorStart);
             }
             maybeDumpNpcDiagnostics();
         } catch (RuntimeException | LinkageError ex) {
