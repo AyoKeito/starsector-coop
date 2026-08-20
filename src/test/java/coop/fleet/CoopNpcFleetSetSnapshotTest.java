@@ -14,8 +14,13 @@ class CoopNpcFleetSetSnapshotTest {
 
     private static CoopNpcFleetSnapshot fleet(String id, String faction, String location, String hullId,
                                               boolean transponderOn) {
-        return CoopNpcFleetSnapshot.create(id, faction, "Name " + id, location, 1f, 2f, 0f, 0f,
-                transponderOn, sensors(150f, 90f), "",
+        return fleet(id, faction, "Name " + id, location, hullId, transponderOn, "");
+    }
+
+    private static CoopNpcFleetSnapshot fleet(String id, String faction, String name, String location,
+                                              String hullId, boolean transponderOn, String actionText) {
+        return CoopNpcFleetSnapshot.create(id, faction, name, location, 1f, 2f, 0f, 0f,
+                transponderOn, sensors(150f, 90f), actionText,
                 List.of(new CoopFleetSnapshot.Member("m-" + id, hullId, hullId + "_Standard",
                         "Ship", "Cpt", 0.8f, 1.0f)));
     }
@@ -67,6 +72,28 @@ class CoopNpcFleetSetSnapshotTest {
                         fleet("f1", "hegemony", "corvus", "lasher", true))),
                 CoopNpcFleetSetSnapshot.computeSetHash(List.of(
                         fleet("f1", "hegemony", "corvus", "lasher", false))));
+    }
+
+    @Test
+    void setHashChangesOnActionText() {
+        // Phase 9b: the set is the only carrier of the tooltip action line, and the host only
+        // rebroadcasts when the hash moves. "traveling to Jangala" -> "pursuing your fleet" with no
+        // structural change must still flip it, or the guest's tooltip freezes on the first text.
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Name f1",
+                        "corvus", "lasher", true, "traveling to Jangala"))),
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Name f1",
+                        "corvus", "lasher", true, "pursuing your fleet"))));
+    }
+
+    @Test
+    void setHashChangesOnName() {
+        // Same carrier argument as action text: refreshIdentity only sees a rename if a set arrives.
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Patrol",
+                        "corvus", "lasher", true, ""))),
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Trade Convoy",
+                        "corvus", "lasher", true, ""))));
     }
 
     @Test

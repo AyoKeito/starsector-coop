@@ -13,10 +13,11 @@ import java.util.Objects;
  * dispose mirrors absent here). Full-set rebroadcast is chosen for v1 because it is self-correcting
  * (no add/remove delta ordering or lost-packet bugs).
  *
- * <p>{@link #setHash()} is order-independent and folds in each fleet's identity, faction, location,
- * transponder state and roster ({@code fleetHash}) so it flips on spawn/despawn, faction change, system
- * jump, transponder toggle, or roster edit — exactly the structural changes that require the guest to
- * re-apply rather than merely interpolate.
+ * <p>{@link #setHash()} is order-independent and folds in each fleet's identity, name, faction,
+ * location, transponder state, roster ({@code fleetHash}) and action text
+ * ({@code aiAssignmentSummary}) so it flips on spawn/despawn, rename, faction change, system jump,
+ * transponder toggle, roster edit, or tooltip-text change — everything the 1 Hz set is the sole
+ * carrier of and the guest must re-apply rather than merely interpolate.
  *
  * <p>Transponder state is in the hash because it is the only place it travels: the 10 Hz
  * {@code NPC_FLEET_MOTION} datagram does not carry it, and on the guest a mirror's transponder flag is
@@ -42,14 +43,22 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
         return new CoopNpcFleetSetSnapshot(safe, computeSetHash(safe));
     }
 
-    /** Order-independent hash over each fleet's identity/faction/location/transponder/roster. */
+    /**
+     * Order-independent hash over each fleet's identity/name/faction/location/transponder/roster/
+     * action text. Name and action text are in the hash for the same reason transponder state is: the
+     * 1 Hz set is their only carrier, and {@code sendSetIfChanged} only rebroadcasts when this hash
+     * moves — a rename (the 2026-08-19 identity fix) or a "traveling to X" → "pursuing Y" flip
+     * (Phase 9b) that does not flip the hash would sit on the host until an unrelated structural
+     * change happened to flush it.
+     */
     public static String computeSetHash(List<CoopNpcFleetSnapshot> fleets) {
         List<String> records = new ArrayList<>();
         if (fleets != null) {
             for (CoopNpcFleetSnapshot fleet : fleets) {
                 records.add(fleet.coopFleetId() + "|" + fleet.factionId() + "|"
                         + fleet.locationId() + "|" + (fleet.transponderOn() ? "1" : "0")
-                        + "|" + fleet.fleetHash());
+                        + "|" + fleet.fleetHash() + "|" + fleet.name()
+                        + "|" + fleet.aiAssignmentSummary());
             }
         }
         records.sort(null);
