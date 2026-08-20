@@ -26,9 +26,9 @@
 
 ## Implementation Order (decided 2026-06-10)
 
-Remaining work proceeds **hardening-first** (the stability rubric): **12b → 12d → 6b → 13-remainder → 14 (its spikes first) → 15 → 16 → 17 → 18 → 12c → 24 (colonies/industries/raids) → 7b → 7c → 20 (incl. 20.6) → 19 (final sign-off)**. Rationale: 12b fixes a live bug (silent autoresolve against mirror fleets) and Phase 13's suppressor extension stops the guest spawning its own pirate/Pather bases today — both protect every later test session. Phase 12d (split out of 12c on 2026-08-09) sits at slot 2 because it restores player-to-player item transfer, which v1 has none of today — every private soak session before it lands runs with no way for the two players to hand each other fuel, supplies, or a ship, which makes the soak unrepresentative of real co-op play. It has no dependency on Phases 13–18; only Phase 19's QA lines pinned the *rest* of 12c late. Phase 12c (extension-point closure) must land before Phase 19, whose bar-pool and market-contents QA lines depend on it; Phase 24 (rescoped into V1 on 2026-06-10) slots right after its 12c prerequisite — its milestone 1 (raids) needs no colony-lifecycle work and can start any time after 12c; 7b/7c are QoL and slot after the core gameplay phases; Phase 20 precedes the Phase 19 sign-off per its own ordering note. 2026-08-20: Phases 17 and 18 were rescoped and both shrank to small hardening passes (see their banners); their order slots are unchanged.
+Remaining work proceeds **hardening-first** (the stability rubric): **12b → 12d → 6b → 13-remainder → 14 (its spikes first) → 15 → 16 → 17 → 18 → 29-M1 (mirror interpolation) → 12c → 24 (colonies/industries/raids) → 7b → 7c → 20 (incl. 20.6) → 29-M2 (adaptive cadence) → 19 (final sign-off)**. Rationale: 12b fixes a live bug (silent autoresolve against mirror fleets) and Phase 13's suppressor extension stops the guest spawning its own pirate/Pather bases today — both protect every later test session. Phase 12d (split out of 12c on 2026-08-09) sits at slot 2 because it restores player-to-player item transfer, which v1 has none of today — every private soak session before it lands runs with no way for the two players to hand each other fuel, supplies, or a ship, which makes the soak unrepresentative of real co-op play. It has no dependency on Phases 13–18; only Phase 19's QA lines pinned the *rest* of 12c late. Phase 12c (extension-point closure) must land before Phase 19, whose bar-pool and market-contents QA lines depend on it; Phase 24 (rescoped into V1 on 2026-06-10) slots right after its 12c prerequisite — its milestone 1 (raids) needs no colony-lifecycle work and can start any time after 12c; 7b/7c are QoL and slot after the core gameplay phases; Phase 20 precedes the Phase 19 sign-off per its own ordering note. 2026-08-20: Phases 17 and 18 were rescoped and both shrank to small hardening passes (see their banners); their order slots are unchanged. Same day, **Phase 29 was pulled forward from post-V1 into V1** (user decision, after the jumpy-mirror root cause was verified live — see the Phase 29 banner): M1 (mirror interpolation, no dependencies beyond the built 8/9) slots right after 18 so every later soak session benefits; M2 (adaptive cadence) needs Phase 20 and slots directly after it, before the 19 sign-off.
 
-**Post-V1 priority** (decided 2026-06-10, "public after soak"): V1 ships privately first (host + one friend); the public forum/Nexus release is the goal after the private soak. Order: **21 (Multiplayer UX) → 23 (Release Packaging) → public release**, with 22 (co-op piloted battles), 25 (guest time-control polish: `coop.allowGuestPause` toggle + consensual fast-forward; needs 7b, promoted from the pause Maybe 2026-06-10), 26 (hyperspace ambient-world replication: slipstreams as outcome polylines + abyssal encounters as keyed re-execution; needs 13, promoted from two replication Maybe bullets 2026-06-10), 27 (multi-guest enablement, host + 2–3 guests: gameplay arbitration + QA matrix on Phase 20's N-ready transport; needs 20, promoted from the multi-guest Maybe 2026-06-10), and 28 (coop options & player-facing configuration: typed registry + settings-file stack + host-policy sync + intel options page; its milestone 1 delivers Phase 23's settings-file item and should land with 23; created 2026-06-10), and 29 (campaign motion smoothness: mirror interpolation/dead-reckoning + adaptive QA'd-tier cadence — the link picks the rate, never the player; M2 needs 20; created 2026-06-10) after or alongside as appetite allows. (Phase 24 — shared-faction colonies/industries/raids — was sketched here post-V1 on 2026-06-10 and **rescoped into V1 the same day**; it now sits in the V1 sequence above.)
+**Post-V1 priority** (decided 2026-06-10, "public after soak"): V1 ships privately first (host + one friend); the public forum/Nexus release is the goal after the private soak. Order: **21 (Multiplayer UX) → 23 (Release Packaging) → public release**, with 22 (co-op piloted battles), 25 (guest time-control polish: `coop.allowGuestPause` toggle + consensual fast-forward; needs 7b, promoted from the pause Maybe 2026-06-10), 26 (hyperspace ambient-world replication: slipstreams as outcome polylines + abyssal encounters as keyed re-execution; needs 13, promoted from two replication Maybe bullets 2026-06-10), 27 (multi-guest enablement, host + 2–3 guests: gameplay arbitration + QA matrix on Phase 20's N-ready transport; needs 20, promoted from the multi-guest Maybe 2026-06-10), and 28 (coop options & player-facing configuration: typed registry + settings-file stack + host-policy sync + intel options page; its milestone 1 delivers Phase 23's settings-file item and should land with 23; created 2026-06-10), after or alongside as appetite allows. (Phase 29 — campaign motion smoothness — was created here post-V1 on 2026-06-10 and **pulled into V1 on 2026-08-20**; it now sits in the V1 sequence above.) (Phase 24 — shared-faction colonies/industries/raids — was sketched here post-V1 on 2026-06-10 and **rescoped into V1 the same day**; it now sits in the V1 sequence above.)
 
 ### Phase Status Ledger (review pass, 2026-06-10)
 
@@ -51,7 +51,8 @@ Authoritative build status per phase. Checkbox state inside the early phases pre
 | 16 | **BUILT** | Smoke-verified in-game 2026-08-20 (commit `617e4b9`). Verified live: host save → snapshot embedded (`coop.guestFleetSnapshot`) + guest coordinated autosave (immediate and dialog-deferred ~6–9 s); quit-both → resume (campaign UUID `minted=false`, mirrors rebuilt, guest state byte-identical); D-mods on dozens of NPC fleets (per-ship counts, matching hashes); S-mods on the player mirror (`ziggurat+s1`); post-battle mirror teardown/removal unaffected. Host save is now mod-dependent (user decision, see the Design Alignment Notes revision). Fallout fix: NPC deflate/inflate flips oscillated the fleet hash → capture latch (see commit after `617e4b9`). Pursuit-escape verified later the same day in the follow-up session (see 14b row); that session also verified cross-system save/resume (host Corvus / guest Galatia, `minted=false`) and caught+fixed the NPC_FLEET_SET oversized-frame regression (`23feb5d`). |
 | 17–19 | NOT BUILT | V1. 17 + 18 rescoped 2026-08-20 and both shrank (17: harden the vanilla wipe respawn, no respawn build; 18: interaction-gate WAN race, lock system cancelled — see the phase banners). 17's empty-roster guard must be player-mirror-scoped (see the 2026-08-20 scope warning in its Steps). 19 is the final sign-off and runs last, after 20. |
 | 20 | NOT BUILT | V1; includes 20.6; precedes 19. |
-| 21–29 | NOT BUILT | Post-V1. 21/22/24-siblings have executable specs; 23 is scope-level; 25–29 are design-complete sketches. |
+| 21–28 | NOT BUILT | Post-V1. 21/22 have executable specs; 23 is scope-level; 25–28 are design-complete sketches. |
+| 29 | NOT BUILT | **Pulled into V1 2026-08-20** (user decision) after the jumpy-mirror root cause was verified live during the perf-debug session — see the Phase 29 banner for the two measured failure modes. M1 (interpolation) slots after 18; M2 (cadence) needs 20 and slots after it. The M1 partner-mirror scope question is SETTLED: included — the host↔guest orbit pair was the worst live offender. |
 
 ## Source Layout
 
@@ -2434,7 +2435,39 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 - Campaign policy survives save/load and reconnect; a fresh campaign seeds from install defaults; guests cannot edit policy (the button is absent, not an error).
 - With every option at its default, behavior is byte-for-byte the pre-Phase-28 session (all existing tests stay green), and the not-configurable list still has zero knobs.
 
-## Phase 29: Campaign Motion Smoothness (post-V1) — Mirror Interpolation + Adaptive Cadence
+## Phase 29: Campaign Motion Smoothness (V1 since 2026-08-20) — Mirror Interpolation + Adaptive Cadence
+
+> **Pulled into V1, 2026-08-20 (user decision), with the root cause now verified live** during the
+> perf-debug session (the stutter fixes made the jumpiness plainly visible). The mirror drive model —
+> `setMoveDestinationOverride` + `setVelocity` per 10 Hz record, with a hard `setLocation` snap every
+> 10th apply (`CoopFleetMirror.LOCATION_CORRECTION_EVERY = 10`, i.e. ~1 Hz) — fails in **two measured
+> modes**, both producing a visible ~1 Hz teleport:
+>
+> 1. **Speed-clamped chase.** The engine steers the mirror under the *mirror's* movement stats; the
+>    real fleet is usually running sustained burn (or other ability modifiers) the mirror does not
+>    run, so a traveling fleet's mirror physically cannot keep up. Error accumulates for a second,
+>    then the snap teleports it forward.
+> 2. **Arrival dead zone.** A near-stationary fleet (orbit drift) hands the mirror a destination at
+>    ~its own position; the engine's fleet movement stops inside its arrival radius and the mirror
+>    freezes while the real fleet drifts. Observed live: host and guest parked in orbit at the same
+>    planet each saw the *other's* mirror hop once per second instead of drifting — the partner
+>    player mirror is a worst-case offender, which settles the M1 scope question below.
+>
+> **Eliminated causes (A/B verified same session):** host-side simulation fidelity is NOT the source —
+> the host flying into the guest's system changed nothing visibly; the full-fidelity guest-system
+> driver was confirmed engaged (`drive engaged for <system> (guest present, host elsewhere)` +
+> `npc.systemDriver` ~0.2 ms/frame in the profiler), and the sender-side `CoopNpcFleetMotionSmoother`
+> covers the stride-advanced systems (hyperspace remains smoother-only by design — fixed phase slot).
+> The defect is purely in guest-side application, shared by the player-mirror (`apply`) and NPC-mirror
+> (`applySnapshot`/`applyMotion`) paths through `placeInLocation`/`driveMovement`.
+>
+> **Consequences for M1:** the "spike first" artifact characterization below is largely satisfied by
+> these live observations (following-lag, correction pop, and the dead-zone freeze-hop are all
+> confirmed on a clean localhost link — no shaped link needed to reproduce); the shaped-loopback pass
+> remains for the loss/staleness behaviors only. The M1 acceptance gains a concrete scenario: **a host
+> and guest parked in orbit see each other glide, and a stationary-drift mirror logs zero correction
+> snaps.** M1's known-risk note called this "post-V1 polish rather than a V1 rescope" — superseded by
+> this banner; the QA gate (no rubber-banding) stands.
 
 > **Created 2026-06-10 (user question: "should players be able to tune the sync rate for a smoother experience? automatic? semi-automatic with a limit?"):** the answer reframes the ask. Snapshot rate is not the smoothness lever — smoothness is decided by what a mirror does *between* snapshots, and raising the rate just buys smaller position steps at more bandwidth while silently invalidating tolerances calibrated against the QA'd rates (the Phase 7c dead zone is sized against the 5 Hz `TIME_SNAPSHOT` cadence; the ~1 Hz position/orbit snaps absorb skew bounded by those same streams). So: **no player-facing rate knob, ever** — cadences stay on Phase 28's not-configurable list. This phase builds the two things that actually deliver smoothness: **(M1) client-side interpolation / dead-reckoning of mirrors** — the fix the rejected regional-authority Maybe already named — and **(M2) the "semi-automatic with a limit" idea done right:** the *link-quality machinery*, not the player, moves the UDP state streams between a few QA-certified cadence tiers. This changes **who** picks the rate (the link, within certified bounds), never whether players can. Dependencies: M1 needs only the built Phases 8/9 (plus Phase 20's clumsy shaped-loopback harness for QA); M2 needs Phase 20 (`CoopLinkQuality`, `LINK_STATUS`, `CoopPeerLink`).
 
@@ -2451,7 +2484,7 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 - **Staleness decay:** after ~2 missed expected intervals, decay extrapolation to a stop — a mirror starved of packets coasts briefly and parks; it never sails off unboundedly. (The expected interval comes from the active cadence tier once M2 exists; fixed 100 ms before that.)
 - The blunt periodic `setLocation` snap is subsumed by the error-banded correction; thresholds and blend windows are **internal tunables recorded in code, not options** — tuned once on the shaped harness, values documented here when built.
 - Applies to every `CoopFleetMirror` on whichever side renders it (guest: NPC mirrors + host-player mirror; host: guest-player mirror). Render-side only — **the wire format and send rates are untouched by M1.**
-- Known risk (already flagged by the regional-authority Maybe): extrapolation can introduce rubber-banding/overshoot oscillation. That is the QA gate, and why this is post-V1 polish rather than a V1 rescope — V1 keeps the dumb-but-correct snap.
+- Known risk (already flagged by the regional-authority Maybe): extrapolation can introduce rubber-banding/overshoot oscillation. That is the QA gate. *(The original "post-V1 polish rather than a V1 rescope" rationale here is superseded by the 2026-08-20 banner — the phase is V1 now, but the QA gate stands unchanged.)*
 
 **Milestone 2 — adaptive tiered cadence (`coop.net.CoopCadenceController`):**
 
@@ -2469,7 +2502,7 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 
 **Decision points to settle before building:**
 
-- **Partner-mirror inclusion in M1:** recommend deciding from the spike — NPC mirrors are the certain offenders; the Phase 8 partner mirror's destination-override + presence-indicator treatment may already mask sub-snapshot error.
+- **Partner-mirror inclusion in M1: SETTLED 2026-08-20 — included.** The live orbit-pair observation (banner above) showed the Phase 8 partner mirror is a worst-case offender, not a masked one: the destination-override treatment is exactly what produces the dead-zone freeze-hop at drift speeds.
 - **Tier set:** recommend certifying 5/10/20 but enabling the 20 Hz upshift only on histogram headroom (above).
 - **Blend/threshold values:** tuned on the shaped harness, then frozen and documented here — they are calibration, not configuration.
 
@@ -2490,6 +2523,7 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 **Acceptance:**
 
 - On a shaped 100 ms / 2% loss / jitter link, mirrored fleets move visually continuously: no per-snapshot stepping, no periodic correction pop, no extrapolation overshoot/rubber-banding; a fleet that jumps or despawns cuts instantly, never glides.
+- **Orbit-pair scenario (2026-08-20, the live worst case):** host and guest parked in orbit at the same planet see each other *glide* along the drift, and a stationary-drift mirror produces zero hard correction snaps on a clean link. A sustained-burn traveling fleet's mirror tracks it without the ~1 Hz catch-up teleport.
 - A packet-starved mirror coasts for at most ~2 expected intervals and parks; it never diverges unboundedly from the last authoritative position.
 - Tier changes occur only between certified tiers, per link, with hysteresis (no flapping on a noisy link), and every change is announced (feed message + HUD + intel). With UDP blocked, the TCP fallback presents as the pinned floor tier — one code path.
 - `TIME_SNAPSHOT`, battle status, and all TCP semantic streams are untouched at every tier; Phase 28's registry gains no key and the not-configurable list still has zero knobs.
