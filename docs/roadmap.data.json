@@ -603,22 +603,22 @@
       "title": "Coordinated Saves + Guest Snapshot",
       "theme": "save",
       "track": "v1",
-      "status": "not-built",
-      "summary": "Host owns canonical save; guest fleet snapshot embedded in host save's persistentData, and every host save triggers a deferred guest autosave.",
+      "status": "built",
+      "summary": "Host owns canonical save; guest fleet snapshot embedded in host save's persistentData, every host save triggers a deferred guest autosave, and mirror rosters replicate D-mods/S-mods (14b fold-in).",
       "introduces": [
         "CoopGuestSnapshot DTO",
         "CoopSaveCheckpoint",
-        "SAVE_CHECKPOINT message",
+        "SAVE_CHECKPOINT + GUEST_SNAPSHOT messages",
         "XStream aliases",
         "persistentData coop.guestFleetSnapshot",
-        "deferred autosave"
+        "deferred autosave",
+        "CoopShipMods D-mod/S-mod replication"
       ],
       "residue": [
-        "snapshot DTO round-trip test",
-        "checkpoint deferral test",
-        "two-instance save + resume-from-saves smoke test"
+        "pursuit-escape scenario deferred again → Phase 17 smoke",
+        "NPC deflate/inflate capture latch (post-smoke fallout fix)"
       ],
-      "note": "File export cancelled (sandbox-blocked I/O); snapshot is write-only disaster-recovery in v1"
+      "note": "Smoke-verified 2026-08-20. File export cancelled (sandbox-blocked I/O); snapshot is write-only disaster-recovery in v1; host save now mod-dependent (user decision)"
     },
     {
       "id": "17",
