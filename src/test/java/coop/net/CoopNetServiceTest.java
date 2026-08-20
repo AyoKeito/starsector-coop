@@ -7,11 +7,14 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.ServerSocket;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -113,6 +116,124 @@ class CoopNetServiceTest {
         }
     }
 
+    // ---- poll consolidation (perf audit #10) -----------------------------------------------------
+
+    /**
+     * The drain no longer polls the network per message — it empties the queue first and only polls
+     * when it runs dry. Every queued message must still come out, in order.
+     */
+    @Test
+    void pollInboundDrainsTheWholeBacklogAfterOnePoll() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            for (int i = 0; i < 5; i++) {
+                guest.send(CoopMessages.ping(null, guest.nextSeq(), 1000L + i));
+            }
+            guest.flushOutbound();
+
+            List<CoopMessages.Message> drained = new ArrayList<>();
+            waitUntil(() -> {
+                CoopMessages.Message message;
+                while ((message = host.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return drained.size() == 5;
+            }, "host drained all five pings");
+
+            for (int i = 0; i < 5; i++) {
+                assertEquals(CoopMessages.Type.PING, drained.get(i).type());
+                assertEquals(i + 1L, drained.get(i).seq(), "backlog came out of order");
+            }
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /** Same contract for the UDP queue. */
+    @Test
+    void pollDatagramDrainsTheWholeBacklogAfterOnePoll() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            for (int i = 0; i < 4; i++) {
+                guest.sendDatagram(CoopMessages.datagram(
+                        "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "snapshot-" + i));
+            }
+            guest.flushOutbound();
+
+            List<String> drained = new ArrayList<>();
+            waitUntil(() -> {
+                String payload;
+                while ((payload = host.pollDatagram()) != null) {
+                    drained.add(payload);
+                }
+                return drained.size() == 4;
+            }, "host drained all four datagrams");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The cached flag must follow the channel, not lag it: the poll that discovers the peer is gone is
+     * the one that has to clear it, because the pump's {@code detectPeerDisconnect} reads the flag
+     * immediately after that poll and nothing else re-derives it.
+     */
+    @Test
+    void cachedConnectedFlagClearsOnThePollThatSeesThePeerLeave() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+            assertTrue(host.isConnected(), "host should be connected before the guest leaves");
+
+            guest.shutdown();
+
+            waitUntil(() -> {
+                host.flushOutbound(); // the pump's frame-head poll
+                return !host.isConnected();
+            }, "host observed the disconnect through its frame poll");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /** Local shutdown clears the flag with no poll at all. */
+    @Test
+    void shutdownClearsTheCachedConnectedFlagImmediately() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            guest.shutdown();
+            assertFalse(guest.isConnected(), "shutdown must clear the connected flag on the spot");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
     private int reserveLocalPort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             socket.setReuseAddress(true);
@@ -142,7 +263,10 @@ class CoopNetServiceTest {
                                                                 String description) throws InterruptedException {
         AtomicReference<CoopMessages.Message> message = new AtomicReference<>();
         waitUntil(() -> {
-            host.isConnected();
+            // The host's accept only happens inside a poll, and since perf audit #10 isConnected()
+            // stops polling once it is connected. flushOutbound() is the poll the pump runs at the
+            // head of every frame, so driving the host with it is what the game actually does.
+            host.flushOutbound();
             message.set(guest.pollInbound());
             return message.get() != null;
         }, description);
@@ -227,9 +351,11 @@ class CoopNetServiceTest {
             intruder.send(new DatagramPacket(payload, payload.length,
                     InetAddress.getByName("127.0.0.1"), port));
 
-            // The intruder's payload must never surface as inbound traffic.
+            // The intruder's payload must never surface as inbound traffic. Poll for real (the host is
+            // connected, so isConnected() no longer does) — the packet has to be received and dropped
+            // for this assertion to mean anything.
             Thread.sleep(200L);
-            host.isConnected();
+            host.flushOutbound();
             CoopMessages.Message leaked = host.pollInbound();
             assertNull(leaked, "intruder datagram must not be delivered as inbound traffic");
 

@@ -18,11 +18,22 @@ public final class CoopDelimited {
     private CoopDelimited() {
     }
 
-    /** Escapes a single field value so it round-trips through {@link #split(String)}. */
+    /**
+     * Escapes a single field value so it round-trips through {@link #split(String)}.
+     *
+     * <p>Almost every real field — ids, hull names, faction keys — contains nothing that needs
+     * escaping, and this is called per field of per record of every list payload, so the
+     * nothing-to-do case returns the input rather than copying it through a StringBuilder.
+     */
     public static String field(String value) {
         String text = value == null ? "" : value;
+        int firstEscapable = indexOfEscapable(text);
+        if (firstEscapable < 0) {
+            return text;
+        }
         StringBuilder escaped = new StringBuilder(text.length() + 4);
-        for (int i = 0; i < text.length(); i++) {
+        escaped.append(text, 0, firstEscapable);
+        for (int i = firstEscapable; i < text.length(); i++) {
             char c = text.charAt(i);
             switch (c) {
                 case '\\' -> escaped.append("\\\\");
@@ -33,6 +44,17 @@ public final class CoopDelimited {
             }
         }
         return escaped.toString();
+    }
+
+    /** First index needing an escape, or -1 when the value can be emitted verbatim. */
+    private static int indexOfEscapable(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\\' || c == '|' || c == '\n' || c == '\r') {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** Splits one {@code |}-separated, backslash-escaped record line back into its fields. */

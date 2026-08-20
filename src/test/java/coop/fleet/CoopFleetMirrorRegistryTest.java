@@ -7,6 +7,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -382,6 +383,44 @@ class CoopFleetMirrorRegistryTest {
         assertFalse(CoopFleetMirrorRegistry.shouldDeferReassert("hash-1", 0L, "hash-1",
                         CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS),
                 "the freeze expires so it can never diverge permanently");
+    }
+
+    // ---- diagnostics pre-check (perf audit #16) --------------------------------------------------
+
+    @Test
+    void theIdHashTracksTheMirroredSetWithoutBuildingIt() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        assertEquals(1, registry.fleetIdsHash(), "the empty registry hashes to the seed");
+
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")), 1000L);
+        int twoFleets = registry.fleetIdsHash();
+
+        // Same population, resent: the pre-check must say "nothing to print".
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")), 2000L);
+        assertEquals(twoFleets, registry.fleetIdsHash());
+
+        // A roster change with no id change must not move it either — that is what the host's own
+        // set hash is for; this only answers "are these the same mirrors".
+        registry.applySet(set(fleet("a", "corvus", "hammerhead"), fleet("b", "corvus", "lasher")), 3000L);
+        assertEquals(twoFleets, registry.fleetIdsHash());
+
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 4000L);
+        assertNotEquals(twoFleets, registry.fleetIdsHash(), "a dropped mirror must change the hash");
+
+        registry.disposeAll();
+        assertEquals(1, registry.fleetIdsHash(), "teardown returns to the empty hash");
+    }
+
+    @Test
+    void theIdHashDistinguishesASwapOfOneIdForAnother() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        int withA = registry.fleetIdsHash();
+
+        registry.applySet(set(fleet("b", "corvus", "wolf")), 2000L);
+
+        assertEquals(1, registry.size(), "same size, different fleet");
+        assertNotEquals(withA, registry.fleetIdsHash());
     }
 
     /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */

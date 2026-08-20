@@ -12,11 +12,13 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -241,6 +243,16 @@ public final class CoopBattleResultReconciler {
         private final Supplier<SectorAPI> sectorSupplier;
         private final Runnable setRebroadcast;
         private final Consumer<String> engageCooldownRestart;
+        /**
+         * Last fleet {@link #find(String)} resolved. {@code exists()} is always followed immediately by
+         * {@code despawn()} or {@code applySurvivingRoster()} for the same id, and each of those ran its
+         * own sector-wide scan — ~10 scans in the single frame the player returns from combat (perf
+         * audit #17). The hit is revalidated ({@link #stillResolves}) rather than trusted, so a memo
+         * that outlives its fleet — including across battles, since this object lives as long as the
+         * pump — degrades to the scan instead of returning a corpse.
+         */
+        private String memoFleetId;
+        private CampaignFleetAPI memoFleet;
 
         public EngineFleets(Supplier<SectorAPI> sectorSupplier, Runnable setRebroadcast,
                             Consumer<String> engageCooldownRestart) {
@@ -262,6 +274,9 @@ public final class CoopBattleResultReconciler {
                 return;
             }
             String name = safeName(fleet);
+            // This id is about to stop resolving; do not leave it memoised for the survivor pass.
+            memoFleetId = null;
+            memoFleet = null;
             try {
                 fleet.despawn(CampaignEventListener.FleetDespawnReason.DESTROYED_BY_BATTLE, null);
                 CoopLog.info(CoopBattleResultReconciler.class, "Coop despawned NPC fleet destroyed in"
@@ -314,8 +329,9 @@ public final class CoopBattleResultReconciler {
                 byKey.computeIfAbsent(memberKey(member.hullId(), member.variantId()),
                         key -> new ArrayDeque<>()).add(member);
             }
+            Set<Integer> removedIndices = new HashSet<>(removed);
             for (int i = 0; i < current.size(); i++) {
-                if (removed.contains(i)) {
+                if (removedIndices.contains(i)) {
                     continue;
                 }
                 FleetMemberAPI member = current.get(i);
@@ -348,6 +364,38 @@ public final class CoopBattleResultReconciler {
             if (coopFleetId == null || coopFleetId.isEmpty()) {
                 return null;
             }
+            if (coopFleetId.equals(memoFleetId) && stillResolves(memoFleet, coopFleetId)) {
+                return memoFleet;
+            }
+            memoFleetId = null;
+            memoFleet = null;
+            CampaignFleetAPI found = scan(coopFleetId);
+            if (found != null) {
+                memoFleetId = coopFleetId;
+                memoFleet = found;
+            }
+            return found;
+        }
+
+        /**
+         * O(1) revalidation of a memoised fleet: still alive, still in a location, still that id. A
+         * fleet that passes is exactly the one {@link #scan(String)} would return — ids are unique and
+         * the scan walks locations — and a fleet that fails is one the scan would no longer find.
+         */
+        private static boolean stillResolves(CampaignFleetAPI fleet, String coopFleetId) {
+            if (fleet == null) {
+                return false;
+            }
+            try {
+                return fleet.isAlive()
+                        && fleet.getContainingLocation() != null
+                        && coopFleetId.equals(safeId(fleet));
+            } catch (RuntimeException | LinkageError ex) {
+                return false;
+            }
+        }
+
+        private CampaignFleetAPI scan(String coopFleetId) {
             SectorAPI sector;
             try {
                 sector = sectorSupplier.get();

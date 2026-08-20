@@ -44,7 +44,9 @@ public final class CoopOrbitSync {
     }
 
     public static String encode(List<OrbitEntry> entries) {
-        StringBuilder sb = new StringBuilder();
+        // ~64 chars a record (two ids plus three floats). A star system's worth of bodies is a ~4 KB
+        // payload, which an unsized builder reached through five or six array copies.
+        StringBuilder sb = new StringBuilder(Math.max(64, entries.size() * 64));
         for (OrbitEntry e : entries) {
             if (sb.length() > 0) {
                 sb.append('\n');

@@ -241,6 +241,21 @@ public final class CoopFleetMirrorRegistry {
         return new java.util.LinkedHashSet<>(mirrors.keySet());
     }
 
+    /**
+     * Cheap change detector for the mirrored id set: a rolling hash over the ids in registry order.
+     * The CoopDebug NPC-set dump ran {@link #fleetIds()} (a fresh 43-entry LinkedHashSet) plus a string
+     * concat every frame just to find out nothing had changed, which perturbed the very measurement
+     * runs it was on for (perf audit #16). Order-sensitive on purpose — insertion order changing is
+     * itself a change worth printing — and free, because {@code String.hashCode} is cached.
+     */
+    public int fleetIdsHash() {
+        int hash = 1;
+        for (String id : mirrors.keySet()) {
+            hash = 31 * hash + (id == null ? 0 : id.hashCode());
+        }
+        return hash;
+    }
+
     private record PendingReconcile(String markHash, long markedAtMillis) {
     }
 }

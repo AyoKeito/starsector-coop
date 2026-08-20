@@ -171,4 +171,26 @@ class CoopWorldEntitySpawnTest {
     void plainWorldgenEntitiesLikePlanetsAreNotTracked() {
         assertFalse(CoopCampaignReplicator.shouldTrackForConsume(false, false, false, false));
     }
+
+    // ---- Consume-watcher scan gate (perf audit #5) -----------------------------------------------
+
+    @Test
+    void theFirstScanAfterAResetAlwaysRuns() {
+        assertTrue(CoopCampaignReplicator.shouldScanSalvage(0L, 1_000_000L));
+    }
+
+    @Test
+    void scansAreGatedToTheInterval() {
+        long last = 1_000_000L;
+        assertFalse(CoopCampaignReplicator.shouldScanSalvage(last, last));
+        assertFalse(CoopCampaignReplicator.shouldScanSalvage(last,
+                last + CoopCampaignReplicator.SALVAGE_SCAN_INTERVAL_MILLIS - 1));
+        assertTrue(CoopCampaignReplicator.shouldScanSalvage(last,
+                last + CoopCampaignReplicator.SALVAGE_SCAN_INTERVAL_MILLIS));
+    }
+
+    @Test
+    void aClockThatStepsBackwardsDoesNotWedgeTheWatcher() {
+        assertTrue(CoopCampaignReplicator.shouldScanSalvage(1_000_000L, 999_000L));
+    }
 }

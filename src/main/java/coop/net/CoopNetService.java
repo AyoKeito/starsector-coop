@@ -52,6 +52,12 @@ public class CoopNetService {
     private CoopConnectionRole role = CoopConnectionRole.NONE;
     private ServerSocketChannel serverChannel;
     private SocketChannel activeChannel;
+    /**
+     * Cached answer for {@link #isConnected()}. Derived from {@code activeChannel} by
+     * {@link #refreshConnectedLocked()}, which every path that can change it calls; volatile so the
+     * fast path can read it without taking {@code lifecycleLock}.
+     */
+    private volatile boolean connected;
     private SocketChannel pendingConnectChannel;
     private DatagramChannel udpChannel;
     private SocketAddress udpRemoteAddress;
@@ -112,10 +118,30 @@ public class CoopNetService {
         }
     }
 
+    /**
+     * Whether the TCP channel is up. Reads a cached flag while connected — the pump and the battle
+     * bridge ask this ~11 times a frame, and every one of those calls used to run a full
+     * {@link #pollNetworkLocked()} (accept + read loop + datagram receive), which is where most of the
+     * measured ~3000 socket syscalls/s came from (perf audit #10).
+     *
+     * <p>The flag is refreshed by {@link #refreshConnectedLocked()} from every path that can change the
+     * answer: every poll, and every mutation of {@code activeChannel} (attach, close, shutdown). A peer
+     * that vanishes is only ever discovered inside a poll (a {@code read} of -1), and the pump polls at
+     * the head of its frame via {@link #flushOutbound()} — immediately before {@code detectPeerDisconnect}
+     * reads this — so a transition is still observed on the frame it happens.
+     *
+     * <p>While the flag is false this still polls, and deliberately: a connection can only be
+     * <em>established</em> inside a poll (host accept, guest connect-retry), and callers spinning on
+     * this to wait for a peer — including a guest reconnecting mid-battle, when the campaign pump is
+     * not running to poll for it — must keep driving that.
+     */
     public boolean isConnected() {
+        if (connected) {
+            return true;
+        }
         synchronized (lifecycleLock) {
             pollNetworkLocked();
-            return activeChannel != null && activeChannel.isOpen() && activeChannel.isConnected();
+            return connected;
         }
     }
 
@@ -127,6 +153,11 @@ public class CoopNetService {
         outbound.add(message);
     }
 
+    /**
+     * Polls the network, then writes everything queued. This is the frame's poll: the pump calls it at
+     * the head and the tail of {@code advance()}, so everything that arrived before the frame started
+     * is already queued by the time the drains below run.
+     */
     public void flushOutbound() {
         synchronized (lifecycleLock) {
             pollNetworkLocked();
@@ -135,8 +166,22 @@ public class CoopNetService {
         }
     }
 
+    /**
+     * Next queued TCP message, or null. Drains the queue first and only polls when it runs dry, rather
+     * than polling on every call (perf audit #10): the drain loop that empties a 40-message backlog
+     * used to cost 40 accept+read+recvfrom passes.
+     *
+     * <p>The delivered sequence is unchanged. The frame's poll already happened in
+     * {@link #flushOutbound()}, so everything that arrived before the frame started is in the queue;
+     * the dry poll at the end of the drain is what still lets a message that landed <em>during</em> the
+     * frame be processed by it, exactly as before.
+     */
     public CoopMessages.Message pollInbound() {
         synchronized (lifecycleLock) {
+            CoopMessages.Message queued = inbound.poll();
+            if (queued != null) {
+                return queued;
+            }
             pollNetworkLocked();
             return inbound.poll();
         }
@@ -150,9 +195,14 @@ public class CoopNetService {
         outboundDatagrams.add(payload);
     }
 
-    /** Returns the next received UDP datagram payload, or null. */
+    /** Returns the next received UDP datagram payload, or null. Drains first, polls dry — see
+     * {@link #pollInbound()} for why that preserves what a frame ingests. */
     public String pollDatagram() {
         synchronized (lifecycleLock) {
+            String queued = inboundDatagrams.poll();
+            if (queued != null) {
+                return queued;
+            }
             pollNetworkLocked();
             return inboundDatagrams.poll();
         }
@@ -176,6 +226,13 @@ public class CoopNetService {
             pendingConnectChannel = null;
         }
         readDatagramsLocked();
+        refreshConnectedLocked();
+    }
+
+    /** Recomputes the {@link #isConnected()} cache from the live channel. Cheap: two field reads. */
+    private void refreshConnectedLocked() {
+        SocketChannel channel = activeChannel;
+        connected = channel != null && channel.isOpen() && channel.isConnected();
     }
 
     private void openUdpLocked(InetSocketAddress bindAddress, SocketAddress remoteAddress) {
@@ -428,6 +485,7 @@ public class CoopNetService {
             // locked and the new guest's datagrams would be rejected for the rest of the session.
             udpRemoteAddress = null;
         }
+        refreshConnectedLocked();
         CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role
                 + (pinnedPeerAddress == null ? "" : " (UDP pinned to " + pinnedPeerAddress.getHostAddress() + ")"));
         return true;
@@ -551,6 +609,7 @@ public class CoopNetService {
         }
 
         activeChannel = null;
+        connected = false;
         pendingWrite = null;
         inboundFrameLength = 0;
         discardingOversizedFrame = false;
@@ -568,6 +627,7 @@ public class CoopNetService {
         closeChannel(udpChannel);
         serverChannel = null;
         activeChannel = null;
+        connected = false;
         pendingConnectChannel = null;
         udpChannel = null;
         udpRemoteAddress = null;

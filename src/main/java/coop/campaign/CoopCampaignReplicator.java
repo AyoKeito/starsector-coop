@@ -102,10 +102,23 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     private final CoopMarketSync marketSync = new CoopMarketSync();
     private final CoopWorldDelta.Ledger worldLedger = new CoopWorldDelta.Ledger();
 
-    // Salvage watcher: salvageable entity ids present at the local player's location last tick. A
+    // Salvage watcher: salvageable entity ids present at the local player's location last pass. A
     // tracked id that vanishes means the local player salvaged/disassembled it -> WORLD_DELTA(CONSUME).
     private final Set<String> trackedSalvageables = new HashSet<>();
     private String watchedLocationId;
+    /**
+     * How often the watcher walks the player's location. It used to run every frame over every entity
+     * there (358 in an asteroid belt), reading {@code getMemoryWithoutUpdate()} — which lazily allocates
+     * a save-persisted Memory for entities that lack one — and allocating a fresh id set each time
+     * (perf audit #5). The output is an event report, so seeing a salvage up to 250 ms late is not
+     * observable: nothing in the session reads a CONSUME delta on a deadline.
+     */
+    static final long SALVAGE_SCAN_INTERVAL_MILLIS = 250L;
+    private long lastSalvageScanMillis;
+    /** Scratch, reused across passes: ids present at the watched location on the current pass. */
+    private final Set<String> salvageScanScratch = new HashSet<>();
+    /** Scratch, reused across passes: tracked ids that vanished on the current pass. */
+    private final List<String> salvageConsumedScratch = new ArrayList<>();
 
     // Orbit-angle sync: host re-broadcasts orbiting-body angles ~1Hz so the guest can snap out the
     // small clock-drift offset that makes shared systems' planets/jumps appear at different angles.
@@ -209,7 +222,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         // system, every entity consumed last session looked "newly missing" and was re-reported as a
         // fresh WORLD_DELTA(CONSUME). Clearing forces a silent re-seed on the next tick.
         trackedSalvageables.clear();
+        salvageScanScratch.clear();
+        salvageConsumedScratch.clear();
         watchedLocationId = null;
+        lastSalvageScanMillis = 0L;
     }
 
     public boolean isRegistered() {
@@ -1341,6 +1357,11 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         // Host-only, self-throttled, and deliberately ahead of the hyperspace early-return below:
         // objectives and gates flip whether or not the host is sitting in a star system.
         tickSkeletonMutations();
+        long nowMillis = now();
+        if (!shouldScanSalvage(lastSalvageScanMillis, nowMillis)) {
+            return;
+        }
+        lastSalvageScanMillis = nowMillis;
         try {
             SectorAPI sector = Global.getSector();
             CampaignFleetAPI player = sector == null ? null : sector.getPlayerFleet();
@@ -1352,12 +1373,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 watchedLocationId = null;
                 return;
             }
-            Set<String> current = new HashSet<>();
+            // Scratch set, cleared and refilled: a fresh HashSet per pass was pure churn.
+            Set<String> current = salvageScanScratch;
+            current.clear();
             for (SectorEntityToken entity : location.getAllEntities()) {
-                if (!isConsumableWorldEntity(entity)) {
-                    continue;
-                }
-                String key = consumeKeyFor(entity);
+                // One getMemoryWithoutUpdate() per entity, not two — the call allocates a Memory for
+                // entities that lack one, so the old track-then-key pair did that twice over the whole
+                // location every frame.
+                String key = consumeKeyIfTracked(entity);
                 if (key != null) {
                     current.add(key);
                 }
@@ -1373,17 +1396,33 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 }
                 return;
             }
-            // A tracked entity that is no longer present was consumed by the local player this tick.
-            for (String id : new ArrayList<>(trackedSalvageables)) {
+            // A tracked entity that is no longer present was consumed by the local player this pass.
+            // Collected first because the report path is free to touch the tracked set.
+            salvageConsumedScratch.clear();
+            for (String id : trackedSalvageables) {
                 if (!current.contains(id)) {
-                    trackedSalvageables.remove(id);
-                    reportLocalSalvageConsume(id);
+                    salvageConsumedScratch.add(id);
                 }
             }
+            for (int i = 0; i < salvageConsumedScratch.size(); i++) {
+                String id = salvageConsumedScratch.get(i);
+                trackedSalvageables.remove(id);
+                reportLocalSalvageConsume(id);
+            }
+            salvageConsumedScratch.clear();
             trackedSalvageables.addAll(current);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Salvage watcher failed", ex);
         }
+    }
+
+    /** The salvage watcher's timer gate (pure, unit-tested). First pass after a reset always runs. */
+    static boolean shouldScanSalvage(long lastScanMillis, long nowMillis) {
+        if (lastScanMillis == 0L) {
+            return true; // fresh session / post-reset: seed the baseline on the first frame
+        }
+        long elapsed = nowMillis - lastScanMillis;
+        return elapsed < 0L || elapsed >= SALVAGE_SCAN_INTERVAL_MILLIS; // negative = clock stepped back
     }
 
     /**
@@ -1517,8 +1556,13 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                     snapped++;
                 }
             }
-            CoopLog.info(CoopCampaignReplicator.class, "Coop ORBIT_SNAPSHOT applied loc=" + locationId
-                    + " entries=" + entries.size() + " snapped=" + snapped);
+            // 1 Hz, and the concat ran whether or not anything would read it (perf audit #18). It
+            // earned its keep in the orbit-desync smoke tests, so it stays — behind the same
+            // diagnostics gate as the orbit dump it is read alongside.
+            if (CoopDebug.diagnosticsEnabled()) {
+                CoopLog.info(CoopCampaignReplicator.class, "Coop ORBIT_SNAPSHOT applied loc=" + locationId
+                        + " entries=" + entries.size() + " snapped=" + snapped);
+            }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply ORBIT_SNAPSHOT", ex);
         } finally {
@@ -1642,7 +1686,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     /**
-     * Which entities the consume watcher tracks (Phase 12d widening).
+     * The consume watcher's per-entity step: the tracking key for an entity worth watching, or null.
+     *
+     * <p><b>Which entities are tracked</b> (Phase 12d widening).
      *
      * <p>Was an allowlist of {@code Tags.SALVAGEABLE} only, which silently missed everything nobody
      * had thought to tag: verified in-game on 2026-08-09, {@code nav_buoy_makeshift} is tagged
@@ -1654,42 +1700,43 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      * entities cover pods and the makeshift structures without naming either. Planets, stars, and
      * jump points are not custom entities and so stay out; fleets are excluded outright because
      * Phase 9 owns them.
+     *
+     * <p><b>Which key.</b> Coop-replicated entities key on their coop-assigned id because the engine
+     * mints its own per client and the two never match; everything else keys on the engine id, which
+     * deterministic worldgen makes identical across clients.
      */
-    private boolean isConsumableWorldEntity(SectorEntityToken entity) {
+    private String consumeKeyIfTracked(SectorEntityToken entity) {
         if (entity == null) {
-            return false;
+            return null;
         }
+        // The one memory read the whole per-entity pass gets: getMemoryWithoutUpdate() lazily
+        // allocates a save-persisted Memory for entities that lack one, so asking twice (once to
+        // decide, once to key) doubled that cost across every entity in the location.
         MemoryAPI memory = entity.getMemoryWithoutUpdate();
-        return shouldTrackForConsume(
+        boolean coopReplicated = memory != null && memory.contains(CoopWorldEntitySpawn.COOP_ENTITY_TAG);
+        if (!shouldTrackForConsume(
                 entity instanceof CampaignFleetAPI,
                 entity.hasTag(Tags.SALVAGEABLE),
-                memory != null && memory.contains(CoopWorldEntitySpawn.COOP_ENTITY_TAG),
-                entity instanceof CustomCampaignEntityAPI);
-    }
-
-    /** Pure decision function (unit-tested) behind {@link #isConsumableWorldEntity}. */
-    static boolean shouldTrackForConsume(boolean isFleet, boolean salvageTagged,
-                                         boolean coopReplicated, boolean isCustomEntity) {
-        if (isFleet) {
-            return false; // Phase 9 owns fleet existence
+                coopReplicated,
+                entity instanceof CustomCampaignEntityAPI)) {
+            return null;
         }
-        return salvageTagged || coopReplicated || isCustomEntity;
-    }
-
-    /**
-     * Identity used for consume tracking. Coop-replicated entities key on their coop-assigned id
-     * because the engine mints its own per client and the two never match; everything else keys on
-     * the engine id, which deterministic worldgen makes identical across clients.
-     */
-    private String consumeKeyFor(SectorEntityToken entity) {
-        MemoryAPI memory = entity.getMemoryWithoutUpdate();
-        if (memory != null && memory.contains(CoopWorldEntitySpawn.COOP_ENTITY_TAG)) {
+        if (coopReplicated) {
             Object coopId = memory.get(CoopWorldEntitySpawn.COOP_ENTITY_TAG);
             if (coopId != null && !String.valueOf(coopId).isBlank()) {
                 return String.valueOf(coopId);
             }
         }
         return entity.getId();
+    }
+
+    /** Pure decision function (unit-tested) behind {@link #consumeKeyIfTracked}. */
+    static boolean shouldTrackForConsume(boolean isFleet, boolean salvageTagged,
+                                         boolean coopReplicated, boolean isCustomEntity) {
+        if (isFleet) {
+            return false; // Phase 9 owns fleet existence
+        }
+        return salvageTagged || coopReplicated || isCustomEntity;
     }
 
     /** Finds a replicated entity by coop id, falling back to the engine id for worldgen entities. */

@@ -69,6 +69,14 @@ public final class CoopFullFidelitySystemDriver {
     /** Kill switch. Defaults to on; set {@code -Dcoop.fullFidelityGuestSystem=false} to fall back. */
     public static final String ENABLED_PROPERTY = "coop.fullFidelityGuestSystem";
 
+    /**
+     * Read once at class init: it is a launch-time JVM property, so it cannot change mid-session, and
+     * {@code Boolean.parseBoolean(System.getProperty(...))} on the per-frame drive was a synchronized
+     * {@code Properties} lookup for an answer that never moves (perf audit #18).
+     */
+    private static final boolean ENABLED =
+            Boolean.parseBoolean(System.getProperty(ENABLED_PROPERTY, "true"));
+
     /** The obfuscated, unused second parameter of {@code BaseLocation.advance}. Always passed null. */
     private static final String ADVANCE_PARAM_CLASS = "com.fs.starfarer.util.A.new";
 
@@ -180,7 +188,7 @@ public final class CoopFullFidelitySystemDriver {
     // ---- Drive ------------------------------------------------------------------------------------
 
     private static void runTick(SectorAPI sector) throws Throwable {
-        boolean enabled = Boolean.parseBoolean(System.getProperty(ENABLED_PROPERTY, "true"));
+        boolean enabled = ENABLED;
         // The cheap hard stops gate the location resolve, in the same precedence order
         // CoopSystemDriveState.classify uses (kill switch, then save, then fast advance), so a frame
         // that cannot drive anything does not go looking for the guest. Ordering is load-bearing only

@@ -152,6 +152,9 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean npcReplicationStreaming;
     private boolean baseReplicationStreaming;
     private String lastNpcDebug;
+    /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
+    private int lastNpcMirrorCount = -1;
+    private int lastNpcMirrorIdsHash;
     private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
     private final CoopCombatSpike combatSpike = new CoopCombatSpike();
@@ -328,6 +331,9 @@ public class CoopNetPump implements EveryFrameScript {
         // the $coopFrameProfile memory flag is set, in which case each split() below is one clock read.
         // Disabled, every call here is a static boolean read and a return.
         profiler.beginFrame();
+        // Same shape: CoopDebug.diagnosticsEnabled() is read 3-4x a frame from the hot paths, so the
+        // property + sector-memory lookup behind it runs here on a 300-frame poll instead.
+        CoopDebug.pollFrame();
         long t = profiler.start();
         maybeStartFromSystemProperties();
         t = profiler.split(SECTION_CFG_PROPERTIES, t);
@@ -1552,6 +1558,8 @@ public class CoopNetPump implements EveryFrameScript {
             npcFleetRegistry.disposeAll();
             npcReplicationStreaming = false;
             lastNpcDebug = null;
+            lastNpcMirrorCount = -1;
+            lastNpcMirrorIdsHash = 0;
         }
         if (!active) {
             return;
@@ -1633,7 +1641,17 @@ public class CoopNetPump implements EveryFrameScript {
             state = "host fleets=" + npcFleetReplicator.lastFleetCount()
                     + " hash=" + shortHash(npcFleetReplicator.lastSetHash());
         } else {
-            state = "guest mirrors=" + npcFleetRegistry.size() + " ids=" + npcFleetRegistry.fleetIds();
+            // Pre-check before building anything: size plus a rolling hash of the ids. The set copy
+            // and the concat below are only worth paying for when one of them moved (perf audit #16).
+            int size = npcFleetRegistry.size();
+            int idsHash = npcFleetRegistry.fleetIdsHash();
+            if (size == lastNpcMirrorCount && idsHash == lastNpcMirrorIdsHash) {
+                maybeDumpVisibilityProbe();
+                return;
+            }
+            lastNpcMirrorCount = size;
+            lastNpcMirrorIdsHash = idsHash;
+            state = "guest mirrors=" + size + " ids=" + npcFleetRegistry.fleetIds();
         }
         if (!state.equals(lastNpcDebug)) {
             CoopLog.info(CoopNetPump.class, "Coop NPC-set " + state);
