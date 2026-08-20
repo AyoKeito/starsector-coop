@@ -29,6 +29,14 @@ public final class CoopFleetSnapshotFactory {
     /** {@code Misc.D_HULL_SUFFIX}: the suffix {@code DModManager.setDHull} appends to a hull id. */
     static final String D_HULL_SUFFIX = "_default_D";
 
+    /**
+     * Holds each NPC fleet's inflated fit across the engine's deflations so the structural fleet hash
+     * stops oscillating; see {@link CoopInflationLatch} for the measured defect. Static because the
+     * capture entry points are static and the latch has to outlive a single call — it is weakly keyed
+     * on the fleet, so it needs no lifecycle of its own. Written only from the campaign thread.
+     */
+    private static final CoopInflationLatch INFLATION_LATCH = new CoopInflationLatch();
+
     private CoopFleetSnapshotFactory() {
     }
 
@@ -79,6 +87,10 @@ public final class CoopFleetSnapshotFactory {
      * then never rebuilds until the host fleet's real roster changes. The guest log for build 56b025f
      * shows the end state directly: 20 "roster refreshed to 0 ship(s)" lines, six of them inside a
      * single set apply.
+     *
+     * <p><b>Inflation latch (2026-08-20).</b> What leaves here for a fleet the engine has currently
+     * deflated is its last <em>inflated</em> fit, not the stripped stock roster — see
+     * {@link CoopInflationLatch}. Fleets without an inflater, the player's included, are untouched.
      */
     public static List<CoopFleetSnapshot.Member> captureMembers(CampaignFleetAPI fleet) {
         Objects.requireNonNull(fleet, "fleet");
@@ -101,7 +113,27 @@ public final class CoopFleetSnapshotFactory {
                     + " unreadable ship(s) while capturing the roster of " + safeName(fleet)
                     + "; the mirror will be short by that many");
         }
-        return members;
+        return INFLATION_LATCH.reconcile(fleet, capturesRealFit(fleet), members);
+    }
+
+    /**
+     * True when what we just read off this fleet is its real fitted state: the engine has inflated it,
+     * or it has no {@code FleetInflater} and therefore nothing to deflate. Player fleets are always
+     * the second case, so their capture is unchanged by the latch — it only ever records what was
+     * already going on the wire.
+     *
+     * <p>{@code CampaignFleetAPI#getInflater()} / {@code #isInflated()} verified against the 0.98a API
+     * sources ({@code api_pristine/com/fs/starfarer/api/campaign/CampaignFleetAPI.java:249,257}); the
+     * pairing is vanilla's own idiom ({@code Misc.java:4857}).
+     */
+    private static boolean capturesRealFit(CampaignFleetAPI fleet) {
+        try {
+            return fleet.getInflater() == null || fleet.isInflated();
+        } catch (RuntimeException | LinkageError ignored) {
+            // A fleet that cannot answer either question degrades to pre-fix behaviour: stream what
+            // was read rather than replay a latch we can no longer justify.
+            return true;
+        }
     }
 
     /**
