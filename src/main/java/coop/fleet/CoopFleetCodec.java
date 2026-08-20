@@ -19,7 +19,11 @@ import java.util.List;
  */
 final class CoopFleetCodec {
     static final char FIELD_SEPARATOR = '|';
-    static final int MEMBER_FIELD_COUNT = 7;
+    /**
+     * Bumped 7 -&gt; 10 by Phase 16 for the replicated permanent hullmods ({@code dmodIds},
+     * {@code sModIds}, {@code sModdedBuiltInIds}); see {@link CoopFleetSnapshot.Member}.
+     */
+    static final int MEMBER_FIELD_COUNT = 10;
     /** U+001F UNIT SEPARATOR: the datagram envelope's record separator, and player-typeable. */
     static final char UNIT_SEPARATOR = (char) 0x1F;
 
@@ -117,16 +121,20 @@ final class CoopFleetCodec {
                 .append(FIELD_SEPARATOR).append(escape(member.shipName()))
                 .append(FIELD_SEPARATOR).append(escape(member.captainName()))
                 .append(FIELD_SEPARATOR).append(Float.toString(member.cr()))
-                .append(FIELD_SEPARATOR).append(Float.toString(member.hullFraction()));
+                .append(FIELD_SEPARATOR).append(Float.toString(member.hullFraction()))
+                .append(FIELD_SEPARATOR).append(escape(member.dmodIds()))
+                .append(FIELD_SEPARATOR).append(escape(member.sModIds()))
+                .append(FIELD_SEPARATOR).append(escape(member.sModdedBuiltInIds()));
     }
 
-    /** Parses the 7 fields of one member record produced by {@link #appendMember}. */
+    /** Parses the 10 fields of one member record produced by {@link #appendMember}. */
     static CoopFleetSnapshot.Member parseMember(List<String> fields) {
         if (fields.size() != MEMBER_FIELD_COUNT) {
             throw new IllegalArgumentException("Expected " + MEMBER_FIELD_COUNT
                     + " member fields, got " + fields.size());
         }
         return new CoopFleetSnapshot.Member(fields.get(0), fields.get(1), fields.get(2), fields.get(3),
-                fields.get(4), Float.parseFloat(fields.get(5)), Float.parseFloat(fields.get(6)));
+                fields.get(4), Float.parseFloat(fields.get(5)), Float.parseFloat(fields.get(6)),
+                fields.get(7), fields.get(8), fields.get(9));
     }
 }

@@ -4,9 +4,12 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
+import com.fs.starfarer.api.impl.campaign.DModManager;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import com.fs.starfarer.api.loading.VariantSource;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
@@ -562,6 +565,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
             if (!member.shipName().isEmpty()) {
                 created.setShipName(member.shipName());
             }
+            applyReplicatedHullMods(created, member);
             created.getRepairTracker().setCR(member.cr());
             created.getStatus().setHullFraction(member.hullFraction());
             return true;
@@ -570,6 +574,90 @@ public class CoopFleetMirror implements CoopNpcMirror {
                     "Failed to attach coop mirror member " + member.fleetMemberId(), ex);
             return false;
         }
+    }
+
+    /**
+     * Re-applies the sender's d-mods and S-mods on the freshly built stock ship (Phase 16). Never
+     * fatal: a mirror that stays cosmetically clean is exactly the pre-Phase-16 behaviour and is
+     * strictly better than a roster short by one ship.
+     */
+    private void applyReplicatedHullMods(FleetMemberAPI created, CoopFleetSnapshot.Member member) {
+        try {
+            CoopShipMods.apply(member.dmodIds(), member.sModIds(), member.sModdedBuiltInIds(),
+                    engineVariantOps(created));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop mirror hullmods (dmods="
+                    + member.dmodIds() + " sMods=" + member.sModIds()
+                    + " sModdedBuiltIns=" + member.sModdedBuiltInIds() + ") to coopFleetId="
+                    + coopFleetId + " fleetMemberId=" + member.fleetMemberId(), ex);
+        }
+    }
+
+    /**
+     * The engine half of the permanent-hullmod apply.
+     *
+     * <p><b>{@code clone()} is the invariant, and it stays whatever the engine happens to do.</b> The
+     * hazard is that a member's variant can be the shared spec-store object for that stock variant, in
+     * which case {@code addPermaMod} would not mod one mirror ship — it would mod every ship of that
+     * variant in this player's universe, their own fleet and every market's stock included, for the
+     * rest of the session. As of 0.98a the engine happens to clone it first
+     * ({@code FleetMember.updateSpecIfNeeded} does {@code this.variant = this.variant.clone()} for the
+     * {@code SHIP} branch, {@code tmp_ff_analysis/probe/FleetMember.java:178-184}), so this path is
+     * doubly safe today — but that is an implementation detail of a method that has changed before,
+     * and the cost of the copy is one variant per mirror ship per rebuild. Copy, mutate the copy,
+     * install the copy. The {@code REFIT} source and the hull-swap-then-mods order mirror
+     * {@code ShipRecoverySpecial}'s own recovery path
+     * ({@code api_pristine/.../ShipRecoverySpecial.java:389-405, 405-428}).
+     *
+     * <p>{@code addSModdedBuiltIn} writes through {@code getSModdedBuiltIns()} because that is the
+     * only surface the API exposes for that set — {@code HullVariantSpec} returns the live
+     * {@code LinkedHashSet} and populates it exactly this way when reading a variant file, and
+     * {@code addPermaMod(id, true)} is the wrong tool for a built-in (it would also push the id into
+     * {@code permaMods}, which the engine reserves for non-built-in mods). It is a mirror's throwaway
+     * runtime variant, never persisted gameplay state.
+     */
+    private static CoopShipMods.VariantOps<ShipVariantAPI> engineVariantOps(FleetMemberAPI member) {
+        return new CoopShipMods.VariantOps<ShipVariantAPI>() {
+            @Override
+            public ShipVariantAPI currentVariant() {
+                return member.getVariant();
+            }
+
+            @Override
+            public ShipVariantAPI copyOf(ShipVariantAPI variant) {
+                return variant.clone();
+            }
+
+            @Override
+            public void setDamagedHull(ShipVariantAPI variant) {
+                variant.setSource(VariantSource.REFIT);
+                // The engine's own damaged-hull swap: hullSpec -> Misc.getDHullId(spec), i.e. the
+                // generated "<hullId>_default_D" both installs build at load from the same ship data.
+                DModManager.setDHull(variant);
+            }
+
+            @Override
+            public void addDmod(ShipVariantAPI variant, String hullModId) {
+                variant.removeSuppressedMod(hullModId);
+                variant.addPermaMod(hullModId, false);
+            }
+
+            @Override
+            public void addSMod(ShipVariantAPI variant, String hullModId) {
+                variant.removeSuppressedMod(hullModId);
+                variant.addPermaMod(hullModId, true);
+            }
+
+            @Override
+            public void addSModdedBuiltIn(ShipVariantAPI variant, String hullModId) {
+                variant.getSModdedBuiltIns().add(hullModId);
+            }
+
+            @Override
+            public void install(ShipVariantAPI variant) {
+                member.setVariant(variant, false, true);
+            }
+        };
     }
 
     /**

@@ -40,6 +40,26 @@ class CoopRosterSummaryTest {
     }
 
     @Test
+    void replicatedPermanentHullModsShowInTheSummary() {
+        // Phase 16: the whole point of the roster-diff pair is that a divergence is visible without
+        // opening two saves, so the replicated d-mod/S-mod counts have to be on the line.
+        assertEquals("falcon_default_D+d2 x1, wolf+s1 x1, onslaught+d1+s2 x1",
+                CoopRosterSummary.ofMembers(List.of(
+                        new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault",
+                                "Ship", "", 1f, 1f, "compromised_storage,damagedengines", "", ""),
+                        new CoopFleetSnapshot.Member("m2", "wolf", "wolf_Assault",
+                                "Ship", "", 1f, 1f, "", "heavyarmor", ""),
+                        new CoopFleetSnapshot.Member("m3", "onslaught", "onslaught_Standard",
+                                "Ship", "", 1f, 1f, "structuraldamage", "heavyarmor",
+                                "armoredweapons"))));
+    }
+
+    @Test
+    void aCleanRosterPrintsExactlyAsItDidBeforePhase16() {
+        assertEquals("hound x2", CoopRosterSummary.ofMembers(List.of(member("hound"), member("hound"))));
+    }
+
+    @Test
     void aMissingHullIdIsMarkedRatherThanDropped() {
         assertEquals("? x1, hound x1", CoopRosterSummary.ofHullIds(java.util.Arrays.asList("", "hound")));
     }

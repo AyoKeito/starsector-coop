@@ -26,13 +26,30 @@ final class CoopRosterSummary {
     private CoopRosterSummary() {
     }
 
-    /** Summarises the hull ids of a snapshot's members (what the host says the fleet contains). */
+    /**
+     * Summarises the hull ids of a snapshot's members (what the host says the fleet contains).
+     *
+     * <p>A member carrying replicated permanent hullmods (Phase 16) prints as {@code hullId+dN+sM} —
+     * N d-mods, M S-mods (ordinary plus built-in) — so the roster-diff pair shows those fields without
+     * a second diagnostic line. A clean roster is unchanged.
+     */
     static String ofMembers(List<CoopFleetSnapshot.Member> members) {
         List<String> hullIds = new ArrayList<>(members == null ? 0 : members.size());
         if (members != null) {
             for (CoopFleetSnapshot.Member member : members) {
                 if (member != null) {
-                    hullIds.add(member.hullId());
+                    int dmods = CoopShipMods.count(member.dmodIds());
+                    int sMods = CoopShipMods.count(member.sModIds())
+                            + CoopShipMods.count(member.sModdedBuiltInIds());
+                    StringBuilder key = new StringBuilder(
+                            member.hullId().isEmpty() ? "?" : member.hullId());
+                    if (dmods > 0) {
+                        key.append("+d").append(dmods);
+                    }
+                    if (sMods > 0) {
+                        key.append("+s").append(sMods);
+                    }
+                    hullIds.add(key.toString());
                 }
             }
         }

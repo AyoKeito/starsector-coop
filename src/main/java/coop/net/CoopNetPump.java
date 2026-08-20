@@ -28,6 +28,10 @@ import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.interaction.CoopInteractionClaim;
 import coop.interaction.CoopInteractionGate;
+import coop.save.CoopGuestSnapshot;
+import coop.save.CoopGuestSnapshotFactory;
+import coop.save.CoopGuestSnapshotStore;
+import coop.save.CoopSaveCheckpoint;
 import coop.seed.CoopSeedSync;
 import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
@@ -50,6 +54,12 @@ public class CoopNetPump implements EveryFrameScript {
     private static final long PING_INTERVAL_MILLIS = 3000L;
     // Campaign fleet snapshots stream at 10 Hz over UDP (COOP_MP_DESIGN.md section 8.4).
     private static final long FLEET_SNAPSHOT_INTERVAL_MILLIS = 100L;
+    /**
+     * Phase 16: how often the guest ships its save-recovery snapshot to the host. It only has to be
+     * fresher than the host's save cadence, and it carries the whole cargo manifest, so it is a slow
+     * timer rather than a stream.
+     */
+    private static final long GUEST_SNAPSHOT_INTERVAL_MILLIS = 30_000L;
     private static final String DEFAULT_PLAYER_FACTION_ID = "player";
     private static final String HOST_PORT_FLAG = "coop.hostPort";
     private static final String CONNECT_HOST_FLAG = "coop.connectHost";
@@ -71,7 +81,9 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean preSessionCampaignDropWarned;
     private long nextTimeSnapshotAtMillis;
     private long nextFleetSnapshotAtMillis;
+    private long nextGuestSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
+    private final CoopSaveCheckpoint saveCheckpoint = new CoopSaveCheckpoint();
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
     /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
@@ -227,10 +239,16 @@ public class CoopNetPump implements EveryFrameScript {
                 CoopNetPump.this.onBattleConcluded(coopFleetIds, localBattle);
             }
         });
+        // Phase 16: the host's save callbacks arrive through the ModPlugin, which has no handle on
+        // this pump; the static registration is how they reach it. The newest pump wins, so a game
+        // load replaces the previous session's instance.
+        this.saveCheckpoint.setSender(this::sendSaveCheckpoint);
+        CoopSaveCheckpoint.setActive(this.saveCheckpoint);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
         this.nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
+        this.nextGuestSnapshotAtMillis = now;
     }
 
     @Override
@@ -265,6 +283,8 @@ public class CoopNetPump implements EveryFrameScript {
         syncFleetMirror();
         drainFleetDatagrams();
         maybeSendFleetSnapshot();
+        maybeSendGuestSnapshot();
+        tickSaveCheckpoint();
         syncNpcReplication();
         tickNpcThreatWatcher();
         syncBaseReplication();
@@ -451,6 +471,8 @@ public class CoopNetPump implements EveryFrameScript {
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
+            case GUEST_SNAPSHOT -> handleGuestSnapshot(message);
+            case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
             case PING -> sendPong(message);
             default -> {
                 // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
@@ -1241,6 +1263,113 @@ public class CoopNetPump implements EveryFrameScript {
         } finally {
             nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
         }
+    }
+
+    // ---- Phase 16: coordinated saves + guest snapshot -------------------------------------------
+
+    /**
+     * Guest &rarr; host, every {@link #GUEST_SNAPSHOT_INTERVAL_MILLIS}: the guest's own campaign state,
+     * so the host always has something current to embed when it saves. The first send is due
+     * immediately once the session is live, so a host that saves early still gets a real snapshot.
+     */
+    private void maybeSendGuestSnapshot() {
+        if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()
+                || !isGameplaySessionActive()) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (now < nextGuestSnapshotAtMillis) {
+            return;
+        }
+        try {
+            CoopGuestSnapshot snapshot = CoopGuestSnapshotFactory.capture(
+                    sectorOrNull(),
+                    sessionState.sessionId(),
+                    sessionState.localPlayerId(),
+                    sessionState.localName(),
+                    storedCampaignIdSupplier.get(),
+                    sessionState.seedString(),
+                    now);
+            if (snapshot == null) {
+                return;
+            }
+            CoopMessages.Message message = CoopMessages.guestSnapshot(
+                    sessionState.sessionId(), service.nextSeq(), now, snapshot.encodeBody());
+            service.send(message);
+            log("outbound", message);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to send the coop guest snapshot", ex);
+        } finally {
+            nextGuestSnapshotAtMillis = now + GUEST_SNAPSHOT_INTERVAL_MILLIS;
+        }
+    }
+
+    /** Host: hold the guest's latest state for the next {@code beforeGameSave()}. */
+    private void handleGuestSnapshot(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            CoopGuestSnapshot snapshot = CoopGuestSnapshot.decodeBody(
+                    CoopMessages.requiredPayloadString(message, "body"));
+            CoopGuestSnapshotStore.publish(snapshot);
+            if (CoopDebug.diagnosticsEnabled()) {
+                CoopLog.info(CoopNetPump.class,
+                        "Coop guest snapshot received: " + snapshot.summary());
+            }
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply GUEST_SNAPSHOT", ex);
+        }
+    }
+
+    /**
+     * Host side of {@link CoopSaveCheckpoint}: puts a checkpoint on the wire and flushes it straight
+     * away. The flush is load-bearing for the session-end checkpoint, which is sent moments before the
+     * transport is torn down and would otherwise die in the outbound queue.
+     */
+    private boolean sendSaveCheckpoint(long checkpointId, String reason) {
+        if (service.role() != CoopConnectionRole.HOST || !service.isConnected()
+                || !isGameplaySessionActive()) {
+            return false;
+        }
+        try {
+            CoopMessages.Message message = CoopMessages.saveCheckpoint(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                    checkpointId, reason);
+            service.send(message);
+            log("outbound", message);
+            service.flushOutbound();
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to send SAVE_CHECKPOINT", ex);
+            return false;
+        }
+    }
+
+    private void handleSaveCheckpoint(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            saveCheckpoint.onCheckpointReceived(
+                    CoopMessages.requiredPayloadLong(message, "checkpointId"),
+                    CoopMessages.requiredPayloadString(message, "reason"),
+                    clockMillis.getAsLong());
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply SAVE_CHECKPOINT", ex);
+        }
+    }
+
+    /** Guest: retry the parked coordinated autosave until a frame the engine will honour it. */
+    private void tickSaveCheckpoint() {
+        if (!saveCheckpoint.isAutosavePending()) {
+            return;
+        }
+        if (service.role() != CoopConnectionRole.GUEST) {
+            saveCheckpoint.cancel();
+            return;
+        }
+        saveCheckpoint.tick(CoopSaveCheckpoint.engineTarget(sectorOrNull()), clockMillis.getAsLong());
     }
 
     private void drainFleetDatagrams() {

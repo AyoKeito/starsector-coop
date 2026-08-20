@@ -51,6 +51,8 @@ public final class CoopMessages {
         BATTLE_RESULT,
         ENGAGE_GUEST,
         DIALOG_BEGIN,
+        GUEST_SNAPSHOT,
+        SAVE_CHECKPOINT,
         PING,
         PONG,
         DISCONNECT
@@ -463,6 +465,35 @@ public final class CoopMessages {
                 "{\"coopFleetId\":\"" + escapeJson(requireText(coopFleetId, "coopFleetId")) + "\","
                         + "\"factionId\":\"" + escapeJson(factionId == null ? "" : factionId) + "\","
                         + "\"kind\":\"" + kind.name() + "\"}");
+    }
+
+    // ---- Phase 16: coordinated saves + guest snapshot -------------------------------------------
+
+    /**
+     * Guest &rarr; host, low rate: the guest's own fleet/cargo/credits/officers, so the host has
+     * something current to embed in its save. {@code body} is the self-contained delimited blob from
+     * {@link coop.save.CoopGuestSnapshot#encodeBody()} — the envelope parser has no arrays.
+     *
+     * <p>It is not folded into the 10 Hz {@code FLEET_SNAPSHOT} datagram: this is cargo-and-credits
+     * sized, needed once per host save rather than per frame, and must arrive reliably (TCP) because
+     * a dropped copy is a stale recovery artifact rather than a dropped animation frame.
+     */
+    public static Message guestSnapshot(String sessionId, long seq, long sentAtMillis, String body) {
+        return new Message(Type.GUEST_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"body\":\"" + escapeJson(body == null ? "" : body) + "\"}");
+    }
+
+    /**
+     * Host &rarr; guest: the host just saved (manual, autosave, or session end). The guest takes its
+     * own vanilla autosave as soon as no screen is open, keeping the two saves temporally aligned.
+     * {@code checkpointId} is a host-local monotonic counter used for duplicate suppression, not the
+     * envelope {@code seq}.
+     */
+    public static Message saveCheckpoint(String sessionId, long seq, long sentAtMillis,
+                                         long checkpointId, String reason) {
+        return new Message(Type.SAVE_CHECKPOINT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"checkpointId\":" + checkpointId + ","
+                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {

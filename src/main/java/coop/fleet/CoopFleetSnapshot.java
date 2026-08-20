@@ -62,15 +62,36 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * catch. {@code CoopFleetSnapshotFactory#streamableVariantId} / {@code #streamableHullId} enforce
      * the contract by validating every id against the sender's own spec store before it is sent —
      * sound because the handshake already requires an identical mod manifest on both sides.
+     *
+     * <p><b>{@code dmodIds}, {@code sModIds} and {@code sModdedBuiltInIds} (Phase 16)</b> are
+     * comma-joined, sorted lists of the variant's permanent hullmod ids — damaged, story-pointed, and
+     * story-pointed built-in respectively — each empty when the ship has none. Those are stock
+     * spreadsheet ids too, so they resolve on both installs exactly like {@code variantId} does; the
+     * receiver re-applies them on top of the clean stock ship it built ({@link CoopShipMods}, which
+     * documents why the engine keeps the three lists apart). Without them a battered, story-pointed
+     * host ship mirrored as a pristine one — see {@code PHASE14_SPIKE_NOTES.md}.
      */
     public record Member(String fleetMemberId, String hullId, String variantId, String shipName,
-                         String captainName, float cr, float hullFraction) {
+                         String captainName, float cr, float hullFraction,
+                         String dmodIds, String sModIds, String sModdedBuiltInIds) {
         public Member {
             fleetMemberId = normalize(fleetMemberId);
             hullId = normalize(hullId);
             variantId = normalize(variantId);
             shipName = normalize(shipName);
             captainName = normalize(captainName);
+            dmodIds = normalize(dmodIds);
+            sModIds = normalize(sModIds);
+            sModdedBuiltInIds = normalize(sModdedBuiltInIds);
+        }
+
+        /**
+         * A member with no replicated hullmods; keeps the pre-Phase-16 call sites (and their tests)
+         * honest.
+         */
+        public Member(String fleetMemberId, String hullId, String variantId, String shipName,
+                      String captainName, float cr, float hullFraction) {
+            this(fleetMemberId, hullId, variantId, shipName, captainName, cr, hullFraction, "", "", "");
         }
     }
 
@@ -87,8 +108,14 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
 
     /**
      * SHA-256 over the member records sorted by {@code fleetMemberId}. <b>Structural fields only</b>
-     * (identity, hull, variant, names): the hash gates a full mirror-roster teardown and rebuild on
-     * the remote client, so it must flip only when the ship set actually changes.
+     * (identity, hull, variant, names, permanent hullmods): the hash gates a full mirror-roster
+     * teardown and rebuild on the remote client, so it must flip only when the ship set actually
+     * changes.
+     *
+     * <p>D-mods and S-mods are structural (Phase 16) because they are baked into the mirror ship at
+     * build time — a ship that gains one has to be rebuilt for the mirror to show it. They are also
+     * slow-moving (recovery, refit and fleet inflation, not repair), so including them cannot
+     * reproduce the CR rebuild storm described below.
      *
      * <p>CR and hull fraction used to be included rounded to a whole percent, and that was a
      * measured performance defect: at 10 game-seconds per real second, a repairing or CR-recovering
@@ -103,7 +130,10 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                 .thenComparing(Member::hullId)
                 .thenComparing(Member::variantId)
                 .thenComparing(Member::shipName)
-                .thenComparing(Member::captainName));
+                .thenComparing(Member::captainName)
+                .thenComparing(Member::dmodIds)
+                .thenComparing(Member::sModIds)
+                .thenComparing(Member::sModdedBuiltInIds));
 
         StringBuilder canonical = new StringBuilder(sorted.size() * 48);
         for (Member member : sorted) {
@@ -114,7 +144,10 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .append('|').append(member.hullId())
                     .append('|').append(member.variantId())
                     .append('|').append(member.shipName())
-                    .append('|').append(member.captainName());
+                    .append('|').append(member.captainName())
+                    .append('|').append(member.dmodIds())
+                    .append('|').append(member.sModIds())
+                    .append('|').append(member.sModdedBuiltInIds());
         }
         return CoopChecksum.sha256Text(canonical.toString());
     }

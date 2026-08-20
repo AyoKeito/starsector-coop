@@ -116,6 +116,65 @@ class CoopFleetSnapshotTest {
                 "a raw U+001F in the encoded payload would split the datagram record");
     }
 
+    // ---- Phase 16: replicated permanent hullmods -----------------------------------------------
+
+    @Test
+    void permanentHullModFieldsRoundTripInEveryCombination() {
+        // Clean, d-mods only, S-mods only, S-modded built-ins only, and all three together: the four
+        // shapes a real roster mixes, plus the empty one that must not turn into a phantom mod id.
+        List<CoopFleetSnapshot.Member> members = List.of(
+                new CoopFleetSnapshot.Member("m0", "wolf", "wolf_Assault", "Clean", "", 1f, 1f,
+                        "", "", ""),
+                new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault", "Battered",
+                        "", 0.4f, 0.6f, "compromised_storage,damagedengines", "", ""),
+                new CoopFleetSnapshot.Member("m2", "wolf", "wolf_Assault", "Refit", "", 1f, 1f,
+                        "", "heavyarmor,hardenedshieldemitter", ""),
+                new CoopFleetSnapshot.Member("m3", "hound", "hound_Standard", "Built-in", "", 1f, 1f,
+                        "", "", "solar_shielding"),
+                new CoopFleetSnapshot.Member("m4", "onslaught_default_D", "onslaught_Standard",
+                        "Veteran", "Ahab", 0.7f, 0.8f, "structuraldamage", "heavyarmor",
+                        "armoredweapons"));
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true, sensors(650f, 420f), members);
+
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+
+        assertEquals(snapshot, decoded);
+        assertEquals("", decoded.members().get(0).dmodIds());
+        assertEquals("compromised_storage,damagedengines", decoded.members().get(1).dmodIds());
+        assertEquals("heavyarmor,hardenedshieldemitter", decoded.members().get(2).sModIds());
+        assertEquals("solar_shielding", decoded.members().get(3).sModdedBuiltInIds());
+        assertEquals("structuraldamage", decoded.members().get(4).dmodIds());
+        assertEquals("heavyarmor", decoded.members().get(4).sModIds());
+        assertEquals("armoredweapons", decoded.members().get(4).sModdedBuiltInIds());
+    }
+
+    @Test
+    void theSevenArgumentMemberIsTheCleanShip() {
+        CoopFleetSnapshot.Member member = member("m1", "wolf", "wolf_Assault");
+        assertEquals("", member.dmodIds());
+        assertEquals("", member.sModIds());
+        assertEquals("", member.sModdedBuiltInIds());
+    }
+
+    @Test
+    void gainingOrLosingAPermanentHullModFlipsTheFleetHash() {
+        // The mirror bakes these into the ship at build time, so the roster gate has to notice —
+        // otherwise a ship that just picked up three d-mods keeps mirroring as pristine forever.
+        String clean = CoopFleetSnapshot.computeFleetHash(List.of(
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f)));
+
+        assertNotEquals(clean, CoopFleetSnapshot.computeFleetHash(List.of(
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f,
+                        "damagedengines", "", ""))));
+        assertNotEquals(clean, CoopFleetSnapshot.computeFleetHash(List.of(
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f,
+                        "", "heavyarmor", ""))));
+        assertNotEquals(clean, CoopFleetSnapshot.computeFleetHash(List.of(
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f,
+                        "", "", "solar_shielding"))));
+    }
+
     @Test
     void createComputesMatchingFleetHash() {
         List<CoopFleetSnapshot.Member> members = List.of(member("m1", "wolf", "wolf_Assault"));

@@ -25,6 +25,22 @@ Do not commit `jars/` or `build/` (gitignored), and never commit decompiled game
 
 Read `docs/starsector-runtime-limitations.md` before changing campaign scripts, networking, dependencies, or save-visible state. It records the Starsector sandbox and save-serialization limits found during Phase 3 TCP testing.
 
+## Save-Visible State
+
+The mod writes two things into the sector's persistent data. Both survive in the host save; neither is removed by the Phase 12b orphan sweep.
+
+| Key | Written by | Read by |
+| --- | --- | --- |
+| `coop.seedLong`, `coop.seedString`, `coop.sectorFingerprint`, `coop.campaignId` | `coop.seed.CoopSeedSync` | seed lock (Phase 6b) |
+| `coop.guestFleetSnapshot` | `coop.save.CoopGuestSnapshotStore`, from `CoopModPlugin.beforeGameSave()` | **nothing — deliberately write-only** |
+
+`coop.guestFleetSnapshot` holds a `CoopGuestSnapshot`: the guest's fleet, cargo, credits and officers as the host last received them, XStream-aliased as `coopGuestSnap` (plus `coopGuestSnapShip`/`coopGuestSnapStack`/`coopGuestSnapOfficer`). It is refreshed on every host save and **never read back by v1 code. That is a decision (2026-06-10), not dead state — do not delete it.**
+
+It exists for one scenario: a guest who loses their save. A fresh same-seed re-roll passes the campaign-id check but hard-rejects at the fingerprint once host campaign state has drifted, with no heal path, so the host save is the only surviving record of what the guest owned. The restore flow that would consume it is sketched in the plan's Maybe list ("Guest-save recovery"). Two consequences worth knowing:
+
+- The store's `clear()` drops only the in-memory copy. It never removes the key from a save — an older snapshot is still the recovery material.
+- A snapshot only appears once a guest has connected and sent one (`GUEST_SNAPSHOT`, every 30 s). A host that saves before that leaves whatever the previous session wrote.
+
 ## Build, Test, And Package
 
 Use the repeatable build script:

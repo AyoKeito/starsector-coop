@@ -24,6 +24,7 @@ import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1199,6 +1200,67 @@ class CoopNetPumpTest {
     }
 
     private record InteractionBlock(boolean blocked, String entityName) {
+    }
+
+    // ---- Phase 16: coordinated saves + guest snapshot -------------------------------------------
+
+    @Test
+    void hostStoresAnInboundGuestSnapshotForTheNextSave() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        coop.save.CoopGuestSnapshot snapshot = new coop.save.CoopGuestSnapshot();
+        snapshot.setPlayerId("guest-player");
+        snapshot.setCredits(4242d);
+        service.inbound.add(CoopMessages.guestSnapshot("session-a", 9L, 1000L, snapshot.encodeBody()));
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+        try {
+            pump.advance(0f);
+
+            coop.save.CoopGuestSnapshot stored = coop.save.CoopGuestSnapshotStore.latest();
+            assertNotNull(stored);
+            assertEquals("guest-player", stored.getPlayerId());
+            assertEquals(4242d, stored.getCredits(), 0.0001d);
+        } finally {
+            coop.save.CoopGuestSnapshotStore.clear();
+        }
+    }
+
+    @Test
+    void aCompletedHostSaveSendsASaveCheckpoint() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        // The pump registers itself as the checkpoint sink in its constructor, which is how the
+        // ModPlugin's afterGameSave() reaches it.
+        pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        coop.save.CoopSaveCheckpoint.notifyLocalGameSaved("host save");
+
+        assertEquals(1, service.sent.size());
+        CoopMessages.Message checkpoint = service.sent.get(0);
+        assertEquals(CoopMessages.Type.SAVE_CHECKPOINT, checkpoint.type());
+        assertEquals("session-a", checkpoint.sessionId());
+        assertEquals(1L, CoopMessages.requiredPayloadLong(checkpoint, "checkpointId"));
+        assertEquals("host save", CoopMessages.requiredPayloadString(checkpoint, "reason"));
+    }
+
+    @Test
+    void aGuestsOwnSaveNeverEchoesACheckpointBackAtTheHost() {
+        // The plugin's afterGameSave() fires on both clients. Without the role gate in the pump's
+        // sender, the guest's coordinated autosave would trigger a checkpoint of its own and the two
+        // clients would save each other in a loop.
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        coop.save.CoopSaveCheckpoint.notifyLocalGameSaved("host save");
+
+        assertTrue(service.sent.isEmpty());
     }
 
     private static final class SequencedIds implements java.util.function.Supplier<String> {

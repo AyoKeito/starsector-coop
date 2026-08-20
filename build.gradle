@@ -110,6 +110,18 @@ compileJava.dependsOn tasks.named('generateCoopBuildInfo')
 
 test {
     useJUnitPlatform()
+    // XStream 1.4.10 predates the module system and reflects into java.base during its own static
+    // init, so a test that exercises the real bundled XStream (CoopGuestSnapshotTest) needs the same
+    // opens the game itself passes. These are a subset of starsector-core/vmparams -- the mod adds no
+    // access the engine does not already grant at runtime.
+    jvmArgs(
+        '--add-opens=java.base/java.util=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
+        '--add-opens=java.base/java.text=ALL-UNNAMED',
+        '--add-opens=java.desktop/java.awt=ALL-UNNAMED',
+        '--add-opens=java.desktop/java.awt.font=ALL-UNNAMED'
+    )
 }
 
 jar {

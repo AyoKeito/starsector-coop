@@ -7,12 +7,15 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.loading.HullModSpecAPI;
 import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Captures the local player's fleet into a {@link CoopFleetSnapshot} for replication.
@@ -201,7 +204,79 @@ public final class CoopFleetSnapshotFactory {
                 member.getShipName(),
                 captainName,
                 cr,
-                hullFraction);
+                hullFraction,
+                captureDmodIds(variant),
+                captureSModIds(variant),
+                captureSModdedBuiltInIds(variant));
+    }
+
+    // ---- Permanent hullmod capture (Phase 16) ---------------------------------------------------
+
+    /**
+     * The variant's d-mods as the wire field. Best-effort like every other per-member read: a ship
+     * that cannot report its hullmods replicates as a clean one rather than costing the whole roster.
+     */
+    private static String captureDmodIds(ShipVariantAPI variant) {
+        if (variant == null) {
+            return "";
+        }
+        try {
+            return CoopShipMods.encode(variant.getHullMods(), CoopFleetSnapshotFactory::isDmodHullMod);
+        } catch (RuntimeException | LinkageError ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * The variant's story-pointed hullmods, minus any that are S-modded <em>built-ins</em> — those
+     * ride in their own field and must not be re-applied as ordinary perma-mods. The exclusion is the
+     * engine's own: {@code CoreAutofitPlugin} skips exactly these when copying S-mods across
+     * ({@code api_pristine/.../CoreAutofitPlugin.java:386-387}).
+     */
+    private static String captureSModIds(ShipVariantAPI variant) {
+        if (variant == null) {
+            return "";
+        }
+        try {
+            Set<String> builtIns = variant.getSModdedBuiltIns();
+            return CoopShipMods.encode(variant.getSMods(),
+                    id -> builtIns == null || !builtIns.contains(id));
+        } catch (RuntimeException | LinkageError ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * The hull's own built-in hullmods that a story point upgraded. Only the player's refit screen
+     * writes this set — the fleet inflater spends its S-mod budget through
+     * {@code addPermaMod(id, true)} and never touches it — so in practice this field is populated for
+     * player mirrors and empty for replicated NPC fleets.
+     */
+    private static String captureSModdedBuiltInIds(ShipVariantAPI variant) {
+        if (variant == null) {
+            return "";
+        }
+        try {
+            return CoopShipMods.encode(variant.getSModdedBuiltIns(), null);
+        } catch (RuntimeException | LinkageError ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * The engine's own d-mod test, not a hardcoded id list: {@code DModManager.getNumDMods} counts a
+     * hullmod as a d-mod exactly when its spec carries {@code Tags.HULLMOD_DMOD}
+     * ({@code api_pristine/.../DModManager.java:333-339}), and {@code DModManager.getMod(id)} is just
+     * {@code Global.getSettings().getHullModSpec(id)}. Reading the spec directly avoids loading
+     * {@code DModManager}, whose static initializer touches {@code Global.getSettings()} eagerly.
+     */
+    private static boolean isDmodHullMod(String hullModId) {
+        try {
+            HullModSpecAPI spec = Global.getSettings().getHullModSpec(hullModId);
+            return spec != null && spec.hasTag(Tags.HULLMOD_DMOD);
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
     }
 
     // ---- Resolvable-by-construction ship ids (2026-08-19) --------------------------------------
