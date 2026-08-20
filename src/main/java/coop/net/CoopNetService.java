@@ -15,7 +15,19 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class CoopNetService {
-    private static final int MAX_FRAME_BYTES = 64 * 1024;
+    /**
+     * TCP frame sanity cap. This is corruption protection, not a transport limit — TCP is a stream,
+     * so any frame size survives the wire; a frame this large only ever means a corrupted length or a
+     * runaway encoder. Raised from 64 KB on 2026-08-20: NPC_FLEET_SET with the Phase 16 per-member
+     * hullmod fields crossed 64 KB in a busy sector, and every set rebroadcast was silently discarded
+     * by the receiver — the guest's mirror population froze. Must match on both installs (handshake
+     * enforces same build). {@link #WARN_FRAME_BYTES} gives the early warning before this cliff.
+     */
+    private static final int MAX_FRAME_BYTES = 1024 * 1024;
+    /** Soft threshold: an outbound frame this big logs once per message type, so growth is loud. */
+    private static final int WARN_FRAME_BYTES = 256 * 1024;
+    /** UDP receive buffer — sized for the datagram path, not the TCP frame cap. */
+    private static final int DATAGRAM_BUFFER_BYTES = 64 * 1024;
     private static final int READ_BUFFER_BYTES = 8 * 1024;
     private static final int MAX_DATAGRAM_BYTES = 60 * 1024;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
@@ -28,10 +40,13 @@ public class CoopNetService {
     // (see CoopNetServiceSandboxCompatibilityTest), so coop networking uses java.nio throughout.
     private final Queue<String> inboundDatagrams = new ConcurrentLinkedQueue<>();
     private final Queue<String> outboundDatagrams = new ConcurrentLinkedQueue<>();
+    // One warning per message type per service lifetime; guarded by lifecycleLock (flush path).
+    private final java.util.Set<CoopMessages.Type> largeFrameWarned =
+            java.util.EnumSet.noneOf(CoopMessages.Type.class);
     private final AtomicLong nextSeq = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final ByteBuffer readBuffer = ByteBuffer.allocate(READ_BUFFER_BYTES);
-    private final ByteBuffer datagramBuffer = ByteBuffer.allocate(MAX_FRAME_BYTES);
+    private final ByteBuffer datagramBuffer = ByteBuffer.allocate(DATAGRAM_BUFFER_BYTES);
     private final byte[] inboundFrame = new byte[MAX_FRAME_BYTES];
 
     private CoopConnectionRole role = CoopConnectionRole.NONE;
@@ -494,8 +509,22 @@ public class CoopNetService {
 
             CoopMessages.Message message;
             while ((message = outbound.poll()) != null) {
-                pendingWrite = ByteBuffer.wrap((CoopMessages.encode(message) + "\n")
-                        .getBytes(StandardCharsets.UTF_8));
+                byte[] frame = (CoopMessages.encode(message) + "\n").getBytes(StandardCharsets.UTF_8);
+                if (frame.length > MAX_FRAME_BYTES) {
+                    // The receiver's inbound cap would discard it anyway; dropping here keeps the
+                    // failure on the sender's log where the message type is still known.
+                    CoopLog.warn(CoopNetService.class, "Coop TCP dropping oversized outbound "
+                            + message.type() + " frame (" + frame.length + " bytes, cap "
+                            + MAX_FRAME_BYTES + ")");
+                    continue;
+                }
+                if (frame.length > WARN_FRAME_BYTES && largeFrameWarned.add(message.type())) {
+                    CoopLog.warn(CoopNetService.class, "Coop TCP outbound " + message.type()
+                            + " frame is " + frame.length + " bytes (soft threshold "
+                            + WARN_FRAME_BYTES + ", hard cap " + MAX_FRAME_BYTES
+                            + "); consider shrinking this message before it hits the cap");
+                }
+                pendingWrite = ByteBuffer.wrap(frame);
                 if (!writePendingLocked(channel)) {
                     return;
                 }
