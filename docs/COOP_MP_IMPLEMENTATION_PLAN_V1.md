@@ -41,6 +41,7 @@ Authoritative build status per phase. Checkbox state inside the early phases pre
 | 7 | **BUILT** | FF verdict partially superseded by 7b (annotated in place). |
 | 7b, 7c | NOT BUILT | V1; slot after 24. |
 | 8–12 | **BUILT** | Unchecked residue = pending manual smoke tests (annotated inline). The deferred commits were resolved by the 2026-06-10 catch-up commit (repo wired to GitHub the same day). |
+| 9b | **BUILT** | 2026-08-20. `aiAssignmentSummary` had been a stubbed `""` since Phase 9, so mirrored NPC fleets showed no action line on the guest. Host capture (`CoopNpcActionTextCapture`) replicates the `StandardTooltipV2$9` resolution with the host-player/guest-mirror observer rewrites; guest applies it via `setActionTextOverride` + `setNullAIActionText`. No wire-format change. Unit-tested (28 cases); PENDING the visual check in the next two-instance session. |
 | 12b | **BUILT** | Smoke-verified in-game 2026-08-17. The reconnect drill failed and was fixed in-session (session-state disconnect transition + pre-session traffic gate); checksum probe verdict SUCCESS → wiring moved to 6b. |
 | 12c | NOT BUILT | V1; after 18, before 24. |
 | 12d | **BUILT** | Smoke-verified in-game 2026-08-17 (pods both directions, nav buoy, derelict regression). Split out of 12c gap 4 on 2026-08-09; restores player-to-player item transfer. |
@@ -802,6 +803,14 @@ Implement Phase 9 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Make the entire non-pl
 - **Integrating combat outcomes** (NPC death/damage) back into the authoritative set and re-broadcasting `NPC_FLEET_SET` → Phase 15.
 - **`NPC_FLEET_ADD`/`NPC_FLEET_REMOVE` delta optimization** — only if busy-sector full-set TCP rebroadcast proves a bandwidth problem in practice. Do not pre-build.
 - **Note on the "Phase 13 `BASE_SET` / suppression pattern" references above:** Phase 13 is not built yet, so those patterns are *established here in Phase 9* (the set-hash encoding and the guest-manager suppressor), not reused from existing code.
+
+## Phase 9b: NPC Fleet Action Text (BUILT 2026-08-20)
+
+Hovering an NPC fleet on the host reads "Unidentified Fleet — Unknown, travelling to Jangala", or ", pursuing your fleet". On the guest the same fleet read only "Unknown". The action line is not a field on the fleet: the vanilla tooltip derives it live from the fleet's `ModularFleetAI` (current assignment, tactical target, largest enemy, the fleeing/busy/maintaining-contact flags), and a guest mirror is an empty AI-mode fleet with no assignments whose tactical module never acquires a target. Phase 9 defined `CoopNpcFleetSnapshot.aiAssignmentSummary` for exactly this and the host wrote `""` into it; 9b fills it in.
+
+Two pieces. `coop.fleet.CoopNpcActionTextCapture` (host) transcribes the resolution in `com.fs.starfarer.ui.impl.StandardTooltipV2$9` over a captured value object, with two observer rewrites, because the text is resolved on the host and read by the guest: a target that is the host's own player fleet is named with the `CoopPresenceIndicator.presenceLabel` the guest's mirror of the host already wears, and a target that is the guest's mirror on the host becomes "your fleet". `fleet.getBattle() != null` rides the wire too, since the mirror is never in a battle. On the guest, `CoopFleetMirror.applyActionText` pins the text with both `getAI().setActionTextOverride(...)` and `setNullAIActionText(...)`, because which of the two the tooltip reads depends on whether `createEmptyFleet(..., true)` gave the mirror a `ModularFleetAI`; a `CoopDebug`-gated line prints the mirror's actual AI class once so the log answers that. Empty maps to null on both setters, or the tooltip paints a dangling ", " after every idle fleet's name.
+
+Cost and blast radius: one capture per replicated fleet per `NPC_FLEET_SET` (1 Hz), never on the 10 Hz motion path. `capture` catches `RuntimeException | LinkageError` and returns `""`, and the result is flattened to one line and capped at 80 characters, so no fleet can break a set send or inflate the message. No wire-format change: the field, its header count and its `CoopFleetCodec` escaping were already there.
 
 ## Phase 10: Interaction Gate
 

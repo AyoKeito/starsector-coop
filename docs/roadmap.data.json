@@ -359,6 +359,25 @@
       "note": "Guest transponder-off faction reactions no longer fire (regression) — fix deferred to Phase 14"
     },
     {
+      "id": "9b",
+      "num": "9b",
+      "title": "NPC Fleet Action Text",
+      "theme": "npc",
+      "track": "v1",
+      "status": "built",
+      "summary": "Replicates the tooltip's action line (\"travelling to Jangala\", \"pursuing your fleet\") for mirrored NPC fleets: the host derives it from the fleet's ModularFleetAI and the guest pins it onto the mirror, which has no AI state to derive it from.",
+      "introduces": [
+        "CoopNpcActionTextCapture",
+        "aiAssignmentSummary populated (stubbed since Phase 9)",
+        "setActionTextOverride + setNullAIActionText on mirrors",
+        "host-player / guest-mirror observer rewrites"
+      ],
+      "residue": [
+        "PENDING visual check in the next two-instance session: hover a mirrored NPC fleet on the guest and confirm the action line matches the host's"
+      ],
+      "note": "No wire-format change; the field, its header count and its escaping were already in place. Capture is fail-closed (returns \"\") and capped at 80 chars, and rides the 1 Hz NPC_FLEET_SET only."
+    },
+    {
       "id": "10",
       "num": 10,
       "title": "Interaction Gate",

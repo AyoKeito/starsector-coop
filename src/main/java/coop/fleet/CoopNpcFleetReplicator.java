@@ -160,7 +160,14 @@ public final class CoopNpcFleetReplicator {
     private void sendSetIfChanged(SectorAPI sector, long now) {
         List<CoopNpcFleetSnapshot> fleets = new ArrayList<>();
         LocationAPI hostLocation = hostCurrentLocation(sector);
-        forEachReplicatedFleet(sector, fleet -> fleets.add(toSnapshot(fleet, hostLocation, now)));
+        // Resolved once per send, not per fleet: the two fleets the captured action text has to
+        // rewrite (see CoopNpcActionTextCapture's observer-rewrite section) plus the label the guest
+        // has painted on its mirror of the host player.
+        CampaignFleetAPI hostPlayerFleet = sector.getPlayerFleet();
+        CampaignFleetAPI guestMirror = CoopGuestMirrorHandle.current();
+        String hostPlayerLabel = CoopPresenceIndicator.presenceLabel(sessionState.localName());
+        forEachReplicatedFleet(sector, fleet -> fleets.add(
+                toSnapshot(fleet, hostLocation, now, hostPlayerFleet, guestMirror, hostPlayerLabel)));
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
         if (set.setHash().equals(lastSetHash)) {
             return;
@@ -236,7 +243,9 @@ public final class CoopNpcFleetReplicator {
                 CoopMessages.Type.NPC_FLEET_MOTION, CoopNpcFleetMotion.encodeBatch(motions)));
     }
 
-    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now) {
+    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now,
+                                            CampaignFleetAPI hostPlayerFleet,
+                                            CampaignFleetAPI guestMirror, String hostPlayerLabel) {
         LocationAPI loc = fleet.getContainingLocation();
         CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
         return CoopNpcFleetSnapshot.create(
@@ -248,7 +257,10 @@ public final class CoopNpcFleetReplicator {
                 motion.velocityX(), motion.velocityY(),
                 transponderOn(fleet),
                 CoopSensorSync.capture(fleet),
-                "",
+                // Phase 9b: the tooltip's action line ("travelling to Jangala", "pursuing your
+                // fleet"). Stubbed "" from Phase 9 until 2026-08-20 — the guest mirror has no AI
+                // state to derive it from, so it has to ride the wire.
+                CoopNpcActionTextCapture.capture(fleet, hostPlayerFleet, guestMirror, hostPlayerLabel),
                 CoopFleetSnapshotFactory.captureMembers(fleet));
     }
 

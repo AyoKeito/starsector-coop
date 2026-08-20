@@ -39,6 +39,24 @@ class CoopNpcFleetSnapshotTest {
         assertEquals("Na\nme|Break", decoded.name());
     }
 
+    /**
+     * Phase 9b: {@code aiAssignmentSummary} stopped being a stubbed {@code ""} and now carries the
+     * tooltip action line, which is derived from player-editable fleet and market names — so the
+     * separators have to survive it, not just the ship fields.
+     */
+    @Test
+    void aiAssignmentSummarySurvivesSeparatorsAndNewlines() {
+        String summary = "pursuing ISS Pipe|Wolf\nof the Hegemony";
+        CoopNpcFleetSnapshot snapshot = CoopNpcFleetSnapshot.create(
+                "fleet-9b", "hegemony", "Patrol", "corvus", 0f, 0f, 0f, 0f, true,
+                sensors(140f, 80f), summary, List.of(member("m1", "wolf", "wolf_Assault")));
+
+        CoopNpcFleetSnapshot decoded = CoopNpcFleetSnapshot.decode(snapshot.encode());
+
+        assertEquals(summary, decoded.aiAssignmentSummary());
+        assertEquals(snapshot, decoded);
+    }
+
     @Test
     void createReusesPhase8FleetHash() {
         List<CoopFleetSnapshot.Member> members = List.of(member("m1", "wolf", "wolf_Assault"));

@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.ai.CampaignFleetAIAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
@@ -84,6 +85,13 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * its own detectability mods every frame — see {@link #assertSensorState()}.
      */
     private CoopSensorSync.Profile sensors = CoopSensorSync.Profile.UNKNOWN;
+    /**
+     * Last {@code aiAssignmentSummary} pinned onto this mirror (Phase 9b). Held so the two setters run
+     * only when the host's text actually moves, not on every 1 Hz set apply for every mirrored fleet.
+     */
+    private String appliedActionText = "";
+    /** Whether the {@link CoopDebug} one-shot "which tooltip path is live" line has been printed. */
+    private boolean loggedActionTextPath;
 
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
@@ -142,9 +150,79 @@ public class CoopFleetMirror implements CoopNpcMirror {
                     snapshot.transponderOn());
             acceptSensors(snapshot.sensors());
             refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
+            applyActionText(snapshot.aiAssignmentSummary());
             applyCount++;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop NPC fleet snapshot", ex);
+        }
+    }
+
+    /**
+     * Pins the host's captured tooltip action line onto the mirror (Phase 9b), so a hovered NPC fleet
+     * on the guest reads "Unidentified Fleet — Unknown, travelling to Jangala" rather than just
+     * "Unknown". The text is produced by {@link CoopNpcActionTextCapture} on the host, because a mirror
+     * has none of the AI state the vanilla tooltip derives it from.
+     *
+     * <p><b>Both setters, deliberately.</b> The vanilla tooltip has two independent sources for this
+     * line and which one a mirror lands on depends on whether {@code createEmptyFleet(..., true)} gave
+     * it a {@code ModularFleetAI}: with one, the tooltip reads
+     * {@code getAI().getActionTextOverride()} (the pursuit/assignment branches above it cannot fire —
+     * the mirror's tactical module never acquires a target, see {@code assertEngagementShield}); with
+     * none, it falls through to {@code fleet.getNullAIActionText()}. Setting both costs one extra
+     * assignment on change and makes the display independent of that detail.
+     *
+     * <p><b>Empty must map to null.</b> The tooltip renders {@code name + ", " + text} whenever the
+     * text is non-null, so an empty-string override would paint a dangling ", " after every idle
+     * fleet's name.
+     *
+     * <p>Rides the 1 Hz {@code NPC_FLEET_SET} only — never the 10 Hz motion path, which carries no
+     * text and must stay as cheap as it is.
+     */
+    private void applyActionText(String actionText) {
+        String text = actionText == null ? "" : actionText;
+        if (text.equals(appliedActionText)) {
+            return;
+        }
+        appliedActionText = text;
+        String value = text.isEmpty() ? null : text;
+        try {
+            mirrorFleet.setNullAIActionText(value);
+        } catch (RuntimeException ignored) {
+            // Tooltip text is display-only; never abort an apply over it.
+        }
+        try {
+            CampaignFleetAIAPI ai = mirrorFleet.getAI();
+            if (ai != null) {
+                ai.setActionTextOverride(value);
+            }
+        } catch (RuntimeException ignored) {
+            // As above.
+        }
+        reportActionText(value);
+    }
+
+    /**
+     * {@link CoopDebug}-gated counterpart to the host's capture: what text arrived, plus — once per
+     * mirror — which of the two display paths is actually live on this client. That second line is the
+     * only way to tell from a log whether {@code createEmptyFleet(..., true)} built a
+     * {@code ModularFleetAI} for the mirror or left it AI-less, which decides which setter above is
+     * doing the work.
+     */
+    private void reportActionText(String value) {
+        if (!CoopDebug.diagnosticsEnabled()) {
+            return;
+        }
+        try {
+            if (!loggedActionTextPath) {
+                loggedActionTextPath = true;
+                Object ai = mirrorFleet.getAI();
+                CoopLog.info(CoopFleetMirror.class, "Coop NPC mirror action-text path coopFleetId="
+                        + coopFleetId + " ai=" + (ai == null ? "null" : ai.getClass().getName()));
+            }
+            CoopLog.info(CoopFleetMirror.class, "Coop NPC mirror action text coopFleetId=" + coopFleetId
+                    + " name=" + appliedName + " text=" + (value == null ? "(none)" : value));
+        } catch (RuntimeException ignored) {
+            // A diagnostic must never break the apply it is reporting on.
         }
     }
 
@@ -881,6 +959,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         shieldReleased = false;
         shieldAssertedAtMillis = NEVER_ASSERTED;
         sensors = CoopSensorSync.Profile.UNKNOWN;
+        appliedActionText = "";
+        loggedActionTextPath = false;
     }
 
     /**
