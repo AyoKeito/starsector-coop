@@ -384,7 +384,13 @@ public final class CoopNpcThreatWatcher {
      */
     private static Action decideCustomsStart(FleetView view, boolean mirrorTransponderOn,
                                              boolean coopBattleActive, boolean customsReady) {
-        if (coopBattleActive || mirrorTransponderOn || !view.patrol() || view.engagePick()
+        // No engagePick term here (removed 2026-08-20): engagePick is a strength-ratio read, and
+        // against a weak guest fleet EVERY patrol picks engage — which starved customs entirely
+        // (live: 1592 visible-contact probes, zero customs arms, patrols parked on top of a dark
+        // guest). A non-hostile patrol can never actually fire the vanilla engage path, and decide()
+        // routes genuinely hostile fleets away before this branch, so the term defended nothing.
+        // The start gate is detection and nothing else, as the class doc always said.
+        if (coopBattleActive || mirrorTransponderOn || !view.patrol()
                 || !view.visible() || !customsReady) {
             return Action.NONE;
         }
@@ -401,8 +407,11 @@ public final class CoopNpcThreatWatcher {
      */
     private static Action decideCustomsPursuit(FleetView view, boolean mirrorTransponderOn,
                                                boolean coopBattleActive) {
+        // engagePick removed here too (2026-08-20, same defect as decideCustomsStart): a mid-chase
+        // strength-ratio flip would have aborted the pursuit for no reason. A patrol that turns
+        // genuinely hostile mid-chase still gives up via the hostile() term and is picked up by the
+        // hostile branch on the next scan.
         if (coopBattleActive || mirrorTransponderOn || view.hostile() || !view.patrol()
-                || view.engagePick()
                 || view.customsPursuitDays() > view.pursuitBudgetDays()
                 || view.customsUnseenScans() > CUSTOMS_UNSEEN_SCAN_LIMIT) {
             return Action.CUSTOMS_GIVE_UP;
@@ -431,7 +440,7 @@ public final class CoopNpcThreatWatcher {
         if (mirrorTransponderOn) {
             return "transponderOn";
         }
-        if (view.hostile() || view.engagePick()) {
+        if (view.hostile()) {
             return "turnedHostile";
         }
         if (!view.patrol()) {

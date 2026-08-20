@@ -211,6 +211,29 @@ class CoopNpcThreatWatcherTest {
                 patrol(2000f, true), VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, COOLING));
     }
 
+    @Test
+    void aStrongPatrolThatWouldPickEngageStillRunsCustomsOnTheDarkGuest() {
+        // Regression (2026-08-20, live): engagePick is a strength-ratio read, so against a weak guest
+        // fleet EVERY patrol picked engage and the old engagePick term in the start gate starved
+        // customs sector-wide — patrols parked on top of a dark guest and did nothing. A non-hostile
+        // patrol can never fire the vanilla engage path, so the pick must not block the inspection.
+        assertEquals(Action.CUSTOMS_PURSUE, CoopNpcThreatWatcher.decide(
+                engagePickingPatrol(4000f, true, NOT_PURSUING, 0f, 0), VANILLA_MODEL,
+                TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+        assertEquals(Action.CUSTOMS_DIALOG, CoopNpcThreatWatcher.decide(
+                engagePickingPatrol(CONTACT - 1f, true, NOT_PURSUING, 0f, 0), VANILLA_MODEL,
+                TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+    }
+
+    @Test
+    void aMidChaseStrengthFlipDoesNotAbortTheInspection() {
+        // Same defect's continuation half: a strength-ratio flip mid-chase must not read as an abort;
+        // only a genuine hostility turn ends the chase early (and the hostile branch takes over).
+        assertEquals(Action.CUSTOMS_PURSUE, CoopNpcThreatWatcher.decide(
+                engagePickingPatrol(1200f, true, PURSUING, 1.0f, 0), VANILLA_MODEL,
+                TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
+    }
+
     // ---- customs: sustaining and ending the chase -------------------------------------------------
 
     @Test
@@ -564,6 +587,14 @@ class CoopNpcThreatWatcherTest {
     private static FleetView patrol(float distance, boolean visible, boolean pursuing,
                                     float pursuitDays, int unseenScans) {
         return new FleetView("fleet-p", "Fast Picket", "hegemony", false, false, true, true,
+                visible, false, true, 0f, PATROL_PATIENCE_DAYS, distance, CONTACT,
+                pursuing, pursuitDays, unseenScans);
+    }
+
+    /** A non-hostile patrol whose strength read makes it pick engage (the 2026-08-20 regression). */
+    private static FleetView engagePickingPatrol(float distance, boolean visible, boolean pursuing,
+                                                 float pursuitDays, int unseenScans) {
+        return new FleetView("fleet-p", "Fast Picket", "hegemony", false, true, true, true,
                 visible, false, true, 0f, PATROL_PATIENCE_DAYS, distance, CONTACT,
                 pursuing, pursuitDays, unseenScans);
     }
