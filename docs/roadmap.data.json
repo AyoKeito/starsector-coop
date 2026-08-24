@@ -504,7 +504,7 @@
       "title": "Close the Phase 12 Extension Points",
       "theme": "economy",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Wire the built-but-inert Phase 12 infrastructure: bar/mission pool enumeration, full market capture, and concrete ability world effects.",
       "introduces": [
         "bar/mission pool enumeration",
