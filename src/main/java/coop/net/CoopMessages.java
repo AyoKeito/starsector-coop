@@ -252,11 +252,21 @@ public final class CoopMessages {
                         + "\"resultingValue\":\"" + resultingValue + "\"}");
     }
 
+    /**
+     * Host -&gt; guest shared offer pool.
+     *
+     * <p>{@code barSeed} is the host's {@code BarEventManager} seed, which decides how many offers a
+     * market shows and the shuffle that picks which ones (Phase 12c). It rides here rather than in its
+     * own message because it is only meaningful alongside the pool it shuffles — the same seed over a
+     * different pool shows a different bar. {@code 0} means "not carrying a seed"; the engine never
+     * holds 0 (it re-rolls on load if it ever is).
+     */
     public static Message missionPoolSnapshot(String sessionId, long seq, long sentAtMillis,
-                                              String marketId, String encodedPool) {
+                                              String marketId, String encodedPool, long barSeed) {
         return new Message(Type.MISSION_POOL_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"marketId\":\"" + escapeJson(marketId == null ? "" : marketId) + "\","
-                        + "\"pool\":\"" + escapeJson(encodedPool == null ? "" : encodedPool) + "\"}");
+                        + "\"pool\":\"" + escapeJson(encodedPool == null ? "" : encodedPool) + "\","
+                        + "\"barSeed\":" + barSeed + "}");
     }
 
     public static Message missionClaimRequest(String sessionId, long seq, long sentAtMillis,

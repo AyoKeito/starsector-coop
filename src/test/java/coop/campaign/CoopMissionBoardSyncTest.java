@@ -8,13 +8,15 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopMissionBoardSyncTest {
 
     private static CoopMissionBoardSync.Entry entry(String missionId, String acceptedBy) {
         return new CoopMissionBoardSync.Entry("market-1", CoopMissionBoardSync.SourceType.BAR,
-                missionId, "Title " + missionId, "giver-1", "50000 credits", acceptedBy, 120L);
+                missionId, "Title " + missionId, "giver-1", "50000 credits", acceptedBy, 120L,
+                0L, "");
     }
 
     @Test
@@ -86,7 +88,8 @@ class CoopMissionBoardSyncTest {
     void poolEncodingRoundTripsWithDelimiterEdgeCases() {
         CoopMissionBoardSync.Entry tricky = new CoopMissionBoardSync.Entry(
                 "market|2", CoopMissionBoardSync.SourceType.BOUNTY, "m|3",
-                "Hunt the\npirate", "giver\\1", "100|000 cr", "guest", 88L);
+                "Hunt the\npirate", "giver\\1", "100|000 cr", "guest", 88L,
+                -7654321L, "Pirate|Kind");
         String encoded = CoopMissionBoardSync.encodePool(List.of(entry("m1", ""), tricky));
         List<CoopMissionBoardSync.Entry> decoded = CoopMissionBoardSync.decodePool(encoded);
 
@@ -99,6 +102,20 @@ class CoopMissionBoardSyncTest {
         assertEquals("100|000 cr", back.rewardSummary());
         assertEquals(CoopMissionBoardSync.SourceType.BOUNTY, back.sourceType());
         assertEquals(88L, back.expiresAtDay());
+        assertEquals(-7654321L, back.contentSeed());
+        assertEquals("Pirate|Kind", back.eventKind());
+    }
+
+    @Test
+    void poolDecodeRejectsAPreBarPoolEightFieldLine() {
+        // A peer on the pre-12c codec: the two new fields are simply absent. Decoding it by sliding
+        // whatever is present into the first eight slots would produce a plausible-looking pool with
+        // the wrong values, so short lines are rejected outright.
+        String legacy = "1\nmarket-1|BAR|m1|Title m1|giver-1|50000 credits||120";
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> CoopMissionBoardSync.decodePool(legacy));
+        assertTrue(ex.getMessage().contains("10"), ex.getMessage());
     }
 
     @Test
@@ -120,9 +137,11 @@ class CoopMissionBoardSyncTest {
         assertEquals("already_claimed_by:host", CoopMessages.requiredPayloadString(decodedRej, "reason"));
 
         CoopMessages.Message pool = CoopMessages.missionPoolSnapshot("s1", 4L, 40L, "market-1",
-                CoopMissionBoardSync.encodePool(List.of(entry("m1", ""))));
+                CoopMissionBoardSync.encodePool(List.of(entry("m1", ""))), -42L);
         CoopMessages.Message decodedPool = CoopMessages.decode(CoopMessages.encode(pool));
         assertEquals(CoopMessages.Type.MISSION_POOL_SNAPSHOT, decodedPool.type());
+        assertEquals(-42L, CoopMessages.requiredPayloadLong(decodedPool, "barSeed"),
+                "the bar shuffle seed rides with the pool it shuffles");
         List<CoopMissionBoardSync.Entry> back = CoopMissionBoardSync.decodePool(
                 CoopMessages.requiredPayloadString(decodedPool, "pool"));
         assertEquals("m1", back.get(0).missionId());

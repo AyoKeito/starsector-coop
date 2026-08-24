@@ -160,6 +160,16 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     private long lastSkeletonPollMillis;
     private DecivCapture decivCapture;
 
+    // Phase 12c bar pool: the host polls the global portside bar pool and pushes the ordered list on
+    // change. Two seconds is well inside a dock-to-bar-click, and the pool only ever changes on
+    // BarEventManager's 0.4-0.6 day generation tick or when someone accepts an offer.
+    static final long BAR_POOL_POLL_INTERVAL_MILLIS = 2000L;
+    /** The bar pool is sector-global, so its snapshot has no owning market. */
+    static final String BAR_POOL_MARKET_ID = "";
+    private final CoopBarPoolCapture barPoolCapture = new CoopBarPoolCapture();
+    private final CoopBarPoolInjector barPoolInjector = new CoopBarPoolInjector();
+    private long lastBarPoolPollMillis;
+
     private CoopCampaignEventListener listener;
     private boolean factionRelationsSeeded;
 
@@ -182,6 +192,11 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
         listener = new CoopCampaignEventListener(this);
         sector.addTransientListener(listener);
+        // Session start: re-arm the bar-pool rebroadcast so a (re)joining guest gets a warm pool on
+        // the first poll rather than waiting for the host's next offer to spawn or expire.
+        barPoolCapture.reset();
+        barPoolInjector.reset();
+        lastBarPoolPollMillis = 0L;
         // CargoScreenListener is dispatched through the listener manager, not the campaign-event
         // list, so it needs its own transient registration (Phase 12d: cargo pod replication).
         try {
@@ -230,6 +245,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         factionRelationsSeeded = false;
         lastPlayerRepSyncMillis = 0L;
         lastSkeletonPollMillis = 0L;
+        lastBarPoolPollMillis = 0L;
+        barPoolCapture.reset();
+        barPoolInjector.reset();
         skeletonWatcher.clear();
         repTable.clear();
         factionRelations.clear();
@@ -738,14 +756,49 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         return byKind.toString();
     }
 
-    /** Broadcast a captured mission/bar pool for a market (host). */
-    public void broadcastMissionPool(String marketId, List<CoopMissionBoardSync.Entry> entries) {
+    /**
+     * Broadcast a captured mission/bar pool (host), along with the {@code BarEventManager} seed the
+     * guest needs to shuffle it into the same shown subset ({@code 0} = not carrying one).
+     */
+    public void broadcastMissionPool(String marketId, List<CoopMissionBoardSync.Entry> entries, long barSeed) {
         if (!isHost() || !isActive()) {
             return;
         }
         missionBoard.applySnapshot(entries);
         send(CoopMessages.missionPoolSnapshot(session.sessionId(), service.nextSeq(), now(),
-                marketId, CoopMissionBoardSync.encodePool(entries)));
+                marketId, CoopMissionBoardSync.encodePool(entries), barSeed));
+    }
+
+    /**
+     * Phase 12c host bar-pool watcher: poll the global portside pool, and on any membership, seed,
+     * pin or <em>order</em> change push the whole ordered list to the guest.
+     *
+     * <p>Push, not request/response. The pool is sector-global rather than per-market, so there is
+     * nothing to fetch on market open, and a player who clicks the bar option the same frame they
+     * dock would beat a round trip anyway. The poll is cheap: a walk of a list that holds a handful of
+     * events, reading one field each.
+     */
+    public void tickBarPool() {
+        if (!isHost() || !isActive()) {
+            return;
+        }
+        long nowMillis = now();
+        if (nowMillis - lastBarPoolPollMillis < BAR_POOL_POLL_INTERVAL_MILLIS) {
+            return;
+        }
+        lastBarPoolPollMillis = nowMillis;
+        List<CoopMissionBoardSync.Entry> entries = barPoolCapture.capture();
+        // Null means "could not read the pool", which is not the same as "the pool is empty" — an
+        // empty snapshot tells the guest to clear its bar, so it must only ever be a real reading.
+        if (entries == null || !barPoolCapture.markChanged(entries)) {
+            return;
+        }
+        // The manager seed rides with the pool: it is what BarCMD shuffles the pool with, so sending
+        // one without the other still shows the two players different bars.
+        Long barSeed = CoopBarSync.hostSeed();
+        broadcastMissionPool(BAR_POOL_MARKET_ID, entries, barSeed == null ? 0L : barSeed);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop MISSION_POOL_SNAPSHOT bar offers="
+                + entries.size() + " barSeed=" + (barSeed == null ? "unreadable" : barSeed));
     }
 
     private void applyMissionPool(CoopMessages.Message message) {
@@ -756,6 +809,19 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 CoopMessages.requiredPayloadString(message, "pool"));
         missionBoard.applySnapshot(entries);
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied MISSION_POOL_SNAPSHOT entries=" + entries.size());
+        long barSeed = CoopMessages.requiredPayloadLong(message, "barSeed");
+        if (barSeed != 0L) {
+            CoopBarSync.applySeed(barSeed);
+        }
+        // Bar offers are the one pool source that has a live engine counterpart to rebuild; contact
+        // and bounty entries stay per-player by design and are model-only here. Going through
+        // visibleEntriesFor means an offer the host has already claimed never reaches the guest's
+        // pool, which is the existing first-come machinery doing the arbitration.
+        String playerId = session.localPlayerId();
+        List<CoopMissionBoardSync.Entry> offers = playerId == null || playerId.trim().isEmpty()
+                ? missionBoard.pool()
+                : missionBoard.visibleEntriesFor(playerId);
+        barPoolInjector.apply(offers, playerId);
     }
 
     private void hostHandleMissionClaim(CoopMessages.Message message) {

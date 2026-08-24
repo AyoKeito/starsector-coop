@@ -237,9 +237,11 @@ Accepted: a storm strike only hits the fleet inside its cell. Own fleets are own
 
 Was accepted here as "each player hires from their own pool". Now replicated: the host's pool rides the `MARKET_SNAPSHOT` as one stock line per person and the guest strips its own pool and rebuilds the host's through `OfficerManagerEvent.addAvailable`/`addAvailableAdmin`. One roll still diverges before the snapshot lands; see "Mercenary level rolled off `Misc.random`" below.
 
-### Bar events, smuggling scans, patrol hassles of the local player
+### Smuggling scans and patrol hassles of the local player
 
-Per-player by design — these are local dialog interactions against a player's own cargo and rep, with no shared state touched. Already proven unfixable by seeding: bar offer selection draws from `Math.random()`, not the shared campaign seed, so offers diverged even with both clients on identical seeds (memory `bar-mission-seed-sync`). Accepted.
+Per-player by design: local dialog interactions against a player's own cargo and rep, with no shared state touched. Accepted.
+
+Bar *offers* used to be listed here on the same reasoning. They are not accepted any more; Phase 12c build task C replicates the pool instead of trying to reseed it. The seeding half of that old entry stands and is why the pool had to be replicated: offer selection runs through a `WeightedRandomPicker` with a null `Random`, which falls back to `Math.random()`, so equal `BarEventManager.seed` values never produced equal offers (memory `bar-mission-seed-sync`). What the seed does control is the shown subset, and that is now synced too. See "Phase 12c — Bar Pool" below for what still diverges.
 
 ### Slipstream networks
 
@@ -299,3 +301,33 @@ The snapshot overwrites that, so the divergence is only visible in the window be
 `OpenMarketPlugin` clears its ship and weapon stock at serialization time when `okToUpdateShipsAndWeapons()` says the last roll is over 30 days old, so a market's shop contents can change across a save/load with no player action and no event. Host and guest save at different moments and reload with different clocks, so the two copies of a market neither has docked at recently can drift apart without either client doing anything.
 
 Independent of gap 2e's restock rebroadcast, which only fires on `reportPlayerOpenedMarketAndCargoUpdated`. The converging force is the same one gap 2e relies on: any dock re-runs `updateCargoPrePlayerInteraction` and the host re-broadcasts, so the drift lasts until the next time either player opens that market.
+
+## Phase 12c — Bar Pool: What Is Replicated and What Is Not
+
+The host's `PortsideBarData` pool is captured in order and pushed on change (`MISSION_POOL_SNAPSHOT`, carrying each offer's id, class name, content seed and `shownAt` pin, plus the host's `BarEventManager` seed). The guest rebuilds the replicable part of its own pool from that list and has its `BarEventManager` script registration removed so it rolls nothing of its own. Five things this does not give you.
+
+### Offer numbers scale off the local fleet — user-accepted
+
+The wire carries the seed an offer regenerates from, not the numbers it regenerates into. `DeliveryBarEvent` and its siblings size quantity and payment against the *local* player's cargo capacity and the local market's supply price, inside `regen(market)`, from `seed + market.getId().hashCode()`. Two players therefore see the same offer from the same person for the same commodity with different tonnage and different credits.
+
+Accepted on request rather than by default: pinning the numbers would mean either capturing every derived field per offer type or forking each event class, and both players completing the same offer is the point, not both completing it for the same fee.
+
+### Rumor offers stay locally generated, and can shift the shown subset
+
+`PirateBaseRumorBarEvent` and `LuddicPathBaseBarEvent` hold a live `PirateBaseIntel` / `LuddicPathBaseIntel` reference, and their `shouldRemoveEvent()` reads it. Nothing about that survives the wire, so the capture skips them and the guest keeps making its own from the Phase 13 replicated base intel. Both are `isAlwaysShow()`, so both players do see their local one.
+
+The cost is subset parity. `BarCMD.showOptions` runs `Collections.shuffle(events, random)` over the whole pool, and `shuffle`'s permutation is a function of the list *size* and the random alone. A rumor event sitting at a different index on each client shifts every other offer's post-shuffle position, so the two bars can show different picks out of an identical pool. With no rumor events live, which is the normal early-campaign state, the two pools are element-for-element identical and the picks match.
+
+### Injected offers never expire on the guest
+
+`BarEventManager.advance` is what ages `active` and drops timed-out offers, and it is exactly what the suppressor stops. Injected events are also deliberately kept out of `barEventCreators`, because `advance`'s orphan sweep deletes anything that is in `barEventCreators` but not in `active`; an event the manager has never seen is invisible to that sweep and survives.
+
+So nothing on the guest ever removes an injected offer on a timer. The host's next snapshot does it instead: when an offer expires or is accepted host-side it leaves the host pool, the pool signature changes, and the guest's rebuild drops it. Same for a guest that accepts an offer, which the host's copy will keep offering until its own timer runs out.
+
+### Accepting an offer is not arbitrated at the offer level
+
+`CoopInteractionGate` claims are keyed by entity id, so two players at the same market already serialize on the market entity, bar screen included. There is no seam below that: the engine fires no listener on `BarEventManager.notifyWasInteractedWith`, so a bar acceptance cannot request a `MISSION_CLAIM_REQUEST` without forking the dialog plugin. What the pool does enforce is the host's side of first-come — an offer the host has taken vanishes from its pool and is gone from the guest's next rebuild — and `visibleEntriesFor` keeps any claim recorded through the existing machinery out of the injected set.
+
+### Contacts, contact-board missions and person bounties stay per-player — user-accepted
+
+Only bar events ride the pool. Contact lists, the missions a contact offers through `BaseMissionHub`, and `PersonBountyManager` are untouched, and `PersonBountyManager` is one of the scripts the Phase 9 suppressor removes guest-side, so a guest has no person bounties at all in v1.

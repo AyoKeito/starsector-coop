@@ -14,8 +14,9 @@ import java.util.Objects;
  *   <li><b>Pool:</b> when a shared board opens, the host snapshots the visible entries and
  *   broadcasts them ({@code MISSION_POOL_SNAPSHOT}). The guest renders/filters from this host pool
  *   ({@link #applySnapshot(List)}) instead of generating an independent pool, so both players see
- *   the same offers. Special one-time bar <em>events</em> (unique ship/blueprint/AI-core offers,
- *   rumor tip-offs, special recruitment) ride the same pool with {@link SourceType#BAR}.</li>
+ *   the same offers. Portside bar <em>events</em> ride the same pool with {@link SourceType#BAR};
+ *   Phase 12c wires that path end to end ({@link CoopBarPoolCapture} on the host,
+ *   {@link CoopBarPoolInjector} + {@link CoopBarGenerationSuppressor} on the guest).</li>
  *   <li><b>Claims:</b> the host accepts the first claim for an unclaimed {@code missionId}, records
  *   the accepting player, and rejects later claims with {@code already_claimed_by:<playerId>}
  *   ({@link #arbitrate(String, String)}). Mission rewards go to the accepting player only; they are
@@ -34,9 +35,27 @@ public final class CoopMissionBoardSync {
         MISSION_BOARD
     }
 
-    /** A single shared offer. {@code acceptedByPlayerId} is empty until someone claims it. */
+    /**
+     * A single shared offer. {@code acceptedByPlayerId} is empty until someone claims it.
+     *
+     * <p>Two fields exist for the Phase 12c bar pool and are blank/zero for every other source type:
+     * <ul>
+     *   <li>{@code contentSeed} — the one {@code long} a concrete {@link
+     *   com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarEvent} regenerates all of its content
+     *   from (see {@link CoopBarSync}). Bar offers are code objects and cannot be serialized, so the
+     *   wire carries the seed and the guest reconstructs the object around it.</li>
+     *   <li>{@code eventKind} — the host-side concrete class simple name, the discriminator the guest
+     *   uses to pick a construction path ({@code HubMissionBarEventWrapper} takes the spec-id
+     *   constructor, anything else goes through a registered creator).</li>
+     * </ul>
+     * For {@link SourceType#BAR} entries {@code marketId} carries the {@code shownAt} pin (blank when
+     * the offer is not pinned to a market) and {@code expiresAtDay} carries the remaining active days,
+     * not an absolute day — the pool is global, so there is no owning market and no absolute deadline
+     * the guest could act on.
+     */
     public record Entry(String marketId, SourceType sourceType, String missionId, String title,
-                        String giverId, String rewardSummary, String acceptedByPlayerId, long expiresAtDay) {
+                        String giverId, String rewardSummary, String acceptedByPlayerId, long expiresAtDay,
+                        long contentSeed, String eventKind) {
         public Entry {
             sourceType = Objects.requireNonNull(sourceType, "sourceType");
             missionId = requireText(missionId, "missionId");
@@ -45,6 +64,14 @@ public final class CoopMissionBoardSync {
             giverId = CoopDelimited.normalize(giverId);
             rewardSummary = CoopDelimited.normalize(rewardSummary);
             acceptedByPlayerId = CoopDelimited.normalize(acceptedByPlayerId);
+            eventKind = CoopDelimited.normalize(eventKind);
+        }
+
+        /** A captured portside bar offer: identity + the seed its content regenerates from. */
+        public static Entry barOffer(String barEventId, String eventKind, long contentSeed,
+                                     String shownAtMarketId, long daysRemaining) {
+            return new Entry(shownAtMarketId, SourceType.BAR, barEventId, "", "", "", "",
+                    daysRemaining, contentSeed, eventKind);
         }
 
         public boolean isClaimed() {
@@ -53,7 +80,7 @@ public final class CoopMissionBoardSync {
 
         public Entry withAcceptedBy(String playerId) {
             return new Entry(marketId, sourceType, missionId, title, giverId, rewardSummary,
-                    CoopDelimited.normalize(playerId), expiresAtDay);
+                    CoopDelimited.normalize(playerId), expiresAtDay, contentSeed, eventKind);
         }
     }
 
@@ -153,6 +180,9 @@ public final class CoopMissionBoardSync {
 
     // ---- Snapshot encoding (single delimited string carried over TCP) -------------------------
 
+    /** Fields per encoded entry line. Bumped from 8 to 10 by Phase 12c (contentSeed, eventKind). */
+    static final int ENTRY_FIELD_COUNT = 10;
+
     public static String encodePool(List<Entry> entries) {
         StringBuilder out = new StringBuilder(64 + (entries == null ? 0 : entries.size()) * 48);
         out.append(entries == null ? 0 : entries.size());
@@ -166,7 +196,9 @@ public final class CoopMissionBoardSync {
                         .append('|').append(CoopDelimited.field(entry.giverId()))
                         .append('|').append(CoopDelimited.field(entry.rewardSummary()))
                         .append('|').append(CoopDelimited.field(entry.acceptedByPlayerId()))
-                        .append('|').append(entry.expiresAtDay());
+                        .append('|').append(entry.expiresAtDay())
+                        .append('|').append(entry.contentSeed())
+                        .append('|').append(CoopDelimited.field(entry.eventKind()));
             }
         }
         return out.toString();
@@ -183,11 +215,16 @@ public final class CoopMissionBoardSync {
         List<Entry> entries = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             List<String> f = CoopDelimited.split(lines[i + 1]);
-            if (f.size() != 8) {
-                throw new IllegalArgumentException("Expected 8 mission entry fields, got " + f.size());
+            // Reject, never shift: a line from a peer running the pre-12c 8-field codec must fail
+            // loudly here rather than silently decode with fields slid into the wrong slots. The
+            // handshake manifest already refuses mismatched builds; this is the second line.
+            if (f.size() != ENTRY_FIELD_COUNT) {
+                throw new IllegalArgumentException("Expected " + ENTRY_FIELD_COUNT
+                        + " mission entry fields, got " + f.size());
             }
             entries.add(new Entry(f.get(0), SourceType.valueOf(f.get(1)), f.get(2), f.get(3),
-                    f.get(4), f.get(5), f.get(6), Long.parseLong(f.get(7).trim())));
+                    f.get(4), f.get(5), f.get(6), Long.parseLong(f.get(7).trim()),
+                    Long.parseLong(f.get(8).trim()), f.get(9)));
         }
         return entries;
     }

@@ -2,48 +2,64 @@ package coop.campaign;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
-import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 
-import com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarData;
 import com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarEvent;
 import com.fs.starfarer.api.impl.campaign.intel.bar.events.BarEventManager;
 
 import coop.util.CoopLog;
 
 /**
- * Bar-event field access — <b>currently unused</b>, retained for a future host-authoritative bar
- * mirroring phase and as the reference example of the MethodHandles field-access workaround.
+ * The two {@code protected long seed} fields shared bars are built on, and the only place the mod
+ * touches either of them. Both are read and written through {@link MethodHandles}: the {@code seed}
+ * fields have no public accessor, and plain reflection is out because Starfarer's script classloader
+ * hard-blocks {@code java.lang.reflect} ("File access and reflection are not allowed to scripts").
+ * {@code java.lang.invoke} is not on that denylist (the same workaround MagicLib uses). Every access
+ * is defensive: a failure is logged and degrades to "that part of the bar is unsynced".
  *
- * <p><b>Why the seed-sync idea it was built for was abandoned:</b> the original plan was to make both
- * clients roll identical dockside offers by equalizing {@code BarEventManager.seed}. That can't work —
- * {@code advance()} selects which offers spawn via a {@code WeightedRandomPicker} with a null
- * {@code Random}, so {@code pick()} falls back to {@code Math.random()} (global, unseeded). Offer
- * selection is therefore non-deterministic and independent of the seed; equal seeds only flavor an
- * already-spawned event's internal content via {@code getSeed()}. Confirmed in bytecode and by two
- * live tests. True shared bars need host-authoritative mirroring of the chosen event objects, deferred
- * to its own phase. The {@code MethodHandles} access below stays valid and reusable.
+ * <p><b>Two seeds, two jobs.</b> Phase 12c splits what an earlier attempt tried to do with one:
+ * <ul>
+ *   <li><b>{@code BarEventManager.seed} — the shown-subset seed</b> ({@link #hostSeed()},
+ *   {@link #applySeed(long)}). {@code BarCMD.showOptions} builds its {@code Random} from
+ *   {@code getSeed(entity, null, null)} and uses it both to pick how many offers a market shows and
+ *   to {@code Collections.shuffle} the global pool before taking that many. Equal seeds therefore
+ *   mean equal shuffles — <em>given equal pools</em>, which is the other half.</li>
+ *   <li><b>Per-event {@code seed} — the content seed</b> ({@link #readEventSeed},
+ *   {@link #writeEventSeed}). Every concrete offer regenerates its person, commodity, quantity,
+ *   price and mission body from one {@code long} plus {@code market.getId().hashCode()}. So an offer
+ *   need not be serialized: send the id and the seed, reconstruct the object on the guest, overwrite
+ *   the seed, and the guest's own engine regenerates identical content.</li>
+ * </ul>
  *
- * <p>Bar/mission offers are <em>not</em> plain data — each {@link PortsideBarEvent} is a code object
- * whose dialog and reward logic live in the instance, so they can't be serialized and rebuilt on the
- * guest. But {@code BarEventManager} selects which offers spawn at each market purely from
- * {@code getSeed(token, person, id) = (nameHash * personHash * idHash) * CONST + this.seed}. Every
- * factor except {@code this.seed} is deterministic across instances (named markets/persons are
- * identical), so <b>if the guest's manager seed equals the host's, both clients roll byte-identical
- * offers natively</b> — each generates its own event objects, so completion/reward works locally on
- * whichever player accepts. Two fresh games otherwise roll independent seeds (via {@code updateSeed},
- * every 20-40 days) and show entirely different bars, which is the divergence we fix here.
- *
- * <p>The {@code seed} field is {@code protected} with no public accessor. Plain reflection is out:
- * Starfarer's script classloader hard-blocks {@code java.lang.reflect} ("File access and reflection
- * are not allowed to scripts"). {@code java.lang.invoke} is <em>not</em> on that denylist, so we read
- * and write the field with {@link MethodHandles} (the same workaround MagicLib uses). All access is
- * isolated here and fully defensive: any failure is logged once and degrades to "unsynced bars".
+ * <p><b>What the earlier seed-only design got wrong.</b> Equalizing the manager seed alone cannot
+ * equalize offers: {@code BarEventManager.advance} picks which creators fire through a
+ * {@code WeightedRandomPicker} with a null {@code Random}, so {@code pick()} falls back to the global
+ * unseeded {@code Math.random()}. Which offers <em>exist</em> is therefore non-deterministic and
+ * independent of the seed — confirmed in bytecode and in two live tests. That is why the pool itself
+ * is now replicated ({@link CoopBarPoolCapture} captures it on the host, {@link CoopBarPoolInjector}
+ * rebuilds it on the guest, {@link CoopBarGenerationSuppressor} stops the guest generating its own).
+ * The manager seed sync is still needed on top of that, for the shuffle.
  */
 public final class CoopBarSync {
 
     private static MethodHandle seedGetter;
     private static MethodHandle seedSetter;
     private static boolean handlesResolved;
+
+    /**
+     * Per-event-class {@code seed} accessors, resolved once per concrete class. {@link #ABSENT} is
+     * the negative cache: a class with no {@code long seed} anywhere in its hierarchy (a bar event
+     * with no regenerable content) must not be re-walked on every snapshot.
+     */
+    private static final SeedHandles ABSENT = new SeedHandles(null, null);
+    private static final Map<Class<?>, SeedHandles> EVENT_SEED_HANDLES = new HashMap<>();
+
+    private record SeedHandles(MethodHandle getter, MethodHandle setter) {
+        boolean usable() {
+            return getter != null && setter != null;
+        }
+    }
 
     private CoopBarSync() {
     }
@@ -76,29 +92,79 @@ public final class CoopBarSync {
         }
     }
 
+    // ---- Per-event content seed (Phase 12c bar pool) -----------------------------------------
+
     /**
-     * Drop already-rolled offers so they re-roll under the freshly-synced seed. Called once on the
-     * guest at first sync (offers spawned with its old seed are otherwise stale); not on later seed
-     * changes, where vanilla also keeps existing offers until they time out.
+     * The seed a single bar offer regenerates its content from, or {@code null} when the event class
+     * has no such field (nothing to replicate) or the handle could not be resolved.
      */
-    public static void clearActiveOffers() {
-        try {
-            BarEventManager mgr = BarEventManager.getInstance();
-            if (mgr != null && mgr.getActive() != null) {
-                mgr.getActive().clear();
-            }
-            if (mgr != null && mgr.getTimeout() != null) {
-                mgr.getTimeout().clear();
-            }
-            PortsideBarData bar = PortsideBarData.getInstance();
-            if (bar != null) {
-                for (PortsideBarEvent event : new ArrayList<>(bar.getEvents())) {
-                    bar.removeEvent(event);
-                }
-            }
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopBarSync.class, "Failed to clear active bar offers", ex);
+    public static Long readEventSeed(PortsideBarEvent event) {
+        if (event == null) {
+            return null;
         }
+        SeedHandles handles = handlesFor(event.getClass());
+        if (!handles.usable()) {
+            return null;
+        }
+        try {
+            return (long) handles.getter().invoke(event);
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBarSync.class,
+                    "Failed to read bar-event seed from " + event.getClass().getSimpleName(), t);
+            return null;
+        }
+    }
+
+    /** Overwrite a freshly constructed offer's content seed with the host's. */
+    public static boolean writeEventSeed(PortsideBarEvent event, long seed) {
+        if (event == null) {
+            return false;
+        }
+        SeedHandles handles = handlesFor(event.getClass());
+        if (!handles.usable()) {
+            return false;
+        }
+        try {
+            handles.setter().invoke(event, seed);
+            return true;
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBarSync.class,
+                    "Failed to write bar-event seed on " + event.getClass().getSimpleName(), t);
+            return false;
+        }
+    }
+
+    /**
+     * Resolve (and cache) the {@code seed} accessors for one concrete event class.
+     *
+     * <p>The field is declared by a base class, not by the concrete one — {@code
+     * HubMissionBarEventWrapper}, {@code BaseBarEventWithPerson}, {@code BaseGetCommodityBarEvent},
+     * {@code HistorianBarEvent} each declare their own — so the lookup walks up the hierarchy until a
+     * class declares it. {@code NoSuchFieldException} is the "keep walking" signal and is not an
+     * error; anything else is, and is logged once per class because the negative result is cached.
+     */
+    private static synchronized SeedHandles handlesFor(Class<?> eventClass) {
+        SeedHandles cached = EVENT_SEED_HANDLES.get(eventClass);
+        if (cached != null) {
+            return cached;
+        }
+        SeedHandles resolved = ABSENT;
+        for (Class<?> c = eventClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                MethodHandles.Lookup priv = MethodHandles.privateLookupIn(c, MethodHandles.lookup());
+                resolved = new SeedHandles(priv.findGetter(c, "seed", long.class),
+                        priv.findSetter(c, "seed", long.class));
+                break;
+            } catch (NoSuchFieldException ignored) {
+                // This class does not declare it; try the superclass.
+            } catch (RuntimeException | LinkageError | IllegalAccessException ex) {
+                CoopLog.warn(CoopBarSync.class,
+                        "Failed to resolve bar-event seed handles for " + c.getName(), ex);
+                break;
+            }
+        }
+        EVENT_SEED_HANDLES.put(eventClass, resolved);
+        return resolved;
     }
 
     private static synchronized void resolveHandles() throws Throwable {

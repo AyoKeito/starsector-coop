@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopCampaignReplicator;
 import coop.combat.CoopBattleBridge;
@@ -108,6 +109,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_NPC_SUPPRESSOR = "npc.suppressor";
     private static final String SECTION_NPC_THREAT_WATCHER = "npc.threatWatcher";
     private static final String SECTION_BASE_REPLICATION = "base.syncReplication";
+    private static final String SECTION_BAR_SUPPRESSOR = "bar.suppressGeneration";
     private static final String SECTION_INTERACTION_GATE = "interaction.gate";
     private static final String SECTION_DEBUG_DIALOG_STATE = "debug.dialogState";
     private static final String SECTION_COMBAT_SPIKE = "combat.spike";
@@ -115,6 +117,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_REPLICATOR_WORLD_DELTAS = "replicator.worldDeltas";
     private static final String SECTION_REPLICATOR_ORBIT_SYNC = "replicator.orbitSync";
     private static final String SECTION_REPLICATOR_REP_SYNC = "replicator.playerRepSync";
+    private static final String SECTION_REPLICATOR_BAR_POOL = "replicator.barPool";
     private static final String SECTION_PING = "net.sendPing";
     private static final String SECTION_FLUSH_OUTBOUND_POST = "net.flushOutbound.post";
     /**
@@ -172,10 +175,12 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private final CoopFleetMirrorRegistry npcFleetRegistry;
     private final CoopNpcFleetSuppressor npcFleetSuppressor = new CoopNpcFleetSuppressor();
+    private final CoopBarGenerationSuppressor barGenerationSuppressor = new CoopBarGenerationSuppressor();
     private final CoopNpcFleetReplicator npcFleetReplicator;
     private final CoopBaseAuthority baseAuthority;
     private boolean npcReplicationStreaming;
     private boolean baseReplicationStreaming;
+    private boolean barSuppressionArmed;
     private String lastNpcDebug;
     /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
     private int lastNpcMirrorCount = -1;
@@ -433,6 +438,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_NPC_THREAT_WATCHER, t);
         syncBaseReplication();
         t = profiler.split(SECTION_BASE_REPLICATION, t);
+        syncBarGeneration();
+        t = profiler.split(SECTION_BAR_SUPPRESSOR, t);
         syncInteractionGate();
         t = profiler.split(SECTION_INTERACTION_GATE, t);
         debugDialogState();
@@ -447,6 +454,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_REPLICATOR_ORBIT_SYNC, t);
         campaignReplicator.tickPlayerRepSync();
         t = profiler.split(SECTION_REPLICATOR_REP_SYNC, t);
+        campaignReplicator.tickBarPool();
+        t = profiler.split(SECTION_REPLICATOR_BAR_POOL, t);
         maybeSendPing();
         t = profiler.split(SECTION_PING, t);
         service.flushOutbound();
@@ -1787,6 +1796,31 @@ public class CoopNetPump implements EveryFrameScript {
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync host-authoritative bases", ex);
+        }
+    }
+
+    /**
+     * Phase 12c guest bar-offer suppression. The host's portside bar pool is the only pool, so the
+     * guest's {@code BarEventManager} script registration is removed once per session (its
+     * sector-memory instance stays — see {@link CoopBarGenerationSuppressor}). Vanilla re-adds the
+     * script on every game load, so the session edge re-arms the removal, exactly like the Phase 9
+     * fleet spawner suppression.
+     */
+    private void syncBarGeneration() {
+        boolean active = service.isConnected() && isGameplaySessionActive();
+        if (active && !barSuppressionArmed) {
+            barGenerationSuppressor.reset();
+            barSuppressionArmed = true;
+        } else if (!active && barSuppressionArmed) {
+            barSuppressionArmed = false;
+        }
+        if (!active || !CoopBarGenerationSuppressor.activeForRole(service.role())) {
+            return;
+        }
+        try {
+            barGenerationSuppressor.tick(Global.getSector());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to suppress guest bar event generation", ex);
         }
     }
 
