@@ -1675,6 +1675,12 @@ public class CoopNetPump implements EveryFrameScript {
         }
         fleetMirror.advanceMotion(cursor);
         npcFleetRegistry.advanceMotion(cursor);
+        if (CoopDebug.diagnosticsEnabled()) {
+            String report = coop.fleet.CoopMotionSpeedProbe.INSTANCE.maybeReport(clockMillis.getAsLong());
+            if (report != null) {
+                CoopLog.info(CoopNetPump.class, report);
+            }
+        }
     }
 
     private void handleNpcFleetSet(CoopMessages.Message message) {
@@ -1719,6 +1725,7 @@ public class CoopNetPump implements EveryFrameScript {
             datagramWatermark.reset();
             datagramRedundancy.reset();
             motionTimeline.reset();
+            coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
             npcReplicationStreaming = true;
         } else if (!active && npcReplicationStreaming) {
             // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
@@ -1726,6 +1733,7 @@ public class CoopNetPump implements EveryFrameScript {
             datagramWatermark.reset();
             datagramRedundancy.reset();
             motionTimeline.reset();
+            coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
             npcReplicationStreaming = false;
             lastNpcDebug = null;
             lastNpcMirrorCount = -1;

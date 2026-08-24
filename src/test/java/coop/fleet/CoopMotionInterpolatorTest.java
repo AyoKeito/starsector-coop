@@ -74,9 +74,12 @@ class CoopMotionInterpolatorTest {
 
     @Test
     void nonIncreasingSampleTimesAreDropped() {
-        assertFalse(interpolator.addSample(1.0, 0f, 0f, 10f, 0f));
-        assertFalse(interpolator.addSample(1.0, 999f, 999f, 10f, 0f), "duplicate stamp dropped");
-        assertFalse(interpolator.addSample(0.9, 999f, 999f, 10f, 0f), "older stamp dropped");
+        assertEquals(CoopMotionInterpolator.AddResult.ADDED,
+                interpolator.addSample(1.0, 0f, 0f, 10f, 0f));
+        assertEquals(CoopMotionInterpolator.AddResult.STALE,
+                interpolator.addSample(1.0, 999f, 999f, 10f, 0f), "duplicate stamp dropped");
+        assertEquals(CoopMotionInterpolator.AddResult.STALE,
+                interpolator.addSample(0.9, 999f, 999f, 10f, 0f), "older stamp dropped");
         // Still holding the original sample only.
         assertEquals(0f, interpolator.evaluate(1.0).x());
     }
@@ -84,10 +87,11 @@ class CoopMotionInterpolatorTest {
     @Test
     void teleportScaleJumpRestartsTheBufferAndReportsTheCut() {
         interpolator.addSample(1.0, 0f, 0f, 10f, 0f);
-        boolean teleport = interpolator.addSample(
+        CoopMotionInterpolator.AddResult teleport = interpolator.addSample(
                 1.1, CoopMotionInterpolator.TELEPORT_DISTANCE + 100f, 0f, 10f, 0f);
 
-        assertTrue(teleport, "the caller must hard-cut, never glide");
+        assertEquals(CoopMotionInterpolator.AddResult.TELEPORT, teleport,
+                "the caller must hard-cut, never glide");
         // The buffer restarted at the jump target: a cursor before it holds there, not at the origin.
         CoopMotionInterpolator.Pose pose = interpolator.evaluate(1.05);
         assertEquals(CoopMotionInterpolator.TELEPORT_DISTANCE + 100f, pose.x());

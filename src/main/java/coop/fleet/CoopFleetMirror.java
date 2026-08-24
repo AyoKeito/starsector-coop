@@ -66,6 +66,17 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private final CoopPresenceIndicator presenceIndicator;
     /** Phase 29 M1: the per-mirror sample buffer {@link #advanceMotion} renders from. */
     private final CoopMotionInterpolator motionInterpolator = new CoopMotionInterpolator();
+    /**
+     * {@link CoopMotionSpeedProbe} trackers ({@link coop.util.CoopDebug}-gated): the previous
+     * rendered pose and the previous accepted sample, so each frame/sample contributes its move
+     * distance to the shared probe. Both invalidate on any hard cut — a teleport is not "speed".
+     */
+    private boolean speedProbeHasRendered;
+    private float speedProbeRenderedX;
+    private float speedProbeRenderedY;
+    private boolean speedProbeHasSample;
+    private float speedProbeSampleX;
+    private float speedProbeSampleY;
 
     private CampaignFleetAPI mirrorFleet;
     private String lastFleetHash;
@@ -393,6 +404,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
             // A location change is the hard-cut signal (system jumps change location): the buffer
             // restarts here so the interpolator can never glide across a jump.
             motionInterpolator.clear();
+            resetSpeedProbeTracking();
             mirrorFleet.setLocation(x, y);
             lastLocationId = targetId;
             CoopLog.info(CoopFleetMirror.class, "Coop mirror fleet moved to location " + targetId);
@@ -413,8 +425,23 @@ public class CoopFleetMirror implements CoopNpcMirror {
      */
     private void feedMotion(double sampleTimeSeconds, float x, float y,
                             float velocityX, float velocityY) {
-        if (motionInterpolator.addSample(sampleTimeSeconds, x, y, velocityX, velocityY)) {
+        CoopMotionInterpolator.AddResult result =
+                motionInterpolator.addSample(sampleTimeSeconds, x, y, velocityX, velocityY);
+        if (result == CoopMotionInterpolator.AddResult.STALE) {
+            return;
+        }
+        if (result == CoopMotionInterpolator.AddResult.TELEPORT) {
             mirrorFleet.setLocation(x, y);
+            resetSpeedProbeTracking();
+        }
+        if (CoopDebug.diagnosticsEnabled()) {
+            if (speedProbeHasSample && result == CoopMotionInterpolator.AddResult.ADDED) {
+                CoopMotionSpeedProbe.INSTANCE.recordAuthority(
+                        Math.hypot(x - speedProbeSampleX, y - speedProbeSampleY));
+            }
+            speedProbeHasSample = true;
+            speedProbeSampleX = x;
+            speedProbeSampleY = y;
         }
     }
 
@@ -455,9 +482,29 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 mirrorFleet.setFacing(
                         (float) Math.toDegrees(Math.atan2(pose.velocityY(), pose.velocityX())));
             }
+            if (CoopDebug.diagnosticsEnabled()) {
+                if (speedProbeHasRendered) {
+                    double moved = Math.hypot(pose.x() - speedProbeRenderedX,
+                            pose.y() - speedProbeRenderedY);
+                    // Defensive: a cursor re-seat after an outage renders one large hop; that is a
+                    // cut, not speed, so it must not pollute the window.
+                    if (moved < CoopMotionInterpolator.TELEPORT_DISTANCE) {
+                        CoopMotionSpeedProbe.INSTANCE.recordRendered(moved);
+                    }
+                }
+                speedProbeHasRendered = true;
+                speedProbeRenderedX = pose.x();
+                speedProbeRenderedY = pose.y();
+            }
         } catch (RuntimeException ignored) {
             // Hot path (every frame per mirror): a transient engine hiccup must never kill the pump.
         }
+    }
+
+    /** Invalidates both speed-probe trackers (hard cuts: teleport, location change, teardown). */
+    private void resetSpeedProbeTracking() {
+        speedProbeHasRendered = false;
+        speedProbeHasSample = false;
     }
 
     /**
@@ -1056,6 +1103,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private void resetTracking() {
         motionInterpolator.clear();
+        resetSpeedProbeTracking();
         lastFleetHash = null;
         retriedFleetHash = null;
         lastLocationId = null;

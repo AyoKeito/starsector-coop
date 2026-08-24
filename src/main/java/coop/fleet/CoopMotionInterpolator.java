@@ -46,6 +46,16 @@ public final class CoopMotionInterpolator {
     public record Pose(float x, float y, float velocityX, float velocityY, boolean parked) {
     }
 
+    /** What {@link #addSample} did with a sample. */
+    public enum AddResult {
+        /** Queued normally. */
+        ADDED,
+        /** Queued after a teleport-scale jump restarted the buffer — the caller hard-cuts. */
+        TELEPORT,
+        /** Dropped: stream time not after the newest queued sample (duplicate or stale). */
+        STALE
+    }
+
     record Sample(double time, float x, float y, float velocityX, float velocityY) {
     }
 
@@ -53,14 +63,13 @@ public final class CoopMotionInterpolator {
 
     /**
      * Queues one received sample. Non-increasing stream times are dropped (the datagram watermark
-     * removes most; duplicate stamps from a paused sender land here). Returns true when the sample
-     * was a teleport-scale jump from the previous one — the buffer restarts at it and the caller
-     * hard-cuts the fleet instead of gliding.
+     * removes most; duplicate stamps from a paused sender land here). A teleport-scale jump from the
+     * previous sample restarts the buffer at it — the caller hard-cuts the fleet instead of gliding.
      */
-    public boolean addSample(double timeSeconds, float x, float y, float velocityX, float velocityY) {
+    public AddResult addSample(double timeSeconds, float x, float y, float velocityX, float velocityY) {
         Sample last = samples.peekLast();
         if (last != null && timeSeconds <= last.time()) {
-            return false;
+            return AddResult.STALE;
         }
         boolean teleport = false;
         if (last != null) {
@@ -75,7 +84,7 @@ public final class CoopMotionInterpolator {
         while (samples.size() > BUFFER_LIMIT) {
             samples.removeFirst();
         }
-        return teleport;
+        return teleport ? AddResult.TELEPORT : AddResult.ADDED;
     }
 
     /** Drops all samples (location change, teleport, mirror teardown). */
