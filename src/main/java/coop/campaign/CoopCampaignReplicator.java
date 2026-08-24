@@ -611,7 +611,45 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_OPEN requested market=" + market.getId());
         }
         // When the host opens, its engine market is already canonical; the guest (if it later opens
-        // the same market) pulls it via MARKET_OPEN. Phase 18 mutexes simultaneous same-market use.
+        // the same market) pulls it via MARKET_OPEN. Simultaneous same-market use is prevented by
+        // the Phase 10 gate, whose WAN race Phase 18 closes (the per-submarket mutex that this line
+        // used to promise was cancelled on 2026-08-20 — see the Phase 18 banner).
+    }
+
+    /**
+     * Phase 18: the local player left a market screen. Pure forwarding — the observer (the pump)
+     * uses it to confirm a rejected interaction's dialog is gone; Phase 24 will diff the colony
+     * state here.
+     */
+    @Override
+    public void onPlayerClosedMarket(MarketAPI market) {
+        if (marketCloseObserver == null || market == null) {
+            return;
+        }
+        String entityId = null;
+        try {
+            SectorEntityToken primary = market.getPrimaryEntity();
+            entityId = primary == null ? null : primary.getId();
+        } catch (RuntimeException | LinkageError ex) {
+            // A procgen/local market may have no primary entity; the market id alone still helps.
+        }
+        marketCloseObserver.onMarketClosed(entityId, market.getId());
+    }
+
+    /** Observer of the vanilla market-close callback; wired to the Phase 18 reject bookkeeping. */
+    public interface MarketCloseObserver {
+        /**
+         * @param entityId the market's primary entity id (the id the interaction gate claims), or
+         *                 null when the market has no primary entity.
+         * @param marketId the market's own id.
+         */
+        void onMarketClosed(String entityId, String marketId);
+    }
+
+    private MarketCloseObserver marketCloseObserver;
+
+    public void setMarketCloseObserver(MarketCloseObserver observer) {
+        this.marketCloseObserver = observer;
     }
 
     /** Host: a player opened a market; capture the canonical open-market stock and send it. */
@@ -2089,6 +2127,34 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         return openMarketCargo(findMarket(marketId));
     }
 
+    /**
+     * The one submarket the market-snapshot path is ever allowed to read or write:
+     * {@link Submarkets#SUBMARKET_OPEN}.
+     *
+     * <p><b>Storage regression fence (Phase 18).</b> Every market snapshot in this class — capture
+     * ({@link #captureOpenMarketStock}), pre-stock ({@link #ensureOpenMarketStocked}), apply
+     * ({@code applySnapshotToEngine}) and per-item delta ({@code applyItemDeltaToEngine}) — goes
+     * through this accessor, so these submarkets are never touched:
+     *
+     * <ul>
+     *   <li>{@code storage} ({@link Submarkets#SUBMARKET_STORAGE}) — <b>this is the dangerous
+     *       one.</b> It holds the player's own ships and cargo, and a snapshot apply is a full
+     *       <em>replacement</em>, not a merge: pointing it at storage would delete whatever the
+     *       player had parked there and hand back the host's open-market roll instead. Anything
+     *       that widens this accessor must exclude storage explicitly.</li>
+     *   <li>{@code black_market} ({@link Submarkets#SUBMARKET_BLACK}) — stock is tied to the
+     *       market's own illegal-trade state and to per-player smuggling suspicion.</li>
+     *   <li>{@code open_market}'s military sibling {@code generic_military}
+     *       ({@link Submarkets#GENERIC_MILITARY}) — access is gated on per-player commission and
+     *       standing, so it is not a shared, host-canonical shop in the first place.</li>
+     *   <li>{@code local_resources} ({@link Submarkets#LOCAL_RESOURCES}) — a derived view of the
+     *       colony's production, not a stocked shop.</li>
+     * </ul>
+     *
+     * <p>Widening the snapshot to any of them is Phase 12c work and needs its own model (per-player
+     * visibility, not one canonical list). {@code CoopCampaignReplicatorStorageFenceTest} asserts a
+     * snapshot apply leaves storage alone.
+     */
     private CargoAPI openMarketCargo(MarketAPI market) {
         if (market == null || !market.hasSubmarket(Submarkets.SUBMARKET_OPEN)) {
             return null;

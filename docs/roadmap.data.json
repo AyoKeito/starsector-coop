@@ -663,9 +663,10 @@
       "title": "Interaction-Gate WAN Race Hardening",
       "theme": "interaction",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Rescoped 2026-08-20: the UI-lock system is cancelled (the global Phase 10 gate already serializes all dialogs); this phase force-closes the loser's dialog on INTERACTION_REJECT, fixes the reject re-claim loop, and fences storage.",
       "introduces": [
+        "CoopRejectTracker",
         "forced close on INTERACTION_REJECT",
         "reject re-claim loop fix",
         "coop.debug.interactionDelayMs lever",
@@ -673,11 +674,9 @@
         "storage regression fence"
       ],
       "residue": [
-        "reject bookkeeping unit tests",
-        "storage-untouched snapshot test",
         "induced-latency same-market smoke test"
       ],
-      "note": "Concurrent same-dock UI deferred post-V1; needs entity-scoping the gate first"
+      "note": "Built 2026-08-24. Forced close is deferred one frame into the pump's own EveryFrameScript step and re-issued until the dialog is gone; a reported market close cannot cancel one in flight. Concurrent same-dock UI still deferred post-V1; needs entity-scoping the gate first"
     },
     {
       "id": "19",

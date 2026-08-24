@@ -26,6 +26,18 @@ public final class CoopDebug {
     public static final String PROPERTY = "coop.debug.diagnostics";
     public static final String MEMORY_FLAG = "$coopDebug";
 
+    /**
+     * Phase 18 latency lever: {@code -Dcoop.debug.interactionDelayMs=<n>} makes the HOST hold every
+     * inbound {@code INTERACTION_CLAIM} for {@code n} ms before arbitrating it, which widens the
+     * claim race to something a human can hit on localhost (on a real link the window is only host
+     * frame + TCP one-way + guest frame). Dormant at 0, which is the default and what every shipped
+     * session runs; it is a test instrument, not a tuning knob.
+     */
+    public static final String INTERACTION_DELAY_PROPERTY = "coop.debug.interactionDelayMs";
+
+    /** Sanity cap on the lever: past this the session is unplayable and the value is a typo. */
+    static final int MAX_INTERACTION_DELAY_MILLIS = 60_000;
+
     /** How often {@link #pollFrame()} re-reads the toggle, in pump frames (~5 s at 60 fps). */
     static final int TOGGLE_POLL_FRAMES = 300;
 
@@ -36,6 +48,12 @@ public final class CoopDebug {
      * another thread; every read and the poll itself are campaign-thread.
      */
     private static volatile boolean enabled = Boolean.getBoolean(PROPERTY);
+    /**
+     * Milliseconds the host holds an inbound interaction claim before arbitrating it; 0 = dormant.
+     * Seeded at class init so a launch-time property is live before the first frame, then refreshed
+     * on the same poll as {@link #enabled} (so it can also be flipped from the console mid-session).
+     */
+    private static volatile int interactionClaimDelayMillis = readInteractionClaimDelayMillis();
     private static int pollFrames;
 
     private CoopDebug() {
@@ -44,6 +62,14 @@ public final class CoopDebug {
     /** True when coop diagnostics should log, via the JVM property or the in-game memory flag. */
     public static boolean diagnosticsEnabled() {
         return enabled;
+    }
+
+    /**
+     * How long the host should delay processing an inbound {@code INTERACTION_CLAIM}, in ms. Zero
+     * (the default) means process it immediately; see {@link #INTERACTION_DELAY_PROPERTY}.
+     */
+    public static int interactionClaimDelayMillis() {
+        return interactionClaimDelayMillis;
     }
 
     /**
@@ -60,6 +86,7 @@ public final class CoopDebug {
 
     /** The real lookup. Package-private so the toggle test can drive it without a pump. */
     static void refresh() {
+        interactionClaimDelayMillis = readInteractionClaimDelayMillis();
         if (Boolean.getBoolean(PROPERTY)) {
             enabled = true;
             return;
@@ -77,9 +104,43 @@ public final class CoopDebug {
         enabled = flagged;
     }
 
+    /**
+     * Parses {@link #INTERACTION_DELAY_PROPERTY}. A missing property, a non-number, or a negative
+     * value all mean "dormant" — the lever must never be able to take a session down, and a typo
+     * that silently disabled a debug instrument is cheaper than one that throws in the pump.
+     */
+    static int readInteractionClaimDelayMillis() {
+        String raw = System.getProperty(INTERACTION_DELAY_PROPERTY);
+        if (raw == null || raw.trim().isEmpty()) {
+            return 0;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException ex) {
+            CoopLog.warn(CoopDebug.class, "Ignoring non-numeric " + INTERACTION_DELAY_PROPERTY
+                    + "=" + raw);
+            return 0;
+        }
+        if (parsed <= 0) {
+            return 0;
+        }
+        if (parsed > MAX_INTERACTION_DELAY_MILLIS) {
+            CoopLog.warn(CoopDebug.class, "Clamping " + INTERACTION_DELAY_PROPERTY + "=" + parsed
+                    + " to " + MAX_INTERACTION_DELAY_MILLIS + "ms");
+            return MAX_INTERACTION_DELAY_MILLIS;
+        }
+        return parsed;
+    }
+
     /** Test seam: the flag is otherwise only driven by the JVM property and the memory flag. */
     static void setEnabledForTesting(boolean value) {
         enabled = value;
+    }
+
+    /** Test seam for the latency lever; production only sets it from the JVM property. */
+    static void setInteractionClaimDelayMillisForTesting(int value) {
+        interactionClaimDelayMillis = Math.max(0, value);
     }
 
     /** Test seam: resets the frame counter so a test starts a poll window from a known point. */

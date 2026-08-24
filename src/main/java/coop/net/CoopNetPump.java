@@ -29,6 +29,7 @@ import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.interaction.CoopInteractionClaim;
 import coop.interaction.CoopInteractionGate;
+import coop.interaction.CoopRejectTracker;
 import coop.save.CoopGuestSnapshot;
 import coop.save.CoopGuestSnapshotFactory;
 import coop.save.CoopGuestSnapshotStore;
@@ -44,6 +45,7 @@ import coop.util.CoopDebug;
 import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
 
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -63,6 +65,11 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private static final long GUEST_SNAPSHOT_INTERVAL_MILLIS = 30_000L;
     private static final String DEFAULT_PLAYER_FACTION_ID = "player";
+    /**
+     * Ceiling on the Phase 18 debug delay queue. Only reachable with the lever on and a peer
+     * spamming claims; past it the host arbitrates immediately rather than growing without bound.
+     */
+    private static final int MAX_DELAYED_INTERACTION_CLAIMS = 256;
     private static final String HOST_PORT_FLAG = "coop.hostPort";
     private static final String CONNECT_HOST_FLAG = "coop.connectHost";
     private static final String CONNECT_PORT_FLAG = "coop.connectPort";
@@ -168,6 +175,13 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopRespawnNotifier respawnNotifier = new CoopRespawnNotifier();
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
+    /** Phase 18: the local claim the host rejected, until its dialog is actually closed. */
+    private final CoopRejectTracker rejectTracker = new CoopRejectTracker();
+    /**
+     * Phase 18 debug lever ({@link CoopDebug#INTERACTION_DELAY_PROPERTY}): inbound claims held on
+     * the host until their release stamp. Empty and untouched unless the property is set.
+     */
+    private final ArrayDeque<DelayedInteractionClaim> delayedInteractionClaims = new ArrayDeque<>();
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
     private final BooleanSupplier ironModeSupplier;
     private final Supplier<CoopSeedSync.SeedData> hostSeedSupplier;
@@ -285,6 +299,9 @@ public class CoopNetPump implements EveryFrameScript {
                 battleBridge.onPlayerEngagement(outcome);
             }
         });
+        // Phase 18: vanilla's market-close callback, forwarded so a rejected claim stops being
+        // tracked once the screen it referred to is confirmed gone.
+        this.campaignReplicator.setMarketCloseObserver(this::onLocalMarketClosed);
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis);
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
@@ -1783,6 +1800,57 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
             return;
         }
+        int delayMillis = CoopDebug.interactionClaimDelayMillis();
+        if (delayMillis > 0 && queueDelayedInteractionClaim(message, delayMillis)) {
+            return;
+        }
+        arbitrateInteractionClaim(message);
+    }
+
+    /**
+     * Phase 18 latency lever. Parks the claim with a release stamp instead of sleeping: the pump
+     * thread is the campaign thread, so blocking here would stall the whole game rather than
+     * simulate a slow link. {@link #drainDelayedInteractionClaims()} releases it in receive order,
+     * which is exactly the ordering {@code CoopInteractionGate} arbitrates on.
+     *
+     * @return true when the message was parked (the caller must not arbitrate it now).
+     */
+    private boolean queueDelayedInteractionClaim(CoopMessages.Message message, int delayMillis) {
+        if (delayedInteractionClaims.size() >= MAX_DELAYED_INTERACTION_CLAIMS) {
+            CoopLog.warn(CoopNetPump.class, "Coop debug interaction-delay queue is full ("
+                    + MAX_DELAYED_INTERACTION_CLAIMS + "); arbitrating claim seq=" + message.seq()
+                    + " immediately");
+            return false;
+        }
+        long releaseAt = clockMillis.getAsLong() + delayMillis;
+        delayedInteractionClaims.addLast(new DelayedInteractionClaim(message, releaseAt));
+        CoopLog.info(CoopNetPump.class, "Coop debug delaying INTERACTION_CLAIM seq=" + message.seq()
+                + " by " + delayMillis + "ms (" + CoopDebug.INTERACTION_DELAY_PROPERTY + ")");
+        return true;
+    }
+
+    /** Releases every parked claim whose stamp has passed. No-op (one size check) when dormant. */
+    private void drainDelayedInteractionClaims() {
+        if (delayedInteractionClaims.isEmpty()) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        while (!delayedInteractionClaims.isEmpty()
+                && delayedInteractionClaims.peekFirst().releaseAtMillis() <= now) {
+            DelayedInteractionClaim due = delayedInteractionClaims.pollFirst();
+            try {
+                arbitrateInteractionClaim(due.message());
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopNetPump.class, "Coop dropped delayed INTERACTION_CLAIM seq="
+                        + due.message().seq(), ex);
+            }
+        }
+    }
+
+    private void arbitrateInteractionClaim(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
         String entityId = CoopMessages.requiredPayloadString(message, "entityId");
         String entityName = CoopMessages.requiredPayloadString(message, "entityName");
         String playerId = CoopMessages.requiredPayloadString(message, "playerId");
@@ -1820,24 +1888,41 @@ public class CoopNetPump implements EveryFrameScript {
         interactionGate.applyAccepted(claim);
     }
 
+    /**
+     * Our optimistic local interaction lost the race (Phase 18).
+     *
+     * <p>Two things deliberately do <em>not</em> happen here. The dialog is not dismissed on this
+     * call: we are inside the inbound drain, several pump steps before the interaction gate runs,
+     * and tearing the screen down from under a half-processed frame is exactly the kind of
+     * mid-frame engine surgery that has bitten this mod before. It is deferred one frame to
+     * {@link #forceCloseRejectedDialog}, which re-issues until the dialog is really gone while
+     * {@link #applyLocalBlocking} re-asserts the block every frame in the meantime.
+     *
+     * <p>And {@code localInteractionEntityId} is not cleared. Clearing it was the reject re-claim
+     * loop: the per-frame detector then saw an untracked open dialog and claimed it again, every
+     * frame, at up to 60 msg/s plus a warn per frame. Keeping it, plus the reject tracker, means
+     * one claim and one reject per lost race.
+     */
     private void handleInteractionReject(CoopMessages.Message message) {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
         }
         String entityId = CoopMessages.requiredPayloadString(message, "entityId");
         String reason = CoopMessages.requiredPayloadString(message, "reason");
-        // Our optimistic local interaction lost the race; stop tracking it so we re-claim cleanly
-        // next time. Full forced-close of the guest's already-open dialog is deferred past v1.
-        if (entityId.equals(localInteractionEntityId)) {
-            localInteractionEntityId = null;
+        if (rejectTracker.onRejected(entityId)) {
+            CoopLog.warn(CoopNetPump.class, "Coop interaction rejected entityId=" + entityId + " "
+                    + reason + "; closing the local dialog");
         }
-        CoopLog.warn(CoopNetPump.class, "Coop interaction rejected entityId=" + entityId + " " + reason);
     }
 
     private void handleInteractionRelease(CoopMessages.Message message) {
         String entityId = CoopMessages.requiredPayloadString(message, "entityId");
         String playerId = CoopMessages.requiredPayloadString(message, "playerId");
         interactionGate.release(entityId, playerId);
+        // Deliberately does NOT cancel a pending forced close. If the winner releases the entity in
+        // the same breath as our reject, letting our dialog stay would leave the guest holding an
+        // open, unclaimed shop the host is now free to open too - the exact both-in-one-shop state
+        // this phase exists to prevent. The dialog closes; re-docking re-claims it cleanly.
     }
 
     private void syncInteractionGate() {
@@ -1847,6 +1932,7 @@ public class CoopNetPump implements EveryFrameScript {
             resetInteractionState();
             return;
         }
+        drainDelayedInteractionClaims();
         try {
             SectorAPI sector = Global.getSector();
             if (sector == null) {
@@ -1863,20 +1949,24 @@ public class CoopNetPump implements EveryFrameScript {
         String currentEntityId = null;
         String currentEntityName = null;
         CampaignUIAPI ui = sector.getCampaignUI();
-        if (ui != null) {
-            InteractionDialogAPI dialog = ui.getCurrentInteractionDialog();
-            // Every open dialog claims its target, including the fleet dialog the guest opens by
-            // engaging an NPC mirror: the mirror is a local entity with its own id, so the claim can
-            // never collide with the host's claim on the real fleet and the gate stays out of the
-            // engagement's way. (The Phase 14 spectator panel used to be excluded here; it was
-            // replaced by banners on 2026-08-19, so there is nothing left to exclude.)
-            if (dialog != null) {
-                SectorEntityToken target = dialog.getInteractionTarget();
-                if (target != null) {
-                    currentEntityId = target.getId();
-                    currentEntityName = target.getName();
-                }
+        InteractionDialogAPI dialog = ui == null ? null : ui.getCurrentInteractionDialog();
+        // Every open dialog claims its target, including the fleet dialog the guest opens by
+        // engaging an NPC mirror: the mirror is a local entity with its own id, so the claim can
+        // never collide with the host's claim on the real fleet and the gate stays out of the
+        // engagement's way. (The Phase 14 spectator panel used to be excluded here; it was
+        // replaced by banners on 2026-08-19, so there is nothing left to exclude.)
+        if (dialog != null) {
+            SectorEntityToken target = dialog.getInteractionTarget();
+            if (target != null) {
+                currentEntityId = target.getId();
+                currentEntityName = target.getName();
             }
+        }
+
+        // Phase 18: a claim the host rejected takes the dialog away again, before any of the
+        // claim/release bookkeeping below runs for it.
+        if (forceCloseRejectedDialog(ui, dialog, currentEntityId, currentEntityName)) {
+            return;
         }
 
         if (Objects.equals(currentEntityId, localInteractionEntityId)) {
@@ -1894,9 +1984,81 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         // A new local interaction just opened: host arbitrates locally and broadcasts the accept;
-        // guest requests the claim from the host.
-        if (currentEntityId != null) {
+        // guest requests the claim from the host. A still-rejected entity is skipped so a dialog
+        // that reopens inside the forced-close window cannot restart the claim/reject ping-pong.
+        if (currentEntityId != null && !rejectTracker.isRejected(currentEntityId)) {
             beginLocalInteraction(currentEntityId, currentEntityName);
+        }
+    }
+
+    /**
+     * Phase 18 forced close: dismiss the local player's dialog for an entity whose claim the host
+     * rejected, on the frame after the reject arrived, and keep re-issuing until it is gone.
+     *
+     * <p>Narrow by construction — {@link CoopRejectTracker#onFrame} only fires while the dialog
+     * currently open is the rejected one, so a dialog on any other entity is never touched.
+     *
+     * <p>Interaction with the rest of the guest machinery is passive: the input blocker is
+     * suspended/unsuspended by {@code syncGuestInputBlocker} from whether a blocking screen is
+     * open, so it releases by itself on the frame after the dialog goes; and nothing here touches
+     * {@code setPaused} — the guest's screen-pause intent simply stops being sent once the dialog
+     * closes, and the host's snapshot resumes driving the guest clock.
+     *
+     * @return true when a dismissal was issued this frame (the caller skips its claim/release
+     *         bookkeeping while the close is in flight).
+     */
+    private boolean forceCloseRejectedDialog(CampaignUIAPI ui, InteractionDialogAPI dialog,
+                                             String openEntityId, String openEntityName) {
+        CoopRejectTracker.Action action = rejectTracker.onFrame(openEntityId);
+        if (action == CoopRejectTracker.Action.NONE) {
+            return false;
+        }
+        try {
+            if (action == CoopRejectTracker.Action.DISMISS_AND_NOTIFY) {
+                String name = openEntityName == null || openEntityName.isEmpty()
+                        ? "this location" : openEntityName;
+                // ASCII only: the campaign font is not guaranteed to carry an em dash (see the
+                // Phase 17 respawn banner).
+                String banner = remoteDisplayName() + " is using " + name + " - try again shortly";
+                if (ui != null) {
+                    ui.addMessage(banner);
+                }
+                CoopLog.info(CoopNetPump.class, "Coop force-closing rejected interaction dialog"
+                        + " entityId=" + openEntityId);
+                if (ui != null && ui.getCurrentCoreTab() != null) {
+                    // Only reachable if the reject landed after the player already opened a core
+                    // tab (trade/refit) from the dialog, which the ~100 ms race window makes very
+                    // unlikely. Dismiss anyway: an open shop on the losing client is the defect
+                    // this phase exists to close. Logged so a live occurrence is not a mystery.
+                    CoopLog.warn(CoopNetPump.class, "Coop force-closing a rejected dialog while core"
+                            + " tab " + ui.getCurrentCoreTab() + " is open entityId=" + openEntityId);
+                }
+            }
+            if (dialog != null) {
+                dialog.dismiss();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to force-close rejected interaction dialog"
+                    + " entityId=" + openEntityId, ex);
+        }
+        return true;
+    }
+
+    /** Display name for the player holding the claim we lost; falls back to a neutral label. */
+    private String remoteDisplayName() {
+        String name = sessionState.remoteName();
+        return name == null || name.isEmpty() ? "The other player" : name;
+    }
+
+    /**
+     * Phase 18: {@code reportPlayerClosedMarket} routed through the campaign replicator. Only a
+     * confirmation signal for the reject bookkeeping — see {@link CoopRejectTracker} for why the
+     * per-frame observation stays authoritative — and the hook Phase 24's diff-on-close will use.
+     */
+    private void onLocalMarketClosed(String entityId, String marketId) {
+        if (rejectTracker.onDialogClosed(entityId) || rejectTracker.onDialogClosed(marketId)) {
+            CoopLog.info(CoopNetPump.class, "Coop rejected interaction cleared by market close"
+                    + " marketId=" + marketId);
         }
     }
 
@@ -1958,7 +2120,13 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void resetInteractionState() {
-        if (localInteractionEntityId == null && lastBlockedEntityName == null) {
+        // Session end / disconnect also ends any pending forced close and drops parked claims: the
+        // dialog the rejection referred to belongs to a session that no longer exists.
+        boolean hadRejection = rejectTracker.clear();
+        boolean hadDelayedClaims = !delayedInteractionClaims.isEmpty();
+        delayedInteractionClaims.clear();
+        if (localInteractionEntityId == null && lastBlockedEntityName == null
+                && !hadRejection && !hadDelayedClaims) {
             return;
         }
         localInteractionEntityId = null;
@@ -2287,6 +2455,10 @@ public class CoopNetPump implements EveryFrameScript {
         } else {
             CoopLog.info(CoopNetPump.class, line);
         }
+    }
+
+    /** An inbound claim parked by the Phase 18 latency lever, with the frame stamp it is due at. */
+    private record DelayedInteractionClaim(CoopMessages.Message message, long releaseAtMillis) {
     }
 
     private static boolean isHighFrequency(CoopMessages.Type type) {

@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -17,24 +18,34 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CoopDebugTest {
 
     private String savedProperty;
+    private String savedDelayProperty;
 
     @BeforeEach
     void setUp() {
         savedProperty = System.getProperty(CoopDebug.PROPERTY);
+        savedDelayProperty = System.getProperty(CoopDebug.INTERACTION_DELAY_PROPERTY);
         System.clearProperty(CoopDebug.PROPERTY);
+        System.clearProperty(CoopDebug.INTERACTION_DELAY_PROPERTY);
         CoopDebug.setEnabledForTesting(false);
+        CoopDebug.setInteractionClaimDelayMillisForTesting(0);
         CoopDebug.resetPollCounterForTesting();
     }
 
     @AfterEach
     void tearDown() {
-        if (savedProperty == null) {
-            System.clearProperty(CoopDebug.PROPERTY);
-        } else {
-            System.setProperty(CoopDebug.PROPERTY, savedProperty);
-        }
+        restore(CoopDebug.PROPERTY, savedProperty);
+        restore(CoopDebug.INTERACTION_DELAY_PROPERTY, savedDelayProperty);
         CoopDebug.setEnabledForTesting(false);
+        CoopDebug.setInteractionClaimDelayMillisForTesting(0);
         CoopDebug.resetPollCounterForTesting();
+    }
+
+    private static void restore(String key, String saved) {
+        if (saved == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, saved);
+        }
     }
 
     @Test
@@ -71,6 +82,45 @@ class CoopDebugTest {
         }
 
         assertFalse(CoopDebug.diagnosticsEnabled(), "toggle must disengage once the flag is gone");
+    }
+
+    // ---- Phase 18 latency lever -----------------------------------------------------------------
+
+    @Test
+    void interactionDelayIsDormantWithoutTheProperty() {
+        CoopDebug.refresh();
+
+        assertEquals(0, CoopDebug.interactionClaimDelayMillis());
+    }
+
+    @Test
+    void interactionDelayReadsTheProperty() {
+        System.setProperty(CoopDebug.INTERACTION_DELAY_PROPERTY, "250");
+
+        CoopDebug.refresh();
+
+        assertEquals(250, CoopDebug.interactionClaimDelayMillis());
+    }
+
+    @Test
+    void aBadOrNegativeInteractionDelayIsDormantRatherThanFatal() {
+        System.setProperty(CoopDebug.INTERACTION_DELAY_PROPERTY, "soon");
+        CoopDebug.refresh();
+        assertEquals(0, CoopDebug.interactionClaimDelayMillis());
+
+        System.setProperty(CoopDebug.INTERACTION_DELAY_PROPERTY, "-40");
+        CoopDebug.refresh();
+        assertEquals(0, CoopDebug.interactionClaimDelayMillis());
+    }
+
+    @Test
+    void anAbsurdInteractionDelayIsClamped() {
+        System.setProperty(CoopDebug.INTERACTION_DELAY_PROPERTY,
+                String.valueOf(CoopDebug.MAX_INTERACTION_DELAY_MILLIS * 10L));
+
+        CoopDebug.refresh();
+
+        assertEquals(CoopDebug.MAX_INTERACTION_DELAY_MILLIS, CoopDebug.interactionClaimDelayMillis());
     }
 
     @Test

@@ -43,6 +43,13 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener
 
         void onPlayerOpenedMarket(MarketAPI market);
 
+        /**
+         * The local player closed a market screen. Phase 18 uses it to confirm that a dialog whose
+         * interaction claim was rejected is really gone; Phase 24's diff-on-close colony model is
+         * the reason the signature carries the whole {@link MarketAPI} rather than an id.
+         */
+        void onPlayerClosedMarket(MarketAPI market);
+
         void onPlayerMarketTransaction(PlayerMarketTransaction transaction);
 
         void onPlayerActivatedAbility(AbilityPlugin ability, Object param);
@@ -87,6 +94,11 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener
     @Override
     public void reportPlayerOpenedMarketAndCargoUpdated(MarketAPI market) {
         sink.onPlayerOpenedMarket(market);
+    }
+
+    @Override
+    public void reportPlayerClosedMarket(MarketAPI market) {
+        sink.onPlayerClosedMarket(market);
     }
 
     @Override

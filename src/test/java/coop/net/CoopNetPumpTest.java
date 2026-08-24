@@ -610,6 +610,169 @@ class CoopNetPumpTest {
                 timeLock.interactionBlocks.get(timeLock.interactionBlocks.size() - 1));
     }
 
+    // ---- Phase 18: interaction-gate WAN race ---------------------------------------------------
+
+    @Test
+    void guestDialogIsForceClosedWhenTheHostRejectsTheClaim() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        // The guest opens optimistically and claims; the host says no.
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_CLAIM));
+        service.inbound.add(CoopMessages.interactionReject(
+                "session-a", 9L, 1100L, "market-1", "already_claimed_by:host-player"));
+
+        pump.advance(0f);
+
+        assertEquals(1, ui.dismissCount, "the losing dialog must be dismissed");
+        assertTrue(ui.messages.stream().anyMatch(m -> m.contains("Host is using Jangala")),
+                "the guest must be told why its dialog vanished: " + ui.messages);
+    }
+
+    @Test
+    void aRejectedClaimIsNeverReclaimedWhileItsDialogIsStillOpen() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        // The dialog outlives the first dismiss, which is the state that used to produce a
+        // claim/reject ping-pong at up to 60 msg/s plus one warn per frame.
+        ui.dismissClosesDialog = false;
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.interactionReject(
+                "session-a", 9L, 1100L, "market-1", "already_claimed_by:host-player"));
+        pump.advance(0f);
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_CLAIM),
+                "exactly one claim per lost race");
+        assertEquals(3, ui.dismissCount, "the dismissal is re-asserted until the dialog is gone");
+        assertEquals(1, ui.messages.stream().filter(m -> m.contains("Host is using")).count(),
+                "the in-use message is shown once, not once per frame: " + ui.messages);
+    }
+
+    @Test
+    void theEntityBecomesClaimableAgainOnceTheDialogIsActuallyClosed() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.interactionReject(
+                "session-a", 9L, 1100L, "market-1", "already_claimed_by:host-player"));
+        pump.advance(0f);
+        // The dismissal took: the next frame sees no dialog, releases and stops tracking.
+        pump.advance(0f);
+
+        // The player re-docks after the host let go.
+        ui.target = entity;
+        pump.advance(0f);
+
+        assertEquals(2, countOfType(service, CoopMessages.Type.INTERACTION_CLAIM),
+                "a closed rejection must not lock the entity out for the rest of the session");
+    }
+
+    @Test
+    void aRejectForAnotherEntityNeverTouchesTheOpenDialog() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.interactionReject(
+                "session-a", 9L, 1100L, "derelict-7", "already_claimed_by:host-player"));
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(0, ui.dismissCount, "a rejection for another entity must not close this dialog");
+        assertTrue(ui.messages.isEmpty(), "no message for an unrelated rejection: " + ui.messages);
+    }
+
+    @Test
+    void hostHoldsInboundClaimsForTheDebugLatencyLever() {
+        String saved = System.getProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
+        System.setProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY, "500");
+        try {
+            forceDebugToggleRefresh();
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            CoopSessionState session = activeHostSession();
+            RecordingCampaignUi ui = new RecordingCampaignUi(null);
+            Global.setSector(new RecordingSector(false, ui).proxy());
+            AtomicLong now = new AtomicLong(1000L);
+            CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+            service.inbound.add(CoopMessages.interactionClaim(
+                    "session-a", 7L, 1000L, "market-1", "Jangala", "guest-player"));
+            pump.advance(0f);
+            assertEquals(0, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT),
+                    "the claim must be held, not arbitrated on arrival");
+
+            now.set(1499L);
+            pump.advance(0f);
+            assertEquals(0, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT),
+                    "still inside the induced delay");
+
+            now.set(1500L);
+            pump.advance(0f);
+            assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT),
+                    "the claim must be arbitrated once the delay elapses");
+        } finally {
+            if (saved == null) {
+                System.clearProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
+            } else {
+                System.setProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY, saved);
+            }
+            forceDebugToggleRefresh();
+        }
+    }
+
+    @Test
+    void hostArbitratesImmediatelyWhenTheLeverIsDormant() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+        service.inbound.add(CoopMessages.interactionClaim(
+                "session-a", 7L, 1000L, "market-1", "Jangala", "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT));
+    }
+
+    /** Drives {@link coop.util.CoopDebug}'s frame poll far enough to re-read the JVM properties. */
+    private static void forceDebugToggleRefresh() {
+        for (int i = 0; i <= 300; i++) {
+            coop.util.CoopDebug.pollFrame();
+        }
+    }
+
+    private static long countOfType(RecordingNetService service, CoopMessages.Type type) {
+        return service.sent.stream().filter(m -> m.type() == type).count();
+    }
+
     // ---- Phase 12b: inbound dispatch guard ---------------------------------------------------
 
     @Test
@@ -1098,6 +1261,13 @@ class CoopNetPumpTest {
         private RecordingEntity target;
         private boolean showingMenu;
         private int disallowInteractionCount;
+        private int dismissCount;
+        /**
+         * Phase 18: whether a {@code dismiss()} takes the dialog off screen. True models the engine
+         * closing it; false models the frame(s) where the dialog is still up, which is what the
+         * forced close has to keep re-asserting against.
+         */
+        private boolean dismissClosesDialog = true;
         private final List<String> messages = new ArrayList<>();
 
         private RecordingCampaignUi(RecordingEntity target) {
@@ -1150,6 +1320,13 @@ class CoopNetPumpTest {
                         }
                         if ("getInteractionTarget".equals(method.getName())) {
                             return entity.proxy();
+                        }
+                        if ("dismiss".equals(method.getName())) {
+                            dismissCount++;
+                            if (dismissClosesDialog) {
+                                target = null;
+                            }
+                            return null;
                         }
                         // Phase 14: the interaction gate asks the dialog for its plugin so it can skip
                         // the coop battle status panel. A vanilla dialog's plugin is not a coop one.
