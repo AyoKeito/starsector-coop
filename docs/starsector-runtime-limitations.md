@@ -233,9 +233,9 @@ Accepted: a storm strike only hits the fleet inside its cell. Own fleets are own
 
 `FlareManager`, `new Random()` at line ~307. Same ownership argument as storm cells — a flare only affects the fleet it hits, no shared state involved. Accepted.
 
-### Officer pools at markets
+### Officer pools at markets — RESOLVED by Phase 12c gap 2d
 
-`OfficerManagerEvent`, `Math.random()`. Each player hires from their own pool, so there is nothing to desync. Accepted for v1; a shared pool would need a market-officer sync layered on top of the existing Phase 12 snapshot-on-open.
+Was accepted here as "each player hires from their own pool". Now replicated: the host's pool rides the `MARKET_SNAPSHOT` as one stock line per person and the guest strips its own pool and rebuilds the host's through `OfficerManagerEvent.addAvailable`/`addAvailableAdmin`. One roll still diverges before the snapshot lands; see "Mercenary level rolled off `Misc.random`" below.
 
 ### Bar events, smuggling scans, patrol hassles of the local player
 
@@ -277,3 +277,25 @@ Second-order consequence, also accepted: because `spawnFleet` positions the resp
 `InterdictionPulseAbility.getRange` and `getInterdictSeconds` both read `fleet.getSensorRangeMod().computeEffective(fleet.getSensorStrength())` (`InterdictionPulseAbility.java:123,309`). Phase 14b's `CoopSensorSync` pins the mirror's *sensor strength* and its `detectedRangeMod` totals, but not `sensorRangeMod`, so a guest whose skills or hullmods modify sensor range gets a pulse on the host that is slightly the wrong size and slightly the wrong strength against each victim. Accepted for v1: the error is a percentage on a 500+ su radius, and the pulse is not a state the two clients have to agree on — the host's result is the only one that exists.
 
 The standing hit the pulse costs is also applied at **activation** time rather than at pulse time (`CoopAbilityEffectApplier.applyInterdictionRepHit`). Vanilla charges it from inside `applyEffect`, after the charge-up, against whoever is in range then; hooking that moment would mean forking the ability. A fleet that leaves or enters the radius during the charge-up therefore counts differently for reputation than it does for the interdict itself.
+
+## Phase 12c — Market Capture Fidelity: Accepted Gaps
+
+Gaps 2a through 2e closed most of what the market snapshot used to drop. Three things it still does not carry.
+
+### Multi-module ships arrive with pristine modules
+
+`CoopShipDetail` captures one variant: the parent's hull spec, perma mods, s-mods, refit, suppressed mods, weapons, wings, vents/caps and the member's base CR. A station or multi-module hull keeps its modules as separate variants referenced from the parent's module slots, and the codec does not recurse into them. A damaged Prometheus MkII listing therefore reconstructs with a battered parent and clean modules.
+
+Not attempted because the recursion is unbounded in the wrong direction: module variants can themselves reference modules, the slot-to-variant mapping is not exposed as a settable pair on `ShipVariantAPI`, and the market listings that carry modules at all are rare (station hulls are almost never open-market stock). The parent's D-mods and CR are what price the listing, and those do survive.
+
+### Mercenary level rolled off `Misc.random` before the snapshot
+
+`OfficerManagerEvent.createOfficer` draws a mercenary's level with `Misc.random.nextInt(maxLevel + 1 - minLevel)` and its officer-vs-merc level bump with `(float) Math.random() > 0.75f` (`impl/campaign/events/OfficerManagerEvent.java:378,388`). Both clients roll independently, so before a `MARKET_SNAPSHOT` reaches the guest its bar holds different captains at different levels than the host's.
+
+The snapshot overwrites that, so the divergence is only visible in the window between the guest's market screen opening and the host's reply arriving, and only if the guest is looking at the comm directory rather than the trade screen. Not worth a suppressor: `OfficerManagerEvent` also runs the timeout pruning that keeps stale offers from accumulating, so removing it guest-side would need that half reimplemented.
+
+### `OpenMarketPlugin.writeReplace` drops stock older than 30 days on save
+
+`OpenMarketPlugin` clears its ship and weapon stock at serialization time when `okToUpdateShipsAndWeapons()` says the last roll is over 30 days old, so a market's shop contents can change across a save/load with no player action and no event. Host and guest save at different moments and reload with different clocks, so the two copies of a market neither has docked at recently can drift apart without either client doing anything.
+
+Independent of gap 2e's restock rebroadcast, which only fires on `reportPlayerOpenedMarketAndCargoUpdated`. The converging force is the same one gap 2e relies on: any dock re-runs `updateCargoPrePlayerInteraction` and the host re-broadcasts, so the drift lasts until the next time either player opens that market.

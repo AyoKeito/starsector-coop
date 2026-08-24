@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Host-authoritative market contents and transaction effects (Phase 12).
@@ -27,18 +28,50 @@ public final class CoopMarketSync {
         SHIP,
         WEAPON,
         FIGHTER,
+        /**
+         * A {@code SpecialItemData} stack: modspecs, blueprints, AI cores, nanoforges, and every other
+         * item the engine models as {@code CargoItemType.SPECIAL}. The item id is not a plain spec id
+         * — it is {@link #specialItemId(String, String)}, because a special is identified by
+         * <em>both</em> its id and its (nullable) data payload, and {@code SpecialItemData.equals}
+         * compares both. A modspec's data is the hullmod id it teaches; an AI core's is null.
+         */
+        SPECIAL,
         OFFICER,
-        MERC
+        MERC,
+        /**
+         * A freelance administrator. Distinct from {@link #OFFICER} because the engine keeps admins in
+         * a second pool with its own accessors ({@code addAvailableAdmin} / {@code getAdmin}), so the
+         * apply side has to branch on it anyway — see {@link CoopPersonDetail}.
+         */
+        ADMIN
     }
 
-    /** A single stockable line item at a market. */
-    public record StockItem(ItemKind kind, String itemId, int quantity, float unitPrice) {
+    /**
+     * A single stockable line item at a market.
+     *
+     * <p>{@code detail} is an opaque, kind-specific blob (empty for fungible stacks). SHIP listings
+     * carry a {@link CoopShipDetail} — a hull's D-mods, s-mods, refit and CR are not recoverable from
+     * a variant id, and a listing rebuilt from the id alone arrives pristine and mispriced.
+     * OFFICER/MERC/ADMIN listings carry a {@link CoopPersonDetail}.
+     *
+     * <p>Because the detail reconstructs the real variant, {@link #unitPrice} stays 0 for ships and
+     * the guest's own engine prices the listing — by construction it now prices the same hull with
+     * the same mods and the same CR as the host's, so the two displayed prices agree without the
+     * price ever riding the wire.
+     */
+    public record StockItem(ItemKind kind, String itemId, int quantity, float unitPrice, String detail) {
         public StockItem {
             kind = Objects.requireNonNull(kind, "kind");
             itemId = requireText(itemId, "itemId");
             if (quantity < 0) {
                 throw new IllegalArgumentException("quantity must be >= 0");
             }
+            detail = CoopDelimited.normalize(detail);
+        }
+
+        /** A fungible line with no kind-specific detail. */
+        public StockItem(ItemKind kind, String itemId, int quantity, float unitPrice) {
+            this(kind, itemId, quantity, unitPrice, "");
         }
 
         public String key() {
@@ -46,17 +79,59 @@ public final class CoopMarketSync {
         }
 
         public StockItem withQuantity(int newQuantity) {
-            return new StockItem(kind, itemId, Math.max(0, newQuantity), unitPrice);
+            return new StockItem(kind, itemId, Math.max(0, newQuantity), unitPrice, detail);
         }
     }
 
-    /** Acting-client report of a buy/sell/hire against a market. */
-    public record Transaction(String marketId, ItemKind kind, String itemId, int qty, float unitPrice) {
+    /**
+     * Acting-client report of a buy/sell/hire against a market.
+     *
+     * <p>{@code detail} mirrors {@link StockItem#detail()}: a sell-back carries the full
+     * {@link CoopShipDetail} of the hull being handed over, so the ship the host puts back on the
+     * shelf is the battered one the player actually sold, not a pristine reroll of its base variant.
+     */
+    public record Transaction(String marketId, ItemKind kind, String itemId, int qty, float unitPrice,
+                              String detail) {
         public Transaction {
             marketId = requireText(marketId, "marketId");
             kind = Objects.requireNonNull(kind, "kind");
             itemId = requireText(itemId, "itemId");
+            detail = CoopDelimited.normalize(detail);
         }
+
+        public Transaction(String marketId, ItemKind kind, String itemId, int qty, float unitPrice) {
+            this(marketId, kind, itemId, qty, unitPrice, "");
+        }
+    }
+
+    // ---- SPECIAL item identity ------------------------------------------------------------------
+
+    /**
+     * Packs a {@code SpecialItemData}'s (id, data) pair into one stock item id.
+     *
+     * <p>Both halves are load-bearing: {@code SpecialItemData.equals} compares id <em>and</em> data,
+     * and {@code CargoAPI.removeItems(SPECIAL, data, n)} matches by equality, so a modspec
+     * reconstructed with a blank data instead of its hullmod id would be un-removable. {@code data} is
+     * nullable in the engine (AI cores, nanoforges) and null is normalized to the empty string on the
+     * wire; {@link #specialData(String)} maps it back to null.
+     *
+     * <p>Packed as a two-field {@link CoopDelimited} record so an id or data containing {@code |}
+     * still round-trips (one nesting level inside the stock line's own field).
+     */
+    public static String specialItemId(String id, String data) {
+        return CoopDelimited.field(requireText(id, "specialId"))
+                + "|" + CoopDelimited.field(data == null ? "" : data);
+    }
+
+    public static String specialId(String itemId) {
+        return CoopDelimited.split(Objects.requireNonNull(itemId, "itemId")).get(0);
+    }
+
+    /** The special's data payload, or null when it carries none (AI cores, nanoforges). */
+    public static String specialData(String itemId) {
+        List<String> fields = CoopDelimited.split(Objects.requireNonNull(itemId, "itemId"));
+        String data = fields.size() < 2 ? "" : fields.get(1);
+        return data.isEmpty() ? null : data;
     }
 
     // marketId -> (item key -> stock)
@@ -87,9 +162,9 @@ public final class CoopMarketSync {
 
     /**
      * Applies a transaction to the canonical stock: a buy/hire (positive {@code qty}) decrements the
-     * shared availability; a sell (negative {@code qty}) increments it. SHIP/OFFICER/MERC lines are
-     * unique (quantity drops to 0 on purchase, removing the listing). Returns the resulting stock for
-     * the market so the host can re-broadcast it.
+     * shared availability; a sell (negative {@code qty}) increments it. SHIP/OFFICER/MERC/ADMIN lines
+     * are unique (quantity drops to 0 on purchase, removing the listing). Returns the resulting stock
+     * for the market so the host can re-broadcast it.
      */
     public synchronized List<StockItem> applyTransaction(Transaction txn) {
         Objects.requireNonNull(txn, "txn");
@@ -98,17 +173,53 @@ public final class CoopMarketSync {
         StockItem existing = stock.get(key);
         int current = existing == null ? 0 : existing.quantity();
         float price = existing == null ? txn.unitPrice() : existing.unitPrice();
+        // A sell-back of something the market never listed brings its own detail with it; an existing
+        // listing keeps the one it was snapshotted with.
+        String detail = existing == null ? txn.detail() : existing.detail();
         int updated = current - txn.qty();
         if (updated <= 0) {
             stock.remove(key);
         } else {
-            stock.put(key, new StockItem(txn.kind(), txn.itemId(), updated, price));
+            stock.put(key, new StockItem(txn.kind(), txn.itemId(), updated, price, detail));
         }
         return new ArrayList<>(stock.values());
     }
 
     public synchronized void clear() {
         stockByMarket.clear();
+    }
+
+    // ---- Hire detection (Phase 12c gap 2d) ------------------------------------------------------
+
+    /** Split of a market's previously-applied hireable pool into "was hired" and "still there". */
+    public record HireDiff(Map<String, ItemKind> hired, Map<String, ItemKind> remaining) {
+    }
+
+    /**
+     * The engine fires no event when a player hires an officer, mercenary or administrator, so the
+     * acting client detects its own hires by diffing: anyone the last snapshot put in the pool who is
+     * no longer hireable when the market screen closes was hired.
+     *
+     * <p>One-directional on purpose. A person appearing who was <em>not</em> in the applied set is not
+     * a hire and is not reported — that is the local {@code OfficerManagerEvent} rolling its own
+     * candidate, which the next host snapshot will overwrite anyway.
+     *
+     * @param applied        personId -&gt; the kind it was listed as, as of the last applied snapshot
+     * @param stillHireable  the person ids currently flagged hireable at that market
+     */
+    public static HireDiff diffHires(Map<String, ItemKind> applied, Set<String> stillHireable) {
+        Map<String, ItemKind> hired = new LinkedHashMap<>();
+        Map<String, ItemKind> remaining = new LinkedHashMap<>();
+        if (applied != null) {
+            for (Map.Entry<String, ItemKind> entry : applied.entrySet()) {
+                if (stillHireable != null && stillHireable.contains(entry.getKey())) {
+                    remaining.put(entry.getKey(), entry.getValue());
+                } else {
+                    hired.put(entry.getKey(), entry.getValue());
+                }
+            }
+        }
+        return new HireDiff(hired, remaining);
     }
 
     // ---- Snapshot encoding (single delimited string carried over TCP) -------------------------
@@ -122,7 +233,8 @@ public final class CoopMarketSync {
                         .append(item.kind().name())
                         .append('|').append(CoopDelimited.field(item.itemId()))
                         .append('|').append(item.quantity())
-                        .append('|').append(Float.toString(item.unitPrice()));
+                        .append('|').append(Float.toString(item.unitPrice()))
+                        .append('|').append(CoopDelimited.field(item.detail()));
             }
         }
         return out.toString();
@@ -139,11 +251,11 @@ public final class CoopMarketSync {
         List<StockItem> items = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             List<String> f = CoopDelimited.split(lines[i + 1]);
-            if (f.size() != 4) {
-                throw new IllegalArgumentException("Expected 4 stock fields, got " + f.size());
+            if (f.size() != 5) {
+                throw new IllegalArgumentException("Expected 5 stock fields, got " + f.size());
             }
             items.add(new StockItem(ItemKind.valueOf(f.get(0)), f.get(1),
-                    Integer.parseInt(f.get(2).trim()), Float.parseFloat(f.get(3).trim())));
+                    Integer.parseInt(f.get(2).trim()), Float.parseFloat(f.get(3).trim()), f.get(4)));
         }
         return items;
     }

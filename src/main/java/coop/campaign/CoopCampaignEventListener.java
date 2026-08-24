@@ -41,7 +41,14 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener
 
         void onPlayerReputationChange(PersonAPI person, float delta);
 
-        void onPlayerOpenedMarket(MarketAPI market);
+        /**
+         * @param cargoUpdated true when the engine reached this through
+         *                     {@code reportPlayerOpenedMarketAndCargoUpdated}, i.e. the submarket
+         *                     plugins just restocked. Phase 12c gap 2e: the host re-broadcasts its
+         *                     snapshot on that signal, because a restock silently rerolls the
+         *                     canonical stock out from under the guest's copy.
+         */
+        void onPlayerOpenedMarket(MarketAPI market, boolean cargoUpdated);
 
         /**
          * The local player closed a market screen. Phase 18 uses it to confirm that a dialog whose
@@ -88,12 +95,17 @@ public final class CoopCampaignEventListener extends BaseCampaignEventListener
 
     @Override
     public void reportPlayerOpenedMarket(MarketAPI market) {
-        sink.onPlayerOpenedMarket(market);
+        sink.onPlayerOpenedMarket(market, false);
     }
 
+    /**
+     * Distinct from {@link #reportPlayerOpenedMarket}: this is the engine saying the submarket
+     * plugins just restocked. Collapsing the two threw that signal away, which is why a market the
+     * host reopened after a restock kept serving the guest a stale snapshot (Phase 12c gap 2e).
+     */
     @Override
     public void reportPlayerOpenedMarketAndCargoUpdated(MarketAPI market) {
-        sink.onPlayerOpenedMarket(market);
+        sink.onPlayerOpenedMarket(market, true);
     }
 
     @Override

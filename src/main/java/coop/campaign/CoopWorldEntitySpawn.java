@@ -40,13 +40,26 @@ public record CoopWorldEntitySpawn(String coopEntityId, String entityType, Strin
      *
      * <p><b>SHIP fidelity limitation:</b> ships are keyed by variant id, so hull mods, D-mods, and CR
      * do not survive the handover — a battered ship arrives pristine. Same root cause as Phase 12c
-     * gap 2a (market ship listings) and it wants the same fix; do not solve it twice.
+     * gap 2a (market ship listings), which is now fixed: the codec that closes it is
+     * {@link CoopShipDetail}, and porting it here means widening this map's value from a count to a
+     * per-member record. Tracked in {@code docs/starsector-runtime-limitations.md}.
      */
     public enum ItemKind {
         COMMODITY,
         WEAPON,
         FIGHTER,
-        SHIP
+        SHIP,
+        /**
+         * A {@code SpecialItemData} stack — AI cores, nanoforges, blueprints, modspecs. Its id half of
+         * the {@code KIND:id} key is {@link CoopMarketSync#specialItemId(String, String)}, not a bare
+         * spec id, because a special is identified by id <em>and</em> its nullable data payload.
+         *
+         * <p>Before this kind existed a jettisoned AI core fell through the classifier's
+         * {@code COMMODITY} default and was silently re-materialized as a commodity of the same id —
+         * i.e. mangled into nothing. The default is gone with it: an unclassifiable stack is now
+         * skipped, not guessed at.
+         */
+        SPECIAL
     }
 
     public static String key(ItemKind kind, String id) {

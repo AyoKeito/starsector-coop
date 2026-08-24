@@ -244,6 +244,9 @@ class CoopCampaignReplicatorStorageFenceTest {
                     new Class<?>[]{CargoStackAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "isCommodityStack" -> Boolean.TRUE;
+                        // The classifier checks specials first (Phase 12c gap 2c); a null here would
+                        // NPE on unboxing rather than answering "not a special".
+                        case "isSpecialStack", "isWeaponStack", "isFighterWingStack" -> Boolean.FALSE;
                         case "getCommodityId" -> commodityId;
                         case "getSize" -> (float) size;
                         case "toString" -> "FakeStack[" + commodityId + "]";

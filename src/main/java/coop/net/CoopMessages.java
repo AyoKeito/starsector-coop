@@ -298,13 +298,27 @@ public final class CoopMessages {
     public static Message marketTxn(String sessionId, long seq, long sentAtMillis,
                                     String marketId, String kind, String itemId, int qty, float unitPrice,
                                     String actingPlayerId) {
+        return marketTxn(sessionId, seq, sentAtMillis, marketId, kind, itemId, qty, unitPrice,
+                actingPlayerId, "");
+    }
+
+    /**
+     * @param detail kind-specific blob mirroring {@code CoopMarketSync.StockItem.detail} — a
+     *               {@code CoopShipDetail} for a ship sold back to the market, empty otherwise. The
+     *               payload stays flat JSON: the blob is one opaque string value, and its own
+     *               delimited structure is the mod's business, not the envelope's.
+     */
+    public static Message marketTxn(String sessionId, long seq, long sentAtMillis,
+                                    String marketId, String kind, String itemId, int qty, float unitPrice,
+                                    String actingPlayerId, String detail) {
         return new Message(Type.MARKET_TXN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
                         + "\"kind\":\"" + escapeJson(requireText(kind, "kind")) + "\","
                         + "\"itemId\":\"" + escapeJson(requireText(itemId, "itemId")) + "\","
                         + "\"qty\":" + qty + ","
                         + "\"unitPrice\":\"" + unitPrice + "\","
-                        + "\"actingPlayerId\":\"" + escapeJson(actingPlayerId == null ? "" : actingPlayerId) + "\"}");
+                        + "\"actingPlayerId\":\"" + escapeJson(actingPlayerId == null ? "" : actingPlayerId) + "\","
+                        + "\"detail\":\"" + escapeJson(detail == null ? "" : detail) + "\"}");
     }
 
     public static Message worldDelta(String sessionId, long seq, long sentAtMillis,

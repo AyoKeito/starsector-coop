@@ -3,6 +3,8 @@ package coop.campaign;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.CargoStackAPI;
+import com.fs.starfarer.api.campaign.CommDirectoryAPI;
+import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.PlayerMarketTransaction;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
@@ -13,16 +15,21 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.campaign.SpecialItemData;
 import com.fs.starfarer.api.campaign.SubmarketPlugin;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.listeners.ColonyDecivListener;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
+import com.fs.starfarer.api.characters.FullName;
+import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
 import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
+import com.fs.starfarer.api.impl.campaign.events.OfficerManagerEvent;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
@@ -30,6 +37,9 @@ import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
+import com.fs.starfarer.api.loading.VariantSource;
+import com.fs.starfarer.api.util.Misc;
+import com.fs.starfarer.api.EveryFrameScript;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -38,6 +48,7 @@ import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -101,6 +112,13 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     private final CoopMissionBoardSync missionBoard = new CoopMissionBoardSync();
     private final CoopMarketSync marketSync = new CoopMarketSync();
     private final CoopWorldDelta.Ledger worldLedger = new CoopWorldDelta.Ledger();
+
+    /**
+     * Guest-side hire detection baseline: marketId -> (personId -> the kind it was listed as) as of
+     * the last applied MARKET_SNAPSHOT. There is no vanilla hire event, so a person present here and
+     * absent from the market's live hireable set at close was hired by the local player.
+     */
+    private final Map<String, Map<String, CoopMarketSync.ItemKind>> appliedHireables = new HashMap<>();
 
     // Salvage watcher: salvageable entity ids present at the local player's location last pass. A
     // tracked id that vanishes means the local player salvaged/disassembled it -> WORLD_DELTA(CONSUME).
@@ -217,6 +235,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         factionRelations.clear();
         missionBoard.clear();
         marketSync.clear();
+        appliedHireables.clear();
         worldLedger.clear();
         // Salvage-watcher baseline too: leaving it populated meant that on reconnect in the same
         // system, every entity consumed last session looked "newly missing" and was re-reported as a
@@ -597,9 +616,20 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     // ---- Mission/bar pool + claims ------------------------------------------------------------
 
     @Override
-    public void onPlayerOpenedMarket(MarketAPI market) {
+    public void onPlayerOpenedMarket(MarketAPI market, boolean cargoUpdated) {
         if (!isActive() || replayGuard.isReplaying() || market == null) {
             return;
+        }
+        // Phase 12c gap 2e: the host re-snapshots when the engine says the submarket plugins just
+        // restocked. Without it a market the host reopened after a 30-day ship/weapon reroll kept
+        // serving the guest the stock it had captured before the reroll.
+        //
+        // Safe against accelerated restock: broadcastMarketSnapshot re-enters
+        // updateCargoPrePlayerInteraction with a zero-day sinceLastCargoUpdate, and vanilla's own
+        // sub-unit guard refuses the fractional add, so the second call adds nothing. Gated on a live
+        // connection so a host docking with nobody attached emits nothing.
+        if (isHost() && cargoUpdated && service.isConnected()) {
+            broadcastMarketSnapshot(market);
         }
         // Host-authoritative market contents are synced once, at open (never per-frame, so the trade
         // UI is never fought mid-transaction). The host's engine market IS the canonical source: the
@@ -623,7 +653,19 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      */
     @Override
     public void onPlayerClosedMarket(MarketAPI market) {
-        if (marketCloseObserver == null || market == null) {
+        if (market == null) {
+            return;
+        }
+        // Phase 12c gap 2d: there is no vanilla hire event, so the guest claims its hires here by
+        // diffing the market's hireable set against the set the last snapshot applied.
+        if (isGuest() && isActive() && !replayGuard.isReplaying()) {
+            try {
+                reportHiresOnClose(market);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to diff hireable pool on market close", ex);
+            }
+        }
+        if (marketCloseObserver == null) {
             return;
         }
         String entityId = null;
@@ -680,6 +722,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         // an empty shop. See ensureOpenMarketStocked.
         ensureOpenMarketStocked(market);
         List<CoopMarketSync.StockItem> items = captureOpenMarketStock(market);
+        items.addAll(captureHireablePool(market));
         marketSync.applySnapshot(market.getId(), items);
         send(CoopMessages.marketSnapshot(session.sessionId(), service.nextSeq(), now(),
                 market.getId(), CoopMarketSync.encodeStock(items)));
@@ -823,28 +866,37 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
     }
 
-    /** Report ship deltas (each sale is one hull, keyed by variant id). */
+    /**
+     * Report ship deltas, one line per hull, keyed by the fleet member's id.
+     *
+     * <p>Member id, not variant id: a listing is a specific hull with its own D-mods and CR (see
+     * {@link CoopShipDetail}), and the ids match across clients because the guest reconstructs each
+     * listing with {@code setId} from the host's snapshot. So a <b>bought</b> ship is stripped from
+     * the host's shelf by id, and a ship <b>sold back</b> carries its full detail blob so the host
+     * shelves the battered hull the player actually handed over rather than a pristine reroll.
+     */
     private void reportShipDeltas(String marketId, List<PlayerMarketTransaction.ShipSaleInfo> ships, int sign) {
         if (ships == null) {
             return;
         }
-        Map<String, Integer> byVariant = new LinkedHashMap<>();
         for (PlayerMarketTransaction.ShipSaleInfo info : ships) {
-            String variantId = shipVariantId(info == null ? null : info.getMember());
-            if (variantId != null) {
-                byVariant.merge(variantId, sign, Integer::sum);
+            CoopShipDetail detail = captureShipDetail(info == null ? null : info.getMember());
+            if (detail == null) {
+                continue;
             }
-        }
-        for (Map.Entry<String, Integer> e : byVariant.entrySet()) {
-            if (e.getValue() != 0) {
-                sendMarketTxn(marketId, CoopMarketSync.ItemKind.SHIP, e.getKey(), e.getValue());
-            }
+            sendMarketTxn(marketId, CoopMarketSync.ItemKind.SHIP, detail.memberId(), sign,
+                    sign < 0 ? detail.encode() : "");
         }
     }
 
     private void sendMarketTxn(String marketId, CoopMarketSync.ItemKind kind, String itemId, int qty) {
+        sendMarketTxn(marketId, kind, itemId, qty, "");
+    }
+
+    private void sendMarketTxn(String marketId, CoopMarketSync.ItemKind kind, String itemId, int qty,
+                               String detail) {
         send(CoopMessages.marketTxn(session.sessionId(), service.nextSeq(), now(),
-                marketId, kind.name(), itemId, qty, 0f, session.localPlayerId()));
+                marketId, kind.name(), itemId, qty, 0f, session.localPlayerId(), detail));
         CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_TXN sent market=" + marketId
                 + " " + kind + ":" + itemId + " qty=" + qty);
     }
@@ -858,13 +910,19 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 CoopMessages.requiredPayloadString(message, "kind"));
         String itemId = CoopMessages.requiredPayloadString(message, "itemId");
         int qty = (int) CoopMessages.requiredPayloadLong(message, "qty");
+        String detail = CoopMessages.requiredPayloadString(message, "detail");
         // Keep the in-memory model in step (used by tests / future assertions).
         marketSync.applyTransaction(new CoopMarketSync.Transaction(marketId, kind, itemId, qty,
-                CoopMessages.requiredPayloadFloat(message, "unitPrice")));
-        // Apply the delta to the host's canonical engine market so its stock actually changes.
+                CoopMessages.requiredPayloadFloat(message, "unitPrice"), detail));
+        // A hire is an availability removal on a second engine structure (the officer manager's pools),
+        // not a cargo delta, so it routes past applyItemDeltaToEngine entirely. No credit deduction:
+        // credits are per-player and the guest's own engine already charged the hiring bonus.
+        boolean applied = CoopPersonDetail.roleOf(kind) != null
+                ? applyHireToEngine(marketId, itemId)
+                : applyItemDeltaToEngine(marketId, kind, itemId, qty, detail);
         // Only claim "applied" when the engine mutation ran; the previous unconditional log asserted
         // success over a silent no-op, which is how the propagation bug stayed invisible.
-        if (applyItemDeltaToEngine(marketId, kind, itemId, qty)) {
+        if (applied) {
             CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_TXN market=" + marketId
                     + " " + kind + ":" + itemId + " qty=" + qty);
         }
@@ -880,6 +938,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         marketSync.applySnapshot(marketId, items);
         // One-shot apply to the guest's engine open-market so it shows the host's canonical stock.
         applySnapshotToEngine(marketId, items);
+        // The hireable pool lives on the market, not in the submarket cargo, so it applies even when
+        // the guest has no materialized open-market cargo to replace.
+        applyHireablePool(findMarket(marketId), items);
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_SNAPSHOT market=" + marketId
                 + " items=" + items.size());
     }
@@ -912,6 +973,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 switch (ref.kind()) {
                     case WEAPON -> cargo.removeWeapons(ref.id(), size);
                     case FIGHTER -> cargo.removeFighters(ref.id(), size);
+                    // Specials are rolled per instance like weapons (which nanoforge, which core,
+                    // which blueprint), so they are stripped wholesale and re-added from the host set.
+                    case SPECIAL -> removeSpecial(cargo, ref.id(), size);
                     case COMMODITY -> {
                         if (!snapshotCommodities.contains(ref.id())) {
                             cargo.removeCommodity(ref.id(), size);
@@ -926,11 +990,13 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                     switch (item.kind()) {
                         // Commodities survive the strip (shared list), so set them to the target.
                         case COMMODITY -> setCommodityQuantity(cargo, item.itemId(), item.quantity());
-                        // Weapons/fighters/ships were stripped to zero, so just add the host's count.
+                        // Weapons/fighters/specials/ships were stripped to zero, so just add the host's.
                         case WEAPON -> cargo.addWeapons(item.itemId(), item.quantity());
                         case FIGHTER -> cargo.addFighters(item.itemId(), item.quantity());
-                        case SHIP -> addMothballedShips(cargo, item.itemId(), item.quantity());
-                        default -> { /* officers/mercs/special not synced yet */ }
+                        case SPECIAL -> addSpecial(cargo, item.itemId(), item.quantity());
+                        case SHIP -> addMothballedShipFromDetail(cargo, item.detail());
+                        // Hireable people are not cargo; applyHireablePool handles them.
+                        default -> { /* officers/mercs/admins */ }
                     }
                 } catch (RuntimeException | LinkageError ex) {
                     CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply snapshot item "
@@ -968,7 +1034,8 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
      * engine refills toward {@code getStockpileLimit} on every interaction, so deltas do not survive.
      * Tracked as Phase 12c gap 2e.
      */
-    private boolean applyItemDeltaToEngine(String marketId, CoopMarketSync.ItemKind kind, String itemId, int qty) {
+    private boolean applyItemDeltaToEngine(String marketId, CoopMarketSync.ItemKind kind, String itemId,
+                                           int qty, String detail) {
         CargoAPI cargo = openMarketCargo(marketId);
         if (cargo == null) {
             CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_TXN not applied to engine: no"
@@ -978,7 +1045,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
         replayGuard.begin();
         try {
-            addItemToEngine(cargo, kind, itemId, qty);
+            addItemToEngine(cargo, kind, itemId, qty, detail);
             return true;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply market delta to engine "
@@ -990,7 +1057,8 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     // qty>0 means the buyer removed it from the market (stock decreases); qty<0 means it was sold back.
-    private void addItemToEngine(CargoAPI cargo, CoopMarketSync.ItemKind kind, String itemId, int qty) {
+    private void addItemToEngine(CargoAPI cargo, CoopMarketSync.ItemKind kind, String itemId, int qty,
+                                 String detail) {
         switch (kind) {
             case COMMODITY -> {
                 if (qty > 0) {
@@ -1013,19 +1081,147 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                     cargo.addFighters(itemId, -qty);
                 }
             }
-            case SHIP -> {
+            case SPECIAL -> {
                 if (qty > 0) {
-                    removeMothballedShips(cargo, itemId, qty);
+                    removeSpecial(cargo, itemId, qty);
                 } else {
-                    addMothballedShips(cargo, itemId, -qty);
+                    addSpecial(cargo, itemId, -qty);
                 }
             }
-            default -> { /* officers/mercs/special not synced yet */ }
+            case SHIP -> {
+                if (qty > 0) {
+                    removeMothballedShipById(cargo, itemId);
+                } else {
+                    addMothballedShipFromDetail(cargo, detail);
+                }
+            }
+            // Hires are an availability removal on the officer manager, not a cargo delta; they route
+            // through applyHireToEngine before reaching here.
+            default -> { /* officers/mercs/admins */ }
         }
     }
 
-    private void addMothballedShips(CargoAPI cargo, String variantId, int count) {
-        FleetDataAPI ships = cargo.getMothballedShips();
+    // ---- SPECIAL stacks (Phase 12c gap 2c) ------------------------------------------------------
+    //
+    // A special is identified by SpecialItemData's (id, data) pair, which its equals() compares in
+    // full, and removeItems matches by equality. Reconstructing an AI core's null data as "" -- or a
+    // modspec's hullmod id as null -- yields an item that looks right and cannot be removed.
+
+    private void addSpecial(CargoAPI cargo, String itemId, int quantity) {
+        if (quantity <= 0) {
+            return;
+        }
+        cargo.addSpecial(specialData(itemId), quantity);
+    }
+
+    private void removeSpecial(CargoAPI cargo, String itemId, int quantity) {
+        if (quantity <= 0) {
+            return;
+        }
+        cargo.removeItems(CargoAPI.CargoItemType.SPECIAL, specialData(itemId), quantity);
+    }
+
+    private static SpecialItemData specialData(String itemId) {
+        return new SpecialItemData(CoopMarketSync.specialId(itemId), CoopMarketSync.specialData(itemId));
+    }
+
+    // ---- Mothballed ship listings ---------------------------------------------------------------
+
+    /**
+     * Rebuilds one listed hull from its {@link CoopShipDetail}, D-mods, refit, CR and all.
+     *
+     * <p>The variant is always {@code clone()}d before it is touched: {@code createFleetMember} can
+     * hand back a shared stock variant, and mutating that would rewrite the hull for every ship in the
+     * sector using it (vanilla does the same dance in {@code ShipRecoverySpecial}). Setting the source
+     * to REFIT and clearing the original-variant link is what makes the copy a standalone,
+     * independently-modifiable variant rather than a view onto the stock one — and it is also what
+     * D-modding does, so a captured D-hull round-trips into the same shape it came from.
+     */
+    private void addMothballedShipFromDetail(CargoAPI cargo, String encodedDetail) {
+        if (encodedDetail == null || encodedDetail.isEmpty()) {
+            return;
+        }
+        CoopShipDetail detail;
+        try {
+            detail = CoopShipDetail.decode(encodedDetail);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Malformed ship detail blob; listing skipped", ex);
+            return;
+        }
+        FleetDataAPI ships = mothballedShips(cargo);
+        if (ships == null) {
+            return;
+        }
+        try {
+            FleetMemberAPI member = Global.getFactory()
+                    .createFleetMember(FleetMemberType.SHIP, detail.baseVariantId());
+            ShipVariantAPI variant = member.getVariant().clone();
+            variant.setSource(VariantSource.REFIT);
+            variant.setOriginalVariant(null);
+            if (!detail.hullSpecId().isEmpty() && variant.getHullSpec() != null
+                    && !detail.hullSpecId().equals(variant.getHullSpec().getHullId())) {
+                // The D-hull swap: DModManager.setDHull replaces the hull spec outright, so a listing
+                // whose id says "hound" but whose spec says "hound_dhull" only survives if we do too.
+                variant.setHullSpecAPI(Global.getSettings().getHullSpec(detail.hullSpecId()));
+            }
+            for (String modId : detail.suppressedMods()) {
+                variant.addSuppressedMod(modId);
+            }
+            for (String modId : detail.permaMods()) {
+                // Vanilla's DModManager order: a perma-mod is un-suppressed first, or the hull mod is
+                // installed and inert.
+                variant.removeSuppressedMod(modId);
+                variant.addPermaMod(modId, detail.sMods().contains(modId));
+            }
+            for (String modId : detail.refitMods()) {
+                variant.addMod(modId);
+            }
+            for (String modId : detail.sModdedBuiltIns()) {
+                // Built-ins are already installed; s-modding one is an addPermaMod with the s-mod flag
+                // (there is no dedicated setter, and the returned set is not documented as live). Best
+                // effort: a built-in that fails to read back as s-modded is a small stat difference on
+                // a shop hull, not a broken listing.
+                try {
+                    variant.addPermaMod(modId, true);
+                } catch (RuntimeException | LinkageError ex) {
+                    CoopLog.debug(CoopCampaignReplicator.class,
+                            "Could not mark built-in hull mod as s-modded: " + modId);
+                }
+            }
+            for (String slotId : new ArrayList<>(orEmptyList(variant.getNonBuiltInWeaponSlots()))) {
+                variant.clearSlot(slotId);
+            }
+            for (Map.Entry<String, String> weapon : detail.weapons().entrySet()) {
+                variant.addWeapon(weapon.getKey(), weapon.getValue());
+            }
+            for (Map.Entry<String, String> wing : detail.wings().entrySet()) {
+                variant.setWingId(Integer.parseInt(wing.getKey()), wing.getValue());
+            }
+            variant.setNumFluxVents(detail.vents());
+            variant.setNumFluxCapacitors(detail.caps());
+            variant.autoGenerateWeaponGroups();
+
+            member.setVariant(variant, false, true);
+            member.setId(detail.memberId());
+            if (!detail.shipName().isEmpty()) {
+                member.setShipName(detail.shipName());
+            }
+            if (member.getRepairTracker() != null) {
+                member.getRepairTracker().setMothballed(true);
+                member.getRepairTracker().setCR(detail.baseCR());
+            }
+            ships.addFleetMember(member);
+        } catch (RuntimeException | LinkageError ex) {
+            // A variant, hull spec or hull mod this client cannot resolve (a mod mismatch): skip the
+            // listing rather than crash the whole snapshot apply.
+            CoopLog.warn(CoopCampaignReplicator.class, "Could not rebuild mothballed ship member="
+                    + detail.memberId() + " variant=" + detail.baseVariantId(), ex);
+        }
+    }
+
+    /** Legacy variant-id path, still used by cargo pods (which key contents by variant id). */
+    private void addMothballedShipsByVariant(CargoAPI cargo, String variantId, int count) {
+        FleetDataAPI ships = mothballedShips(cargo);
         if (ships == null || variantId == null) {
             return;
         }
@@ -1042,20 +1238,42 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
     }
 
-    private void removeMothballedShips(CargoAPI cargo, String variantId, int count) {
+    /**
+     * Removes the listing with this fleet-member id. There is no {@code getMemberWithId}, so the
+     * members list is scanned; ids match across clients because the guest rebuilds each listing with
+     * {@code setId} from the host's snapshot.
+     */
+    private void removeMothballedShipById(CargoAPI cargo, String memberId) {
         FleetDataAPI ships = cargo.getMothballedShips();
-        if (ships == null || variantId == null) {
+        if (ships == null || memberId == null) {
             return;
         }
-        int removed = 0;
         for (FleetMemberAPI member : ships.getMembersListCopy()) {
-            if (removed >= count) {
-                break;
-            }
-            if (variantId.equals(shipVariantId(member))) {
+            if (memberId.equals(member.getId())) {
                 ships.removeFleetMember(member);
-                removed++;
+                return;
             }
+        }
+        CoopLog.warn(CoopCampaignReplicator.class,
+                "Coop ship delta: no mothballed listing with member id=" + memberId);
+    }
+
+    /**
+     * The mothballed-ship roster, materializing it if the cargo has never held one.
+     * {@code getMothballedShips()} returns null until {@code initMothballedShips} has run, and a
+     * snapshot that lands on a fresh cargo would otherwise silently drop every ship listing.
+     */
+    private FleetDataAPI mothballedShips(CargoAPI cargo) {
+        FleetDataAPI ships = cargo.getMothballedShips();
+        if (ships != null) {
+            return ships;
+        }
+        try {
+            cargo.initMothballedShips(Factions.NEUTRAL);
+            return cargo.getMothballedShips();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Could not init mothballed ship storage", ex);
+            return null;
         }
     }
 
@@ -1881,9 +2099,13 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             if (ref == null) {
                 continue;
             }
+            CoopWorldEntitySpawn.ItemKind kind = spawnKindOf(ref.kind());
+            if (kind == null) {
+                continue;
+            }
             int size = Math.round(stack.getSize());
             if (size > 0) {
-                out.merge(CoopWorldEntitySpawn.key(spawnKindOf(ref.kind()), ref.id()), size, Integer::sum);
+                out.merge(CoopWorldEntitySpawn.key(kind, ref.id()), size, Integer::sum);
             }
         }
         FleetDataAPI ships = cargo.getMothballedShips();
@@ -1899,11 +2121,24 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         return out;
     }
 
+    /**
+     * The pod-content kind a cargo-stack kind maps to, or null when the stack cannot be pod content.
+     *
+     * <p>Deliberately no {@code default -> COMMODITY}. That default is what mangled a jettisoned AI
+     * core: a SPECIAL stack fell through it and was re-materialized on the partner's client as a
+     * commodity of the same id, i.e. as nothing at all. Unmapped kinds are now skipped, loudly-shaped
+     * (an exhaustive switch, so a new ItemKind is a compile error here rather than a silent
+     * mis-materialization).
+     */
     private static CoopWorldEntitySpawn.ItemKind spawnKindOf(CoopMarketSync.ItemKind kind) {
         return switch (kind) {
+            case COMMODITY -> CoopWorldEntitySpawn.ItemKind.COMMODITY;
             case WEAPON -> CoopWorldEntitySpawn.ItemKind.WEAPON;
             case FIGHTER -> CoopWorldEntitySpawn.ItemKind.FIGHTER;
-            default -> CoopWorldEntitySpawn.ItemKind.COMMODITY;
+            case SHIP -> CoopWorldEntitySpawn.ItemKind.SHIP;
+            case SPECIAL -> CoopWorldEntitySpawn.ItemKind.SPECIAL;
+            // People are not cargo and can never be in a pod.
+            case OFFICER, MERC, ADMIN -> null;
         };
     }
 
@@ -1964,7 +2199,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 case COMMODITY -> cargo.addCommodity(id, quantity);
                 case WEAPON -> cargo.addWeapons(id, quantity);
                 case FIGHTER -> cargo.addFighters(id, quantity);
-                case SHIP -> addMothballedShips(cargo, id, quantity);
+                case SPECIAL -> addSpecial(cargo, id, quantity);
+                // Pod ships still key by variant id, so they still arrive pristine (see
+                // CoopWorldEntitySpawn.ItemKind.SHIP).
+                case SHIP -> addMothballedShipsByVariant(cargo, id, quantity);
             }
         } catch (RuntimeException | LinkageError ex) {
             // A variant or spec this client cannot resolve: skip that stack rather than lose the pod.
@@ -2036,9 +2274,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
 
     // ---- Engine helpers (defensive) -----------------------------------------------------------
 
-    // Captures the open-market stock shown on the Trade screen: commodities, weapons and fighters
-    // (cargo stacks) plus ships (mothballed hulls, keyed by variant id). Officers/mercs and other
-    // submarkets (black market, military) remain a documented follow-up.
+    // Captures the open-market stock shown on the Trade screen: commodities, weapons, fighters and
+    // specials (cargo stacks), ships (one listing per mothballed hull, carrying its full
+    // CoopShipDetail), and the market's hireable officer/merc/admin pool. Other submarkets (black
+    // market, military) remain a documented follow-up -- see openMarketCargo's fence.
     private List<CoopMarketSync.StockItem> captureOpenMarketStock(MarketAPI market) {
         List<CoopMarketSync.StockItem> items = new ArrayList<>();
         CargoAPI cargo = openMarketCargo(market);
@@ -2057,19 +2296,411 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
         FleetDataAPI ships = cargo.getMothballedShips();
         if (ships != null) {
-            Map<String, Integer> byVariant = new LinkedHashMap<>();
+            // One listing per member, keyed by the member id rather than the variant id: two hulls of
+            // the same variant are not interchangeable once one of them has three D-mods and 40% CR,
+            // and a per-variant count could not tell the guest which is which.
             for (FleetMemberAPI member : ships.getMembersListCopy()) {
-                String variantId = shipVariantId(member);
-                if (variantId != null) {
-                    byVariant.merge(variantId, 1, Integer::sum);
+                CoopShipDetail detail = captureShipDetail(member);
+                if (detail != null) {
+                    items.add(new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP,
+                            detail.memberId(), 1, 0f, detail.encode()));
                 }
-            }
-            for (Map.Entry<String, Integer> e : byVariant.entrySet()) {
-                items.add(new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP,
-                        e.getKey(), e.getValue(), 0f));
             }
         }
         return items;
+    }
+
+    /**
+     * Everything about one listed hull that its variant id does not carry: the D-mod hull swap, perma
+     * mods (which is what D-mods are), s-mods, the refit, suppressed mods, weapons, wings, vents/caps
+     * and base CR. See {@link CoopShipDetail} for why each of those is separately load-bearing.
+     *
+     * <p>Multi-module hulls are captured as their parent variant only — no module recursion (accepted
+     * gap, documented in {@code docs/starsector-runtime-limitations.md}).
+     */
+    private CoopShipDetail captureShipDetail(FleetMemberAPI member) {
+        if (member == null || member.getVariant() == null) {
+            return null;
+        }
+        try {
+            ShipVariantAPI variant = member.getVariant();
+            String memberId = member.getId();
+            if (memberId == null || memberId.isBlank()) {
+                return null;
+            }
+            List<String> permaMods = new ArrayList<>(orEmpty(variant.getPermaMods()));
+            List<String> sMods = new ArrayList<>(orEmpty(variant.getSMods()));
+            List<String> refitMods = new ArrayList<>();
+            for (String modId : orEmpty(variant.getNonBuiltInHullmods())) {
+                if (!permaMods.contains(modId)) {
+                    refitMods.add(modId);
+                }
+            }
+            Map<String, String> weapons = new LinkedHashMap<>();
+            for (String slotId : orEmptyList(variant.getNonBuiltInWeaponSlots())) {
+                String weaponId = variant.getWeaponId(slotId);
+                if (weaponId != null) {
+                    weapons.put(slotId, weaponId);
+                }
+            }
+            Map<String, String> wings = new LinkedHashMap<>();
+            List<String> builtInWings = variant.getHullSpec() == null
+                    ? List.of() : orEmptyList(variant.getHullSpec().getBuiltInWings());
+            List<String> allWings = orEmptyList(variant.getWings());
+            for (int i = 0; i < allWings.size(); i++) {
+                String wingId = allWings.get(i);
+                if (wingId == null || wingId.isBlank()) {
+                    continue;
+                }
+                if (i < builtInWings.size() && wingId.equals(builtInWings.get(i))) {
+                    continue; // built-in bay: the hull spec puts it back on its own
+                }
+                wings.put(Integer.toString(i), wingId);
+            }
+            float baseCR = member.getRepairTracker() == null ? 0f : member.getRepairTracker().getBaseCR();
+            return new CoopShipDetail(memberId,
+                    member.getShipName(),
+                    variant.getHullVariantId(),
+                    variant.getHullSpec() == null ? "" : variant.getHullSpec().getHullId(),
+                    baseCR,
+                    variant.getNumFluxVents(),
+                    variant.getNumFluxCapacitors(),
+                    permaMods,
+                    sMods,
+                    new ArrayList<>(orEmpty(variant.getSModdedBuiltIns())),
+                    refitMods,
+                    new ArrayList<>(orEmpty(variant.getSuppressedMods())),
+                    weapons,
+                    wings);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to capture ship detail for member "
+                    + (member.getId() == null ? "?" : member.getId()), ex);
+            return null;
+        }
+    }
+
+    private static Collection<String> orEmpty(Collection<String> values) {
+        return values == null ? List.of() : values;
+    }
+
+    private static List<String> orEmptyList(List<String> values) {
+        return values == null ? List.of() : values;
+    }
+
+    // ---- Hireable officers / mercenaries / administrators (Phase 12c gap 2d) --------------------
+    //
+    // The pool is rolled per client by the sector's OfficerManagerEvent off Misc.random and
+    // Math.random(), so host and guest saw different captains standing at the same bar. The host's
+    // pool rides the MARKET_SNAPSHOT alongside the stock (one StockItem per person) and the guest
+    // strips its own and rebuilds the host's.
+    //
+    // There is no vanilla hire event, so a guest hire is detected by diffing the market's hireable set
+    // on close against the set the last snapshot applied; a person that vanished was hired.
+
+    /**
+     * The people at a market that are actually for hire.
+     *
+     * <p>The engine's own {@code available} / {@code availableAdmins} lists are protected, so the pool
+     * is enumerated the way vanilla's dialog does: comm-directory PERSON entries carrying the
+     * {@code $ome_hireable} memory flag.
+     */
+    private List<PersonAPI> hireablePeople(MarketAPI market) {
+        List<PersonAPI> out = new ArrayList<>();
+        if (market == null) {
+            return out;
+        }
+        try {
+            CommDirectoryAPI directory = market.getCommDirectory();
+            if (directory == null || directory.getEntriesCopy() == null) {
+                return out;
+            }
+            for (CommDirectoryEntryAPI entry : directory.getEntriesCopy()) {
+                if (entry == null || entry.getType() != CommDirectoryEntryAPI.EntryType.PERSON) {
+                    continue;
+                }
+                if (!(entry.getEntryData() instanceof PersonAPI person)) {
+                    continue;
+                }
+                MemoryAPI memory = person.getMemoryWithoutUpdate();
+                if (memory != null && memory.is(OME_HIREABLE, true)) {
+                    out.add(person);
+                }
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to enumerate hireable people at market "
+                    + market.getId(), ex);
+        }
+        return out;
+    }
+
+    private static final String OME_HIREABLE = "$ome_hireable";
+    private static final String OME_IS_ADMIN = "$ome_isAdmin";
+    private static final String OME_ADMIN_TIER = "$ome_adminTier";
+
+    /** Host: one StockItem per hireable person at the market. */
+    private List<CoopMarketSync.StockItem> captureHireablePool(MarketAPI market) {
+        List<CoopMarketSync.StockItem> items = new ArrayList<>();
+        OfficerManagerEvent manager = officerManager();
+        if (manager == null) {
+            // The core sector-gen script always installs one, so this means something removed it. Say
+            // so: the snapshot that follows claims "no hireables anywhere" and the guest will strip its
+            // own pool to match it.
+            CoopLog.warn(CoopCampaignReplicator.class, "No OfficerManagerEvent on the host sector;"
+                    + " every market snapshot will report an empty hireable pool");
+            return items;
+        }
+        for (PersonAPI person : hireablePeople(market)) {
+            CoopPersonDetail detail = capturePersonDetail(manager, person);
+            if (detail != null) {
+                items.add(new CoopMarketSync.StockItem(detail.stockKind(), detail.personId(),
+                        1, 0f, detail.encode()));
+            }
+        }
+        return items;
+    }
+
+    private CoopPersonDetail capturePersonDetail(OfficerManagerEvent manager, PersonAPI person) {
+        try {
+            String personId = person.getId();
+            if (personId == null || personId.isBlank()) {
+                return null;
+            }
+            // hiringBonus/salary come from the engine's AvailableOfficer, never from the
+            // $ome_hiringBonus / $ome_salary memory keys: those are pre-formatted display strings
+            // (Misc.getWithDGS) and parsing them back would be separator-dependent.
+            OfficerManagerEvent.AvailableOfficer entry = manager.getOfficer(personId);
+            CoopPersonDetail.Role role;
+            if (entry != null) {
+                role = Misc.isMercenary(person) ? CoopPersonDetail.Role.MERC : CoopPersonDetail.Role.OFFICER;
+            } else {
+                entry = manager.getAdmin(personId);
+                if (entry == null) {
+                    CoopLog.debug(CoopCampaignReplicator.class, "Hireable person " + personId
+                            + " has no OfficerManagerEvent entry; not replicated");
+                    return null;
+                }
+                role = CoopPersonDetail.Role.ADMIN;
+            }
+            FullName name = person.getName();
+            MemoryAPI memory = person.getMemoryWithoutUpdate();
+            int adminTier = 0;
+            if (role == CoopPersonDetail.Role.ADMIN && memory != null && memory.contains(OME_ADMIN_TIER)) {
+                adminTier = memory.getInt(OME_ADMIN_TIER);
+            }
+            Map<String, Float> skills = new LinkedHashMap<>();
+            if (person.getStats() != null && person.getStats().getSkillsCopy() != null) {
+                for (MutableCharacterStatsAPI.SkillLevelAPI skill : person.getStats().getSkillsCopy()) {
+                    if (skill != null && skill.getSkill() != null && skill.getSkill().getId() != null) {
+                        skills.put(skill.getSkill().getId(), skill.getLevel());
+                    }
+                }
+            }
+            return new CoopPersonDetail(personId,
+                    name == null ? "" : name.getFirst(),
+                    name == null ? "" : name.getLast(),
+                    person.getGender() == null ? FullName.Gender.ANY.name() : person.getGender().name(),
+                    person.getPortraitSprite(),
+                    person.getPersonalityAPI() == null ? "" : person.getPersonalityAPI().getId(),
+                    person.getRankId(),
+                    person.getPostId(),
+                    person.getFaction() == null ? "" : person.getFaction().getId(),
+                    person.getStats() == null ? 0 : person.getStats().getLevel(),
+                    person.getStats() == null ? 0L : person.getStats().getXP(),
+                    role,
+                    entry.hiringBonus,
+                    entry.salary,
+                    adminTier,
+                    skills);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to capture hireable person detail", ex);
+            return null;
+        }
+    }
+
+    /**
+     * Guest: replace the market's hireable pool with the host's.
+     *
+     * <p>Strip-then-add through {@code OfficerManagerEvent} rather than the comm directory directly:
+     * {@code addAvailable} is what sets {@code $ome_eventRef} to <em>this client's own</em> manager
+     * script, and the hiring dialog reads that reference to complete the hire. Hand-placing a person
+     * into the comm directory produces a captain who can be talked to and never hired.
+     */
+    private void applyHireablePool(MarketAPI market, List<CoopMarketSync.StockItem> items) {
+        if (market == null) {
+            return;
+        }
+        OfficerManagerEvent manager = officerManager();
+        if (manager == null) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "No OfficerManagerEvent on this sector; hireable pool not replicated");
+            return;
+        }
+        Map<String, CoopMarketSync.ItemKind> applied = new LinkedHashMap<>();
+        try {
+            for (PersonAPI person : hireablePeople(market)) {
+                OfficerManagerEvent.AvailableOfficer entry = manager.getOfficer(person.getId());
+                if (entry == null) {
+                    entry = manager.getAdmin(person.getId());
+                }
+                if (entry != null) {
+                    manager.removeAvailable(entry);
+                }
+            }
+            for (CoopMarketSync.StockItem item : items) {
+                if (CoopPersonDetail.roleOf(item.kind()) == null || item.detail().isEmpty()) {
+                    continue;
+                }
+                CoopPersonDetail detail = CoopPersonDetail.decode(item.detail());
+                PersonAPI person = buildPerson(detail);
+                if (person == null) {
+                    continue;
+                }
+                OfficerManagerEvent.AvailableOfficer entry = new OfficerManagerEvent.AvailableOfficer(
+                        person, market.getId(), detail.hiringBonus(), detail.salary());
+                if (detail.role() == CoopPersonDetail.Role.ADMIN) {
+                    manager.addAvailableAdmin(entry);
+                } else {
+                    manager.addAvailable(entry);
+                }
+                applied.put(detail.personId(), item.kind());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply hireable pool for market "
+                    + market.getId(), ex);
+        }
+        appliedHireables.put(market.getId(), applied);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied hireable pool market=" + market.getId()
+                + " people=" + applied.size());
+    }
+
+    private PersonAPI buildPerson(CoopPersonDetail detail) {
+        try {
+            PersonAPI person = Global.getFactory().createPerson();
+            person.setId(detail.personId());
+            person.setName(new FullName(detail.first(), detail.last(), genderOf(detail.gender())));
+            if (!detail.factionId().isEmpty()) {
+                person.setFaction(detail.factionId());
+            }
+            if (!detail.portraitSprite().isEmpty()) {
+                person.setPortraitSprite(detail.portraitSprite());
+            }
+            if (!detail.rankId().isEmpty()) {
+                person.setRankId(detail.rankId());
+            }
+            if (!detail.postId().isEmpty()) {
+                person.setPostId(detail.postId());
+            }
+            if (!detail.personalityId().isEmpty()) {
+                person.setPersonality(detail.personalityId());
+            }
+            MutableCharacterStatsAPI stats = person.getStats();
+            if (stats != null) {
+                // Vanilla's own build order (OfficerManagerEvent.createAdmin): batch the skill writes
+                // behind skipRefresh, then refresh once. Refreshing per skill is both slow and,
+                // mid-build, wrong.
+                stats.setSkipRefresh(true);
+                stats.setLevel(detail.level());
+                stats.setXP(detail.xp());
+                for (Map.Entry<String, Float> skill : detail.skills().entrySet()) {
+                    stats.setSkillLevel(skill.getKey(), skill.getValue());
+                }
+                stats.setSkipRefresh(false);
+                stats.refreshCharacterStatsEffects();
+            }
+            if (detail.role() == CoopPersonDetail.Role.MERC) {
+                Misc.setMercenary(person, true);
+            }
+            if (detail.role() == CoopPersonDetail.Role.ADMIN && person.getMemoryWithoutUpdate() != null) {
+                person.getMemoryWithoutUpdate().set(OME_IS_ADMIN, true);
+                person.getMemoryWithoutUpdate().set(OME_ADMIN_TIER, detail.adminTier());
+            }
+            return person;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to rebuild hireable person "
+                    + detail.personId(), ex);
+            return null;
+        }
+    }
+
+    private static FullName.Gender genderOf(String name) {
+        try {
+            return FullName.Gender.valueOf(name);
+        } catch (IllegalArgumentException ex) {
+            return FullName.Gender.ANY;
+        }
+    }
+
+    /**
+     * Guest: a person that was in the last applied pool and is no longer hireable was hired locally.
+     * There is no vanilla hire event, so this close-time diff is the claim.
+     *
+     * <p>No credit deduction rides with it: credits are per-player and the acting client's own engine
+     * already charged the hiring bonus. All the host needs is the availability removal.
+     */
+    private void reportHiresOnClose(MarketAPI market) {
+        Map<String, CoopMarketSync.ItemKind> applied = appliedHireables.get(market.getId());
+        if (applied == null || applied.isEmpty()) {
+            return;
+        }
+        Set<String> stillHireable = new HashSet<>();
+        for (PersonAPI person : hireablePeople(market)) {
+            stillHireable.add(person.getId());
+        }
+        CoopMarketSync.HireDiff diff = CoopMarketSync.diffHires(applied, stillHireable);
+        for (Map.Entry<String, CoopMarketSync.ItemKind> entry : diff.hired().entrySet()) {
+            sendMarketTxn(market.getId(), entry.getValue(), entry.getKey(), 1, "");
+            CoopLog.info(CoopCampaignReplicator.class, "Coop hire claim " + entry.getValue()
+                    + ":" + entry.getKey() + " market=" + market.getId());
+        }
+        appliedHireables.put(market.getId(), diff.remaining());
+    }
+
+    /** Host: a guest hired someone; take them out of the canonical pool. */
+    private boolean applyHireToEngine(String marketId, String personId) {
+        OfficerManagerEvent manager = officerManager();
+        if (manager == null) {
+            return false;
+        }
+        replayGuard.begin();
+        try {
+            OfficerManagerEvent.AvailableOfficer entry = manager.getOfficer(personId);
+            if (entry == null) {
+                entry = manager.getAdmin(personId);
+            }
+            if (entry == null) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Coop hire claim for unknown person "
+                        + personId + " at market=" + marketId);
+                return false;
+            }
+            manager.removeAvailable(entry);
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply hire claim " + personId, ex);
+            return false;
+        } finally {
+            replayGuard.end();
+        }
+    }
+
+    /**
+     * The sector's officer manager. It is placed by the core sector-gen script and lives in the
+     * every-frame script list; there is no registry accessor for it.
+     */
+    private OfficerManagerEvent officerManager() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null || sector.getScripts() == null) {
+                return null;
+            }
+            for (EveryFrameScript script : sector.getScripts()) {
+                if (script instanceof OfficerManagerEvent manager) {
+                    return manager;
+                }
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to locate OfficerManagerEvent", ex);
+        }
+        return null;
     }
 
     /** Identifying (kind, id) for a fungible cargo stack; null for kinds we don't sync. */
@@ -2079,6 +2710,16 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     private StackRef classify(CargoStackAPI stack) {
         if (stack == null) {
             return null;
+        }
+        // Specials are checked first: a special stack is not a commodity stack, but putting the check
+        // last invites the same "unknown -> commodity" fallthrough that mangled jettisoned AI cores.
+        if (stack.isSpecialStack() && stack.getSpecialDataIfSpecial() != null) {
+            SpecialItemData data = stack.getSpecialDataIfSpecial();
+            if (data.getId() == null || data.getId().isBlank()) {
+                return null;
+            }
+            return new StackRef(CoopMarketSync.ItemKind.SPECIAL,
+                    CoopMarketSync.specialItemId(data.getId(), data.getData()));
         }
         if (stack.isCommodityStack() && stack.getCommodityId() != null) {
             return new StackRef(CoopMarketSync.ItemKind.COMMODITY, stack.getCommodityId());
