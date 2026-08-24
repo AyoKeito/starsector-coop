@@ -39,17 +39,33 @@ class CoopAbilityArbiterTest {
     }
 
     @Test
+    void theLocalSetIsPinned() {
+        assertEquals(java.util.Set.of("emergency_burn", "sustained_burn", "transponder", "go_dark",
+                        "sensor_burst", "gravitic_scan", "remote_survey"),
+                CoopAbilityArbiter.LOCAL_ABILITIES);
+    }
+
+    @Test
     void worldAffectingAbilitiesAreArbitrated() {
         assertTrue(CoopAbilityArbiter.isWorldAffecting("interdiction_pulse"));
         assertTrue(CoopAbilityArbiter.isWorldAffecting("distress_call"));
+    }
+
+    /**
+     * Phase 12c build task D: its world effect (every planet in the system to PRELIMINARY) now
+     * replicates through the survey poll, so arbitrating it was pure log noise.
+     */
+    @Test
+    void remoteSurveyIsLocal() {
+        assertTrue(CoopAbilityArbiter.isLocal("remote_survey"));
+        assertFalse(CoopAbilityArbiter.isWorldAffecting("remote_survey"));
     }
 
     @Test
     void unknownAbilityDefaultsToWorldAffecting() {
         // Safe default: arbitrate an unknown ability rather than risk a silent desync.
         assertTrue(CoopAbilityArbiter.isWorldAffecting("some_mod_ability"));
-        // Including the two vanilla ids that have no host-side effect wired yet.
-        assertTrue(CoopAbilityArbiter.isWorldAffecting("remote_survey"));
+        // Including the vanilla id that has no host-side effect wired yet.
         assertTrue(CoopAbilityArbiter.isWorldAffecting("generate_slipsurge"));
     }
 

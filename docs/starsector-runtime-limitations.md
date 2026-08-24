@@ -331,3 +331,25 @@ So nothing on the guest ever removes an injected offer on a timer. The host's ne
 ### Contacts, contact-board missions and person bounties stay per-player — user-accepted
 
 Only bar events ride the pool. Contact lists, the missions a contact offers through `BaseMissionHub`, and `PersonBountyManager` are untouched, and `PersonBountyManager` is one of the scripts the Phase 9 suppressor removes guest-side, so a guest has no person bounties at all in v1.
+
+## Phase 12c — Survey Levels and Ruins: Three Accepted Leaks
+
+`MarketAPI.SurveyLevel` and the `$ruinsExplored` market-memory flag now replicate on the both-sides skeleton poll, as `WORLD_DELTA(SURVEY)` and `WORLD_DELTA(RUINS_EXPLORED)`. Apply is max-wins on the level's ordinal, so the two clients converge whatever order the deltas land in. What does not replicate is everything *around* the level.
+
+### The remote_survey lockout is per-player, so a system can be swept twice
+
+`RemoteSurveyAbility` latches its once-per-system flag into the star system's own memory (`$core_didRemoteSurveyInSystem`, `abilities/RemoteSurveyAbility.java:21,104`) and `findBestPlanet` refuses to run again while the key is present (line 131). That key is not on the wire, so host and guest each hold their own copy and each can remote-survey the same system once. Two PRELIMINARY sweeps where a solo campaign gets one.
+
+Left that way on purpose. The flag guards a cost the second player would still pay: the ability pins fleetwide max burn to zero while it charges (line 89), and the planet it would pick is already at PRELIMINARY from the first player's sweep, which arrived as a `SURVEY` delta. Replicating the flag buys nothing and takes the ability away from whoever activates second. The acting player also keeps the `RemoteSurveyDataForPlanetIntel` entry the ability mints (line 101); the other player gets the level without the intel entry.
+
+### The survey data goes to whoever ran the survey
+
+Completing a planet survey puts one `survey_data_1` through `survey_data_5` unit in the surveying fleet's cargo, picked by `SurveyPluginImpl.getSurveyDataType` off the planet's conditions and hazard (`impl/campaign/SurveyPluginImpl.java:157-183`). The peer's planet reaches FULL through the delta instead, and a planet at FULL is not offered the survey option again, so the peer never collects a unit of its own.
+
+Same rule as salvage: one player loots, the world state is shared. Not a bug to fix, and the alternative (minting a second commodity stack from a replicated flag) would be duplication of a sellable good.
+
+### A guest's survey mission pays out when the host does the surveying
+
+`SurveyPlanetMissionIntel.advanceMission` polls the target planet every frame and calls `reportPlayerSurveyedPlanet` the moment its market reads FULL (`intel/SurveyPlanetMissionIntel.java:141-143`). It never asks who surveyed it. So a survey mission the guest accepted completes, with payment, when the host's FULL arrives over the wire.
+
+Consistent with the shared world the rest of Phase 12 builds, and the same thing already happens for a mission whose target the host decivilizes or whose objective the host captures. Worth knowing before treating survey contracts as a per-player income stream: two players holding the same contract from different bar offers both get paid for one survey.

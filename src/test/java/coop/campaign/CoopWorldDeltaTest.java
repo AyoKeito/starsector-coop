@@ -176,13 +176,43 @@ class CoopWorldDeltaTest {
     }
 
     @Test
+    void surveyAppliesEveryLevelStep() {
+        // SEEN -> PRELIMINARY -> FULL is three separate deltas on one planet; a set-based key would
+        // deliver the first and swallow the rest, leaving the peer stuck at SEEN forever.
+        CoopWorldDelta.Ledger ledger = new CoopWorldDelta.Ledger();
+
+        assertTrue(ledger.apply(survey("planet-1", "SEEN")));
+        assertTrue(ledger.apply(survey("planet-1", "PRELIMINARY")));
+        assertTrue(ledger.apply(survey("planet-1", "FULL")));
+        assertFalse(ledger.apply(survey("planet-1", "FULL")), "the host's echo must be inert");
+        assertEquals("FULL", ledger.latestState(CoopWorldDelta.Kind.SURVEY, "planet-1"));
+    }
+
+    @Test
+    void ruinsExplorationIsAppliedOnce() {
+        CoopWorldDelta.Ledger ledger = new CoopWorldDelta.Ledger();
+        CoopWorldDelta explored = new CoopWorldDelta("planet-1", CoopWorldDelta.Kind.RUINS_EXPLORED,
+                false, "true", "guest");
+
+        assertTrue(ledger.apply(explored));
+        assertFalse(ledger.apply(explored));
+    }
+
+    @Test
     void onlyTheValueBearingKindsAreLatestWins() {
         assertTrue(CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP.latestWins());
         assertTrue(CoopWorldDelta.Kind.GATE_ACTIVATED.latestWins());
+        assertTrue(CoopWorldDelta.Kind.SURVEY.latestWins());
         assertFalse(CoopWorldDelta.Kind.DECIV.latestWins());
         assertFalse(CoopWorldDelta.Kind.CONSTRUCT.latestWins());
         assertFalse(CoopWorldDelta.Kind.PARLEY.latestWins());
         assertFalse(CoopWorldDelta.Kind.SPAWN.latestWins());
+        // A single one-way flip with a constant payload: the set-based key is the right one.
+        assertFalse(CoopWorldDelta.Kind.RUINS_EXPLORED.latestWins());
+    }
+
+    private static CoopWorldDelta survey(String entityId, String level) {
+        return new CoopWorldDelta(entityId, CoopWorldDelta.Kind.SURVEY, false, level, "host");
     }
 
     private static CoopWorldDelta ownership(String entityId, String factionId) {

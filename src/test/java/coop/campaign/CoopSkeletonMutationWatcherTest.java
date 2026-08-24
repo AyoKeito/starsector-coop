@@ -116,6 +116,57 @@ class CoopSkeletonMutationWatcherTest {
         assertTrue(watcher.diffGateStates(gates("gate-1", true, true, true)).isEmpty());
     }
 
+    // ---- Survey / ruins poll -------------------------------------------------------------------
+
+    @Test
+    void firstSurveyPollSeedsSilently() {
+        // A fresh sector is hundreds of planets at whatever level worldgen gave both clients; the
+        // seeding pass must not put any of that on the wire.
+        CoopSkeletonMutationWatcher watcher = new CoopSkeletonMutationWatcher();
+
+        assertTrue(watcher.diffSurveyLevels(levels("planet-1", "NONE", "planet-2", "FULL")).isEmpty());
+        assertEquals("FULL", watcher.surveyLevel("planet-2"));
+    }
+
+    @Test
+    void everySurveyStepIsReportedOnceAndOnlyForTheChangedPlanet() {
+        CoopSkeletonMutationWatcher watcher = new CoopSkeletonMutationWatcher();
+        watcher.diffSurveyLevels(levels("planet-1", "NONE", "planet-2", "NONE"));
+
+        assertEquals(List.of(new CoopSkeletonMutationWatcher.Flip("planet-1", "SEEN")),
+                watcher.diffSurveyLevels(levels("planet-1", "SEEN", "planet-2", "NONE")));
+        assertEquals(List.of(new CoopSkeletonMutationWatcher.Flip("planet-1", "PRELIMINARY")),
+                watcher.diffSurveyLevels(levels("planet-1", "PRELIMINARY", "planet-2", "NONE")));
+        assertEquals(List.of(new CoopSkeletonMutationWatcher.Flip("planet-1", "FULL")),
+                watcher.diffSurveyLevels(levels("planet-1", "FULL", "planet-2", "NONE")));
+        assertTrue(watcher.diffSurveyLevels(levels("planet-1", "FULL", "planet-2", "NONE")).isEmpty());
+    }
+
+    @Test
+    void ruinsExplorationIsReportedBecauseUnexploredPlanetsAreSeededToo() {
+        // The collector feeds "false" for every ruins-bearing planet, which is what puts the entry in
+        // the baseline; a map holding only the explored ones would never produce a flip at all.
+        CoopSkeletonMutationWatcher watcher = new CoopSkeletonMutationWatcher();
+        assertTrue(watcher.diffRuinsExplored(levels("planet-1", "false")).isEmpty());
+
+        assertEquals(List.of(new CoopSkeletonMutationWatcher.Flip("planet-1", "true")),
+                watcher.diffRuinsExplored(levels("planet-1", "true")));
+        assertTrue(watcher.diffRuinsExplored(levels("planet-1", "true")).isEmpty());
+        assertEquals("true", watcher.ruinsExplored("planet-1"));
+    }
+
+    @Test
+    void clearForcesSurveyAndRuinsToReseedSilentlyToo() {
+        CoopSkeletonMutationWatcher watcher = new CoopSkeletonMutationWatcher();
+        watcher.diffSurveyLevels(levels("planet-1", "NONE"));
+        watcher.diffRuinsExplored(levels("planet-1", "false"));
+        watcher.clear();
+
+        assertTrue(watcher.diffSurveyLevels(levels("planet-1", "FULL")).isEmpty());
+        assertTrue(watcher.diffRuinsExplored(levels("planet-1", "true")).isEmpty());
+        assertEquals(null, watcher.surveyLevel("planet-2"));
+    }
+
     // ---- Payload encodings ---------------------------------------------------------------------
 
     @Test
@@ -207,6 +258,11 @@ class CoopSkeletonMutationWatcherTest {
             map.put(idThenFaction[i], idThenFaction[i + 1]);
         }
         return map;
+    }
+
+    /** {@code id, value} pairs — survey levels or {@code $ruinsExplored} booleans. */
+    private static Map<String, String> levels(String... idThenValue) {
+        return owners(idThenValue);
     }
 
     private static Map<String, String> gates(String id, boolean scanned, boolean gatesActive,

@@ -18,6 +18,7 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.SpecialItemData;
 import com.fs.starfarer.api.campaign.SubmarketPlugin;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.listeners.ColonyDecivListener;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
@@ -151,10 +152,11 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     static final long PLAYER_REP_SYNC_INTERVAL_MILLIS = 30000L;
     private long lastPlayerRepSyncMillis;
 
-    // Phase 13 skeleton mutations: the host polls campaign-objective ownership and story-gate
-    // activation on a slow cadence and broadcasts the changes as WORLD_DELTAs. Both are rare
-    // (war-sim swings are days apart; gates activate once a campaign), so the poll is cheap: two
-    // tag lookups per location, every few seconds.
+    // Phase 13 skeleton mutations: campaign-objective ownership and story-gate activation are polled
+    // on a slow cadence and broadcast as WORLD_DELTAs, joined in Phase 12c by planet survey levels
+    // and ruins exploration. All are rare (war-sim swings are days apart; gates activate once a
+    // campaign; a survey is a manual player act), so the poll is cheap: two tag lookups and one
+    // planet list per location, every few seconds.
     static final long SKELETON_POLL_INTERVAL_MILLIS = 5000L;
     private final CoopSkeletonMutationWatcher skeletonWatcher = new CoopSkeletonMutationWatcher();
     private long lastSkeletonPollMillis;
@@ -1415,6 +1417,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 applyGateStateToEngine(delta);
                 return;
             }
+            case SURVEY -> {
+                applySurveyLevelToEngine(delta);
+                return;
+            }
+            case RUINS_EXPLORED -> {
+                applyRuinsExploredToEngine(delta);
+                return;
+            }
             default -> {
                 // Fall through to the consume path below.
             }
@@ -1573,9 +1583,130 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     /**
-     * Slow poll for the two skeleton mutations that have no usable capture event — campaign
-     * objective ownership (the war sim's own listener is the sim we suppress guest-side) and story
-     * gate activation (no event at all).
+     * Raise a planet's survey level to the reported one (Phase 12c, plan gap 5). Max-wins by ordinal:
+     * the level is monotonic in vanilla (nothing ever lowers it), so taking the higher of the two
+     * makes the apply idempotent, commutative and reorder-proof — a SEEN arriving after a FULL, which
+     * two independently polling clients can absolutely produce, is simply dropped.
+     *
+     * <p>FULL goes through {@code Misc.setFullySurveyed} (api_src {@code util/Misc.java:3003-3009})
+     * rather than the plain setter, because the enum is only half of "fully surveyed": vanilla also
+     * flips every {@code MarketConditionAPI.setSurveyed} bit, and without that the peer's planet reads
+     * as FULL with its conditions still hidden. {@code withNotification=false} — the message belongs
+     * to the player who actually ran the survey.
+     */
+    private void applySurveyLevelToEngine(CoopWorldDelta delta) {
+        SectorAPI sector = Global.getSector();
+        if (sector == null) {
+            return;
+        }
+        MarketAPI market = planetMarketForDelta(sector, delta);
+        if (market == null) {
+            return;
+        }
+        MarketAPI.SurveyLevel incoming;
+        try {
+            incoming = MarketAPI.SurveyLevel.valueOf(delta.newStateJson().trim());
+        } catch (IllegalArgumentException ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "SURVEY entity=" + delta.entityId()
+                    + " carries unknown level '" + delta.newStateJson() + "'; skipping");
+            return;
+        }
+        MarketAPI.SurveyLevel current = market.getSurveyLevel();
+        if (current != null && incoming.ordinal() <= current.ordinal()) {
+            return;
+        }
+        if (incoming == MarketAPI.SurveyLevel.FULL) {
+            setFullySurveyed(market);
+        } else {
+            market.setSurveyLevel(incoming);
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied SURVEY entity=" + delta.entityId()
+                + " level=" + incoming + " (was " + current + ")");
+    }
+
+    /**
+     * Vanilla's routine first, so an engine update to it is picked up for free. Its two writes are
+     * repeated inline if the class will not load: every static field on {@code Misc} initializes off
+     * {@code Global.getSettings()} ({@code util/Misc.java:196}), which exists in the game and not in
+     * a unit test, and a {@code NoClassDefFoundError} there must not cost the guest its survey.
+     */
+    private static void setFullySurveyed(MarketAPI market) {
+        try {
+            Misc.setFullySurveyed(market, null, false);
+            return;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Misc.setFullySurveyed unavailable; applying its writes directly", ex);
+        }
+        List<MarketConditionAPI> conditions = market.getConditions();
+        if (conditions != null) {
+            for (MarketConditionAPI condition : conditions) {
+                if (condition != null) {
+                    condition.setSurveyed(true);
+                }
+            }
+        }
+        market.setSurveyLevel(MarketAPI.SurveyLevel.FULL);
+    }
+
+    /**
+     * {@code Misc.hasRuins} without the {@code Misc} class dependency — the four condition ids are
+     * compile-time constants ({@code util/Misc.java:5883-5889}).
+     */
+    private static boolean hasRuins(MarketAPI market) {
+        return market.hasCondition(Conditions.RUINS_SCATTERED)
+                || market.hasCondition(Conditions.RUINS_WIDESPREAD)
+                || market.hasCondition(Conditions.RUINS_EXTENSIVE)
+                || market.hasCondition(Conditions.RUINS_VAST);
+    }
+
+    /**
+     * Mirror the {@code $ruinsExplored} flag vanilla's {@code salRuins_postSalvagePerform} rule sets
+     * on the acting client only. One-way: the flag is never cleared, so a report that says anything
+     * but {@code true} is ignored rather than unsetting a flag the local player earned.
+     */
+    private void applyRuinsExploredToEngine(CoopWorldDelta delta) {
+        if (!Boolean.parseBoolean(delta.newStateJson().trim())) {
+            return;
+        }
+        SectorAPI sector = Global.getSector();
+        if (sector == null) {
+            return;
+        }
+        MarketAPI market = planetMarketForDelta(sector, delta);
+        if (market == null) {
+            return;
+        }
+        MemoryAPI memory = market.getMemoryWithoutUpdate();
+        if (memory == null
+                || memory.getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG)) {
+            return;
+        }
+        memory.set(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG, true);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied RUINS_EXPLORED entity="
+                + delta.entityId());
+    }
+
+    /** Resolves the planet market a {@link CoopWorldDelta.Kind#SURVEY}-family delta targets. */
+    private MarketAPI planetMarketForDelta(SectorAPI sector, CoopWorldDelta delta) {
+        SectorEntityToken entity = findEntityForDelta(sector, delta.entityId());
+        MarketAPI market = entity == null ? null : entity.getMarket();
+        if (market == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, delta.kind() + " for entity "
+                    + delta.entityId() + " with no market here; skipping");
+        }
+        return market;
+    }
+
+    /**
+     * Slow poll for the skeleton mutations that have no usable capture event — campaign objective
+     * ownership (the war sim's own listener is the sim we suppress guest-side), story gate activation
+     * (no event at all), and since Phase 12c planet survey levels plus ruins exploration (four of the
+     * five survey mutation paths fire no listener, and rules.csv sets {@code $ruinsExplored} directly).
+     *
+     * <p><b>Survey and ruins run on both roles</b> for the same reason objectives do: both players
+     * survey, and the flip has to reach the other side either way. Apply is max-wins on the level's
+     * ordinal, which makes the two independent polls converge no matter what order the deltas land in.
      *
      * <p><b>Objectives run on both roles</b> (Phase 12c, plan gap 3b). The guest can capture a comm
      * relay / nav buoy / sensor array through its own local interaction dialog — {@code
@@ -1613,11 +1744,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
 
             Map<String, String> objectiveOwners = new LinkedHashMap<>();
             Map<String, String> gateStates = new LinkedHashMap<>();
+            Map<String, String> surveyLevels = new LinkedHashMap<>();
+            Map<String, String> ruinsExplored = new LinkedHashMap<>();
             for (LocationAPI location : sector.getAllLocations()) {
                 if (location == null) {
                     continue;
                 }
                 collectObjectiveOwners(location, objectiveOwners);
+                collectSurveyState(location, surveyLevels, ruinsExplored);
                 if (host) {
                     collectGateStates(location, gatesActive, canUseGates, gateStates);
                 }
@@ -1625,6 +1759,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             for (CoopSkeletonMutationWatcher.Flip flip
                     : skeletonWatcher.diffObjectiveOwners(objectiveOwners)) {
                 emitSkeletonDelta(CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP, flip);
+            }
+            for (CoopSkeletonMutationWatcher.Flip flip
+                    : skeletonWatcher.diffSurveyLevels(surveyLevels)) {
+                emitSkeletonDelta(CoopWorldDelta.Kind.SURVEY, flip);
+            }
+            for (CoopSkeletonMutationWatcher.Flip flip
+                    : skeletonWatcher.diffRuinsExplored(ruinsExplored)) {
+                emitSkeletonDelta(CoopWorldDelta.Kind.RUINS_EXPLORED, flip);
             }
             if (host) {
                 for (CoopSkeletonMutationWatcher.Flip flip
@@ -1662,6 +1804,43 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             }
             out.put(gate.getId(), CoopSkeletonMutationWatcher.encodeGateState(
                     GateEntityPlugin.isScanned(gate), gatesActive, canUseGates));
+        }
+    }
+
+    /**
+     * Reads every non-star planet's survey level and, for the ones that have ruins, whether those
+     * ruins have been salvaged. Both roles: either player can survey, and the survey-data special
+     * item can raise the level of a planet light-years from the player who cracked the cache, so the
+     * walk is sector-wide rather than scoped to the acting client's system.
+     *
+     * <p>Ruins-bearing planets are fed on every pass with their current {@code true}/{@code false}
+     * value rather than only when explored — the watcher only reports a change to an entry it has
+     * seen before, so a map that omits the unexplored planets would never notice one becoming
+     * explored.
+     */
+    private void collectSurveyState(LocationAPI location, Map<String, String> surveyOut,
+                                    Map<String, String> ruinsOut) {
+        List<PlanetAPI> planets = location.getPlanets();
+        if (planets == null) {
+            return;
+        }
+        for (PlanetAPI planet : planets) {
+            if (planet == null || planet.isStar() || planet.getId() == null) {
+                continue;
+            }
+            MarketAPI market = planet.getMarket();
+            if (market == null) {
+                continue;
+            }
+            MarketAPI.SurveyLevel level = market.getSurveyLevel();
+            if (level != null) {
+                surveyOut.put(planet.getId(), level.name());
+            }
+            if (hasRuins(market)) {
+                MemoryAPI memory = market.getMemoryWithoutUpdate();
+                ruinsOut.put(planet.getId(), Boolean.toString(memory != null
+                        && memory.getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG)));
+            }
         }
     }
 

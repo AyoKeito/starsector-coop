@@ -32,13 +32,20 @@ public final class CoopAbilityArbiter {
             "sensor_burst",
             // Reads the activating fleet's own surroundings into its own map/intel. Nothing shared
             // is written, so the pre-12c world-affecting default was simply wrong.
-            "gravitic_scan");
+            "gravitic_scan",
+            // It does write shared state — every planet in the system goes to PRELIMINARY survey
+            // level — but that outcome replicates on its own now, through the Phase 12c survey poll
+            // (WORLD_DELTA(SURVEY)), which catches all five of the level's mutation paths rather than
+            // just this one. Routing the ability to the host applier only produced log noise: there
+            // is no host-side effect wired for it, and the ability's own once-per-system flag and
+            // CR cost are charged on the activating fleet regardless.
+            "remote_survey");
 
     /**
      * Vanilla ability ids that touch shared / NPC / world state and must be host-arbitrated. Kept as
      * documentation of the arbitrated set — {@link #isWorldAffecting} routes by the local set plus
      * the unknown-is-world-affecting default, so anything not listed in {@link #LOCAL_ABILITIES}
-     * (notably {@code remote_survey} and {@code generate_slipsurge}) also arbitrates.
+     * (notably {@code generate_slipsurge}) also arbitrates.
      */
     public static final Set<String> WORLD_AFFECTING_ABILITIES = Set.of(
             "interdiction_pulse",

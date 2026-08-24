@@ -7,12 +7,20 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Pure decision half of the Phase 13 skeleton-mutation capture: a client polls the two pollable
- * skeleton mutations (campaign-objective ownership, story-gate activation) and this class decides
- * which of them changed since the last poll. The replicator supplies the engine readings and turns
- * the returned flips into {@code WORLD_DELTA} broadcasts. Gates are polled host-side only; objectives
- * are polled on both roles since Phase 12c, because a guest can capture one through its own local
- * interaction dialog and that flip has to reach the host.
+ * Pure decision half of the Phase 13 skeleton-mutation capture: a client polls the pollable skeleton
+ * mutations (campaign-objective ownership, story-gate activation, and since Phase 12c planet survey
+ * levels and ruins exploration) and this class decides which of them changed since the last poll.
+ * The replicator supplies the engine readings and turns the returned flips into {@code WORLD_DELTA}
+ * broadcasts. Gates are polled host-side only; objectives, survey levels and ruins are polled on both
+ * roles, because either player produces those and the flip has to reach the other side.
+ *
+ * <p><b>Why survey is a poll too.</b> {@code SurveyLevel} is one shared field per market with five
+ * mutation paths — the survey dialog panel, the {@code remote_survey} ability
+ * ({@code abilities/RemoteSurveyAbility.java:98}), system-entry SEEN marking
+ * ({@code CoreScript.markSystemAsEntered:441-443}), salvaged survey-data caches
+ * ({@code SurveyDataSpecial.java:160}, which can target a planet a couple of light-years away) and
+ * story rulecmds — and only the first has any listener at all. A sector-wide poll is the only
+ * capture that covers all five. Same for {@code $ruinsExplored}, which rules.csv sets directly.
  *
  * <p><b>Why a poll.</b> Objective ownership flips come out of the host's war sim
  * ({@code WarSimScript.processStarSystem} &rarr; {@code Objectives.control}, api_src
@@ -52,10 +60,22 @@ public final class CoopSkeletonMutationWatcher {
     /** A gate nobody has scanned, in a campaign where gates are not active: nothing to report. */
     public static final String DEFAULT_GATE_STATE = encodeGateState(false, false, false);
 
+    /**
+     * Vanilla's market-memory flag for "somebody has already salvaged this planet's ruins", set by
+     * the {@code salRuins_postSalvagePerform} rules.csv command and read by mission generation
+     * ({@code HubMissionWithSearch.java:752}, {@code Misc.java:2905/5881}). There is no
+     * {@code MemFlags} constant for it in the API — vanilla uses the raw string everywhere.
+     */
+    public static final String RUINS_EXPLORED_FLAG = "$ruinsExplored";
+
     private final Map<String, String> objectiveOwners = new LinkedHashMap<>();
     private final Map<String, String> gateStates = new LinkedHashMap<>();
+    private final Map<String, String> surveyLevels = new LinkedHashMap<>();
+    private final Map<String, String> ruinsExplored = new LinkedHashMap<>();
     private boolean objectivesSeeded;
     private boolean gatesSeeded;
+    private boolean surveyLevelsSeeded;
+    private boolean ruinsSeeded;
 
     /**
      * Diffs {@code entityId -> owning faction id} against the remembered map. Returns one flip per
@@ -74,6 +94,31 @@ public final class CoopSkeletonMutationWatcher {
     public List<Flip> diffGateStates(Map<String, String> current) {
         List<Flip> flips = diff(gateStates, current, gatesSeeded, DEFAULT_GATE_STATE);
         gatesSeeded = true;
+        return flips;
+    }
+
+    /**
+     * Diffs {@code planetId -> } {@code MarketAPI.SurveyLevel} name against the remembered map. Seeds
+     * silently: a fresh sector has hundreds of planets, all at the level deterministic worldgen gave
+     * both clients, and reporting that as "changed" would put ~800 deltas on the wire at every
+     * session start. Every planet is present from the first poll (planets are gen-time), so a level
+     * that rises later is still caught.
+     */
+    public List<Flip> diffSurveyLevels(Map<String, String> current) {
+        List<Flip> flips = diff(surveyLevels, current, surveyLevelsSeeded, null);
+        surveyLevelsSeeded = true;
+        return flips;
+    }
+
+    /**
+     * Diffs {@code planetId -> "true"/"false"} ({@link #RUINS_EXPLORED_FLAG}) against the remembered
+     * map. Same silent seeding as the survey levels, and for the same reason: the caller feeds every
+     * ruins-bearing planet on every pass, explored or not, so the flip is a value change on an entry
+     * that has been in the baseline since the first poll.
+     */
+    public List<Flip> diffRuinsExplored(Map<String, String> current) {
+        List<Flip> flips = diff(ruinsExplored, current, ruinsSeeded, null);
+        ruinsSeeded = true;
         return flips;
     }
 
@@ -104,12 +149,16 @@ public final class CoopSkeletonMutationWatcher {
         return flips;
     }
 
-    /** Forgets both baselines so the next poll re-seeds silently (session end / reconnect). */
+    /** Forgets every baseline so the next poll re-seeds silently (session end / reconnect). */
     public void clear() {
         objectiveOwners.clear();
         gateStates.clear();
+        surveyLevels.clear();
+        ruinsExplored.clear();
         objectivesSeeded = false;
         gatesSeeded = false;
+        surveyLevelsSeeded = false;
+        ruinsSeeded = false;
     }
 
     /** Last owner this watcher recorded for an objective, or {@code null}. Tests + diagnostics. */
@@ -120,6 +169,16 @@ public final class CoopSkeletonMutationWatcher {
     /** Last gate state this watcher recorded, or {@code null}. Tests + diagnostics. */
     public String gateState(String entityId) {
         return gateStates.get(entityId);
+    }
+
+    /** Last survey level this watcher recorded for a planet, or {@code null}. Tests + diagnostics. */
+    public String surveyLevel(String planetId) {
+        return surveyLevels.get(planetId);
+    }
+
+    /** Last {@code $ruinsExplored} value this watcher recorded, or {@code null}. Tests + diagnostics. */
+    public String ruinsExplored(String planetId) {
+        return ruinsExplored.get(planetId);
     }
 
     // ---- Guest-apply decisions ----------------------------------------------------------------

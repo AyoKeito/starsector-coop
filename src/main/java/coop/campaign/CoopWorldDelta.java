@@ -30,6 +30,10 @@ import java.util.Set;
  * host&rarr;guest only (the host owns the sims that produce them); {@link Kind#OBJECTIVE_OWNERSHIP}
  * is bidirectional since Phase 12c, because a guest can capture an objective through its own local
  * dialog. All three are captured by {@link CoopSkeletonMutationWatcher} plus a colony-deciv listener.
+ *
+ * <p>Phase 12c adds two more world-state values to the same poll, both bidirectional because either
+ * player produces them: {@link Kind#SURVEY} (a planet's survey level) and
+ * {@link Kind#RUINS_EXPLORED}.
  */
 public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
                              String newStateJson, String actingPlayerId) {
@@ -80,7 +84,30 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * <p>{@link #latestWins() Latest-wins}: activation arrives in two steps (a gate is scanned
          * first, gates become usable later), so the second step must not be deduped away.
          */
-        GATE_ACTIVATED;
+        GATE_ACTIVATED,
+        /**
+         * A planet's {@code SurveyLevel} rose (Phase 12c). {@code entityId} is the planet's gen-time
+         * engine id, so it matches across clients; {@link #newStateJson} is the
+         * {@code MarketAPI.SurveyLevel} constant name.
+         *
+         * <p>Bidirectional: both players survey, and the level is one shared per-market field with no
+         * event on four of its five mutation paths, so both roles poll for it.
+         *
+         * <p>{@link #latestWins() Latest-wins}: the level climbs in steps
+         * (SEEN&rarr;PRELIMINARY&rarr;FULL) and a set-based (kind, entity) key would swallow every
+         * step after the first, freezing the peer on the first level it heard about.
+         */
+        SURVEY,
+        /**
+         * A planet's ruins were salvaged (Phase 12c): the {@code $ruinsExplored} market-memory flag
+         * that vanilla's {@code salRuins_postSalvagePerform} rule sets locally and never replicates.
+         * {@code entityId} is the planet's gen-time engine id, payload {@code "true"}.
+         *
+         * <p><b>Not</b> latest-wins, deliberately: this is a single one-way flip
+         * (false&rarr;true, never back), so the set-based (kind, entity) key is exactly right and
+         * cheaper. Either dedup would behave identically here — the payload never varies.
+         */
+        RUINS_EXPLORED;
 
         /**
          * Whether the {@link Ledger} should dedup this kind by <em>payload</em> rather than by the
@@ -88,7 +115,7 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * change repeatedly — including changing back to a value it already held.
          */
         public boolean latestWins() {
-            return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED;
+            return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED || this == SURVEY;
         }
     }
 
