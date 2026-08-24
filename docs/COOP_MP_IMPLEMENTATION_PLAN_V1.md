@@ -1998,6 +1998,15 @@ Implement Phase 20 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Harden the coop trans
 - **Persistent screen-space HUD:** `CampaignUIRenderingListener` (`renderInUICoordsBelowUI` / `AboveUIBelowTooltips` / `AboveUIAndTooltips`) is a sanctioned every-frame overlay hook — raw OpenGL in UI coords, display-only (no widgets, no input).
 - Everything above is official API — **no MethodHandles-into-obfuscated-UI is needed or permitted here** (that route exists but is rejected under the stability rubric; one game patch would break it).
 
+**Deferred issue this phase owns (2026-08-24, user decision):** observed live in the Phase 29 M1
+smoke sessions — a host that loads its save before the guest connects **starts unpaused and plays on
+alone**; the existing connect-time hold (`maybeHoldHostPausedUntilSessionReady`) covers the
+handshake-in-progress window, not the nobody-connected-yet window, so the shared world advances
+without the guest. Deliberately NOT patched with another interim pause source: the lobby's
+force-pause-until-all-ready below is the real fix, and the first Steps item already reuses the
+connect-pause hold for exactly this. Until Phase 21 lands, the workaround is host etiquette (pause
+after loading until the guest appears).
+
 **Scope:**
 
 - **In-campaign lobby (`coop.ui.CoopLobbyDialog`).** Host loads the save → world force-paused → lobby interaction dialog: connected players, per-player ready state, the Phase 20 connection-doctor verdict (tier, external endpoint, RTT) rendered with widgets instead of log lines, and a "Start" gated on all-ready. Guest sees the same lobby in read-mostly form after handshake; a guest connecting mid-handshake sees a "connecting…" dialog. Unpause when everyone readies. (The pause machinery, input blocker, and rebroadcast-on-start all exist — this is choreography, not new sync.)
