@@ -179,18 +179,47 @@ class CoopMessagesTest {
     @Test
     void datagramEnvelopeRoundTripsHighFrequencyPayload() {
         String body = "player-a|Guest|corvus\nmember-1|wolf|wolf_Assault";
-        String encoded = CoopMessages.datagram("session-a", CoopMessages.Type.FLEET_SNAPSHOT, body);
+        String encoded = CoopMessages.datagram(
+                "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 7L, 12345L, body);
 
         CoopMessages.Datagram decoded = CoopMessages.parseDatagram(encoded);
 
         assertEquals("session-a", decoded.sessionId());
         assertEquals(CoopMessages.Type.FLEET_SNAPSHOT, decoded.type());
-        assertEquals(body, decoded.body());
+        assertEquals(1, decoded.sections().size());
+        assertEquals(7L, decoded.sections().get(0).epoch());
+        assertEquals(12345L, decoded.sections().get(0).sentGameTimeMillis());
+        assertEquals(body, decoded.sections().get(0).body());
+    }
+
+    @Test
+    void datagramEnvelopeRoundTripsRedundantSectionsOldestFirst() {
+        // Bodies deliberately exercise the characters the section split must not trip on: the batch
+        // codecs use newlines and pipes internally, never the envelope's unit separator.
+        String older = "3\nfleet-a|corvus|1.0|2.0|0.5|0.5";
+        String newer = "3\nfleet-a|corvus|1.5|2.5|0.5|0.5";
+        String encoded = CoopMessages.datagram("session-a", CoopMessages.Type.NPC_FLEET_MOTION,
+                java.util.List.of(new CoopMessages.DatagramSection(4L, 400L, older),
+                        new CoopMessages.DatagramSection(5L, 500L, newer)));
+
+        CoopMessages.Datagram decoded = CoopMessages.parseDatagram(encoded);
+
+        assertEquals(2, decoded.sections().size());
+        assertEquals(4L, decoded.sections().get(0).epoch());
+        assertEquals(older, decoded.sections().get(0).body());
+        assertEquals(5L, decoded.sections().get(1).epoch());
+        assertEquals(500L, decoded.sections().get(1).sentGameTimeMillis());
+        assertEquals(newer, decoded.sections().get(1).body());
     }
 
     @Test
     void malformedDatagramEnvelopeIsRejected() {
         assertThrows(IllegalArgumentException.class,
                 () -> CoopMessages.parseDatagram("session-a|FLEET_SNAPSHOT|payload"));
+        // A stamp that is not a number is malformed, not a zero.
+        String badStamp = CoopMessages.datagram(
+                        "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "body")
+                .replace("10", "x0");
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagram(badStamp));
     }
 }

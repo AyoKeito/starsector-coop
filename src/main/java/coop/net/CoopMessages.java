@@ -3,7 +3,9 @@ package coop.net;
 import coop.handshake.CoopHandshakeManifest;
 import coop.session.CoopPlayerInfo;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -337,9 +339,14 @@ public final class CoopMessages {
      * registry against it. Rebroadcast whenever the set hash changes. (NPC fleet *motion* rides the
      * separate high-frequency UDP {@code NPC_FLEET_MOTION} datagram, built via {@link #datagram}.)
      */
-    public static Message npcFleetSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
+    public static Message npcFleetSet(String sessionId, long seq, long sentAtMillis,
+                                      long gameTimeMillis, String encodedSet) {
+        // gameTimeMillis is the sender's stream time (CoopStreamClock) at capture, so the guest can
+        // feed set positions into the same interpolation buffers the UDP motion sections fill
+        // (Phase 29 M1) — a TCP Message has no datagram section stamp to carry it otherwise.
         return new Message(Type.NPC_FLEET_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
-                "{\"set\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+                "{\"gameTimeMillis\":" + gameTimeMillis + ","
+                        + "\"set\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
     }
 
     /**
@@ -524,39 +531,98 @@ public final class CoopMessages {
 
     /**
      * UDP datagram envelope for high-frequency state streams (Phase 8 fleet snapshots, later combat
-     * snapshots). Unlike the TCP {@link Message} line protocol this is not JSON: the body carries its
-     * own compact encoding (e.g. {@link coop.fleet.CoopFleetSnapshot#encode()}), and the envelope is
-     * just {@code sessionId} + {@code type} + {@code body} joined by a unit-separator that never
-     * appears in those encodings. Datagrams are framed one-per-packet by UDP itself.
+     * snapshots). Unlike the TCP {@link Message} line protocol this is not JSON: each section body
+     * carries its own compact encoding (e.g. {@link coop.fleet.CoopFleetSnapshot#encode()}), and the
+     * envelope is fields joined by a unit-separator that never appears in those encodings. Datagrams
+     * are framed one-per-packet by UDP itself.
+     *
+     * <p><b>Phase 29 M1 wire prerequisite (2026-08-24; the Phase 20.1 epoch guard pulled forward):</b>
+     * the envelope carries one or more <em>sections</em>, oldest first, each stamped with the sender's
+     * monotonic {@code epoch} and stream time ({@link CoopStreamClock}). The current send plus the
+     * previous one ride in the same packet ({@link CoopDatagramRedundancy}), so a single lost datagram
+     * costs nothing — its sections arrive again in the next one. The receiver drops sections at or
+     * below its per-type epoch watermark ({@link CoopDatagramWatermark}), which is also what makes a
+     * reordered datagram inert instead of a stale-position apply. Wire shape: {@code sessionId},
+     * {@code TYPE}, then per section {@code epoch}, {@code sentGameTimeMillis}, {@code body}, all
+     * unit-separator joined — token count {@code 2 + 3n}.
      */
-    public record Datagram(String sessionId, Type type, String body) {
+    public record Datagram(String sessionId, Type type, List<DatagramSection> sections) {
         public Datagram {
             type = Objects.requireNonNull(type, "type");
             sessionId = sessionId == null ? "" : sessionId;
+            sections = sections == null ? List.of() : List.copyOf(sections);
+        }
+    }
+
+    /** One stamped body within a {@link Datagram}; {@code sentGameTimeMillis} is sender stream time. */
+    public record DatagramSection(long epoch, long sentGameTimeMillis, String body) {
+        public DatagramSection {
             body = body == null ? "" : body;
         }
     }
 
     private static final char DATAGRAM_SEPARATOR = '\u001f';
 
-    public static String datagram(String sessionId, Type type, String body) {
+    public static String datagram(String sessionId, Type type, List<DatagramSection> sections) {
         Objects.requireNonNull(type, "type");
-        return (sessionId == null ? "" : sessionId)
-                + DATAGRAM_SEPARATOR + type.name()
-                + DATAGRAM_SEPARATOR + (body == null ? "" : body);
+        Objects.requireNonNull(sections, "sections");
+        if (sections.isEmpty()) {
+            throw new IllegalArgumentException("Datagram needs at least one section");
+        }
+        StringBuilder out = new StringBuilder(64 + sections.size() * 32);
+        out.append(sessionId == null ? "" : sessionId).append(DATAGRAM_SEPARATOR).append(type.name());
+        for (DatagramSection section : sections) {
+            out.append(DATAGRAM_SEPARATOR).append(section.epoch())
+                    .append(DATAGRAM_SEPARATOR).append(section.sentGameTimeMillis())
+                    .append(DATAGRAM_SEPARATOR).append(section.body());
+        }
+        return out.toString();
+    }
+
+    /** Single-section convenience (transport tests and call sites without redundancy). */
+    public static String datagram(String sessionId, Type type, long epoch, long sentGameTimeMillis,
+                                  String body) {
+        return datagram(sessionId, type, List.of(new DatagramSection(epoch, sentGameTimeMillis, body)));
     }
 
     public static Datagram parseDatagram(String raw) {
         Objects.requireNonNull(raw, "raw");
-        int first = raw.indexOf(DATAGRAM_SEPARATOR);
-        int second = first < 0 ? -1 : raw.indexOf(DATAGRAM_SEPARATOR, first + 1);
-        if (first < 0 || second < 0) {
+        String[] tokens = splitDatagram(raw);
+        if (tokens.length < 5 || (tokens.length - 2) % 3 != 0) {
             throw new IllegalArgumentException("Malformed coop datagram envelope");
         }
-        String sessionId = raw.substring(0, first);
-        Type type = Type.valueOf(raw.substring(first + 1, second));
-        String body = raw.substring(second + 1);
-        return new Datagram(sessionId, type, body);
+        String sessionId = tokens[0];
+        Type type = Type.valueOf(tokens[1]);
+        int sectionCount = (tokens.length - 2) / 3;
+        List<DatagramSection> sections = new ArrayList<>(sectionCount);
+        for (int i = 0; i < sectionCount; i++) {
+            int base = 2 + i * 3;
+            try {
+                sections.add(new DatagramSection(Long.parseLong(tokens[base]),
+                        Long.parseLong(tokens[base + 1]), tokens[base + 2]));
+            } catch (NumberFormatException ex) {
+                throw new IllegalArgumentException("Malformed coop datagram section stamp", ex);
+            }
+        }
+        return new Datagram(sessionId, type, sections);
+    }
+
+    /**
+     * Splits on the unit separator without regex. Bodies never contain the separator (each body
+     * encoding predates the envelope and was chosen for exactly that), so a flat split is exact.
+     */
+    private static String[] splitDatagram(String raw) {
+        List<String> tokens = new ArrayList<>(8);
+        int start = 0;
+        while (true) {
+            int idx = raw.indexOf(DATAGRAM_SEPARATOR, start);
+            if (idx < 0) {
+                tokens.add(raw.substring(start));
+                return tokens.toArray(new String[0]);
+            }
+            tokens.add(raw.substring(start, idx));
+            start = idx + 1;
+        }
     }
 
     public static String encode(Message message) {

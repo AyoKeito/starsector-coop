@@ -56,14 +56,14 @@ class CoopNetServiceTest {
             waitUntil(() -> bothConnected(host, guest), "host and guest connected");
 
             String guestSnapshot = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "guest-snapshot");
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "guest-snapshot");
             guest.sendDatagram(guestSnapshot);
             guest.flushOutbound();
 
             assertEquals(guestSnapshot, waitForDatagram(host, "host inbound UDP fleet snapshot"));
 
             String hostSnapshot = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "host-snapshot");
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "host-snapshot");
             host.sendDatagram(hostSnapshot);
             host.flushOutbound();
 
@@ -169,7 +169,7 @@ class CoopNetServiceTest {
 
             for (int i = 0; i < 4; i++) {
                 guest.sendDatagram(CoopMessages.datagram(
-                        "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "snapshot-" + i));
+                        "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "snapshot-" + i));
             }
             guest.flushOutbound();
 
@@ -337,7 +337,7 @@ class CoopNetServiceTest {
 
             // Establish the legitimate return address first.
             String fromGuest = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "guest-snapshot");
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "guest-snapshot");
             guest.sendDatagram(fromGuest);
             guest.flushOutbound();
             assertEquals(fromGuest, waitForDatagram(host, "host inbound UDP from guest"));
@@ -346,7 +346,7 @@ class CoopNetServiceTest {
             // 127.0.0.1), different port. Address-only pinning would let this through and re-teach
             // the host its return address, blackholing the motion stream to the intruder.
             byte[] payload = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "intruder")
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "intruder")
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8);
             intruder.send(new DatagramPacket(payload, payload.length,
                     InetAddress.getByName("127.0.0.1"), port));
@@ -361,7 +361,7 @@ class CoopNetServiceTest {
 
             // And the host still streams to the real guest, not to whoever spoke last.
             String toGuest = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "host-snapshot");
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "host-snapshot");
             host.sendDatagram(toGuest);
             host.flushOutbound();
             assertEquals(toGuest, waitForDatagram(guest, "guest inbound UDP after intruder packet"));
@@ -384,7 +384,7 @@ class CoopNetServiceTest {
 
             // Teach the host the guest's return address with a normal datagram.
             String small = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "small");
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "small");
             guest.sendDatagram(small);
             guest.flushOutbound();
             assertEquals(small, waitForDatagram(host, "host inbound UDP priming"));
@@ -403,7 +403,7 @@ class CoopNetServiceTest {
             // A subsequent valid datagram still gets through, proving the discard did not wedge
             // the receive loop.
             String after = CoopMessages.datagram(
-                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, "after-truncation");
+                    "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "after-truncation");
             guest.sendDatagram(after);
             guest.flushOutbound();
             assertEquals(after, waitForDatagram(host, "host inbound UDP after oversized datagram"));

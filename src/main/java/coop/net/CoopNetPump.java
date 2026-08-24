@@ -148,6 +148,16 @@ public class CoopNetPump implements EveryFrameScript {
     private long nextGuestSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
     private final CoopSaveCheckpoint saveCheckpoint = new CoopSaveCheckpoint();
+    /**
+     * Phase 29 M1 wire prerequisite: outbound stream stamping, sender-side redundancy, and the
+     * receive-side epoch watermark for the UDP state streams. The stream clock advances by campaign
+     * dt (0 while paused) at the top of every frame; the watermark and redundancy reset on the
+     * session edges in {@link #syncNpcReplication} so a new session's restarted epochs are accepted
+     * and no stale section leaks across sessions.
+     */
+    private final CoopStreamClock streamClock = new CoopStreamClock();
+    private final CoopDatagramRedundancy datagramRedundancy = new CoopDatagramRedundancy();
+    private final CoopDatagramWatermark datagramWatermark = new CoopDatagramWatermark();
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
     /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
@@ -302,7 +312,8 @@ public class CoopNetPump implements EveryFrameScript {
         // Phase 18: vanilla's market-close callback, forwarded so a rejected claim stops being
         // tracked once the screen it referred to is confirmed gone.
         this.campaignReplicator.setMarketCloseObserver(this::onLocalMarketClosed);
-        this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis);
+        this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis,
+                streamClock);
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
@@ -355,6 +366,9 @@ public class CoopNetPump implements EveryFrameScript {
         // Same shape: CoopDebug.diagnosticsEnabled() is read 3-4x a frame from the hot paths, so the
         // property + sector-memory lookup behind it runs here on a 300-frame poll instead.
         CoopDebug.pollFrame();
+        // Phase 29 M1: stream time advances by campaign dt, frozen while paused, before anything
+        // this frame stamps an outbound datagram with it.
+        streamClock.advance(amount, isSectorPausedForStream());
         long t = profiler.start();
         maybeStartFromSystemProperties();
         t = profiler.split(SECTION_CFG_PROPERTIES, t);
@@ -1408,8 +1422,9 @@ public class CoopNetPump implements EveryFrameScript {
             if (snapshot == null) {
                 return;
             }
-            String datagram = CoopMessages.datagram(
-                    sessionState.sessionId(), CoopMessages.Type.FLEET_SNAPSHOT, snapshot.encode());
+            String datagram = datagramRedundancy.compose(
+                    sessionState.sessionId(), CoopMessages.Type.FLEET_SNAPSHOT,
+                    streamClock.nextEpoch(), streamClock.gameTimeMillis(), snapshot.encode());
             service.sendDatagram(datagram);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to capture coop fleet snapshot", ex);
@@ -1601,10 +1616,15 @@ public class CoopNetPump implements EveryFrameScript {
                 if (!sessionMatches(datagram.sessionId())) {
                     continue;
                 }
-                switch (datagram.type()) {
-                    case FLEET_SNAPSHOT -> applyFleetSnapshotDatagram(datagram);
-                    case NPC_FLEET_MOTION -> handleNpcFleetMotion(datagram);
-                    default -> { /* ignore unknown datagram types */ }
+                // Sections at or below the per-type epoch watermark are dropped here: a reordered
+                // datagram applies nothing, a redundant section that already arrived applies nothing,
+                // and a redundant section covering a lost packet applies normally (oldest first).
+                for (CoopMessages.DatagramSection section : datagramWatermark.accept(datagram)) {
+                    switch (datagram.type()) {
+                        case FLEET_SNAPSHOT -> applyFleetSnapshotSection(section);
+                        case NPC_FLEET_MOTION -> handleNpcFleetMotion(section);
+                        default -> { /* ignore unknown datagram types */ }
+                    }
                 }
             } catch (RuntimeException ex) {
                 CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram", ex);
@@ -1612,8 +1632,8 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
-    private void applyFleetSnapshotDatagram(CoopMessages.Datagram datagram) {
-        CoopFleetSnapshot snapshot = CoopFleetSnapshot.decode(datagram.body());
+    private void applyFleetSnapshotSection(CoopMessages.DatagramSection section) {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.decode(section.body());
         // Ignore our own echoed datagrams and any sender that is not the remote coop player.
         if (!snapshot.playerId().equals(sessionState.remotePlayerId())) {
             return;
@@ -1621,11 +1641,11 @@ public class CoopNetPump implements EveryFrameScript {
         fleetMirror.apply(snapshot, localPlayerFactionId());
     }
 
-    private void handleNpcFleetMotion(CoopMessages.Datagram datagram) {
+    private void handleNpcFleetMotion(CoopMessages.DatagramSection section) {
         if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
             return;
         }
-        List<CoopNpcFleetMotion> motions = CoopNpcFleetMotion.decodeBatch(datagram.body());
+        List<CoopNpcFleetMotion> motions = CoopNpcFleetMotion.decodeBatch(section.body());
         npcFleetRegistry.applyMotion(motions);
     }
 
@@ -1661,10 +1681,14 @@ public class CoopNetPump implements EveryFrameScript {
             npcFleetSuppressor.reset();
             npcThreatWatcher.reset();
             battleResultReconciler.reset();
+            datagramWatermark.reset();
+            datagramRedundancy.reset();
             npcReplicationStreaming = true;
         } else if (!active && npcReplicationStreaming) {
             // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
             npcFleetRegistry.disposeAll();
+            datagramWatermark.reset();
+            datagramRedundancy.reset();
             npcReplicationStreaming = false;
             lastNpcDebug = null;
             lastNpcMirrorCount = -1;
@@ -2363,6 +2387,23 @@ public class CoopNetPump implements EveryFrameScript {
             return Global.getSector();
         } catch (RuntimeException | LinkageError ex) {
             return null;
+        }
+    }
+
+    /**
+     * Whether stream time should hold this frame. No sector (title screen, teardown) counts as
+     * paused: stamps must only advance while the campaign world actually moves, or the receiver's
+     * interpolation cursor would chase time that no fleet motion ever filled.
+     */
+    private static boolean isSectorPausedForStream() {
+        SectorAPI sector = sectorOrNull();
+        if (sector == null) {
+            return true;
+        }
+        try {
+            return sector.isPaused();
+        } catch (RuntimeException | LinkageError ex) {
+            return true;
         }
     }
 

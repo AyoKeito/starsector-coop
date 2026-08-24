@@ -59,6 +59,10 @@ public final class CoopNpcFleetReplicator {
     private final CoopNetService service;
     private final CoopSessionState sessionState;
     private final LongSupplier clockMillis;
+    /** Pump-owned (Phase 29 M1): outbound epoch + stream-time stamps for motion datagrams and sets. */
+    private final coop.net.CoopStreamClock streamClock;
+    private final coop.net.CoopDatagramRedundancy datagramRedundancy =
+            new coop.net.CoopDatagramRedundancy();
     private final CoopGuestPresence guestPresence = new CoopGuestPresence();
     private final CoopNpcFleetMotionSmoother motionSmoother = new CoopNpcFleetMotionSmoother();
 
@@ -70,10 +74,11 @@ public final class CoopNpcFleetReplicator {
     private final Map<String, String> loggedFleetHashes = new HashMap<>();
 
     public CoopNpcFleetReplicator(CoopNetService service, CoopSessionState sessionState,
-                                  LongSupplier clockMillis) {
+                                  LongSupplier clockMillis, coop.net.CoopStreamClock streamClock) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
+        this.streamClock = Objects.requireNonNull(streamClock, "streamClock");
     }
 
     /**
@@ -134,6 +139,7 @@ public final class CoopNpcFleetReplicator {
         loggedFleetHashes.clear();
         guestPresence.reset();
         motionSmoother.reset();
+        datagramRedundancy.reset();
         CoopFullFidelitySystemDriver.reset();
     }
 
@@ -173,7 +179,8 @@ public final class CoopNpcFleetReplicator {
             return;
         }
         service.send(CoopMessages.npcFleetSet(
-                sessionState.sessionId(), service.nextSeq(), now, set.encode()));
+                sessionState.sessionId(), service.nextSeq(), now,
+                streamClock.gameTimeMillis(), set.encode()));
         lastSetHash = set.setHash();
         lastFleetCount = fleets.size();
         CoopLog.info(CoopNpcFleetReplicator.class,
@@ -239,8 +246,9 @@ public final class CoopNpcFleetReplicator {
         if (motions.isEmpty()) {
             return;
         }
-        service.sendDatagram(CoopMessages.datagram(sessionState.sessionId(),
-                CoopMessages.Type.NPC_FLEET_MOTION, CoopNpcFleetMotion.encodeBatch(motions)));
+        service.sendDatagram(datagramRedundancy.compose(sessionState.sessionId(),
+                CoopMessages.Type.NPC_FLEET_MOTION, streamClock.nextEpoch(),
+                streamClock.gameTimeMillis(), CoopNpcFleetMotion.encodeBatch(motions)));
     }
 
     private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now,
