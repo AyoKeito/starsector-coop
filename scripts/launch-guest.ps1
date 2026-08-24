@@ -5,6 +5,8 @@ param(
     [int] $Port = 7777,
     [string] $SeedString = 'MN-1234567890123456789',
     [switch] $Diagnostics,
+    # Extra -D JVM properties appended verbatim, e.g. -ExtraJvmProps '-Dcoop.debug.interactionDelayMs=1500'
+    [string[]] $ExtraJvmProps = @(),
     # Explicit consent to join an in-flight campaign with a save that does not belong to it
     # (fresh re-roll or wrong save). This is the supported save-less-guest rejoin path.
     [switch] $AdoptCampaign,
@@ -84,6 +86,9 @@ if ($Diagnostics) {
 }
 if ($AdoptCampaign) {
     $jvmProperties += "-Dcoop.adoptCampaignId=true"
+}
+if ($ExtraJvmProps.Count -gt 0) {
+    $jvmProperties += $ExtraJvmProps
 }
 
 Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties $jvmProperties

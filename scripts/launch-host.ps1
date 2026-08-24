@@ -4,6 +4,8 @@ param(
     [int] $Port = 7777,
     [string] $SeedString = 'MN-1234567890123456789',
     [switch] $Diagnostics,
+    # Extra -D JVM properties appended verbatim, e.g. -ExtraJvmProps '-Dcoop.debug.interactionDelayMs=1500'
+    [string[]] $ExtraJvmProps = @(),
     [switch] $PatchOnly
 )
 
@@ -70,6 +72,9 @@ if (-not [string]::IsNullOrWhiteSpace($SeedString)) {
 }
 if ($Diagnostics) {
     $jvmProperties += "-Dcoop.debug.diagnostics=true"
+}
+if ($ExtraJvmProps.Count -gt 0) {
+    $jvmProperties += $ExtraJvmProps
 }
 
 Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties $jvmProperties
