@@ -114,8 +114,12 @@ class CoopSkeletonMutationReplicatorTest {
                 CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
     }
 
+    /**
+     * Phase 12c gap 3b: {@code Objectives.control} runs in the guest's own dialog, so the guest polls
+     * objectives too and reports the capture upward on the same channel.
+     */
     @Test
-    void guestNeverCaptures() {
+    void guestReportsItsOwnObjectiveCapture() {
         FakeSector sector = new FakeSector();
         FakeEntity relay = sector.addObjective("relay-1", "hegemony");
         Global.setSector(sector.proxy());
@@ -126,11 +130,95 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeGuestSession(), clock);
 
         replicator.tickWorldDeltas();
-        relay.factionId = "pirates";
+        assertTrue(service.sent.isEmpty(), "the seeding poll reports nothing");
+
+        relay.factionId = "player";
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
         replicator.tickWorldDeltas();
 
-        assertTrue(service.sent.isEmpty(), "the host owns the war sim; the guest must stay quiet");
+        assertEquals(List.of("player"), ownershipPayloads(service.sent));
+        assertEquals("guest-player",
+                CoopMessages.requiredPayloadString(service.sent.get(0), "actingPlayerId"));
+    }
+
+    /** The host's verbatim rebroadcast of what the guest just reported must die in the ledger. */
+    @Test
+    void guestSwallowsTheHostsEchoOfItsOwnCapture() {
+        FakeSector sector = new FakeSector();
+        FakeEntity relay = sector.addObjective("relay-1", "hegemony");
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        MutableClock clock = new MutableClock(1_000_000L);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), clock);
+
+        replicator.tickWorldDeltas();
+        relay.factionId = "player";
+        clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
+        replicator.tickWorldDeltas();
+        assertEquals(1, service.sent.size());
+        int setFactionCalls = relay.setFactionCalls;
+
+        replicator.handle(ownershipMessage("relay-1", "player"));
+
+        assertEquals(1, service.sent.size(), "the echo must not be re-reported");
+        assertEquals(setFactionCalls, relay.setFactionCalls, "the echo must not touch the engine");
+
+        // And the next poll finds nothing new either.
+        clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
+        replicator.tickWorldDeltas();
+        assertEquals(1, service.sent.size());
+    }
+
+    /** Gates and deciv stay host-only: the guest's producers for both are suppressed. */
+    @Test
+    void guestNeverCapturesGates() {
+        FakeSector sector = new FakeSector();
+        FakeEntity gate = sector.addGate("gate-galatia");
+        gate.memory.set(GateEntityPlugin.GATE_SCANNED, true);
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        MutableClock clock = new MutableClock(1_000_000L);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), clock);
+
+        replicator.tickWorldDeltas();
+        clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
+        replicator.tickWorldDeltas();
+
+        assertTrue(service.sent.isEmpty(), "the host owns gate activation");
+    }
+
+    /**
+     * Host integration of a guest capture: apply it to the authoritative world, rebroadcast once, and
+     * let the ledger stop the host's own next poll from reporting the same value straight back.
+     */
+    @Test
+    void hostIntegratesAGuestObjectiveCaptureWithoutEchoingItTwice() {
+        FakeSector sector = new FakeSector();
+        FakeEntity relay = sector.addObjective("relay-1", "hegemony");
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableClock clock = new MutableClock(1_000_000L);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), clock);
+
+        replicator.tickWorldDeltas(); // seed the host baseline at "hegemony"
+        assertTrue(service.sent.isEmpty());
+
+        replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L, "relay-1",
+                "OBJECTIVE_OWNERSHIP", false, "player", "guest-player"));
+
+        assertEquals("player", relay.factionId);
+        assertEquals(List.of("player"), ownershipPayloads(service.sent), "rebroadcast exactly once");
+
+        clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
+        replicator.tickWorldDeltas();
+
+        assertEquals(1, service.sent.size(), "the host's poll must not re-report what it just applied");
     }
 
     @Test

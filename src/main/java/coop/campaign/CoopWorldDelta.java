@@ -26,8 +26,10 @@ import java.util.Set;
  *
  * <p>Phase 13 adds the three host&rarr;guest skeleton mutations its runtime-content inventory found
  * beyond what Phases 9/12 already replicate: {@link Kind#DECIV}, {@link Kind#OBJECTIVE_OWNERSHIP},
- * and {@link Kind#GATE_ACTIVATED}. These flow host&rarr;guest only (the host owns the sims that
- * produce them) and are captured by {@link CoopSkeletonMutationWatcher} plus a colony-deciv listener.
+ * and {@link Kind#GATE_ACTIVATED}. {@link Kind#DECIV} and {@link Kind#GATE_ACTIVATED} flow
+ * host&rarr;guest only (the host owns the sims that produce them); {@link Kind#OBJECTIVE_OWNERSHIP}
+ * is bidirectional since Phase 12c, because a guest can capture an objective through its own local
+ * dialog. All three are captured by {@link CoopSkeletonMutationWatcher} plus a colony-deciv listener.
  */
 public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
                              String newStateJson, String actingPlayerId) {
@@ -57,10 +59,13 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          */
         DECIV,
         /**
-         * A campaign objective (comm relay / nav buoy / sensor array) changed hands in the host's war
-         * sim (Phase 13). {@code entityId} is the objective's engine id — objectives are gen-time
-         * entities, so the id matches across clients — and {@link #newStateJson} is the new owning
-         * faction id.
+         * A campaign objective (comm relay / nav buoy / sensor array) changed hands (Phase 13).
+         * {@code entityId} is the objective's engine id — objectives are gen-time entities, so the id
+         * matches across clients — and {@link #newStateJson} is the new owning faction id.
+         *
+         * <p>The only skeleton kind that travels both ways: the host's war sim produces most flips,
+         * but the guest can also capture an objective through its own local interaction dialog, so
+         * since Phase 12c both roles poll for it and report upward/outward on this kind.
          *
          * <p>{@link #latestWins() Latest-wins}: ownership oscillates (A&rarr;B&rarr;A), which a
          * set-based (kind, entity) key would swallow after the first flip.

@@ -7,10 +7,12 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Pure decision half of the Phase 13 skeleton-mutation capture: the host polls the two pollable
+ * Pure decision half of the Phase 13 skeleton-mutation capture: a client polls the two pollable
  * skeleton mutations (campaign-objective ownership, story-gate activation) and this class decides
  * which of them changed since the last poll. The replicator supplies the engine readings and turns
- * the returned flips into {@code WORLD_DELTA} broadcasts.
+ * the returned flips into {@code WORLD_DELTA} broadcasts. Gates are polled host-side only; objectives
+ * are polled on both roles since Phase 12c, because a guest can capture one through its own local
+ * interaction dialog and that flip has to reach the host.
  *
  * <p><b>Why a poll.</b> Objective ownership flips come out of the host's war sim
  * ({@code WarSimScript.processStarSystem} &rarr; {@code Objectives.control}, api_src

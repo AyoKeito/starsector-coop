@@ -1202,14 +1202,18 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     /**
-     * Guest: flip a campaign objective's owner the way vanilla's own capture does — {@code setFaction}
-     * plus clearing the non-functional memory flag ({@code rulecmd/salvage/Objectives.control},
-     * api_src lines 304-312).
+     * Flip a campaign objective's owner the way vanilla's own capture does — {@code setFaction} plus
+     * clearing the non-functional memory flag ({@code rulecmd/salvage/Objectives.control}, api_src
+     * lines 304-312). Runs on both roles since Phase 12c: host&rarr;guest for a war-sim flip, and
+     * guest&rarr;host for an objective the guest captured in its own dialog.
      *
      * <p>Deliberately <em>not</em> mirrored: {@code ListenerUtil.reportObjectiveChangedHands}. Its
      * only core implementor is {@code WarSimScript} ({@code command/WarSimScript.java:314}), which
-     * answers by spawning response fleets — the exact simulation the guest suppresses. The dialog-only
-     * reputation hit and the comm-sniffer unhack are likewise host-side/player-local concerns.
+     * answers by spawning response fleets — the exact simulation the guest suppresses. Skipping it on
+     * the host too means a guest capture draws no war-sim retaliation where the host's own capture
+     * would; that is the conservative side of the trade (a missing response fleet, not a phantom one)
+     * and stays consistent with the guest, whose sim could not mirror the spawn anyway. The
+     * dialog-only reputation hit and the comm-sniffer unhack are likewise player-local concerns.
      */
     private void applyObjectiveOwnershipToEngine(CoopWorldDelta delta) {
         SectorAPI sector = Global.getSector();
@@ -1285,12 +1289,25 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     }
 
     /**
-     * Host: slow poll for the two skeleton mutations that have no usable capture event — campaign
+     * Slow poll for the two skeleton mutations that have no usable capture event — campaign
      * objective ownership (the war sim's own listener is the sim we suppress guest-side) and story
-     * gate activation (no event at all). Guest-side this is a no-op: the host owns both sims.
+     * gate activation (no event at all).
+     *
+     * <p><b>Objectives run on both roles</b> (Phase 12c, plan gap 3b). The guest can capture a comm
+     * relay / nav buoy / sensor array through its own local interaction dialog — {@code
+     * Objectives.control} runs entirely client-side — and before this the flip stayed guest-local
+     * until the host's war sim happened to overwrite it. Reporting upward on the same
+     * {@code WORLD_DELTA(OBJECTIVE_OWNERSHIP)} channel makes the guest's capture authoritative: the
+     * host applies it in {@link #applyObjectiveOwnershipToEngine} and rebroadcasts, and the ledger's
+     * latest-wins payload dedup absorbs both the host's echo back to the guest and the guest's own
+     * next poll (which sees the value it already recorded).
+     *
+     * <p><b>Gates and deciv stay host-only.</b> Both of the guest's producers for those are
+     * suppressed — there is no guest-side sim to observe — so a guest poll could only ever report the
+     * host's own change back at it.
      */
     private void tickSkeletonMutations() {
-        if (!isHost() || !isActive()) {
+        if (!isActive()) {
             return;
         }
         long nowMillis = now();
@@ -1298,6 +1315,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             return;
         }
         lastSkeletonPollMillis = nowMillis;
+        boolean host = isHost();
         try {
             SectorAPI sector = Global.getSector();
             if (sector == null) {
@@ -1316,14 +1334,19 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                     continue;
                 }
                 collectObjectiveOwners(location, objectiveOwners);
-                collectGateStates(location, gatesActive, canUseGates, gateStates);
+                if (host) {
+                    collectGateStates(location, gatesActive, canUseGates, gateStates);
+                }
             }
             for (CoopSkeletonMutationWatcher.Flip flip
                     : skeletonWatcher.diffObjectiveOwners(objectiveOwners)) {
                 emitSkeletonDelta(CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP, flip);
             }
-            for (CoopSkeletonMutationWatcher.Flip flip : skeletonWatcher.diffGateStates(gateStates)) {
-                emitSkeletonDelta(CoopWorldDelta.Kind.GATE_ACTIVATED, flip);
+            if (host) {
+                for (CoopSkeletonMutationWatcher.Flip flip
+                        : skeletonWatcher.diffGateStates(gateStates)) {
+                    emitSkeletonDelta(CoopWorldDelta.Kind.GATE_ACTIVATED, flip);
+                }
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Skeleton mutation poll failed", ex);
@@ -1358,7 +1381,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
     }
 
-    /** Record the host's own capture in the ledger (so the guest's echo is inert) and broadcast it. */
+    /**
+     * Record this client's own capture in the ledger (so the peer's echo is inert) and send it. On
+     * the host that is a broadcast; on the guest it is the upward report the host then integrates.
+     */
     private void emitSkeletonDelta(CoopWorldDelta.Kind kind, CoopSkeletonMutationWatcher.Flip flip) {
         CoopWorldDelta delta = new CoopWorldDelta(flip.entityId(), kind, false, flip.state(),
                 session.localPlayerId());
@@ -1392,8 +1418,8 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         if (!isActive()) {
             return;
         }
-        // Host-only, self-throttled, and deliberately ahead of the hyperspace early-return below:
-        // objectives and gates flip whether or not the host is sitting in a star system.
+        // Self-throttled, and deliberately ahead of the hyperspace early-return below: objectives and
+        // gates flip whether or not the polling client is sitting in a star system.
         tickSkeletonMutations();
         long nowMillis = now();
         if (!shouldScanSalvage(lastSalvageScanMillis, nowMillis)) {
@@ -1999,11 +2025,13 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         }
         String abilityId = CoopMessages.requiredPayloadString(message, "abilityId");
         String playerId = CoopMessages.requiredPayloadString(message, "playerId");
-        // The host applies the world-affecting effect against its authoritative NPC fleets/world.
-        // The concrete per-ability effect is applied in-game; v1 routes + logs it explicitly. NPC
-        // fleet state changes propagate back to the guest via Phase 9 NPC_FLEET_SET rebroadcast.
+        // The host applies the world-affecting effect against its authoritative NPC fleets/world by
+        // running the vanilla ability plugin on the guest's mirror fleet (Phase 12c A1). NPC fleet
+        // state changes propagate back to the guest via the Phase 9 NPC_FLEET_SET rebroadcast, and
+        // the interdiction standing hit rides the existing REP_DELTA capture.
+        CoopAbilityEffectApplier.Decision decision = CoopAbilityEffectApplier.apply(abilityId, playerId);
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied ABILITY_ACTIVATE abilityId=" + abilityId
-                + " playerId=" + playerId);
+                + " playerId=" + playerId + " decision=" + decision);
     }
 
     // ---- Engine helpers (defensive) -----------------------------------------------------------

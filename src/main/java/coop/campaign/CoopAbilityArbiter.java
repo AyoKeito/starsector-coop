@@ -6,11 +6,12 @@ import java.util.Set;
 /**
  * Classifies fleet abilities into host-arbitrated (world-affecting) vs purely-local (Phase 12).
  *
- * <p>Abilities that touch shared / NPC state — interdiction pulse, distress call, active sensor
- * burst — are host-arbitrated: the activating client sends an {@code ABILITY_ACTIVATE} intent and
- * the host applies the effect to the authoritative NPC fleets/world and broadcasts the result.
- * Purely-local abilities — emergency burn, sustained burn, transponder toggle, go-dark affecting
- * only the user's own detection — stay local and are not arbitrated.
+ * <p>Abilities that touch shared / NPC state — interdiction pulse, distress call — are
+ * host-arbitrated: the activating client sends an {@code ABILITY_ACTIVATE} intent and the host
+ * applies the effect to the authoritative NPC fleets/world ({@link CoopAbilityEffectApplier}) and
+ * broadcasts the result. Purely-local abilities — emergency burn, sustained burn, transponder
+ * toggle, go-dark and the sensor abilities, all of which only move the activating fleet's own
+ * detection numbers — stay local and are not arbitrated.
  *
  * <p>Unknown ability ids default to <em>world-affecting</em>: arbitrating an ability that turns out
  * to be harmless is cheap, while failing to arbitrate one that mutates shared state would desync the
@@ -23,14 +24,25 @@ public final class CoopAbilityArbiter {
             "emergency_burn",
             "sustained_burn",
             "transponder",
-            "go_dark");
+            "go_dark",
+            // Its whole effect is a detectedRangeMod / sensorRangeMod spike on the activating fleet,
+            // and Phase 14b's CoopSensorSync already pins the mirror's detected-range total from the
+            // real fleet every frame. Arbitrating it would ask the host to activate a second source
+            // of the same number, which the very next sensor-sync frame cancels.
+            "sensor_burst",
+            // Reads the activating fleet's own surroundings into its own map/intel. Nothing shared
+            // is written, so the pre-12c world-affecting default was simply wrong.
+            "gravitic_scan");
 
-    /** Vanilla ability ids that touch shared / NPC / world state and must be host-arbitrated. */
+    /**
+     * Vanilla ability ids that touch shared / NPC / world state and must be host-arbitrated. Kept as
+     * documentation of the arbitrated set — {@link #isWorldAffecting} routes by the local set plus
+     * the unknown-is-world-affecting default, so anything not listed in {@link #LOCAL_ABILITIES}
+     * (notably {@code remote_survey} and {@code generate_slipsurge}) also arbitrates.
+     */
     public static final Set<String> WORLD_AFFECTING_ABILITIES = Set.of(
             "interdiction_pulse",
-            "distress_call",
-            "sensor_burst",
-            "active_sensor_burst");
+            "distress_call");
 
     private CoopAbilityArbiter() {
     }
