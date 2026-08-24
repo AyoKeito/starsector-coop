@@ -369,6 +369,10 @@ public class CoopNetPump implements EveryFrameScript {
         maybeSendLobbyHello();
         t = profiler.split(SECTION_LOBBY_HELLO, t);
         drainInbound();
+        // Immediately after the real drain, so a message released from the debug latency queue takes
+        // the exact frame path a just-arrived one would: claims before the interaction gate runs,
+        // pause intents before syncSharedPause computes the effective pause.
+        drainDelayedGuestMessages();
         t = profiler.split(SECTION_DRAIN_INBOUND, t);
         assertMirrorEngagementShields();
         t = profiler.split(SECTION_MIRROR_SHIELDS, t);
@@ -1209,6 +1213,19 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
             return;
         }
+        // Phase 18 latency lever: the pause intent rides the same guest->host leg as the interaction
+        // claim, so a faithful WAN simulation must delay both. Without this the guest's screen-pause
+        // freezes the host within a TIME_SNAPSHOT cadence and the claim race is unreachable by hand
+        // on localhost — the exact gap the lever exists to close. Same queue as the claims, so the
+        // two release in receive order relative to each other, which is what a real link preserves.
+        int delayMillis = CoopDebug.interactionClaimDelayMillis();
+        if (delayMillis > 0 && queueDelayedGuestMessage(message, delayMillis)) {
+            return;
+        }
+        applyPauseIntent(message);
+    }
+
+    private void applyPauseIntent(CoopMessages.Message message) {
         CoopMessages.PauseSource source = CoopMessages.PauseSource.valueOf(
                 CoopMessages.requiredPayloadString(message, "source"));
         boolean paused = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "paused"));
@@ -1801,36 +1818,39 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         int delayMillis = CoopDebug.interactionClaimDelayMillis();
-        if (delayMillis > 0 && queueDelayedInteractionClaim(message, delayMillis)) {
+        if (delayMillis > 0 && queueDelayedGuestMessage(message, delayMillis)) {
             return;
         }
         arbitrateInteractionClaim(message);
     }
 
     /**
-     * Phase 18 latency lever. Parks the claim with a release stamp instead of sleeping: the pump
+     * Phase 18 latency lever. Parks the message with a release stamp instead of sleeping: the pump
      * thread is the campaign thread, so blocking here would stall the whole game rather than
-     * simulate a slow link. {@link #drainDelayedInteractionClaims()} releases it in receive order,
-     * which is exactly the ordering {@code CoopInteractionGate} arbitrates on.
+     * simulate a slow link. {@link #drainDelayedGuestMessages()} releases in receive order, which is
+     * exactly the ordering {@code CoopInteractionGate} arbitrates on — and, because
+     * {@code PAUSE_INTENT} shares the queue, the same relative order a real link would deliver the
+     * guest's pause alongside its claim.
      *
-     * @return true when the message was parked (the caller must not arbitrate it now).
+     * @return true when the message was parked (the caller must not process it now).
      */
-    private boolean queueDelayedInteractionClaim(CoopMessages.Message message, int delayMillis) {
+    private boolean queueDelayedGuestMessage(CoopMessages.Message message, int delayMillis) {
         if (delayedInteractionClaims.size() >= MAX_DELAYED_INTERACTION_CLAIMS) {
             CoopLog.warn(CoopNetPump.class, "Coop debug interaction-delay queue is full ("
-                    + MAX_DELAYED_INTERACTION_CLAIMS + "); arbitrating claim seq=" + message.seq()
-                    + " immediately");
+                    + MAX_DELAYED_INTERACTION_CLAIMS + "); processing " + message.type() + " seq="
+                    + message.seq() + " immediately");
             return false;
         }
         long releaseAt = clockMillis.getAsLong() + delayMillis;
         delayedInteractionClaims.addLast(new DelayedInteractionClaim(message, releaseAt));
-        CoopLog.info(CoopNetPump.class, "Coop debug delaying INTERACTION_CLAIM seq=" + message.seq()
-                + " by " + delayMillis + "ms (" + CoopDebug.INTERACTION_DELAY_PROPERTY + ")");
+        CoopLog.info(CoopNetPump.class, "Coop debug delaying " + message.type() + " seq="
+                + message.seq() + " by " + delayMillis + "ms ("
+                + CoopDebug.INTERACTION_DELAY_PROPERTY + ")");
         return true;
     }
 
-    /** Releases every parked claim whose stamp has passed. No-op (one size check) when dormant. */
-    private void drainDelayedInteractionClaims() {
+    /** Releases every parked message whose stamp has passed. No-op (one size check) when dormant. */
+    private void drainDelayedGuestMessages() {
         if (delayedInteractionClaims.isEmpty()) {
             return;
         }
@@ -1839,10 +1859,14 @@ public class CoopNetPump implements EveryFrameScript {
                 && delayedInteractionClaims.peekFirst().releaseAtMillis() <= now) {
             DelayedInteractionClaim due = delayedInteractionClaims.pollFirst();
             try {
-                arbitrateInteractionClaim(due.message());
+                if (due.message().type() == CoopMessages.Type.PAUSE_INTENT) {
+                    applyPauseIntent(due.message());
+                } else {
+                    arbitrateInteractionClaim(due.message());
+                }
             } catch (RuntimeException | LinkageError ex) {
-                CoopLog.warn(CoopNetPump.class, "Coop dropped delayed INTERACTION_CLAIM seq="
-                        + due.message().seq(), ex);
+                CoopLog.warn(CoopNetPump.class, "Coop dropped delayed " + due.message().type()
+                        + " seq=" + due.message().seq(), ex);
             }
         }
     }
@@ -1932,7 +1956,6 @@ public class CoopNetPump implements EveryFrameScript {
             resetInteractionState();
             return;
         }
-        drainDelayedInteractionClaims();
         try {
             SectorAPI sector = Global.getSector();
             if (sector == null) {

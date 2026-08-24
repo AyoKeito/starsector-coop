@@ -762,6 +762,46 @@ class CoopNetPumpTest {
         assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT));
     }
 
+    @Test
+    void hostHoldsGuestPauseIntentsForTheDebugLatencyLever() {
+        // The pause intent rides the same guest->host leg as the interaction claim. If the lever
+        // delayed only the claim, the guest's screen pause would freeze the host instantly on
+        // localhost and the claim race would be impossible to reach by hand — the lever must
+        // simulate the whole leg.
+        String saved = System.getProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
+        System.setProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY, "500");
+        try {
+            forceDebugToggleRefresh();
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            CoopSessionState session = activeHostSession();
+            RecordingSector sector = new RecordingSector(false);
+            Global.setSector(sector.proxy());
+            AtomicLong now = new AtomicLong(1000L);
+            CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+
+            service.inbound.add(CoopMessages.pauseIntent(
+                    "session-a", 8L, 1000L, CoopMessages.PauseSource.SCREEN, true, 1L));
+            pump.advance(0f);
+            assertFalse(sector.paused, "the pause intent must be held, not applied on arrival");
+
+            now.set(1499L);
+            pump.advance(0f);
+            assertFalse(sector.paused, "still inside the induced delay");
+
+            now.set(1500L);
+            pump.advance(0f);
+            assertTrue(sector.paused, "the pause intent must apply once the delay elapses");
+        } finally {
+            if (saved == null) {
+                System.clearProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
+            } else {
+                System.setProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY, saved);
+            }
+            forceDebugToggleRefresh();
+        }
+    }
+
     /** Drives {@link coop.util.CoopDebug}'s frame poll far enough to re-read the JVM properties. */
     private static void forceDebugToggleRefresh() {
         for (int i = 0; i <= 300; i++) {
