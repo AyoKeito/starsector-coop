@@ -28,11 +28,11 @@ function Set-CoopVmParams {
     }
 
     $content = Get-Content -LiteralPath $vmparams -Raw
-    $content = $content -replace '\s-Dcoop\.hostPort=\S+', ''
-    $content = $content -replace '\s-Dcoop\.connectHost=\S+', ''
-    $content = $content -replace '\s-Dcoop\.connectPort=\S+', ''
-    $content = $content -replace '\s-Dcoop\.newGameSeed=\S+', ''
-    $content = $content -replace '\s-Dcoop\.debug\.diagnostics=\S+', ''
+    # Strip EVERY coop property, not an enumerated list: script-managed ones are re-added below and
+    # -ExtraJvmProps levers are launch-scoped by design. The enumerated list let a previous run's
+    # lever (e.g. -Dcoop.debug.interactionDelayMs) silently persist into later sessions — found live
+    # 2026-08-24 when a leftover 1500 ms delay queue showed up as pause lag in the Phase 29 smoke test.
+    $content = $content -replace '\s-Dcoop\.\S+', ''
     # Remove any prior coop-forks classpath entry so re-patching stays idempotent.
     $content = $content -replace '\.\.\\mods\\coop\\jars\\coop-forks\.jar;', ''
 
