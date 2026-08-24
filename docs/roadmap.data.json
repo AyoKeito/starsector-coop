@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b)"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete, smoke pending"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 12c API verification in progress",
-  "here": "Phase 29 M1 landed and was smoke-verified on a clean link 2026-08-24: the mirror drive is now kinematic (per-frame setLocation/setVelocity/velocity-derived facing) evaluating a Hermite trajectory 200 ms behind host game time, the UDP envelope gained per-type epochs + game-time stamps + single-loss redundancy, and both measured ~1 Hz teleport modes are gone. The speed-probe baseline is on record (host ≈ 1.00, guest 1.08–1.11 = the healthy clean-link reading; regression = sustained readings below ~0.97). Phase 18's claim-race force-close and the Phase 9b action-text check landed the same day. The next build is <b>Phase 12c</b> — closing the Phase 12 extension points (bar/mission-pool enumeration, full market capture, ability world effects); per-surface API verification is underway.",
+  "hereHead": "You are here — a manual smoke test is pending",
+  "here": "Phase 12c is code-complete (2026-08-24, same day as the 29-M1 smoke): four sequential build tasks — ability world effects (interdiction/distress activated on the guest mirror; sensor burst reclassified as already-covered by the 14b sensor sync), full-fidelity market capture (per-listing ships with D-mods + CR, specials, officer/merc/admin pools with close-diff hire claims, restock re-snapshot), bar pool enumeration + guest injection (host offers rendered in the guest's vanilla bar UI, guest generation suppressed), and survey/ruins replication (a gap found and user-scoped into v1 mid-phase) — plus an integration review pass that caught and fixed three majors (officer lifetime prune, stale hire baseline, refitted sell-back drop). 890 tests green. <b>Pending: the two-instance smoke</b> — identical bar offers + claim race, ship listings with D-mods/CR, specials and officer stock + a guest hire, a guest interdiction pulse, a guest comm-relay capture, and a survey by either player raising the other's level.",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next build: Phase 12c",
+      "head": "Next build: Phase 24 (after the 12c smoke)",
       "state": "you are here",
-      "body": "Everything through <span class=\"rp\" data-jump=\"18\">Phase 18</span> plus <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1 (buffered snapshot interpolation + kinematic mirror drive) is built and smoke-verified in live two-instance sessions (latest 2026-08-24). The build order continues with <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> — bar/mission-pool enumeration, market-capture fidelity (per-listing ships with D-mods/CR, special stacks, officers/mercs, restock re-snapshot), and ability world effects — which must land before the <span class=\"rp\" data-jump=\"19\">Phase 19</span> QA pass. Remaining order after it: 24 → 7b/7c → 20 → 29-M2 → 21 → 19."
+      "body": "Everything through <span class=\"rp\" data-jump=\"18\">Phase 18</span> plus <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1 is built and smoke-verified; <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> is code-complete with its two-instance smoke still to run (see the banner above for the checklist). After that smoke, the build order continues with <span class=\"rp\" data-jump=\"24\">Phase 24</span> — shared-faction colonies, industries, and raids — then 7b/7c → 20 → 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -518,13 +518,11 @@
         "WORLD_DELTA(SURVEY) replication"
       ],
       "residue": [
-        "all steps unchecked",
-        "API verification per surface",
-        "guest-side render/injection",
-        "two-instance smoke test",
-        "must land before Phase 19 QA"
+        "two-instance smoke test PENDING (bar offers + claim race, D-mod/CR listings, specials, officer hire, interdiction pulse, comm-relay capture, survey both ways)",
+        "offer-level bar claim unarbitrated (market-entity gate only, documented)",
+        "pod SHIP handovers still pristine (CoopShipDetail codec ready, pods not yet widened)"
       ],
-      "note": "Order slot 9; blocks Phase 19 QA pass"
+      "note": "Code-complete 2026-08-24: 4 build tasks + review pass (3 majors fixed), 890 tests green. Blocks Phase 19 QA"
     },
     {
       "id": "13",

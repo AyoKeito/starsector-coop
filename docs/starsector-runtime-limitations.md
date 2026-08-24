@@ -353,3 +353,7 @@ Same rule as salvage: one player loots, the world state is shared. Not a bug to 
 `SurveyPlanetMissionIntel.advanceMission` polls the target planet every frame and calls `reportPlayerSurveyedPlanet` the moment its market reads FULL (`intel/SurveyPlanetMissionIntel.java:141-143`). It never asks who surveyed it. So a survey mission the guest accepted completes, with payment, when the host's FULL arrives over the wire.
 
 Consistent with the shared world the rest of Phase 12 builds, and the same thing already happens for a mission whose target the host decivilizes or whose objective the host captures. Worth knowing before treating survey contracts as a per-player income stream: two players holding the same contract from different bar offers both get paid for one survey.
+
+### Either player entering a system reveals its planets on both maps
+
+`CoreScript.markSystemAsEntered` bumps every planet in a newly entered system from NONE to SEEN, and the poll replicates SEEN like any other level (deliberately — the system-map display reads the minimum system survey level, and filtering SEEN out would leave the two maps visibly different). The consequence: one player's travels light up planet markers on the partner's map. That is a shared-exploration feature under this mod's model, but it is a visible departure from two solo campaigns and belongs in any "what's different in co-op" player doc (Phase 23).
