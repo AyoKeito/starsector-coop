@@ -336,7 +336,7 @@ table.rm .trk{font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:
     var d=el('div','hereb');
     d.appendChild(el('div','ic','⏸'));
     var m=el('div');
-    m.appendChild(el('div','h','You are here — a manual smoke test is pending'));
+    m.appendChild(el('div','h', D.hereHead || 'You are here'));
     var b=el('div','b');
     b.innerHTML = D.here;
     m.appendChild(b);
