@@ -47,6 +47,7 @@ public record CoopPersonDetail(String personId,
                                int hiringBonus,
                                int salary,
                                int adminTier,
+                               float timeRemainingDays,
                                Map<String, Float> skills) {
 
     /** Which of the engine's two hireable pools this person belongs to. */
@@ -57,7 +58,20 @@ public record CoopPersonDetail(String personId,
     }
 
     /** Number of {@code |}-separated fields in the encoded form. */
-    public static final int FIELD_COUNT = 16;
+    public static final int FIELD_COUNT = 17;
+
+    /**
+     * What {@link #timeRemainingDays} falls back to when the host reports nothing usable.
+     *
+     * <p>Load-bearing, not cosmetic. {@code AvailableOfficer.timeRemaining} defaults to {@code 0f}
+     * and {@code OfficerManagerEvent.advance} deletes every entry whose counter has run out on its
+     * 1-3 day tracker ({@code impl/campaign/events/OfficerManagerEvent.java:192-205}) — comm
+     * directory entry, {@code $ome_hireable} flag and all. A rebuilt hireable that carries no
+     * lifetime is therefore gone from the guest's market within three campaign days of the snapshot
+     * that put it there. Vanilla's own spawn uses 60-120 days
+     * ({@code getOfficerDuration}); this is the low end of that.
+     */
+    public static final float DEFAULT_LIFETIME_DAYS = 60f;
 
     public CoopPersonDetail {
         personId = requireText(personId, "personId");
@@ -119,6 +133,7 @@ public record CoopPersonDetail(String personId,
                 + '|' + hiringBonus
                 + '|' + salary
                 + '|' + adminTier
+                + '|' + Float.toString(timeRemainingDays)
                 + '|' + CoopDelimited.field(encodeSkills(skills));
     }
 
@@ -136,7 +151,8 @@ public record CoopPersonDetail(String personId,
                 Integer.parseInt(f.get(12).trim()),
                 Integer.parseInt(f.get(13).trim()),
                 Integer.parseInt(f.get(14).trim()),
-                decodeSkills(f.get(15)));
+                Float.parseFloat(f.get(15).trim()),
+                decodeSkills(f.get(16)));
     }
 
     private static String encodeSkills(Map<String, Float> skills) {

@@ -9,6 +9,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopPersonDetailTest {
 
@@ -19,7 +20,7 @@ class CoopPersonDetailTest {
         return new CoopPersonDetail("officer-7", "Kira", "Vasquez", "FEMALE",
                 "graphics/portraits/portrait_mercenary01.png", "aggressive", "spaceCaptain",
                 "mercenary", "independent", 5, 1234L, CoopPersonDetail.Role.MERC,
-                20000, 3000, 0, skills);
+                20000, 3000, 0, 45f, skills);
     }
 
     @Test
@@ -44,7 +45,7 @@ class CoopPersonDetailTest {
         skills.put("weird=skill,id\\x", 3f);
         CoopPersonDetail nasty = new CoopPersonDetail("p|1", "Jo\\hn", "O'Ne|il\n", "MALE",
                 "sprite,path=1.png", "steady|", "rank\\", "post,1", "fac|tion", 3, 7L,
-                CoopPersonDetail.Role.OFFICER, 6000, 900, 0, skills);
+                CoopPersonDetail.Role.OFFICER, 6000, 900, 0, 12.5f, skills);
 
         assertEquals(nasty, CoopPersonDetail.decode(nasty.encode()));
     }
@@ -53,7 +54,7 @@ class CoopPersonDetailTest {
     void adminsAreTheirOwnStockKind() {
         CoopPersonDetail admin = new CoopPersonDetail("admin-3", "Sela", "Ord", "FEMALE", "p.png",
                 "cautious", "citizen", "freeAdmin", "independent", 1, 0L,
-                CoopPersonDetail.Role.ADMIN, 40000, 6000, 1, Map.of("industrial_planning", 3f));
+                CoopPersonDetail.Role.ADMIN, 40000, 6000, 1, 90f, Map.of("industrial_planning", 3f));
 
         assertEquals(CoopMarketSync.ItemKind.ADMIN, admin.stockKind());
         assertEquals(CoopPersonDetail.Role.ADMIN, CoopPersonDetail.roleOf(CoopMarketSync.ItemKind.ADMIN));
@@ -82,7 +83,16 @@ class CoopPersonDetailTest {
 
     private static CoopPersonDetail withSkills(Map<String, Float> skills) {
         return new CoopPersonDetail("p", "A", "B", "ANY", "", "steady", "r", "p", "f", 1, 0L,
-                CoopPersonDetail.Role.OFFICER, 1, 2, 0, skills);
+                CoopPersonDetail.Role.OFFICER, 1, 2, 0, 30f, skills);
+    }
+
+    @Test
+    void theHireableLifetimeRidesTheWire() {
+        // Without it the guest rebuilds AvailableOfficer.timeRemaining at its 0f default and the
+        // guest's own OfficerManagerEvent prunes the person 1-3 campaign days later.
+        assertEquals(45f, CoopPersonDetail.decode(merc().encode()).timeRemainingDays());
+        assertTrue(CoopPersonDetail.DEFAULT_LIFETIME_DAYS > 0f,
+                "the fallback must never be the 0f that triggers the prune");
     }
 
     @Test

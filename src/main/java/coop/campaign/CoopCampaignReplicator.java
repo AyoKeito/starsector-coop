@@ -26,6 +26,7 @@ import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.characters.FullName;
 import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
@@ -656,6 +657,14 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         // guest asks the host for a snapshot and applies it to its own market once; thereafter both
         // sides apply the same per-transaction delta, so they stay consistent with no live re-sync.
         if (isGuest()) {
+            // Drop the hire baseline before asking for a fresh one. It is a claim generator: every
+            // person still in it at market-close that is no longer hireable is reported to the host
+            // as "the guest hired them", and the host deletes them from the canonical pool. A
+            // baseline left over from an earlier snapshot (the host docking here, or a previous
+            // visit) describes people this client's own OfficerManagerEvent may since have pruned,
+            // so if the reply does not land before the screen closes the guest silently wipes the
+            // host's pool. No snapshot, no claim.
+            appliedHireables.remove(market.getId());
             send(CoopMessages.marketOpen(session.sessionId(), service.nextSeq(), now(),
                     market.getId(), session.localPlayerId()));
             CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_OPEN requested market=" + market.getId());
@@ -1221,8 +1230,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             return;
         }
         try {
-            FleetMemberAPI member = Global.getFactory()
-                    .createFleetMember(FleetMemberType.SHIP, detail.baseVariantId());
+            FleetMemberAPI member = createBaseMember(detail);
+            if (member == null) {
+                return;
+            }
             ShipVariantAPI variant = member.getVariant().clone();
             variant.setSource(VariantSource.REFIT);
             variant.setOriginalVariant(null);
@@ -1285,6 +1296,42 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             CoopLog.warn(CoopCampaignReplicator.class, "Could not rebuild mothballed ship member="
                     + detail.memberId() + " variant=" + detail.baseVariantId(), ex);
         }
+    }
+
+    /**
+     * The fleet member a rebuilt listing starts from, or null when even the hull cannot be resolved.
+     *
+     * <p><b>Why the variant id is not enough on its own.</b> A variant id only names a spec while the
+     * variant is a stock one. A ship the player refitted before selling it back carries a runtime
+     * variant id that exists on that member and nowhere else, so
+     * {@code createFleetMember(SHIP, thatId)} throws on the receiving client and the listing used to
+     * be dropped outright — i.e. the seller's hull disappeared from the shared shelf at the next
+     * snapshot, which is worse than the pristine-rebuild gap this codec was written to close. Vanilla
+     * hits the same wall and answers it the same way ({@code impl/campaign/CoreScript.java:639-641}
+     * falls back off {@code isStockVariant()}).
+     *
+     * <p>The empty variant off the hull spec is the backstop rather than {@code getOriginalVariant()}
+     * because that one is documented "may or may not be set". Nothing is lost by starting from empty:
+     * every field that makes the listing itself — hull spec, perma/s/refit/suppressed mods, weapons,
+     * wings, vents, caps, CR — is re-applied on top by the caller regardless of what it starts from.
+     */
+    private FleetMemberAPI createBaseMember(CoopShipDetail detail) {
+        if (Global.getSettings().doesVariantExist(detail.baseVariantId())) {
+            return Global.getFactory().createFleetMember(FleetMemberType.SHIP, detail.baseVariantId());
+        }
+        ShipHullSpecAPI hull = detail.hullSpecId().isEmpty()
+                ? null : Global.getSettings().getHullSpec(detail.hullSpecId());
+        if (hull == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member=" + detail.memberId()
+                    + " names neither a known variant (" + detail.baseVariantId()
+                    + ") nor a known hull (" + detail.hullSpecId() + "); skipped");
+            return null;
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop ship listing member=" + detail.memberId()
+                + " rebuilt from an empty " + hull.getHullId() + " variant (custom variant id "
+                + detail.baseVariantId() + " is not a spec on this client)");
+        return Global.getFactory().createFleetMember(FleetMemberType.SHIP,
+                Global.getSettings().createEmptyVariant(detail.baseVariantId(), hull));
     }
 
     /** Legacy variant-id path, still used by cargo pods (which key contents by variant id). */
@@ -2755,6 +2802,9 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                     entry.hiringBonus,
                     entry.salary,
                     adminTier,
+                    // The lifetime rides along or the guest's own OfficerManagerEvent deletes the
+                    // rebuilt person within its 1-3 day prune tick (see DEFAULT_LIFETIME_DAYS).
+                    entry.timeRemaining,
                     skills);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to capture hireable person detail", ex);
@@ -2802,6 +2852,12 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 }
                 OfficerManagerEvent.AvailableOfficer entry = new OfficerManagerEvent.AvailableOfficer(
                         person, market.getId(), detail.hiringBonus(), detail.salary());
+                // Without this the field stays at its 0f default and the local manager's own prune
+                // tick deletes the person 1-3 campaign days later — comm-directory entry, hireable
+                // flag and all. See CoopPersonDetail.DEFAULT_LIFETIME_DAYS.
+                entry.timeRemaining = detail.timeRemainingDays() > 0f
+                        ? detail.timeRemainingDays()
+                        : CoopPersonDetail.DEFAULT_LIFETIME_DAYS;
                 if (detail.role() == CoopPersonDetail.Role.ADMIN) {
                     manager.addAvailableAdmin(entry);
                 } else {
