@@ -6,11 +6,22 @@ package coop.fleet;
  * implementation (the real {@link CoopFleetMirror} touches the engine and cannot run headless).
  */
 public interface CoopNpcMirror {
-    /** Full apply from an {@code NPC_FLEET_SET} entry: create-if-needed, place, move, refresh roster. */
-    void applySnapshot(CoopNpcFleetSnapshot snapshot);
+    /**
+     * Full apply from an {@code NPC_FLEET_SET} entry: create-if-needed, place, queue the motion
+     * sample, refresh roster. {@code sampleTimeSeconds} is the sender's stream-time stamp (Phase 29
+     * M1) the position/velocity pair sorts on in the interpolation buffer.
+     */
+    void applySnapshot(CoopNpcFleetSnapshot snapshot, double sampleTimeSeconds);
 
-    /** Lightweight position/velocity update from an {@code NPC_FLEET_MOTION} record. */
-    void applyMotion(CoopNpcFleetMotion motion);
+    /** Lightweight position/velocity sample from an {@code NPC_FLEET_MOTION} record. */
+    void applyMotion(CoopNpcFleetMotion motion, double sampleTimeSeconds);
+
+    /**
+     * Phase 29 M1, once per frame: render the buffered trajectory at the shared cursor
+     * ({@link CoopMotionTimeline}). Defaults to a no-op for headless fakes.
+     */
+    default void advanceMotion(double cursorSeconds) {
+    }
 
     /**
      * Re-asserts the mirror's per-frame engagement shield ({@code setNoEngaging}), which is what keeps

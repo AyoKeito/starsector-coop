@@ -19,6 +19,9 @@ class CoopFleetMirrorRegistryTest {
         final Object fleet = new Object();
         int snapshotApplies;
         int motionApplies;
+        int motionAdvances;
+        double lastSampleTimeSeconds = Double.NaN;
+        double lastCursorSeconds = Double.NaN;
         int shieldAsserts;
         int shieldReleases;
         long shieldAssertedAtMillis = CoopFleetMirror.NEVER_ASSERTED;
@@ -42,14 +45,22 @@ class CoopFleetMirrorRegistryTest {
         }
 
         @Override
-        public void applySnapshot(CoopNpcFleetSnapshot snapshot) {
+        public void applySnapshot(CoopNpcFleetSnapshot snapshot, double sampleTimeSeconds) {
             snapshotApplies++;
             lastSnapshot = snapshot;
+            lastSampleTimeSeconds = sampleTimeSeconds;
         }
 
         @Override
-        public void applyMotion(CoopNpcFleetMotion motion) {
+        public void applyMotion(CoopNpcFleetMotion motion, double sampleTimeSeconds) {
             motionApplies++;
+            lastSampleTimeSeconds = sampleTimeSeconds;
+        }
+
+        @Override
+        public void advanceMotion(double cursorSeconds) {
+            motionAdvances++;
+            lastCursorSeconds = cursorSeconds;
         }
 
         @Override
@@ -82,7 +93,7 @@ class CoopFleetMirrorRegistryTest {
     void applySetCreatesOneMirrorPerFleet() {
         CoopFleetMirrorRegistry registry = newRegistry();
 
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
 
         assertEquals(2, registry.size());
         assertEquals(List.of("a", "b"), new ArrayList<>(registry.fleetIds()));
@@ -92,10 +103,10 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void reapplyingSameSetIsIdempotentAndReusesMirrors() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
         FakeMirror first = creationOrder.get(0);
 
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
 
         assertEquals(1, registry.size());
         assertEquals(1, creationOrder.size(), "no new mirror created for an existing fleet id");
@@ -107,11 +118,11 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void fleetAbsentFromNewSetIsDisposedAndRemoved() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
         FakeMirror mirrorA = creationOrder.get(0);
         FakeMirror mirrorB = creationOrder.get(1);
 
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
 
         assertEquals(1, registry.size());
         assertEquals(List.of("a"), new ArrayList<>(registry.fleetIds()));
@@ -122,9 +133,9 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void newFleetInLaterSetIsAddedWithoutTouchingOthers() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
 
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("c", "hyperspace", "kite")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("c", "hyperspace", "kite")), 0.0);
 
         assertEquals(2, registry.size());
         assertTrue(registry.fleetIds().contains("c"));
@@ -134,15 +145,30 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void applyMotionRoutesToMatchingMirrorAndIgnoresUnknown() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
         FakeMirror mirrorA = creationOrder.get(0);
 
         registry.applyMotion(List.of(
                 new CoopNpcFleetMotion("a", "corvus", 1f, 2f, 0f, 0f, sensors(150f, 90f)),
-                new CoopNpcFleetMotion("ghost", "corvus", 9f, 9f, 0f, 0f, sensors(150f, 90f))));
+                new CoopNpcFleetMotion("ghost", "corvus", 9f, 9f, 0f, 0f, sensors(150f, 90f))), 12.5);
 
         assertEquals(1, mirrorA.motionApplies);
+        assertEquals(12.5, mirrorA.lastSampleTimeSeconds, "the section stamp reaches the mirror");
         assertEquals(1, registry.size(), "motion for an unknown fleet does not create a mirror");
+    }
+
+    @Test
+    void advanceMotionDrivesEveryMirrorAndSkipsAnEmptyCursor() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
+
+        registry.advanceMotion(Double.NaN);
+        assertEquals(0, creationOrder.get(0).motionAdvances, "no cursor yet means no drive");
+
+        registry.advanceMotion(42.0);
+        assertEquals(1, creationOrder.get(0).motionAdvances);
+        assertEquals(1, creationOrder.get(1).motionAdvances);
+        assertEquals(42.0, creationOrder.get(1).lastCursorSeconds);
     }
 
     @Test
@@ -150,7 +176,7 @@ class CoopFleetMirrorRegistryTest {
         // The pass runs every frame and never depends on traffic arriving; the engine call it makes is
         // what is rate-limited, because setNoEngaging allocates a fader that lasts ~1 s.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
 
         registry.assertEngagementShields(null, 1_000L);
         registry.assertEngagementShields(null, 1_016L);
@@ -166,7 +192,7 @@ class CoopFleetMirrorRegistryTest {
         // Releasing clears the stamp, so the frame after the player stops targeting the mirror puts
         // the shield straight back up instead of leaving it engageable for up to an interval.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
         FakeMirror mirror = creationOrder.get(0);
 
         registry.assertEngagementShields(null, 1_000L);
@@ -182,7 +208,7 @@ class CoopFleetMirrorRegistryTest {
         // Without this release the engine's player-combat-initiation block skips the mirror entirely
         // (it needs target.canBeEngaged()), so right-clicking a mirror does nothing at all.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
         FakeMirror targeted = creationOrder.get(0);
         FakeMirror other = creationOrder.get(1);
 
@@ -197,7 +223,7 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void aTargetThatIsNotAMirrorLeavesEveryShieldUp() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
 
         registry.assertEngagementShields(new Object());
 
@@ -208,7 +234,7 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void theShieldGoesBackUpWhenThePlayerPicksAnotherTarget() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
         FakeMirror mirror = creationOrder.get(0);
 
         registry.assertEngagementShields(mirror.fleet);
@@ -233,8 +259,8 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void disposedMirrorNoLongerGetsTheShield() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
-        registry.applySet(set(fleet("a", "corvus", "wolf")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0);
 
         registry.assertEngagementShields(null);
 
@@ -245,7 +271,7 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void disposeAllDisposesEveryMirrorAndClears() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")));
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0);
 
         registry.disposeAll();
 
@@ -259,12 +285,12 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void aFrozenMirrorIsNotResurrectedByTheHostsStaleSet() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
         // The host has not heard about the battle yet, so it keeps reporting the pre-battle roster.
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 3000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 3000L);
 
         assertEquals(1, mirror.snapshotApplies, "the beaten mirror must not be re-asserted");
         assertFalse(mirror.disposed);
@@ -274,12 +300,12 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void theFreezeReleasesWhenTheHostReportsTheNewRoster() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
         // Reconciled: the fleet lost a ship, so its roster hash is different now.
-        registry.applySet(set(fleet("a", "corvus", "lasher")), 3000L);
+        registry.applySet(set(fleet("a", "corvus", "lasher")), 0.0, 3000L);
 
         assertEquals(2, mirror.snapshotApplies);
         assertTrue(registry.pendingReconcileIds().isEmpty());
@@ -288,11 +314,11 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void theFreezeReleasesWhenTheHostDropsTheFleetEntirely() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "magec", "lasher")), 0.0, 1000L);
         FakeMirror killed = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
-        registry.applySet(set(fleet("b", "magec", "lasher")), 3000L);
+        registry.applySet(set(fleet("b", "magec", "lasher")), 0.0, 3000L);
 
         assertTrue(killed.disposed, "the host confirmed the kill");
         assertEquals(1, registry.size());
@@ -304,11 +330,11 @@ class CoopFleetMirrorRegistryTest {
         // A BATTLE_RESULT that never arrives (disconnect) must not leave a mirror frozen forever;
         // the host's authoritative set legitimately resurrects the unreported kill.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
-        registry.applySet(set(fleet("a", "corvus", "wolf")),
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0,
                 2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS);
 
         assertEquals(2, mirror.snapshotApplies);
@@ -319,11 +345,11 @@ class CoopFleetMirrorRegistryTest {
     void motionKeepsDrivingAFrozenMirror() {
         // The freeze is a roster freeze, not a position freeze: a beaten survivor still flees.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
-        registry.applyMotion(List.of(new CoopNpcFleetMotion("a", "corvus", 5f, 5f, 1f, 1f, sensors(150f, 90f))));
+        registry.applyMotion(List.of(new CoopNpcFleetMotion("a", "corvus", 5f, 5f, 1f, 1f, sensors(150f, 90f))), 0.0);
 
         assertEquals(1, mirror.motionApplies);
     }
@@ -333,13 +359,13 @@ class CoopFleetMirrorRegistryTest {
         // The freeze is refreshed on the battle's status cadence so a fight longer than the timeout
         // does not come back to an already-thawed mirror.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
         registry.markPendingReconcile("a",
                 2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS - 1);
 
-        registry.applySet(set(fleet("a", "corvus", "wolf")),
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0,
                 2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS + 1000L);
 
         assertEquals(1, mirror.snapshotApplies, "the refreshed freeze still holds");
@@ -352,13 +378,13 @@ class CoopFleetMirrorRegistryTest {
         // as the post-battle dialog is open; interleaved with the host's ~1 s set stream, the stale
         // pre-battle roster must never re-assert, however long the player browses salvage.
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         FakeMirror mirror = creationOrder.get(0);
         registry.markPendingReconcile("a", 2000L);
 
         for (long now = 2000L; now <= 2000L + 180_000L; now += 2000L) {
             registry.markPendingReconcile("a", now);
-            registry.applySet(set(fleet("a", "corvus", "wolf")), now + 1000L);
+            registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, now + 1000L);
         }
 
         assertEquals(1, mirror.snapshotApplies, "the stale pre-battle roster never re-asserts");
@@ -392,19 +418,19 @@ class CoopFleetMirrorRegistryTest {
         CoopFleetMirrorRegistry registry = newRegistry();
         assertEquals(1, registry.fleetIdsHash(), "the empty registry hashes to the seed");
 
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")), 0.0, 1000L);
         int twoFleets = registry.fleetIdsHash();
 
         // Same population, resent: the pre-check must say "nothing to print".
-        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")), 2000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")), 0.0, 2000L);
         assertEquals(twoFleets, registry.fleetIdsHash());
 
         // A roster change with no id change must not move it either — that is what the host's own
         // set hash is for; this only answers "are these the same mirrors".
-        registry.applySet(set(fleet("a", "corvus", "hammerhead"), fleet("b", "corvus", "lasher")), 3000L);
+        registry.applySet(set(fleet("a", "corvus", "hammerhead"), fleet("b", "corvus", "lasher")), 0.0, 3000L);
         assertEquals(twoFleets, registry.fleetIdsHash());
 
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 4000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 4000L);
         assertNotEquals(twoFleets, registry.fleetIdsHash(), "a dropped mirror must change the hash");
 
         registry.disposeAll();
@@ -414,10 +440,10 @@ class CoopFleetMirrorRegistryTest {
     @Test
     void theIdHashDistinguishesASwapOfOneIdForAnother() {
         CoopFleetMirrorRegistry registry = newRegistry();
-        registry.applySet(set(fleet("a", "corvus", "wolf")), 1000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
         int withA = registry.fleetIdsHash();
 
-        registry.applySet(set(fleet("b", "corvus", "wolf")), 2000L);
+        registry.applySet(set(fleet("b", "corvus", "wolf")), 0.0, 2000L);
 
         assertEquals(1, registry.size(), "same size, different fleet");
         assertNotEquals(withA, registry.fleetIdsHash());

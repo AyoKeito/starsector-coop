@@ -85,13 +85,18 @@ public final class CoopFleetMirrorRegistry {
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
     }
 
-    /** Reconciles the local mirror set against the host's authoritative set. Idempotent. */
-    public void applySet(CoopNpcFleetSetSnapshot set) {
-        applySet(set, clockMillis.getAsLong());
+    /**
+     * Reconciles the local mirror set against the host's authoritative set. Idempotent.
+     * {@code sampleTimeSeconds} (Phase 29 M1) stamps each entry's position/velocity into its mirror's
+     * interpolation buffer — the set rides TCP, so the stamp comes from the message payload rather
+     * than a datagram section.
+     */
+    public void applySet(CoopNpcFleetSetSnapshot set, double sampleTimeSeconds) {
+        applySet(set, sampleTimeSeconds, clockMillis.getAsLong());
     }
 
-    /** Clock-injected form (see {@link #applySet(CoopNpcFleetSetSnapshot)}); tests drive this one. */
-    public void applySet(CoopNpcFleetSetSnapshot set, long nowMillis) {
+    /** Clock-injected form (see {@link #applySet(CoopNpcFleetSetSnapshot, double)}); tests drive this one. */
+    public void applySet(CoopNpcFleetSetSnapshot set, double sampleTimeSeconds, long nowMillis) {
         Objects.requireNonNull(set, "set");
 
         Set<String> incoming = new java.util.HashSet<>();
@@ -114,7 +119,7 @@ public final class CoopFleetMirrorRegistry {
                 mirror = Objects.requireNonNull(mirrorFactory.get(), "mirrorFactory.get()");
                 mirrors.put(id, mirror);
             }
-            mirror.applySnapshot(snapshot);
+            mirror.applySnapshot(snapshot, sampleTimeSeconds);
             lastAppliedHash.put(id, snapshot.fleetHash());
         }
 
@@ -177,8 +182,8 @@ public final class CoopFleetMirrorRegistry {
     }
 
     /** Routes motion records to existing mirrors; records for unknown fleets are ignored (the next
-     * set creates them). */
-    public void applyMotion(List<CoopNpcFleetMotion> motions) {
+     * set creates them). {@code sampleTimeSeconds} is the datagram section's stream-time stamp. */
+    public void applyMotion(List<CoopNpcFleetMotion> motions, double sampleTimeSeconds) {
         if (motions == null || motions.isEmpty()) {
             return;
         }
@@ -187,8 +192,21 @@ public final class CoopFleetMirrorRegistry {
             if (mirror != null) {
                 // Deliberately not gated on the post-battle freeze: motion carries no roster, and a
                 // surviving mirror must keep moving while its roster waits for the host.
-                mirror.applyMotion(motion);
+                mirror.applyMotion(motion, sampleTimeSeconds);
             }
+        }
+    }
+
+    /**
+     * Phase 29 M1, once per frame from the pump: every mirror renders its buffered trajectory at the
+     * shared cursor. Runs (harmlessly) while paused — the cursor simply has not moved.
+     */
+    public void advanceMotion(double cursorSeconds) {
+        if (Double.isNaN(cursorSeconds)) {
+            return;
+        }
+        for (CoopNpcMirror mirror : mirrors.values()) {
+            mirror.advanceMotion(cursorSeconds);
         }
     }
 

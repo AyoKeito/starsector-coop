@@ -35,14 +35,20 @@ import java.util.function.Supplier;
  *
  * <p>Both roles share the driving contract: {@code setAIMode(true)}, the per-frame engagement shield
  * ({@link #assertEngagementShield()}, driven by the pump — the mirror never autonomously starts
- * combat, because real engagements happen on the host's authoritative copy),
- * {@code setMoveDestinationOverride} plus a periodic {@code setLocation} snap to correct interpolation
- * drift, and a roster rebuild only when the snapshot's {@code fleetHash} changes.
+ * combat, because real engagements happen on the host's authoritative copy), <b>kinematic motion</b>
+ * (Phase 29 M1: received samples queue in a {@link CoopMotionInterpolator}; every frame
+ * {@link #advanceMotion} places the fleet at the buffered trajectory ~200 ms behind the sender —
+ * {@code setMoveDestinationOverride} is never called on a mirror, because engine steering runs under
+ * the <em>mirror's</em> movement stats and arrival radius, which produced the two measured ~1 Hz
+ * teleport modes the plan's Phase 29 banner records), and a roster rebuild only when the snapshot's
+ * {@code fleetHash} changes.
  */
 public class CoopFleetMirror implements CoopNpcMirror {
-    // 10 Hz snapshots; snap the absolute position roughly once per second to correct interpolation
-    // drift without fighting the per-tick move-destination override every frame.
-    private static final int LOCATION_CORRECTION_EVERY = 10;
+    /**
+     * Below this interpolated speed (su/s) the mirror keeps its last facing instead of tracking the
+     * velocity direction — an orbit-drift fleet must not spin as its tiny velocity vector wanders.
+     */
+    static final float FACING_SPEED_FLOOR = 5f;
     /**
      * How often the {@code noEngaging} fader is refreshed. The fader the engine builds expires ~1 s
      * after the last {@code setNoEngaging} call, so 250 ms holds it with a 4x margin while cutting the
@@ -58,6 +64,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private final Supplier<SectorAPI> sectorSupplier;
     private final CoopPresenceIndicator presenceIndicator;
+    /** Phase 29 M1: the per-mirror sample buffer {@link #advanceMotion} renders from. */
+    private final CoopMotionInterpolator motionInterpolator = new CoopMotionInterpolator();
 
     private CampaignFleetAPI mirrorFleet;
     private String lastFleetHash;
@@ -109,8 +117,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     // ---- Player mirror (Phase 8) -------------------------------------------------------------
 
-    /** Local player's faction id, used to color the mirror in the local player's own color. */
-    public void apply(CoopFleetSnapshot snapshot, String localPlayerFactionId) {
+    /**
+     * Local player's faction id, used to color the mirror in the local player's own color.
+     * {@code sampleTimeSeconds} is the sender's stream-time stamp from the datagram section.
+     */
+    public void apply(CoopFleetSnapshot snapshot, String localPlayerFactionId,
+                      double sampleTimeSeconds) {
         Objects.requireNonNull(snapshot, "snapshot");
         SectorAPI sector = sectorOrNull();
         if (sector == null) {
@@ -124,8 +136,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
         try {
             ensurePlayerFleet(snapshot, localPlayerFactionId);
             placeInLocation(location, snapshot.x(), snapshot.y());
-            driveMovement(snapshot.x(), snapshot.y(), snapshot.velocityX(), snapshot.velocityY(),
-                    snapshot.transponderOn());
+            feedMotion(sampleTimeSeconds, snapshot.x(), snapshot.y(),
+                    snapshot.velocityX(), snapshot.velocityY());
+            acceptTransponder(snapshot.transponderOn());
             acceptSensors(snapshot.sensors());
             // Phase 17: the player path is the only one the empty-roster guard covers. See
             // shouldSkipRosterApply — the NPC path below must keep accepting empty rosters.
@@ -145,7 +158,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
     // ---- NPC mirror (Phase 9) ----------------------------------------------------------------
 
     @Override
-    public void applySnapshot(CoopNpcFleetSnapshot snapshot) {
+    public void applySnapshot(CoopNpcFleetSnapshot snapshot, double sampleTimeSeconds) {
         Objects.requireNonNull(snapshot, "snapshot");
         SectorAPI sector = sectorOrNull();
         if (sector == null) {
@@ -158,8 +171,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
         try {
             ensureNpcFleet(snapshot);
             placeInLocation(location, snapshot.x(), snapshot.y());
-            driveMovement(snapshot.x(), snapshot.y(), snapshot.velocityX(), snapshot.velocityY(),
-                    snapshot.transponderOn());
+            feedMotion(sampleTimeSeconds, snapshot.x(), snapshot.y(),
+                    snapshot.velocityX(), snapshot.velocityY());
+            acceptTransponder(snapshot.transponderOn());
             acceptSensors(snapshot.sensors());
             refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
             applyActionText(snapshot.aiAssignmentSummary());
@@ -239,7 +253,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     @Override
-    public void applyMotion(CoopNpcFleetMotion motion) {
+    public void applyMotion(CoopNpcFleetMotion motion, double sampleTimeSeconds) {
         Objects.requireNonNull(motion, "motion");
         // Motion is an optimization between full-set applies; if the set has not created the fleet yet
         // there is nothing to move. The next NPC_FLEET_SET will create it.
@@ -256,7 +270,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
         try {
             placeInLocation(location, motion.x(), motion.y());
-            driveMovement(motion.x(), motion.y(), motion.velocityX(), motion.velocityY(), null);
+            feedMotion(sampleTimeSeconds, motion.x(), motion.y(),
+                    motion.velocityX(), motion.velocityY());
             acceptSensors(motion.sensors());
             applyCount++;
         } catch (RuntimeException ex) {
@@ -375,28 +390,73 @@ public class CoopFleetMirror implements CoopNpcMirror {
             if (mirrorFleet.getContainingLocation() != location) {
                 location.addEntity(mirrorFleet);
             }
+            // A location change is the hard-cut signal (system jumps change location): the buffer
+            // restarts here so the interpolator can never glide across a jump.
+            motionInterpolator.clear();
             mirrorFleet.setLocation(x, y);
             lastLocationId = targetId;
             CoopLog.info(CoopFleetMirror.class, "Coop mirror fleet moved to location " + targetId);
-        } else if (applyCount % LOCATION_CORRECTION_EVERY == 0) {
+        }
+        // No periodic setLocation snap anymore: Phase 29 M1's advanceMotion places the fleet every
+        // frame from the sample buffer, so there is nothing left for a 1 Hz correction to correct —
+        // that snap WAS the visible teleport (see the plan's Phase 29 banner).
+    }
+
+    /**
+     * Queues one received motion sample for {@link #advanceMotion}. A teleport-scale jump inside the
+     * same location (rare: respawn relocation, console moves) cuts immediately rather than gliding.
+     *
+     * <p>No shield assert here on purpose: the per-frame pump pass (assertEngagementShield) is the
+     * single authoritative shield. Asserting it from the driving path as well would fight the
+     * targeted release every time a snapshot or motion record arrived (10 Hz), leaving the fleet the
+     * player explicitly targeted permanently unengageable.
+     */
+    private void feedMotion(double sampleTimeSeconds, float x, float y,
+                            float velocityX, float velocityY) {
+        if (motionInterpolator.addSample(sampleTimeSeconds, x, y, velocityX, velocityY)) {
             mirrorFleet.setLocation(x, y);
         }
     }
 
-    /** {@code transponderOn} may be null for motion-only updates that do not carry transponder state. */
-    private void driveMovement(float x, float y, float velocityX, float velocityY, Boolean transponderOn) {
-        mirrorFleet.setMoveDestinationOverride(x, y);
-        mirrorFleet.setVelocity(velocityX, velocityY);
-        // No shield assert here on purpose: the per-frame pump pass (assertEngagementShield) is the
-        // single authoritative shield. Asserting it from the driving path as well would fight the
-        // targeted release below every time a snapshot or motion record arrived (10 Hz), leaving the
-        // fleet the player explicitly targeted permanently unengageable.
-        if (transponderOn != null) {
-            try {
-                mirrorFleet.setTransponderOn(transponderOn);
-            } catch (RuntimeException ignored) {
-                // transponder state is best-effort for the mirror
+    /** {@code transponderOn} rides the snapshot streams; motion-only records do not carry it. */
+    private void acceptTransponder(Boolean transponderOn) {
+        if (transponderOn == null) {
+            return;
+        }
+        try {
+            mirrorFleet.setTransponderOn(transponderOn);
+        } catch (RuntimeException ignored) {
+            // transponder state is best-effort for the mirror
+        }
+    }
+
+    /**
+     * Phase 29 M1, once per frame from the pump: places the mirror at the buffered trajectory
+     * evaluated at the shared render cursor ({@link CoopMotionTimeline}). Velocity is written every
+     * frame because engine consumers read it (trails, other fleets' intercept AI); facing tracks the
+     * interpolated velocity above {@link #FACING_SPEED_FLOOR} and otherwise holds, and a parked pose
+     * (starvation ladder fully decayed) also holds facing.
+     */
+    @Override
+    public void advanceMotion(double cursorSeconds) {
+        if (mirrorFleet == null || !mirrorFleet.isAlive() || Double.isNaN(cursorSeconds)) {
+            return;
+        }
+        CoopMotionInterpolator.Pose pose = motionInterpolator.evaluate(cursorSeconds);
+        if (pose == null) {
+            return;
+        }
+        try {
+            mirrorFleet.setLocation(pose.x(), pose.y());
+            mirrorFleet.setVelocity(pose.velocityX(), pose.velocityY());
+            float speedSq = pose.velocityX() * pose.velocityX()
+                    + pose.velocityY() * pose.velocityY();
+            if (!pose.parked() && speedSq >= FACING_SPEED_FLOOR * FACING_SPEED_FLOOR) {
+                mirrorFleet.setFacing(
+                        (float) Math.toDegrees(Math.atan2(pose.velocityY(), pose.velocityX())));
             }
+        } catch (RuntimeException ignored) {
+            // Hot path (every frame per mirror): a transient engine hiccup must never kill the pump.
         }
     }
 
@@ -995,6 +1055,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     private void resetTracking() {
+        motionInterpolator.clear();
         lastFleetHash = null;
         retriedFleetHash = null;
         lastLocationId = null;

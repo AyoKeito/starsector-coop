@@ -158,6 +158,12 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopStreamClock streamClock = new CoopStreamClock();
     private final CoopDatagramRedundancy datagramRedundancy = new CoopDatagramRedundancy();
     private final CoopDatagramWatermark datagramWatermark = new CoopDatagramWatermark();
+    /**
+     * Phase 29 M1: the remote peer's render cursor, shared by the player mirror and every NPC mirror.
+     * Fed by every accepted datagram section and set stamp; advanced by campaign dt each frame in
+     * {@link #advanceMirrorMotion}; reset on the session edges beside the watermark.
+     */
+    private final coop.fleet.CoopMotionTimeline motionTimeline = new coop.fleet.CoopMotionTimeline();
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
     /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
@@ -410,6 +416,9 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_FLEET_MIRROR, t);
         drainFleetDatagrams();
         t = profiler.split(SECTION_FLEET_DATAGRAMS, t);
+        // Immediately after the drain so this frame renders this frame's samples: advance the shared
+        // render cursor by campaign dt and place every mirror on its buffered trajectory (Phase 29 M1).
+        advanceMirrorMotion(amount);
         maybeSendFleetSnapshot();
         t = profiler.split(SECTION_FLEET_SNAPSHOT_SEND, t);
         tickRespawnNotifier();
@@ -1638,7 +1647,9 @@ public class CoopNetPump implements EveryFrameScript {
         if (!snapshot.playerId().equals(sessionState.remotePlayerId())) {
             return;
         }
-        fleetMirror.apply(snapshot, localPlayerFactionId());
+        double sampleTimeSeconds = section.sentGameTimeMillis() / 1000.0;
+        motionTimeline.noteSample(sampleTimeSeconds);
+        fleetMirror.apply(snapshot, localPlayerFactionId(), sampleTimeSeconds);
     }
 
     private void handleNpcFleetMotion(CoopMessages.DatagramSection section) {
@@ -1646,7 +1657,24 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         List<CoopNpcFleetMotion> motions = CoopNpcFleetMotion.decodeBatch(section.body());
-        npcFleetRegistry.applyMotion(motions);
+        double sampleTimeSeconds = section.sentGameTimeMillis() / 1000.0;
+        motionTimeline.noteSample(sampleTimeSeconds);
+        npcFleetRegistry.applyMotion(motions, sampleTimeSeconds);
+    }
+
+    /**
+     * Phase 29 M1: one cursor read per frame, then every mirror (partner player mirror + NPC mirrors)
+     * renders its buffered trajectory at it. The cursor advances by campaign dt — zero while paused,
+     * so a shared pause freezes all mirrors in place and unpause resumes without a hop.
+     */
+    private void advanceMirrorMotion(float amount) {
+        double gameDt = isSectorPausedForStream() ? 0.0 : amount;
+        double cursor = motionTimeline.advance(gameDt);
+        if (Double.isNaN(cursor)) {
+            return;
+        }
+        fleetMirror.advanceMotion(cursor);
+        npcFleetRegistry.advanceMotion(cursor);
     }
 
     private void handleNpcFleetSet(CoopMessages.Message message) {
@@ -1654,13 +1682,20 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         try {
-            String encoded = CoopMessages.requiredPayloadString(message, "set");
+            // One payload parse for both fields — the set blob is large and this path is profiled.
+            java.util.Map<String, Object> payload = CoopMessages.decodePayload(message);
+            String encoded = String.valueOf(payload.getOrDefault("set", ""));
+            // The sender's stream-time stamp (Phase 29 M1) so set-fed positions land in the same
+            // interpolation buffers the UDP motion sections fill.
+            double sampleTimeSeconds =
+                    payload.get("gameTimeMillis") instanceof Number n ? n.longValue() / 1000.0 : 0.0;
+            motionTimeline.noteSample(sampleTimeSeconds);
             // Split-stamped so the profiler can separate decode cost from apply cost; both stamps are
             // 0 and noteNpcSetApply is a no-op when profiling is off.
             long decodeStart = profiler.start();
             CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.decode(encoded);
             long applyStart = profiler.start();
-            npcFleetRegistry.applySet(set);
+            npcFleetRegistry.applySet(set, sampleTimeSeconds);
             profiler.noteNpcSetApply(encoded.length(), decodeStart, applyStart);
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply NPC_FLEET_SET", ex);
@@ -1683,12 +1718,14 @@ public class CoopNetPump implements EveryFrameScript {
             battleResultReconciler.reset();
             datagramWatermark.reset();
             datagramRedundancy.reset();
+            motionTimeline.reset();
             npcReplicationStreaming = true;
         } else if (!active && npcReplicationStreaming) {
             // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
             npcFleetRegistry.disposeAll();
             datagramWatermark.reset();
             datagramRedundancy.reset();
+            motionTimeline.reset();
             npcReplicationStreaming = false;
             lastNpcDebug = null;
             lastNpcMirrorCount = -1;
