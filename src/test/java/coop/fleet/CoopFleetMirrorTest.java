@@ -50,6 +50,30 @@ class CoopFleetMirrorTest {
         assertFalse(CoopFleetMirror.shouldCommitRoster(false, "hash-b", "hash-a"));
     }
 
+    @Test
+    void anEmptyPlayerRosterIsNeverCommitted() {
+        // The wiped client streams 0-member FLEET_SNAPSHOTs for the seconds between "no ships left"
+        // and vanilla's showShuttleDialog() replacing its fleet. Committing that gives the partner a
+        // 0-member CampaignFleet, which CampaignFleet.advance() despawns as NO_MEMBERS - a branch
+        // setNoAutoDespawn(true) does not cover. Skipping keeps the last non-empty roster until the
+        // respawned fleet's snapshot lands.
+        assertTrue(CoopFleetMirror.shouldSkipRosterApply(true, 0));
+    }
+
+    @Test
+    void aNonEmptyPlayerRosterAppliesNormally() {
+        assertFalse(CoopFleetMirror.shouldSkipRosterApply(true, 1));
+        assertFalse(CoopFleetMirror.shouldSkipRosterApply(true, 30));
+    }
+
+    @Test
+    void anNpcMirrorStillAcceptsAnEmptyRoster() {
+        // Phase 15's battle-result teardown legitimately empties a destroyed NPC mirror moments before
+        // removing it. A blanket guard would leave the wreck wearing its pre-battle roster.
+        assertFalse(CoopFleetMirror.shouldSkipRosterApply(false, 0));
+        assertFalse(CoopFleetMirror.shouldSkipRosterApply(false, 4));
+    }
+
     /** Stands in for this install's spec store. */
     private static java.util.function.Predicate<String> installHas(String... ids) {
         java.util.Set<String> known = new java.util.HashSet<>(java.util.Arrays.asList(ids));

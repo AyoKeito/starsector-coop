@@ -92,6 +92,11 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private String appliedActionText = "";
     /** Whether the {@link CoopDebug} one-shot "which tooltip path is live" line has been printed. */
     private boolean loggedActionTextPath;
+    /**
+     * Whether the empty-roster guard has already logged for the current wipe episode (Phase 17). Reset
+     * the moment a non-empty roster arrives, so a second wipe later in the session logs again.
+     */
+    private boolean emptyRosterSkipLogged;
 
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
@@ -122,7 +127,14 @@ public class CoopFleetMirror implements CoopNpcMirror {
             driveMovement(snapshot.x(), snapshot.y(), snapshot.velocityX(), snapshot.velocityY(),
                     snapshot.transponderOn());
             acceptSensors(snapshot.sensors());
-            refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
+            // Phase 17: the player path is the only one the empty-roster guard covers. See
+            // shouldSkipRosterApply — the NPC path below must keep accepting empty rosters.
+            if (shouldSkipRosterApply(true, snapshot.members().size())) {
+                noteEmptyPlayerRosterSkipped(snapshot.fleetHash());
+            } else {
+                emptyRosterSkipLogged = false;
+                refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
+            }
             presenceIndicator.apply(mirrorFleet, snapshot.username());
             applyCount++;
         } catch (RuntimeException ex) {
@@ -585,6 +597,40 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     /**
+     * The empty-roster guard (Phase 17). A wiped client streams 0-member {@code FLEET_SNAPSHOT}s for
+     * the few seconds between "no ships left" and vanilla's {@code CampaignState.showShuttleDialog()}
+     * replacing its fleet. Committing that roster to the partner's mirror hands the engine a 0-member
+     * {@link CampaignFleetAPI}, and {@code CampaignFleet.advance()} despawns one of those with
+     * {@code FleetDespawnReason.NO_MEMBERS} — a branch {@code setNoAutoDespawn(true)} does <em>not</em>
+     * cover (it guards only {@code fadeAndExpire}). The 2026-08-19 live wipe survived it only because
+     * the shared pause held for the whole window; at WAN latency the pause lands a round trip late and
+     * the unpaused frames despawn and recreate the mirror in a loop, spraying spurious
+     * {@code reportFleetDespawned} events at vanilla listeners. Skipping the apply keeps the last
+     * non-empty roster on screen until the respawned fleet's snapshot arrives, which is also the better
+     * thing to look at.
+     *
+     * <p><b>Player mirrors only, deliberately.</b> This class also backs the Phase 9 NPC mirrors, and
+     * the Phase 15 battle-result teardown <em>legitimately</em> commits a 0-member roster to a
+     * destroyed NPC mirror moments before removing it ({@code roster refreshed to 0 of 0 ship(s)} on
+     * {@code BATTLE_END}). A blanket guard would leave those wrecks wearing their pre-battle rosters
+     * for the frames before removal, so the NPC path stays unguarded.
+     */
+    static boolean shouldSkipRosterApply(boolean playerMirror, int memberCount) {
+        return playerMirror && memberCount == 0;
+    }
+
+    /** One line per wipe episode, not per 10 Hz snapshot; rare enough to stay at INFO. */
+    private void noteEmptyPlayerRosterSkipped(String fleetHash) {
+        if (emptyRosterSkipLogged) {
+            return;
+        }
+        emptyRosterSkipLogged = true;
+        CoopLog.info(CoopFleetMirror.class,
+                "Coop player mirror kept its last roster: empty snapshot ignored (fleet wipe window)"
+                        + " coopFleetId=" + coopFleetId + " fleetHash=" + fleetHash);
+    }
+
+    /**
      * Applies CR/hull onto the existing mirror members without a rebuild. Members are matched by
      * list position: both sides preserve fleet order (the roster was built in snapshot order and the
      * structural hash pins the same ship set), and a transient order mismatch merely paints repair
@@ -961,6 +1007,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         sensors = CoopSensorSync.Profile.UNKNOWN;
         appliedActionText = "";
         loggedActionTextPath = false;
+        emptyRosterSkipLogged = false;
     }
 
     /**

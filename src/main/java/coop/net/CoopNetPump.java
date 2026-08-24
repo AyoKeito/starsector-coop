@@ -24,6 +24,7 @@ import coop.fleet.CoopNpcFleetMotion;
 import coop.fleet.CoopNpcFleetReplicator;
 import coop.fleet.CoopNpcFleetSetSnapshot;
 import coop.fleet.CoopNpcFleetSuppressor;
+import coop.fleet.CoopRespawnNotifier;
 import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.interaction.CoopInteractionClaim;
@@ -88,6 +89,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_FLEET_MIRROR = "fleet.syncMirror";
     private static final String SECTION_FLEET_DATAGRAMS = "fleet.drainDatagrams";
     private static final String SECTION_FLEET_SNAPSHOT_SEND = "fleet.sendSnapshot";
+    private static final String SECTION_RESPAWN_NOTIFIER = "fleet.respawnNotifier";
     private static final String SECTION_GUEST_SNAPSHOT_SEND = "save.sendGuestSnapshot";
     private static final String SECTION_SAVE_CHECKPOINT = "save.tickCheckpoint";
     /**
@@ -162,6 +164,8 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopNpcThreatWatcher npcThreatWatcher;
     private final CoopBattleResultReconciler battleResultReconciler;
     private final CoopCampaignReplicator campaignReplicator;
+    /** Phase 17: watches the local player fleet for the vanilla wipe respawn's object swap. */
+    private final CoopRespawnNotifier respawnNotifier = new CoopRespawnNotifier();
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
     private final Supplier<CoopHandshakeManifest> manifestSupplier;
@@ -373,6 +377,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_FLEET_DATAGRAMS, t);
         maybeSendFleetSnapshot();
         t = profiler.split(SECTION_FLEET_SNAPSHOT_SEND, t);
+        tickRespawnNotifier();
+        t = profiler.split(SECTION_RESPAWN_NOTIFIER, t);
         maybeSendGuestSnapshot();
         t = profiler.split(SECTION_GUEST_SNAPSHOT_SEND, t);
         tickSaveCheckpoint();
@@ -582,6 +588,7 @@ public class CoopNetPump implements EveryFrameScript {
             case BATTLE_RESULT -> handleBattleResult(message);
             case GUEST_SNAPSHOT -> handleGuestSnapshot(message);
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
+            case RESPAWN_PLAYER -> handleRespawnPlayer(message);
             case PING -> sendPong(message);
             default -> {
                 // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
@@ -1374,6 +1381,74 @@ public class CoopNetPump implements EveryFrameScript {
             CoopLog.warn(CoopNetPump.class, "Failed to capture coop fleet snapshot", ex);
         } finally {
             nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
+        }
+    }
+
+    // ---- Phase 17: fleet wipe --------------------------------------------------------------------
+
+    /**
+     * Wiped client: notice vanilla's respawn swapping the player fleet out from under us and tell the
+     * partner. The mod builds none of the respawn — {@code CampaignState.showShuttleDialog()} already
+     * hands back two ships, 80% of the credits, the officers, the skills and the reputation — this is
+     * the notification the partner would otherwise never get.
+     *
+     * <p>The detection is reset whenever the session stops streaming, so a reconnect (or a session that
+     * has not started yet) re-seeds the tracked reference instead of banner-ing on the first swap it
+     * happens to see.
+     */
+    private void tickRespawnNotifier() {
+        if (!shouldStreamFleet()) {
+            respawnNotifier.reset();
+            return;
+        }
+        CoopRespawnNotifier.Respawn respawn =
+                respawnNotifier.onFrame(CoopRespawnNotifier.engineProbe(sectorOrNull()));
+        if (respawn == null) {
+            return;
+        }
+        String localPlayerId = sessionState.localPlayerId();
+        if (localPlayerId == null) {
+            return;
+        }
+        CoopLog.info(CoopNetPump.class, "Coop local fleet was destroyed; vanilla respawn placed it at "
+                + (respawn.destinationName().isEmpty() ? "an unknown destination" : respawn.destinationName()));
+        try {
+            CoopMessages.Message message = CoopMessages.respawnPlayer(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                    localPlayerId, respawn.destinationName());
+            service.send(message);
+            log("outbound", message);
+            service.flushOutbound();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to send RESPAWN_PLAYER", ex);
+        }
+    }
+
+    /** Partner: banner the wipe, since the only other cue is the mirror teleporting across the sector. */
+    private void handleRespawnPlayer(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+            String destination = CoopMessages.requiredPayloadString(message, "destinationName");
+            String name = playerId.equals(sessionState.remotePlayerId()) ? sessionState.remoteName() : null;
+            if (name == null || name.isEmpty()) {
+                name = "Remote player";
+            }
+            // ASCII only: no vanilla string in data/strings uses an em dash, so the campaign font is
+            // not guaranteed to have the glyph and a missing one renders as a box.
+            String banner = destination.isEmpty()
+                    ? name + "'s fleet was destroyed - respawned elsewhere in the sector"
+                    : name + "'s fleet was destroyed - respawned at " + destination;
+            CoopLog.info(CoopNetPump.class, "Coop " + banner);
+            SectorAPI sector = sectorOrNull();
+            CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
+            if (ui != null) {
+                ui.addMessage(banner);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply RESPAWN_PLAYER", ex);
         }
     }
 

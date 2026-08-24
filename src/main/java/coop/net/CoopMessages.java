@@ -53,6 +53,7 @@ public final class CoopMessages {
         DIALOG_BEGIN,
         GUEST_SNAPSHOT,
         SAVE_CHECKPOINT,
+        RESPAWN_PLAYER,
         PING,
         PONG,
         DISCONNECT
@@ -494,6 +495,26 @@ public final class CoopMessages {
         return new Message(Type.SAVE_CHECKPOINT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"checkpointId\":" + checkpointId + ","
                         + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    // ---- Phase 17: fleet wipe ---------------------------------------------------------------------
+
+    /**
+     * Wiped client &rarr; partner: vanilla's {@code CampaignState.showShuttleDialog()} just swapped
+     * this client's player fleet for the two-ship starter set and teleported it to a random friendly
+     * market. Reliable TCP, one-shot per wipe; the mod builds none of the respawn itself.
+     *
+     * <p>Purely a notification. Without it the survivor's only cue is the partner mirror silently
+     * jumping across the sector, and the mirror carries no "what happened" channel.
+     * {@code destinationName} is best-effort ("" when the destination could not be resolved) and the
+     * receiver resolves the player's display name from its own session state.
+     */
+    public static Message respawnPlayer(String sessionId, long seq, long sentAtMillis,
+                                        String playerId, String destinationName) {
+        return new Message(Type.RESPAWN_PLAYER, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
+                        + "\"destinationName\":\""
+                        + escapeJson(destinationName == null ? "" : destinationName) + "\"}");
     }
 
     public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {

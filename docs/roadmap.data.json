@@ -645,7 +645,7 @@
       "title": "Fleet Wipe — Harden the Vanilla Respawn for Coop",
       "theme": "respawn",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Rescoped 2026-08-20: vanilla 0.98a already respawns a wiped player (showShuttleDialog, Wayfarer+Kite at a random friendly market); the mod adds only an empty-roster mirror guard and a RESPAWN_PLAYER partner banner.",
       "introduces": [
         "CoopRespawnNotifier",
@@ -653,10 +653,9 @@
         "RESPAWN_PLAYER message"
       ],
       "residue": [
-        "empty-roster guard unit tests",
         "deliberate-wipe smoke test both directions"
       ],
-      "note": "Original Wolf+5k injection cancelled — it would have suppressed the vanilla respawn; random destination kept by user decision"
+      "note": "Built 2026-08-20. Original Wolf+5k injection cancelled — it would have suppressed the vanilla respawn; random destination kept by user decision. Guard is player-mirror-scoped so Phase 15's NPC battle teardown still empties a destroyed mirror"
     },
     {
       "id": "18",
