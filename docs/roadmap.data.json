@@ -738,7 +738,7 @@
       "num": 21,
       "title": "Multiplayer UX",
       "theme": "ui-lock",
-      "track": "post-v1",
+      "track": "v1",
       "status": "not-built",
       "summary": "Purpose-built multiplayer UI on official API only: in-campaign lobby with ready-up, connecting screen, desync dialog, and session stats.",
       "introduces": [
@@ -750,7 +750,8 @@
         "all-ready gate",
         "input-blocker suspend"
       ],
-      "residue": []
+      "residue": [],
+      "note": "Pulled into V1 2026-08-24 (user decision): the lobby’s force-pause-until-all-ready fixes the host-starts-unpaused-before-guest issue. Whole phase after 20 (split declined); slots after 29-M2, before 19."
     },
     {
       "id": "22",
@@ -932,7 +933,7 @@
       "title": "Campaign Motion Smoothness",
       "theme": "motion",
       "track": "v1",
-      "status": "not-built",
+      "status": "partial",
       "summary": "Pulled into V1 2026-08-20: root cause verified live (speed-clamped chase + arrival dead zone in the mirror drive path = ~1 Hz teleports; orbit pair = worst case). M1 mirror interpolation slots after 18; M2 adaptive cadence needs 20. No player-facing rate knob ever.",
       "introduces": [
         "CoopMotionInterpolator",
@@ -970,6 +971,7 @@
     "7b",
     "7c",
     "20",
+    "21",
     "19"
   ],
   "acceptance": [
