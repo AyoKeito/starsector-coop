@@ -355,6 +355,11 @@ public class CoopNetService {
                         "Coop UDP dropping oversized datagram (" + bytes.length + " bytes)");
                 continue;
             }
+            // Dev wiretap (dormant unless -Dcoop.debug.wiretap=true / $coopWiretap): hooked here
+            // rather than at sendDatagram so the size histogram measures datagrams that actually
+            // reach the socket, at the exact byte length the wire sees. Disabled, this is one static
+            // boolean read.
+            CoopWiretap.noteSend(payload, bytes.length);
             try {
                 channel.send(ByteBuffer.wrap(bytes), remote);
             } catch (Exception ex) {

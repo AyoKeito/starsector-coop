@@ -225,6 +225,12 @@ public class CoopNetPump implements EveryFrameScript {
      * session's numbers into the new one.
      */
     private final CoopFrameProfiler profiler = CoopFrameProfiler.installFresh();
+    /**
+     * Dev wiretap (diagnostic only, dormant unless {@code coop.debug.wiretap} is on). Freshly
+     * installed per pump for the same reason the profiler is; assigned in the constructor because it
+     * rides the pump's injected clock.
+     */
+    private final CoopWiretap wiretap;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -351,6 +357,8 @@ public class CoopNetPump implements EveryFrameScript {
         // load replaces the previous session's instance.
         this.saveCheckpoint.setSender(this::sendSaveCheckpoint);
         CoopSaveCheckpoint.setActive(this.saveCheckpoint);
+        // Same static-seam deal as the profiler: the transport's send hook has no handle on the pump.
+        this.wiretap = CoopWiretap.installFresh(clockMillis);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
@@ -377,6 +385,8 @@ public class CoopNetPump implements EveryFrameScript {
         // Same shape: CoopDebug.diagnosticsEnabled() is read 3-4x a frame from the hot paths, so the
         // property + sector-memory lookup behind it runs here on a 300-frame poll instead.
         CoopDebug.pollFrame();
+        // Same again for the datagram wiretap, which also emits its size summary from this poll.
+        CoopWiretap.pollFrame();
         // Phase 29 M1: stream time advances by campaign dt, frozen while paused, before anything
         // this frame stamps an outbound datagram with it.
         streamClock.advance(amount, isSectorPausedForStream());
@@ -1631,6 +1641,10 @@ public class CoopNetPump implements EveryFrameScript {
         while ((raw = service.pollDatagram()) != null) {
             try {
                 CoopMessages.Datagram datagram = CoopMessages.parseDatagram(raw);
+                // Wiretap before the session filter and the watermark: a datagram this side decoded
+                // but then discarded is exactly what a desync investigation wants to see. Dormant
+                // unless -Dcoop.debug.wiretap=true / $coopWiretap.
+                wiretap.recordReceive(raw, datagram);
                 if (!sessionMatches(datagram.sessionId())) {
                     continue;
                 }
@@ -1735,6 +1749,7 @@ public class CoopNetPump implements EveryFrameScript {
             datagramRedundancy.reset();
             motionTimeline.reset();
             coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
+            wiretap.sessionStarted();
             npcReplicationStreaming = true;
         } else if (!active && npcReplicationStreaming) {
             // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
@@ -1743,6 +1758,8 @@ public class CoopNetPump implements EveryFrameScript {
             datagramRedundancy.reset();
             motionTimeline.reset();
             coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
+            // Final size summary while the numbers still exist — this is the Phase 20.1 histogram.
+            wiretap.sessionEnded();
             npcReplicationStreaming = false;
             lastNpcDebug = null;
             lastNpcMirrorCount = -1;
