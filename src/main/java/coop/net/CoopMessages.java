@@ -43,6 +43,8 @@ public final class CoopMessages {
         MARKET_TXN,
         WORLD_DELTA,
         RAID_RESULT,
+        COLONY_FOUNDED,
+        COLONY_ABANDONED,
         ABILITY_ACTIVATE,
         ORBIT_SNAPSHOT,
         NPC_FLEET_SET,
@@ -357,6 +359,38 @@ public final class CoopMessages {
     public static Message raidResult(String sessionId, long seq, long sentAtMillis, String outcome) {
         return new Message(Type.RAID_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"outcome\":\"" + escapeJson(requireText(outcome, "outcome")) + "\"}");
+    }
+
+    /**
+     * Phase 24 milestone 2: a colony either player just founded (reliable TCP, bidirectional).
+     * {@code colony} is the self-contained delimited blob from
+     * {@link coop.colony.CoopColonySync.Event#encode()} — header line plus one line per condition,
+     * industry and submarket, because the envelope parser has no arrays.
+     *
+     * <p>It carries both the planet's entity id and the market's id. The market is the planet's
+     * gen-time planet-condition market, promoted in place rather than created, so its id
+     * ({@code "market_" + planetId}) matches across seed-locked engines — but that market is not
+     * registered with the economy until it is colonized, so the receiving engine has to reach it
+     * through the planet.
+     */
+    public static Message colonyFounded(String sessionId, long seq, long sentAtMillis, String colony) {
+        return new Message(Type.COLONY_FOUNDED, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"colony\":\"" + escapeJson(requireText(colony, "colony")) + "\"}");
+    }
+
+    /**
+     * Phase 24 milestone 2: a colony either player just abandoned (reliable TCP, bidirectional). Same
+     * body shape as {@link #colonyFounded}, but identity only: vanilla reports abandonment
+     * <em>after</em> its own teardown has run ({@code AbandonMarketPluginImpl.java:121-123}), so
+     * there is no colony state left to read and none is needed — the applier re-runs the same vanilla
+     * teardown on its own copy.
+     *
+     * <p>The evacuation cost and shutdown refund deliberately do not ride along: they are the
+     * abandoning player's own credits, the same rule salvage and raid loot follow.
+     */
+    public static Message colonyAbandoned(String sessionId, long seq, long sentAtMillis, String colony) {
+        return new Message(Type.COLONY_ABANDONED, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"colony\":\"" + escapeJson(requireText(colony, "colony")) + "\"}");
     }
 
     public static Message abilityActivate(String sessionId, long seq, long sentAtMillis,

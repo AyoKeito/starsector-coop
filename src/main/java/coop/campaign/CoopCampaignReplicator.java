@@ -42,6 +42,7 @@ import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
 import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.util.Misc;
 import com.fs.starfarer.api.EveryFrameScript;
+import coop.colony.CoopColonySync;
 import coop.colony.CoopRaidOutcomeSync;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
@@ -82,7 +83,7 @@ import java.util.function.LongSupplier;
  * smoke test.
  */
 public final class CoopCampaignReplicator
-        implements CoopCampaignEventListener.Sink, CoopRaidOutcomeSync.Sink {
+        implements CoopCampaignEventListener.Sink, CoopRaidOutcomeSync.Sink, CoopColonySync.Sink {
 
     /**
      * Re-entrancy guard: while {@link #isReplaying()} the applier is mid-apply of a host-originated
@@ -171,6 +172,12 @@ public final class CoopCampaignReplicator
     private final CoopRaidOutcomeSync.Ledger raidLedger = new CoopRaidOutcomeSync.Ledger();
     private CoopRaidOutcomeSync.HostileActCapture raidCapture;
 
+    // Phase 24 milestone 2: colony lifecycle. Same bidirectional shape as the raid channel -- the
+    // colonizing player captures the finished colony, the host canonicalizes and rebroadcasts, the
+    // ledger absorbs the echo. Founding is captured a frame late, so the capture needs a tick.
+    private final CoopColonySync.Ledger colonyLedger = new CoopColonySync.Ledger();
+    private CoopColonySync.ColonizationCapture colonyCapture;
+
     // Phase 12c bar pool: the host polls the global portside bar pool and pushes the ordered list on
     // change. Two seconds is well inside a dock-to-bar-click, and the pool only ever changes on
     // BarEventManager's 0.4-0.6 day generation tick or when someone accepts an offer.
@@ -236,6 +243,15 @@ public final class CoopCampaignReplicator
             CoopLog.warn(CoopCampaignReplicator.class,
                     "Could not register coop hostile-act listener; RAID_RESULT will not fire", ex);
         }
+        // Phase 24 M2: colonization/abandonment is a third listener-manager interface.
+        try {
+            colonyCapture = new CoopColonySync.ColonizationCapture(this);
+            sector.getListenerManager().addListener(colonyCapture, true);
+        } catch (RuntimeException | LinkageError ex) {
+            colonyCapture = null;
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Could not register coop colonization listener; COLONY_FOUNDED will not fire", ex);
+        }
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
 
@@ -268,11 +284,24 @@ public final class CoopCampaignReplicator
                 CoopLog.warn(CoopCampaignReplicator.class, "Failed to remove coop hostile-act listener", ex);
             }
         }
+        if (sector != null && colonyCapture != null) {
+            try {
+                sector.getListenerManager().removeListener(colonyCapture);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class,
+                        "Failed to remove coop colonization listener", ex);
+            }
+        }
         if (raidCapture != null) {
             raidCapture.reset();
         }
         raidCapture = null;
         raidLedger.clear();
+        if (colonyCapture != null) {
+            colonyCapture.reset();
+        }
+        colonyCapture = null;
+        colonyLedger.clear();
         decivCapture = null;
         listener = null;
         factionRelationsSeeded = false;
@@ -321,6 +350,7 @@ public final class CoopCampaignReplicator
             case MARKET_TXN -> hostApplyMarketTxn(message);
             case WORLD_DELTA -> handleWorldDelta(message);
             case RAID_RESULT -> handleRaidResult(message);
+            case COLONY_FOUNDED, COLONY_ABANDONED -> handleColonyLifecycle(message);
             case ABILITY_ACTIVATE -> hostHandleAbilityActivate(message);
             case ORBIT_SNAPSHOT -> applyOrbitSnapshot(message);
             default -> {
@@ -1502,6 +1532,84 @@ public final class CoopCampaignReplicator
         }
         CoopLog.info(CoopCampaignReplicator.class, "Coop RAID_RESULT " + outcome.kind() + " market="
                 + outcome.marketId() + " id=" + outcome.outcomeId() + " firstApply=" + firstApply);
+    }
+
+    // ---- Phase 24 M2: colony lifecycle ---------------------------------------------------------
+
+    @Override
+    public boolean shouldCaptureColonyLifecycle() {
+        // Same reasoning as shouldCaptureRaidOutcome: applying a remote COLONY_FOUNDED re-drives the
+        // market mutations locally, and without the guard our own listener would report them as a
+        // fresh colonization and bounce it back.
+        return isActive() && !replayGuard.isReplaying();
+    }
+
+    @Override
+    public String colonyActingPlayerId() {
+        return session.localPlayerId();
+    }
+
+    /**
+     * Either player founded or abandoned a colony locally. Vanilla already did the work here, so this
+     * only reports it; the ledger entry taken now is what makes the host's rebroadcast a no-op when it
+     * comes back.
+     */
+    @Override
+    public void onColonyLifecycleCaptured(CoopColonySync.Event event) {
+        if (event == null || !isActive()) {
+            return;
+        }
+        if (!colonyLedger.apply(event)) {
+            return;
+        }
+        send(event.kind() == CoopColonySync.Kind.FOUNDED
+                ? CoopMessages.colonyFounded(session.sessionId(), service.nextSeq(), now(), event.encode())
+                : CoopMessages.colonyAbandoned(session.sessionId(), service.nextSeq(), now(), event.encode()));
+        CoopLog.info(CoopCampaignReplicator.class, "Coop captured COLONY_" + event.kind()
+                + " planet=" + event.planetId() + " market=" + event.marketId()
+                + " id=" + event.eventId() + " name=" + event.name() + " size=" + event.size()
+                + " industries=" + event.industries().size());
+    }
+
+    /**
+     * Per-frame drain of pending colonizations. Founding is snapshotted one frame after vanilla
+     * reports it, so the colony is definitely finished before it is read — see
+     * {@link CoopColonySync.ColonizationCapture}.
+     */
+    public void tickColonyLifecycle() {
+        if (colonyCapture == null || !isActive()) {
+            return;
+        }
+        try {
+            colonyCapture.drainPending();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to drain coop colonizations", ex);
+        }
+    }
+
+    private void handleColonyLifecycle(CoopMessages.Message message) {
+        CoopColonySync.Event event = CoopColonySync.decode(
+                CoopMessages.requiredPayloadString(message, "colony"));
+        boolean firstApply = colonyLedger.apply(event);
+        if (firstApply) {
+            replayGuard.begin();
+            try {
+                CoopColonySync.applyToEngine(event);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply COLONY_" + event.kind(), ex);
+            } finally {
+                replayGuard.end();
+            }
+        }
+        // The host owns the canonical world: it integrates the guest's report and rebroadcasts so both
+        // clients converge. The originator's ledger entry kills the echo.
+        if (isHost() && isActive()) {
+            send(event.kind() == CoopColonySync.Kind.FOUNDED
+                    ? CoopMessages.colonyFounded(session.sessionId(), service.nextSeq(), now(), event.encode())
+                    : CoopMessages.colonyAbandoned(session.sessionId(), service.nextSeq(), now(), event.encode()));
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop COLONY_" + event.kind() + " planet="
+                + event.planetId() + " id=" + event.eventId() + " firstApply=" + firstApply);
     }
 
     private void handleWorldDelta(CoopMessages.Message message) {
@@ -3301,6 +3409,10 @@ public final class CoopCampaignReplicator
 
     public CoopRaidOutcomeSync.Ledger raidLedger() {
         return raidLedger;
+    }
+
+    public CoopColonySync.Ledger colonyLedger() {
+        return colonyLedger;
     }
 
     public CoopSkeletonMutationWatcher skeletonWatcher() {

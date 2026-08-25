@@ -1,6 +1,5 @@
 package coop.campaign;
 
-import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -11,10 +10,8 @@ import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
 import com.fs.starfarer.api.impl.campaign.intel.bases.LuddicPathBaseIntel;
-import com.fs.starfarer.api.impl.campaign.intel.bases.LuddicPathBaseManager;
 import com.fs.starfarer.api.impl.campaign.intel.bases.PirateActivityIntel;
 import com.fs.starfarer.api.impl.campaign.intel.bases.PirateBaseIntel;
-import com.fs.starfarer.api.impl.campaign.intel.bases.PirateBaseManager;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -43,14 +40,17 @@ import java.util.function.LongSupplier;
  * replicated instead.
  *
  * <ul>
- *   <li><b>Host</b> ({@link #tickHost()}): polls {@code PirateBaseManager.getInstance().getActive()}
- *       and {@code LuddicPathBaseManager.getInstance().getActive()} once a second, builds the record
- *       set, and broadcasts the whole set over reliable TCP whenever the order-independent set hash
+ *   <li><b>Host</b> ({@link #tickHost()}): scans the intel manager for live
+ *       {@code PirateBaseIntel} / {@code LuddicPathBaseIntel} once a second, builds the record set,
+ *       and broadcasts the whole set over reliable TCP whenever the order-independent set hash
  *       changes. Full-set rebroadcast (never deltas) is the same self-correcting choice Phase 9 made
  *       for {@code NPC_FLEET_SET}. {@link #reset()} re-arms it at session (re)start.
- *       {@code PlayerRelatedPirateBaseManager} is deliberately <em>not</em> polled: it has no
- *       {@code getActive()} (it extends {@code EveryFrameScript} directly) and creates bases only in
- *       response to player colonies, which do not exist until Phase 24.</li>
+ *       <p>Phase 24 M2 replaced the original {@code PirateBaseManager.getActive()} /
+ *       {@code LuddicPathBaseManager.getActive()} poll with that scan. The manager poll was correct
+ *       only while player colonies did not exist: {@code PlayerRelatedPirateBaseManager} creates
+ *       pirate bases in response to player colonies, keeps them in a private list, and exposes no
+ *       {@code getActive()} (it implements {@code EveryFrameScript} directly), so its bases were
+ *       missed entirely. See {@link #scanHostIntel(Class)}.</li>
  *   <li><b>Guest</b> ({@link #applySet(String)} + {@link #tickGuest()}): reconciles the local intel
  *       manager against the host's set, keyed by {@code (kind, systemId)}. Reconcile re-runs on a
  *       low-rate tick as well as on message arrival, because the guest's <em>mirrored</em> bases keep
@@ -115,7 +115,7 @@ public final class CoopBaseAuthority {
     private void sendSetIfChanged(long now) {
         List<CoopBaseRecord> records = captureHostBases();
         if (records == null) {
-            // Neither manager was readable this poll (no sector yet, or both threw). Staying silent
+            // Neither intel scan was readable this poll (no sector yet, or both threw). Staying silent
             // is the safe answer: broadcasting the resulting "empty set" would tell the guest to end
             // every base it mirrors.
             return;
@@ -132,45 +132,106 @@ public final class CoopBaseAuthority {
     }
 
     /**
-     * Reads the host's live base population. Defensive per manager so one broken manager cannot blank
-     * the other half of the set, and returns {@code null} — "no reading this poll", not "no bases" —
-     * when neither manager could be read at all.
+     * Reads the host's live base population, one intel type at a time. Returns {@code null} — "no
+     * reading this poll", not "no bases" — when no scan succeeded at all; broadcasting the resulting
+     * empty set would tell the guest to end every base it mirrors.
      */
     private static List<CoopBaseRecord> captureHostBases() {
+        return captureHostBases(CoopBaseAuthority::scanHostIntel);
+    }
+
+    /**
+     * Pure composition half of the host capture, over the {@link HostBaseScan} seam. Defensive per
+     * type so one broken scan cannot blank the other half of the set, and the null-vs-empty
+     * distinction is decided here: {@code null} only when <em>neither</em> type could be read.
+     */
+    static List<CoopBaseRecord> captureHostBases(HostBaseScan scan) {
+        Objects.requireNonNull(scan, "scan");
         List<CoopBaseRecord> records = new ArrayList<>();
-        boolean anyRead = false;
-        try {
-            PirateBaseManager pirates = PirateBaseManager.getInstance();
-            if (pirates != null) {
-                collect(pirates.getActive(), records);
-                anyRead = true;
-            }
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopBaseAuthority.class, "Failed to read pirate base manager", ex);
-        }
-        try {
-            LuddicPathBaseManager pathers = LuddicPathBaseManager.getInstance();
-            if (pathers != null) {
-                collect(pathers.getActive(), records);
-                anyRead = true;
-            }
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopBaseAuthority.class, "Failed to read Luddic-Path base manager", ex);
-        }
+        boolean anyRead = scanInto(scan, PirateBaseIntel.class, records);
+        anyRead |= scanInto(scan, LuddicPathBaseIntel.class, records);
         return anyRead ? records : null;
     }
 
-    /** {@code BaseEventManager.getActive()} is {@code List<EveryFrameScript>} — cast per element. */
-    private static void collect(List<EveryFrameScript> active, List<CoopBaseRecord> out) {
-        if (active == null) {
-            return;
+    private static boolean scanInto(HostBaseScan scan, Class<?> type, List<CoopBaseRecord> out) {
+        try {
+            List<CoopBaseRecord> found = scan.scan(type);
+            if (found == null) {
+                return false;
+            }
+            out.addAll(found);
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopBaseAuthority.class,
+                    "Failed to scan host base intel of type " + type.getSimpleName(), ex);
+            return false;
         }
-        for (EveryFrameScript script : active) {
-            CoopBaseRecord record = toRecord(script);
+    }
+
+    /**
+     * Seam over the host's live base intel so {@link #captureHostBases(HostBaseScan)} stays testable
+     * without engine intel objects (their constructors are massively side-effectful and cannot run in
+     * a test — the same reason {@link BaseWorld} exists).
+     */
+    public interface HostBaseScan {
+        /**
+         * Records for every live base intel of this type, or {@code null} when the scan could not be
+         * performed at all (no sector, no intel manager). An empty list means "no bases of this kind".
+         */
+        List<CoopBaseRecord> scan(Class<?> type);
+    }
+
+    /**
+     * The engine-backed {@link HostBaseScan}: scan the intel manager, not the base managers.
+     *
+     * <p>Phase 24 M2 switched this. Polling {@code PirateBaseManager.getActive()} /
+     * {@code LuddicPathBaseManager.getActive()} only ever saw the bases <em>those two managers</em>
+     * own. Once player colonies exist, {@code PlayerRelatedPirateBaseManager} starts creating pirate
+     * bases too ({@code PlayerRelatedPirateBaseManager.java:183}), keeps them in its own list, and has
+     * no {@code getActive()} at all — so every base it spawned was invisible to the host poll and the
+     * guest never mirrored it. Every base intel registers itself with the intel manager on
+     * construction ({@code PirateBaseIntel.java:261}), so the intel scan is the one reading that sees
+     * all three sources. It is also exactly the scan the guest already uses for cleanup
+     * ({@link SectorBaseWorld#localBases()}), so both roles now read the world the same way.
+     */
+    private static List<CoopBaseRecord> scanHostIntel(Class<?> type) {
+        SectorAPI sector = Global.getSector();
+        IntelManagerAPI intel = sector == null ? null : sector.getIntelManager();
+        if (intel == null) {
+            return null;
+        }
+        List<CoopBaseRecord> records = new ArrayList<>();
+        for (Object base : liveIntel(intel, type)) {
+            CoopBaseRecord record = toRecord(base);
             if (record != null) {
-                out.add(record);
+                records.add(record);
             }
         }
+        return records;
+    }
+
+    /**
+     * Live (neither ending nor ended) intel of one type. Shared by the host capture and the guest's
+     * reconcile so a base that vanilla has already retired is invisible to both.
+     */
+    static List<Object> liveIntel(IntelManagerAPI intel, Class<?> type) {
+        List<Object> result = new ArrayList<>();
+        if (intel == null) {
+            return result;
+        }
+        List<IntelInfoPlugin> items = intel.getIntel(type);
+        if (items == null) {
+            return result;
+        }
+        for (IntelInfoPlugin item : items) {
+            if (item instanceof BaseIntelPlugin plugin && (plugin.isEnding() || plugin.isEnded())) {
+                continue;
+            }
+            if (item != null) {
+                result.add(item);
+            }
+        }
+        return result;
     }
 
     /**
@@ -628,29 +689,13 @@ public final class CoopBaseAuthority {
         }
 
         private List<Object> liveBaseIntel() {
-            List<Object> bases = new ArrayList<>();
-            for (Object base : collect(PirateBaseIntel.class)) {
-                bases.add(base);
-            }
+            List<Object> bases = new ArrayList<>(collect(PirateBaseIntel.class));
             bases.addAll(collect(LuddicPathBaseIntel.class));
             return bases;
         }
 
         private List<Object> collect(Class<?> type) {
-            List<Object> result = new ArrayList<>();
-            List<IntelInfoPlugin> items = intel.getIntel(type);
-            if (items == null) {
-                return result;
-            }
-            for (IntelInfoPlugin item : items) {
-                if (item instanceof BaseIntelPlugin plugin && (plugin.isEnding() || plugin.isEnded())) {
-                    continue;
-                }
-                if (item != null) {
-                    result.add(item);
-                }
-            }
-            return result;
+            return liveIntel(intel, type);
         }
 
         /**

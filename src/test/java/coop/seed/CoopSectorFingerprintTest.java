@@ -53,4 +53,44 @@ class CoopSectorFingerprintTest {
         assertNotEquals(baseFingerprint, CoopSectorFingerprint.fingerprintFromEntries(differentSize));
         assertNotEquals(baseFingerprint, CoopSectorFingerprint.fingerprintFromEntries(differentFaction));
     }
+
+    /**
+     * Phase 24 M2 check: a mid-campaign player colony must not break the seed lock on session resume.
+     *
+     * <p>It does not, and needs no exclusion. Both sides recompute the fingerprint live from their own
+     * loaded save at every seed lock ({@code CoopNetPump.maybeSendSeedLockRequest} falls through to
+     * the live supplier because a stored {@code SeedData} carries no fingerprint), and on the
+     * supported resume path both saves carry the same replicated colony. The colony is one added
+     * entry, identical on both sides. Before colonization there is no entry at all: a planet-condition
+     * market is never registered with the economy, so {@code getMarketsCopy()} never sees it — which is
+     * also why abandonment removes the entry symmetrically rather than leaving a size-1 ghost behind.
+     *
+     * <p>The one fingerprint input a colony moves on its own is {@code marketSize}, and colony growth
+     * is fully deterministic — no RNG anywhere in {@code CoreImmigrationPluginImpl} or any
+     * {@code MarketImmigrationModifier} — so it is a state-mirroring risk of the same kind every
+     * market already carries, not an asymmetric-by-construction input like the hidden dynamic bases
+     * {@link CoopSectorFingerprint#includeMarket} drops.
+     */
+    @Test
+    void aPlayerColonyIsASymmetricFingerprintEntryOnBothSides() {
+        List<CoopSectorFingerprint.Entry> beforeColonizing = List.of(
+                CoopSectorFingerprint.entry("eos", "market_core", 5, "hegemony", 1f, 2f));
+        List<CoopSectorFingerprint.Entry> hostAfter = List.of(
+                CoopSectorFingerprint.entry("eos", "market_core", 5, "hegemony", 1f, 2f),
+                CoopSectorFingerprint.entry("eos", "market_planet_eos", 3, "player", 1f, 2f));
+        List<CoopSectorFingerprint.Entry> guestAfter = List.of(
+                CoopSectorFingerprint.entry("eos", "market_planet_eos", 3, "player", 1f, 2f),
+                CoopSectorFingerprint.entry("eos", "market_core", 5, "hegemony", 1f, 2f));
+
+        assertNotEquals(CoopSectorFingerprint.fingerprintFromEntries(beforeColonizing),
+                CoopSectorFingerprint.fingerprintFromEntries(hostAfter),
+                "the colony is a real entry, so a save with one is a different sector state");
+        assertEquals(CoopSectorFingerprint.fingerprintFromEntries(hostAfter),
+                CoopSectorFingerprint.fingerprintFromEntries(guestAfter),
+                "both coordinated saves carry the same colony, so the seed lock still matches");
+        assertEquals(CoopSectorFingerprint.fingerprintFromEntries(beforeColonizing),
+                CoopSectorFingerprint.fingerprintFromEntries(List.of(
+                        CoopSectorFingerprint.entry("eos", "market_core", 5, "hegemony", 1f, 2f))),
+                "abandoning drops the entry again on both sides, back to the pre-colony fingerprint");
+    }
 }

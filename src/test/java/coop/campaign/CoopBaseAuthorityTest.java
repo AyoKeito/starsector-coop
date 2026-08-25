@@ -1,5 +1,6 @@
 package coop.campaign;
 
+import com.fs.starfarer.api.impl.campaign.intel.bases.PirateBaseIntel;
 import coop.campaign.CoopBaseAuthority.Action;
 import coop.campaign.CoopBaseAuthority.ActionType;
 import coop.campaign.CoopBaseAuthority.BaseWorld;
@@ -17,6 +18,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -273,6 +275,64 @@ class CoopBaseAuthorityTest {
         assertTrue(CoopBaseAuthority.reconcilesForRole(CoopConnectionRole.GUEST));
         assertFalse(CoopBaseAuthority.reconcilesForRole(CoopConnectionRole.HOST));
         assertFalse(CoopBaseAuthority.reconcilesForRole(CoopConnectionRole.NONE));
+    }
+
+    // ---- Host capture (Phase 24 M2: intel scan, not manager poll) -------------------------------
+
+    /**
+     * The whole point of the M2 switch: {@code PlayerRelatedPirateBaseManager} keeps its bases in a
+     * private list with no {@code getActive()}, so the old manager poll could not see them. Anything
+     * the intel scan yields is captured, whichever manager created it.
+     */
+    @Test
+    void hostCaptureTakesEveryBaseTheIntelScanYields() {
+        CoopBaseRecord managerBase = CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_MINOR");
+        CoopBaseRecord playerRelatedBase = CoopBaseRecord.pirate("yma", "pirates", "TIER_3_2MODULE");
+        CoopBaseRecord patherBase = CoopBaseRecord.pather("askonia", "luddic_path", true);
+
+        List<CoopBaseRecord> captured = CoopBaseAuthority.captureHostBases(type ->
+                type == PirateBaseIntel.class
+                        ? List.of(managerBase, playerRelatedBase)
+                        : List.of(patherBase));
+
+        assertEquals(List.of(managerBase, playerRelatedBase, patherBase), captured);
+    }
+
+    /**
+     * Load-bearing null-vs-empty distinction: {@code null} means "no reading this poll" and keeps the
+     * host silent, {@code empty} means "no bases" and tells the guest to drop every mirror. Getting
+     * these the wrong way round wipes the guest's bases whenever a scan fails.
+     */
+    @Test
+    void hostCapturePreservesTheNullVersusEmptyDistinction() {
+        assertTrue(CoopBaseAuthority.captureHostBases(type -> List.of()).isEmpty(),
+                "both scans readable and empty means 'no bases', not 'no reading'");
+        assertNull(CoopBaseAuthority.captureHostBases(type -> null),
+                "no scan readable must stay null so the host says nothing");
+        assertNull(CoopBaseAuthority.captureHostBases(type -> {
+            throw new IllegalStateException("intel manager exploded");
+        }), "a throwing scan is a failed reading, not an empty world");
+    }
+
+    /** One broken scan must not blank the other half of the set. */
+    @Test
+    void hostCaptureKeepsTheReadableHalfWhenTheOtherScanFails() {
+        CoopBaseRecord patherBase = CoopBaseRecord.pather("askonia", "luddic_path", false);
+
+        List<CoopBaseRecord> captured = CoopBaseAuthority.captureHostBases(type -> {
+            if (type == PirateBaseIntel.class) {
+                throw new IllegalStateException("pirate intel scan failed");
+            }
+            return List.of(patherBase);
+        });
+
+        assertEquals(List.of(patherBase), captured);
+    }
+
+    /** No sector / no intel manager is the "no reading" case, and must not throw. */
+    @Test
+    void liveIntelOnANullManagerIsEmptyRatherThanAThrow() {
+        assertTrue(CoopBaseAuthority.liveIntel(null, PirateBaseIntel.class).isEmpty());
     }
 
     // ---- Seam fake ----------------------------------------------------------------------------
