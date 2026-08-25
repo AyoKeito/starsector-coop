@@ -35,6 +35,59 @@ class CoopFleetMirrorTest {
     }
 
     @Test
+    void aSlowCrRecoveryTripsTheGateOnceInsteadOfNever() {
+        // The 2026-08-25 ratchet. Wire CR arrives quantized onto CoopFleetCodec.FRACTION_STEP (0.001),
+        // so a repairing ship moves one step per sample and no single step ever clears the 0.005
+        // epsilon. Gating against the value the previous apply WROTE meant the gate never fired at all
+        // however far CR really drifted, and cachedStrength stayed frozen for the life of the roster.
+        float ratchetReference = 0.40f;
+        float lastInvalidated = 0.40f;
+        int ratchetFirings = 0;
+        int firings = 0;
+        float cr = 0.40f;
+        for (int step = 0; step < 6; step++) {
+            cr += 0.001f;
+            if (CoopFleetMirror.crDiffers(ratchetReference, cr)) {
+                ratchetFirings++;
+            }
+            ratchetReference = cr; // the old behaviour: the reference chased every write
+            if (CoopFleetMirror.crDiffers(lastInvalidated, cr)) {
+                firings++;
+            }
+            lastInvalidated = CoopFleetMirror.nextCrReference(lastInvalidated, cr);
+        }
+        assertEquals(0, ratchetFirings);
+        assertEquals(1, firings);
+        // The one firing reseated the reference; it is no longer the CR the recovery started from.
+        assertTrue(lastInvalidated > 0.404f);
+    }
+
+    @Test
+    void perTickCrNoiseAroundAStableValueStillInvalidatesNothing() {
+        // The case the gate exists for: a fleet whose CR is not really moving must not drag a full
+        // per-member updateStats() (and the fleet sync it cascades into) through every 10 Hz apply.
+        // Holding the reference still is also what keeps the noise from random-walking the reference
+        // out from under itself.
+        float reference = 0.70f;
+        int firings = 0;
+        for (float cr : new float[] {0.700f, 0.703f, 0.698f, 0.702f, 0.699f, 0.701f, 0.700f}) {
+            if (CoopFleetMirror.crDiffers(reference, cr)) {
+                firings++;
+            }
+            reference = CoopFleetMirror.nextCrReference(reference, cr);
+        }
+        assertEquals(0, firings);
+        assertEquals(0.70f, reference, 1e-6f);
+    }
+
+    @Test
+    void aFiredGateReseatsItsReferenceOnTheValueThatFiredIt() {
+        // Otherwise one real jump would leave the reference behind and every later sample would fire.
+        assertEquals(0.4f, CoopFleetMirror.nextCrReference(1.0f, 0.4f), 1e-6f);
+        assertEquals(0.7f, CoopFleetMirror.nextCrReference(0.7f, 0.702f), 1e-6f);
+    }
+
+    @Test
     void aCompleteRebuildIsCommittedImmediately() {
         assertTrue(CoopFleetMirror.shouldCommitRoster(true, "hash-a", null));
     }

@@ -16,6 +16,7 @@ import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -116,6 +117,16 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * the moment a non-empty roster arrives, so a second wipe later in the session logs again.
      */
     private boolean emptyRosterSkipLogged;
+    /**
+     * Per-slot CR reference for the {@link #updateMemberState} invalidation gate: the value that last
+     * <em>fired</em> the gate, not the value last written. {@code NaN} means "no gate has fired for this
+     * slot yet", and the first apply seats it from the member's live CR. Indexed by list position
+     * because that is the axis the CR write itself pairs on — a reference that followed the ship while
+     * the write followed the slot would be wrong in exactly the transient-order case the write tolerates.
+     * Null until the first apply after a rebuild; {@link #rebuildRoster} drops it so a new ship set never
+     * gates against the old one's references.
+     */
+    private float[] crInvalidationReferences;
 
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
@@ -756,22 +767,36 @@ public class CoopFleetMirror implements CoopNpcMirror {
      *
      * <p>Invalidation is gated on an actual change so the deferred {@code updateStats()} (a full
      * per-member stat rebuild, which then cascades into one fleet sync) does not run on every 10 Hz
-     * apply for a fleet whose CR is not moving.
+     * apply for a fleet whose CR is not moving. <b>The gate compares against the last CR that fired it,
+     * not the last CR written (2026-08-25).</b> CR is written on every apply — that part is a bare field
+     * assignment and costs nothing — but comparing the incoming value against what the previous apply
+     * wrote made the gate a ratchet rather than a filter: a ship recovering CR one wire step at a time
+     * moves 0.001 per sample ({@link CoopFleetCodec#FRACTION_STEP} quantizes the wire onto that grid, so
+     * "every step is under the epsilon" is the normal regime, not a fluke), never trips 0.005 on any
+     * single step, and the mirror's {@code cachedStrength} stays frozen while the true drift grows
+     * without bound. Holding the reference still until the gate fires keeps the storm protection —
+     * per-tick noise around a stable CR still moves no reference and still invalidates nothing — while
+     * making a slow monotonic recovery fire once per 0.005 of real movement.
      */
     private void updateMemberState(List<CoopFleetSnapshot.Member> members) {
         List<FleetMemberAPI> current = mirrorFleet.getFleetData().getMembersListCopy();
         if (current.size() != members.size()) {
             return;
         }
+        float[] references = crInvalidationReferences(current.size());
         for (int i = 0; i < current.size(); i++) {
             try {
                 FleetMemberAPI member = current.get(i);
                 float cr = members.get(i).cr();
-                boolean crChanged = crDiffers(member.getRepairTracker().getCR(), cr);
+                if (Float.isNaN(references[i])) {
+                    references[i] = member.getRepairTracker().getCR();
+                }
+                boolean crChanged = crDiffers(references[i], cr);
                 member.getRepairTracker().setCR(cr);
                 member.getStatus().setHullFraction(members.get(i).hullFraction());
                 if (crChanged) {
                     member.setStatUpdateNeeded(true);
+                    references[i] = cr;
                 }
             } catch (RuntimeException ignored) {
                 // repair state on a mirror is display-only; never abort the update over it
@@ -779,15 +804,40 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
     }
 
-    /** CR is a 0..1 fraction; half a percent is below anything the strength formula reacts to. */
-    static boolean crDiffers(float current, float incoming) {
-        return Math.abs(current - incoming) > 0.005f;
+    /** The per-slot reference row, seated as all-unknown on the first apply after a roster rebuild. */
+    private float[] crInvalidationReferences(int size) {
+        if (crInvalidationReferences == null || crInvalidationReferences.length != size) {
+            crInvalidationReferences = new float[size];
+            Arrays.fill(crInvalidationReferences, Float.NaN);
+        }
+        return crInvalidationReferences;
+    }
+
+    /**
+     * CR is a 0..1 fraction; half a percent is below anything the strength formula reacts to.
+     *
+     * @param reference the CR that last fired the gate for this slot, <em>not</em> the CR last written
+     */
+    static boolean crDiffers(float reference, float incoming) {
+        return Math.abs(reference - incoming) > 0.005f;
+    }
+
+    /**
+     * The gate's reference advance, split out so the ratchet has a pure surface to be tested on: the
+     * reference moves only when the gate fires, so sub-epsilon steps accumulate against a fixed point
+     * instead of chasing the value that just arrived.
+     */
+    static float nextCrReference(float reference, float incoming) {
+        return crDiffers(reference, incoming) ? incoming : reference;
     }
 
     /** @return true when every member in the snapshot was actually built and attached. */
     private boolean rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
         // Diagnostic counter only; a no-op unless the frame profiler is enabled.
         CoopFrameProfiler.noteRosterRebuild();
+        // New ship set, new slots: the CR gate must not judge them against the old set's references.
+        // Dropping the row here rather than on length change covers a rebuild that keeps the count.
+        crInvalidationReferences = null;
         for (FleetMemberAPI existing : mirrorFleet.getFleetData().getMembersListCopy()) {
             mirrorFleet.getFleetData().removeFleetMember(existing);
         }
@@ -1106,6 +1156,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         resetSpeedProbeTracking();
         lastFleetHash = null;
         retriedFleetHash = null;
+        crInvalidationReferences = null;
         lastLocationId = null;
         coopFleetId = "";
         appliedName = "";
