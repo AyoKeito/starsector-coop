@@ -977,10 +977,8 @@
         "server-side state diffing",
         "-Bridge launch switch"
       ],
-      "residue": [
-        "minor tooling nits (diff role/engineId exclusion, survey by-id lookup, ability toggle-off) — fix opportunistically"
-      ],
-      "note": "Built AND live-verified 2026-08-25, same day as the spec (c51ee37 mod side, 943 tests; 4ed9a77 tools side, 20 mock-bridge tests; live check + automated 7-item 12c smoke portion all PASS). Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Phase 23 dormancy checklist line added."
+      "residue": [],
+      "note": "Built, live-verified, AND polished 2026-08-25, same day as the spec (c51ee37/4ed9a77 build; live check + automated 7-item 12c smoke portion all PASS; 1f4aed2 fixed every run-surfaced nit and added status.pause stall diagnosis, markets verb, diffable visibility.view, ss_diff ignore, help-popup seeding � 959 mod + 31 MCP tests). Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Phase 23 dormancy checklist line added."
     }
   ],
   "buildOrderFallback": [
