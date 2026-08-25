@@ -583,6 +583,7 @@ const COLONIZABLE = {
   fromLocationId: 'corvus',
   limit: 10,
   maxLy: 0,
+  neutralOnly: false,
   candidateCount: 2,
   count: 2,
   planets: [
@@ -593,6 +594,9 @@ const COLONIZABLE = {
       gasGiant: false,
       systemId: 'corvus',
       systemName: 'Corvus Star System',
+      x: 8123.5,
+      y: -2210.75,
+      marketsInSystem: 1,
       distanceLy: 0,
       distanceSu: 1487.5,
       hazard: 1.25,
@@ -607,6 +611,9 @@ const COLONIZABLE = {
       gasGiant: true,
       systemId: 'aleph',
       systemName: 'Aleph Star System',
+      x: -400,
+      y: 6100,
+      marketsInSystem: 0,
       distanceLy: 5,
       distanceSu: 0,
       hazard: 1.5,
@@ -644,6 +651,10 @@ test('colonizable is a query verb, keyed by planetId and diffable across instanc
   await ssDump(bridges, 'host', 'colonizable');
   assert.deepEqual(hostBridge.requests[1].args, {}, 'no args means the defaults, not a bad request');
 
+  // neutralOnly is the mod's filter; the server passes it through rather than filtering client-side.
+  await ssDump(bridges, 'host', 'colonizable', { neutralOnly: true, limit: 3 });
+  assert.deepEqual(hostBridge.requests[2].args, { neutralOnly: true, limit: 3 });
+
   const result = await ssDiff(bridges, 'colonizable');
   assert.equal(result.equal, true, 'the same planets in a different order are not a divergence');
 
@@ -672,6 +683,27 @@ test('a colonizable divergence is reported per planet, not as one opaque array d
   ]);
 });
 
+test('the position and neutrality fields diff per planet like every other row field', () => {
+  const occupied = {
+    ...COLONIZABLE,
+    planets: [{ ...COLONIZABLE.planets[0], marketsInSystem: 0 }, COLONIZABLE.planets[1]]
+  };
+  assert.deepEqual(diffJson(COLONIZABLE, occupied).differences, [
+    { path: '$.planets[planetId=ancyra].marketsInSystem', host: 1, guest: 0 }
+  ]);
+
+  const drifted = {
+    ...COLONIZABLE,
+    planets: [{ ...COLONIZABLE.planets[0], x: 8124.25 }, COLONIZABLE.planets[1]]
+  };
+  assert.deepEqual(diffJson(COLONIZABLE, drifted).differences, [
+    { path: '$.planets[planetId=ancyra].x', host: 8123.5, guest: 8124.25 }
+  ]);
+  // Planets orbit. x/y are ordinary numeric leaves, so a live position compare takes a tolerance
+  // like every other one rather than needing its own ignore entry.
+  assert.equal(diffJson(COLONIZABLE, drifted, { tolerance: 1 }).equal, true);
+});
+
 const LANDMARKS = {
   fromLocationId: 'corvus',
   kinds: ['hypershunt', 'cryosleeper'],
@@ -688,6 +720,8 @@ const LANDMARKS = {
       systemId: 'system_a41c',
       systemName: 'Tuvalu Star System',
       hyperspace: false,
+      x: -4120,
+      y: 980,
       distanceLy: 6.82,
       distanceSu: 0,
       usable: true,
@@ -702,6 +736,8 @@ const LANDMARKS = {
       systemId: 'system_0b3f',
       systemName: 'Naraka Star System',
       hyperspace: false,
+      x: 2400,
+      y: -60,
       distanceLy: 9.5,
       distanceSu: 0,
       usable: false,
@@ -758,6 +794,76 @@ test('a landmark divergence is reported per entity, and a per-kind extra only wh
   // minBenefitMult is on the cryosleeper and not the hypershunt; rows key by entityId, so an extra
   // that only some kinds carry never reads as a missing field.
   assert.equal(diffJson(LANDMARKS, LANDMARKS).equal, true);
+
+  // x/y are the teleport-ready coordinates and diff per entity like the rest of the row.
+  const moved = {
+    ...LANDMARKS,
+    landmarks: [{ ...LANDMARKS.landmarks[0], x: -4118 }, LANDMARKS.landmarks[1]]
+  };
+  assert.deepEqual(diffJson(LANDMARKS, moved).differences, [
+    { path: '$.landmarks[entityId=cryosleeper_calypso].x', host: -4120, guest: -4118 }
+  ]);
+});
+
+test('teleport relays both argument modes, including the mod\'s refusal of the two together', async (t) => {
+  const jumped = {
+    locationId: 'penelope',
+    x: 3320,
+    y: -1500,
+    movedFrom: 'corvus',
+    entityId: 'aztlan',
+    entityName: 'Aztlan',
+    transition: 'jump',
+    pending: true
+  };
+  const placed = {
+    locationId: 'corvus',
+    x: 500,
+    y: 250,
+    movedFrom: 'corvus',
+    entityId: '',
+    entityName: '',
+    transition: 'local',
+    pending: false
+  };
+  const hostBridge = new MockBridge((request) => {
+    if (request.cmd !== 'teleport') {
+      return { ok: false, error: 'IllegalArgumentException: unknown command' };
+    }
+    const args = request.args ?? {};
+    if (args.entityId && (args.x !== undefined || args.locationId !== undefined)) {
+      return {
+        ok: false,
+        error:
+          'IllegalArgumentException: teleport takes either entityId or x/y/locationId, not both; got entityId and x'
+      };
+    }
+    return { ok: true, data: args.entityId ? jumped : placed };
+  });
+  const guestBridge = new MockBridge(() => ({ ok: true, data: placed }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssAct(bridges, 'host', 'teleport', { entityId: 'aztlan' }), jumped);
+  assert.deepEqual(hostBridge.requests[0].args, { entityId: 'aztlan' }, 'entityId goes through verbatim');
+
+  const local = await ssAct(bridges, 'host', 'teleport', { locationId: 'corvus', x: 500, y: 250 });
+  assert.equal(local.transition, 'local', 'the original coordinate mode is unchanged');
+  assert.deepEqual(hostBridge.requests[1].args, { locationId: 'corvus', x: 500, y: 250 });
+
+  // Which argument combinations are legal is the mod's call, not the server's: the bad request has
+  // to reach the bridge and come back as its refusal rather than being pre-judged here.
+  await assert.rejects(
+    () => ssAct(bridges, 'host', 'teleport', { entityId: 'aztlan', x: 5 }),
+    /either entityId or x\/y\/locationId/
+  );
+  assert.deepEqual(hostBridge.requests[2].args, { entityId: 'aztlan', x: 5 });
 });
 
 test('expedition is an action verb, passed through with its optional factionId', async (t) => {

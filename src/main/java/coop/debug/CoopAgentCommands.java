@@ -4,6 +4,7 @@ import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
+import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -678,9 +679,15 @@ public final class CoopAgentCommands {
      * <p>{@code distanceLy} is hyperspace distance from the player fleet to the planet's system and is
      * {@code 0} for anything in the fleet's own system; {@code distanceSu} is the in-system distance
      * and is {@code 0} for everything else, so the pair sorts "here first, then nearest".
+     *
+     * <p>{@code x}/{@code y} are the planet's <em>current</em> location-local coordinates — the pair
+     * {@code teleport} takes alongside {@code systemId}, so naming a target and flying to it is one
+     * query and one action instead of a hand-derivation off the orbit. An orbiting planet's pair moves
+     * with the clock; that is not a diff hazard, because both clients read it off the same shared clock.
      */
     record ColonizableCandidate(String planetId, String name, String type, boolean gasGiant,
-                                String systemId, String systemName, float distanceLy,
+                                String systemId, String systemName, float x, float y,
+                                int marketsInSystem, float distanceLy,
                                 float distanceSu, float hazard, String surveyLevel,
                                 boolean unexploredRuins, List<String> conditions) {
     }
@@ -715,8 +722,18 @@ public final class CoopAgentCommands {
      * a territorial claim on the system — is neither filtered nor reported: none of it is a property
      * of the planet.
      *
+     * <p><b>{@code marketsInSystem} is the "is anyone already here" field</b>, and it is a count of
+     * <em>economy</em> markets in the planet's location, not of markets in general. Every uncolonized
+     * planet carries a planet-condition market of its own and none of those are in
+     * {@code EconomyAPI.getMarketsCopy()} — vanilla's own passes iterate the economy and the
+     * condition-market planets separately ({@code CoreLifecyclePluginImpl.addJunk}), and decivilizing a
+     * colony calls {@code getEconomy().removeMarket} on the way out
+     * ({@code DecivTracker.java:231}) — so a {@code 0} here means no faction holds anything in that
+     * system, which is exactly the question "find me a system nobody is in" asks.
+     *
      * <p>Args: {@code limit} (default {@value #COLONIZABLE_DEFAULT_LIMIT}, 1..{@value
-     * #COLONIZABLE_MAX_LIMIT}) and {@code maxLy} (0 or absent = no range filter).
+     * #COLONIZABLE_MAX_LIMIT}), {@code maxLy} (0 or absent = no range filter) and {@code neutralOnly}
+     * (default false; true keeps only {@code marketsInSystem == 0} rows).
      */
     static JSONObject colonizable(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
@@ -727,15 +744,17 @@ public final class CoopAgentCommands {
                     + ", got " + limit);
         }
         double maxLy = optionalDouble(args, "maxLy", 0d);
+        boolean neutralOnly = optionalBoolean(args, "neutralOnly", false);
 
         List<ColonizableCandidate> all = colonizableCandidates(sector, player);
-        List<ColonizableCandidate> shown = selectColonizable(all, limit, maxLy);
+        List<ColonizableCandidate> shown = selectColonizable(all, limit, maxLy, neutralOnly);
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
         out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
+        out.put("neutralOnly", neutralOnly);
         // Everything that passed the filters, before maxLy and limit trimmed the list: "none nearby"
         // and "none at all" are different answers and the caller has to be able to tell them apart.
         out.put("candidateCount", all.size());
@@ -750,6 +769,9 @@ public final class CoopAgentCommands {
             row.put("gasGiant", candidate.gasGiant());
             row.put("systemId", candidate.systemId());
             row.put("systemName", candidate.systemName());
+            row.put("x", round(candidate.x()));
+            row.put("y", round(candidate.y()));
+            row.put("marketsInSystem", candidate.marketsInSystem());
             row.put("distanceLy", round(candidate.distanceLy()));
             row.put("distanceSu", round(candidate.distanceSu()));
             row.put("hazard", round(candidate.hazard()));
@@ -762,15 +784,23 @@ public final class CoopAgentCommands {
         return out;
     }
 
-    /** Range filter, then nearest-first order, then the cap. No candidates is an empty list, not an error. */
+    /**
+     * Both filters, then nearest-first order, then the cap. No candidates is an empty list, not an
+     * error. The cap runs last on purpose: {@code limit} has to apply to what actually passed
+     * {@code maxLy} and {@code neutralOnly}, or a caller asking for three neutral planets would get
+     * the three nearest planets filtered down to however many of them happened to be neutral.
+     */
     static List<ColonizableCandidate> selectColonizable(List<ColonizableCandidate> candidates,
-                                                        int limit, double maxLy) {
+                                                        int limit, double maxLy, boolean neutralOnly) {
         List<ColonizableCandidate> kept = new ArrayList<>();
         for (ColonizableCandidate candidate : candidates) {
             if (candidate == null) {
                 continue;
             }
             if (maxLy > 0d && candidate.distanceLy() > maxLy) {
+                continue;
+            }
+            if (neutralOnly && candidate.marketsInSystem() > 0) {
                 continue;
             }
             kept.add(candidate);
@@ -785,6 +815,9 @@ public final class CoopAgentCommands {
     /** Every uncolonized planet in the sector, unsorted and untrimmed. */
     static List<ColonizableCandidate> colonizableCandidates(SectorAPI sector, CampaignFleetAPI player) {
         LocationAPI here = player.getContainingLocation();
+        // Counted once for the whole query rather than per planet: the economy walk is the same list
+        // every candidate in a system would otherwise re-scan.
+        Map<String, Integer> marketsByLocation = marketCountsByLocation(sector);
         List<ColonizableCandidate> found = new ArrayList<>();
         CoopLocations.forEach(sector, location -> {
             if (!colonizableSystem(location)) {
@@ -794,14 +827,39 @@ public final class CoopAgentCommands {
             if (planets == null) {
                 return;
             }
+            int markets = marketsByLocation.getOrDefault(nullSafe(location.getId()), 0);
             for (PlanetAPI planet : planets) {
-                ColonizableCandidate candidate = colonizableCandidate(planet, location, player, here);
+                ColonizableCandidate candidate =
+                        colonizableCandidate(planet, location, player, here, markets);
                 if (candidate != null) {
                     found.add(candidate);
                 }
             }
         });
         return found;
+    }
+
+    /**
+     * Live economy markets per containing location id. Absent from the map means zero, which is the
+     * answer {@code neutralOnly} keys on: nobody holds anything in that system.
+     */
+    static Map<String, Integer> marketCountsByLocation(SectorAPI sector) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        EconomyAPI economy = sector.getEconomy();
+        List<MarketAPI> all = economy == null ? List.<MarketAPI>of() : economy.getMarketsCopy();
+        if (all == null) {
+            return counts;
+        }
+        for (MarketAPI market : all) {
+            if (market == null) {
+                continue;
+            }
+            String locationId = marketLocationId(market);
+            if (!locationId.isEmpty()) {
+                counts.merge(locationId, 1, Integer::sum);
+            }
+        }
+        return counts;
     }
 
     /**
@@ -869,7 +927,8 @@ public final class CoopAgentCommands {
      * reason a colonized one is: no market, no survey dialog, no colony.
      */
     private static ColonizableCandidate colonizableCandidate(PlanetAPI planet, LocationAPI location,
-                                                             CampaignFleetAPI player, LocationAPI here) {
+                                                             CampaignFleetAPI player, LocationAPI here,
+                                                             int marketsInSystem) {
         try {
             if (planet == null || planet.isStar() || planet.getId() == null) {
                 return null;
@@ -879,6 +938,7 @@ public final class CoopAgentCommands {
                 return null;
             }
             MarketAPI.SurveyLevel level = market.getSurveyLevel();
+            Vector2f at = planet.getLocation();
             return new ColonizableCandidate(
                     nullSafe(planet.getId()),
                     nullSafe(planet.getName()),
@@ -886,6 +946,9 @@ public final class CoopAgentCommands {
                     planet.isGasGiant(),
                     nullSafe(location.getId()),
                     nullSafe(location.getName()),
+                    at == null ? 0f : at.x,
+                    at == null ? 0f : at.y,
+                    marketsInSystem,
                     distanceLy(planet, player),
                     location == here ? distanceSu(planet, player) : 0f,
                     market.getHazardValue(),
@@ -1015,10 +1078,16 @@ public final class CoopAgentCommands {
      */
     static final String LANDMARK_USABLE_FLAG = "$usable";
 
-    /** One landmark. {@code extras} is the per-kind tail, flattened into the row. */
+    /**
+     * One landmark. {@code extras} is the per-kind tail, flattened into the row.
+     *
+     * <p>{@code x}/{@code y} are the entity's current location-local coordinates, same meaning and
+     * same purpose as {@code colonizable}'s: with {@code systemId} they are a {@code teleport}
+     * argument, so flying to a landmark needs no orbit arithmetic.
+     */
     record Landmark(String kind, String entityId, String name, String type, String systemId,
-                    String systemName, boolean hyperspace, float distanceLy, float distanceSu,
-                    Map<String, Object> extras) {
+                    String systemName, boolean hyperspace, float x, float y,
+                    float distanceLy, float distanceSu, Map<String, Object> extras) {
     }
 
     /** Nearest first, then kind, then id — total and stable, so two clients emit the same order. */
@@ -1083,6 +1152,8 @@ public final class CoopAgentCommands {
             row.put("systemId", landmark.systemId());
             row.put("systemName", landmark.systemName());
             row.put("hyperspace", landmark.hyperspace());
+            row.put("x", round(landmark.x()));
+            row.put("y", round(landmark.y()));
             row.put("distanceLy", round(landmark.distanceLy()));
             row.put("distanceSu", round(landmark.distanceSu()));
             for (Map.Entry<String, Object> extra : landmark.extras().entrySet()) {
@@ -1216,6 +1287,7 @@ public final class CoopAgentCommands {
             if (entity == null || entity.getId() == null || !seen.add(entity.getId())) {
                 return null;
             }
+            Vector2f at = entity.getLocation();
             return new Landmark(
                     kind.key(),
                     nullSafe(entity.getId()),
@@ -1224,6 +1296,8 @@ public final class CoopAgentCommands {
                     nullSafe(location.getId()),
                     nullSafe(location.getName()),
                     location.isHyperspace(),
+                    at == null ? 0f : at.x,
+                    at == null ? 0f : at.y,
                     distanceLy(entity, player),
                     location == here ? distanceSu(entity, player) : 0f,
                     landmarkExtras(kind, entity, gates));
@@ -1368,34 +1442,156 @@ public final class CoopAgentCommands {
 
     // ---- Setup actions --------------------------------------------------------------------------
 
-    /** The mirror's own relocation pattern: leave the old location, join the new one, then place. */
+    /** Clearance past an entity's own radius, so an entity-targeted teleport never lands inside it. */
+    static final float TELEPORT_ENTITY_CLEARANCE = 200f;
+
+    /** The x/y-mode arguments {@code entityId} replaces; naming them is how the refusal reads. */
+    static final List<String> TELEPORT_COORDINATE_ARGS = List.of("x", "y", "locationId");
+
+    /** Where a teleport is going, after either argument mode has been resolved. */
+    record TeleportTarget(LocationAPI location, float x, float y, String entityId, String entityName) {
+    }
+
+    /**
+     * Put the player fleet somewhere, either at raw coordinates or beside a named entity.
+     *
+     * <p><b>Two argument modes, mutually exclusive.</b> {@code {locationId, x, y}} is the original:
+     * exact coordinates in a named location. {@code {entityId}} resolves an entity anywhere in the
+     * sector and places the fleet {@code radius + }{@value #TELEPORT_ENTITY_CLEARANCE} units along +x
+     * from it, which is the mode worth using for a planet — a planet's coordinates are a function of
+     * its orbit and the clock, so deriving them by hand from the orbit definition is both work and a
+     * source of wrong answers. Passing both is refused rather than silently preferring one.
+     *
+     * <p><b>Crossing locations goes through the engine's jump transition, not a raw re-parent.</b>
+     * This is the fix for a live defect: a fleet moved between systems by
+     * {@code removeEntity}/{@code addEntity}/{@code setLocation} rendered in the destination and then
+     * could not fly at all. The reason is in {@code CampaignEngine.advance}, which hands the input
+     * object only to {@code getCurrentLocation().advance(f, input)} and advances every other location
+     * with {@code null} — so a fleet sitting in a location that is not the engine's <em>current</em>
+     * one receives no player input. {@code setCurrentLocation} is one of the things
+     * {@code doHyperspaceTransition}'s script does at its {@code SWITCHING_LOCATIONS} step, alongside
+     * the re-parent, {@code setOrbit(null)}, the move-destination override and the closing
+     * {@code reportFleetJumped}. Rather than reproduce that list and hope it stays complete, the
+     * cross-location case calls the engine's own path, exactly as {@code FractureJumpAbility} does:
+     * a throwaway destination token at the target coordinates, no {@code jumpLocation} (so the fleet
+     * warps out where it stands instead of flying to a jump point first, which is also what removes
+     * the abort case).
+     *
+     * <p><b>A jump is not instantaneous and does not run while the clock is stopped.</b> The
+     * transition is an ordinary {@code EveryFrameScript}, and {@code CampaignEngine.advance} skips
+     * scripts that do not opt into running while paused. So the response's {@code x}/{@code y} are the
+     * <em>destination</em>, the fleet arrives a couple of seconds of game time later, and while the
+     * session is paused it does not arrive at all until time runs. {@code transition} says which path
+     * ran and {@code pending} says whether the fleet is still on its way; a second teleport issued
+     * mid-flight is refused rather than silently swallowed by the engine's own re-entrancy guard.
+     *
+     * <p>A same-location teleport keeps the original direct placement, which is verified working and
+     * has none of the above to worry about.
+     */
     static JSONObject teleport(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
         CampaignFleetAPI player = requirePlayerFleet(sector);
-        String locationId = requiredString(args, "locationId");
-        float x = (float) requiredDouble(args, "x");
-        float y = (float) requiredDouble(args, "y");
-
-        LocationAPI target = CoopLocations.byId(sector, locationId);
-        if (target == null) {
-            throw new IllegalArgumentException("no location with id " + locationId);
+        if (player.isInHyperspaceTransition()) {
+            throw new IllegalStateException("player fleet is already in a jump transition; let the"
+                    + " clock run until it lands before teleporting again");
         }
+        TeleportTarget target = teleportTarget(sector, args);
 
         LocationAPI current = player.getContainingLocation();
-        if (current != null && current != target) {
-            current.removeEntity(player);
+        boolean jump = current != null && current != target.location();
+        if (jump) {
+            SectorEntityToken destination = target.location().createToken(target.x(), target.y());
+            sector.doHyperspaceTransition(player, null,
+                    new JumpPointAPI.JumpDestination(destination, null));
+        } else {
+            if (player.getContainingLocation() != target.location()) {
+                target.location().addEntity(player);
+            }
+            player.setLocation(target.x(), target.y());
         }
-        if (player.getContainingLocation() != target) {
-            target.addEntity(player);
-        }
-        player.setLocation(x, y);
 
         JSONObject out = new JSONObject();
-        out.put("locationId", locationId);
-        out.put("x", round(x));
-        out.put("y", round(y));
+        out.put("locationId", nullSafe(target.location().getId()));
+        out.put("x", round(target.x()));
+        out.put("y", round(target.y()));
         out.put("movedFrom", current == null ? "" : nullSafe(current.getId()));
+        out.put("entityId", target.entityId());
+        out.put("entityName", target.entityName());
+        out.put("transition", jump ? "jump" : "local");
+        out.put("pending", jump);
         return out;
+    }
+
+    /**
+     * Which of the two argument modes was asked for, resolved down to one location and one point.
+     * {@code entityId} wins the mode choice by being present at all, and then forbids the other three
+     * rather than quietly ignoring them: a caller who passed both meant one of them and guessing which
+     * is how a fleet ends up somewhere nobody asked for.
+     */
+    static TeleportTarget teleportTarget(SectorAPI sector, JSONObject args) {
+        if (!args.has("entityId")) {
+            String locationId = requiredString(args, "locationId");
+            float x = (float) requiredDouble(args, "x");
+            float y = (float) requiredDouble(args, "y");
+            LocationAPI location = CoopLocations.byId(sector, locationId);
+            if (location == null) {
+                throw new IllegalArgumentException("no location with id " + locationId);
+            }
+            return new TeleportTarget(location, x, y, "", "");
+        }
+
+        for (String conflicting : TELEPORT_COORDINATE_ARGS) {
+            if (args.has(conflicting)) {
+                throw new IllegalArgumentException("teleport takes either entityId or "
+                        + String.join("/", TELEPORT_COORDINATE_ARGS) + ", not both; got entityId and "
+                        + conflicting);
+            }
+        }
+        String entityId = requiredString(args, "entityId");
+        SectorEntityToken entity = findEntity(sector, entityId);
+        if (entity == null) {
+            throw new IllegalArgumentException("no entity with id " + entityId
+                    + " anywhere in this sector");
+        }
+        LocationAPI location = entity.getContainingLocation();
+        if (location == null) {
+            throw new IllegalArgumentException("entity " + entityId + " is in no location");
+        }
+        Vector2f at = entity.getLocation();
+        if (at == null) {
+            throw new IllegalArgumentException("entity " + entityId + " has no position");
+        }
+        // Straight +x rather than a random bearing: two runs of the same request have to put the
+        // fleet in the same place, and Misc.getPointAtRadius (what vanilla's own jump-in uses) draws
+        // its angle from Math.random().
+        float clearance = entity.getRadius() + TELEPORT_ENTITY_CLEARANCE;
+        return new TeleportTarget(location, at.x + clearance, at.y, entityId,
+                nullSafe(entity.getName()));
+    }
+
+    /**
+     * An entity anywhere in the sector, or null.
+     *
+     * <p>{@code SectorAPI.getEntityById} first — the engine answers it out of an id map and only falls
+     * back to a walk on a miss. The explicit walk behind it is not redundant: the engine's map is
+     * rebuilt lazily and its own fallback is the same walk, so doing it here costs nothing on the hit
+     * path and keeps the verb answering on any {@code SectorAPI} whose id map is not populated.
+     */
+    static SectorEntityToken findEntity(SectorAPI sector, String entityId) {
+        SectorEntityToken direct = sector.getEntityById(entityId);
+        if (direct != null) {
+            return direct;
+        }
+        for (LocationAPI location : CoopLocations.all(sector)) {
+            if (location == null) {
+                continue;
+            }
+            SectorEntityToken entity = location.getEntityById(entityId);
+            if (entity != null) {
+                return entity;
+            }
+        }
+        return null;
     }
 
     /**
@@ -1934,6 +2130,18 @@ public final class CoopAgentCommands {
                     + args.optString(key, ""));
         }
         return value;
+    }
+
+    /** Absent means the fallback; a word form is accepted the same way {@code pause} accepts one. */
+    private static boolean optionalBoolean(JSONObject args, String key, boolean fallback) {
+        if (!args.has(key)) {
+            return fallback;
+        }
+        Object raw = args.opt(key);
+        if (raw instanceof Boolean flag) {
+            return flag;
+        }
+        return parseOnOff(String.valueOf(raw), key);
     }
 
     private static double requiredDouble(JSONObject args, String key) {

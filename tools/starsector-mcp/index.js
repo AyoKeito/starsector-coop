@@ -50,9 +50,12 @@ const TOOLS = [
     description:
       `Run one read-only bridge verb against one instance and return its JSON. Verbs: ${QUERY_VERBS.join(', ')}. ` +
       'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}, ' +
-      'colonizable{limit?, maxLy?} (uncolonized planets nearest the local player fleet), ' +
+      'colonizable{limit?, maxLy?, neutralOnly?} (uncolonized planets nearest the local player fleet; ' +
+      'neutralOnly keeps only systems with no economy market, i.e. no faction presence), ' +
       'landmarks{kinds?, limit?, maxLy?} (hypershunts, cryosleepers, gates, stable locations, ' +
-      'the gate hauler); status, markets and barpool take none.',
+      'the gate hauler); status, markets and barpool take none. ' +
+      'colonizable and landmarks rows carry x/y, the location-local coordinates ss_act teleport takes ' +
+      'alongside systemId.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -93,7 +96,11 @@ const TOOLS = [
     name: 'ss_act',
     description:
       `Run one state-changing bridge verb against one instance. Verbs: ${ACTION_VERBS.join(', ')}. ` +
-      'Args by verb: teleport{x,y,locationId}, pause{on|off}, ability{abilityId}, setcr{value, memberIndex|"all"}, ' +
+      'Args by verb: teleport{entityId} or teleport{x,y,locationId} (the two modes are mutually ' +
+      'exclusive; entityId resolves any entity in the sector and parks the fleet just outside it, ' +
+      'and a teleport that crosses locations runs the engine jump transition, so it completes over ' +
+      'the next few seconds of game time rather than instantly), pause{on|off}, ability{abilityId}, ' +
+      'setcr{value, memberIndex|"all"}, ' +
       'give{commodityId?, qty?, credits?}, objective{entityId, factionId}, surveyset{planetId, level}, ' +
       'expedition{factionId?} (host only: forces a punitive expedition against a player colony). ' +
       'Market buy/sell, officer hire, bar-offer accept and market open/close are deliberately absent.',

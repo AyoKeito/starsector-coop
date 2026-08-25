@@ -110,7 +110,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `barpool` | none | ordered offer list plus the bar's render order |
 | `survey` | `{systemId}` or `{systemId: "all"}` | planetId to survey level and ruins state |
 | `visibility` | `{fleetId?}` | `lines`, the probe's text dump, plus `view`, a coopFleetId to visibility-level map |
-| `colonizable` | `{limit?, maxLy?}` | uncolonized planets nearest the local player fleet, nearest first |
+| `colonizable` | `{limit?, maxLy?, neutralOnly?}` | uncolonized planets nearest the local player fleet, nearest first |
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 
 ```
@@ -119,15 +119,17 @@ ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
 
 `markets` is an index, not a dock visit: it enumerates and stocks nothing. Use it to find the `marketId` that `market` wants. `survey` takes the same system id every other verb emits as a `locationId` (`system_16cf` and the like), not the display name.
 
-`colonizable` answers "where do I put a colony" without searching the map, which is what the Phase 24 smoke needs before it can use `teleport`, `surveyset` and `give`. `limit` defaults to 10 and must be 1..200; `maxLy` is a range filter in light years, and 0 or absent means no filter. `candidateCount` is every planet that passed the filters, `count` is how many survived `maxLy` and `limit` — so "none within 8 LY" and "none anywhere" read differently.
+`colonizable` answers "where do I put a colony" without searching the map, which is what the Phase 24 smoke needs before it can use `teleport`, `surveyset` and `give`. `limit` defaults to 10 and must be 1..200; `maxLy` is a range filter in light years, and 0 or absent means no filter. `candidateCount` is every planet that passed the filters, `count` is how many survived `maxLy`, `neutralOnly` and `limit` — so "none within 8 LY" and "none anywhere" read differently.
 
 ```
-ss_dump(instance: "host", what: "colonizable", args: { "limit": 3, "maxLy": 8 })
+ss_dump(instance: "host", what: "colonizable", args: { "limit": 3, "maxLy": 8, "neutralOnly": true })
 
-{ "fromLocationId": "corvus", "limit": 3, "maxLy": 8, "candidateCount": 214, "count": 3,
+{ "fromLocationId": "corvus", "limit": 3, "maxLy": 8, "neutralOnly": true,
+  "candidateCount": 214, "count": 3,
   "planets": [
     { "planetId": "ancyra", "name": "Ancyra", "type": "terran", "gasGiant": false,
       "systemId": "corvus", "systemName": "Corvus Star System",
+      "x": 8123.5, "y": -2210.75, "marketsInSystem": 0,
       "distanceLy": 0, "distanceSu": 1487.5, "hazard": 1.25,
       "surveyLevel": "FULL", "unexploredRuins": false,
       "conditions": ["farmland_poor", "habitable", "ore_moderate"] },
@@ -135,7 +137,11 @@ ss_dump(instance: "host", what: "colonizable", args: { "limit": 3, "maxLy": 8 })
   ] }
 ```
 
-`distanceLy` is hyperspace distance to the planet's system and is 0 for anything in the fleet's own system; `distanceSu` is the in-system distance and is 0 for everything else, so the two together sort "here first, then nearest". Sorting is `distanceLy`, then `distanceSu`, then `planetId`, and the condition list is sorted, so two clients whose worldgen agrees return byte-identical rows and `ss_diff` on this verb is a real worldgen check.
+`x` and `y` are the planet's current location-local coordinates, which with `systemId` are exactly what `ss_act(verb: "teleport")` wants — or skip the pair and pass `teleport` the `planetId` as its `entityId`. Do not derive a planet's position from its orbit by hand; planets orbit, so the answer changes with the clock, and this field is the engine's own reading of it.
+
+`marketsInSystem` counts *economy* markets in the planet's system, and `neutralOnly: true` keeps only the rows where that is 0 — "find me somewhere no faction is already sitting" in one query instead of a cross-reference against the `markets` dump. It is a count of live colonies: every uncolonized planet carries a planet-condition market of its own and none of those are in the economy, and decivilizing a colony removes it from the economy too, so 0 really does mean nobody is there. The filter runs before `limit`, so `limit: 3, neutralOnly: true` is three neutral planets rather than the three nearest planets with the occupied ones struck out.
+
+`distanceLy` is hyperspace distance to the planet's system and is 0 for anything in the fleet's own system; `distanceSu` is the in-system distance and is 0 for everything else, so the two together sort "here first, then nearest". Sorting is `distanceLy`, then `distanceSu`, then `planetId`, and the condition list is sorted, so two clients whose worldgen agrees return the same rows in the same order and `ss_diff` on this verb is a real worldgen check. `x`/`y` move as planets orbit, which is not a diff hazard: both instances read them off the same shared clock.
 
 What counts as colonizable is vanilla's own test, not a heuristic. A candidate is a non-star planet whose market is `planetConditionMarketOnly` — the flag colonizing clears, and the one `rules.csv` requires before it offers "Establish a colony" — in a system that is not hyperspace, not deep space, not `system_abyssal`, and not `system_cut_off_from_hyper`. The last three are the tooltips `PlanetSurveyPanel` prints when it disables the colonize button, and two of them appear in no rule and in no API source. Gas giants are in; vanilla colonizes them. `temporary_location` is filtered too, which is the one deliberate step past vanilla: those systems are minted and discarded by the abyssal encounter generators, so offering one as a target would be offering something that stops existing.
 
@@ -159,13 +165,13 @@ ss_dump(instance: "host", what: "landmarks", args: { "kinds": "hypershunt,cryosl
   "landmarks": [
     { "kind": "cryosleeper", "entityId": "cryosleeper_calypso", "name": "Domain-era Cryosleeper \"Calypso\"",
       "type": "derelict_cryosleeper", "systemId": "system_a41c", "systemName": "Tuvalu Star System",
-      "hyperspace": false, "distanceLy": 6.82, "distanceSu": 0,
+      "hyperspace": false, "x": -4120, "y": 980, "distanceLy": 6.82, "distanceSu": 0,
       "usable": true, "benefitRangeLy": 10, "minBenefitMult": 0.1 },
     ...
   ] }
 ```
 
-`limit` defaults to 25. `candidateCount` counts what the requested kinds found sector-wide, before `maxLy` and `limit` trimmed it. Sorting is `distanceLy`, then `distanceSu`, then `kind`, then `entityId` — total and stable, so `ss_diff what: "landmarks"` is a worldgen check rather than a reorder report.
+`x` and `y` mean the same thing they do on a `colonizable` row: location-local coordinates, ready to hand to `teleport` with `systemId`, or skip them and pass `teleport` the `entityId`. For a `hyperspace: true` row they are hyperspace coordinates, which is still what teleporting there wants. `limit` defaults to 25. `candidateCount` counts what the requested kinds found sector-wide, before `maxLy` and `limit` trimmed it. Sorting is `distanceLy`, then `distanceSu`, then `kind`, then `entityId` — total and stable, so `ss_diff what: "landmarks"` is a worldgen check rather than a reorder report.
 
 **These are not all one-per-sector.** Hypershunts and cryosleepers are exactly two each and the gate hauler is exactly one, but a stock sector has 15-20 gates plus a second-pass batch, and more stable locations than that. `kinds` and the limit are how you keep the answer readable.
 
@@ -216,7 +222,7 @@ One state-changing verb against one instance.
 
 | `verb` | `args` |
 | --- | --- |
-| `teleport` | `{x, y, locationId}` |
+| `teleport` | `{entityId}` or `{x, y, locationId}` — not both |
 | `pause` | `{on: true}` or `{on: false}` |
 | `ability` | `{abilityId}` or `{abilityId, on: true}` / `{abilityId, on: false}` |
 | `setcr` | `{value, memberIndex}` or `{value, memberIndex: "all"}` |
@@ -228,6 +234,17 @@ One state-changing verb against one instance.
 ```
 ss_act(instance: "guest", verb: "ability", args: { "abilityId": "interdiction_pulse" })
 ```
+
+`teleport` takes either an entity or a point, and refuses both together rather than picking one. `{entityId: "ancyra"}` resolves any entity in the sector — planet, station, gate, cryosleeper, anything with an id — and parks the fleet `radius + 200` units off it, on the +x side so two runs of the same request land in the same place. That is the mode to use for a planet: a planet's coordinates are a function of its orbit and the clock, so hand-deriving them from the orbit definition is both work and a reliable source of wrong answers. `{locationId, x, y}` is still there for a bare point.
+
+```
+ss_act(instance: "host", verb: "teleport", args: { "entityId": "ancyra" })
+
+{ "locationId": "corvus", "x": 8223.5, "y": -2210.75, "movedFrom": "hyperspace",
+  "entityId": "ancyra", "entityName": "Ancyra", "transition": "jump", "pending": true }
+```
+
+**A teleport that crosses locations is a real jump, and it takes game time.** Moving a fleet between systems by re-parenting it leaves it unable to fly — the engine hands player input only to the location it considers current, so a fleet dropped into a system the engine has not switched to receives none. The location switch is one of the things `doHyperspaceTransition` does, so a cross-location teleport calls that instead, and `transition` says which path ran: `"jump"` for the engine transition, `"local"` for a same-location placement, which is unchanged and still immediate. `pending: true` means the fleet is still on its way and the reported `x`/`y` are its destination. The transition is an ordinary frame script and **does not advance while the game is paused**, so after a cross-location teleport let the clock run — `ss_advance_days(days: 0.5)` is more than enough — before expecting `ss_status` to report the new location. A second teleport issued mid-jump is refused by name rather than silently ignored.
 
 `ability` goes through the same engine path the toolbar button uses, down to `reportPlayerActivatedAbility`, so the mod's listener fires and the host sees `ABILITY_ACTIVATE`. With no `on` argument it is one press of the button, whatever state the ability was in, which is what a one-shot like the distress call wants. Add `on` to make it a level instead: `on: true` activates only if the ability is off, `on: false` deactivates only if it is on, and either is a no-op otherwise. Without it a toggle like the transponder could only ever be re-armed, never turned off. `surveyset` does not: it sets the survey level at the engine level, which is faithful to what the replication poll watches but skips the survey dialog. Check the dialog path by hand.
 

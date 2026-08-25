@@ -3,6 +3,7 @@ package coop.debug;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -440,6 +441,48 @@ class CoopAgentQueryVerbsTest {
     }
 
     @Test
+    void aRowCarriesThePlanetsOwnCoordinatesSoTeleportNeedsNoOrbitArithmetic() throws JSONException {
+        JSONObject out = CoopAgentCommands.colonizable(new JSONObject(), colonizableSector());
+
+        JSONObject ancyra = out.getJSONArray("planets").getJSONObject(0);
+        assertEquals(1000d, ancyra.getDouble("x"), 1e-6,
+                "location-local coordinates, the pair teleport takes alongside systemId");
+        assertEquals(0d, ancyra.getDouble("y"), 1e-6);
+
+        JSONObject gasGiant = out.getJSONArray("planets").getJSONObject(1);
+        assertEquals(2000d, gasGiant.getDouble("x"), 1e-6);
+    }
+
+    @Test
+    void marketsInSystemCountsTheEconomyAndIsZeroWhereNoFactionHoldsAnything() throws JSONException {
+        JSONObject out = CoopAgentCommands.colonizable(new JSONObject(), colonizableSector());
+
+        assertEquals(1, out.getJSONArray("planets").getJSONObject(0).getInt("marketsInSystem"),
+                "Corvus holds Jangala, so it is not a system nobody is in");
+        assertEquals(1, out.getJSONArray("planets").getJSONObject(1).getInt("marketsInSystem"),
+                "the count is the system's, so both Corvus planets read it");
+        assertEquals(0, out.getJSONArray("planets").getJSONObject(2).getInt("marketsInSystem"),
+                "the hidden system has no economy market; the candidate's own condition market must"
+                        + " not count itself, or nothing would ever read as neutral");
+        assertFalse(out.getBoolean("neutralOnly"), "the answer echoes the filter it was asked for");
+    }
+
+    @Test
+    void neutralOnlyLeavesOnlyTheSystemsNobodyHolds() throws JSONException {
+        JSONObject args = new JSONObject();
+        args.put("neutralOnly", true);
+
+        JSONObject out = CoopAgentCommands.colonizable(args, colonizableSector());
+
+        assertEquals(List.of("hidden_planet"), planetIds(out));
+        assertTrue(out.getBoolean("neutralOnly"));
+        assertEquals(3, out.getInt("candidateCount"),
+                "candidateCount stays the whole sector's, so \"none neutral nearby\" and \"nothing to"
+                        + " colonize at all\" still read differently");
+        assertEquals(1, out.getInt("count"));
+    }
+
+    @Test
     void theSurveyGateAndTheRuinsGateAreReportedRatherThanFiltered() throws JSONException {
         JSONObject out = CoopAgentCommands.colonizable(new JSONObject(), colonizableSector());
 
@@ -500,7 +543,8 @@ class CoopAgentQueryVerbsTest {
         CoopAgentCommands.ColonizableCandidate near = colonizable("near", 3.5f, 0f);
 
         assertEquals(List.of("here_near", "here_far", "near", "far"),
-                ids(CoopAgentCommands.selectColonizable(List.of(far, hereFar, hereNear, near), 10, 0d)));
+                ids(CoopAgentCommands.selectColonizable(
+                        List.of(far, hereFar, hereNear, near), 10, 0d, false)));
     }
 
     @Test
@@ -508,14 +552,31 @@ class CoopAgentQueryVerbsTest {
         List<CoopAgentCommands.ColonizableCandidate> all = List.of(
                 colonizable("a", 1f, 0f), colonizable("b", 4f, 0f), colonizable("c", 9f, 0f));
 
-        assertEquals(List.of("a", "b"), ids(CoopAgentCommands.selectColonizable(all, 2, 0d)),
+        assertEquals(List.of("a", "b"), ids(CoopAgentCommands.selectColonizable(all, 2, 0d, false)),
                 "limit takes the nearest, not the first two the walk happened to find");
-        assertEquals(List.of("a", "b"), ids(CoopAgentCommands.selectColonizable(all, 10, 5d)));
-        assertEquals(List.of("a"), ids(CoopAgentCommands.selectColonizable(all, 1, 5d)),
+        assertEquals(List.of("a", "b"), ids(CoopAgentCommands.selectColonizable(all, 10, 5d, false)));
+        assertEquals(List.of("a"), ids(CoopAgentCommands.selectColonizable(all, 1, 5d, false)),
                 "maxLy runs first so the cap applies to what is actually in range");
-        assertEquals(List.of(), ids(CoopAgentCommands.selectColonizable(all, 10, 0.5d)));
-        assertEquals(List.of("a", "b", "c"), ids(CoopAgentCommands.selectColonizable(all, 10, 0d)),
+        assertEquals(List.of(), ids(CoopAgentCommands.selectColonizable(all, 10, 0.5d, false)));
+        assertEquals(List.of("a", "b", "c"), ids(CoopAgentCommands.selectColonizable(all, 10, 0d, false)),
                 "maxLy 0 is no filter, not a filter that excludes everything");
+    }
+
+    @Test
+    void neutralOnlyDropsSystemsWithAnyFactionPresenceAndDoesItBeforeTheCap() {
+        List<CoopAgentCommands.ColonizableCandidate> all = List.of(
+                colonizable("occupied_near", 1f, 0f, 2),
+                colonizable("empty_mid", 4f, 0f, 0),
+                colonizable("empty_far", 9f, 0f, 0));
+
+        assertEquals(List.of("empty_mid", "empty_far"),
+                ids(CoopAgentCommands.selectColonizable(all, 10, 0d, true)));
+        assertEquals(List.of("empty_mid"), ids(CoopAgentCommands.selectColonizable(all, 1, 0d, true)),
+                "filter first, then cap: limit 1 has to mean one neutral planet, not \"the nearest"
+                        + " planet, dropped for not being neutral\"");
+        assertEquals(List.of("occupied_near", "empty_mid", "empty_far"),
+                ids(CoopAgentCommands.selectColonizable(all, 10, 0d, false)),
+                "the default keeps everything, so the field is context rather than a hidden filter");
     }
 
     @Test
@@ -568,6 +629,19 @@ class CoopAgentQueryVerbsTest {
         assertTrue(inHyperspace.getBoolean("hyperspace"),
                 "hyperspace is walked like any other location; a landmark out there is a real one");
         assertEquals("hyperspace", inHyperspace.getString("systemId"));
+    }
+
+    @Test
+    void aLandmarkRowCarriesItsOwnCoordinatesTheSameWayAColonizableRowDoes() throws JSONException {
+        Map<String, JSONObject> rows =
+                landmarkRows(CoopAgentCommands.landmarks(new JSONObject(), landmarkSector()));
+
+        JSONObject gate = rows.get("corvus_gate");
+        assertEquals(400d, gate.getDouble("x"), 1e-6, "with systemId, a teleport argument");
+        assertEquals(0d, gate.getDouble("y"), 1e-6);
+        assertEquals(20_000d, rows.get("hyper_stable").getDouble("x"), 1e-6,
+                "a hyperspace landmark's coordinates are hyperspace coordinates, which is what"
+                        + " teleporting to it wants");
     }
 
     @Test
@@ -822,7 +896,7 @@ class CoopAgentQueryVerbsTest {
 
     private static CoopAgentCommands.Landmark landmark(String entityId, String kind, float ly, float su) {
         return new CoopAgentCommands.Landmark(kind, entityId, entityId, "spec", "system", "System",
-                false, ly, su, new LinkedHashMap<>());
+                false, 0f, 0f, ly, su, new LinkedHashMap<>());
     }
 
     private static List<String> landmarkIds(List<CoopAgentCommands.Landmark> landmarks) {
@@ -896,10 +970,24 @@ class CoopAgentQueryVerbsTest {
         LocationAPI temporary = system("abyss_tmp", "Nowhere", List.of(ephemeral), "temporary_location");
 
         CampaignFleetAPI player = fleetAt(corvus, 0f, 0f, 0f, 0f);
+        // The economy holds Jangala only. Corvus therefore reads one market and the hidden system
+        // reads none, which is the whole point of the field: no market, no faction presence. The
+        // uncolonized planets' own condition markets are deliberately not in here, because they are
+        // not in the engine's economy either.
+        EconomyAPI economy = proxy(EconomyAPI.class,
+                answers("getMarketsCopy", args -> List.of(economyMarket("jangala", "corvus"))));
         return contextFor(proxy(SectorAPI.class, answers(
                 "getPlayerFleet", args -> player,
+                "getEconomy", args -> economy,
                 "getAllLocations",
                 args -> List.of(corvus, hiddenSystem, cutOff, abyssal, temporary, hyperspace()))));
+    }
+
+    /** A market that answers only what {@code marketsInSystem} counts it by. */
+    private static MarketAPI economyMarket(String marketId, String locationId) {
+        return proxy(MarketAPI.class, answers(
+                "getId", args -> marketId,
+                "getContainingLocation", args -> location(locationId, List.of())));
     }
 
     /** A deep-space pocket: colonization is refused by the core UI, not by any rule or tag. */
@@ -979,8 +1067,13 @@ class CoopAgentQueryVerbsTest {
     }
 
     private static CoopAgentCommands.ColonizableCandidate colonizable(String planetId, float ly, float su) {
+        return colonizable(planetId, ly, su, 0);
+    }
+
+    private static CoopAgentCommands.ColonizableCandidate colonizable(String planetId, float ly,
+                                                                      float su, int marketsInSystem) {
         return new CoopAgentCommands.ColonizableCandidate(planetId, planetId, "terran", false,
-                "system", "System", ly, su, 1f, "FULL", false, List.of());
+                "system", "System", 0f, 0f, marketsInSystem, ly, su, 1f, "FULL", false, List.of());
     }
 
     private static List<String> ids(List<CoopAgentCommands.ColonizableCandidate> candidates) {
@@ -1005,6 +1098,235 @@ class CoopAgentQueryVerbsTest {
             out.add(array.getString(i));
         }
         return out;
+    }
+
+    // ---- teleport: naming a target, and crossing locations the way the engine does -----------------
+
+    @Test
+    void teleportingToAnEntityLandsClearOfItInItsOwnSystem() throws JSONException {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.system("penelope");
+        world.entity("penelope", "aztlan", "Aztlan", 3000f, -1500f, 120f);
+        world.playerIn("corvus");
+
+        JSONObject out = CoopAgentCommands.teleport(args("entityId", "aztlan"), world.context());
+
+        assertEquals("aztlan", out.getString("entityId"));
+        assertEquals("Aztlan", out.getString("entityName"));
+        assertEquals("penelope", out.getString("locationId"), "the entity's location, not the fleet's");
+        assertEquals("corvus", out.getString("movedFrom"));
+        assertEquals(3320d, out.getDouble("x"), 1e-6, "radius 120 + 200 clearance, straight out on +x");
+        assertEquals(-1500d, out.getDouble("y"), 1e-6);
+    }
+
+    @Test
+    void anEntityTheSectorIndexMissesIsStillFoundByWalkingTheLocations() throws JSONException {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.system("penelope");
+        world.entity("penelope", "aztlan", "Aztlan", 3000f, -1500f, 120f);
+        world.playerIn("corvus");
+        world.sectorIndexAnswers = false;
+
+        JSONObject out = CoopAgentCommands.teleport(args("entityId", "aztlan"), world.context());
+
+        assertEquals("penelope", out.getString("locationId"),
+                "the engine rebuilds its id map lazily; the walk behind it is what makes the verb"
+                        + " answer for an entity in a system this client has never had current");
+    }
+
+    @Test
+    void anUnresolvableEntityIdIsRefusedByName() {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.playerIn("corvus");
+        CoopAgentCommands.Context context = world.context();
+
+        String message = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.teleport(args("entityId", "not_a_thing"), context))
+                .getMessage();
+
+        assertTrue(message.contains("not_a_thing"),
+                "a typo has to name what was typed, not read as an empty sector: " + message);
+    }
+
+    @Test
+    void entityIdAndCoordinatesTogetherAreRefusedRatherThanOneQuietlyWinning() throws JSONException {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.entity("corvus", "ancyra", "Ancyra", 1000f, 0f, 100f);
+        world.playerIn("corvus");
+        CoopAgentCommands.Context context = world.context();
+
+        JSONObject both = args("entityId", "ancyra");
+        both.put("x", 50);
+        both.put("y", 50);
+
+        String message = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.teleport(both, context)).getMessage();
+
+        assertTrue(message.contains("entityId") && message.contains("x"),
+                "guessing which one the caller meant is how a fleet ends up somewhere nobody asked"
+                        + " for: " + message);
+    }
+
+    @Test
+    void aCrossLocationTeleportGoesThroughTheEngineJumpTransition() throws JSONException {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.system("penelope");
+        world.entity("penelope", "aztlan", "Aztlan", 3000f, -1500f, 120f);
+        world.playerIn("corvus");
+
+        JSONObject out = CoopAgentCommands.teleport(args("entityId", "aztlan"), world.context());
+
+        assertEquals("jump", out.getString("transition"));
+        assertTrue(out.getBoolean("pending"), "the transition is frame-driven; x/y is where it is"
+                + " going, not where the fleet is at reply time");
+        assertEquals("penelope", world.jumpLocationId);
+        assertEquals(3320f, world.jumpPoint.x, 1e-3, "the destination token carries the same point"
+                + " the answer reports, so the fleet lands where the caller was told");
+        assertEquals(-1500f, world.jumpPoint.y, 1e-3);
+        assertTrue(world.localPlacements.isEmpty(),
+                "the raw re-parent is the bug: it skips setCurrentLocation, and a fleet outside the"
+                        + " engine's current location gets no player input and cannot fly");
+    }
+
+    @Test
+    void aCrossLocationTeleportByCoordinatesJumpsToo() throws JSONException {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.system("penelope");
+        world.playerIn("corvus");
+
+        JSONObject args = new JSONObject();
+        args.put("locationId", "penelope");
+        args.put("x", 750);
+        args.put("y", -250);
+
+        JSONObject out = CoopAgentCommands.teleport(args, world.context());
+
+        assertEquals("jump", out.getString("transition"),
+                "the path is chosen by the destination, not by which argument mode was used");
+        assertEquals("penelope", world.jumpLocationId);
+        assertEquals(750f, world.jumpPoint.x, 1e-3);
+        assertEquals("", out.getString("entityId"), "no entity was named, so the field is empty");
+    }
+
+    @Test
+    void aSameLocationTeleportKeepsTheDirectPlacement() throws JSONException {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.playerIn("corvus");
+
+        JSONObject args = new JSONObject();
+        args.put("locationId", "corvus");
+        args.put("x", 500);
+        args.put("y", 250);
+
+        JSONObject out = CoopAgentCommands.teleport(args, world.context());
+
+        assertEquals("local", out.getString("transition"));
+        assertFalse(out.getBoolean("pending"), "a local placement is done by the time this answers");
+        assertNull(world.jumpLocationId, "no location change, nothing for a jump transition to fix");
+        assertEquals(List.of("500.0,250.0"), world.localPlacements);
+    }
+
+    @Test
+    void aTeleportIssuedMidJumpIsRefusedRatherThanSwallowedByTheEngine() {
+        TeleportWorld world = new TeleportWorld();
+        world.system("corvus");
+        world.system("penelope");
+        world.entity("penelope", "aztlan", "Aztlan", 3000f, -1500f, 120f);
+        world.playerIn("corvus");
+        world.inTransition = true;
+        CoopAgentCommands.Context context = world.context();
+
+        String message = assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.teleport(args("entityId", "aztlan"), context)).getMessage();
+
+        assertTrue(message.contains("jump transition"),
+                "doHyperspaceTransition returns silently on a fleet already in one, so the second"
+                        + " request would otherwise look like it worked: " + message);
+    }
+
+    /** Locations, entities and a player fleet, recording which of the two move paths a teleport took. */
+    private static final class TeleportWorld {
+        private final Map<String, LocationAPI> locations = new LinkedHashMap<>();
+        private final Map<String, SectorEntityToken> entitiesById = new LinkedHashMap<>();
+        private final Map<String, String> locationOfEntity = new LinkedHashMap<>();
+        private final List<String> localPlacements = new ArrayList<>();
+
+        /** False stands in for the engine's lazily-rebuilt id map coming up empty. */
+        private boolean sectorIndexAnswers = true;
+        private boolean inTransition;
+        private CampaignFleetAPI player;
+        private LocationAPI playerLocation;
+        private String jumpLocationId;
+        private Vector2f jumpPoint;
+
+        private void system(String id) {
+            Map<String, Answer> answers = answers();
+            answers.put("getId", args -> id);
+            answers.put("getName", args -> id);
+            answers.put("getEntityById", args -> entityIn(id, String.valueOf(args[0])));
+            answers.put("createToken",
+                    args -> token(id, ((Number) args[0]).floatValue(), ((Number) args[1]).floatValue()));
+            locations.put(id, proxy(LocationAPI.class, answers));
+        }
+
+        private void entity(String locationId, String id, String name, float x, float y, float radius) {
+            Map<String, Answer> answers = answers();
+            answers.put("getId", args -> id);
+            answers.put("getName", args -> name);
+            answers.put("getLocation", args -> new Vector2f(x, y));
+            answers.put("getRadius", args -> radius);
+            answers.put("getContainingLocation", args -> locations.get(locationId));
+            entitiesById.put(id, proxy(SectorEntityToken.class, answers));
+            locationOfEntity.put(id, locationId);
+        }
+
+        private void playerIn(String locationId) {
+            playerLocation = locations.get(locationId);
+            Map<String, Answer> answers = answers();
+            answers.put("getContainingLocation", args -> playerLocation);
+            answers.put("getLocation", args -> new Vector2f(0f, 0f));
+            answers.put("isInHyperspaceTransition", args -> inTransition);
+            answers.put("setLocation", args -> {
+                localPlacements.add(args[0] + "," + args[1]);
+                return null;
+            });
+            player = proxy(CampaignFleetAPI.class, answers);
+        }
+
+        private CoopAgentCommands.Context context() {
+            Map<String, Answer> answers = answers();
+            answers.put("getPlayerFleet", args -> player);
+            answers.put("getAllLocations", args -> new ArrayList<>(locations.values()));
+            answers.put("getEntityById",
+                    args -> sectorIndexAnswers ? entitiesById.get(String.valueOf(args[0])) : null);
+            answers.put("doHyperspaceTransition", args -> {
+                SectorEntityToken destination =
+                        ((JumpPointAPI.JumpDestination) args[2]).getDestination();
+                jumpLocationId = destination.getContainingLocation().getId();
+                jumpPoint = destination.getLocation();
+                return null;
+            });
+            return contextFor(proxy(SectorAPI.class, answers));
+        }
+
+        private SectorEntityToken entityIn(String locationId, String entityId) {
+            return locationId.equals(locationOfEntity.get(entityId))
+                    ? entitiesById.get(entityId) : null;
+        }
+
+        private SectorEntityToken token(String locationId, float x, float y) {
+            Map<String, Answer> answers = answers();
+            answers.put("getLocation", args -> new Vector2f(x, y));
+            answers.put("getContainingLocation", args -> locations.get(locationId));
+            return proxy(SectorEntityToken.class, answers);
+        }
     }
 
     // ---- Fakes --------------------------------------------------------------------------------------
