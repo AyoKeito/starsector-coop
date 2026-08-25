@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete, smoke pending"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete, smoke pending; 30 built 2026-08-25, live bridged check pending"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 30 (agent bridge), then the 12c smoke",
-  "here": "Phase 12c is code-complete (2026-08-24): four build tasks — ability world effects on the guest mirror, full-fidelity market capture (D-mods/CR per listing, specials, officer/merc/admin pools with close-diff hire claims, restock re-snapshot), bar pool enumeration + guest injection, and survey/ruins replication — plus a review pass that fixed three majors. 890 tests green, deployed (incl. the 2026-08-25 wire-quantization + CR-ratchet commits from the parallel datagram session). <b>Phase 30 (created 2026-08-25) now precedes the 12c smoke:</b> a dormant in-game agent bridge + starsector-mcp server, coded in a separate instance from the plan's spec, so the agent runs 7 of the 10 smoke checks itself (bar/ship/officer equality, officer persistence, interdiction, distress, objective+survey replication, CR recovery, visibility). The manual residue for the next short session: the claim race, sell-back + hire click-throughs, and the motion/stealth feel pass (plus the speed-probe re-baseline under quantization, diagnostics-automated).",
+  "hereHead": "You are here — Phase 30 built; next: live bridged check, then the 12c smoke",
+  "here": "<b>Phase 30 was built 2026-08-25, same day it was specced</b> (<code>c51ee37</code> mod side, 943 tests; <code>4ed9a77</code> tools side, 20 mock-bridge tests): the dormant <code>CoopAgentBridge</code> (localhost nio TCP, campaign-thread-only, gated on <code>-Dcoop.debug.bridge</code>, 13 query/setup verbs reusing the existing capture serializers) plus <code>tools/starsector-mcp</code>, a Node stdio MCP server with server-side structural diffing (<code>ss_status/ss_dump/ss_diff/ss_act/ss_advance_days</code>). Launch scripts take <code>-Bridge</code>. What remains needs a driven two-instance session: the live bridged check (<code>ss_diff(market)</code> empty at a shared dock; <code>ss_act(guest, ability)</code> lands host-side), then the agent runs 7 of the 12c smoke's 10 checks itself (bar/ship/officer equality, officer persistence, interdiction, distress, objective+survey replication, CR recovery, visibility). Phase 12c itself has been code-complete since 2026-08-24 (890 tests at the time; four build tasks + a review pass that fixed three majors). The manual residue for that session: the claim race, sell-back + hire click-throughs, and the motion/stealth feel pass (plus the speed-probe re-baseline under quantization, diagnostics-automated).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next build: Phase 30, then the automated 12c smoke",
+      "head": "Next: live bridged check, then the automated 12c smoke",
       "state": "you are here",
-      "body": "Everything through <span class=\"rp\" data-jump=\"18\">Phase 18</span> plus <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1 is built and smoke-verified; <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> is code-complete with its smoke split by <span class=\"rp\" data-jump=\"30\">Phase 30</span> (agent bridge + MCP, dev tooling) into a 7-item automated portion the agent runs alone and a 3-item manual residue (claim race, sell-back/hire clicks, feel pass). After both, the order continues with <span class=\"rp\" data-jump=\"24\">Phase 24</span> — shared-faction colonies, industries, and raids — then 7b/7c → 20 → 29-M2 → 21 → 19."
+      "body": "Everything through <span class=\"rp\" data-jump=\"18\">Phase 18</span> plus <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1 is built and smoke-verified; <span class=\"rp\" data-jump=\"30\">Phase 30</span> (agent bridge + MCP, dev tooling) was built 2026-08-25 and splits the code-complete <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> smoke into a 7-item automated portion the agent runs alone over the bridge and a 3-item manual residue (claim race, sell-back/hire clicks, feel pass). The next two-instance session opens with the live bridged check (deploy, launch with <code>-Bridge</code>, <code>ss_diff(market)</code> empty at a shared dock), then the automated smoke. After both, the order continues with <span class=\"rp\" data-jump=\"24\">Phase 24</span> — shared-faction colonies, industries, and raids — then 7b/7c → 20 → 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -967,7 +967,7 @@
       "title": "Agent Bridge + Starsector MCP",
       "theme": "infra",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Dev tooling: a dormant localhost TCP bridge in each game instance plus an external MCP server, letting the agent query and diff live game state and run setup verbs — automates 7 of the 12c smoke's 10 checks and pays off again at Phase 19.",
       "introduces": [
         "CoopAgentBridge",
@@ -978,13 +978,10 @@
         "-Bridge launch switch"
       ],
       "residue": [
-        "mod-side bridge + tests",
-        "MCP server + README + launch switch",
-        "live two-instance bridged check",
-        "run the automated 12c smoke portion",
-        "Phase 23 dormancy checklist line"
+        "live two-instance bridged check (ss_diff(market) empty at a shared dock; guest ability lands host-side)",
+        "run the automated 12c smoke portion, record results in the 12c smoke step"
       ],
-      "note": "Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Coded in a separate instance from the plan's spec (2026-08-25)."
+      "note": "Built 2026-08-25, same day as the spec (c51ee37 mod side, 943 tests; 4ed9a77 tools side, 20 mock-bridge tests). Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Phase 23 dormancy checklist line added."
     }
   ],
   "buildOrderFallback": [

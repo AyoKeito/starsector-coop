@@ -57,7 +57,7 @@ Authoritative build status per phase. Checkbox state inside the early phases pre
 | 21 | NOT BUILT | **Pulled into V1 2026-08-24** (user decision — the lobby's force-pause-until-all-ready fixes the host-starts-unpaused-before-guest issue it now owns). Stays whole (lobby-early split declined); slots after 29-M2, before 19. Executable spec. |
 | 22–28 | NOT BUILT | Post-V1. 22 has an executable spec; 23 is scope-level; 25–28 are design-complete sketches. |
 | 29 | **PARTIAL** | **M1 + its wire prerequisite BUILT 2026-08-24** (`0e1871a` + `9e4f935`, same day the mechanism was revised to buffered snapshot interpolation + kinematic drive after the deep-research pass — see the research banner; pure dead reckoning rejected). Unit-tested (42 new cases); **clean-link smoke VERIFIED in-game 2026-08-24** (orbit-pair glide + ambient NPC motion smooth, zero coop errors, ~0.1 ms avg frame cost; pause-lag red herring traced to a leftover Phase 18 latency lever in vmparams, launch scripts hardened in `e4f8fc9`). Remaining M1 QA: the shaped-loopback loss/reorder pass. M2 (adaptive cadence) NOT BUILT — needs 20, slots after it. Phase history: pulled into V1 2026-08-20 after the jumpy-mirror root cause was verified live (banner has the two measured failure modes); partner-mirror scope SETTLED: included. |
-| 30 | NOT BUILT | Dev tooling (agent bridge + starsector-mcp), created 2026-08-25; slots after 12c code, before its smoke — automates 7/10 of the 12c smoke items. Built from the plan spec in a separate instance. Dormant without `-Dcoop.debug.bridge`; Phase 23 confirms dormancy. |
+| 30 | BUILT (code; live bridged check pending) | Dev tooling (agent bridge + starsector-mcp), created and built 2026-08-25 (`c51ee37` mod side, 943 tests; `4ed9a77` tools side, 20 mock-bridge tests) — automates 7/10 of the 12c smoke items. Remaining steps need a driven two-instance session: the live bridged check, then the automated 12c smoke portion. Dormant without `-Dcoop.debug.bridge`; Phase 23 confirms dormancy (checklist line added). |
 
 ## Source Layout
 
@@ -2204,6 +2204,7 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 - [ ] Harden launch scripts for non-dev machines (path detection, no hardcoded `K:\`).
 - [ ] Release hygiene: version-string agreement (`mod_info.json` ↔ handshake build hash), player CHANGELOG, license + CoOpCombat MIT attribution if Phase 22 shipped, honest listing text.
 - [ ] Document the issue-report flow (which doctor/log lines to paste).
+- [ ] Confirm Phase 30 agent-bridge dormancy in the release build: `-Dcoop.debug.bridge` absent → zero sockets, zero log lines (pin with the existing dormancy unit test; confirm, don't strip — added by Phase 30, 2026-08-25).
 
 ## Phase 24: Shared-Faction Colonies, Industries, and Raids
 
@@ -2705,11 +2706,11 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 
 **Steps:**
 
-- [ ] Mod-side bridge + commands + tests; `gradlew clean test build` green; commit `feat: dormant agent bridge (-Dcoop.debug.bridge)`.
-- [ ] MCP server + launch-script switch + README_DEV; commit `feat: starsector-mcp dev tools`.
-- [ ] Live check with both instances bridged: `ss_diff(market)` at a shared dock returns an empty diff; `ss_act(guest, ability, interdiction_pulse)` produces the host-side `ABILITY_ACTIVATE` log line and visible scatter in `ss_dump(fleets)`.
+- [x] Mod-side bridge + commands + tests; `gradlew clean test build` green (943 tests); commit `feat: dormant agent bridge (-Dcoop.debug.bridge)` = `c51ee37`. *(2026-08-25. As-built notes: `catch` clause adds `JSONException` — the bundled 2010 org.json declares it checked; `fleets` enumerates fleets itself but captures every field through the shared capturers (`CoopSensorSync`/`CoopNpcActionTextCapture`/`CoopFleetSnapshotFactory`) because the replicator's set-capture path skips coop mirrors and feeds the motion smoother — both wrong for a read-only diff; floats quantized to 3 decimals in responses so the structural diff doesn't flag float tails; named non-verbs get a "stays manual" refusal distinct from unknown-command; `install()` closes a stale listener before the dormancy check so a second game load in one process can re-bind; reuse doors = narrow public `*ForBridge` facades on `CoopCampaignReplicator`/`CoopNetPump` delegating to the still-private originals.)*
+- [x] MCP server + launch-script switch + README_DEV; commit `feat: starsector-mcp dev tools` = `4ed9a77`. *(2026-08-25. 20 mock-bridge tests via `npm test`; SDK pinned 1.30.0; env overrides `STARSECTOR_MCP_{HOST_PORT,GUEST_PORT,ADDRESS,TIMEOUT_MS}`; `ss_diff` adds optional numeric `tolerance` (default 0) and `missing`/`note` fields on difference entries; `ss_advance_days` budget derived from the 10 s/game-day clock rate and re-pauses on every exit path; `pause` wire shape = `{"on":true|false}`.)*
+- [ ] Live check with both instances bridged: `ss_diff(market)` at a shared dock returns an empty diff; `ss_act(guest, ability, interdiction_pulse)` produces the host-side `ABILITY_ACTIVATE` log line and visible scatter in `ss_dump(fleets)`. *(Needs a driven two-instance session — deploy via `deploy-to-test-clients.ps1`, launch with `-Bridge`.)*
 - [ ] Run the automated 7-item portion of the 12c smoke via MCP end-to-end; record results in the 12c smoke step; leave the 3-item manual residue listed there.
-- [ ] Add the dormancy line to Phase 23's checklist (release build: property absent → zero sockets/log lines — pin with the existing dormancy unit test).
+- [x] Add the dormancy line to Phase 23's checklist (release build: property absent → zero sockets/log lines — pin with the existing dormancy unit test). *(2026-08-25, same-day as the build commits.)*
 
 **Acceptance:**
 
