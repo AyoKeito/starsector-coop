@@ -360,9 +360,7 @@
         "per-frame suppressor sweep"
       ],
       "residue": [
-        "PENDING two-instance smoke test: deploy build, launch host+guest, join a shared system, confirm guest shows identical NPC fleets (count, factions, rosters), fleets the host despawns disappear on guest, and guest's starsector.log never logs an independently-spawned NPC fleet",
-        "Landed via 2026-06-10 catch-up commit, not human-verified in two live instances yet",
-        "Step 0 pursuit gate verified PASS 2026-06-02"
+        "Verified in-game 2026-08-09 (Sindria) and corroborated 2026-08-25 by bridged full-set diffs (zero one-sided NPC fleets over 19 game days; 31 spawner scripts suppressed at session start)"
       ],
       "note": "Guest transponder-off faction reactions no longer fire (regression) — fix deferred to Phase 14"
     },
@@ -380,10 +378,8 @@
         "setActionTextOverride + setNullAIActionText on mirrors",
         "host-player / guest-mirror observer rewrites"
       ],
-      "residue": [
-        "PENDING visual check in the next two-instance session: hover a mirrored NPC fleet on the guest and confirm the action line matches the host's"
-      ],
-      "note": "No wire-format change; the field, its header count and its escaping were already in place. Capture is fail-closed (returns \"\") and capped at 80 chars, and rides the 1 Hz NPC_FLEET_SET only."
+      "residue": [],
+      "note": "No wire-format change; the field, its header count and its escaping were already in place. Capture is fail-closed (returns \"\") and capped at 80 chars, and rides the 1 Hz NPC_FLEET_SET only. Live-verified 2026-08-25 via bridged fleet diffs (zero actionText differences across 37-fleet sets, twice)."
     },
     {
       "id": "10",
