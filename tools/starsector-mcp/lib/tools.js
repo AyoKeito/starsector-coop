@@ -8,7 +8,16 @@ import { DEFAULT_IGNORE_KEYS, diffJson } from './diff.js';
 export const QUERY_VERBS = ['status', 'fleets', 'market', 'markets', 'barpool', 'survey', 'visibility'];
 
 /** State-changing verbs. ss_act accepts these. */
-export const ACTION_VERBS = ['teleport', 'pause', 'ability', 'setcr', 'give', 'objective', 'surveyset'];
+export const ACTION_VERBS = [
+  'teleport',
+  'pause',
+  'ability',
+  'setcr',
+  'give',
+  'objective',
+  'surveyset',
+  'expedition'
+];
 
 /**
  * Verbs the bridge deliberately does not implement, and the reason. Each of these

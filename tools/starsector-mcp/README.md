@@ -161,12 +161,27 @@ One state-changing verb against one instance.
 | `give` | `{commodityId?, qty?, credits?}` |
 | `objective` | `{entityId, factionId}` |
 | `surveyset` | `{planetId, level}` |
+| `expedition` | `{}` or `{factionId}` — host only |
 
 ```
 ss_act(instance: "guest", verb: "ability", args: { "abilityId": "interdiction_pulse" })
 ```
 
 `ability` goes through the same engine path the toolbar button uses, down to `reportPlayerActivatedAbility`, so the mod's listener fires and the host sees `ABILITY_ACTIVATE`. With no `on` argument it is one press of the button, whatever state the ability was in, which is what a one-shot like the distress call wants. Add `on` to make it a level instead: `on: true` activates only if the ability is off, `on: false` deactivates only if it is on, and either is a no-op otherwise. Without it a toggle like the transponder could only ever be re-armed, never turned off. `surveyset` does not: it sets the survey level at the engine level, which is faithful to what the replication poll watches but skips the survey dialog. Check the dialog path by hand.
+
+`expedition` exists so the Phase 24 expedition-warning check does not have to sit through months of game time waiting for one. It calls `PunitiveExpeditionManager.createExpedition`, the same public method the manager calls itself once a faction's anger passes its threshold, and the `PunitiveExpeditionIntel` that comes out registers with the intel manager the way an organic one does. The only guard it skips is `punExMaxConcurrent`. With no `factionId` it picks the first faction that has a live reason, preferring one with an `ANTI_FREE_PORT` reason so a repeated run picks the same faction; factions already running an expedition are skipped, because the manager holds one intel handle per faction.
+
+It runs on the host only. The guest's `PunitiveExpeditionManager` is on the Phase 13 suppressor list, so a guest-side call is refused by name; the resulting warning reaches the guest through the Phase 24 sync, which scans `RaidIntel` and picks the new intel up on its next one-second poll.
+
+```
+ss_act(instance: "host", verb: "expedition")
+
+{ "role": "HOST", "factionId": "hegemony", "created": true,
+  "reasonCount": 3, "reasonTypes": ["ANTI_FREE_PORT"], "trackedBefore": true, "ongoing": 1,
+  "targetMarketId": "player_colony_1", "targetMarketName": "New Kaunas", "etaDays": 47.315 }
+```
+
+`createExpedition` returns `void` and bails silently from five places, so success is read off `PunExData.intel` afterwards rather than assumed. Every failure comes back as an error naming the cause: no faction carries `punitiveExpeditionData`, the named faction has none, the faction has no live reason, one is already running, or vanilla picked a reason and then found no colony at or above `punExMinColonySizeForNonTerritorial`, no market to stage from, or no raidable spaceport. The reason a caller can create on demand is free port: turn it on at any player colony outside hyperspace and every `vsFreePort` faction (`hegemony`, `luddic_church`, `sindrian_diktat` in vanilla) gets a reason with no other preconditions, weighted `max(1, size - 2) * 5`.
 
 ### `ss_advance_days(days, timeoutSeconds?)`
 

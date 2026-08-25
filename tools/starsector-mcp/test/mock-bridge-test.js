@@ -579,6 +579,48 @@ test('ss_diff reports equal when both instances agree', async (t) => {
   assert.equal(result.counts.differing, 0);
 });
 
+test('expedition is an action verb, passed through with its optional factionId', async (t) => {
+  const created = {
+    role: 'HOST',
+    factionId: 'hegemony',
+    created: true,
+    reasonCount: 3,
+    reasonTypes: ['ANTI_FREE_PORT'],
+    trackedBefore: true,
+    ongoing: 1,
+    targetMarketId: 'player_colony_1',
+    targetMarketName: 'New Kaunas',
+    etaDays: 47.315
+  };
+  const hostBridge = new MockBridge((request) =>
+    request.cmd === 'expedition'
+      ? { ok: true, data: created }
+      : { ok: false, error: 'IllegalArgumentException: unknown command' }
+  );
+  const guestBridge = new MockBridge(() => ({
+    ok: false,
+    error: 'IllegalStateException: expedition is host-only: the guest\'s PunitiveExpeditionManager is suppressed (Phase 13)'
+  }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssAct(bridges, 'host', 'expedition', { factionId: 'hegemony' }), created);
+  assert.deepEqual(hostBridge.requests[0].args, { factionId: 'hegemony' });
+
+  await ssAct(bridges, 'host', 'expedition');
+  assert.deepEqual(hostBridge.requests[1].args, {}, 'no factionId means "pick one", not a missing argument');
+
+  // The host-only refusal is the mod's to make; the server must relay it rather than pre-judge it.
+  await assert.rejects(() => ssAct(bridges, 'guest', 'expedition', {}), /host-only.*suppressed/s);
+  await assert.rejects(() => ssDump(bridges, 'host', 'expedition', {}), /unknown query verb "expedition"/);
+});
+
 test('refuses the non-verbs with the reason, and unknown verbs with the verb list', async () => {
   const bridges = bridgesFor(1, 2);
   await assert.rejects(() => ssDump(bridges, 'host', 'buy', {}), /not a bridge verb by design.*PlayerMarketTransaction/s);

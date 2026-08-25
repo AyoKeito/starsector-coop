@@ -307,6 +307,82 @@ class CoopAgentQueryVerbsTest {
         assertEquals("NONE", out.getJSONObject("view").getString("fleet_A"));
     }
 
+    // ---- expedition: who gets forced, and why nobody could ----------------------------------------
+
+    @Test
+    void theFreePortCandidateWinsSoARepeatedSmokeRunPicksTheSameFaction() {
+        CoopAgentCommands.ExpeditionCandidate competition =
+                candidate("tritachyon", 4, false, false);
+        CoopAgentCommands.ExpeditionCandidate freePort =
+                candidate("hegemony", 1, true, false);
+
+        assertSame(freePort, CoopAgentCommands.chooseExpeditionFaction(
+                List.of(competition, freePort)),
+                "ANTI_FREE_PORT is the only reason the caller can conjure on demand; preferring it"
+                        + " keeps the pick deterministic instead of following today's economy");
+    }
+
+    @Test
+    void aFactionWithNoLiveReasonOrOneAlreadyRunningIsNotACandidate() {
+        CoopAgentCommands.ExpeditionCandidate none = candidate("luddic_church", 0, false, false);
+        // Reasons and a free port, but its one intel handle is taken: forcing a second would orphan it.
+        CoopAgentCommands.ExpeditionCandidate busy = candidate("hegemony", 3, true, true);
+        CoopAgentCommands.ExpeditionCandidate usable = candidate("sindrian_diktat", 2, false, false);
+
+        assertSame(usable, CoopAgentCommands.chooseExpeditionFaction(List.of(none, busy, usable)));
+        assertNull(CoopAgentCommands.chooseExpeditionFaction(List.of(none, busy)));
+    }
+
+    @Test
+    void theRefusalNamesTheFreePortPreconditionWhenNothingHasAReason() {
+        String one = CoopAgentCommands.noExpeditionCandidateMessage(
+                List.of(candidate("hegemony", 0, false, false)));
+        assertTrue(one.contains("hegemony") && one.contains("no live punitive expedition reason"), one);
+        assertTrue(one.contains(CoopAgentCommands.FREE_PORT_HINT),
+                "a caller who cannot see the cause must be told the one they can create: " + one);
+
+        String many = CoopAgentCommands.noExpeditionCandidateMessage(List.of(
+                candidate("hegemony", 0, false, false),
+                candidate("luddic_church", 0, false, false),
+                candidate("sindrian_diktat", 2, true, true)));
+        assertTrue(many.contains("none of the 3") && many.contains("(1 already running one)"), many);
+        assertTrue(many.contains(CoopAgentCommands.FREE_PORT_HINT), many);
+    }
+
+    @Test
+    void theRefusalDropsTheFreePortHintWhenTheOnlyProblemIsAnExpeditionAlreadyRunning() {
+        String one = CoopAgentCommands.noExpeditionCandidateMessage(
+                List.of(candidate("hegemony", 3, true, true)));
+        assertTrue(one.contains("already running") && one.contains("orphan"), one);
+        assertFalse(one.contains(CoopAgentCommands.FREE_PORT_HINT),
+                "free port is already on; telling the caller to toggle it would be a wrong lead: " + one);
+
+        String all = CoopAgentCommands.noExpeditionCandidateMessage(List.of(
+                candidate("hegemony", 3, true, true),
+                candidate("luddic_church", 1, true, true)));
+        assertTrue(all.contains("all 2 factions"), all);
+        assertFalse(all.contains(CoopAgentCommands.FREE_PORT_HINT), all);
+    }
+
+    @Test
+    void expeditionIsRefusedOnTheGuestAndAllowedWithNoSessionAtAll() {
+        IllegalStateException refused = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class,
+                () -> CoopAgentCommands.requireExpeditionAuthority(CoopConnectionRole.GUEST));
+        assertTrue(refused.getMessage().contains("host-only")
+                        && refused.getMessage().contains("suppressed"),
+                "the guest's manager is suppressed, so the refusal has to say so rather than read as"
+                        + " a missing feature: " + refused.getMessage());
+
+        CoopAgentCommands.requireExpeditionAuthority(CoopConnectionRole.HOST);
+        CoopAgentCommands.requireExpeditionAuthority(CoopConnectionRole.NONE);
+    }
+
+    private static CoopAgentCommands.ExpeditionCandidate candidate(String factionId, int reasonCount,
+                                                                   boolean freePort, boolean ongoing) {
+        return new CoopAgentCommands.ExpeditionCandidate(factionId, reasonCount, freePort, ongoing);
+    }
+
     // ---- Fakes --------------------------------------------------------------------------------------
 
     /** A recording {@link AbilityPlugin}; the counters are the whole point of the on/off tests. */

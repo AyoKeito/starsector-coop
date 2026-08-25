@@ -92,7 +92,8 @@ const TOOLS = [
     description:
       `Run one state-changing bridge verb against one instance. Verbs: ${ACTION_VERBS.join(', ')}. ` +
       'Args by verb: teleport{x,y,locationId}, pause{on|off}, ability{abilityId}, setcr{value, memberIndex|"all"}, ' +
-      'give{commodityId?, qty?, credits?}, objective{entityId, factionId}, surveyset{planetId, level}. ' +
+      'give{commodityId?, qty?, credits?}, objective{entityId, factionId}, surveyset{planetId, level}, ' +
+      'expedition{factionId?} (host only: forces a punitive expedition against a player colony). ' +
       'Market buy/sell, officer hire, bar-offer accept and market open/close are deliberately absent.',
     inputSchema: {
       type: 'object',

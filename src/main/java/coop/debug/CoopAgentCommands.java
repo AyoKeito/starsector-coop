@@ -3,6 +3,7 @@ package coop.debug;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
+import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
@@ -13,6 +14,11 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionIntel;
+import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
+import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager.PunExData;
+import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager.PunExReason;
 import coop.campaign.CoopBarPoolCapture;
 import coop.campaign.CoopCampaignReplicator;
 import coop.campaign.CoopMarketSync;
@@ -191,6 +197,7 @@ public final class CoopAgentCommands {
         map.put("give", CoopAgentCommands::give);
         map.put("objective", CoopAgentCommands::objective);
         map.put("surveyset", CoopAgentCommands::surveyset);
+        map.put("expedition", CoopAgentCommands::expedition);
         return map;
     }
 
@@ -888,6 +895,258 @@ public final class CoopAgentCommands {
         out.put("level", market == null || market.getSurveyLevel() == null
                 ? "" : market.getSurveyLevel().name());
         return out;
+    }
+
+    // ---- expedition: forcing the Phase 24 milestone-3 warning ------------------------------------
+
+    /**
+     * What the free-port precondition is, in one sentence, for every error path that needs it.
+     *
+     * <p>{@code ANTI_FREE_PORT} is the only reason a dev caller can conjure on demand: the second
+     * block of {@code getExpeditionReasons} adds one, unconditionally and with no commodity maths, for
+     * every player-owned non-hyperspace market with free port on. The other two reasons need real
+     * campaign conditions — a production share the faction actually notices, or a claimed system — and
+     * this verb deliberately does not fake either.
+     */
+    static final String FREE_PORT_HINT = "Toggle free port on a player colony first: any player-owned "
+            + "colony outside hyperspace with free port on gives every vsFreePort faction (in vanilla "
+            + "hegemony, luddic_church and sindrian_diktat) a reason with no other preconditions.";
+
+    /** One faction's eligibility for a forced expedition, reduced to what the choice turns on. */
+    record ExpeditionCandidate(String factionId, int reasonCount, boolean freePortReason,
+                               boolean ongoing) {
+    }
+
+    /**
+     * Forces one punitive expedition so the Phase 24 milestone-3 warning check does not have to wait
+     * out months of game time for an organic one.
+     *
+     * <p>This is campaign state through a public vanilla API, not a UI shortcut:
+     * {@code PunitiveExpeditionManager.createExpedition} is the same call the manager's own
+     * {@code checkExpedition} makes once a faction's anger crosses its threshold, and the
+     * {@code PunitiveExpeditionIntel} it builds registers itself with the intel manager exactly as an
+     * organic one does. The only guard it skips is {@code MAX_CONCURRENT}, which is a pacing knob.
+     *
+     * <p><b>Host-only.</b> The guest's manager is on the Phase 13 suppressor list, so an expedition
+     * forced there would belong to no authority and would be overwritten by the next sync. Role
+     * {@code NONE} is allowed: a single instance being set up for a check has a live manager and no
+     * session yet.
+     *
+     * <p><b>Success is detected, not assumed.</b> {@code createExpedition} is {@code void} and returns
+     * silently from five different bail-outs, so this reads {@code PunExData.intel} afterwards — the
+     * field the manager itself uses to know an expedition is running — and reports a diagnostic naming
+     * the likely bail-out when it is still null.
+     */
+    static JSONObject expedition(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CoopConnectionRole role = roleOf(context.pump());
+        requireExpeditionAuthority(role);
+        String requestedFactionId = optionalString(args, "factionId");
+
+        PunitiveExpeditionManager manager = PunitiveExpeditionManager.getInstance();
+        if (manager == null) {
+            throw new IllegalStateException("this campaign has no PunitiveExpeditionManager ("
+                    + PunitiveExpeditionManager.KEY + " is unset in sector memory), so nothing can send"
+                    + " a punitive expedition");
+        }
+
+        List<FactionAPI> factions = punitiveFactions(sector, requestedFactionId);
+        List<ExpeditionCandidate> candidates = new ArrayList<>();
+        Map<String, FactionAPI> byId = new LinkedHashMap<>();
+        Map<String, List<PunExReason>> reasonsById = new LinkedHashMap<>();
+        for (FactionAPI faction : factions) {
+            String factionId = nullSafe(faction.getId());
+            PunExData tracked = manager.getDataFor(faction);
+            List<PunExReason> reasons = expeditionReasons(manager, faction, tracked);
+            byId.put(factionId, faction);
+            reasonsById.put(factionId, reasons);
+            candidates.add(new ExpeditionCandidate(factionId, reasons.size(),
+                    hasFreePortReason(reasons), tracked != null && tracked.intel != null));
+        }
+
+        ExpeditionCandidate chosen = chooseExpeditionFaction(candidates);
+        if (chosen == null) {
+            throw new IllegalStateException(noExpeditionCandidateMessage(candidates));
+        }
+
+        FactionAPI faction = byId.get(chosen.factionId());
+        List<PunExReason> reasons = reasonsById.get(chosen.factionId());
+        // The manager's own record when it has one, so anger, threshold and the intel handle stay the
+        // ones it tracks. Its map is populated from live markets on advance(); a faction it has not
+        // reached yet is registered here the same way, so the expedition is tracked rather than
+        // orphaned the moment it is created.
+        PunExData data = manager.getDataFor(faction);
+        boolean tracked = data != null;
+        if (data == null) {
+            data = new PunExData();
+            data.faction = faction;
+            manager.getData().put(faction, data);
+        }
+
+        manager.createExpedition(data);
+
+        JSONObject out = new JSONObject();
+        out.put("role", role.name());
+        out.put("factionId", chosen.factionId());
+        out.put("reasonCount", chosen.reasonCount());
+        out.put("reasonTypes", new JSONArray(reasonTypes(reasons)));
+        out.put("trackedBefore", tracked);
+        out.put("ongoing", manager.getOngoing());
+
+        if (!(data.intel instanceof PunitiveExpeditionIntel expedition)) {
+            throw new IllegalStateException("createExpedition made nothing for " + chosen.factionId()
+                    + " (reasons=" + chosen.reasonCount() + "); vanilla picked a reason and then bailed"
+                    + " — no player colony matched it at or above punExMinColonySizeForNonTerritorial,"
+                    + " the faction has no market to stage the fleet from, or the target has no"
+                    + " raidable spaceport");
+        }
+        out.put("created", true);
+        MarketAPI target = expedition.getTarget();
+        out.put("targetMarketId", target == null ? "" : nullSafe(target.getId()));
+        out.put("targetMarketName", target == null ? "" : nullSafe(target.getName()));
+        out.put("etaDays", round(expedition.getETA()));
+        return out;
+    }
+
+    /** Refuses the guest, allows the host and a session-less instance. */
+    static void requireExpeditionAuthority(CoopConnectionRole role) {
+        if (role == CoopConnectionRole.GUEST) {
+            throw new IllegalStateException("expedition is host-only: the guest's"
+                    + " PunitiveExpeditionManager is suppressed (Phase 13), so one forced here would"
+                    + " belong to no authority. Force it on the host — the warning reaches the guest"
+                    + " through the Phase 24 expedition sync.");
+        }
+    }
+
+    /**
+     * The factions worth asking about: those carrying {@code punitiveExpeditionData}. A faction
+     * without it makes {@code createExpedition} return on its first line, so refusing here is the
+     * difference between a named error and a silent no-op.
+     */
+    private static List<FactionAPI> punitiveFactions(SectorAPI sector, String requestedFactionId) {
+        if (!requestedFactionId.isEmpty()) {
+            FactionAPI faction = sector.getFaction(requestedFactionId);
+            if (faction == null) {
+                throw new IllegalArgumentException("no faction with id " + requestedFactionId);
+            }
+            if (!hasPunitiveData(faction)) {
+                throw new IllegalArgumentException("faction " + requestedFactionId + " has no "
+                        + Factions.CUSTOM_PUNITIVE_EXPEDITION_DATA + " custom data, so vanilla can"
+                        + " never send a punitive expedition from it");
+            }
+            return List.of(faction);
+        }
+        List<FactionAPI> all = sector.getAllFactions();
+        List<FactionAPI> found = new ArrayList<>();
+        if (all != null) {
+            for (FactionAPI faction : all) {
+                if (faction != null && faction.getId() != null && hasPunitiveData(faction)) {
+                    found.add(faction);
+                }
+            }
+        }
+        if (found.isEmpty()) {
+            throw new IllegalStateException("no faction in this campaign carries "
+                    + Factions.CUSTOM_PUNITIVE_EXPEDITION_DATA + " custom data");
+        }
+        return found;
+    }
+
+    private static boolean hasPunitiveData(FactionAPI faction) {
+        try {
+            return faction.getCustomJSONObject(Factions.CUSTOM_PUNITIVE_EXPEDITION_DATA) != null;
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    /**
+     * The faction's live reasons. Asked through a throwaway {@code PunExData} when the manager has no
+     * record yet: {@code getExpeditionReasons} reads only the faction off it, and scanning must not
+     * register every faction in the sector as a side effect of being asked what is possible.
+     */
+    private static List<PunExReason> expeditionReasons(PunitiveExpeditionManager manager,
+                                                       FactionAPI faction, PunExData tracked) {
+        PunExData probe = tracked;
+        if (probe == null) {
+            probe = new PunExData();
+            probe.faction = faction;
+        }
+        try {
+            List<PunExReason> reasons = manager.getExpeditionReasons(probe);
+            return reasons == null ? List.<PunExReason>of() : reasons;
+        } catch (RuntimeException | LinkageError ex) {
+            // One unreadable faction must not cost the caller every other candidate.
+            return List.of();
+        }
+    }
+
+    private static boolean hasFreePortReason(List<PunExReason> reasons) {
+        for (PunExReason reason : reasons) {
+            if (reason != null
+                    && reason.type == PunitiveExpeditionManager.PunExType.ANTI_FREE_PORT) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<String> reasonTypes(List<PunExReason> reasons) {
+        Set<String> types = new TreeSet<>();
+        for (PunExReason reason : reasons) {
+            if (reason != null && reason.type != null) {
+                types.add(reason.type.name());
+            }
+        }
+        return new ArrayList<>(types);
+    }
+
+    /**
+     * The first faction that can actually send one, preferring an {@code ANTI_FREE_PORT} reason so a
+     * repeated smoke run picks the same faction rather than whichever one the economy angered today.
+     * Factions already running an expedition are skipped: the manager tracks one intel handle per
+     * faction, so forcing a second would orphan the first.
+     */
+    static ExpeditionCandidate chooseExpeditionFaction(List<ExpeditionCandidate> candidates) {
+        ExpeditionCandidate fallback = null;
+        for (ExpeditionCandidate candidate : candidates) {
+            if (candidate == null || candidate.ongoing() || candidate.reasonCount() <= 0) {
+                continue;
+            }
+            if (candidate.freePortReason()) {
+                return candidate;
+            }
+            if (fallback == null) {
+                fallback = candidate;
+            }
+        }
+        return fallback;
+    }
+
+    /** Why nothing was eligible, in the caller's terms rather than the engine's. */
+    static String noExpeditionCandidateMessage(List<ExpeditionCandidate> candidates) {
+        int ongoing = 0;
+        for (ExpeditionCandidate candidate : candidates) {
+            if (candidate != null && candidate.ongoing()) {
+                ongoing++;
+            }
+        }
+        if (candidates.size() == 1) {
+            ExpeditionCandidate only = candidates.get(0);
+            if (only.ongoing()) {
+                return "faction " + only.factionId() + " is already running a punitive expedition;"
+                        + " the manager tracks one per faction, so forcing another would orphan it."
+                        + " Name a different faction or let this one resolve.";
+            }
+            return "faction " + only.factionId() + " has no live punitive expedition reason. "
+                    + FREE_PORT_HINT;
+        }
+        if (ongoing == candidates.size()) {
+            return "all " + candidates.size() + " factions with punitive expedition data are already"
+                    + " running one; let one resolve first";
+        }
+        return "none of the " + candidates.size() + " factions with punitive expedition data has a"
+                + " live reason (" + ongoing + " already running one). " + FREE_PORT_HINT;
     }
 
     // ---- Shared helpers -------------------------------------------------------------------------
