@@ -366,6 +366,40 @@ public class CoopNetPump implements EveryFrameScript {
         this.nextGuestSnapshotAtMillis = now;
     }
 
+    // ---- Phase 30 agent-bridge accessors (dev tooling) -----------------------------------------
+    //
+    // The dormant agent bridge (coop.debug.CoopAgentBridge, -Dcoop.debug.bridge=<port>) is installed
+    // as its own transient script, deliberately outside this pump's session lifecycle: it has to
+    // answer before and without an active coop session. When a session *is* up it still needs the
+    // pump's collaborators to answer queries through the replication code rather than a parallel set
+    // of readers, and it finds this pump by scanning the sector's transient scripts. These are plain
+    // getters; nothing here mutates pump state.
+
+    /** Bridge-only: the live session record (role, handshake, seed). */
+    public CoopSessionState sessionStateForBridge() {
+        return sessionState;
+    }
+
+    /** Bridge-only: the transport, for its connection role. */
+    public CoopNetService netServiceForBridge() {
+        return service;
+    }
+
+    /** Bridge-only: the owner of the market/survey/objective capture and apply facades. */
+    public CoopCampaignReplicator campaignReplicatorForBridge() {
+        return campaignReplicator;
+    }
+
+    /** Bridge-only: the shared pause coordinator behind the bridge's {@code pause} verb. */
+    public CoopSharedPauseCoordinator pauseCoordinatorForBridge() {
+        return pauseCoordinator;
+    }
+
+    /** Bridge-only: the same predicate the pump gates gameplay replication on. */
+    public boolean gameplaySessionActiveForBridge() {
+        return isGameplaySessionActive();
+    }
+
     @Override
     public boolean isDone() {
         return false;

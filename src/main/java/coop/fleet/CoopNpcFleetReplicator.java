@@ -44,8 +44,10 @@ import java.util.function.LongSupplier;
  * identically on the guest (the guest suppressor likewise preserves them).
  */
 public final class CoopNpcFleetReplicator {
-    static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
-    static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    // Public since Phase 30: the dormant agent bridge (coop.debug) is the second reader of these
+    // memory tags — its fleets dump has to report a guest mirror's coopFleetId next to its engine id.
+    public static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
+    public static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
     private static final long SET_SYNC_INTERVAL_MILLIS = 1000L;
     private static final long MOTION_INTERVAL_MILLIS = 100L;
 

@@ -3212,4 +3212,76 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     public CoopSkeletonMutationWatcher skeletonWatcher() {
         return skeletonWatcher;
     }
+
+    // ---- Phase 30 agent-bridge facades (dev tooling) -------------------------------------------
+    //
+    // The dormant agent bridge (coop.debug.CoopAgentBridge, -Dcoop.debug.bridge=<port>) is the
+    // *second* caller of the capture and apply routines below. They stay private because the
+    // replication path is their only production caller; these narrow public wrappers exist so the
+    // bridge does not grow a parallel set of state readers that could drift from the wire's.
+    // Nothing in the replication path calls them.
+
+    /**
+     * Bridge-only: the market stock a dock would show.
+     *
+     * <p>{@code stockFirst} is the host/guest split the bridge's {@code market} verb needs. On the
+     * host it is {@code true}, so this runs the same {@link #ensureOpenMarketStocked} a real dock (and
+     * {@link #broadcastMarketSnapshot}) runs before capturing — a market the host has never docked at
+     * has no stock at all, and dumping it un-stocked would report an empty shop as canonical. That
+     * generation is intended, not a bug: it is exactly what makes a host dump comparable to a guest
+     * dump of the same market. On the guest it is {@code false} — the guest is not allowed to roll
+     * stock, so the bridge reports its raw current cargo and lets
+     * {@link #openMarketStockedForBridge} say whether there is any.
+     */
+    public List<CoopMarketSync.StockItem> captureMarketStockForBridge(MarketAPI market, boolean stockFirst) {
+        if (market == null) {
+            return new ArrayList<>();
+        }
+        if (stockFirst) {
+            ensureOpenMarketStocked(market);
+        }
+        List<CoopMarketSync.StockItem> items = captureOpenMarketStock(market);
+        items.addAll(captureHireablePool(market));
+        return items;
+    }
+
+    /**
+     * Bridge-only: whether this client's open submarket has ever been stocked. False means "never
+     * docked here", which the bridge reports as {@code "stocked":false} rather than as an empty shop.
+     */
+    public boolean openMarketStockedForBridge(MarketAPI market) {
+        if (market == null || !market.hasSubmarket(Submarkets.SUBMARKET_OPEN)) {
+            return false;
+        }
+        SubmarketAPI open = market.getSubmarket(Submarkets.SUBMARKET_OPEN);
+        return open != null && open.getCargoNullOk() != null;
+    }
+
+    /** Bridge-only: second caller of {@link #collectSurveyState}. */
+    public void collectSurveyStateForBridge(LocationAPI location, Map<String, String> surveyOut,
+                                            Map<String, String> ruinsOut) {
+        if (location == null) {
+            return;
+        }
+        collectSurveyState(location, surveyOut, ruinsOut);
+    }
+
+    /**
+     * Bridge-only: second caller of {@link #applySurveyLevelToEngine}, so the {@code surveyset} verb
+     * writes through the same max-wins/{@code setFullySurveyed} path a replicated SURVEY delta does.
+     */
+    public void applySurveyLevelForBridge(String planetId, String surveyLevelName) {
+        applySurveyLevelToEngine(new CoopWorldDelta(planetId, CoopWorldDelta.Kind.SURVEY, false,
+                surveyLevelName, session.localPlayerId()));
+    }
+
+    /**
+     * Bridge-only: second caller of {@link #applyObjectiveOwnershipToEngine}, so the
+     * {@code objective} verb flips ownership through the same engine writes the dialog's capture
+     * ends up producing (faction set + {@code OBJECTIVE_NON_FUNCTIONAL} cleared).
+     */
+    public void applyObjectiveOwnershipForBridge(String entityId, String factionId) {
+        applyObjectiveOwnershipToEngine(new CoopWorldDelta(entityId,
+                CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP, false, factionId, session.localPlayerId()));
+    }
 }

@@ -7,6 +7,7 @@ import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorOrphanSweeper;
+import coop.debug.CoopAgentBridge;
 import coop.fleet.CoopSystemDriveFrameHook;
 import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
@@ -59,6 +60,12 @@ public class CoopModPlugin extends BaseModPlugin {
         // always-on observer that releases the drive when the pump stops ticking it.
         CoopSystemDriveFrameHook.install(Global.getSector());
         CoopNetPumpInstaller.install(Global.getSector(), netService);
+        // Phase 30 dev tooling, dormant unless -Dcoop.debug.bridge=<port> is set: no socket, no log
+        // line and no script when it is absent. Installed here rather than inside the pump because it
+        // has to answer before and without a coop session, and always as a TRANSIENT script — it owns
+        // live channels and XStream must never walk it into a save. Installed after the pump so the
+        // scan that finds the pump's capture code has something to find on the first bridged frame.
+        CoopAgentBridge.install(Global.getSector());
         CoopSeedSync.storeCurrentSectorFingerprint();
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
     }

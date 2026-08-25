@@ -58,7 +58,8 @@ import java.util.Locale;
  * cannot render anyway) and capped at {@value #MAX_LENGTH} characters so no fleet can inflate the set
  * message. No reflection: every read is public 0.98a API.
  */
-final class CoopNpcActionTextCapture {
+// Public since Phase 30: the dormant agent bridge (coop.debug) is the second caller of capture().
+public final class CoopNpcActionTextCapture {
 
     /** Longest text put on the wire. Vanilla's own strings sit far under this; the cap is a bound. */
     static final int MAX_LENGTH = 80;
@@ -81,8 +82,8 @@ final class CoopNpcActionTextCapture {
      *                       "your fleet"; may be null
      * @param hostPlayerLabel what the guest calls the host player (its mirror's campaign-map label)
      */
-    static String capture(CampaignFleetAPI fleet, CampaignFleetAPI hostPlayerFleet,
-                          CampaignFleetAPI guestMirror, String hostPlayerLabel) {
+    public static String capture(CampaignFleetAPI fleet, CampaignFleetAPI hostPlayerFleet,
+                                 CampaignFleetAPI guestMirror, String hostPlayerLabel) {
         if (fleet == null) {
             return "";
         }
