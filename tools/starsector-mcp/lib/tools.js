@@ -2,10 +2,10 @@
 // Kept free of the MCP SDK so the test suite can drive it against a mock bridge.
 
 import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
-import { diffJson } from './diff.js';
+import { DEFAULT_IGNORE_KEYS, diffJson } from './diff.js';
 
 /** Read-only verbs. ss_dump and ss_diff accept these. */
-export const QUERY_VERBS = ['status', 'fleets', 'market', 'barpool', 'survey', 'visibility'];
+export const QUERY_VERBS = ['status', 'fleets', 'market', 'markets', 'barpool', 'survey', 'visibility'];
 
 /** State-changing verbs. ss_act accepts these. */
 export const ACTION_VERBS = ['teleport', 'pause', 'ability', 'setcr', 'give', 'objective', 'surveyset'];
@@ -101,6 +101,8 @@ export async function ssAct(bridges, instance, verb, args) {
   return bridges.get(instance).send(verb, args);
 }
 
+export { DEFAULT_IGNORE_KEYS };
+
 export async function ssDiff(bridges, what, args, options = {}) {
   assertVerb(what, QUERY_VERBS, 'query');
   const [host, guest] = await Promise.all([
@@ -152,6 +154,10 @@ export async function ssAdvanceDays(bridges, days, options = {}) {
     failure = err;
   }
 
+  // Diagnosed BEFORE the re-pause, on purpose: pausing sets the host's own intent, which would then
+  // be the answer to every stalled advance and would hide the one that actually held the clock.
+  const stall = timedOut ? await diagnoseStall(bridges) : null;
+
   let repauseError = null;
   try {
     await host.send('pause', pauseArgs(true));
@@ -175,8 +181,50 @@ export async function ssAdvanceDays(bridges, days, options = {}) {
     elapsedRealSeconds: Number(((Date.now() - startedAt) / 1000).toFixed(1)),
     timedOut,
     repaused: repauseError === null,
+    ...(stall ? { stall } : {}),
     ...(repauseError ? { repauseError } : {})
   };
+}
+
+/**
+ * Which intent is holding the shared clock, for the case where an advance did not move it. Polls
+ * `status` on both instances and reads the pause block the mod now reports; the answer is the first
+ * true term of the host's OR, then either client's open screen, then `unknown` when nothing in the
+ * two pause blocks explains the stall (which is itself the finding — it means the clock is being held
+ * by something outside the coordinator).
+ *
+ * Never throws: an unreachable instance is recorded and the diagnosis carries on with what it has.
+ * Replacing a useful timeout result with a connection error would lose the measurement.
+ */
+export async function diagnoseStall(bridges) {
+  const pause = { host: null, guest: null };
+  const unreachable = {};
+  for (const instance of INSTANCES) {
+    try {
+      const status = await bridges.get(instance).send('status');
+      pause[instance] = status?.pause ?? null;
+    } catch (err) {
+      unreachable[instance] = err.message;
+    }
+  }
+  return {
+    ...holderOf(pause),
+    pause,
+    ...(Object.keys(unreachable).length ? { unreachable } : {})
+  };
+}
+
+function holderOf({ host, guest }) {
+  const h = host ?? {};
+  const g = guest ?? {};
+  if (h.hostIntent) return { instance: 'host', reason: 'hostIntent' };
+  if (h.guestScreenIntent) return { instance: 'guest', reason: 'guestScreenIntent' };
+  if (h.guestKeyIntent) return { instance: 'guest', reason: 'guestKeyIntent' };
+  if (h.guestIntent) return { instance: 'guest', reason: 'guestIntent' };
+  if (h.eitherInCombat) return { instance: 'host', reason: 'eitherInCombat' };
+  if (g.blockingScreenOpen) return { instance: 'guest', reason: 'blockingScreenOpen' };
+  if (h.blockingScreenOpen) return { instance: 'host', reason: 'blockingScreenOpen' };
+  return { instance: 'host', reason: 'unknown' };
 }
 
 // The bridge's pause handler reads {"on":true|false} (CoopAgentCommands.requiredPauseState).

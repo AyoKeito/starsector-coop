@@ -8,7 +8,7 @@ import net from 'node:net';
 import test from 'node:test';
 
 import { BridgeClient, BridgeError, BridgeTimeoutError, BridgeUnreachableError } from '../lib/bridge-client.js';
-import { diffJson, leafCount, pickKeyField } from '../lib/diff.js';
+import { DEFAULT_IGNORE_KEYS, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
 import { Bridges, ssAct, ssAdvanceDays, ssDiff, ssDump, MS_PER_GAME_DAY } from '../lib/tools.js';
 
 // --------------------------------------------------------------------------
@@ -343,6 +343,186 @@ test('counts report leaf values per side', () => {
 });
 
 // --------------------------------------------------------------------------
+// Ignored keys
+// --------------------------------------------------------------------------
+
+// The three payload shapes the live run tripped over. Everything here is per-instance except the
+// coopFleetId keys and the visibility view, which is the point: with the default ignore list these
+// two sides are equal, and without it every run reports the same three meaningless differences.
+const FLEETS_HOST = {
+  role: 'HOST',
+  locationId: 'corvus',
+  count: 2,
+  fleets: [
+    { coopFleetId: 'player:p-host', engineId: 'fleet_00a', name: 'Alice', isPlayer: true, x: 10, y: 20 },
+    { coopFleetId: 'player:p-guest', engineId: 'fleet_11b', name: 'Bob', isPlayer: false, x: 30, y: 40 }
+  ]
+};
+
+const FLEETS_GUEST = {
+  role: 'GUEST',
+  locationId: 'corvus',
+  count: 2,
+  // Same two logical fleets, opposite sides of the mirror, and engine ids assigned locally.
+  fleets: [
+    { coopFleetId: 'player:p-guest', engineId: 'fleet_77x', name: 'Bob', isPlayer: true, x: 30, y: 40 },
+    { coopFleetId: 'player:p-host', engineId: 'fleet_88y', name: 'Alice', isPlayer: false, x: 10, y: 20 }
+  ]
+};
+
+const VISIBILITY_HOST = {
+  role: 'HOST',
+  fleetId: '',
+  lines: ['HOST visibility probe hostPlayerStr=180 fleets=2', '  H fleet_A "Patrol" visHost=SENSOR_CONTACT'],
+  viewCount: 2,
+  view: { fleet_A: 'SENSOR_CONTACT', fleet_B: 'NONE' }
+};
+
+const VISIBILITY_GUEST = {
+  role: 'GUEST',
+  fleetId: '',
+  lines: ['GUEST visibility probe guestPlayerStr=120 mirrors=2', '  G fleet_A "Patrol" vis=SENSOR_CONTACT'],
+  viewCount: 2,
+  view: { fleet_A: 'SENSOR_CONTACT', fleet_B: 'NONE' }
+};
+
+test('role, engineId and lines are excluded by default', () => {
+  const fleets = diffJson(FLEETS_HOST, FLEETS_GUEST);
+  assert.deepEqual(fleets.ignored, DEFAULT_IGNORE_KEYS);
+  assert.deepEqual(
+    fleets.differences.map((d) => d.path).sort(),
+    ['$.fleets[coopFleetId=player:p-guest].isPlayer', '$.fleets[coopFleetId=player:p-host].isPlayer'],
+    'role and both engine ids are gone; only isPlayer is left, and it is not on the default list'
+  );
+
+  const visibility = diffJson(VISIBILITY_HOST, VISIBILITY_GUEST);
+  assert.equal(visibility.equal, true, 'two probes describing the same fact in different sentences');
+  assert.equal(visibility.counts.host, visibility.counts.guest);
+});
+
+test('an explicit ignore replaces the default rather than adding to it', () => {
+  const result = diffJson(FLEETS_HOST, FLEETS_GUEST, { ignore: ['engineId'] });
+
+  assert.equal(result.equal, false);
+  assert.deepEqual(result.ignored, ['engineId']);
+  assert.deepEqual(
+    result.differences.map((d) => d.path).sort(),
+    [
+      '$.fleets[coopFleetId=player:p-guest].isPlayer',
+      '$.fleets[coopFleetId=player:p-host].isPlayer',
+      '$.role'
+    ],
+    'role came back because the caller took over the list'
+  );
+});
+
+test('a per-instance field outside the default list is dropped by naming it', () => {
+  const result = diffJson(FLEETS_HOST, FLEETS_GUEST, { ignore: [...DEFAULT_IGNORE_KEYS, 'isPlayer'] });
+  assert.equal(result.equal, true);
+});
+
+test('an empty ignore list compares everything', () => {
+  const result = diffJson(FLEETS_HOST, FLEETS_GUEST, { ignore: [] });
+
+  const paths = result.differences.map((d) => d.path).sort();
+  assert.deepEqual(paths, [
+    '$.fleets[coopFleetId=player:p-guest].engineId',
+    '$.fleets[coopFleetId=player:p-guest].isPlayer',
+    '$.fleets[coopFleetId=player:p-host].engineId',
+    '$.fleets[coopFleetId=player:p-host].isPlayer',
+    '$.role'
+  ]);
+});
+
+test('an ignored key cannot be the collection identity either', () => {
+  // engineId sits in KEY_FIELDS ahead of most ids; keying on it would pair rows that are not the
+  // same fleet and report every field of both as different.
+  const host = [{ engineId: 'a', marketId: 'jangala', size: 6 }];
+  const guest = [{ engineId: 'z', marketId: 'jangala', size: 6 }];
+  assert.equal(pickKeyField(host, guest), 'engineId');
+  assert.equal(pickKeyField(host, guest, new Set(['engineId'])), 'marketId');
+  assert.equal(diffJson({ markets: host }, { markets: guest }).equal, true);
+});
+
+test('ignored keys do not inflate the leaf counts', () => {
+  const result = diffJson({ role: 'HOST', a: 1 }, { role: 'GUEST', a: 1 });
+  assert.deepEqual(result.counts, { host: 1, guest: 1, differing: 0 });
+});
+
+// --------------------------------------------------------------------------
+// status.pause and markets shapes
+// --------------------------------------------------------------------------
+
+function statusFor(role, pause) {
+  return {
+    role,
+    sessionActive: true,
+    paused: true,
+    sessionId: 's-1',
+    localPlayerId: role === 'HOST' ? 'p-host' : 'p-guest',
+    clock: { date: 'day 3, month 2, cycle 206', timestamp: 6_503_846_400_000 },
+    playerFleet: { locationId: 'corvus', x: 10, y: 20 },
+    pause
+  };
+}
+
+const HOST_PAUSE = {
+  blockingScreenOpen: false,
+  hostIntent: false,
+  guestIntent: true,
+  guestKeyIntent: false,
+  guestScreenIntent: true,
+  eitherInCombat: false,
+  effective: true
+};
+
+const MARKETS = {
+  count: 2,
+  markets: [
+    { marketId: 'asharu', name: 'Asharu', factionId: 'independent', size: 4, locationId: 'askonia' },
+    { marketId: 'jangala', name: 'Jangala', factionId: 'hegemony', size: 6, locationId: 'corvus' }
+  ]
+};
+
+test('the host-only pause breakdown reads as missing on the guest, not as a value difference', () => {
+  const result = diffJson(
+    statusFor('HOST', HOST_PAUSE),
+    statusFor('GUEST', { blockingScreenOpen: true })
+  );
+
+  const byPath = Object.fromEntries(result.differences.map((d) => [d.path, d]));
+  assert.equal(byPath['$.pause.hostIntent'].missing, 'guest', 'only the host has an authority view');
+  assert.equal(byPath['$.pause.effective'].missing, 'guest');
+  assert.deepEqual(byPath['$.pause.blockingScreenOpen'], {
+    path: '$.pause.blockingScreenOpen',
+    host: false,
+    guest: true
+  });
+  assert.equal(byPath['$.localPlayerId'].host, 'p-host');
+});
+
+test('markets is a query verb, diffed by marketId', async (t) => {
+  const hostBridge = new MockBridge(() => ({ ok: true, data: MARKETS }));
+  const guestBridge = new MockBridge(() => ({
+    ok: true,
+    data: { count: 2, markets: [MARKETS.markets[1], MARKETS.markets[0]] }
+  }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssDump(bridges, 'host', 'markets'), MARKETS);
+  const result = await ssDiff(bridges, 'markets');
+  assert.equal(result.equal, true, 'the economy is the same on both sides, whatever order it came in');
+  await assert.rejects(() => ssAct(bridges, 'host', 'markets', {}), /unknown action verb "markets"/);
+});
+
+// --------------------------------------------------------------------------
 // Tool layer
 // --------------------------------------------------------------------------
 
@@ -470,6 +650,90 @@ test('ss_advance_days re-pauses and reports the timeout when the clock does not 
   assert.equal(result.achievedDays, 0);
   assert.equal(result.repaused, true);
   assert.equal(hostBridge.requests.filter((r) => r.cmd === 'pause').length, 2);
+  assert.equal(result.stall.reason, 'unknown', 'nothing in either pause block explains this one');
+});
+
+test('a stalled advance names the guest screen that is holding the clock', async (t) => {
+  // The case the live run hit blind: the clock did not move and there was no way to ask why.
+  const hostBridge = new MockBridge((request) =>
+    request.cmd === 'pause'
+      ? { ok: true, data: {} }
+      : {
+          ok: true,
+          data: statusFor('HOST', { ...HOST_PAUSE, guestIntent: false, guestScreenIntent: false })
+        }
+  );
+  const guestBridge = new MockBridge(() => ({
+    ok: true,
+    data: statusFor('GUEST', { blockingScreenOpen: true })
+  }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  const result = await ssAdvanceDays(bridges, 2, { pollMs: 1, timeoutSeconds: 1 });
+
+  assert.equal(result.timedOut, true);
+  assert.equal(result.stall.instance, 'guest');
+  assert.equal(result.stall.reason, 'blockingScreenOpen');
+  assert.equal(result.stall.pause.guest.blockingScreenOpen, true);
+  assert.equal(result.repaused, true, 'the diagnosis must not cost the re-pause');
+  assert.equal(result.achievedDays, 0);
+  assert.equal(result.startDate, 'day 3, month 2, cycle 206', 'the existing fields are unchanged');
+});
+
+test('the host intent wins the stall diagnosis over a screen, and is read before the re-pause', async (t) => {
+  const pauseCalls = [];
+  const hostBridge = new MockBridge((request) => {
+    if (request.cmd === 'pause') {
+      pauseCalls.push(request.args.on);
+      return { ok: true, data: {} };
+    }
+    return { ok: true, data: statusFor('HOST', { ...HOST_PAUSE, hostIntent: true }) };
+  });
+  await hostBridge.start();
+  const bridges = bridgesFor(hostBridge.port, await freePort());
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+  });
+
+  const result = await ssAdvanceDays(bridges, 1, { pollMs: 1, timeoutSeconds: 1 });
+
+  assert.deepEqual(result.stall.instance, 'host');
+  assert.equal(result.stall.reason, 'hostIntent');
+  assert.equal(result.stall.pause.guest, null, 'an unreachable guest does not sink the diagnosis');
+  assert.match(result.stall.unreachable.guest, /bridge "guest"/);
+  assert.deepEqual(pauseCalls, [false, true]);
+});
+
+test('a completed advance carries no stall object', async (t) => {
+  const start = 2_000_000_000_000;
+  const state = { timestamp: start, paused: true };
+  const hostBridge = new MockBridge((request) => {
+    if (request.cmd === 'pause') {
+      state.paused = request.args.on === true;
+      return { ok: true, data: {} };
+    }
+    if (!state.paused) state.timestamp += MS_PER_GAME_DAY;
+    return { ok: true, data: { clock: { date: 'day x', timestamp: state.timestamp } } };
+  });
+  await hostBridge.start();
+  const bridges = bridgesFor(hostBridge.port, await freePort());
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+  });
+
+  const result = await ssAdvanceDays(bridges, 1, { pollMs: 1, timeoutSeconds: 10 });
+
+  assert.equal(result.timedOut, false);
+  assert.equal(result.stall, undefined, 'nothing to diagnose when the clock moved');
 });
 
 test('ss_advance_days rejects a status payload with no clock timestamp', async (t) => {

@@ -9,6 +9,8 @@ import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Diagnostic-only (CoopDebug) probe that dumps the engine's ground-truth detection numbers for every
@@ -92,6 +94,41 @@ public final class CoopFleetVisibilityProbe {
         return out.toString();
     }
 
+    /**
+     * The guest's <em>actual</em> visibility of every host NPC mirror, keyed by {@code coopFleetId}:
+     * the machine-readable half of {@link #dumpGuest}, for the agent bridge's {@code visibility} verb.
+     *
+     * <p>Same walk, same accessors as the dump — only the id is the full {@code coopFleetId} instead of
+     * the log-friendly short form, because this map is compared against the host's estimate below.
+     */
+    public static Map<String, String> guestVisibilityActual(SectorAPI sector) {
+        Map<String, String> out = new TreeMap<>();
+        if (sector == null) {
+            return out;
+        }
+        for (CampaignFleetAPI mirror : npcMirrors(sector)) {
+            out.put(fullNpcMirrorId(mirror), visToPlayer(mirror));
+        }
+        return out;
+    }
+
+    /**
+     * The host's <em>estimate</em> of that same map, asked of the engine through the guest's reverse
+     * mirror. Equal to {@link #guestVisibilityActual} on the other client whenever the two sides' sensor
+     * model agrees; the entries that differ are the sensor-replication gaps.
+     */
+    public static Map<String, String> guestVisibilityEstimate(SectorAPI sector) {
+        Map<String, String> out = new TreeMap<>();
+        if (sector == null) {
+            return out;
+        }
+        CampaignFleetAPI guestMirror = findPlayerMirror(sector);
+        for (CampaignFleetAPI fleet : realNpcFleets(sector)) {
+            out.put(fullIdOf(fleet), guestMirror == null ? "?" : visTo(fleet, guestMirror));
+        }
+        return out;
+    }
+
     // ---- collection helpers ------------------------------------------------------------------
 
     private static List<CampaignFleetAPI> realNpcFleets(SectorAPI sector) {
@@ -157,17 +194,28 @@ public final class CoopFleetVisibilityProbe {
     }
 
     private static String npcMirrorId(CampaignFleetAPI fleet) {
+        return shortId(fullNpcMirrorId(fleet));
+    }
+
+    private static String idOf(CampaignFleetAPI fleet) {
+        return shortId(fullIdOf(fleet));
+    }
+
+    /** Unshortened forms of the two ids above; the structured view keys on them, the dumps shorten. */
+    private static String fullIdOf(CampaignFleetAPI fleet) {
         try {
-            Object v = fleet.getMemoryWithoutUpdate().get(NPC_MIRROR_TAG);
-            return shortId(v == null ? fleet.getId() : v.toString());
+            String id = fleet.getId();
+            return id == null || id.isEmpty() ? "?" : id;
         } catch (RuntimeException ex) {
             return "?";
         }
     }
 
-    private static String idOf(CampaignFleetAPI fleet) {
+    private static String fullNpcMirrorId(CampaignFleetAPI fleet) {
         try {
-            return shortId(fleet.getId());
+            Object v = fleet.getMemoryWithoutUpdate().get(NPC_MIRROR_TAG);
+            String id = v == null ? fleet.getId() : v.toString();
+            return id == null || id.isEmpty() ? "?" : id;
         } catch (RuntimeException ex) {
             return "?";
         }

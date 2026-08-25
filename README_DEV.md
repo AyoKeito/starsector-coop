@@ -168,6 +168,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 
 The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind.
 
-The agent side is `tools/starsector-mcp`, a Node stdio MCP server that wraps both ports into `ss_status`, `ss_dump`, `ss_diff`, `ss_act` and `ss_advance_days`. All state comparison lives there; the bridge only serializes. Setup, the `.mcp.json` registration block, the port env overrides and a worked example per tool are in `tools/starsector-mcp/README.md`. It is not part of the mod jar and ships no runtime dependency into the game.
+Fourteen verbs: `status`, `fleets`, `market`, `markets`, `barpool`, `survey`, `visibility` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `objective`, `surveyset` act. Four of them carry shapes worth knowing before you diff two dumps:
+
+| verb | shape |
+| --- | --- |
+| `status` | adds `pause`: `blockingScreenOpen` on both roles, plus `hostIntent` / `guestIntent` / `guestKeyIntent` / `guestScreenIntent` / `eitherInCombat` / `effective` on the host. When an advance stalls, that block says which term of the coordinator's OR is holding the clock. |
+| `fleets` | a player fleet and its mirror on the other client are both keyed `coopFleetId: "player:<playerId>"`, so one logical fleet is one row on both instances. The local engine id stays in `engineId`. |
+| `visibility` | `lines` is the probe's text dump; `view` is the same computation as a `coopFleetId` to visibility-level map, guest-actual against host-estimate, so the two sides' maps are directly comparable. |
+| `markets` | enumeration only (`marketId`, `name`, `factionId`, `size`, `locationId`). It does not stock anything — that is `market`'s documented host-side dock equivalence. |
+
+`ability` takes an optional `on`: absent is the plain toolbar press, `on: true` / `on: false` is an idempotent level for toggles like the transponder, which `activate()` alone can only re-arm.
+
+The agent side is `tools/starsector-mcp`, a Node stdio MCP server that wraps both ports into `ss_status`, `ss_dump`, `ss_diff`, `ss_act` and `ss_advance_days`. All state comparison lives there; the bridge only serializes. `ss_diff` excludes `role`, `engineId` and `lines` by default (per-instance by nature, and the diff drowns in them otherwise); its `ignore` argument replaces that list. Setup, the `.mcp.json` registration block, the port env overrides and a worked example per tool are in `tools/starsector-mcp/README.md`. It is not part of the mod jar and ships no runtime dependency into the game.
 
 Four things are deliberately not bridge verbs: market buy/sell, officer hire, bar-offer accept, and market open/close. Each of those is on the smoke checklist because a UI listener drives it (`PlayerMarketTransaction`, the dialog close-diff that produces a hire claim, snapshot-on-open). A bridge verb would call the engine method underneath the listener, which passes whether or not the listener is still wired up, so it would green-light exactly the breakage the check exists to catch. Those four stay manual, alongside the claim race and the motion and stealth feel passes.

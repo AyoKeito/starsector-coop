@@ -400,6 +400,15 @@ public class CoopNetPump implements EveryFrameScript {
         return isGameplaySessionActive();
     }
 
+    /**
+     * Bridge-only: the very predicate the guest's screen-pause intent is driven by, so the bridge's
+     * {@code status} verb reports the screen state that actually holds the shared clock rather than a
+     * second opinion about what counts as a blocking screen.
+     */
+    public static boolean blockingScreenOpenForBridge(SectorAPI sector) {
+        return sector != null && isVanillaBlockingScreenOpen(sector);
+    }
+
     @Override
     public boolean isDone() {
         return false;
@@ -1272,7 +1281,7 @@ public class CoopNetPump implements EveryFrameScript {
         log("outbound", message);
     }
 
-    private boolean isVanillaBlockingScreenOpen(SectorAPI sector) {
+    private static boolean isVanillaBlockingScreenOpen(SectorAPI sector) {
         CampaignUIAPI ui = sector.getCampaignUI();
         if (ui == null) {
             return false;

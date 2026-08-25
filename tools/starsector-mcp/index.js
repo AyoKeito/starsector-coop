@@ -12,6 +12,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import {
   ACTION_VERBS,
   Bridges,
+  DEFAULT_IGNORE_KEYS,
   INSTANCES,
   QUERY_VERBS,
   ssAct,
@@ -48,7 +49,8 @@ const TOOLS = [
     name: 'ss_dump',
     description:
       `Run one read-only bridge verb against one instance and return its JSON. Verbs: ${QUERY_VERBS.join(', ')}. ` +
-      'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}; status and barpool take none.',
+      'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}; ' +
+      'status, markets and barpool take none.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -64,7 +66,7 @@ const TOOLS = [
     description:
       'Run the same read-only verb against both instances and diff the two JSON trees field by field. ' +
       'Keyed collections (fleets by coopFleetId, stock by id) compare order-insensitively. ' +
-      'Returns equal, differences[{path, host, guest}] and counts{host, guest, differing} where host/guest are leaf-value counts.',
+      'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,6 +75,13 @@ const TOOLS = [
         tolerance: {
           type: 'number',
           description: 'Absolute tolerance for numeric leaves. Default 0 (exact match).'
+        },
+        ignore: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Key names excluded from the comparison at any depth. Replaces the default ' +
+            `[${DEFAULT_IGNORE_KEYS.join(', ')}] rather than adding to it; pass [] to compare everything.`
         }
       },
       required: ['what']
@@ -100,7 +109,8 @@ const TOOLS = [
     description:
       'Unpause the host, wait for its campaign clock to advance N game days, then pause it again. ' +
       'One game day is about 10 real seconds at normal speed, so budget accordingly. ' +
-      'Returns the achieved clock delta, start and end dates, and whether the timeout was hit.',
+      'Returns the achieved clock delta, start and end dates, and whether the timeout was hit. ' +
+      'On a timeout it also returns stall{instance, reason}, naming which pause intent held the clock.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -124,7 +134,7 @@ async function dispatch(name, args) {
     case 'ss_dump':
       return ssDump(bridges, args.instance, args.what, args.args);
     case 'ss_diff':
-      return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance });
+      return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance, ignore: args.ignore });
     case 'ss_act':
       return ssAct(bridges, args.instance, args.verb, args.args);
     case 'ss_advance_days':

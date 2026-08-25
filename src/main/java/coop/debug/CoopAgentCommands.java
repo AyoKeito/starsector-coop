@@ -7,6 +7,7 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
+import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
@@ -179,6 +180,7 @@ public final class CoopAgentCommands {
         map.put("status", CoopAgentCommands::status);
         map.put("fleets", CoopAgentCommands::fleets);
         map.put("market", CoopAgentCommands::market);
+        map.put("markets", CoopAgentCommands::markets);
         map.put("barpool", CoopAgentCommands::barpool);
         map.put("survey", CoopAgentCommands::survey);
         map.put("visibility", CoopAgentCommands::visibility);
@@ -229,6 +231,35 @@ public final class CoopAgentCommands {
             fleetJson.put("y", round(player.getLocation() == null ? 0f : player.getLocation().y));
         }
         out.put("playerFleet", fleetJson);
+
+        out.put("pause", pauseBlock(roleOf(pump),
+                pump == null ? null : pump.pauseCoordinatorForBridge(),
+                CoopNetPump.blockingScreenOpenForBridge(sector)));
+        return out;
+    }
+
+    /**
+     * Why the clock is where it is. {@code blockingScreenOpen} is on both roles because either client
+     * can hold the shared clock by opening a screen, and it is read through
+     * {@link CoopNetPump#blockingScreenOpenForBridge} — the same predicate that drives the guest's
+     * {@code PAUSE_INTENT(SCREEN)} — rather than a second opinion about what blocks.
+     *
+     * <p>The intent breakdown is host-only because the host is the only client that has one: the
+     * coordinator's fields on a guest are its own outgoing intents, not the authority's. When an
+     * advance stalls, this block names which term of the OR is holding it.
+     */
+    static JSONObject pauseBlock(CoopConnectionRole role, CoopSharedPauseCoordinator coordinator,
+                                 boolean blockingScreenOpen) throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("blockingScreenOpen", blockingScreenOpen);
+        if (role == CoopConnectionRole.HOST && coordinator != null) {
+            out.put("hostIntent", coordinator.hostPauseIntent());
+            out.put("guestIntent", coordinator.guestKeyPauseIntent() || coordinator.guestScreenPauseIntent());
+            out.put("guestKeyIntent", coordinator.guestKeyPauseIntent());
+            out.put("guestScreenIntent", coordinator.guestScreenPauseIntent());
+            out.put("eitherInCombat", coordinator.eitherInCombat());
+            out.put("effective", coordinator.effectivePaused());
+        }
         return out;
     }
 
@@ -250,6 +281,8 @@ public final class CoopAgentCommands {
         CoopNetPump pump = context.pump();
         CoopSessionState session = pump == null ? null : pump.sessionStateForBridge();
         String playerLabel = CoopPresenceIndicator.presenceLabel(session == null ? null : session.localName());
+        String localPlayerId = session == null ? null : session.localPlayerId();
+        String remotePlayerId = session == null ? null : session.remotePlayerId();
 
         List<JSONObject> rows = new ArrayList<>();
         CoopLocations.forEach(sector, location -> {
@@ -267,7 +300,8 @@ public final class CoopAgentCommands {
                 if (fleet == null) {
                     continue;
                 }
-                JSONObject row = fleetRow(fleet, location, playerFleet, guestMirror, playerLabel);
+                JSONObject row = fleetRow(fleet, location, playerFleet, guestMirror, playerLabel,
+                        localPlayerId, remotePlayerId);
                 if (row != null) {
                     rows.add(row);
                 }
@@ -287,11 +321,12 @@ public final class CoopAgentCommands {
 
     private static JSONObject fleetRow(CampaignFleetAPI fleet, LocationAPI location,
                                        CampaignFleetAPI playerFleet, CampaignFleetAPI guestMirror,
-                                       String playerLabel) {
+                                       String playerLabel, String localPlayerId, String remotePlayerId) {
         try {
             JSONObject row = new JSONObject();
             row.put("engineId", nullSafe(fleet.getId()));
-            row.put("coopFleetId", coopFleetId(fleet));
+            row.put("coopFleetId",
+                    coopFleetKey(fleet, playerFleet, guestMirror, localPlayerId, remotePlayerId));
             row.put("name", nullSafe(fleet.getName()));
             row.put("factionId", fleet.getFaction() == null ? "" : nullSafe(fleet.getFaction().getId()));
             row.put("locationId", location.getId() == null ? "" : location.getId());
@@ -327,6 +362,37 @@ public final class CoopAgentCommands {
             // One unreadable fleet must not cost the caller the whole dump.
             return null;
         }
+    }
+
+    /**
+     * The key a host-vs-guest fleet diff lines up on. NPC fleets already agree (guest mirrors carry the
+     * host's fleet id in memory), but the two <em>player</em> fleets did not: each client saw its own
+     * fleet under a local engine id and its partner under another, so one logical fleet showed up as
+     * four one-sided rows. Both clients know both player ids from the handshake, so a player fleet and
+     * its remote mirror are keyed {@code player:<playerId>} on both sides. Engine ids stay in
+     * {@code engineId}, which is per-instance by nature and excluded from the default diff.
+     */
+    static String coopFleetKey(CampaignFleetAPI fleet, CampaignFleetAPI playerFleet,
+                               CampaignFleetAPI guestMirror, String localPlayerId, String remotePlayerId) {
+        if (fleet == playerFleet && localPlayerId != null && !localPlayerId.trim().isEmpty()) {
+            return "player:" + localPlayerId.trim();
+        }
+        if (isPlayerMirror(fleet, guestMirror) && remotePlayerId != null && !remotePlayerId.trim().isEmpty()) {
+            return "player:" + remotePlayerId.trim();
+        }
+        return coopFleetId(fleet);
+    }
+
+    /** The published handle first (it is the only producer), the memory tag as the cold-start fallback. */
+    private static boolean isPlayerMirror(CampaignFleetAPI fleet, CampaignFleetAPI guestMirror) {
+        if (fleet == null) {
+            return false;
+        }
+        if (guestMirror != null && fleet == guestMirror) {
+            return true;
+        }
+        MemoryAPI memory = fleet.getMemoryWithoutUpdate();
+        return memory != null && memory.getBoolean(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG);
     }
 
     /** Guest mirrors carry the host's fleet id in memory; on the host the engine id already is it. */
@@ -386,6 +452,48 @@ public final class CoopAgentCommands {
     }
 
     /**
+     * Every market in the economy: the index the {@code market} verb's {@code marketId} comes from.
+     *
+     * <p>Enumeration only — deliberately no {@code ensureOpenMarketStocked}. The {@code market} verb
+     * stocks on the host because a stock dump of an ungenerated market is meaningless; running that
+     * over the whole economy would generate stock at ~150 markets as a side effect of asking what
+     * exists, which is a world change nobody asked for and a diff nobody could interpret.
+     */
+    static JSONObject markets(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        EconomyAPI economy = sector.getEconomy();
+        List<MarketAPI> all = economy == null ? List.<MarketAPI>of() : economy.getMarketsCopy();
+
+        List<JSONObject> rows = new ArrayList<>();
+        for (MarketAPI market : all) {
+            if (market == null) {
+                continue;
+            }
+            JSONObject row = new JSONObject();
+            row.put("marketId", nullSafe(market.getId()));
+            row.put("name", nullSafe(market.getName()));
+            row.put("factionId", nullSafe(market.getFactionId()));
+            row.put("size", market.getSize());
+            row.put("locationId", marketLocationId(market));
+            rows.add(row);
+        }
+        rows.sort((left, right) -> left.optString("marketId").compareTo(right.optString("marketId")));
+
+        JSONObject out = new JSONObject();
+        out.put("count", rows.size());
+        out.put("markets", new JSONArray(rows));
+        return out;
+    }
+
+    private static String marketLocationId(MarketAPI market) {
+        LocationAPI location = market.getContainingLocation();
+        if (location == null && market.getPrimaryEntity() != null) {
+            location = market.getPrimaryEntity().getContainingLocation();
+        }
+        return location == null ? "" : nullSafe(location.getId());
+    }
+
+    /**
      * The portside bar pool. {@code CoopBarPoolCapture#capture()} walks
      * {@code PortsideBarData.getEvents()} in place, so its order <em>is</em> the render order; the
      * flat id list is emitted alongside so an order-only difference is one array compare rather than
@@ -435,11 +543,11 @@ public final class CoopAgentCommands {
             CoopLocations.forEach(sector, location ->
                     replicator.collectSurveyStateForBridge(location, levels, ruins));
         } else {
-            StarSystemAPI system = sector.getStarSystem(systemId);
-            if (system == null) {
+            LocationAPI scope = resolveSurveyScope(sector, systemId);
+            if (scope == null) {
                 throw new IllegalArgumentException("no star system with id " + systemId);
             }
-            replicator.collectSurveyStateForBridge(system, levels, ruins);
+            replicator.collectSurveyStateForBridge(scope, levels, ruins);
         }
 
         JSONObject planets = new JSONObject();
@@ -458,11 +566,48 @@ public final class CoopAgentCommands {
         return out;
     }
 
+    /**
+     * Resolve a single-system survey scope by the id the {@code all} dump emits.
+     *
+     * <p>{@code SectorAPI#getStarSystem} matches on the system's <em>name</em>, so a generated id like
+     * {@code system_16cf} — which is exactly what every other verb emits as {@code locationId} — came
+     * back null and the verb refused an id it had just handed out. Id first over
+     * {@code getStarSystems()}, then the name lookup, then any location (hyperspace, constellations)
+     * so an id from any dump resolves.
+     */
+    static LocationAPI resolveSurveyScope(SectorAPI sector, String systemId) {
+        List<StarSystemAPI> systems = sector.getStarSystems();
+        if (systems != null) {
+            for (StarSystemAPI system : systems) {
+                if (system != null && systemId.equals(system.getId())) {
+                    return system;
+                }
+            }
+        }
+        StarSystemAPI byName = sector.getStarSystem(systemId);
+        if (byName != null) {
+            return byName;
+        }
+        return CoopLocations.byId(sector, systemId);
+    }
+
+    /**
+     * Detectability, in two forms. {@code lines} is the probe's own text dump, unchanged, for reading.
+     * {@code view} is the same computation as a {@code coopFleetId -> visibility level} map, and it is
+     * built so the two clients' maps are directly comparable: the guest reports what it actually sees,
+     * the host reports what it predicts the guest sees (asked of the engine through the guest's reverse
+     * mirror). Equal maps mean the sensor model agrees; the entries that differ are the gaps. Diffing
+     * the text lines instead would compare two different sentences about the same fact.
+     */
     static JSONObject visibility(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
         String fleetId = optionalString(args, "fleetId");
         CoopConnectionRole role = roleOf(context.pump());
+        return visibilityFor(sector, role, fleetId);
+    }
 
+    static JSONObject visibilityFor(SectorAPI sector, CoopConnectionRole role, String fleetId)
+            throws JSONException {
         String dump = role == CoopConnectionRole.GUEST
                 ? CoopFleetVisibilityProbe.dumpGuest(sector)
                 : CoopFleetVisibilityProbe.dumpHost(sector);
@@ -479,10 +624,23 @@ public final class CoopAgentCommands {
             lines.put(trimmed);
         }
 
+        Map<String, String> view = role == CoopConnectionRole.GUEST
+                ? CoopFleetVisibilityProbe.guestVisibilityActual(sector)
+                : CoopFleetVisibilityProbe.guestVisibilityEstimate(sector);
+        JSONObject viewJson = new JSONObject();
+        for (Map.Entry<String, String> entry : view.entrySet()) {
+            if (!fleetId.isEmpty() && !entry.getKey().contains(fleetId)) {
+                continue;
+            }
+            viewJson.put(entry.getKey(), entry.getValue());
+        }
+
         JSONObject out = new JSONObject();
         out.put("role", role.name());
         out.put("fleetId", fleetId);
         out.put("lines", lines);
+        out.put("viewCount", viewJson.length());
+        out.put("view", viewJson);
         return out;
     }
 
@@ -560,6 +718,16 @@ public final class CoopAgentCommands {
      * calls, so the engine's {@code isPlayerFleet} check, its
      * {@code reportPlayerActivatedAbility} callback and therefore the mod's own listener all fire.
      * An ability applied by poking its effect directly would test a path no player can reach.
+     *
+     * <p>With no {@code on} argument that is all this does — one press of the button, whatever state
+     * the ability was in. That is the right default for a one-shot like the distress call, and it is
+     * useless for a toggle like the transponder: pressing a toggle that is already on re-arms it
+     * rather than turning it off, so a script could not put the fleet into a known state. The optional
+     * {@code on} makes the request a level rather than a press: {@code true} activates only if the
+     * ability is off, {@code false} deactivates only if it is on, and either is a no-op otherwise, so
+     * a setup step can be re-run without flipping what it just set. The guard reads
+     * {@code isActiveOrInProgress} rather than {@code isActive} so an ability mid-turn-on is treated
+     * as on, which is what the toolbar shows.
      */
     static JSONObject ability(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
@@ -570,7 +738,17 @@ public final class CoopAgentCommands {
         if (plugin == null) {
             throw new IllegalArgumentException("player fleet has no ability " + abilityId);
         }
-        plugin.activate();
+
+        Boolean desired = optionalAbilityState(args);
+        if (desired == null) {
+            plugin.activate();
+        } else if (desired) {
+            if (!plugin.isActiveOrInProgress()) {
+                plugin.activate();
+            }
+        } else if (plugin.isActiveOrInProgress()) {
+            plugin.deactivate();
+        }
 
         JSONObject out = new JSONObject();
         out.put("abilityId", abilityId);
@@ -773,20 +951,32 @@ public final class CoopAgentCommands {
             if (raw instanceof Boolean flag) {
                 return flag;
             }
-            return parsePauseWord(String.valueOf(raw));
+            return parseOnOff(String.valueOf(raw), "pause");
         }
         if (args.has("state")) {
-            return parsePauseWord(args.optString("state", ""));
+            return parseOnOff(args.optString("state", ""), "pause");
         }
         throw new IllegalArgumentException("pause needs {\"on\":true|false} or {\"state\":\"on\"|\"off\"}");
     }
 
-    private static boolean parsePauseWord(String word) {
+    /** {@code null} = the argument was absent, which for {@code ability} means "just press the button". */
+    private static Boolean optionalAbilityState(JSONObject args) {
+        if (!args.has("on")) {
+            return null;
+        }
+        Object raw = args.opt("on");
+        if (raw instanceof Boolean flag) {
+            return flag;
+        }
+        return parseOnOff(String.valueOf(raw), "ability");
+    }
+
+    private static boolean parseOnOff(String word, String verb) {
         String normalized = word == null ? "" : word.trim().toLowerCase(Locale.ROOT);
         return switch (normalized) {
             case "on", "true", "1", "yes" -> true;
             case "off", "false", "0", "no" -> false;
-            default -> throw new IllegalArgumentException("pause state must be on|off, got " + word);
+            default -> throw new IllegalArgumentException(verb + " state must be on|off, got " + word);
         };
     }
 

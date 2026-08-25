@@ -85,6 +85,18 @@ foreach ($profile in @('host', 'guest')) {
             New-Item -ItemType Directory -Force -Path $path | Out-Null
         }
     }
+
+    # Campaign help popups block the shared pause during automated bridge runs (Phase 30),
+    # so test profiles start with them off. Seed only when the game hasn't written its own
+    # settings yet - a later in-game change wins over this default.
+    $commonDir = Join-Path $profileRoot 'saves\common'
+    $sharedSettings = Join-Path $commonDir 'core_shared_settings.json.data'
+    if ($WhatIfOnly) {
+        Write-Host "Would seed help-popups-off: $sharedSettings"
+    } elseif (-not (Test-Path -LiteralPath $sharedSettings)) {
+        New-Item -ItemType Directory -Force -Path $commonDir | Out-Null
+        Set-Content -LiteralPath $sharedSettings -Value '{"campaignHelpPopupsOptionChecked": false}' -Encoding UTF8
+    }
 }
 
 Write-Host "Two-client test profiles are ready under $testRootFull"

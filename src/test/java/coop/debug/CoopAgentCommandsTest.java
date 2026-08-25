@@ -194,8 +194,9 @@ class CoopAgentCommandsTest {
     @Test
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
-                java.util.Set.of("ability", "barpool", "fleets", "give", "market", "objective",
-                        "pause", "setcr", "status", "survey", "surveyset", "teleport", "visibility"),
+                java.util.Set.of("ability", "barpool", "fleets", "give", "market", "markets",
+                        "objective", "pause", "setcr", "status", "survey", "surveyset", "teleport",
+                        "visibility"),
                 new CoopAgentCommands().verbs());
     }
 
