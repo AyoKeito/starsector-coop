@@ -533,6 +533,324 @@ class CoopAgentQueryVerbsTest {
                 .getMessage().contains("maxLy must be numeric"));
     }
 
+    // ---- landmarks: the unique objects, found by vanilla's own tags -------------------------------
+
+    @Test
+    void eachLandmarkKindIsFoundByItsVanillaTagAndNothingElseIs() throws JSONException {
+        JSONObject out = CoopAgentCommands.landmarks(new JSONObject(), landmarkSector());
+
+        assertEquals(List.of("hypershunt", "cryosleeper", "gate", "stable_location", "gate_hauler"),
+                stringList(out.getJSONArray("kinds")));
+        assertEquals(6, out.getInt("candidateCount"));
+        assertEquals(
+                List.of("corvus_stable", "corvus_gate", "sleeper", "shunt", "hauler", "hyper_stable"),
+                landmarkIds(out),
+                "the comm relay carries no landmark tag and must not appear. Corvus first (the fleet"
+                        + " is there, so in-system distance orders it), then Aleph's two at the same"
+                        + " 3 LY broken by kind - cryosleeper before hypershunt");
+    }
+
+    @Test
+    void aLandmarkRowNamesItsKindItsSpecAndWhereItIs() throws JSONException {
+        JSONObject out = CoopAgentCommands.landmarks(new JSONObject(), landmarkSector());
+        Map<String, JSONObject> rows = landmarkRows(out);
+
+        JSONObject shunt = rows.get("shunt");
+        assertEquals("hypershunt", shunt.getString("kind"));
+        assertEquals("Coronal Hypershunt", shunt.getString("name"));
+        assertEquals("coronal_tap", shunt.getString("type"), "the custom entity spec id");
+        assertEquals("aleph", shunt.getString("systemId"));
+        assertEquals(3d, shunt.getDouble("distanceLy"), 1e-6, "6000 su / 2000 su per LY");
+        assertEquals(0d, shunt.getDouble("distanceSu"), 0d);
+        assertFalse(shunt.getBoolean("hyperspace"));
+
+        JSONObject inHyperspace = rows.get("hyper_stable");
+        assertTrue(inHyperspace.getBoolean("hyperspace"),
+                "hyperspace is walked like any other location; a landmark out there is a real one");
+        assertEquals("hyperspace", inHyperspace.getString("systemId"));
+    }
+
+    @Test
+    void aGateCarriesTheReadsThatDecideWhetherItCanBeUsed() throws JSONException {
+        JSONObject gate = landmarkRows(CoopAgentCommands.landmarks(new JSONObject(), landmarkSector()))
+                .get("corvus_gate");
+
+        assertTrue(gate.getBoolean("scanned"));
+        assertFalse(gate.getBoolean("active"));
+        assertTrue(gate.getBoolean("gatesActive"));
+        assertFalse(gate.getBoolean("playerCanUseGates"));
+        assertFalse(landmarkRows(CoopAgentCommands.landmarks(new JSONObject(), landmarkSector()))
+                .get("shunt").has("scanned"), "the gate tail is the gate's, not every row's");
+    }
+
+    @Test
+    void theHypershuntAndCryosleeperCarryTheirUsableFlagAndTheEnginesOwnRange() throws JSONException {
+        Map<String, JSONObject> rows =
+                landmarkRows(CoopAgentCommands.landmarks(new JSONObject(), landmarkSector()));
+
+        JSONObject shunt = rows.get("shunt");
+        assertTrue(shunt.getBoolean("usable"),
+                "$usable is a contains() check in vanilla, not getBoolean - until it is set neither"
+                        + " landmark counts for any colony at any distance");
+        assertEquals(10d, shunt.getDouble("benefitRangeLy"), 0d,
+                "read live off ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS, not copied into this repo");
+        assertFalse(shunt.has("minBenefitMult"), "the hypershunt effect is binary, not graded");
+
+        JSONObject sleeper = rows.get("sleeper");
+        assertFalse(sleeper.getBoolean("usable"), "its guardian is still alive");
+        assertEquals(10d, sleeper.getDouble("benefitRangeLy"), 0d,
+                "read live off Cryorevival.MAX_BONUS_DIST_LY");
+        assertEquals(0.1d, sleeper.getDouble("minBenefitMult"), 1e-6,
+                "Cryorevival.MIN_BONUS_MULT - the cryosleeper bonus is graded down to this at the edge");
+
+        assertFalse(rows.get("corvus_stable").has("benefitRangeLy"),
+                "only the two landmarks with a real colony radius get one");
+    }
+
+    @Test
+    void theGateHaulerIsFoundBySpecIdBecauseItHasNoTagThatIdentifiesIt() throws JSONException {
+        JSONObject out = CoopAgentCommands.landmarks(args("kinds", "gate_hauler"), landmarkSector());
+
+        assertEquals(List.of("hauler"), landmarkIds(out),
+                "its four tags are all shared with cryosleepers and ordinary salvage, so the walk has"
+                        + " to match the custom entity spec id and skip everything else in the system");
+        assertEquals("derelict_gatehauler",
+                out.getJSONArray("landmarks").getJSONObject(0).getString("type"));
+    }
+
+    @Test
+    void theSectorWideGateFlagsIgnoreWhatTheLocalPlayerHappensToBeCarrying() {
+        // GateEntityPlugin.areGatesActive()/canUseGates() OR in "holding a Janus Device", which is one
+        // client's cargo. Reading the memory flags instead is what keeps this verb diffable.
+        assertEquals(new CoopAgentCommands.GateState(false, false),
+                CoopAgentCommands.readGateState(proxy(SectorAPI.class, answers())),
+                "a sector with no memory at all is not a crash and not gates-open");
+        assertEquals(new CoopAgentCommands.GateState(true, false),
+                CoopAgentCommands.readGateState(sectorWithGateFlags(true, false)));
+    }
+
+    @Test
+    void theKindsArgumentFiltersAndKeepsTheRegistrysOrderHoweverItIsSpelled() throws JSONException {
+        JSONObject byString = CoopAgentCommands.landmarks(args("kinds", "gate, hypershunt"),
+                landmarkSector());
+        assertEquals(List.of("hypershunt", "gate"), stringList(byString.getJSONArray("kinds")),
+                "the answer's kind list is the registry's order, not the caller's");
+        assertEquals(List.of("corvus_gate", "shunt"), landmarkIds(byString));
+        assertEquals(2, byString.getInt("candidateCount"),
+                "candidateCount counts what the requested kinds found, not the whole sector");
+
+        JSONObject args = new JSONObject();
+        args.put("kinds", new JSONArray(List.of("CRYOSLEEPER")));
+        assertEquals(List.of("sleeper"), landmarkIds(CoopAgentCommands.landmarks(args, landmarkSector())));
+    }
+
+    @Test
+    void anUnknownKindIsRefusedRatherThanAnsweredWithAnEmptyList() {
+        String message = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.landmarks(args("kinds", "gate,hypergate"), landmarkSector()))
+                .getMessage();
+
+        assertTrue(message.contains("unknown landmark kind hypergate"), message);
+        assertTrue(message.contains("hypershunt, cryosleeper, gate, stable_location, gate_hauler"),
+                "\"none of that kind\" and \"you misspelled the kind\" have to read differently: "
+                        + message);
+    }
+
+    @Test
+    void aSectorWithNoLandmarksAnswersAnEmptyListNotAnError() throws JSONException {
+        LocationAPI empty = system("corvus", "Corvus Star System", List.of());
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getPlayerFleet", args -> fleetAt(empty, 0f, 0f, 0f, 0f),
+                "getAllLocations", args -> List.of(empty)));
+
+        JSONObject out = CoopAgentCommands.landmarks(new JSONObject(), contextFor(sector));
+
+        assertEquals(0, out.getInt("candidateCount"));
+        assertEquals(0, out.getInt("count"));
+        assertEquals(0, out.getJSONArray("landmarks").length());
+    }
+
+    @Test
+    void anEntityCarryingTwoLandmarkTagsIsEmittedOnceUnderTheFirstKindThatClaimsIt()
+            throws JSONException {
+        SectorEntityToken doubleTagged = landmarkEntity("odd", "Odd Thing", "coronal_tap", 0f, 0f, 0f, 0f);
+        LocationAPI corvus = taggedSystem("corvus", "Corvus Star System", Map.of(
+                "coronal_tap", List.of(doubleTagged),
+                "cryosleeper", List.of(doubleTagged)));
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getPlayerFleet", args -> fleetAt(corvus, 0f, 0f, 0f, 0f),
+                "getAllLocations", args -> List.of(corvus)));
+
+        JSONObject out = CoopAgentCommands.landmarks(new JSONObject(), contextFor(sector));
+
+        assertEquals(List.of("odd"), landmarkIds(out), "two rows for one object would break the keyed diff");
+        assertEquals("hypershunt", out.getJSONArray("landmarks").getJSONObject(0).getString("kind"));
+    }
+
+    @Test
+    void landmarksSortNearestFirstAndAreTrimmedByLimitAndMaxLy() {
+        CoopAgentCommands.Landmark far = landmark("far", "gate", 12f, 0f);
+        CoopAgentCommands.Landmark hereFar = landmark("here_far", "gate", 0f, 9000f);
+        CoopAgentCommands.Landmark hereNear = landmark("here_near", "stable_location", 0f, 250f);
+        CoopAgentCommands.Landmark near = landmark("near", "cryosleeper", 3.5f, 0f);
+        List<CoopAgentCommands.Landmark> all = List.of(far, hereFar, hereNear, near);
+
+        assertEquals(List.of("here_near", "here_far", "near", "far"),
+                landmarkIds(CoopAgentCommands.selectLandmarks(all, 25, 0d)));
+        assertEquals(List.of("here_near", "here_far"),
+                landmarkIds(CoopAgentCommands.selectLandmarks(all, 2, 0d)));
+        assertEquals(List.of("here_near", "here_far", "near"),
+                landmarkIds(CoopAgentCommands.selectLandmarks(all, 25, 5d)),
+                "maxLy runs before the cap");
+        assertEquals(List.of("here_near", "here_far"),
+                landmarkIds(CoopAgentCommands.selectLandmarks(all, 25, 0.5d)),
+                "a landmark in the fleet's own system is at zero LY, so no range filter can exclude"
+                        + " it however tight it is - which is the behaviour you want");
+    }
+
+    @Test
+    void twoLandmarksAtTheSameDistanceStillHaveOneAgreedOrder() {
+        CoopAgentCommands.Landmark gate = landmark("zzz", "gate", 4f, 0f);
+        CoopAgentCommands.Landmark sleeper = landmark("aaa", "cryosleeper", 4f, 0f);
+
+        assertEquals(List.of("aaa", "zzz"),
+                landmarkIds(CoopAgentCommands.selectLandmarks(List.of(gate, sleeper), 25, 0d)),
+                "kind then id breaks the tie, so ss_diff never sees a phantom reorder");
+    }
+
+    // ---- landmarks fakes ---------------------------------------------------------------------------
+
+    /**
+     * Corvus (the fleet's own system) holds a scanned gate, a stable location, a comm relay and a
+     * plain station; Aleph 3 LY out holds the hypershunt and the cryosleeper; hyperspace holds a
+     * stable location. Gates are active sector-wide but the player cannot use them yet.
+     */
+    private static CoopAgentCommands.Context landmarkSector() {
+        SectorEntityToken gate = landmarkEntity("corvus_gate", "Gate", "inactive_gate", 400f, 0f, 0f, 0f);
+        SectorEntityToken stable = landmarkEntity("corvus_stable", "Stable Location",
+                "stable_location", 100f, 0f, 0f, 0f);
+        SectorEntityToken relay = landmarkEntity("corvus_relay", "Comm Relay", "comm_relay", 50f, 0f, 0f, 0f);
+        LocationAPI corvus = taggedSystem("corvus", "Corvus Star System", Map.of(
+                "gate", List.of(gate),
+                "stable_location", List.of(stable),
+                "objective", List.of(relay)));
+
+        // The shunt has been repaired, the cryosleeper's guardian is still alive.
+        SectorEntityToken shunt = landmarkEntity("shunt", "Coronal Hypershunt", "coronal_tap",
+                0f, 0f, 6000f, 0f, true);
+        SectorEntityToken sleeper = landmarkEntity("sleeper", "Derelict Cryosleeper",
+                "derelict_cryosleeper", 0f, 0f, 6000f, 0f, false);
+        LocationAPI aleph = taggedSystem("aleph", "Aleph Star System", Map.of(
+                "coronal_tap", List.of(shunt),
+                "cryosleeper", List.of(sleeper)));
+
+        // The gate hauler sits in its own hidden deep-space system and carries no identifying tag, so
+        // it is found by spec id through getAllEntities.
+        SectorEntityToken hauler = landmarkEntity("hauler", "Domain-era Gate Hauler",
+                "derelict_gatehauler", 0f, 0f, 14_000f, 0f);
+        SectorEntityToken haulerJunk = landmarkEntity("hauler_rock", "Ice Giant", "planet",
+                0f, 0f, 14_000f, 0f);
+        Map<String, Answer> haulerSystem = answers();
+        haulerSystem.put("getId", args -> "gatehauler_loc");
+        haulerSystem.put("getName", args -> "Deep Space");
+        haulerSystem.put("getEntitiesWithTag", args -> List.of());
+        haulerSystem.put("getAllEntities", args -> List.of(haulerJunk, hauler));
+        LocationAPI haulerLocation = proxy(LocationAPI.class, haulerSystem);
+
+        SectorEntityToken deepStable = landmarkEntity("hyper_stable", "Stable Location",
+                "stable_location", 20_000f, 0f, 20_000f, 0f);
+        LocationAPI hyper = proxy(LocationAPI.class, answers(
+                "getId", args -> "hyperspace",
+                "getName", args -> "Hyperspace",
+                "isHyperspace", args -> true,
+                "getEntitiesWithTag",
+                args -> "stable_location".equals(args[0]) ? List.of(deepStable) : List.of()));
+
+        CampaignFleetAPI player = fleetAt(corvus, 0f, 0f, 0f, 0f);
+        Map<String, Answer> sector = answers();
+        sector.put("getPlayerFleet", args -> player);
+        sector.put("getAllLocations", args -> List.of(corvus, aleph, haulerLocation, hyper));
+        sector.put("getMemoryWithoutUpdate", args -> gateMemory(true, false));
+        return contextFor(proxy(SectorAPI.class, sector));
+    }
+
+    private static SectorAPI sectorWithGateFlags(boolean gatesActive, boolean canUse) {
+        return proxy(SectorAPI.class,
+                answers("getMemoryWithoutUpdate", args -> gateMemory(gatesActive, canUse)));
+    }
+
+    private static MemoryAPI gateMemory(boolean gatesActive, boolean canUse) {
+        return proxy(MemoryAPI.class, answers("getBoolean", args -> switch (String.valueOf(args[0])) {
+            case "$gatesActive" -> gatesActive;
+            case "$playerCanUseGates" -> canUse;
+            default -> false;
+        }));
+    }
+
+    private static SectorEntityToken landmarkEntity(String id, String name, String specId,
+                                                    float x, float y, float hyperX, float hyperY) {
+        return landmarkEntity(id, name, specId, x, y, hyperX, hyperY, false);
+    }
+
+    private static SectorEntityToken landmarkEntity(String id, String name, String specId,
+                                                    float x, float y, float hyperX, float hyperY,
+                                                    boolean usable) {
+        Map<String, Answer> answers = answers();
+        answers.put("getId", args -> id);
+        answers.put("getName", args -> name);
+        answers.put("getCustomEntityType", args -> specId);
+        answers.put("getLocation", args -> new Vector2f(x, y));
+        answers.put("getLocationInHyperspace", args -> new Vector2f(hyperX, hyperY));
+        // Everything is a scanned gate as far as getBoolean is concerned; only the gate is asked.
+        // $usable is a contains() check, which is how vanilla itself tests it.
+        Map<String, Answer> memory = answers();
+        memory.put("getBoolean", args -> "$gateScanned".equals(args[0]));
+        memory.put("contains", args -> usable && "$usable".equals(args[0]));
+        answers.put("getMemoryWithoutUpdate", args -> proxy(MemoryAPI.class, memory));
+        return proxy(SectorEntityToken.class, answers);
+    }
+
+    private static LocationAPI taggedSystem(String id, String name,
+                                            Map<String, List<SectorEntityToken>> byTag) {
+        Map<String, Answer> answers = answers();
+        answers.put("getId", args -> id);
+        answers.put("getName", args -> name);
+        answers.put("getEntitiesWithTag",
+                args -> byTag.getOrDefault(String.valueOf(args[0]), List.of()));
+        return proxy(LocationAPI.class, answers);
+    }
+
+    private static CoopAgentCommands.Landmark landmark(String entityId, String kind, float ly, float su) {
+        return new CoopAgentCommands.Landmark(kind, entityId, entityId, "spec", "system", "System",
+                false, ly, su, new LinkedHashMap<>());
+    }
+
+    private static List<String> landmarkIds(List<CoopAgentCommands.Landmark> landmarks) {
+        List<String> out = new ArrayList<>();
+        for (CoopAgentCommands.Landmark landmark : landmarks) {
+            out.add(landmark.entityId());
+        }
+        return out;
+    }
+
+    private static List<String> landmarkIds(JSONObject out) throws JSONException {
+        List<String> ids = new ArrayList<>();
+        JSONArray rows = out.getJSONArray("landmarks");
+        for (int i = 0; i < rows.length(); i++) {
+            ids.add(rows.getJSONObject(i).getString("entityId"));
+        }
+        return ids;
+    }
+
+    private static Map<String, JSONObject> landmarkRows(JSONObject out) throws JSONException {
+        Map<String, JSONObject> rows = new LinkedHashMap<>();
+        JSONArray array = out.getJSONArray("landmarks");
+        for (int i = 0; i < array.length(); i++) {
+            rows.put(array.getJSONObject(i).getString("entityId"), array.getJSONObject(i));
+        }
+        return rows;
+    }
+
     // ---- colonizable fakes ------------------------------------------------------------------------
 
     /**

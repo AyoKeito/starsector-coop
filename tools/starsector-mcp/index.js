@@ -50,8 +50,9 @@ const TOOLS = [
     description:
       `Run one read-only bridge verb against one instance and return its JSON. Verbs: ${QUERY_VERBS.join(', ')}. ` +
       'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}, ' +
-      'colonizable{limit?, maxLy?} (uncolonized planets nearest the local player fleet); ' +
-      'status, markets and barpool take none.',
+      'colonizable{limit?, maxLy?} (uncolonized planets nearest the local player fleet), ' +
+      'landmarks{kinds?, limit?, maxLy?} (hypershunts, cryosleepers, gates, stable locations, ' +
+      'the gate hauler); status, markets and barpool take none.',
     inputSchema: {
       type: 'object',
       properties: {

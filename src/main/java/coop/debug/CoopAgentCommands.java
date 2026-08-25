@@ -16,6 +16,10 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
+import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
+import com.fs.starfarer.api.impl.campaign.econ.impl.Cryorevival;
+import com.fs.starfarer.api.impl.campaign.econ.impl.ItemEffectsRepo;
+import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionIntel;
@@ -198,6 +202,7 @@ public final class CoopAgentCommands {
         map.put("survey", CoopAgentCommands::survey);
         map.put("visibility", CoopAgentCommands::visibility);
         map.put("colonizable", CoopAgentCommands::colonizable);
+        map.put("landmarks", CoopAgentCommands::landmarks);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("ability", CoopAgentCommands::ability);
@@ -942,6 +947,423 @@ public final class CoopAgentCommands {
             }
         }
         return new ArrayList<>(ids);
+    }
+
+    // ---- landmarks: the unique objects a colony site is chosen relative to ------------------------
+
+    /** Rows returned when the caller does not say. */
+    static final int LANDMARKS_DEFAULT_LIMIT = 25;
+
+    /**
+     * One landmark kind and how to find it: by tag where vanilla gives one, by custom-entity spec id
+     * where it does not. Exactly one of {@code tag} and {@code specId} is set.
+     *
+     * <p>The tag is preferred: {@code getEntitiesWithTag} is the indexed lookup
+     * ({@code LocationAPI.java:181}), it is what vanilla's own code keys on, and a modded entity
+     * carrying the tag is found too. The spec-id path exists for one entity that has no usable tag —
+     * see {@link #LANDMARK_KINDS}.
+     */
+    record LandmarkKind(String key, String tag, String specId) {
+        static LandmarkKind byTag(String key, String tag) {
+            return new LandmarkKind(key, tag, "");
+        }
+
+        static LandmarkKind bySpec(String key, String specId) {
+            return new LandmarkKind(key, "", specId);
+        }
+    }
+
+    /**
+     * The landmarks worth naming, in output order.
+     *
+     * <p><b>These are not all one-per-sector.</b> Hypershunts and cryosleepers are exactly two each
+     * ({@code MiscellaneousThemeGenerator.java:651-652} hard-sets {@code numTaps = 2};
+     * {@code DerelictThemeGenerator.java:131} sets {@code numCryo = 2}) and the gate hauler is exactly
+     * one, but gates run to 15-20 plus a second pass ({@code settings.json} keys
+     * {@code minNonCoreGatesInSector} / {@code maxNonCoreGatesInSector} / {@code minGatesToAddOnSecondPass})
+     * and stable locations are commoner still. That is what {@code kinds} and the default limit are
+     * for: the useful default is "the nearest notable things", not "every one of them".
+     *
+     * <p><b>The gate hauler is the odd one out.</b> Its four tags — {@code has_interaction_dialog},
+     * {@code salvageable}, {@code neutrino_high}, {@code not_random_mission_target} — are all shared
+     * with cryosleepers and ordinary salvage, so there is no tag that identifies it. It is found by
+     * its spec id instead. ({@code $gateHauler} in its memory would work too —
+     * {@code GateHaulerLocation.java:108-109} — but that is a walk of every entity either way, and the
+     * spec id needs no memory allocation to read.)
+     *
+     * <p><b>Deliberately excluded.</b> {@link Tags#OBJECTIVE} (comm relays, nav buoys and sensor
+     * arrays run to dozens and are already the {@code objective} verb's subject), {@link Tags#STATION},
+     * {@link Tags#JUMP_POINT}, {@link Tags#WARNING_BEACON}, and the story one-offs — the Ziggurat
+     * wreck, the Alpha Site, the red planet, the Nameless Rock, Galatia. Those are identified by
+     * memory flags rather than tags, several of them do not exist at worldgen at all (the Ziggurat is
+     * created only once its guardian is beaten), and none of them changes where you would put a
+     * colony, which is what this verb is for. A list that includes them is a map dump.
+     */
+    static final List<LandmarkKind> LANDMARK_KINDS = List.of(
+            LandmarkKind.byTag("hypershunt", Tags.CORONAL_TAP),
+            LandmarkKind.byTag("cryosleeper", Tags.CRYOSLEEPER),
+            LandmarkKind.byTag("gate", Tags.GATE),
+            LandmarkKind.byTag("stable_location", Tags.STABLE_LOCATION),
+            LandmarkKind.bySpec("gate_hauler", Entities.DERELICT_GATEHAULER));
+
+    /**
+     * Vanilla's "this thing has been repaired / its guardian is beaten" flag, checked with
+     * {@code contains} rather than {@code getBoolean} because that is how vanilla checks it:
+     * {@code PopulationAndInfrastructure.getNearestCoronalTap} and {@code Cryorevival}'s
+     * {@code getNearestCryosleeper} both skip an entity whose memory does not contain it. Until it is
+     * set, neither the hypershunt nor the cryosleeper counts for any colony at any distance.
+     */
+    static final String LANDMARK_USABLE_FLAG = "$usable";
+
+    /** One landmark. {@code extras} is the per-kind tail, flattened into the row. */
+    record Landmark(String kind, String entityId, String name, String type, String systemId,
+                    String systemName, boolean hyperspace, float distanceLy, float distanceSu,
+                    Map<String, Object> extras) {
+    }
+
+    /** Nearest first, then kind, then id — total and stable, so two clients emit the same order. */
+    static final Comparator<Landmark> LANDMARK_ORDER =
+            Comparator.comparingDouble(Landmark::distanceLy)
+                    .thenComparingDouble(Landmark::distanceSu)
+                    .thenComparing(Landmark::kind)
+                    .thenComparing(Landmark::entityId);
+
+    /**
+     * The sector's unique objects, nearest the local player fleet first, so a colony site can be
+     * chosen relative to one instead of found by scrolling the map.
+     *
+     * <p><b>Pure query, any role</b> — local engine read, nothing written, same contract as
+     * {@code colonizable} and {@code markets}. Deterministically ordered so {@code ss_diff} on it is a
+     * real worldgen check.
+     *
+     * <p><b>No colony-relevance number is invented here, and the two that exist are read, not
+     * copied.</b> The hypershunt and cryosleeper rows carry a {@code benefitRangeLy} taken live from
+     * the engine's own fields ({@code ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS} and
+     * {@code Cryorevival.MAX_BONUS_DIST_LY}, both {@code 10} in stock 0.98a, both non-final statics a
+     * mod can move), so a modded install reports its own number instead of this file's memory of one.
+     * Nothing else gets a range: everything else on the list has no colony effect to have a radius
+     * for. <b>The cross-reference is still the caller's</b> — vanilla measures those radii from the
+     * colony's hyperspace position, not from the player fleet, so the {@code distanceLy} in the same
+     * row is not the distance the game will test.
+     *
+     * <p>Args: {@code kinds} (array or comma-separated string; default all), {@code limit} (default
+     * {@value #LANDMARKS_DEFAULT_LIMIT}, 1..{@value #COLONIZABLE_MAX_LIMIT}) and {@code maxLy}
+     * (0 or absent = no range filter).
+     */
+    static JSONObject landmarks(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CampaignFleetAPI player = requirePlayerFleet(sector);
+        List<LandmarkKind> kinds = requestedLandmarkKinds(args);
+        int limit = optionalInt(args, "limit", LANDMARKS_DEFAULT_LIMIT);
+        if (limit < 1 || limit > COLONIZABLE_MAX_LIMIT) {
+            throw new IllegalArgumentException("limit must be between 1 and " + COLONIZABLE_MAX_LIMIT
+                    + ", got " + limit);
+        }
+        double maxLy = optionalDouble(args, "maxLy", 0d);
+
+        List<Landmark> all = landmarkEntities(sector, player, kinds);
+        List<Landmark> shown = selectLandmarks(all, limit, maxLy);
+
+        LocationAPI here = player.getContainingLocation();
+        JSONObject out = new JSONObject();
+        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("kinds", new JSONArray(landmarkKindKeys(kinds)));
+        out.put("limit", limit);
+        out.put("maxLy", round((float) maxLy));
+        out.put("candidateCount", all.size());
+        out.put("count", shown.size());
+
+        JSONArray rows = new JSONArray();
+        for (Landmark landmark : shown) {
+            JSONObject row = new JSONObject();
+            row.put("kind", landmark.kind());
+            row.put("entityId", landmark.entityId());
+            row.put("name", landmark.name());
+            row.put("type", landmark.type());
+            row.put("systemId", landmark.systemId());
+            row.put("systemName", landmark.systemName());
+            row.put("hyperspace", landmark.hyperspace());
+            row.put("distanceLy", round(landmark.distanceLy()));
+            row.put("distanceSu", round(landmark.distanceSu()));
+            for (Map.Entry<String, Object> extra : landmark.extras().entrySet()) {
+                row.put(extra.getKey(), extra.getValue());
+            }
+            rows.put(row);
+        }
+        out.put("landmarks", rows);
+        return out;
+    }
+
+    /** Same shape as {@link #selectColonizable}: range filter, order, cap. */
+    static List<Landmark> selectLandmarks(List<Landmark> landmarks, int limit, double maxLy) {
+        List<Landmark> kept = new ArrayList<>();
+        for (Landmark landmark : landmarks) {
+            if (landmark == null) {
+                continue;
+            }
+            if (maxLy > 0d && landmark.distanceLy() > maxLy) {
+                continue;
+            }
+            kept.add(landmark);
+        }
+        kept.sort(LANDMARK_ORDER);
+        if (limit > 0 && kept.size() > limit) {
+            return new ArrayList<>(kept.subList(0, limit));
+        }
+        return kept;
+    }
+
+    /**
+     * {@code kinds} as an array or a comma-separated string; absent means all of them. An unknown key
+     * is a refusal naming the valid set, never a silently empty answer — "no landmarks of that kind"
+     * and "you misspelled the kind" have to read differently.
+     */
+    static List<LandmarkKind> requestedLandmarkKinds(JSONObject args) throws JSONException {
+        List<String> requested = new ArrayList<>();
+        JSONArray array = args.optJSONArray("kinds");
+        if (array != null) {
+            for (int i = 0; i < array.length(); i++) {
+                requested.add(array.getString(i).trim().toLowerCase(Locale.ROOT));
+            }
+        } else {
+            String raw = optionalString(args, "kinds");
+            for (String part : raw.split(",")) {
+                if (!part.trim().isEmpty()) {
+                    requested.add(part.trim().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        if (requested.isEmpty()) {
+            return LANDMARK_KINDS;
+        }
+        // Filtered out of the canonical list rather than built from the request, so the output order
+        // is the registry's however the caller spelled the argument.
+        List<LandmarkKind> kinds = new ArrayList<>();
+        for (LandmarkKind kind : LANDMARK_KINDS) {
+            if (requested.contains(kind.key())) {
+                kinds.add(kind);
+            }
+        }
+        for (String key : requested) {
+            if (!landmarkKindKeys(LANDMARK_KINDS).contains(key)) {
+                throw new IllegalArgumentException("unknown landmark kind " + key + "; known kinds: "
+                        + String.join(", ", landmarkKindKeys(LANDMARK_KINDS)));
+            }
+        }
+        return kinds;
+    }
+
+    static List<String> landmarkKindKeys(List<LandmarkKind> kinds) {
+        List<String> keys = new ArrayList<>();
+        for (LandmarkKind kind : kinds) {
+            keys.add(kind.key());
+        }
+        return keys;
+    }
+
+    /**
+     * Every landmark of the requested kinds, unsorted and untrimmed.
+     *
+     * <p>Hyperspace is walked like any other location — {@link CoopLocations#forEach} includes it, and
+     * a landmark out there is a real one — so the row carries a {@code hyperspace} flag rather than
+     * being special-cased out.
+     *
+     * <p>An entity carrying two landmark tags is emitted once, under the first kind in
+     * {@link #LANDMARK_KINDS} that claims it. Two rows for one object would break the keyed diff.
+     */
+    static List<Landmark> landmarkEntities(SectorAPI sector, CampaignFleetAPI player,
+                                           List<LandmarkKind> kinds) {
+        LocationAPI here = player.getContainingLocation();
+        GateState gates = readGateState(sector);
+        List<Landmark> found = new ArrayList<>();
+        Set<String> seen = new TreeSet<>();
+        CoopLocations.forEach(sector, location -> {
+            for (LandmarkKind kind : kinds) {
+                for (SectorEntityToken entity : landmarkEntitiesIn(location, kind)) {
+                    Landmark landmark = landmarkOf(kind, entity, location, player, here, gates, seen);
+                    if (landmark != null) {
+                        found.add(landmark);
+                    }
+                }
+            }
+        });
+        return found;
+    }
+
+    /** Indexed tag lookup where there is a tag; a full entity walk only for the kind that needs one. */
+    private static List<SectorEntityToken> landmarkEntitiesIn(LocationAPI location, LandmarkKind kind) {
+        if (!kind.tag().isEmpty()) {
+            List<SectorEntityToken> tagged = location.getEntitiesWithTag(kind.tag());
+            return tagged == null ? List.of() : tagged;
+        }
+        List<SectorEntityToken> all = location.getAllEntities();
+        if (all == null) {
+            return List.of();
+        }
+        List<SectorEntityToken> matched = new ArrayList<>();
+        for (SectorEntityToken entity : all) {
+            if (entity != null && kind.specId().equals(entity.getCustomEntityType())) {
+                matched.add(entity);
+            }
+        }
+        return matched;
+    }
+
+    private static Landmark landmarkOf(LandmarkKind kind, SectorEntityToken entity,
+                                       LocationAPI location, CampaignFleetAPI player,
+                                       LocationAPI here, GateState gates, Set<String> seen) {
+        try {
+            if (entity == null || entity.getId() == null || !seen.add(entity.getId())) {
+                return null;
+            }
+            return new Landmark(
+                    kind.key(),
+                    nullSafe(entity.getId()),
+                    nullSafe(entity.getName()),
+                    nullSafe(entity.getCustomEntityType()),
+                    nullSafe(location.getId()),
+                    nullSafe(location.getName()),
+                    location.isHyperspace(),
+                    distanceLy(entity, player),
+                    location == here ? distanceSu(entity, player) : 0f,
+                    landmarkExtras(kind, entity, gates));
+        } catch (RuntimeException | LinkageError ex) {
+            // One unreadable entity must not cost the caller every other landmark.
+            return null;
+        }
+    }
+
+    /**
+     * The sector-wide half of gate usability; read once per query, not once per gate.
+     *
+     * <p>Read straight off sector memory rather than through {@code GateEntityPlugin.areGatesActive()}
+     * and {@code canUseGates()} on purpose. Those two OR in "the player is carrying a Janus Device"
+     * ({@code GateEntityPlugin.java:76-91}), which is one client's cargo, not campaign state — it would
+     * make the same sector answer differently on host and guest and turn a diff of this verb into a
+     * report about someone's hold. The memory flags are the persistent, replicated half.
+     */
+    record GateState(boolean gatesActive, boolean playerCanUseGates) {
+    }
+
+    static GateState readGateState(SectorAPI sector) {
+        try {
+            MemoryAPI memory = sector.getMemoryWithoutUpdate();
+            if (memory == null) {
+                return new GateState(false, false);
+            }
+            return new GateState(memory.getBoolean(GateEntityPlugin.GATES_ACTIVE),
+                    memory.getBoolean(GateEntityPlugin.PLAYER_CAN_USE_GATES));
+        } catch (RuntimeException | LinkageError ex) {
+            return new GateState(false, false);
+        }
+    }
+
+    /**
+     * The per-kind tail. Every value here is a read vanilla already does somewhere and none of them
+     * mutate: a query that changed the world would be useless for proving two worlds agree.
+     *
+     * <p><b>No extras for {@code stable_location}, and "occupied" is not a missing field.</b> Vanilla
+     * does not mark a stable location as used — it destroys it. {@code Objectives.build}
+     * ({@code Objectives.java:370-393}) creates the relay/array/buoy as a new entity, copies the orbit
+     * and position across, then calls {@code loc.removeEntity(entity)} on the stable location and
+     * stores the dead token under {@code $originalStableLocation} on the objective. A
+     * {@code stable_location} that still exists is therefore free by construction, and destroying the
+     * objective spawns a fresh one back ({@code Objectives.java:240-251}).
+     *
+     * <p><b>No extras for {@code gate_hauler}</b>: it is one entity in one hidden system and its
+     * state lives in {@code GateHaulerIntel}, not on the token.
+     */
+    private static Map<String, Object> landmarkExtras(LandmarkKind kind, SectorEntityToken entity,
+                                                      GateState gates) {
+        Map<String, Object> extras = new LinkedHashMap<>();
+        switch (kind.key()) {
+            case "gate" -> {
+                // active + scanned are vanilla's own two reads. The sector-wide pair is the same one
+                // CoopCampaignReplicator's gate poll encodes, and GateEntityPlugin.advance only lets
+                // the player through a gate when scanned && canUseGates() hold together.
+                //
+                // active is the weakest of the four: it reads the plugin's madeActive field, which is
+                // only flipped inside advance() (GateEntityPlugin.java:274-285), so a gate this client
+                // has never had loaded reads false even when scanned and usable. Trust
+                // scanned && gatesActive over it; it is reported because it is what the sprite shows.
+                extras.put("active", GateEntityPlugin.isActive(entity));
+                MemoryAPI memory = entity.getMemoryWithoutUpdate();
+                // isScanned dereferences the memory unguarded; a gate without one is simply unscanned.
+                extras.put("scanned", memory != null && GateEntityPlugin.isScanned(entity));
+                extras.put("gatesActive", gates.gatesActive());
+                extras.put("playerCanUseGates", gates.playerCanUseGates());
+            }
+            case "hypershunt" -> {
+                extras.put("usable", isLandmarkUsable(entity));
+                putIfPresent(extras, "benefitRangeLy", coronalTapRangeLy());
+            }
+            case "cryosleeper" -> {
+                extras.put("usable", isLandmarkUsable(entity));
+                putIfPresent(extras, "benefitRangeLy", cryosleeperRangeLy());
+                putIfPresent(extras, "minBenefitMult", cryosleeperMinBonusMult());
+            }
+            default -> {
+                // stable_location and gate_hauler: see the javadoc.
+            }
+        }
+        return extras;
+    }
+
+    private static boolean isLandmarkUsable(SectorEntityToken entity) {
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        return memory != null && memory.contains(LANDMARK_USABLE_FLAG);
+    }
+
+    private static void putIfPresent(Map<String, Object> extras, String key, Double value) {
+        if (value != null) {
+            extras.put(key, value);
+        }
+    }
+
+    /**
+     * The radius inside which a colony can use a hypershunt tap, read from the engine rather than
+     * copied: {@code ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS}, a non-final {@code public static int}
+     * that a mod can reassign. {@code BaseInstallableItemEffect.java:152-159} is the gate —
+     * {@code dist > CORONAL_TAP_LIGHT_YEARS} marks the requirement unmet — and it is <b>binary</b>,
+     * not graded: inside the radius the tap works, outside it does nothing.
+     *
+     * <p>Two things this number does not say, and the caller has to know both. The comparison is run
+     * against the <em>colony's</em> hyperspace position, not the player fleet's, so the
+     * {@code distanceLy} in the same row is not the distance being tested. And vanilla measures to
+     * hypershunts it finds through {@code HypershuntIntel}, so an undiscovered one counts for nothing
+     * however close it is.
+     */
+    private static Double coronalTapRangeLy() {
+        try {
+            return (double) ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS;
+        } catch (RuntimeException | LinkageError ex) {
+            // Better absent than guessed: a stale hardcoded 10 would be worse than no field at all.
+            return null;
+        }
+    }
+
+    /**
+     * {@code Cryorevival.MAX_BONUS_DIST_LY}. Unlike the hypershunt this one is <b>graded</b>:
+     * {@code Cryorevival.getDistancePopulationMult} ({@code Cryorevival.java:233-246}) returns
+     * {@code MIN_BONUS_MULT + (1 - MIN_BONUS_MULT) * (1 - dist / MAX_BONUS_DIST_LY)}, so the
+     * multiplier runs from 1.0 on top of the cryosleeper down to {@link #cryosleeperMinBonusMult()} at
+     * the edge, and 0 — unbuildable — past it. Same two caveats as the hypershunt: measured from the
+     * colony, and only against cryosleepers known through {@code CryosleeperIntel}.
+     */
+    private static Double cryosleeperRangeLy() {
+        try {
+            return round(Cryorevival.MAX_BONUS_DIST_LY);
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private static Double cryosleeperMinBonusMult() {
+        try {
+            return round(Cryorevival.MIN_BONUS_MULT);
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
     }
 
     // ---- Setup actions --------------------------------------------------------------------------

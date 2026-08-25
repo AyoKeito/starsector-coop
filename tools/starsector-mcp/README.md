@@ -111,6 +111,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `survey` | `{systemId}` or `{systemId: "all"}` | planetId to survey level and ruins state |
 | `visibility` | `{fleetId?}` | `lines`, the probe's text dump, plus `view`, a coopFleetId to visibility-level map |
 | `colonizable` | `{limit?, maxLy?}` | uncolonized planets nearest the local player fleet, nearest first |
+| `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 
 ```
 ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
@@ -139,6 +140,44 @@ ss_dump(instance: "host", what: "colonizable", args: { "limit": 3, "maxLy": 8 })
 What counts as colonizable is vanilla's own test, not a heuristic. A candidate is a non-star planet whose market is `planetConditionMarketOnly` — the flag colonizing clears, and the one `rules.csv` requires before it offers "Establish a colony" — in a system that is not hyperspace, not deep space, not `system_abyssal`, and not `system_cut_off_from_hyper`. The last three are the tooltips `PlanetSurveyPanel` prints when it disables the colonize button, and two of them appear in no rule and in no API source. Gas giants are in; vanilla colonizes them. `temporary_location` is filtered too, which is the one deliberate step past vanilla: those systems are minted and discarded by the abyssal encounter generators, so offering one as a target would be offering something that stops existing.
 
 Two of vanilla's gates are reported instead of applied, because the run itself can clear them: `surveyLevel` (colonizing needs `FULL`, which is what `ss_act(verb: "surveyset")` is for) and `unexploredRuins` (salvage them and the button unlocks). Filtering on those would hide exactly the planets the smoke is allowed to set up.
+
+`landmarks` is the other half of picking a site: the notable objects a colony gets sited relative to. Five kinds, and the `kinds` argument takes either an array or a comma-separated string:
+
+| kind | found by | extras |
+| --- | --- | --- |
+| `hypershunt` | tag `coronal_tap` | `usable`, `benefitRangeLy` |
+| `cryosleeper` | tag `cryosleeper` | `usable`, `benefitRangeLy`, `minBenefitMult` |
+| `gate` | tag `gate` | `active`, `scanned`, `gatesActive`, `playerCanUseGates` |
+| `stable_location` | tag `stable_location` | — |
+| `gate_hauler` | spec id `derelict_gatehauler` | — |
+
+```
+ss_dump(instance: "host", what: "landmarks", args: { "kinds": "hypershunt,cryosleeper", "maxLy": 12 })
+
+{ "fromLocationId": "corvus", "kinds": ["hypershunt", "cryosleeper"], "limit": 25, "maxLy": 12,
+  "candidateCount": 4, "count": 2,
+  "landmarks": [
+    { "kind": "cryosleeper", "entityId": "cryosleeper_calypso", "name": "Domain-era Cryosleeper \"Calypso\"",
+      "type": "derelict_cryosleeper", "systemId": "system_a41c", "systemName": "Tuvalu Star System",
+      "hyperspace": false, "distanceLy": 6.82, "distanceSu": 0,
+      "usable": true, "benefitRangeLy": 10, "minBenefitMult": 0.1 },
+    ...
+  ] }
+```
+
+`limit` defaults to 25. `candidateCount` counts what the requested kinds found sector-wide, before `maxLy` and `limit` trimmed it. Sorting is `distanceLy`, then `distanceSu`, then `kind`, then `entityId` — total and stable, so `ss_diff what: "landmarks"` is a worldgen check rather than a reorder report.
+
+**These are not all one-per-sector.** Hypershunts and cryosleepers are exactly two each and the gate hauler is exactly one, but a stock sector has 15-20 gates plus a second-pass batch, and more stable locations than that. `kinds` and the limit are how you keep the answer readable.
+
+**`benefitRangeLy` is read off the engine, not written here.** It is `ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS` for the hypershunt and `Cryorevival.MAX_BONUS_DIST_LY` for the cryosleeper — both `10` in stock 0.98a, both non-final `public static` fields, so a modded install reports its own value and the field simply disappears if the read fails. Nothing else on the list gets a range, because nothing else has a colony effect with a radius.
+
+**Cross-referencing it is still your job, and two things make that less obvious than it looks.** Vanilla measures both radii from the *colony's* hyperspace position, not the player fleet's, so the `distanceLy` in the row is not the distance the game will test — it tells you which landmark to aim near, not whether a given planet qualifies. And both checks run over discovered intel (`HypershuntIntel`, `CryosleeperIntel`), so an undiscovered landmark counts for nothing however close it is. The hypershunt effect is binary at the radius; the cryosleeper's is graded, from `1.0` on top down to `minBenefitMult` at the edge and `0` past it.
+
+There is deliberately no "occupied" field on `stable_location`, and that is not an omission. Vanilla does not mark one as used — `Objectives.build` creates the relay/array/buoy as a new entity, copies the orbit across, and then *removes* the stable location. A `stable_location` that still exists is free by construction, and destroying the objective spawns a fresh one back.
+
+Of the four gate fields, `active` is the weakest: it reads a flag the gate's plugin only sets inside `advance()`, so a gate this client has never had loaded reads `false` even when it is scanned and usable. Trust `scanned && gatesActive`. The sector-wide pair is read from sector memory rather than through `GateEntityPlugin.areGatesActive()`, because that method ORs in "the player is carrying a Janus Device" — one client's cargo, which would make the same sector answer differently on host and guest.
+
+Story one-offs are not included: the Ziggurat wreck, the Alpha Site, the red planet, the Nameless Rock, Galatia. They are identified by memory flags rather than tags, several do not exist at worldgen at all (the Ziggurat is created only once its guardian is beaten), and none of them changes where you would put a colony.
 
 `visibility.view` is the half worth diffing. The guest reports the visibility level it actually has on each fleet; the host reports its estimate of that same level, asked of the engine through the guest's reverse mirror. Equal maps mean the two sensor models agree, and every key that differs is a replication gap. `lines` is the same computation as text for reading, which is why it is on the default ignore list below.
 

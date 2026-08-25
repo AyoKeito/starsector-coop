@@ -672,6 +672,94 @@ test('a colonizable divergence is reported per planet, not as one opaque array d
   ]);
 });
 
+const LANDMARKS = {
+  fromLocationId: 'corvus',
+  kinds: ['hypershunt', 'cryosleeper'],
+  limit: 25,
+  maxLy: 12,
+  candidateCount: 4,
+  count: 2,
+  landmarks: [
+    {
+      kind: 'cryosleeper',
+      entityId: 'cryosleeper_calypso',
+      name: 'Domain-era Cryosleeper "Calypso"',
+      type: 'derelict_cryosleeper',
+      systemId: 'system_a41c',
+      systemName: 'Tuvalu Star System',
+      hyperspace: false,
+      distanceLy: 6.82,
+      distanceSu: 0,
+      usable: true,
+      benefitRangeLy: 10,
+      minBenefitMult: 0.1
+    },
+    {
+      kind: 'hypershunt',
+      entityId: 'coronal_tap_1',
+      name: 'Coronal Hypershunt',
+      type: 'coronal_tap',
+      systemId: 'system_0b3f',
+      systemName: 'Naraka Star System',
+      hyperspace: false,
+      distanceLy: 9.5,
+      distanceSu: 0,
+      usable: false,
+      benefitRangeLy: 10
+    }
+  ]
+};
+
+test('landmarks is a query verb, keyed by entityId and diffable across instances', async (t) => {
+  const hostBridge = new MockBridge((request) =>
+    request.cmd === 'landmarks'
+      ? { ok: true, data: LANDMARKS }
+      : { ok: false, error: 'IllegalArgumentException: unknown command' }
+  );
+  // Same landmarks, opposite order: the two walks found them differently, which is not a divergence.
+  const guestBridge = new MockBridge(() => ({
+    ok: true,
+    data: { ...LANDMARKS, landmarks: [LANDMARKS.landmarks[1], LANDMARKS.landmarks[0]] }
+  }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  const args = { kinds: 'hypershunt,cryosleeper', maxLy: 12 };
+  assert.deepEqual(await ssDump(bridges, 'host', 'landmarks', args), LANDMARKS);
+  assert.deepEqual(hostBridge.requests[0].args, args, 'kinds is passed through verbatim');
+
+  await ssDump(bridges, 'host', 'landmarks');
+  assert.deepEqual(hostBridge.requests[1].args, {}, 'no args means every kind, not a bad request');
+
+  assert.equal((await ssDiff(bridges, 'landmarks')).equal, true);
+  await assert.rejects(() => ssAct(bridges, 'host', 'landmarks', {}), /unknown action verb "landmarks"/);
+});
+
+test('a landmark divergence is reported per entity, and a per-kind extra only where it exists', () => {
+  const guest = {
+    ...LANDMARKS,
+    landmarks: [
+      { ...LANDMARKS.landmarks[0], usable: false },
+      LANDMARKS.landmarks[1]
+    ]
+  };
+
+  const result = diffJson(LANDMARKS, guest);
+
+  assert.deepEqual(result.differences, [
+    { path: '$.landmarks[entityId=cryosleeper_calypso].usable', host: true, guest: false }
+  ]);
+  // minBenefitMult is on the cryosleeper and not the hypershunt; rows key by entityId, so an extra
+  // that only some kinds carry never reads as a missing field.
+  assert.equal(diffJson(LANDMARKS, LANDMARKS).equal, true);
+});
+
 test('expedition is an action verb, passed through with its optional factionId', async (t) => {
   const created = {
     role: 'HOST',

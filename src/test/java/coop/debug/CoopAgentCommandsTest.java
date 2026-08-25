@@ -195,8 +195,8 @@ class CoopAgentCommandsTest {
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
                 java.util.Set.of("ability", "barpool", "colonizable", "expedition", "fleets", "give",
-                        "market", "markets", "objective", "pause", "setcr", "status", "survey",
-                        "surveyset", "teleport", "visibility"),
+                        "landmarks", "market", "markets", "objective", "pause", "setcr", "status",
+                        "survey", "surveyset", "teleport", "visibility"),
                 new CoopAgentCommands().verbs());
     }
 
@@ -221,6 +221,20 @@ class CoopAgentCommandsTest {
 
         JSONObject response = new JSONObject(
                 commands.dispatch("{\"id\":12,\"cmd\":\"colonizable\"}", EMPTY_CONTEXT));
+
+        assertFalse(response.getBoolean("ok"));
+        assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
+                "the verb must be wired; without a sector it refuses for the same reason every"
+                        + " other verb does");
+    }
+
+    @Test
+    void landmarksIsRegisteredAndFailsOnTheCampaignCheckRatherThanAsAnUnknownVerb()
+            throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+
+        JSONObject response = new JSONObject(
+                commands.dispatch("{\"id\":13,\"cmd\":\"landmarks\"}", EMPTY_CONTEXT));
 
         assertFalse(response.getBoolean("ok"));
         assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),

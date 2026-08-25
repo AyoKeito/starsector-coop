@@ -13,7 +13,8 @@ export const QUERY_VERBS = [
   'barpool',
   'survey',
   'visibility',
-  'colonizable'
+  'colonizable',
+  'landmarks'
 ];
 
 /** State-changing verbs. ss_act accepts these. */

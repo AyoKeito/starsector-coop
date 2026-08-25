@@ -168,7 +168,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 
 The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind.
 
-Sixteen verbs: `status`, `fleets`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `objective`, `surveyset`, `expedition` act. Five of them carry shapes worth knowing before you diff two dumps:
+Seventeen verbs: `status`, `fleets`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `landmarks` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `objective`, `surveyset`, `expedition` act. Six of them carry shapes worth knowing before you diff two dumps:
 
 | verb | shape |
 | --- | --- |
@@ -177,6 +177,7 @@ Sixteen verbs: `status`, `fleets`, `market`, `markets`, `barpool`, `survey`, `vi
 | `visibility` | `lines` is the probe's text dump; `view` is the same computation as a `coopFleetId` to visibility-level map, guest-actual against host-estimate, so the two sides' maps are directly comparable. |
 | `markets` | enumeration only (`marketId`, `name`, `factionId`, `size`, `locationId`). It does not stock anything — that is `market`'s documented host-side dock equivalence. |
 | `colonizable` | the uncolonized planets nearest the local player fleet, `limit` (default 10) and `maxLy` optional. `distanceLy` is 0 inside the fleet's own system and `distanceSu` is 0 outside it, so the pair sorts "here first, then nearest". The filter is vanilla's, and its authority is the core UI class `PlanetSurveyPanel` rather than `rules.csv` — two of the four location gates (`system_abyssal`, deep space) exist in no rule and in no API source. Survey level and unexplored ruins are reported rather than filtered: both block vanilla's colonize button, and both are things the run clears itself. |
+| `landmarks` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, filterable with `kinds`. Not all one-per-sector — a stock sector has 15-20 gates and more stable locations, which is what `kinds` and the default limit of 25 are for. The two colony-relevance ranges are read live off `ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS` and `Cryorevival.MAX_BONUS_DIST_LY` rather than copied, and are omitted rather than guessed if the read fails; vanilla measures them from the colony, not the fleet, so the row's `distanceLy` is not the distance the game tests. There is no `occupied` field on a stable location because vanilla deletes the entity when you build on it, so one that still exists is free. |
 
 `ability` takes an optional `on`: absent is the plain toolbar press, `on: true` / `on: false` is an idempotent level for toggles like the transponder, which `activate()` alone can only re-arm.
 
