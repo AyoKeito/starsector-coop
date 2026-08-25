@@ -49,7 +49,8 @@ const TOOLS = [
     name: 'ss_dump',
     description:
       `Run one read-only bridge verb against one instance and return its JSON. Verbs: ${QUERY_VERBS.join(', ')}. ` +
-      'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}; ' +
+      'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}, ' +
+      'colonizable{limit?, maxLy?} (uncolonized planets nearest the local player fleet); ' +
       'status, markets and barpool take none.',
     inputSchema: {
       type: 'object',

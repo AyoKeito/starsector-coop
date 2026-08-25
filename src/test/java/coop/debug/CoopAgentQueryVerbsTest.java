@@ -1,22 +1,28 @@
 package coop.debug;
 
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import coop.fleet.CoopLocations;
 import coop.net.CoopConnectionRole;
 import coop.time.CoopSharedPauseCoordinator;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.lwjgl.util.vector.Vector2f;
 
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
@@ -28,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -53,6 +60,18 @@ class CoopAgentQueryVerbsTest {
     void resetLocationCache() {
         // CoopLocations caches per sector identity and the fakes are throwaway sectors.
         CoopLocations.invalidate();
+    }
+
+    @BeforeEach
+    void installSettings() {
+        // Misc.getDistanceLY divides by settings.getFloat("unitsPerLightYear"); colonizable is the
+        // only verb here that measures anything, and 2000 is the stock value.
+        Global.setSettings(proxy(SettingsAPI.class, answers("getFloat", args -> 2000f)));
+    }
+
+    @AfterEach
+    void clearSettings() {
+        Global.setSettings(null);
     }
 
     // ---- survey: an id the "all" dump emits must resolve --------------------------------------
@@ -381,6 +400,293 @@ class CoopAgentQueryVerbsTest {
     private static CoopAgentCommands.ExpeditionCandidate candidate(String factionId, int reasonCount,
                                                                    boolean freePort, boolean ongoing) {
         return new CoopAgentCommands.ExpeditionCandidate(factionId, reasonCount, freePort, ongoing);
+    }
+
+    // ---- colonizable: which planets count, and in what order ---------------------------------------
+
+    @Test
+    void onlyUncolonizedNonStarPlanetsCount_andAGasGiantIsOneOfThem() throws JSONException {
+        JSONObject out = CoopAgentCommands.colonizable(new JSONObject(), colonizableSector());
+
+        assertEquals(3, out.getInt("candidateCount"));
+        assertEquals(List.of("ancyra", "aleph_gas", "hidden_planet"), planetIds(out),
+                "out: the star, the colonized world, the market-less moon, and the cut-off, abyssal"
+                        + " and temporary systems. In: the gas giant, and the theme_hidden system"
+                        + " that carries no gate vanilla actually reads");
+        assertEquals("corvus", out.getString("fromLocationId"));
+    }
+
+    @Test
+    void theRowsCarryWhatChoosingATargetTurnsOn() throws JSONException {
+        JSONObject out = CoopAgentCommands.colonizable(new JSONObject(), colonizableSector());
+
+        JSONObject ancyra = out.getJSONArray("planets").getJSONObject(0);
+        assertEquals("Ancyra", ancyra.getString("name"));
+        assertEquals("terran", ancyra.getString("type"));
+        assertFalse(ancyra.getBoolean("gasGiant"));
+        assertEquals("corvus", ancyra.getString("systemId"));
+        assertEquals("Corvus Star System", ancyra.getString("systemName"));
+        assertEquals(0d, ancyra.getDouble("distanceLy"), 0d, "the fleet's own system is at zero LY");
+        assertEquals(1000d, ancyra.getDouble("distanceSu"), 0d);
+        assertEquals(1.25d, ancyra.getDouble("hazard"), 1e-6);
+        assertEquals(List.of("farmland_poor", "habitable", "ore_moderate"),
+                stringList(ancyra.getJSONArray("conditions")),
+                "sorted, so the same planet on two clients compares equal instead of as a reorder");
+
+        JSONObject faraway = out.getJSONArray("planets").getJSONObject(2);
+        assertEquals(5d, faraway.getDouble("distanceLy"), 1e-6, "10000 su / 2000 su per LY");
+        assertEquals(0d, faraway.getDouble("distanceSu"), 0d,
+                "in-system distance is for this system only");
+    }
+
+    @Test
+    void theSurveyGateAndTheRuinsGateAreReportedRatherThanFiltered() throws JSONException {
+        JSONObject out = CoopAgentCommands.colonizable(new JSONObject(), colonizableSector());
+
+        JSONObject ancyra = out.getJSONArray("planets").getJSONObject(0);
+        assertEquals("FULL", ancyra.getString("surveyLevel"));
+        assertFalse(ancyra.getBoolean("unexploredRuins"));
+
+        JSONObject gasGiant = out.getJSONArray("planets").getJSONObject(1);
+        assertEquals("NONE", gasGiant.getString("surveyLevel"),
+                "an unsurveyed planet still lists: surveyset is exactly how the run fixes that");
+        assertTrue(gasGiant.getBoolean("unexploredRuins"),
+                "ruins block vanilla's colonize option but salvaging them unblocks it, so the planet"
+                        + " stays on the list with the gate named");
+    }
+
+    @Test
+    void aSectorWithNothingLeftToColonizeAnswersAnEmptyListNotAnError() throws JSONException {
+        MarketAPI colonized = conditionMarket(false, MarketAPI.SurveyLevel.FULL, 1f, List.of());
+        PlanetAPI onlyColony = planet("jangala", "Jangala", "terran", false, false, colonized, 0f, 0f, 0f, 0f);
+        LocationAPI corvus = system("corvus", "Corvus Star System", List.of(onlyColony));
+
+        JSONObject out = CoopAgentCommands.colonizable(new JSONObject(),
+                contextFor(colonizableSectorOf(corvus, fleetAt(corvus, 0f, 0f, 0f, 0f))));
+
+        assertEquals(0, out.getInt("candidateCount"));
+        assertEquals(0, out.getInt("count"));
+        assertEquals(0, out.getJSONArray("planets").length());
+    }
+
+    @Test
+    void everyLocationVanillaRefusesToColonizeIsFilteredAndNoOtherIs() {
+        assertFalse(CoopAgentCommands.colonizableSystem(null));
+        assertFalse(CoopAgentCommands.colonizableSystem(hyperspace()));
+        assertFalse(CoopAgentCommands.colonizableSystem(deepSpace()),
+                "PlanetSurveyPanel: \"This planet is in deep space and can not be colonized.\"");
+        assertFalse(CoopAgentCommands.colonizableSystem(
+                system("cut_off", "Cut Off", List.of(), "system_cut_off_from_hyper")),
+                "rules.csv surveySystemIsCutOffCanNotColonize disables the colonize option outright");
+        assertFalse(CoopAgentCommands.colonizableSystem(
+                system("abyss", "Abyss", List.of(), "system_abyssal")),
+                "PlanetSurveyPanel: \"deep in abyssal hyperspace and can not be colonized\" - a gate"
+                        + " that appears in no rules.csv row and in no API source");
+        assertFalse(CoopAgentCommands.colonizableSystem(
+                system("abyss_tmp", "Nowhere", List.of(), "temporary_location")),
+                "the deliberate tightening: the encounter generators mint and discard these systems");
+        assertTrue(CoopAgentCommands.colonizableSystem(
+                system("hidden", "Unknown Location", List.of(), "theme_hidden", "theme_special")),
+                "theme_hidden only means off-map until found; the vanilla systems carrying it are"
+                        + " blocked by abyssal or deep space, and filtering the theme tag instead"
+                        + " would be filtering the wrong thing");
+    }
+
+    @Test
+    void candidatesComeBackNearestFirstWithTheFleetsOwnSystemAhead() {
+        CoopAgentCommands.ColonizableCandidate far = colonizable("far", 12f, 0f);
+        CoopAgentCommands.ColonizableCandidate hereFar = colonizable("here_far", 0f, 9000f);
+        CoopAgentCommands.ColonizableCandidate hereNear = colonizable("here_near", 0f, 250f);
+        CoopAgentCommands.ColonizableCandidate near = colonizable("near", 3.5f, 0f);
+
+        assertEquals(List.of("here_near", "here_far", "near", "far"),
+                ids(CoopAgentCommands.selectColonizable(List.of(far, hereFar, hereNear, near), 10, 0d)));
+    }
+
+    @Test
+    void limitCapsTheListAndMaxLyFiltersItBeforeTheCap() {
+        List<CoopAgentCommands.ColonizableCandidate> all = List.of(
+                colonizable("a", 1f, 0f), colonizable("b", 4f, 0f), colonizable("c", 9f, 0f));
+
+        assertEquals(List.of("a", "b"), ids(CoopAgentCommands.selectColonizable(all, 2, 0d)),
+                "limit takes the nearest, not the first two the walk happened to find");
+        assertEquals(List.of("a", "b"), ids(CoopAgentCommands.selectColonizable(all, 10, 5d)));
+        assertEquals(List.of("a"), ids(CoopAgentCommands.selectColonizable(all, 1, 5d)),
+                "maxLy runs first so the cap applies to what is actually in range");
+        assertEquals(List.of(), ids(CoopAgentCommands.selectColonizable(all, 10, 0.5d)));
+        assertEquals(List.of("a", "b", "c"), ids(CoopAgentCommands.selectColonizable(all, 10, 0d)),
+                "maxLy 0 is no filter, not a filter that excludes everything");
+    }
+
+    @Test
+    void anUnusableLimitIsRefusedRatherThanQuietlyClamped() {
+        CoopAgentCommands.Context context = colonizableSector();
+
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.colonizable(args("limit", "0"), context))
+                .getMessage().contains("limit must be between 1 and 200"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.colonizable(args("limit", "500"), context))
+                .getMessage().contains("limit must be between 1 and 200"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.colonizable(args("maxLy", "nearby"), context))
+                .getMessage().contains("maxLy must be numeric"));
+    }
+
+    // ---- colonizable fakes ------------------------------------------------------------------------
+
+    /**
+     * The sector every end-to-end colonizable test runs against: the fleet's own system holding one
+     * candidate, one gas giant, a star, a colonized world and a moon with no market at all; a hidden
+     * -themed system 5 LY out that must still count; and the two systems that must not.
+     */
+    private static CoopAgentCommands.Context colonizableSector() {
+        PlanetAPI star = planet("corvus_star", "Corvus", "star_yellow", true, false,
+                conditionMarket(true, MarketAPI.SurveyLevel.FULL, 0f, List.of()), 0f, 0f, 0f, 0f);
+        PlanetAPI ancyra = planet("ancyra", "Ancyra", "terran", false, false,
+                conditionMarket(true, MarketAPI.SurveyLevel.FULL, 1.25f,
+                        List.of("habitable", "ore_moderate", "farmland_poor")),
+                1000f, 0f, 0f, 0f);
+        PlanetAPI colony = planet("jangala", "Jangala", "terran", false, false,
+                conditionMarket(false, MarketAPI.SurveyLevel.FULL, 1f, List.of()), 500f, 0f, 0f, 0f);
+        PlanetAPI moon = planet("corvus_moon", "Corvus I", "barren", false, false,
+                null, 100f, 0f, 0f, 0f);
+        PlanetAPI gasGiant = planet("aleph_gas", "Aleph", "gas_giant", false, true,
+                conditionMarket(true, MarketAPI.SurveyLevel.NONE, 1.5f, List.of("ruins_scattered")),
+                2000f, 0f, 0f, 0f);
+        LocationAPI corvus = system("corvus", "Corvus Star System",
+                List.of(star, ancyra, colony, moon, gasGiant));
+
+        PlanetAPI hidden = planet("hidden_planet", "Wayfarer", "tundra", false, false,
+                conditionMarket(true, MarketAPI.SurveyLevel.SEEN, 2f, List.of()),
+                0f, 0f, 10_000f, 0f);
+        LocationAPI hiddenSystem = system("hidden", "Unknown Location", List.of(hidden), "theme_hidden");
+
+        PlanetAPI stranded = planet("cutoff_planet", "Stranded", "terran", false, false,
+                conditionMarket(true, MarketAPI.SurveyLevel.FULL, 1f, List.of()),
+                0f, 0f, 4000f, 0f);
+        LocationAPI cutOff = system("cut_off", "Cut Off", List.of(stranded), "system_cut_off_from_hyper");
+
+        PlanetAPI sunken = planet("abyss_planet", "Drowned", "barren", false, false,
+                conditionMarket(true, MarketAPI.SurveyLevel.FULL, 1f, List.of()),
+                0f, 0f, 3000f, 0f);
+        LocationAPI abyssal = system("abyss", "Abyss", List.of(sunken), "system_abyssal");
+
+        PlanetAPI ephemeral = planet("tmp_planet", "Nowhere", "barren", false, false,
+                conditionMarket(true, MarketAPI.SurveyLevel.FULL, 1f, List.of()),
+                0f, 0f, 2000f, 0f);
+        LocationAPI temporary = system("abyss_tmp", "Nowhere", List.of(ephemeral), "temporary_location");
+
+        CampaignFleetAPI player = fleetAt(corvus, 0f, 0f, 0f, 0f);
+        return contextFor(proxy(SectorAPI.class, answers(
+                "getPlayerFleet", args -> player,
+                "getAllLocations",
+                args -> List.of(corvus, hiddenSystem, cutOff, abyssal, temporary, hyperspace()))));
+    }
+
+    /** A deep-space pocket: colonization is refused by the core UI, not by any rule or tag. */
+    private static LocationAPI deepSpace() {
+        return proxy(LocationAPI.class, answers(
+                "getId", args -> "deep_space",
+                "getName", args -> "Deep Space",
+                "isDeepSpace", args -> true,
+                "getPlanets", args -> new ArrayList<PlanetAPI>(),
+                "getFleets", args -> new ArrayList<CampaignFleetAPI>()));
+    }
+
+    private static SectorAPI colonizableSectorOf(LocationAPI location, CampaignFleetAPI player) {
+        return proxy(SectorAPI.class, answers(
+                "getPlayerFleet", args -> player,
+                "getAllLocations", args -> List.of(location)));
+    }
+
+    private static PlanetAPI planet(String id, String name, String typeId, boolean star,
+                                    boolean gasGiant, MarketAPI market, float x, float y,
+                                    float hyperX, float hyperY) {
+        Map<String, Answer> answers = answers();
+        answers.put("getId", args -> id);
+        answers.put("getName", args -> name);
+        answers.put("getTypeId", args -> typeId);
+        answers.put("isStar", args -> star);
+        answers.put("isGasGiant", args -> gasGiant);
+        answers.put("getMarket", args -> market);
+        answers.put("getLocation", args -> new Vector2f(x, y));
+        answers.put("getLocationInHyperspace", args -> new Vector2f(hyperX, hyperY));
+        return proxy(PlanetAPI.class, answers);
+    }
+
+    /** Conditions double as the {@code hasCondition} answers so {@code Misc.hasRuins} sees them. */
+    private static MarketAPI conditionMarket(boolean planetConditionOnly, MarketAPI.SurveyLevel level,
+                                             float hazard, List<String> conditionIds) {
+        List<MarketConditionAPI> conditions = new ArrayList<>();
+        for (String conditionId : conditionIds) {
+            conditions.add(proxy(MarketConditionAPI.class, answers("getId", args -> conditionId)));
+        }
+        Map<String, Answer> answers = answers();
+        answers.put("isPlanetConditionMarketOnly", args -> planetConditionOnly);
+        answers.put("getSurveyLevel", args -> level);
+        answers.put("getHazardValue", args -> hazard);
+        answers.put("getConditions", args -> conditions);
+        answers.put("hasCondition", args -> conditionIds.contains(String.valueOf(args[0])));
+        answers.put("getMemoryWithoutUpdate", args -> proxy(MemoryAPI.class,
+                answers("getBoolean", memoryArgs -> false)));
+        return proxy(MarketAPI.class, answers);
+    }
+
+    private static LocationAPI system(String id, String name, List<PlanetAPI> planets, String... tags) {
+        List<String> tagList = List.of(tags);
+        Map<String, Answer> answers = answers();
+        answers.put("getId", args -> id);
+        answers.put("getName", args -> name);
+        answers.put("getPlanets", args -> new ArrayList<>(planets));
+        answers.put("hasTag", args -> tagList.contains(String.valueOf(args[0])));
+        answers.put("getFleets", args -> new ArrayList<CampaignFleetAPI>());
+        return proxy(LocationAPI.class, answers);
+    }
+
+    private static LocationAPI hyperspace() {
+        return proxy(LocationAPI.class, answers(
+                "getId", args -> "hyperspace",
+                "isHyperspace", args -> true,
+                "getPlanets", args -> new ArrayList<PlanetAPI>(),
+                "getFleets", args -> new ArrayList<CampaignFleetAPI>()));
+    }
+
+    private static CampaignFleetAPI fleetAt(LocationAPI location, float x, float y,
+                                            float hyperX, float hyperY) {
+        return proxy(CampaignFleetAPI.class, answers(
+                "getContainingLocation", args -> location,
+                "getLocation", args -> new Vector2f(x, y),
+                "getLocationInHyperspace", args -> new Vector2f(hyperX, hyperY)));
+    }
+
+    private static CoopAgentCommands.ColonizableCandidate colonizable(String planetId, float ly, float su) {
+        return new CoopAgentCommands.ColonizableCandidate(planetId, planetId, "terran", false,
+                "system", "System", ly, su, 1f, "FULL", false, List.of());
+    }
+
+    private static List<String> ids(List<CoopAgentCommands.ColonizableCandidate> candidates) {
+        List<String> out = new ArrayList<>();
+        for (CoopAgentCommands.ColonizableCandidate candidate : candidates) {
+            out.add(candidate.planetId());
+        }
+        return out;
+    }
+
+    private static List<String> planetIds(JSONObject out) throws JSONException {
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < out.getJSONArray("planets").length(); i++) {
+            ids.add(out.getJSONArray("planets").getJSONObject(i).getString("planetId"));
+        }
+        return ids;
+    }
+
+    private static List<String> stringList(JSONArray array) throws JSONException {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < array.length(); i++) {
+            out.add(array.getString(i));
+        }
+        return out;
     }
 
     // ---- Fakes --------------------------------------------------------------------------------------

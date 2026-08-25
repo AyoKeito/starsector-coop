@@ -5,24 +5,29 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionIntel;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager.PunExData;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager.PunExReason;
+import com.fs.starfarer.api.util.Misc;
 import coop.campaign.CoopBarPoolCapture;
 import coop.campaign.CoopCampaignReplicator;
 import coop.campaign.CoopMarketSync;
 import coop.campaign.CoopMissionBoardSync;
+import coop.campaign.CoopSkeletonMutationWatcher;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopFleetVisibilityProbe;
@@ -39,8 +44,10 @@ import coop.time.CoopSharedPauseCoordinator;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -190,6 +197,7 @@ public final class CoopAgentCommands {
         map.put("barpool", CoopAgentCommands::barpool);
         map.put("survey", CoopAgentCommands::survey);
         map.put("visibility", CoopAgentCommands::visibility);
+        map.put("colonizable", CoopAgentCommands::colonizable);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("ability", CoopAgentCommands::ability);
@@ -649,6 +657,291 @@ public final class CoopAgentCommands {
         out.put("viewCount", viewJson.length());
         out.put("view", viewJson);
         return out;
+    }
+
+    // ---- colonizable: naming a Phase 24 colony target without searching the map -------------------
+
+    /** Rows returned when the caller does not say. Enough to choose from, short enough to read. */
+    static final int COLONIZABLE_DEFAULT_LIMIT = 10;
+
+    /** Hard ceiling on {@code limit}, so one query cannot dump ~1500 planets down the socket. */
+    static final int COLONIZABLE_MAX_LIMIT = 200;
+
+    /**
+     * One uncolonized planet, reduced to what naming a colony target turns on.
+     *
+     * <p>{@code distanceLy} is hyperspace distance from the player fleet to the planet's system and is
+     * {@code 0} for anything in the fleet's own system; {@code distanceSu} is the in-system distance
+     * and is {@code 0} for everything else, so the pair sorts "here first, then nearest".
+     */
+    record ColonizableCandidate(String planetId, String name, String type, boolean gasGiant,
+                                String systemId, String systemName, float distanceLy,
+                                float distanceSu, float hazard, String surveyLevel,
+                                boolean unexploredRuins, List<String> conditions) {
+    }
+
+    /** Nearest first: light years, then in-system distance, then id so the order never wobbles. */
+    static final Comparator<ColonizableCandidate> COLONIZABLE_ORDER =
+            Comparator.comparingDouble(ColonizableCandidate::distanceLy)
+                    .thenComparingDouble(ColonizableCandidate::distanceSu)
+                    .thenComparing(ColonizableCandidate::planetId);
+
+    /**
+     * The uncolonized planets nearest the local player fleet, so the Phase 24 smoke can name a colony
+     * target instead of hunting the map for one.
+     *
+     * <p><b>Pure query, any role.</b> It reads local engine state and writes nothing, so it answers on
+     * host, guest and a session-less instance alike — same contract as {@code markets} and
+     * {@code fleets}, and for the same reason. It is also deliberately diffable: two clients whose
+     * worldgen agrees must return the same planets in the same order.
+     *
+     * <p><b>What "colonizable" means here is vanilla's own test</b>, not a heuristic — see
+     * {@link #colonizableSystem} and {@link #colonizableCandidate} for the evidence behind each gate.
+     *
+     * <p><b>Two of vanilla's gates are reported rather than applied, on purpose.</b> A full survey
+     * ({@code rules.csv}'s {@code $market.isSurveyed}, and {@code PlanetSurveyPanel} opening its
+     * colonize screen only at {@code SurveyLevel.FULL}) and the absence of unexplored ruins
+     * ({@code !$market.hasUnexploredRuins}, "The ruins on this planet must be explored before a
+     * colonization effort can proceed") both block the button — but both are states the run itself
+     * changes, the first with the {@code surveyset} verb and the second by salvaging. Filtering on
+     * them would hide exactly the targets this verb exists to hand to the caller, so they ride along
+     * as the {@code surveyLevel} and {@code unexploredRuins} fields instead. Everything else that can
+     * still change under the caller — crew and machinery in the hold, a hostile fleet in sensor range,
+     * a territorial claim on the system — is neither filtered nor reported: none of it is a property
+     * of the planet.
+     *
+     * <p>Args: {@code limit} (default {@value #COLONIZABLE_DEFAULT_LIMIT}, 1..{@value
+     * #COLONIZABLE_MAX_LIMIT}) and {@code maxLy} (0 or absent = no range filter).
+     */
+    static JSONObject colonizable(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CampaignFleetAPI player = requirePlayerFleet(sector);
+        int limit = optionalInt(args, "limit", COLONIZABLE_DEFAULT_LIMIT);
+        if (limit < 1 || limit > COLONIZABLE_MAX_LIMIT) {
+            throw new IllegalArgumentException("limit must be between 1 and " + COLONIZABLE_MAX_LIMIT
+                    + ", got " + limit);
+        }
+        double maxLy = optionalDouble(args, "maxLy", 0d);
+
+        List<ColonizableCandidate> all = colonizableCandidates(sector, player);
+        List<ColonizableCandidate> shown = selectColonizable(all, limit, maxLy);
+
+        LocationAPI here = player.getContainingLocation();
+        JSONObject out = new JSONObject();
+        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("limit", limit);
+        out.put("maxLy", round((float) maxLy));
+        // Everything that passed the filters, before maxLy and limit trimmed the list: "none nearby"
+        // and "none at all" are different answers and the caller has to be able to tell them apart.
+        out.put("candidateCount", all.size());
+        out.put("count", shown.size());
+
+        JSONArray planets = new JSONArray();
+        for (ColonizableCandidate candidate : shown) {
+            JSONObject row = new JSONObject();
+            row.put("planetId", candidate.planetId());
+            row.put("name", candidate.name());
+            row.put("type", candidate.type());
+            row.put("gasGiant", candidate.gasGiant());
+            row.put("systemId", candidate.systemId());
+            row.put("systemName", candidate.systemName());
+            row.put("distanceLy", round(candidate.distanceLy()));
+            row.put("distanceSu", round(candidate.distanceSu()));
+            row.put("hazard", round(candidate.hazard()));
+            row.put("surveyLevel", candidate.surveyLevel());
+            row.put("unexploredRuins", candidate.unexploredRuins());
+            row.put("conditions", new JSONArray(candidate.conditions()));
+            planets.put(row);
+        }
+        out.put("planets", planets);
+        return out;
+    }
+
+    /** Range filter, then nearest-first order, then the cap. No candidates is an empty list, not an error. */
+    static List<ColonizableCandidate> selectColonizable(List<ColonizableCandidate> candidates,
+                                                        int limit, double maxLy) {
+        List<ColonizableCandidate> kept = new ArrayList<>();
+        for (ColonizableCandidate candidate : candidates) {
+            if (candidate == null) {
+                continue;
+            }
+            if (maxLy > 0d && candidate.distanceLy() > maxLy) {
+                continue;
+            }
+            kept.add(candidate);
+        }
+        kept.sort(COLONIZABLE_ORDER);
+        if (limit > 0 && kept.size() > limit) {
+            return new ArrayList<>(kept.subList(0, limit));
+        }
+        return kept;
+    }
+
+    /** Every uncolonized planet in the sector, unsorted and untrimmed. */
+    static List<ColonizableCandidate> colonizableCandidates(SectorAPI sector, CampaignFleetAPI player) {
+        LocationAPI here = player.getContainingLocation();
+        List<ColonizableCandidate> found = new ArrayList<>();
+        CoopLocations.forEach(sector, location -> {
+            if (!colonizableSystem(location)) {
+                return;
+            }
+            List<PlanetAPI> planets = location.getPlanets();
+            if (planets == null) {
+                return;
+            }
+            for (PlanetAPI planet : planets) {
+                ColonizableCandidate candidate = colonizableCandidate(planet, location, player, here);
+                if (candidate != null) {
+                    found.add(candidate);
+                }
+            }
+        });
+        return found;
+    }
+
+    /**
+     * Whether a colony could exist in this location at all.
+     *
+     * <p><b>Where the real gate lives.</b> {@code rules.csv} only decides whether the player reaches
+     * the survey panel; the button that actually starts a colony is disabled by the core UI class
+     * {@code com.fs.starfarer.campaign.ui.marketinfo.PlanetSurveyPanel}, and two of its four location
+     * checks appear nowhere in {@code rules.csv} or the API sources. Each disqualifier below is one of
+     * that panel's, with the tooltip it prints:
+     *
+     * <ul>
+     * <li><b>{@link Tags#SYSTEM_CUT_OFF_FROM_HYPER}</b> — "This star system is cut off from hyperspace
+     * and can not be colonized." Also the only one visible from script:
+     * {@code CoreCampaignPluginImpl.java:207-209} derives the {@code $systemCutOffFromHyper} rules
+     * variable from this tag, and {@code rules.csv}'s {@code surveySystemIsCutOffCanNotColonize} row
+     * runs {@code SetEnabled surveyPerform false} off it. Set by {@code GateExplosionScript}
+     * ({@code :80-84}) precisely so a colony cannot be planted mid-explosion, and removed again when a
+     * jump point comes back.</li>
+     * <li><b>{@link Tags#SYSTEM_ABYSSAL}</b> — "This planet is deep in abyssal hyperspace and can not
+     * be colonized." Core-UI only.</li>
+     * <li><b>{@link LocationAPI#isDeepSpace()}</b> — "This planet is in deep space and can not be
+     * colonized." Core-UI only, and the one that rules out the hand-built deep-space pockets.</li>
+     * <li><b>Hyperspace itself</b> — it carries no planets and no planet-condition markets. The guard
+     * is here so the walk says so rather than relying on the planet loop coming up empty.</li>
+     * </ul>
+     *
+     * <p><b>{@link Tags#TEMPORARY_LOCATION} is the one deliberate tightening past vanilla.</b> It is
+     * not a colonize gate — it marks the throwaway systems the abyssal encounter generators mint and
+     * discard ({@code AbyssalRogueStellarObjectEPEC.java:112}), and vanilla's own system scans skip
+     * them for that reason ({@code NamelessRock.java:171}). Every vanilla carrier of it is already
+     * abyssal deep space, so this line changes no answer today; it is here so a modded temporary
+     * system that is neither cannot be offered as a target that will not exist next month.
+     *
+     * <p><b>{@link Tags#THEME_HIDDEN} is deliberately not a disqualifier.</b> It marks the locations
+     * that stay off the map until found, and nothing in the colonize path reads it — the vanilla
+     * systems carrying it are blocked by abyssal or deep space instead. Filtering on the theme tag
+     * would be filtering on the wrong thing.
+     */
+    static boolean colonizableSystem(LocationAPI location) {
+        if (location == null || location.isHyperspace() || location.isDeepSpace()) {
+            return false;
+        }
+        return !location.hasTag(Tags.SYSTEM_CUT_OFF_FROM_HYPER)
+                && !location.hasTag(Tags.SYSTEM_ABYSSAL)
+                && !location.hasTag(Tags.TEMPORARY_LOCATION);
+    }
+
+    /**
+     * One planet's candidacy, or null if it is not one.
+     *
+     * <p><b>{@code isPlanetConditionMarketOnly()} is the uncolonized test</b>, and it is the same flag
+     * {@code CoopColonySync} gates its own capture on. Every planet carries a gen-time
+     * planet-condition market; colonizing <em>promotes</em> that market and clears the flag, and an NPC
+     * colony never had it set. It is also precisely what {@code rules.csv} requires before it offers
+     * "Establish a colony" ({@code surveyAddOptionPerformedAlready}).
+     *
+     * <p><b>Stars are excluded</b>: {@code rules.csv}'s {@code surveyStar} row wins at score 1000 on
+     * anything carrying the {@code star} tag and offers only "Leave", so a star never reaches the
+     * survey panel however its market is flagged.
+     *
+     * <p><b>Gas giants are not excluded.</b> Vanilla colonizes them happily —
+     * {@code PlanetAPI.isGasGiant()} is not referenced anywhere in the colonize path — so it is
+     * reported as a field rather than used as a filter. A market-less planet is skipped for the same
+     * reason a colonized one is: no market, no survey dialog, no colony.
+     */
+    private static ColonizableCandidate colonizableCandidate(PlanetAPI planet, LocationAPI location,
+                                                             CampaignFleetAPI player, LocationAPI here) {
+        try {
+            if (planet == null || planet.isStar() || planet.getId() == null) {
+                return null;
+            }
+            MarketAPI market = planet.getMarket();
+            if (market == null || !market.isPlanetConditionMarketOnly()) {
+                return null;
+            }
+            MarketAPI.SurveyLevel level = market.getSurveyLevel();
+            return new ColonizableCandidate(
+                    nullSafe(planet.getId()),
+                    nullSafe(planet.getName()),
+                    nullSafe(planet.getTypeId()),
+                    planet.isGasGiant(),
+                    nullSafe(location.getId()),
+                    nullSafe(location.getName()),
+                    distanceLy(planet, player),
+                    location == here ? distanceSu(planet, player) : 0f,
+                    market.getHazardValue(),
+                    level == null ? "" : level.name(),
+                    unexploredRuins(market),
+                    conditionIds(market));
+        } catch (RuntimeException | LinkageError ex) {
+            // One unreadable planet must not cost the caller every other candidate.
+            return null;
+        }
+    }
+
+    /**
+     * Hyperspace distance, the way vanilla measures "how far is that planet": both endpoints through
+     * {@code getLocationInHyperspace()}, which for anything inside a star system is that system's
+     * hyperspace position, so two planets in one system are equidistant and a planet in the fleet's own
+     * system is at zero. Null-guarded because {@code Misc.getDistanceLY} is not.
+     */
+    private static float distanceLy(SectorEntityToken from, SectorEntityToken to) {
+        Vector2f a = from.getLocationInHyperspace();
+        Vector2f b = to.getLocationInHyperspace();
+        if (a == null || b == null) {
+            return 0f;
+        }
+        return Misc.getDistanceLY(a, b);
+    }
+
+    private static float distanceSu(SectorEntityToken from, SectorEntityToken to) {
+        Vector2f a = from.getLocation();
+        Vector2f b = to.getLocation();
+        if (a == null || b == null) {
+            return 0f;
+        }
+        return Misc.getDistance(a, b);
+    }
+
+    /**
+     * Vanilla's {@code Misc.hasUnexploredRuins} without its null-memory NPE: ruins block the colonize
+     * option ({@code rules.csv} requires {@code !$market.hasUnexploredRuins}), but salvaging them
+     * unblocks it, so this rides along as a field rather than removing the planet.
+     */
+    private static boolean unexploredRuins(MarketAPI market) {
+        if (!Misc.hasRuins(market)) {
+            return false;
+        }
+        MemoryAPI memory = market.getMemoryWithoutUpdate();
+        return memory == null || !memory.getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG);
+    }
+
+    /** Sorted, so two clients' rows for the same planet compare as equal rather than as a reorder. */
+    private static List<String> conditionIds(MarketAPI market) {
+        Set<String> ids = new TreeSet<>();
+        List<MarketConditionAPI> conditions = market.getConditions();
+        if (conditions != null) {
+            for (MarketConditionAPI condition : conditions) {
+                if (condition != null && condition.getId() != null) {
+                    ids.add(condition.getId());
+                }
+            }
+        }
+        return new ArrayList<>(ids);
     }
 
     // ---- Setup actions --------------------------------------------------------------------------
@@ -1194,6 +1487,31 @@ public final class CoopAgentCommands {
     private static String optionalString(JSONObject args, String key) {
         String value = args.optString(key, "");
         return value == null ? "" : value.trim();
+    }
+
+    /** Absent means the fallback; present-but-unreadable is a refusal, never a silent fallback. */
+    private static int optionalInt(JSONObject args, String key, int fallback) {
+        if (!args.has(key)) {
+            return fallback;
+        }
+        double value = args.optDouble(key, Double.NaN);
+        if (Double.isNaN(value) || value != Math.rint(value)) {
+            throw new IllegalArgumentException(key + " must be a whole number, got "
+                    + args.optString(key, ""));
+        }
+        return (int) value;
+    }
+
+    private static double optionalDouble(JSONObject args, String key, double fallback) {
+        if (!args.has(key)) {
+            return fallback;
+        }
+        double value = args.optDouble(key, Double.NaN);
+        if (Double.isNaN(value)) {
+            throw new IllegalArgumentException(key + " must be numeric, got "
+                    + args.optString(key, ""));
+        }
+        return value;
     }
 
     private static double requiredDouble(JSONObject args, String key) {

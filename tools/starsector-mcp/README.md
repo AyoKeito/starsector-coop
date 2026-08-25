@@ -110,12 +110,35 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `barpool` | none | ordered offer list plus the bar's render order |
 | `survey` | `{systemId}` or `{systemId: "all"}` | planetId to survey level and ruins state |
 | `visibility` | `{fleetId?}` | `lines`, the probe's text dump, plus `view`, a coopFleetId to visibility-level map |
+| `colonizable` | `{limit?, maxLy?}` | uncolonized planets nearest the local player fleet, nearest first |
 
 ```
 ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
 ```
 
 `markets` is an index, not a dock visit: it enumerates and stocks nothing. Use it to find the `marketId` that `market` wants. `survey` takes the same system id every other verb emits as a `locationId` (`system_16cf` and the like), not the display name.
+
+`colonizable` answers "where do I put a colony" without searching the map, which is what the Phase 24 smoke needs before it can use `teleport`, `surveyset` and `give`. `limit` defaults to 10 and must be 1..200; `maxLy` is a range filter in light years, and 0 or absent means no filter. `candidateCount` is every planet that passed the filters, `count` is how many survived `maxLy` and `limit` — so "none within 8 LY" and "none anywhere" read differently.
+
+```
+ss_dump(instance: "host", what: "colonizable", args: { "limit": 3, "maxLy": 8 })
+
+{ "fromLocationId": "corvus", "limit": 3, "maxLy": 8, "candidateCount": 214, "count": 3,
+  "planets": [
+    { "planetId": "ancyra", "name": "Ancyra", "type": "terran", "gasGiant": false,
+      "systemId": "corvus", "systemName": "Corvus Star System",
+      "distanceLy": 0, "distanceSu": 1487.5, "hazard": 1.25,
+      "surveyLevel": "FULL", "unexploredRuins": false,
+      "conditions": ["farmland_poor", "habitable", "ore_moderate"] },
+    ...
+  ] }
+```
+
+`distanceLy` is hyperspace distance to the planet's system and is 0 for anything in the fleet's own system; `distanceSu` is the in-system distance and is 0 for everything else, so the two together sort "here first, then nearest". Sorting is `distanceLy`, then `distanceSu`, then `planetId`, and the condition list is sorted, so two clients whose worldgen agrees return byte-identical rows and `ss_diff` on this verb is a real worldgen check.
+
+What counts as colonizable is vanilla's own test, not a heuristic. A candidate is a non-star planet whose market is `planetConditionMarketOnly` — the flag colonizing clears, and the one `rules.csv` requires before it offers "Establish a colony" — in a system that is not hyperspace, not deep space, not `system_abyssal`, and not `system_cut_off_from_hyper`. The last three are the tooltips `PlanetSurveyPanel` prints when it disables the colonize button, and two of them appear in no rule and in no API source. Gas giants are in; vanilla colonizes them. `temporary_location` is filtered too, which is the one deliberate step past vanilla: those systems are minted and discarded by the abyssal encounter generators, so offering one as a target would be offering something that stops existing.
+
+Two of vanilla's gates are reported instead of applied, because the run itself can clear them: `surveyLevel` (colonizing needs `FULL`, which is what `ss_act(verb: "surveyset")` is for) and `unexploredRuins` (salvage them and the button unlocks). Filtering on those would hide exactly the planets the smoke is allowed to set up.
 
 `visibility.view` is the half worth diffing. The guest reports the visibility level it actually has on each fleet; the host reports its estimate of that same level, asked of the engine through the guest's reverse mirror. Equal maps mean the two sensor models agree, and every key that differs is a replication gap. `lines` is the same computation as text for reading, which is why it is on the default ignore list below.
 

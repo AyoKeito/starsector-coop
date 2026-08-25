@@ -579,6 +579,99 @@ test('ss_diff reports equal when both instances agree', async (t) => {
   assert.equal(result.counts.differing, 0);
 });
 
+const COLONIZABLE = {
+  fromLocationId: 'corvus',
+  limit: 10,
+  maxLy: 0,
+  candidateCount: 2,
+  count: 2,
+  planets: [
+    {
+      planetId: 'ancyra',
+      name: 'Ancyra',
+      type: 'terran',
+      gasGiant: false,
+      systemId: 'corvus',
+      systemName: 'Corvus Star System',
+      distanceLy: 0,
+      distanceSu: 1487.5,
+      hazard: 1.25,
+      surveyLevel: 'FULL',
+      unexploredRuins: false,
+      conditions: ['farmland_poor', 'habitable', 'ore_moderate']
+    },
+    {
+      planetId: 'aleph_gas',
+      name: 'Aleph',
+      type: 'gas_giant',
+      gasGiant: true,
+      systemId: 'aleph',
+      systemName: 'Aleph Star System',
+      distanceLy: 5,
+      distanceSu: 0,
+      hazard: 1.5,
+      surveyLevel: 'NONE',
+      unexploredRuins: true,
+      conditions: ['ruins_scattered', 'volatiles_plentiful']
+    }
+  ]
+};
+
+test('colonizable is a query verb, keyed by planetId and diffable across instances', async (t) => {
+  const hostBridge = new MockBridge((request) =>
+    request.cmd === 'colonizable'
+      ? { ok: true, data: COLONIZABLE }
+      : { ok: false, error: 'IllegalArgumentException: unknown command' }
+  );
+  // Same two planets, opposite order: worldgen agrees, the guest's walk just found them the other
+  // way around. That must diff as equal.
+  const guestBridge = new MockBridge(() => ({
+    ok: true,
+    data: { ...COLONIZABLE, planets: [COLONIZABLE.planets[1], COLONIZABLE.planets[0]] }
+  }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssDump(bridges, 'host', 'colonizable', { limit: 3, maxLy: 8 }), COLONIZABLE);
+  assert.deepEqual(hostBridge.requests[0].args, { limit: 3, maxLy: 8 });
+
+  await ssDump(bridges, 'host', 'colonizable');
+  assert.deepEqual(hostBridge.requests[1].args, {}, 'no args means the defaults, not a bad request');
+
+  const result = await ssDiff(bridges, 'colonizable');
+  assert.equal(result.equal, true, 'the same planets in a different order are not a divergence');
+
+  // A read-only verb must stay out of ss_act, the same way markets does.
+  await assert.rejects(() => ssAct(bridges, 'host', 'colonizable', {}), /unknown action verb "colonizable"/);
+});
+
+test('a colonizable divergence is reported per planet, not as one opaque array difference', () => {
+  const guest = {
+    ...COLONIZABLE,
+    planets: [
+      { ...COLONIZABLE.planets[0], surveyLevel: 'PRELIMINARY' },
+      COLONIZABLE.planets[1]
+    ]
+  };
+
+  const result = diffJson(COLONIZABLE, guest);
+
+  assert.equal(result.equal, false);
+  assert.deepEqual(result.differences, [
+    {
+      path: '$.planets[planetId=ancyra].surveyLevel',
+      host: 'FULL',
+      guest: 'PRELIMINARY'
+    }
+  ]);
+});
+
 test('expedition is an action verb, passed through with its optional factionId', async (t) => {
   const created = {
     role: 'HOST',

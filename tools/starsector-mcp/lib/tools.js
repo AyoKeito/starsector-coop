@@ -5,7 +5,16 @@ import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
 import { DEFAULT_IGNORE_KEYS, diffJson } from './diff.js';
 
 /** Read-only verbs. ss_dump and ss_diff accept these. */
-export const QUERY_VERBS = ['status', 'fleets', 'market', 'markets', 'barpool', 'survey', 'visibility'];
+export const QUERY_VERBS = [
+  'status',
+  'fleets',
+  'market',
+  'markets',
+  'barpool',
+  'survey',
+  'visibility',
+  'colonizable'
+];
 
 /** State-changing verbs. ss_act accepts these. */
 export const ACTION_VERBS = [
