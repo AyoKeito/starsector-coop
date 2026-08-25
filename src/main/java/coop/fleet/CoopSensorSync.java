@@ -238,14 +238,28 @@ public final class CoopSensorSync {
 
     // ---- wire codec ------------------------------------------------------------------------------
 
-    /** Appends the five sensor fields, pipe-prefixed, in the order {@link #parse} expects. */
+    /**
+     * Appends the five sensor fields, pipe-prefixed, in the order {@link #parse} expects. Values are
+     * quantized for the wire ({@link CoopFleetCodec#quantize}): 0.1 for the profile, flat and percent
+     * terms and the strength — all engine units in the hundreds, where a tenth is far inside the
+     * width of a visibility band — and 0.001 for the mult, which sits around 1.
+     *
+     * <p>The profile and the strength go out through {@link CoopFleetCodec#encodePositiveFloat}, since
+     * a zero in either is the "no sensor identity" sentinel {@link Profile#isKnown()} and
+     * {@link #applySensorStrength} test, not a magnitude the grid may round onto.
+     */
     public static void append(StringBuilder out, Profile profile) {
         Profile safe = profile == null ? Profile.UNKNOWN : profile;
-        out.append('|').append(Float.toString(safe.sensorProfile()))
-                .append('|').append(Float.toString(safe.detectedRangeFlat()))
-                .append('|').append(Float.toString(safe.detectedRangePercent()))
-                .append('|').append(Float.toString(safe.detectedRangeMult()))
-                .append('|').append(Float.toString(safe.sensorStrength()));
+        out.append('|').append(CoopFleetCodec.encodePositiveFloat(safe.sensorProfile(),
+                        CoopFleetCodec.SENSOR_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(safe.detectedRangeFlat(),
+                        CoopFleetCodec.SENSOR_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(safe.detectedRangePercent(),
+                        CoopFleetCodec.SENSOR_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(safe.detectedRangeMult(),
+                        CoopFleetCodec.SENSOR_MULT_STEP))
+                .append('|').append(CoopFleetCodec.encodePositiveFloat(safe.sensorStrength(),
+                        CoopFleetCodec.SENSOR_STEP));
     }
 
     /** Reads the five sensor fields starting at {@code offset} in a split record. */

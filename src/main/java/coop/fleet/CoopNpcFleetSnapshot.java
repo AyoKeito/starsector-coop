@@ -60,10 +60,10 @@ public record CoopNpcFleetSnapshot(String coopFleetId, String factionId, String 
                 .append('|').append(CoopFleetCodec.escape(factionId))
                 .append('|').append(CoopFleetCodec.escape(name))
                 .append('|').append(CoopFleetCodec.escape(locationId))
-                .append('|').append(Float.toString(x))
-                .append('|').append(Float.toString(y))
-                .append('|').append(Float.toString(velocityX))
-                .append('|').append(Float.toString(velocityY))
+                .append('|').append(CoopFleetCodec.encodeFloat(x, CoopFleetCodec.POSITION_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(y, CoopFleetCodec.POSITION_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(velocityX, CoopFleetCodec.POSITION_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(velocityY, CoopFleetCodec.POSITION_STEP))
                 .append('|').append(transponderOn ? '1' : '0');
         CoopSensorSync.append(out, sensors);
         out.append('|').append(CoopFleetCodec.escape(aiAssignmentSummary))

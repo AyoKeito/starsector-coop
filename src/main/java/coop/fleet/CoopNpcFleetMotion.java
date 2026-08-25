@@ -33,6 +33,7 @@ public record CoopNpcFleetMotion(String coopFleetId, String locationId,
         sensors = sensors == null ? CoopSensorSync.Profile.UNKNOWN : sensors;
     }
 
+    /** Batch wire form; coordinates, velocities and the sensor terms are quantized on the way out. */
     public static String encodeBatch(List<CoopNpcFleetMotion> motions) {
         List<CoopNpcFleetMotion> safe = motions == null ? List.of() : motions;
         StringBuilder out = new StringBuilder(16 + safe.size() * 48);
@@ -41,10 +42,14 @@ public record CoopNpcFleetMotion(String coopFleetId, String locationId,
             out.append('\n')
                     .append(CoopFleetCodec.escape(motion.coopFleetId()))
                     .append('|').append(CoopFleetCodec.escape(motion.locationId()))
-                    .append('|').append(Float.toString(motion.x()))
-                    .append('|').append(Float.toString(motion.y()))
-                    .append('|').append(Float.toString(motion.velocityX()))
-                    .append('|').append(Float.toString(motion.velocityY()));
+                    .append('|').append(CoopFleetCodec.encodeFloat(motion.x(),
+                            CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(CoopFleetCodec.encodeFloat(motion.y(),
+                            CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(CoopFleetCodec.encodeFloat(motion.velocityX(),
+                            CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(CoopFleetCodec.encodeFloat(motion.velocityY(),
+                            CoopFleetCodec.POSITION_STEP));
             CoopSensorSync.append(out, motion.sensors());
         }
         return out.toString();

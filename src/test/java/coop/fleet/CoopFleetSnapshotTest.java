@@ -184,6 +184,84 @@ class CoopFleetSnapshotTest {
         assertEquals(CoopFleetSnapshot.computeFleetHash(members), snapshot.fleetHash());
     }
 
+    // ---- wire-format float quantization --------------------------------------------------------
+
+    @Test
+    void onGridPositionsAndFractionsRoundTripExactly() {
+        // Multiples of the 0.25 su / 0.001 fraction grids survive the encode untouched.
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "p1", "Alice", "corvus", -14625.25f, 3080.75f, -14f, 3.25f, "player", true,
+                sensors(650f, 420f),
+                List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela",
+                        0.85f, 0.667f)));
+
+        assertEquals(snapshot, CoopFleetSnapshot.decode(snapshot.encode()));
+    }
+
+    @Test
+    void offGridPositionsAndFractionsAreQuantizedToShortDecimals() {
+        // Live values are arbitrary floats; at full precision every one of these costs 8-11 digits,
+        // ten times a second. The header is x|y|vx|vy at indices 3-6, cr and hull at member 5 and 6.
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "p1", "Alice", "corvus", -2324.3894f, 14625.111f, -14.077f, 3.3333333f, "player", true,
+                sensors(650f, 420f),
+                List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela",
+                        0.84999996f, 0.6666667f)));
+
+        String[] lines = snapshot.encode().split("\n", -1);
+        List<String> header = CoopFleetCodec.split(lines[0]);
+        List<String> member = CoopFleetCodec.split(lines[1]);
+
+        assertEquals("-2324.5", header.get(3));
+        assertEquals("14625.0", header.get(4));
+        assertEquals("-14.0", header.get(5));
+        assertEquals("3.25", header.get(6));
+        assertEquals("0.85", member.get(5));
+        assertEquals("0.667", member.get(6));
+
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+        assertEquals(-2324.5f, decoded.x());
+        assertEquals(0.85f, decoded.members().get(0).cr());
+        // Quantized once, stable forever: re-encoding the decoded snapshot is byte-identical.
+        assertEquals(snapshot.encode(), decoded.encode());
+    }
+
+    @Test
+    void quantizationNeverReachesTheFleetHashOrTheSnapshotItself() {
+        // The hash gates the roster teardown/rebuild and takes structural strings only (see
+        // fleetHashIgnoresCrAndHullFractionEntirely). Encoding must not round anything behind it, and
+        // must not mutate the in-memory snapshot the local game still reads.
+        List<CoopFleetSnapshot.Member> members = List.of(
+                new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela",
+                        0.84999996f, 0.6666667f));
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "p1", "Alice", "corvus", -2324.3894f, 14625.111f, -14.077f, 3.3333333f, "player", true,
+                sensors(650.37f, 419.9666f), members);
+
+        String encoded = snapshot.encode();
+
+        assertEquals(CoopFleetSnapshot.computeFleetHash(members), snapshot.fleetHash());
+        assertEquals(-2324.3894f, snapshot.x());
+        assertEquals(0.84999996f, snapshot.members().get(0).cr());
+        assertEquals(650.37f, snapshot.sensors().sensorProfile());
+        // The hash on the wire is the one computed from the unquantized members.
+        assertEquals(snapshot.fleetHash(),
+                CoopFleetCodec.split(encoded.split("\n", -1)[0]).get(14));
+    }
+
+    @Test
+    void quantizeSnapsToTheDecimalGridAndLeavesOddValuesAlone() {
+        assertEquals(0.85f, CoopFleetCodec.quantize(0.84999996f, CoopFleetCodec.FRACTION_STEP));
+        assertEquals(-14625.25f, CoopFleetCodec.quantize(-14625.3f, CoopFleetCodec.POSITION_STEP));
+        assertEquals(0f, CoopFleetCodec.quantize(0.1f, CoopFleetCodec.POSITION_STEP));
+        // Non-finite and out-of-grid-range values pass through rather than turning into garbage.
+        assertEquals(Float.NaN, CoopFleetCodec.quantize(Float.NaN, CoopFleetCodec.POSITION_STEP));
+        assertEquals(Float.POSITIVE_INFINITY,
+                CoopFleetCodec.quantize(Float.POSITIVE_INFINITY, CoopFleetCodec.POSITION_STEP));
+        assertEquals(Float.MAX_VALUE,
+                CoopFleetCodec.quantize(Float.MAX_VALUE, CoopFleetCodec.POSITION_STEP));
+    }
+
     /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */
     private static CoopSensorSync.Profile sensors(float profile, float strength) {
         return new CoopSensorSync.Profile(profile, 0f, 0f, 1f, strength);

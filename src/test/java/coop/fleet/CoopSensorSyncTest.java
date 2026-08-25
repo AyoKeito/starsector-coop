@@ -135,7 +135,8 @@ class CoopSensorSyncTest {
 
     @Test
     void theSensorFieldsRoundTripThroughTheWireCodec() {
-        CoopSensorSync.Profile profile = new CoopSensorSync.Profile(650.5f, 1000f, -25f, 0.5f, 420.25f);
+        // On-grid values (0.1 for everything but the mult, which uses 0.001) round-trip exactly.
+        CoopSensorSync.Profile profile = new CoopSensorSync.Profile(650.5f, 1000f, -25f, 0.5f, 420.3f);
         StringBuilder out = new StringBuilder("prefix");
         CoopSensorSync.append(out, profile);
 
@@ -143,6 +144,47 @@ class CoopSensorSyncTest {
 
         assertEquals(1 + CoopSensorSync.FIELD_COUNT, fields.size());
         assertEquals(profile, CoopSensorSync.parse(fields, 1));
+    }
+
+    @Test
+    void offGridSensorValuesAreQuantizedToShortDecimalsOnTheWire() {
+        // Live engine values are arbitrary floats: a terrain-modified profile prints as "1234.5677"
+        // at full precision. Ten fields of that at 10 Hz per fleet is what the quantization is for.
+        CoopSensorSync.Profile profile = new CoopSensorSync.Profile(
+                1234.5677f, 4999.96f, -24.98f, 0.49999997f, 419.9666f);
+        StringBuilder out = new StringBuilder("prefix");
+        CoopSensorSync.append(out, profile);
+
+        List<String> fields = CoopFleetCodec.split(out.toString());
+
+        assertEquals("1234.6", fields.get(1));
+        assertEquals("5000.0", fields.get(2));
+        assertEquals("-25.0", fields.get(3));
+        assertEquals("0.5", fields.get(4));
+        assertEquals("420.0", fields.get(5));
+        // And the quantized form is what the receiver reconstructs, to the bit.
+        assertEquals(new CoopSensorSync.Profile(1234.6f, 5000f, -25f, 0.5f, 420f),
+                CoopSensorSync.parse(fields, 1));
+    }
+
+    @Test
+    void aTinyPositiveProfileOrStrengthNeverQuantizesIntoTheUnknownSentinel() {
+        // A zero profile means "capture failed" to isKnown(), and a mirror that never gets a profile
+        // hits the engine's !hasSensorProfile() branch, i.e. always identified. The 0.1 grid must not
+        // manufacture that from a real reading, however small.
+        StringBuilder out = new StringBuilder("prefix");
+        CoopSensorSync.append(out, new CoopSensorSync.Profile(0.02f, 0f, 0f, 1f, 0.04f));
+
+        CoopSensorSync.Profile decoded = CoopSensorSync.parse(CoopFleetCodec.split(out.toString()), 1);
+
+        assertTrue(decoded.isKnown());
+        assertEquals(0.1f, decoded.sensorProfile());
+        assertEquals(0.1f, decoded.sensorStrength());
+        // A genuine zero still encodes as zero.
+        StringBuilder unknown = new StringBuilder("prefix");
+        CoopSensorSync.append(unknown, CoopSensorSync.Profile.UNKNOWN);
+        assertEquals(CoopSensorSync.Profile.UNKNOWN,
+                CoopSensorSync.parse(CoopFleetCodec.split(unknown.toString()), 1));
     }
 
     @Test
