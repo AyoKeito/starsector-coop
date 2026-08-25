@@ -12,6 +12,7 @@ import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
 import com.fs.starfarer.api.campaign.listeners.PlayerColonizationListener;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.population.PopulationComposition;
+import coop.colony.CoopColonyManagement;
 import coop.colony.CoopColonySync;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
@@ -228,7 +229,8 @@ class CoopColonyReplicatorTest {
                 "planet_eos", "market_planet_eos", "guest-player", "New Hope", "player", 3, false,
                 "FULL", true,
                 List.of(new CoopColonySync.ConditionState("population_3", true)),
-                List.of("population"), List.of("storage"));
+                List.of("population"), List.of("storage"),
+                List.of(new CoopColonyManagement.QueueItem("spaceport", 50_000)));
         return CoopMessages.colonyFounded("session-a", 1L, 0L, event.encode());
     }
 

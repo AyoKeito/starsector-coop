@@ -368,7 +368,7 @@ public final class CoopMessages {
      * Phase 24 milestone 2: a colony either player just founded (reliable TCP, bidirectional).
      * {@code colony} is the self-contained delimited blob from
      * {@link coop.colony.CoopColonySync.Event#encode()} — header line plus one line per condition,
-     * industry and submarket, because the envelope parser has no arrays.
+     * industry, submarket and construction-queue entry, because the envelope parser has no arrays.
      *
      * <p>It carries both the planet's entity id and the market's id. The market is the planet's
      * gen-time planet-condition market, promoted in place rather than created, so its id

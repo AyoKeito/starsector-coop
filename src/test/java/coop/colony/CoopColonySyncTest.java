@@ -13,6 +13,7 @@ import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.MarketConditionSpecAPI;
+import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue;
 import com.fs.starfarer.api.impl.campaign.population.PopulationComposition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -80,6 +81,49 @@ class CoopColonySyncTest {
         assertEquals(event, CoopColonySync.decode(event.encode()));
     }
 
+    /**
+     * The defect this test exists for: vanilla colonization auto-queues a spaceport, so the founding
+     * payload has to carry a queue. Order is the build order and has to survive.
+     */
+    @Test
+    void theFoundingTimeConstructionQueueRoundTripsInOrder() {
+        CoopColonySync.Event event = withQueue(foundedEvent("host-player:1"),
+                List.of(new CoopColonyManagement.QueueItem("spaceport", 50_000),
+                        new CoopColonyManagement.QueueItem("mining", 60_000),
+                        new CoopColonyManagement.QueueItem("farming", 0)));
+
+        CoopColonySync.Event decoded = CoopColonySync.decode(event.encode());
+
+        assertEquals(event, decoded);
+        assertEquals(List.of("spaceport", "mining", "farming"),
+                decoded.queue().stream().map(CoopColonyManagement.QueueItem::industryId).toList());
+        assertEquals(60_000, decoded.queue().get(1).cost());
+    }
+
+    /** Zero {@code Q} lines is a legal payload, not a malformed one. */
+    @Test
+    void aFoundingWithAnEmptyQueueRoundTrips() {
+        CoopColonySync.Event event = withQueue(foundedEvent("host-player:2"), List.of());
+
+        CoopColonySync.Event decoded = CoopColonySync.decode(event.encode());
+
+        assertEquals(event, decoded);
+        assertTrue(decoded.queue().isEmpty());
+    }
+
+    @Test
+    void queueIndustryIdsCarryingDelimiterCharactersRoundTripExactly() {
+        CoopColonySync.Event event = withQueue(foundedEvent("host-player:3"),
+                List.of(new CoopColonyManagement.QueueItem("space|port\nII", 1),
+                        new CoopColonyManagement.QueueItem("min\\ing", -1)));
+
+        CoopColonySync.Event decoded = CoopColonySync.decode(event.encode());
+
+        assertEquals(event, decoded);
+        assertEquals("space|port\nII", decoded.queue().get(0).industryId());
+        assertEquals("min\\ing", decoded.queue().get(1).industryId());
+    }
+
     @Test
     void anAbandonedColonyRoundTrips() {
         CoopColonySync.Event event = CoopColonySync.Event.abandoned(
@@ -103,7 +147,8 @@ class CoopColonySyncTest {
                 List.of(new CoopColonySync.ConditionState("cond|ition", true),
                         new CoopColonySync.ConditionState("hot\\", false)),
                 List.of("ind|ustry", "pop\nulation"),
-                List.of("sub|market"));
+                List.of("sub|market"),
+                List.of(new CoopColonyManagement.QueueItem("queued|industry", 7)));
 
         CoopColonySync.Event decoded = CoopColonySync.decode(event.encode());
 
@@ -119,7 +164,7 @@ class CoopColonySyncTest {
         String name = "Новая Надежда – 星海";
         CoopColonySync.Event event = new CoopColonySync.Event("host-player:9",
                 CoopColonySync.Kind.FOUNDED, "planet_eos", "market_planet_eos", "host-player",
-                name, "player", 4, false, "FULL", true, List.of(), List.of(), List.of());
+                name, "player", 4, false, "FULL", true, List.of(), List.of(), List.of(), List.of());
 
         assertEquals(name, CoopColonySync.decode(event.encode()).name());
     }
@@ -179,7 +224,7 @@ class CoopColonySyncTest {
         ledger.apply(foundedEvent("host-player:1"));
         ledger.apply(new CoopColonySync.Event("host-player:2", CoopColonySync.Kind.FOUNDED,
                 "planet_yama", "market_planet_yama", "host-player", "Yama", "player", 3, false,
-                "FULL", true, List.of(), List.of(), List.of()));
+                "FULL", true, List.of(), List.of(), List.of(), List.of()));
 
         assertEquals(CoopColonySync.Kind.FOUNDED, ledger.latestKind("planet_eos"));
         assertEquals(CoopColonySync.Kind.FOUNDED, ledger.latestKind("planet_yama"));
@@ -208,7 +253,9 @@ class CoopColonySyncTest {
         assertEquals("FULL", event.surveyLevel());
         assertTrue(event.freePort());
         assertTrue(event.storageUnlocked(), "a storage submarket means founding paid to unlock it");
-        assertEquals(List.of("population", "spaceport"), event.industries());
+        assertEquals(List.of("population"), event.industries());
+        assertEquals(List.of(new CoopColonyManagement.QueueItem("spaceport", 50_000)), event.queue(),
+                "vanilla's auto-queued spaceport is read in the same pass as the industries");
         assertEquals(List.of("local_resources", "storage"), event.submarkets());
         assertEquals(List.of("habitable", "population_3", "decivilized_subpop"),
                 event.conditions().stream().map(CoopColonySync.ConditionState::conditionId).toList());
@@ -338,7 +385,10 @@ class CoopColonySyncTest {
         assertEquals("player", market.factionId);
         assertEquals(3, market.size);
         assertEquals(MarketAPI.SurveyLevel.FULL, market.surveyLevel);
-        assertEquals(List.of("population", "spaceport"), List.copyOf(market.industries));
+        assertEquals(List.of("population"), List.copyOf(market.industries));
+        assertEquals(List.of("spaceport"), queueIds(market),
+                "the mirror has to start the auto-queued spaceport itself");
+        assertEquals(50_000, market.queue.getItems().get(0).cost);
         assertEquals(List.of("local_resources", "storage"), List.copyOf(market.submarkets.keySet()));
         assertEquals(List.of("habitable", "population_3", "decivilized_subpop"),
                 market.conditions.stream().map(FakeCondition::id).toList());
@@ -379,10 +429,43 @@ class CoopColonySyncTest {
         CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
         CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
 
-        assertEquals(List.of("population", "spaceport"), List.copyOf(market.industries));
+        assertEquals(List.of("population"), List.copyOf(market.industries));
         assertEquals(2, market.submarkets.size());
         assertEquals(3, market.conditions.size());
+        assertEquals(List.of("spaceport"), queueIds(market), "the queue must not be appended to twice");
         assertEquals(1, market.addMarketCalls, "already in the economy: do not add it twice");
+    }
+
+    /**
+     * The queue reconcile is latest-wins, not additive: a mirror that already holds a stale queue —
+     * a re-founding on the same planet, a management report that raced ahead — ends up with exactly
+     * the reported list, in the reported order.
+     */
+    @Test
+    void applyingAFoundedColonyReconcilesAQueueThatIsAlreadyPopulated() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        market.queue.addToEnd("spaceport", 50_000);
+        market.queue.addToEnd("mining", 60_000);
+        Global.setSector(sector.proxy());
+
+        CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
+
+        assertEquals(List.of("spaceport"), queueIds(market),
+                "the reported queue replaces what was there rather than adding to it");
+    }
+
+    /** A colony really founded with an empty queue must mirror as empty, not as "unset". */
+    @Test
+    void applyingAFoundedColonyWithNoQueueClearsTheMirrorsQueue() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        market.queue.addToEnd("spaceport", 50_000);
+        Global.setSector(sector.proxy());
+
+        CoopColonySync.applyToEngine(withQueue(foundedEvent("guest-player:1"), List.of()));
+
+        assertTrue(market.queue.getItems().isEmpty());
     }
 
     /**
@@ -477,8 +560,25 @@ class CoopColonySyncTest {
                 List.of(new CoopColonySync.ConditionState("habitable", true),
                         new CoopColonySync.ConditionState("population_3", true),
                         new CoopColonySync.ConditionState("decivilized_subpop", true)),
-                List.of("population", "spaceport"),
-                List.of("local_resources", "storage"));
+                List.of("population"),
+                List.of("local_resources", "storage"),
+                List.of(new CoopColonyManagement.QueueItem("spaceport", 50_000)));
+    }
+
+    private static CoopColonySync.Event withQueue(CoopColonySync.Event event,
+                                                  List<CoopColonyManagement.QueueItem> queue) {
+        return new CoopColonySync.Event(event.eventId(), event.kind(), event.planetId(),
+                event.marketId(), event.actingPlayerId(), event.name(), event.factionId(),
+                event.size(), event.freePort(), event.surveyLevel(), event.storageUnlocked(),
+                event.conditions(), event.industries(), event.submarkets(), queue);
+    }
+
+    private static List<String> queueIds(FakeMarket market) {
+        List<String> ids = new ArrayList<>();
+        for (ConstructionQueue.ConstructionQueueItem item : market.queue.getItems()) {
+            ids.add(item.id);
+        }
+        return ids;
     }
 
     private static FakeMarket colonizedMarket() {
@@ -487,9 +587,10 @@ class CoopColonySyncTest {
         market.conditions.add(new FakeCondition("population_3", true));
         market.conditions.add(new FakeCondition("decivilized_subpop", true));
         market.industries.add("population");
-        market.industries.add("spaceport");
         market.submarkets.put("local_resources", submarketProxy("local_resources"));
         market.submarkets.put("storage", submarketProxy("storage"));
+        // Vanilla colonization queues this one itself; the player never orders it.
+        market.queue.addToEnd("spaceport", 50_000);
         market.becomeColony();
         market.name = "New Hope";
         market.freePort = true;
@@ -599,6 +700,7 @@ class CoopColonySyncTest {
         private final List<FakeCondition> conditions = new ArrayList<>();
         private final List<String> industries = new ArrayList<>();
         private final Map<String, SubmarketAPI> submarkets = new LinkedHashMap<>();
+        private final ConstructionQueue queue = new ConstructionQueue();
         private SectorEntityToken primary;
         private MarketAPI cached;
         private final PopulationComposition population = new PopulationComposition();
@@ -746,6 +848,7 @@ class CoopColonySyncTest {
                             reappliedIndustries = true;
                             yield null;
                         }
+                        case "getConstructionQueue" -> queue;
                         case "getSubmarketsCopy" -> new ArrayList<>(submarkets.values());
                         case "hasSubmarket" -> submarkets.containsKey((String) args[0]);
                         case "addSubmarket" -> {

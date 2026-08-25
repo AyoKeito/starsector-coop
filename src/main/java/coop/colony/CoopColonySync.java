@@ -52,14 +52,23 @@ import java.util.Set;
  * ({@code Misc.java:6510-6543}, commented out) shows the <em>shape</em> of colony creation, but the
  * live closed-source flow can add different starting industries (skills, settings) and the player can
  * name the colony. So the payload carries what the colonizing engine actually ended up with — size,
- * name, faction, conditions with their surveyed flags, industries, submarkets, survey level, free
- * port — and the applier replays that through the recipe's ordering.
+ * name, faction, conditions with their surveyed flags, industries, submarkets, construction queue,
+ * survey level, free port — and the applier replays that through the recipe's ordering.
  *
- * <p><b>Deliberately not here (milestone 3).</b> AI cores, industry improvements, the construction
- * queue, the admin, and any post-founding management edit. A just-founded colony has none of those,
- * and they belong to the diff-on-close {@code COLONY_MGMT} channel. The payload extends by adding
- * fields to the industry record line or new record tags; both engines run the same build (the
- * handshake pins the build hash), so there is no wire-compatibility window to preserve.
+ * <p><b>The construction queue is founding state, not management state.</b> This was assumed away when
+ * the milestone was built and corrected on 2026-08-25 after a live session: vanilla colonization
+ * auto-queues a {@code SPACEPORT} that the player never ordered, so a colony is founded with one
+ * industry (population) and a non-empty queue. Leaving the queue off the payload left the mirror's
+ * spaceport unbuilt until someone happened to open and close the colony screen and milestone 3's
+ * diff-on-close shipped it. The queue therefore rides {@code COLONY_FOUNDED}, using
+ * {@link CoopColonyManagement.QueueItem} and its codec and reconciler verbatim rather than a second
+ * format for the same thing.
+ *
+ * <p><b>Deliberately not here (milestone 3).</b> AI cores, industry improvements, the admin, and any
+ * post-founding management edit. A just-founded colony has none of those, and they belong to the
+ * diff-on-close {@code COLONY_MGMT} channel. The payload extends by adding fields to the industry
+ * record line or new record tags; both engines run the same build (the handshake pins the build hash),
+ * so there is no wire-compatibility window to preserve.
  */
 public final class CoopColonySync {
 
@@ -78,6 +87,8 @@ public final class CoopColonySync {
     private static final String CONDITION_TAG = "C";
     private static final String INDUSTRY_TAG = "I";
     private static final String SUBMARKET_TAG = "S";
+    /** Milestone 3's tag, reused verbatim: same record shape, same codec, same reconciler. */
+    private static final String QUEUE_TAG = CoopColonyManagement.QUEUE_TAG;
     private static final int HEADER_FIELDS = 12;
 
     /**
@@ -136,6 +147,10 @@ public final class CoopColonySync {
      *                       {@code StoragePlugin.playerPaidToUnlock} is private with a setter only —
      *                       so this is captured as "the colony has a storage submarket" rather than
      *                       read back, which is the same thing at founding time.
+     * @param queue          the construction queue as it stands at founding time, in build order.
+     *                       Never empty in practice: vanilla auto-queues a spaceport. Decoding
+     *                       tolerates zero {@code Q} lines all the same, for a colony founded with a
+     *                       genuinely empty queue.
      *                       <p>Every state field is meaningless for {@link Kind#ABANDONED}: vanilla
      *                       fires that report <em>after</em> the teardown has already run, so there is
      *                       nothing left to read, and the applier does not need it — it re-runs the
@@ -145,7 +160,7 @@ public final class CoopColonySync {
                         String actingPlayerId, String name, String factionId, int size,
                         boolean freePort, String surveyLevel, boolean storageUnlocked,
                         List<ConditionState> conditions, List<String> industries,
-                        List<String> submarkets) {
+                        List<String> submarkets, List<CoopColonyManagement.QueueItem> queue) {
 
         public Event {
             eventId = requireText(eventId, "eventId");
@@ -159,20 +174,22 @@ public final class CoopColonySync {
             conditions = conditions == null ? List.of() : List.copyOf(conditions);
             industries = industries == null ? List.of() : List.copyOf(industries);
             submarkets = submarkets == null ? List.of() : List.copyOf(submarkets);
+            queue = queue == null ? List.of() : List.copyOf(queue);
         }
 
         /** An abandonment: identity only, because vanilla reports it post-teardown. */
         public static Event abandoned(String eventId, String actingPlayerId, String planetId,
                                       String marketId) {
             return new Event(eventId, Kind.ABANDONED, planetId, marketId, actingPlayerId, "", "", 0,
-                    false, "", false, List.of(), List.of(), List.of());
+                    false, "", false, List.of(), List.of(), List.of(), List.of());
         }
 
         /**
          * The whole event as one self-contained delimited blob: the envelope's flat JSON parser has
          * no arrays, so list-shaped bodies ship as a single opaque string (the
          * {@code CoopBaseRecord.encodeSet} convention). Header line first, then one line per
-         * condition, industry and submarket.
+         * condition, industry and submarket, then one per construction-queue entry <em>in queue
+         * order</em> — the order is the build order and has to survive the wire.
          */
         public String encode() {
             StringBuilder out = new StringBuilder(192);
@@ -199,6 +216,9 @@ public final class CoopColonySync {
                 out.append(RECORD_SEPARATOR).append(CoopDelimited.field(SUBMARKET_TAG))
                         .append(FIELD_SEPARATOR).append(CoopDelimited.field(submarket));
             }
+            for (CoopColonyManagement.QueueItem item : queue) {
+                out.append(RECORD_SEPARATOR).append(item.encode());
+            }
             return out.toString();
         }
     }
@@ -216,12 +236,14 @@ public final class CoopColonySync {
         List<ConditionState> conditions = new ArrayList<>();
         List<String> industries = new ArrayList<>();
         List<String> submarkets = new ArrayList<>();
+        List<CoopColonyManagement.QueueItem> queue = new ArrayList<>();
         for (int i = 1; i < lines.length; i++) {
             List<String> fields = CoopDelimited.split(lines[i]);
             switch (fields.get(0)) {
                 case CONDITION_TAG -> conditions.add(ConditionState.decode(fields));
                 case INDUSTRY_TAG -> industries.add(requireSingleValue(fields, "industry"));
                 case SUBMARKET_TAG -> submarkets.add(requireSingleValue(fields, "submarket"));
+                case QUEUE_TAG -> queue.add(CoopColonyManagement.QueueItem.decode(fields));
                 default -> throw new IllegalArgumentException(
                         "Unknown colony lifecycle record tag: " + fields.get(0));
             }
@@ -229,7 +251,7 @@ public final class CoopColonySync {
         return new Event(header.get(1), parseKind(header.get(2)), header.get(3), header.get(4),
                 header.get(5), header.get(6), header.get(7), parseInt(header.get(8), "size"),
                 Boolean.parseBoolean(header.get(9)), header.get(10),
-                Boolean.parseBoolean(header.get(11)), conditions, industries, submarkets);
+                Boolean.parseBoolean(header.get(11)), conditions, industries, submarkets, queue);
     }
 
     private static String requireSingleValue(List<String> fields, String what) {
@@ -497,12 +519,15 @@ public final class CoopColonySync {
                 }
             }
         }
+        // Read in the same pass as the industries, off the same finished market: colonization's
+        // auto-queued spaceport is in place by the time the drain gets here.
+        List<CoopColonyManagement.QueueItem> queue = CoopColonyManagement.captureQueue(market);
         MarketAPI.SurveyLevel level = market.getSurveyLevel();
         return new Event(eventId, Kind.FOUNDED, planetId, market.getId(), actingPlayerId,
                 market.getName(), market.getFactionId(), market.getSize(), market.isFreePort(),
                 level == null ? "" : level.name(),
                 submarkets.contains(Submarkets.SUBMARKET_STORAGE),
-                conditions, industries, submarkets);
+                conditions, industries, submarkets, queue);
     }
 
     // ---- Apply ---------------------------------------------------------------------------------
@@ -604,6 +629,11 @@ public final class CoopColonySync {
                 }
             }
         });
+        // Vanilla colonization auto-queues a spaceport, so a founding is not queue-free. Reconciled
+        // through milestone 3's own applier: it rewrites the queue to the reported list only when the
+        // two differ, which is what keeps a re-applied founding from appending the same entry twice.
+        step(event, "construction queue",
+                () -> CoopColonyManagement.applyQueue(market, event.queue()));
         step(event, "submarkets", () -> {
             for (String specId : event.submarkets()) {
                 if (!market.hasSubmarket(specId)) {
@@ -635,7 +665,8 @@ public final class CoopColonySync {
         CoopLog.info(CoopColonySync.class, "Coop built mirrored colony " + market.getId()
                 + " name=" + event.name() + " size=" + event.size()
                 + " industries=" + event.industries().size()
-                + " submarkets=" + event.submarkets().size());
+                + " submarkets=" + event.submarkets().size()
+                + " queued=" + event.queue().size());
     }
 
     /**

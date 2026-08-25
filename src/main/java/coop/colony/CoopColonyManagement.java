@@ -89,7 +89,11 @@ public final class CoopColonyManagement {
     private static final char RECORD_SEPARATOR = '\n';
     private static final String HEADER_TAG = "H";
     private static final String INDUSTRY_TAG = "I";
-    private static final String QUEUE_TAG = "Q";
+    /**
+     * Package-visible because {@link CoopColonySync} carries the same {@link QueueItem} records on its
+     * {@code COLONY_FOUNDED} payload and decodes them with the same tag. One record shape, one codec.
+     */
+    static final String QUEUE_TAG = "Q";
     private static final int HEADER_FIELDS = 8;
     private static final int INDUSTRY_FIELDS = 7;
     private static final int QUEUE_FIELDS = 3;
@@ -349,6 +353,18 @@ public final class CoopColonyManagement {
                 industries.add(captureIndustry(industry));
             }
         }
+        return new State(reportId, market.getId(), actingPlayerId, market.isFreePort(),
+                market.isImmigrationClosed(), market.isImmigrationIncentivesOn(),
+                market.isUseStockpilesForShortages(), industries, captureQueue(market));
+    }
+
+    /**
+     * The market's construction queue as ordered wire records.
+     *
+     * <p>Shared with {@link CoopColonySync}: vanilla colonization auto-queues a spaceport the player
+     * never ordered, so a {@code COLONY_FOUNDED} has to carry a queue too and reads it with this.
+     */
+    static List<QueueItem> captureQueue(MarketAPI market) {
         List<QueueItem> queue = new ArrayList<>();
         ConstructionQueue constructionQueue = market.getConstructionQueue();
         if (constructionQueue != null && constructionQueue.getItems() != null) {
@@ -358,9 +374,7 @@ public final class CoopColonyManagement {
                 }
             }
         }
-        return new State(reportId, market.getId(), actingPlayerId, market.isFreePort(),
-                market.isImmigrationClosed(), market.isImmigrationIncentivesOn(),
-                market.isUseStockpilesForShortages(), industries, queue);
+        return queue;
     }
 
     /** The report id an open-time baseline carries; it is local-only and never encoded. */
@@ -517,7 +531,7 @@ public final class CoopColonyManagement {
             CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony industries", ex);
         }
         try {
-            applyQueue(market, state);
+            applyQueue(market, state.queue());
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony construction queue", ex);
         }
@@ -675,9 +689,13 @@ public final class CoopColonyManagement {
      * <p>Replaced wholesale rather than diffed, because the order <em>is</em> the state: moving an
      * entry up the queue is a management edit with no other observable effect. Rewriting an identical
      * queue is a no-op by inspection first, so the common case (a report that changed something else)
-     * does not touch it.
+     * does not touch it. Clearing before rewriting is also what keeps a re-applied report — or a
+     * {@code COLONY_FOUNDED} landing on a market that already has entries — from appending duplicates.
+     *
+     * <p>Package-visible on the list rather than the report because {@link CoopColonySync} reconciles
+     * a freshly built mirror's queue through the same code.
      */
-    private static void applyQueue(MarketAPI market, State state) {
+    static void applyQueue(MarketAPI market, List<QueueItem> wanted) {
         ConstructionQueue queue = market.getConstructionQueue();
         if (queue == null) {
             return;
@@ -686,11 +704,11 @@ public final class CoopColonyManagement {
         if (items == null) {
             return;
         }
-        if (matches(items, state.queue())) {
+        if (matches(items, wanted)) {
             return;
         }
         items.clear();
-        for (QueueItem item : state.queue()) {
+        for (QueueItem item : wanted) {
             queue.addToEnd(item.industryId(), item.cost());
         }
     }
