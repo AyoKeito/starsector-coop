@@ -45,6 +45,9 @@ public final class CoopMessages {
         RAID_RESULT,
         COLONY_FOUNDED,
         COLONY_ABANDONED,
+        COLONY_MGMT,
+        COLONY_INCOME,
+        EXPEDITION_WARNING,
         ABILITY_ACTIVATE,
         ORBIT_SNAPSHOT,
         NPC_FLEET_SET,
@@ -391,6 +394,60 @@ public final class CoopMessages {
     public static Message colonyAbandoned(String sessionId, long seq, long sentAtMillis, String colony) {
         return new Message(Type.COLONY_ABANDONED, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"colony\":\"" + escapeJson(requireText(colony, "colony")) + "\"}");
+    }
+
+    /**
+     * Phase 24 milestone 3: the colony-management state of one player-owned market, as it stood when
+     * a player closed its screen (reliable TCP, bidirectional). {@code mgmt} is the self-contained
+     * delimited blob from {@link coop.colony.CoopColonyManagement.State#encode()} — header line plus
+     * one line per industry and per construction-queue entry.
+     *
+     * <p>The body is <b>absolute post-close state</b>, not a diff: the diff only decides whether to
+     * send at all. That makes a duplicate delivery, a host rebroadcast and a late arrival all
+     * idempotent, and it is why no ordering guarantee beyond TCP's is needed. Concurrency needs none
+     * either — the Phase 10 interaction gate is a global first-come lockout, so two players are never
+     * inside colony screens at the same time.
+     */
+    public static Message colonyMgmt(String sessionId, long seq, long sentAtMillis, String mgmt) {
+        return new Message(Type.COLONY_MGMT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"mgmt\":\"" + escapeJson(requireText(mgmt, "mgmt")) + "\"}");
+    }
+
+    /**
+     * Phase 24 milestone 3: the host's canonical colony net for a finished economy month (reliable
+     * TCP, host&rarr;guest). <b>Carries no money.</b> Credits are per-player local state and are never
+     * transferred: both engines run the same replicated colonies, each pays its own player the full
+     * local net at month end, and each deducts its own half through {@code CoopRewardSplitter}. This
+     * message exists so the guest can log how far its own local net drifted from the host's — drift
+     * detection, never correction.
+     *
+     * @param netCredits the host's colony income minus colony upkeep for the month.
+     * @param colonyCount how many player-owned markets the host counted, so a drift line can say
+     *                    whether the two engines even agree on the colony set.
+     */
+    public static Message colonyIncome(String sessionId, long seq, long sentAtMillis,
+                                       float netCredits, long colonyCount) {
+        return new Message(Type.COLONY_INCOME, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"netCredits\":\"" + netCredits + "\","
+                        + "\"colonyCount\":" + colonyCount + "}");
+    }
+
+    /**
+     * Phase 24 milestone 3: the host's full set of live NPC threats aimed at player colonies
+     * (reliable TCP, host&rarr;guest). The body is a
+     * {@link coop.colony.CoopExpeditionWarning#encodeSet} blob — one
+     * {@code kind|factionId|targetMarketId|etaDays|status} record per line, because the flat envelope
+     * parser has no arrays.
+     *
+     * <p>Set-reconciled exactly like {@code BASE_SET}: rebroadcast only when the order-independent set
+     * hash changes, and an empty set is a legitimate value that clears every mirrored warning. The
+     * guest turns the records into its own {@code CoopExpeditionWarningIntel} entries; the vanilla
+     * intel objects themselves are never replicated.
+     */
+    public static Message expeditionWarning(String sessionId, long seq, long sentAtMillis,
+                                            String encodedSet) {
+        return new Message(Type.EXPEDITION_WARNING, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"warnings\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
     }
 
     public static Message abilityActivate(String sessionId, long seq, long sentAtMillis,

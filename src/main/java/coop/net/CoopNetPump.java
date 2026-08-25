@@ -119,6 +119,8 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_REPLICATOR_REP_SYNC = "replicator.playerRepSync";
     private static final String SECTION_REPLICATOR_BAR_POOL = "replicator.barPool";
     private static final String SECTION_REPLICATOR_COLONY = "replicator.colonyLifecycle";
+    private static final String SECTION_REPLICATOR_COLONY_INCOME = "replicator.colonyIncome";
+    private static final String SECTION_REPLICATOR_EXPEDITIONS = "replicator.expeditionWarnings";
     private static final String SECTION_PING = "net.sendPing";
     private static final String SECTION_FLUSH_OUTBOUND_POST = "net.flushOutbound.post";
     /**
@@ -512,6 +514,10 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_REPLICATOR_BAR_POOL, t);
         campaignReplicator.tickColonyLifecycle();
         t = profiler.split(SECTION_REPLICATOR_COLONY, t);
+        campaignReplicator.tickColonyIncome();
+        t = profiler.split(SECTION_REPLICATOR_COLONY_INCOME, t);
+        campaignReplicator.tickExpeditionWarnings();
+        t = profiler.split(SECTION_REPLICATOR_EXPEDITIONS, t);
         maybeSendPing();
         t = profiler.split(SECTION_PING, t);
         service.flushOutbound();

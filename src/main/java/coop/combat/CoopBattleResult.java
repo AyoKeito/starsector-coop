@@ -33,7 +33,9 @@ import java.util.Objects;
  *       too would apply the same change twice. The plan's step text is amended with a dated note.</li>
  *   <li><b>No spoils.</b> XP, salvage, credits and recoveries belong to the client that fought, by
  *       the v1 reward rule — vanilla has already applied them locally and the mod must not touch
- *       them. There is no {@code CoopRewardSplitter} in v1 (deferred to v2/v3 joint combat).</li>
+ *       them. {@code coop.rewards.CoopRewardSplitter} does exist since Phase 24 milestone 3, but it
+ *       was created for the monthly colony-income split and nothing here calls it; splitting combat
+ *       spoils is Phase 22 (post-V1 joint combat), which extends that class.</li>
  *   <li><b>No own-fleet roster.</b> {@link #engagingFleetSize} is informational only (log/diagnostic
  *       parity check). The partner's mirror of the engaging player's fleet is refreshed by the
  *       existing Phase 8 {@code FLEET_SNAPSHOT} UDP stream, which carries the <em>full</em> roster

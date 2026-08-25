@@ -1,0 +1,673 @@
+package coop.campaign;
+
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.CargoAPI;
+import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.econ.EconomyAPI;
+import com.fs.starfarer.api.campaign.econ.Industry;
+import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.campaign.econ.MonthlyReport;
+import com.fs.starfarer.api.campaign.listeners.EconomyTickListener;
+import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
+import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue;
+import com.fs.starfarer.api.impl.campaign.shared.SharedData;
+import com.fs.starfarer.api.util.MutableValue;
+import coop.colony.CoopColonyManagement;
+import coop.colony.CoopExpeditionWarning;
+import coop.net.CoopConnectionRole;
+import coop.net.CoopMessages;
+import coop.net.CoopNetService;
+import coop.session.CoopPlayerInfo;
+import coop.session.CoopSessionState;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.awt.Color;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Phase 24 milestone 3 engine glue: the open/close diff the replicator drives, the host/guest sides of
+ * {@code COLONY_MGMT}, the month-end income split and {@code COLONY_INCOME}, and the
+ * {@code EXPEDITION_WARNING} dispatch. The decisions themselves live in {@code coop.colony} and are
+ * tested there; this covers the wiring.
+ */
+class CoopColonyMgmtReplicatorTest {
+
+    private FakeSector sector;
+
+    @BeforeEach
+    void stubGlobals() {
+        Global.setSettings(fakeSettings());
+        sector = new FakeSector();
+        Global.setSector(sector.proxy());
+    }
+
+    @AfterEach
+    void clearGlobals() {
+        Global.setSector(null);
+        Global.setSettings(null);
+    }
+
+    // ---- COLONY_MGMT capture -------------------------------------------------------------------
+
+    @Test
+    void editingAColonyAndClosingItShipsTheWholeState() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+
+        replicator.onPlayerOpenedMarket(market.proxy(), false);
+        market.queue.addToEnd("mining", 60_000);
+        market.freePort = true;
+        replicator.onPlayerClosedMarket(market.proxy());
+
+        List<CoopMessages.Message> mgmt = of(service, CoopMessages.Type.COLONY_MGMT);
+        assertEquals(1, mgmt.size());
+        CoopColonyManagement.State state = CoopColonyManagement.decode(
+                CoopMessages.requiredPayloadString(mgmt.get(0), "mgmt"));
+        assertEquals("market_planet_eos", state.marketId());
+        assertEquals("host-player:1", state.reportId());
+        assertTrue(state.freePort());
+        assertEquals(List.of("mining"),
+                state.queue().stream().map(CoopColonyManagement.QueueItem::industryId).toList());
+        assertTrue(replicator.colonyMgmtLedger().isApplied("host-player:1"),
+                "the ledger entry taken at capture is what kills the host's own echo");
+    }
+
+    @Test
+    void aColonyVisitThatChangedNothingShipsNothing() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+
+        replicator.onPlayerOpenedMarket(market.proxy(), false);
+        replicator.onPlayerClosedMarket(market.proxy());
+
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty());
+        assertEquals(0, replicator.colonyMgmtDiff().baselineCount());
+    }
+
+    @Test
+    void captureIsSkippedWhileApplyingARemoteReport() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.onPlayerOpenedMarket(market.proxy(), false);
+        market.freePort = true;
+
+        replicator.replayGuard().begin();
+        try {
+            replicator.onPlayerClosedMarket(market.proxy());
+        } finally {
+            replicator.replayGuard().end();
+        }
+
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(),
+                "re-driving a remote report must not be recaptured as a fresh edit");
+    }
+
+    // ---- COLONY_MGMT apply ---------------------------------------------------------------------
+
+    @Test
+    void theHostAppliesTheGuestsReportRebroadcastsItAndTheEchoDies() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+
+        CoopMessages.Message inbound = mgmtMessage("guest-player:1");
+        replicator.handle(inbound);
+
+        assertTrue(market.freePort, "the host applies to its canonical market");
+        assertTrue(market.industries.contains("mining"));
+        assertEquals(1, of(service, CoopMessages.Type.COLONY_MGMT).size(),
+                "the host rebroadcasts its canonical view");
+
+        market.addIndustryCalls = 0;
+        replicator.handle(inbound);
+
+        assertEquals(0, market.addIndustryCalls, "the echo must not rebuild the colony");
+        assertTrue(replicator.colonyMgmtLedger().isApplied("guest-player:1"));
+        assertEquals(2, of(service, CoopMessages.Type.COLONY_MGMT).size(),
+                "but the host keeps rebroadcasting: self-healing");
+    }
+
+    @Test
+    void theGuestAppliesTheHostsReportAndNeverRebroadcasts() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+
+        replicator.handle(mgmtMessage("host-player:1"));
+
+        assertTrue(market.freePort);
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(), "a guest never rebroadcasts");
+    }
+
+    // ---- Income ---------------------------------------------------------------------------------
+
+    @Test
+    void theHostDeductsItsOwnHalfBannersItAndShipsTheCanonicalFigure() {
+        sector.addColony("market_planet_eos");
+        sector.credits.set(100_000f);
+        settleReport(1_000L, 25_000f);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        sector.listenerOfType(EconomyTickListener.class).reportEconomyMonthEnd();
+
+        assertEquals(87_500f, sector.credits.get(), "kept exactly half of 25,000");
+        assertEquals(1, replicator.pendingIncomeBannerCount());
+
+        replicator.tickColonyIncome();
+
+        assertEquals(0, replicator.pendingIncomeBannerCount());
+        assertEquals(List.of("Coop: colony income split - kept 12,500 of 25,000 credits."),
+                sector.messages);
+
+        List<CoopMessages.Message> income = of(service, CoopMessages.Type.COLONY_INCOME);
+        assertEquals(1, income.size());
+        assertEquals(25_000f, CoopMessages.requiredPayloadFloat(income.get(0), "netCredits"));
+        assertEquals(1L, CoopMessages.requiredPayloadLong(income.get(0), "colonyCount"));
+    }
+
+    /**
+     * The whole point of the local-half model: the guest deducts its own half from its own wallet and
+     * sends no money anywhere. A transfer on top of this would pay 150%.
+     */
+    @Test
+    void theGuestDeductsItsOwnHalfAndSendsNothing() {
+        sector.addColony("market_planet_eos");
+        sector.credits.set(100_000f);
+        settleReport(1_000L, 25_000f);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        sector.listenerOfType(EconomyTickListener.class).reportEconomyMonthEnd();
+
+        assertEquals(87_500f, sector.credits.get());
+        assertTrue(of(service, CoopMessages.Type.COLONY_INCOME).isEmpty());
+    }
+
+    /** No colonies, no money moved, no banner: nothing to say before the first colony exists. */
+    @Test
+    void aMonthWithNoColoniesIsSilentAndCostsNothing() {
+        sector.credits.set(100_000f);
+        settleReport(1_000L, 0f);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        sector.listenerOfType(EconomyTickListener.class).reportEconomyMonthEnd();
+        replicator.tickColonyIncome();
+
+        assertEquals(100_000f, sector.credits.get());
+        assertEquals(0, replicator.pendingIncomeBannerCount());
+        assertTrue(sector.messages.isEmpty());
+    }
+
+    /** The host's figure is a drift line on the guest, never a correction. */
+    @Test
+    void aHostIncomeFigureNeverMovesTheGuestsCredits() {
+        sector.credits.set(100_000f);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+
+        replicator.handle(CoopMessages.colonyIncome("session-a", 1L, 0L, 25_000f, 1L));
+
+        assertEquals(100_000f, sector.credits.get());
+        assertTrue(service.sent.isEmpty());
+    }
+
+    /** Banners are queued, so a month that ends on a frame with no campaign UI is not lost. */
+    @Test
+    void aBannerSurvivesAFrameWithNoCampaignUi() {
+        sector.addColony("market_planet_eos");
+        sector.credits.set(100_000f);
+        settleReport(1_000L, 25_000f);
+        sector.hasCampaignUi = false;
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+        sector.listenerOfType(EconomyTickListener.class).reportEconomyMonthEnd();
+
+        replicator.tickColonyIncome();
+        assertEquals(1, replicator.pendingIncomeBannerCount(), "held, not dropped");
+
+        sector.hasCampaignUi = true;
+        replicator.tickColonyIncome();
+
+        assertEquals(0, replicator.pendingIncomeBannerCount());
+        assertEquals(1, sector.messages.size());
+    }
+
+    // ---- Expedition warnings ---------------------------------------------------------------------
+
+    @Test
+    void theGuestStoresAnInboundWarningSet() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+
+        replicator.handle(warningMessage(
+                new CoopExpeditionWarning(CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION,
+                        "hegemony", "market_planet_eos", "New Hope", 7,
+                        CoopExpeditionWarning.Status.INBOUND)));
+
+        assertEquals(1, replicator.desiredExpeditionWarnings().size());
+        assertEquals("hegemony", replicator.desiredExpeditionWarnings().get(0).factionId());
+        assertTrue(service.sent.isEmpty(), "the guest never answers a warning set");
+    }
+
+    @Test
+    void anEmptyWarningSetIsALegitimateValueThatClearsEverything() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+        replicator.handle(warningMessage(
+                new CoopExpeditionWarning(CoopExpeditionWarning.Kind.RAID, "pirates",
+                        "market_planet_eos", "New Hope", 2, CoopExpeditionWarning.Status.INBOUND)));
+
+        replicator.handle(CoopMessages.expeditionWarning("session-a", 2L, 0L, ""));
+
+        assertTrue(replicator.desiredExpeditionWarnings().isEmpty());
+    }
+
+    /** The host is authoritative here; an inbound set must not overwrite what it just scanned. */
+    @Test
+    void theHostIgnoresAnInboundWarningSet() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+
+        replicator.handle(warningMessage(
+                new CoopExpeditionWarning(CoopExpeditionWarning.Kind.RAID, "pirates",
+                        "market_planet_eos", "New Hope", 2, CoopExpeditionWarning.Status.INBOUND)));
+
+        assertTrue(replicator.desiredExpeditionWarnings().isEmpty());
+    }
+
+    // ---- Session lifecycle -----------------------------------------------------------------------
+
+    @Test
+    void sessionTeardownClearsEverythingAndRemovesTheMonthEndListener() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+        replicator.handle(mgmtMessage("guest-player:1"));
+        replicator.onPlayerOpenedMarket(market.proxy(), false);
+        assertEquals(1, replicator.colonyMgmtLedger().size());
+        assertEquals(1, replicator.colonyMgmtDiff().baselineCount());
+
+        replicator.dispose(sector.proxy());
+
+        assertEquals(0, replicator.colonyMgmtLedger().size());
+        assertEquals(0, replicator.colonyMgmtDiff().baselineCount());
+        assertEquals(0, replicator.pendingIncomeBannerCount());
+        assertTrue(replicator.desiredExpeditionWarnings().isEmpty());
+        assertNull(sector.listenerOfType(EconomyTickListener.class));
+    }
+
+    // ---- Helpers -------------------------------------------------------------------------------
+
+    private static List<CoopMessages.Message> of(RecordingNetService service, CoopMessages.Type type) {
+        List<CoopMessages.Message> found = new ArrayList<>();
+        for (CoopMessages.Message message : service.sent) {
+            if (message.type() == type) {
+                found.add(message);
+            }
+        }
+        return found;
+    }
+
+    private static CoopMessages.Message mgmtMessage(String reportId) {
+        CoopColonyManagement.State state = new CoopColonyManagement.State(reportId,
+                "market_planet_eos", "guest-player", true, false, false, false,
+                List.of(new CoopColonyManagement.IndustryState("population", "", false,
+                                CoopColonyManagement.BuildState.NONE, "", "", ""),
+                        new CoopColonyManagement.IndustryState("mining", "", false,
+                                CoopColonyManagement.BuildState.NONE, "", "", "")),
+                List.of());
+        return CoopMessages.colonyMgmt("session-a", 1L, 0L, state.encode());
+    }
+
+    private static CoopMessages.Message warningMessage(CoopExpeditionWarning... warnings) {
+        return CoopMessages.expeditionWarning("session-a", 1L, 0L,
+                CoopExpeditionWarning.encodeSet(List.of(warnings)));
+    }
+
+    private void settleReport(long timestamp, float income) {
+        MonthlyReport report = new MonthlyReport();
+        report.setTimestamp(timestamp);
+        if (income != 0f) {
+            MonthlyReport.FDNode node = report.getNode(MonthlyReport.OUTPOSTS, "market_planet_eos");
+            node.custom = sector.market("market_planet_eos").proxy();
+            node.income = income;
+        }
+        report.computeTotals();
+        SharedData.getData().setPreviousReport(report);
+    }
+
+    private static CoopSessionState activeHostSession() {
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
+        return session;
+    }
+
+    private static CoopSessionState activeGuestSession() {
+        CoopSessionState session = new CoopSessionState(new SequencedIds("guest-player"));
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
+        return session;
+    }
+
+    private static SettingsAPI fakeSettings() {
+        return (SettingsAPI) Proxy.newProxyInstance(
+                SettingsAPI.class.getClassLoader(),
+                new Class<?>[]{SettingsAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getColor" -> Color.WHITE;
+                    case "toString" -> "Settings";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> defaultValue(method.getReturnType());
+                });
+    }
+
+    // ---- Engine fakes --------------------------------------------------------------------------
+
+    private static final class FakeMarket {
+        private final String id;
+        private boolean freePort;
+        private final List<String> industries = new ArrayList<>();
+        private final Map<String, Industry> industryProxies = new LinkedHashMap<>();
+        private final ConstructionQueue queue = new ConstructionQueue();
+        private int addIndustryCalls;
+        private MarketAPI cached;
+
+        private FakeMarket(String id) {
+            this.id = id;
+        }
+
+        void addIndustry(String industryId) {
+            if (industries.contains(industryId)) {
+                return;
+            }
+            industries.add(industryId);
+            industryProxies.computeIfAbsent(industryId, key -> (Industry) Proxy.newProxyInstance(
+                    Industry.class.getClassLoader(),
+                    new Class<?>[]{Industry.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getId" -> key;
+                        case "toString" -> "Industry[" + key + "]";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    }));
+            addIndustryCalls++;
+        }
+
+        MarketAPI proxy() {
+            if (cached != null) {
+                return cached;
+            }
+            cached = (MarketAPI) Proxy.newProxyInstance(
+                    MarketAPI.class.getClassLoader(),
+                    new Class<?>[]{MarketAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getId" -> id;
+                        case "getName" -> id;
+                        case "isPlayerOwned" -> true;
+                        case "isPlanetConditionMarketOnly" -> false;
+                        case "isFreePort" -> freePort;
+                        case "setFreePort" -> {
+                            freePort = (Boolean) args[0];
+                            yield null;
+                        }
+                        case "getConstructionQueue" -> queue;
+                        case "getIndustries" -> {
+                            List<Industry> all = new ArrayList<>();
+                            for (String industryId : industries) {
+                                all.add(industryProxies.get(industryId));
+                            }
+                            yield all;
+                        }
+                        case "hasIndustry" -> industries.contains((String) args[0]);
+                        case "getIndustry" -> industries.contains((String) args[0])
+                                ? industryProxies.get((String) args[0]) : null;
+                        case "addIndustry" -> {
+                            addIndustry((String) args[0]);
+                            yield null;
+                        }
+                        case "removeIndustry" -> {
+                            industries.remove((String) args[0]);
+                            yield null;
+                        }
+                        case "getPrimaryEntity" -> null;
+                        case "toString" -> "Market[" + id + "]";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            return cached;
+        }
+    }
+
+    private static final class FakeSector {
+        private final Map<String, FakeMarket> markets = new LinkedHashMap<>();
+        private final Map<String, Object> persistentData = new LinkedHashMap<>();
+        private final List<Object> listeners = new ArrayList<>();
+        private final List<String> messages = new ArrayList<>();
+        private final MutableValue credits = new MutableValue(0f);
+        private boolean hasCampaignUi = true;
+        private SectorAPI cached;
+
+        FakeMarket addColony(String marketId) {
+            FakeMarket market = new FakeMarket(marketId);
+            market.addIndustry("population");
+            market.addIndustryCalls = 0;
+            markets.put(marketId, market);
+            return market;
+        }
+
+        FakeMarket market(String marketId) {
+            return markets.get(marketId);
+        }
+
+        @SuppressWarnings("unchecked")
+        <T> T listenerOfType(Class<T> type) {
+            for (Object listener : listeners) {
+                if (type.isInstance(listener)) {
+                    return (T) listener;
+                }
+            }
+            return null;
+        }
+
+        SectorAPI proxy() {
+            if (cached != null) {
+                return cached;
+            }
+            ListenerManagerAPI listenerManager = (ListenerManagerAPI) Proxy.newProxyInstance(
+                    ListenerManagerAPI.class.getClassLoader(),
+                    new Class<?>[]{ListenerManagerAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "addListener" -> {
+                            listeners.add(args[0]);
+                            yield null;
+                        }
+                        case "removeListener" -> {
+                            listeners.remove(args[0]);
+                            yield null;
+                        }
+                        case "toString" -> "ListenerManager";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            EconomyAPI economy = (EconomyAPI) Proxy.newProxyInstance(
+                    EconomyAPI.class.getClassLoader(),
+                    new Class<?>[]{EconomyAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getMarket" -> {
+                            FakeMarket market = markets.get((String) args[0]);
+                            yield market == null ? null : market.proxy();
+                        }
+                        case "getMarketsCopy" -> List.<MarketAPI>of();
+                        case "toString" -> "Economy";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            CargoAPI cargo = (CargoAPI) Proxy.newProxyInstance(
+                    CargoAPI.class.getClassLoader(),
+                    new Class<?>[]{CargoAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getCredits" -> credits;
+                        case "toString" -> "Cargo";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            CampaignFleetAPI fleet = (CampaignFleetAPI) Proxy.newProxyInstance(
+                    CampaignFleetAPI.class.getClassLoader(),
+                    new Class<?>[]{CampaignFleetAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getCargo" -> cargo;
+                        case "toString" -> "Fleet";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            CampaignUIAPI campaignUi = (CampaignUIAPI) Proxy.newProxyInstance(
+                    CampaignUIAPI.class.getClassLoader(),
+                    new Class<?>[]{CampaignUIAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "addMessage" -> {
+                            if (args[0] instanceof String text) {
+                                messages.add(text);
+                            }
+                            yield null;
+                        }
+                        case "toString" -> "CampaignUI";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            cached = (SectorAPI) Proxy.newProxyInstance(
+                    SectorAPI.class.getClassLoader(),
+                    new Class<?>[]{SectorAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getListenerManager" -> listenerManager;
+                        case "getEconomy" -> economy;
+                        case "getPersistentData" -> persistentData;
+                        case "getPlayerFleet" -> fleet;
+                        case "getCampaignUI" -> hasCampaignUi ? campaignUi : null;
+                        case "getAllLocations" -> List.of();
+                        case "toString" -> "Sector";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            return cached;
+        }
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (type == boolean.class) {
+            return false;
+        }
+        if (type == byte.class) {
+            return (byte) 0;
+        }
+        if (type == short.class) {
+            return (short) 0;
+        }
+        if (type == int.class) {
+            return 0;
+        }
+        if (type == long.class) {
+            return 0L;
+        }
+        if (type == float.class) {
+            return 0f;
+        }
+        if (type == double.class) {
+            return 0d;
+        }
+        if (type == char.class) {
+            return '\0';
+        }
+        return null;
+    }
+
+    private static final class SequencedIds implements java.util.function.Supplier<String> {
+        private final List<String> ids;
+        private int index;
+
+        private SequencedIds(String... ids) {
+            this.ids = List.of(ids);
+        }
+
+        @Override
+        public String get() {
+            return ids.get(index++);
+        }
+    }
+
+    private static final class RecordingNetService extends CoopNetService {
+        private final CoopConnectionRole role;
+        private final List<CoopMessages.Message> sent = new ArrayList<>();
+
+        private RecordingNetService(CoopConnectionRole role) {
+            this.role = role;
+        }
+
+        @Override
+        public CoopConnectionRole role() {
+            return role;
+        }
+
+        @Override
+        public boolean isConnected() {
+            return true;
+        }
+
+        @Override
+        public void send(CoopMessages.Message message) {
+            sent.add(message);
+        }
+    }
+}

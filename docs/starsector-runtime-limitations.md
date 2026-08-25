@@ -357,3 +357,21 @@ Consistent with the shared world the rest of Phase 12 builds, and the same thing
 ### Either player entering a system reveals its planets on both maps
 
 `CoreScript.markSystemAsEntered` bumps every planet in a newly entered system from NONE to SEEN, and the poll replicates SEEN like any other level (deliberately — the system-map display reads the minimum system survey level, and filtering SEEN out would leave the two maps visibly different). The consequence: one player's travels light up planet markers on the partner's map. That is a shared-exploration feature under this mod's model, but it is a visible departure from two solo campaigns and belongs in any "what's different in co-op" player doc (Phase 23).
+
+## Phase 24 — Shared Colonies: Two Accepted Divergences
+
+### The guest's hostile-activity meter runs its own race
+
+`HostileActivityManager` is deliberately *not* on the Phase 9/13 suppressor list — it does not end in `FleetManager`/`RouteManager`/`BountyManager` and it was never added to `KNOWN_SPAWNERS` — so both clients advance their own copy of the colony-crisis event. It is harmless where it counts: everything it spawns reaches the campaign through `RouteManager`, which *is* suppressed guest-side, so the guest's copy produces no fleets. What diverges is the meter itself — event points, stage progress, which factor is loudest — because the two clients' `EconomyUpdateListener` inputs are not identical and the intel is not replicated.
+
+The consequence is that the guest's own hostile-activity intel is not a reliable read on what is actually coming. The mirrored `CoopExpeditionWarningIntel` entry is the authoritative inbound-attack signal on the guest: it is scanned off the host's live intel manager and reconciled as a set. A guest that sees a native hostile-activity entry and a coop warning for the same colony is seeing its own simulation next to the real one; the coop entry is the one with a countdown that matches the fleets on the map.
+
+Not fixed because suppression would cost more than it buys. `HostileActivityEventIntel` is a singleton other systems reach through `HostileActivityEventIntel.get()`, and removing it guest-side would strip a UI surface for no gameplay gain when its fleets already cannot spawn.
+
+### Construction progress drifts between the two clients until an industry finishes
+
+`COLONY_MGMT` replicates the construction *queue*, not build progress. That is the right primary channel — vanilla's build button only appends to `market.getConstructionQueue()`, and each engine's own `Market.advance` drains it through `BaseIndustry.buildNextInQueue` — but the two engines start the same build at slightly different moments and then run their own timers, so the progress bars do not match to the day.
+
+Reading the true progress across the wire is not cheaply possible: `Industry.getBuildOrUpgradeProgress()` returns a 0..1 fraction that reads `0` whenever the industry is disrupted (`BaseIndustry.java:491-498`), the absolute-days field needs a `BaseIndustry` cast, and the `buildTime` field it is measured against is not readable at all during an upgrade — `getBuildTime()` returns the *spec* value, not the field.
+
+Accepted, because it self-heals with a bound: the first client to finish reports the industry as finished, and the applier forces the lagging mirror to `finishBuildingOrUpgrading()`. The drift is therefore never larger than the gap between the two starts, and it always resolves at completion. The one visible artifact is that the client that finishes second may see its "construction complete" message a moment early.

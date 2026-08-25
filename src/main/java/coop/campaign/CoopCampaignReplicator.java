@@ -42,8 +42,15 @@ import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
 import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.util.Misc;
 import com.fs.starfarer.api.EveryFrameScript;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
+import coop.colony.CoopColonyIncome;
+import coop.colony.CoopColonyManagement;
 import coop.colony.CoopColonySync;
+import coop.colony.CoopExpeditionWarning;
+import coop.colony.CoopExpeditionWarningSync;
 import coop.colony.CoopRaidOutcomeSync;
+import coop.rewards.CoopRewardSplitter;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -51,8 +58,10 @@ import coop.session.CoopSessionState;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -83,7 +92,8 @@ import java.util.function.LongSupplier;
  * smoke test.
  */
 public final class CoopCampaignReplicator
-        implements CoopCampaignEventListener.Sink, CoopRaidOutcomeSync.Sink, CoopColonySync.Sink {
+        implements CoopCampaignEventListener.Sink, CoopRaidOutcomeSync.Sink, CoopColonySync.Sink,
+        CoopColonyIncome.Sink {
 
     /**
      * Re-entrancy guard: while {@link #isReplaying()} the applier is mid-apply of a host-originated
@@ -178,6 +188,35 @@ public final class CoopCampaignReplicator
     private final CoopColonySync.Ledger colonyLedger = new CoopColonySync.Ledger();
     private CoopColonySync.ColonizationCapture colonyCapture;
 
+    // Phase 24 milestone 3: colony management, diffed on close. Bidirectional like the two channels
+    // above -- whoever edited the colony ships the resulting absolute state, the host canonicalizes
+    // and rebroadcasts, the ledger absorbs the echo. The Phase 10 interaction gate is a global
+    // first-come lockout on dialogs, so the two players are never in colony screens at once and there
+    // is no conflict to resolve.
+    private final CoopColonyManagement.Ledger colonyMgmtLedger = new CoopColonyManagement.Ledger();
+    private final CoopColonyManagement.Diff colonyMgmtDiff = new CoopColonyManagement.Diff();
+
+    // Phase 24 milestone 3: colony income. No money crosses the wire -- both engines pay their own
+    // player the full local colony net at month end, and each deducts its own half. COLONY_INCOME
+    // carries the host's figure for drift logging only. See CoopColonyIncome.
+    private CoopColonyIncome.MonthEndCapture colonyIncomeCapture;
+    /** Month-end banners, queued because a month can end on a frame with no campaign UI yet. */
+    private final Deque<String> pendingIncomeBanners = new ArrayDeque<>();
+    static final int MAX_PENDING_INCOME_BANNERS = 8;
+    /** Guest side of the income drift line: the two halves arrive in either order. */
+    private Float pendingHostColonyNet;
+    private long pendingHostColonyCount;
+    private CoopColonyIncome.MonthTotals pendingLocalColonyTotals;
+
+    // Phase 24 milestone 3: NPC threats against player colonies. Host-only simulation, so the host
+    // scans its intel manager on a low-rate tick and broadcasts the whole set on hash change; the
+    // guest reconciles its coop-owned warning intel against it. Same shape as Phase 13's BASE_SET.
+    private long nextWarningPollAtMillis;
+    private String lastWarningSetHash = "";
+    private List<CoopExpeditionWarning> desiredWarnings = List.of();
+    private boolean desiredWarningsReceived;
+    private long nextWarningReconcileAtMillis;
+
     // Phase 12c bar pool: the host polls the global portside bar pool and pushes the ordered list on
     // change. Two seconds is well inside a dock-to-bar-click, and the pool only ever changes on
     // BarEventManager's 0.4-0.6 day generation tick or when someone accepts an offer.
@@ -252,6 +291,21 @@ public final class CoopCampaignReplicator
             CoopLog.warn(CoopCampaignReplicator.class,
                     "Could not register coop colonization listener; COLONY_FOUNDED will not fire", ex);
         }
+        // Phase 24 M3: the month-end callback exists only on EconomyTickListener -- the
+        // CampaignEventListener path this class already rides reports economy *ticks* and nothing
+        // else -- so the income split needs its own listener-manager registration.
+        try {
+            colonyIncomeCapture = new CoopColonyIncome.MonthEndCapture(this);
+            sector.getListenerManager().addListener(colonyIncomeCapture, true);
+        } catch (RuntimeException | LinkageError ex) {
+            colonyIncomeCapture = null;
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Could not register coop economy month-end listener; colony income will not split", ex);
+        }
+        // Phase 24 M3: a (re)start re-arms the host's warning rebroadcast so a fresh connection gets
+        // the full set, and drops any management baseline left over from the last session.
+        colonyMgmtDiff.reset();
+        resetExpeditionWarningStreams();
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
 
@@ -292,6 +346,31 @@ public final class CoopCampaignReplicator
                         "Failed to remove coop colonization listener", ex);
             }
         }
+        if (sector != null && colonyIncomeCapture != null) {
+            try {
+                sector.getListenerManager().removeListener(colonyIncomeCapture);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class,
+                        "Failed to remove coop economy month-end listener", ex);
+            }
+        }
+        if (colonyIncomeCapture != null) {
+            colonyIncomeCapture.reset();
+        }
+        colonyIncomeCapture = null;
+        colonyMgmtDiff.reset();
+        colonyMgmtLedger.clear();
+        pendingIncomeBanners.clear();
+        pendingHostColonyNet = null;
+        pendingHostColonyCount = 0L;
+        pendingLocalColonyTotals = null;
+        // The mirrored warnings are coop-owned intel with no meaning outside a session, and leaving
+        // them in the save would show the player a frozen countdown for a threat they cannot see.
+        // The entries' own staleness timer is the backstop for a teardown that never runs.
+        clearMirroredExpeditionWarnings(sector);
+        resetExpeditionWarningStreams();
+        desiredWarnings = List.of();
+        desiredWarningsReceived = false;
         if (raidCapture != null) {
             raidCapture.reset();
         }
@@ -351,6 +430,9 @@ public final class CoopCampaignReplicator
             case WORLD_DELTA -> handleWorldDelta(message);
             case RAID_RESULT -> handleRaidResult(message);
             case COLONY_FOUNDED, COLONY_ABANDONED -> handleColonyLifecycle(message);
+            case COLONY_MGMT -> handleColonyMgmt(message);
+            case COLONY_INCOME -> handleColonyIncome(message);
+            case EXPEDITION_WARNING -> handleExpeditionWarning(message);
             case ABILITY_ACTIVATE -> hostHandleAbilityActivate(message);
             case ORBIT_SNAPSHOT -> applyOrbitSnapshot(message);
             default -> {
@@ -713,6 +795,14 @@ public final class CoopCampaignReplicator
         if (isHost() && cargoUpdated && service.isConnected()) {
             broadcastMarketSnapshot(market);
         }
+        // Phase 24 M3: baseline the colony-management state so the close can diff against it. Both
+        // roles do this -- either player manages the shared colonies from their own client.
+        try {
+            colonyMgmtDiff.onOpened(session.localPlayerId(), market);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Failed to baseline colony management state on market open", ex);
+        }
         // Host-authoritative market contents are synced once, at open (never per-frame, so the trade
         // UI is never fought mid-transaction). The host's engine market IS the canonical source: the
         // guest asks the host for a snapshot and applies it to its own market once; thereafter both
@@ -753,6 +843,16 @@ public final class CoopCampaignReplicator
                 reportHiresOnClose(market);
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopCampaignReplicator.class, "Failed to diff hireable pool on market close", ex);
+            }
+        }
+        // Phase 24 M3: the colony-management diff. Runs before the observer call below so a close that
+        // both ends an interaction and edited a colony reports the edit first.
+        if (isActive() && !replayGuard.isReplaying()) {
+            try {
+                reportColonyMgmtOnClose(market);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class,
+                        "Failed to diff colony management state on market close", ex);
             }
         }
         if (marketCloseObserver == null) {
@@ -1610,6 +1710,283 @@ public final class CoopCampaignReplicator
         }
         CoopLog.info(CoopCampaignReplicator.class, "Coop COLONY_" + event.kind() + " planet="
                 + event.planetId() + " id=" + event.eventId() + " firstApply=" + firstApply);
+    }
+
+    // ---- Phase 24 M3: colony management --------------------------------------------------------
+
+    /**
+     * The local player left a colony screen. Ships the whole post-close management state when it
+     * differs from the open-time baseline, and nothing at all when it does not — which is the common
+     * case, because a player docks at their own colony to trade far more often than to build.
+     */
+    private void reportColonyMgmtOnClose(MarketAPI market) {
+        CoopColonyManagement.State state = colonyMgmtDiff.onClosed(session.localPlayerId(), market);
+        if (state == null) {
+            return;
+        }
+        // The ledger entry taken now is what makes the host's rebroadcast a no-op when it comes back.
+        if (!colonyMgmtLedger.apply(state)) {
+            return;
+        }
+        send(CoopMessages.colonyMgmt(session.sessionId(), service.nextSeq(), now(), state.encode()));
+        CoopLog.info(CoopCampaignReplicator.class, "Coop captured COLONY_MGMT market="
+                + state.marketId() + " id=" + state.reportId()
+                + " industries=" + state.industries().size() + " queue=" + state.queue().size()
+                + " freePort=" + state.freePort());
+    }
+
+    private void handleColonyMgmt(CoopMessages.Message message) {
+        CoopColonyManagement.State state = CoopColonyManagement.decode(
+                CoopMessages.requiredPayloadString(message, "mgmt"));
+        boolean firstApply = colonyMgmtLedger.apply(state);
+        if (firstApply) {
+            replayGuard.begin();
+            try {
+                CoopColonyManagement.applyToEngine(state);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply COLONY_MGMT", ex);
+            } finally {
+                replayGuard.end();
+            }
+        }
+        // The host owns the canonical market: it integrates the guest's report and rebroadcasts so
+        // both clients converge. The originator's ledger entry kills the echo.
+        if (isHost() && isActive()) {
+            send(CoopMessages.colonyMgmt(session.sessionId(), service.nextSeq(), now(), state.encode()));
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop COLONY_MGMT market=" + state.marketId()
+                + " id=" + state.reportId() + " firstApply=" + firstApply);
+    }
+
+    // ---- Phase 24 M3: colony income ------------------------------------------------------------
+
+    @Override
+    public boolean shouldSplitColonyIncome() {
+        return isActive() && !replayGuard.isReplaying();
+    }
+
+    /**
+     * A month ended locally. Both engines run the same replicated colonies and each has just paid its
+     * own player the whole colony net, so each deducts the half it does not keep — no credits cross
+     * the wire. See {@link CoopColonyIncome} for why a transfer would pay 150%.
+     */
+    @Override
+    public void onColonyMonthEnd(CoopColonyIncome.MonthTotals totals) {
+        if (totals == null || !isActive()) {
+            return;
+        }
+        CoopRewardSplitter.Split split = CoopRewardSplitter.splitCredits(totals.net());
+        if (split.total() != 0L) {
+            long deducted = CoopColonyIncome.deductFromLocalPlayer(split.remoteShare());
+            queueIncomeBanner(CoopColonyIncome.splitBanner(split));
+            CoopLog.info(CoopCampaignReplicator.class, "Coop colony income split total="
+                    + split.total() + " kept=" + split.localShare() + " deducted=" + deducted
+                    + " colonies=" + totals.colonyCount());
+        } else if (!totals.isSilent()) {
+            // Colonies exist but broke even. Nothing to move and nothing worth a banner for.
+            CoopLog.info(CoopCampaignReplicator.class,
+                    "Coop colony month ended at break-even across " + totals.colonyCount() + " colonies");
+        }
+        if (isHost()) {
+            send(CoopMessages.colonyIncome(session.sessionId(), service.nextSeq(), now(),
+                    totals.net(), totals.colonyCount()));
+        } else {
+            pendingLocalColonyTotals = totals;
+            maybeLogColonyIncomeDrift();
+        }
+    }
+
+    /**
+     * Host&rarr;guest canonical figure, used for one thing: a drift line. Correcting from it would
+     * mean transferring credits, which is the design the local-half model replaces.
+     */
+    private void handleColonyIncome(CoopMessages.Message message) {
+        if (!isGuest()) {
+            return;
+        }
+        pendingHostColonyNet = CoopMessages.requiredPayloadFloat(message, "netCredits");
+        pendingHostColonyCount = CoopMessages.requiredPayloadLong(message, "colonyCount");
+        maybeLogColonyIncomeDrift();
+    }
+
+    /**
+     * The two halves of the comparison arrive in either order — the guest's own economy stepper and
+     * the host's message are not sequenced against each other — so the line is logged once both are
+     * in hand, and both are then cleared so the next month starts fresh.
+     */
+    private void maybeLogColonyIncomeDrift() {
+        if (pendingHostColonyNet == null || pendingLocalColonyTotals == null) {
+            return;
+        }
+        CoopLog.info(CoopCampaignReplicator.class, CoopColonyIncome.driftLine(
+                pendingLocalColonyTotals, pendingHostColonyNet, pendingHostColonyCount));
+        pendingHostColonyNet = null;
+        pendingHostColonyCount = 0L;
+        pendingLocalColonyTotals = null;
+    }
+
+    private void queueIncomeBanner(String text) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        while (pendingIncomeBanners.size() >= MAX_PENDING_INCOME_BANNERS) {
+            pendingIncomeBanners.poll();
+        }
+        pendingIncomeBanners.add(text);
+    }
+
+    /**
+     * Per-frame flush of month-end banners. Queued rather than posted from the month-end callback for
+     * the same reason the battle bridge queues its own: a frame can have no {@link CampaignUIAPI} at
+     * all (load, teardown), and posting to a half-built UI is not worth the risk.
+     */
+    public void tickColonyIncome() {
+        if (pendingIncomeBanners.isEmpty()) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
+            if (ui == null) {
+                return;
+            }
+            String banner;
+            while ((banner = pendingIncomeBanners.poll()) != null) {
+                try {
+                    ui.addMessage(banner);
+                } catch (RuntimeException | LinkageError ignored) {
+                    // Banner is best-effort; the split itself already happened.
+                }
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to post a coop colony income banner", ex);
+        }
+    }
+
+    // ---- Phase 24 M3: expedition warnings ------------------------------------------------------
+
+    /**
+     * Host: scan for threats aimed at player colonies and broadcast the set on change. Guest:
+     * re-reconcile its mirrored warning intel on a slow tick, which also refreshes each entry's
+     * staleness timer.
+     */
+    public void tickExpeditionWarnings() {
+        if (!isActive() || !service.isConnected()) {
+            return;
+        }
+        try {
+            if (isHost()) {
+                tickExpeditionWarningHost();
+            } else if (isGuest()) {
+                tickExpeditionWarningGuest();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to sync coop expedition warnings", ex);
+        }
+    }
+
+    private void tickExpeditionWarningHost() {
+        long nowMillis = now();
+        if (nowMillis < nextWarningPollAtMillis) {
+            return;
+        }
+        nextWarningPollAtMillis = nowMillis + CoopExpeditionWarningSync.HOST_POLL_INTERVAL_MILLIS;
+        List<CoopExpeditionWarning> warnings = CoopExpeditionWarningSync.captureHostWarnings();
+        if (warnings == null) {
+            // "No reading this poll", not "no threats". Broadcasting the resulting empty set would
+            // tell the guest to drop every warning it is showing.
+            return;
+        }
+        String hash = CoopExpeditionWarning.setHash(warnings);
+        if (hash.equals(lastWarningSetHash)) {
+            return;
+        }
+        lastWarningSetHash = hash;
+        send(CoopMessages.expeditionWarning(session.sessionId(), service.nextSeq(), nowMillis,
+                CoopExpeditionWarning.encodeSet(warnings)));
+        CoopLog.info(CoopCampaignReplicator.class,
+                "Coop sent EXPEDITION_WARNING warnings=" + warnings.size());
+    }
+
+    private void tickExpeditionWarningGuest() {
+        if (!desiredWarningsReceived) {
+            return;
+        }
+        long nowMillis = now();
+        if (nowMillis < nextWarningReconcileAtMillis) {
+            return;
+        }
+        nextWarningReconcileAtMillis =
+                nowMillis + CoopExpeditionWarningSync.GUEST_RECONCILE_INTERVAL_MILLIS;
+        IntelManagerAPI intel = intelManager(Global.getSector());
+        if (intel == null) {
+            return;
+        }
+        replayGuard.begin();
+        try {
+            CoopExpeditionWarningSync.Summary summary = CoopExpeditionWarningSync.apply(
+                    new CoopExpeditionWarningSync.SectorWarningWorld(intel), desiredWarnings);
+            if (!summary.isNoOp()) {
+                CoopLog.info(CoopCampaignReplicator.class,
+                        "Coop reconciled expedition warnings " + summary);
+            }
+        } finally {
+            replayGuard.end();
+        }
+    }
+
+    /**
+     * Stores an inbound set. Deliberately does not reconcile here: inbound dispatch runs early in the
+     * pump frame, and the same session-start ordering trap Phase 13 hit with {@code BASE_SET} (a set
+     * applied before the session edge, then wiped by the reset that followed) applies equally.
+     */
+    private void handleExpeditionWarning(CoopMessages.Message message) {
+        if (!isGuest()) {
+            return;
+        }
+        desiredWarnings = CoopExpeditionWarning.decodeSet(
+                CoopMessages.requiredPayloadString(message, "warnings"));
+        desiredWarningsReceived = true;
+        // Reconcile on the very next tick rather than waiting out the low-rate interval.
+        nextWarningReconcileAtMillis = 0L;
+        CoopLog.info(CoopCampaignReplicator.class,
+                "Coop received EXPEDITION_WARNING warnings=" + desiredWarnings.size());
+    }
+
+    /**
+     * Session (re)start or teardown: forget the last-sent hash so the next host tick rebroadcasts the
+     * full set, and let the guest reconcile immediately.
+     *
+     * <p>The guest's stored desired set deliberately survives this, for the reason Phase 13 recorded:
+     * the host rebroadcasts on its own session edge, so a stale set is short-lived, but a wiped set is
+     * unrecoverable until the host's hash happens to change.
+     */
+    private void resetExpeditionWarningStreams() {
+        nextWarningPollAtMillis = 0L;
+        nextWarningReconcileAtMillis = 0L;
+        lastWarningSetHash = "";
+    }
+
+    private void clearMirroredExpeditionWarnings(SectorAPI sector) {
+        try {
+            IntelManagerAPI intel = intelManager(sector);
+            if (intel == null) {
+                return;
+            }
+            int cleared = new CoopExpeditionWarningSync.SectorWarningWorld(intel).clearAll();
+            if (cleared > 0) {
+                CoopLog.info(CoopCampaignReplicator.class,
+                        "Coop cleared " + cleared + " mirrored expedition warnings on session end");
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Failed to clear mirrored coop expedition warnings", ex);
+        }
+    }
+
+    private static IntelManagerAPI intelManager(SectorAPI sector) {
+        SectorAPI resolved = sector == null ? Global.getSector() : sector;
+        return resolved == null ? null : resolved.getIntelManager();
     }
 
     private void handleWorldDelta(CoopMessages.Message message) {
@@ -3413,6 +3790,24 @@ public final class CoopCampaignReplicator
 
     public CoopColonySync.Ledger colonyLedger() {
         return colonyLedger;
+    }
+
+    public CoopColonyManagement.Ledger colonyMgmtLedger() {
+        return colonyMgmtLedger;
+    }
+
+    public CoopColonyManagement.Diff colonyMgmtDiff() {
+        return colonyMgmtDiff;
+    }
+
+    /** Test/diagnostic seam: month-end banners not yet posted to the campaign UI. */
+    public int pendingIncomeBannerCount() {
+        return pendingIncomeBanners.size();
+    }
+
+    /** Test/diagnostic seam: the last warning set the guest was told to reconcile against. */
+    public List<CoopExpeditionWarning> desiredExpeditionWarnings() {
+        return desiredWarnings;
     }
 
     public CoopSkeletonMutationWatcher skeletonWatcher() {

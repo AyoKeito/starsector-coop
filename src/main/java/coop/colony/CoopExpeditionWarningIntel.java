@@ -1,0 +1,345 @@
+package coop.colony;
+
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.FactionAPI;
+import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
+import com.fs.starfarer.api.ui.SectorMapAPI;
+import com.fs.starfarer.api.ui.TooltipMakerAPI;
+import coop.util.CoopLog;
+
+import java.awt.Color;
+import java.util.Locale;
+import java.util.Set;
+
+/**
+ * Phase 24 milestone 3: the guest's mirrored warning that an NPC force is coming for a player colony.
+ * The mod's first custom intel plugin.
+ *
+ * <p><b>Why this exists.</b> Expeditions, inspections and colony-crisis attacks are simulated
+ * host-side only — the guest's {@code PunitiveExpeditionManager} and the route machinery behind them
+ * are on the Phase 13 suppressor's list — so the vanilla countdown intel is host-local. The decision
+ * (2026-06-10) was to mirror the warning <em>data</em> into a coop-owned intel entry rather than build
+ * generic intel replication, which would mean serialising arbitrary vanilla intel graphs across the
+ * wire. This class is that entry: a handful of strings and an int, fed by {@code EXPEDITION_WARNING}.
+ *
+ * <p><b>Save shape.</b> Every field is a primitive or a {@code String} on purpose. The intel object
+ * lands in the guest's save through XStream, which does not run constructors or field initialisers on
+ * load, so anything richer would be one refactor away from breaking existing saves. The enums the
+ * wire uses are stored by name for the same reason: an enum field serialises by constant name, and a
+ * rename would break loads. {@link #kind()} and {@link #status()} re-parse defensively.
+ *
+ * <p><b>Lifecycle safety.</b> The entry must not survive as a stale countdown in a save that is later
+ * loaded solo, so it expires itself: {@link #advanceImpl} ends it once
+ * {@link #STALE_DAYS} of campaign time pass without a coop session touching it. A live session
+ * refreshes every mirrored entry on each reconcile pass, several times a minute, so the timer only
+ * ever runs out when there is nobody left to refresh it. Session teardown clears the entries
+ * outright; the timer is the backstop for the case teardown never happened (a crash, a save taken
+ * mid-session and loaded alone).
+ */
+public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
+
+    /**
+     * In-game days without a coop update before the entry ends itself. Ten days is far longer than
+     * any gap a live session can produce (the reconcile runs every five seconds of real time) and far
+     * shorter than a player would tolerate a frozen countdown for.
+     */
+    public static final float STALE_DAYS = 10f;
+
+    private String kindName;
+    private String factionId;
+    private String targetMarketId;
+    private String targetName;
+    private int etaDays;
+    private String statusName;
+    /** Campaign-clock timestamp of the last coop update; {@code getElapsedDaysSince} reads it. */
+    private long lastTouchedTimestamp;
+
+    public CoopExpeditionWarningIntel(CoopExpeditionWarning warning) {
+        assign(warning);
+        // BaseIntelPlugin does not register itself as a script, and without one advanceImpl never
+        // runs, so the self-expire would never fire. Vanilla's own intel does exactly this
+        // (RaidIntel.java:87, FleetGroupIntel.java:100) and removes it again in notifyEnded().
+        SectorAPI sector = Global.getSector();
+        if (sector != null) {
+            sector.addScript(this);
+        }
+    }
+
+    /** Overwrites the mirrored values and refreshes the staleness timer. */
+    public final void update(CoopExpeditionWarning warning) {
+        assign(warning);
+    }
+
+    /**
+     * Refreshes the staleness timer without changing anything else. Called for every entry on every
+     * reconcile pass, including the ones the host's set did not move.
+     */
+    public final void touch() {
+        lastTouchedTimestamp = clockTimestamp();
+    }
+
+    private void assign(CoopExpeditionWarning warning) {
+        if (warning == null) {
+            return;
+        }
+        this.kindName = warning.kind().name();
+        this.factionId = warning.factionId();
+        this.targetMarketId = warning.targetMarketId();
+        this.targetName = warning.targetName();
+        this.etaDays = warning.etaDays();
+        this.statusName = warning.status().name();
+        this.lastTouchedTimestamp = clockTimestamp();
+    }
+
+    /** The record this entry mirrors, for the reconcile's local-set read. */
+    public CoopExpeditionWarning toRecord() {
+        return new CoopExpeditionWarning(kind(), factionId, targetMarketId, targetName, etaDays,
+                status());
+    }
+
+    public CoopExpeditionWarning.Kind kind() {
+        return parseKind(kindName);
+    }
+
+    public CoopExpeditionWarning.Status status() {
+        return parseStatus(statusName);
+    }
+
+    public String targetMarketId() {
+        return targetMarketId == null ? "" : targetMarketId;
+    }
+
+    static CoopExpeditionWarning.Kind parseKind(String raw) {
+        if (raw == null) {
+            return CoopExpeditionWarning.Kind.RAID;
+        }
+        try {
+            return CoopExpeditionWarning.Kind.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            return CoopExpeditionWarning.Kind.RAID;
+        }
+    }
+
+    static CoopExpeditionWarning.Status parseStatus(String raw) {
+        if (raw == null) {
+            return CoopExpeditionWarning.Status.INBOUND;
+        }
+        try {
+            return CoopExpeditionWarning.Status.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            return CoopExpeditionWarning.Status.INBOUND;
+        }
+    }
+
+    // ---- Self-expire ---------------------------------------------------------------------------
+
+    /**
+     * The pure half of the lifecycle decision, so the rule is testable without a campaign clock.
+     * A negative elapsed reading (a clock that moved backwards across a load) is not a reason to end
+     * anything.
+     */
+    public static boolean shouldSelfExpire(float daysSinceTouch) {
+        return daysSinceTouch >= STALE_DAYS;
+    }
+
+    @Override
+    protected void advanceImpl(float amount) {
+        if (isEnding() || isEnded()) {
+            return;
+        }
+        try {
+            if (lastTouchedTimestamp == 0L) {
+                // Loaded from a save written before the field existed, or never touched. Start the
+                // clock now rather than expiring instantly.
+                lastTouchedTimestamp = clockTimestamp();
+                return;
+            }
+            if (shouldSelfExpire(daysSinceTouched())) {
+                CoopLog.info(CoopExpeditionWarningIntel.class,
+                        "Coop expedition warning for " + targetMarketId() + " expired: no session"
+                                + " update in " + STALE_DAYS + " days");
+                endImmediately();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopExpeditionWarningIntel.class,
+                    "Failed to advance a coop expedition warning; ending it", ex);
+            endImmediately();
+        }
+    }
+
+    float daysSinceTouched() {
+        SectorAPI sector = Global.getSector();
+        if (sector == null || sector.getClock() == null) {
+            return 0f;
+        }
+        return sector.getClock().getElapsedDaysSince(lastTouchedTimestamp);
+    }
+
+    private static long clockTimestamp() {
+        try {
+            SectorAPI sector = Global.getSector();
+            return sector == null || sector.getClock() == null ? 0L : sector.getClock().getTimestamp();
+        } catch (RuntimeException | LinkageError ex) {
+            return 0L;
+        }
+    }
+
+    @Override
+    protected void notifyEnded() {
+        SectorAPI sector = Global.getSector();
+        if (sector != null) {
+            sector.removeScript(this);
+        }
+    }
+
+    // ---- Rendering -----------------------------------------------------------------------------
+
+    @Override
+    public String getName() {
+        String kind = switch (kind()) {
+            case PUNITIVE_EXPEDITION -> "Punitive Expedition";
+            case INSPECTION -> "Inspection";
+            case HOSTILE_ACTIVITY -> "Hostile Fleets";
+            case RAID -> "Raid";
+        };
+        String faction = factionDisplayName();
+        String prefix = faction.isEmpty() ? kind : faction + " " + kind;
+        String target = targetDisplayName();
+        return target.isEmpty() ? prefix : prefix + " - " + target;
+    }
+
+    @Override
+    protected void addBulletPoints(TooltipMakerAPI info, ListInfoMode mode, boolean isUpdate,
+                                   Color tc, float initPad) {
+        String target = targetDisplayName();
+        if (!target.isEmpty()) {
+            info.addPara("Target: " + target, tc, initPad);
+        }
+        info.addPara(etaLine(), tc, 3f);
+    }
+
+    @Override
+    public void createSmallDescription(TooltipMakerAPI info, float width, float height) {
+        float pad = 10f;
+        info.addPara("Reported by your partner's client. The attacking force is simulated on their"
+                + " machine and its fleets are mirrored to yours.", pad);
+        String faction = factionDisplayName();
+        if (!faction.isEmpty()) {
+            info.addPara("Faction: " + faction, pad);
+        }
+        String target = targetDisplayName();
+        if (!target.isEmpty()) {
+            info.addPara("Target colony: " + target, pad);
+        }
+        info.addPara(etaLine(), pad);
+    }
+
+    /** ASCII only, and singular/plural handled: this is player-facing text. */
+    String etaLine() {
+        if (status() == CoopExpeditionWarning.Status.ARRIVED) {
+            return "Status: in the target system now.";
+        }
+        if (etaDays <= 0) {
+            return "Status: arriving imminently.";
+        }
+        return "Estimated arrival: " + etaDays + (etaDays == 1 ? " day." : " days.");
+    }
+
+    @Override
+    public Set<String> getIntelTags(SectorMapAPI map) {
+        Set<String> tags = super.getIntelTags(map);
+        tags.add(Tags.INTEL_MILITARY);
+        tags.add(Tags.INTEL_COLONIES);
+        if (factionId != null && !factionId.isEmpty()) {
+            tags.add(factionId);
+        }
+        return tags;
+    }
+
+    @Override
+    public String getSortString() {
+        return "Colony Threat";
+    }
+
+    /**
+     * A faction crest, which is the safest possible icon: it is always a loaded sprite, and it is what
+     * both vanilla raid hierarchies use ({@code RaidIntel.java:504},
+     * {@code FleetGroupIntel.java:970}). Falls back to {@code null}, which the intel contract
+     * explicitly allows — "40x40, no icon if null" — rather than to a sprite key that might not exist.
+     */
+    @Override
+    public String getIcon() {
+        try {
+            FactionAPI faction = threatFaction();
+            String crest = faction == null ? null : faction.getCrest();
+            return crest == null || crest.isEmpty() ? null : crest;
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    @Override
+    public FactionAPI getFactionForUIColors() {
+        FactionAPI faction = threatFaction();
+        return faction == null ? super.getFactionForUIColors() : faction;
+    }
+
+    /** Puts the entry on the map at the threatened colony, when this engine can find it. */
+    @Override
+    public SectorEntityToken getMapLocation(SectorMapAPI map) {
+        MarketAPI market = targetMarket();
+        return market == null ? null : market.getPrimaryEntity();
+    }
+
+    private FactionAPI threatFaction() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null || factionId == null || factionId.isEmpty()) {
+                return null;
+            }
+            return sector.getFaction(factionId);
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private String factionDisplayName() {
+        FactionAPI faction = threatFaction();
+        if (faction == null) {
+            return factionId == null ? "" : factionId;
+        }
+        String name = faction.getDisplayName();
+        return name == null ? "" : name;
+    }
+
+    /**
+     * The colony's name. Prefers this engine's live market — the guest mirrors player colonies, so it
+     * normally has one — and falls back to the name the host put on the wire.
+     */
+    private String targetDisplayName() {
+        MarketAPI market = targetMarket();
+        if (market != null && market.getName() != null && !market.getName().isEmpty()) {
+            return market.getName();
+        }
+        return targetName == null ? "" : targetName;
+    }
+
+    private MarketAPI targetMarket() {
+        try {
+            if (targetMarketId == null || targetMarketId.isEmpty()) {
+                return null;
+            }
+            SectorAPI sector = Global.getSector();
+            if (sector == null || sector.getEconomy() == null) {
+                return null;
+            }
+            return sector.getEconomy().getMarket(targetMarketId);
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+}
