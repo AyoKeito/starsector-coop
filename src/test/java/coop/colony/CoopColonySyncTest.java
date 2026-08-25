@@ -455,6 +455,59 @@ class CoopColonySyncTest {
                 "the reported queue replaces what was there rather than adding to it");
     }
 
+    /**
+     * Defect 2 as reported live: the guest was seen "constructing" a population industry the host had
+     * finished at founding. An I-line is a finished industry — the queue is what carries anything still
+     * being built — and a freshly added one already is finished ({@code Market.addIndustry} appends the
+     * plugin and calls {@code apply()}), so nothing on this path may start a build.
+     */
+    @Test
+    void aFoundingLeavesItsIndustriesFinishedAndOnlyItsQueueQueued() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        Global.setSector(sector.proxy());
+
+        CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
+
+        assertFalse(market.industryState("population").building,
+                "an I-line industry is finished, never under construction");
+        assertEquals(List.of("spaceport"), queueIds(market),
+                "and only the Q-lines stay queued for the mirror's own engine to build");
+    }
+
+    /** The backstop: an industry this engine already held mid-build is finished, not left hanging. */
+    @Test
+    void aFoundingFinishesAnIndustryTheMirrorWasAlreadyBuilding() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        market.industries.add("population");
+        market.industryState("population").building = true;
+        Global.setSector(sector.proxy());
+
+        CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
+
+        assertFalse(market.industryState("population").building);
+        assertEquals(1, market.industryState("population").finishCalls);
+    }
+
+    /**
+     * And the vanilla quirk that made the live report look like a rebuild in the first place: a colony
+     * below its maximum size reports itself upgrading forever. Finishing that non-build would fire
+     * vanilla's "construction completed" message and pop the construction queue early.
+     */
+    @Test
+    void aFoundingDoesNotEndVanillasColonyGrowth() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        market.industries.add("population");
+        market.industryState("population").growing = true;
+        Global.setSector(sector.proxy());
+
+        CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
+
+        assertEquals(0, market.industryState("population").finishCalls);
+    }
+
     /** A colony really founded with an empty queue must mirror as empty, not as "unset". */
     @Test
     void applyingAFoundedColonyWithNoQueueClearsTheMirrorsQueue() {
@@ -699,6 +752,7 @@ class CoopColonySyncTest {
         private int addMarketCalls;
         private final List<FakeCondition> conditions = new ArrayList<>();
         private final List<String> industries = new ArrayList<>();
+        private final Map<String, FakeIndustry> industryStates = new LinkedHashMap<>();
         private final Map<String, SubmarketAPI> submarkets = new LinkedHashMap<>();
         private final ConstructionQueue queue = new ConstructionQueue();
         private SectorEntityToken primary;
@@ -726,6 +780,10 @@ class CoopColonySyncTest {
         private FakeMarket(String id) {
             this.id = id;
             this.name = id;
+        }
+
+        FakeIndustry industryState(String industryId) {
+            return industryStates.computeIfAbsent(industryId, FakeIndustry::new);
         }
 
         void becomeColony() {
@@ -835,13 +893,16 @@ class CoopColonySyncTest {
                         case "getIndustries" -> {
                             List<Industry> all = new ArrayList<>();
                             for (String industryId : industries) {
-                                all.add(industryProxy(industryId));
+                                all.add(industryState(industryId).proxy());
                             }
                             yield all;
                         }
                         case "hasIndustry" -> industries.contains((String) args[0]);
+                        case "getIndustry" -> industries.contains((String) args[0])
+                                ? industryState((String) args[0]).proxy() : null;
                         case "addIndustry" -> {
                             industries.add((String) args[0]);
+                            industryState((String) args[0]);
                             yield null;
                         }
                         case "reapplyIndustries" -> {
@@ -868,17 +929,57 @@ class CoopColonySyncTest {
         private MarketAPI.SurveyLevel surveyLevel = MarketAPI.SurveyLevel.NONE;
     }
 
-    private static Industry industryProxy(String industryId) {
-        return (Industry) Proxy.newProxyInstance(
-                Industry.class.getClassLoader(),
-                new Class<?>[]{Industry.class},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getId" -> industryId;
-                    case "toString" -> "Industry[" + industryId + "]";
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    default -> defaultValue(method.getReturnType());
-                });
+    /**
+     * Enough industry to tell "finished" from "under construction" apart, plus the one vanilla quirk
+     * that matters here: {@code PopulationAndInfrastructure} reports a colony below its maximum size as
+     * upgrading with no upgrade in its spec ({@code PopulationAndInfrastructure.java:606-617}).
+     */
+    private static final class FakeIndustry {
+        private final String id;
+        private boolean building;
+        private boolean growing;
+        private int finishCalls;
+        private Industry cached;
+
+        private FakeIndustry(String id) {
+            this.id = id;
+        }
+
+        Industry proxy() {
+            if (cached != null) {
+                return cached;
+            }
+            Object spec = Proxy.newProxyInstance(
+                    com.fs.starfarer.api.loading.IndustrySpecAPI.class.getClassLoader(),
+                    new Class<?>[]{com.fs.starfarer.api.loading.IndustrySpecAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getId" -> id;
+                        case "getUpgrade" -> null;
+                        case "toString" -> "Spec[" + id + "]";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            cached = (Industry) Proxy.newProxyInstance(
+                    Industry.class.getClassLoader(),
+                    new Class<?>[]{Industry.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getId" -> id;
+                        case "getSpec" -> spec;
+                        case "isBuilding" -> building;
+                        case "isUpgrading" -> growing;
+                        case "finishBuildingOrUpgrading" -> {
+                            building = false;
+                            finishCalls++;
+                            yield null;
+                        }
+                        case "toString" -> "Industry[" + id + "]";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
+            return cached;
+        }
     }
 
     private static SubmarketAPI submarketProxy(String specId) {

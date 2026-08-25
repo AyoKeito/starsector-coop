@@ -434,7 +434,254 @@ class CoopColonyManagementTest {
         CoopColonyManagement.applyToEngine(emptyState("host-player:1"));
     }
 
+    // ---- Build state: vanilla's overridden predicates ------------------------------------------
+
+    /**
+     * The live 2026-08-25 defect at the capture end. {@code PopulationAndInfrastructure} reports any
+     * colony below its maximum size as upgrading, so the naive reading shipped
+     * "population is UPGRADING" for every ordinary colony — and population has no upgrade at all.
+     */
+    @Test
+    void aColonyGrowingTowardItsMaxSizeIsNotCapturedAsUpgrading() {
+        FakeMarket market = colony();
+        market.industry("population").growing = true;
+
+        CoopColonyManagement.State state =
+                CoopColonyManagement.capture("a:1", "host-player", market.proxy());
+
+        assertEquals(CoopColonyManagement.BuildState.NONE, state.industries().get(0).buildState());
+        assertEquals("", state.industries().get(0).upgradeId());
+    }
+
+    /** The disambiguation must not cost the two states that are real. */
+    @Test
+    void aRealBuildAndARealUpgradeAreStillCapturedFaithfully() {
+        FakeMarket market = colony();
+        market.industry("spaceport").building = true;
+        market.addIndustry("heavyindustry");
+        market.industry("heavyindustry").upgradeTarget = "orbitalworks";
+        market.industry("heavyindustry").upgrading = true;
+
+        CoopColonyManagement.State state =
+                CoopColonyManagement.capture("a:1", "host-player", market.proxy());
+
+        assertEquals(CoopColonyManagement.BuildState.BUILDING, state.industries().get(1).buildState());
+        assertEquals(CoopColonyManagement.BuildState.UPGRADING, state.industries().get(2).buildState());
+        assertEquals("orbitalworks", state.industries().get(2).upgradeId());
+    }
+
+    /**
+     * The same defect at the apply end: finishing that false "build" fires vanilla's
+     * "construction completed" message and pops the next construction-queue entry early.
+     */
+    @Test
+    void aGrowingColonyIsNeverToldItsConstructionIsFinished() {
+        FakeMarket market = colony();
+        market.industry("population").growing = true;
+
+        CoopColonyManagement.applyToMarket(market.proxy(), stateWithIndustries("host-player:1",
+                new CoopColonyManagement.IndustryState("population", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("spaceport", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")));
+
+        assertEquals(0, market.industry("population").finishCalls);
+        assertTrue(market.industry("population").growing, "vanilla's growth is not ours to end");
+    }
+
+    /**
+     * The exact live state: the host had population finished and a spaceport freshly popped out of the
+     * construction queue, its capture (before the fix) called that population "UPGRADING", and the
+     * mirror — which held population only — threw on {@code startUpgrading} and lost the whole
+     * reconcile: no spaceport, and every industry behind the thrower skipped.
+     */
+    @Test
+    void theLiveReportThatAbortedAColonyReconcileNowCompletesIt() {
+        FakeMarket market = new FakeMarket("market_penelope2");
+        market.addIndustry("population");
+        market.industry("population").growing = true;
+
+        CoopColonyManagement.State inbound = new CoopColonyManagement.State(
+                "67c48e97:1", "market_penelope2", "host-player", true, false, false, false,
+                List.of(new CoopColonyManagement.IndustryState("population", "", false,
+                                CoopColonyManagement.BuildState.UPGRADING, "", "", ""),
+                        new CoopColonyManagement.IndustryState("spaceport", "", false,
+                                CoopColonyManagement.BuildState.BUILDING, "", "", "")),
+                List.of());
+
+        CoopColonyManagement.applyToMarket(market.proxy(), inbound);
+
+        assertEquals(List.of("population", "spaceport"), market.industries);
+        assertTrue(market.industry("spaceport").building, "the industry behind the thrower reconciles");
+        assertEquals(0, market.industry("population").startUpgradeCalls);
+        assertTrue(market.freePort, "and the toggles land");
+    }
+
+    /** Same guard, stated directly: {@code canUpgrade()} is a hardcoded true and guards nothing. */
+    @Test
+    void anUpgradeReportedForASpecWithNoUpgradeIsNotAppliedAndDoesNotThrow() {
+        FakeMarket market = colony();
+
+        CoopColonyManagement.applyToMarket(market.proxy(), stateWithIndustries("host-player:1",
+                new CoopColonyManagement.IndustryState("population", "", false,
+                        CoopColonyManagement.BuildState.UPGRADING, "", "", ""),
+                new CoopColonyManagement.IndustryState("spaceport", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")));
+
+        assertEquals(0, market.industry("population").startUpgradeCalls);
+        assertFalse(market.industry("population").upgrading);
+    }
+
+    @Test
+    void oneFailingIndustryDoesNotStarveTheRest() {
+        FakeMarket market = colony();
+        market.industry("population").broken = true;
+
+        CoopColonyManagement.applyToMarket(market.proxy(), stateWithIndustries("host-player:1",
+                new CoopColonyManagement.IndustryState("population", "alpha_core", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("spaceport", "beta_core", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("mining", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")));
+
+        assertEquals("beta_core", market.industry("spaceport").aiCoreId);
+        assertTrue(market.industries.contains("mining"));
+    }
+
+    // ---- Poll ----------------------------------------------------------------------------------
+
+    @Test
+    void contentHashIgnoresTheReportIdAndTheActingPlayer() {
+        CoopColonyManagement.State host = new CoopColonyManagement.State("host-player:7",
+                "market_planet_eos", "host-player", true, false, false, false,
+                List.of(new CoopColonyManagement.IndustryState("population", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")),
+                List.of(new CoopColonyManagement.QueueItem("mining", 60_000)));
+        CoopColonyManagement.State guest = new CoopColonyManagement.State("guest-player:poll:2",
+                "market_planet_eos", "guest-player", true, false, false, false,
+                host.industries(), host.queue());
+
+        assertEquals(host.contentHash(), guest.contentHash());
+        assertFalse(host.contentHash().equals(withFreePortFlipped(host).contentHash()),
+                "but a real content difference still shows");
+    }
+
+    /**
+     * The whole point of defect 1: a colony managed from the command UI docks nowhere and fires
+     * neither market callback, so nothing but a poll can ever see the edit.
+     */
+    @Test
+    void thePollShipsARemoteEditWithNoMarketOpenOrClose() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);   // consume the baseline tick
+
+        market.freePort = true;
+        List<CoopColonyManagement.State> reports =
+                poll.poll("host-player", List.of(market.proxy()), false);
+
+        assertEquals(1, reports.size());
+        assertEquals("market_planet_eos", reports.get(0).marketId());
+        assertEquals("host-player:poll:1", reports.get(0).reportId());
+        assertTrue(reports.get(0).freePort());
+    }
+
+    @Test
+    void thePollIsSilentWhenNothingChanged() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty());
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty());
+    }
+
+    /**
+     * The suppression that matters: an engine-driven transition fires on both engines at once, so both
+     * polls speak once. Applying the peer's content-identical state has to mark the market synced, or
+     * the two keep answering each other forever.
+     */
+    @Test
+    void anEngineDrivenTransitionOnBothSidesConvergesWithoutPingPong() {
+        FakeMarket local = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(local.proxy()), false);
+
+        // Both engines pop the queued spaceport into a build in the same beat.
+        local.addIndustry("mining");
+        local.industry("mining").building = true;
+        List<CoopColonyManagement.State> ours = poll.poll("host-player", List.of(local.proxy()), false);
+        assertEquals(1, ours.size(), "the local transition is reported once");
+        poll.markSynced(ours.get(0));
+
+        // The peer's report of the same transition arrives; it is content-identical.
+        CoopColonyManagement.State theirs = CoopColonyManagement.capture("guest-player:poll:1",
+                "guest-player", local.proxy());
+        assertEquals(ours.get(0).contentHash(), theirs.contentHash());
+        poll.markSynced(theirs);
+
+        assertTrue(poll.poll("host-player", List.of(local.proxy()), false).isEmpty(),
+                "nothing bounces back");
+    }
+
+    @Test
+    void theHostBaselineSendsEveryColonyOnASessionEdgeAndTheGuestDoesNot() {
+        FakeMarket first = colony();
+        FakeMarket second = new FakeMarket("market_planet_ithaca");
+        second.addIndustry("population");
+        List<MarketAPI> colonies = List.of(first.proxy(), second.proxy());
+
+        CoopColonyManagement.Poll host = new CoopColonyManagement.Poll();
+        assertEquals(2, host.poll("host-player", colonies, true).size(),
+                "the host heals divergence accumulated while the channel was down");
+        assertTrue(host.poll("host-player", colonies, true).isEmpty(),
+                "and only on the baseline tick");
+
+        CoopColonyManagement.Poll guest = new CoopColonyManagement.Poll();
+        assertTrue(guest.poll("guest-player", colonies, false).isEmpty(),
+                "the host is canonical on reconnect");
+        assertEquals(2, guest.syncedCount(), "but the guest still records what it saw");
+
+        first.freePort = true;
+        assertEquals(1, guest.poll("guest-player", colonies, false).size(),
+                "so the guest's normal change-driven sends resume");
+    }
+
+    @Test
+    void anNpcMarketIsNeverPolled() {
+        FakeMarket market = colony();
+        market.playerOwned = false;
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), true).isEmpty());
+        assertEquals(0, poll.syncedCount());
+    }
+
+    @Test
+    void resettingThePollDropsEveryKnownSyncedHashAndRearmsTheBaseline() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+        assertEquals(1, poll.syncedCount());
+
+        poll.reset();
+
+        assertEquals(0, poll.syncedCount());
+        List<CoopColonyManagement.State> baseline =
+                poll.poll("host-player", List.of(market.proxy()), true);
+        assertEquals(1, baseline.size());
+        assertEquals("host-player:poll:1", baseline.get(0).reportId(), "the id counter restarts");
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------
+
+    private static CoopColonyManagement.State withFreePortFlipped(CoopColonyManagement.State state) {
+        return new CoopColonyManagement.State(state.reportId(), state.marketId(),
+                state.actingPlayerId(), !state.freePort(), state.immigrationClosed(),
+                state.immigrationIncentives(), state.useStockpilesForShortages(), state.industries(),
+                state.queue());
+    }
 
     private static void assertSameInstance(Object expected, Object actual) {
         assertTrue(expected == actual, "expected the same instance");
@@ -506,10 +753,20 @@ class CoopColonyManagementTest {
         private boolean improved;
         private boolean building;
         private boolean upgrading;
+        /**
+         * {@code PopulationAndInfrastructure}'s growth override: a colony below its maximum size
+         * reports {@code isUpgrading() == true} with no upgrade in its spec, and (once the growth
+         * fraction is above zero) {@code isBuilding() == true} as well, while nothing is being built
+         * ({@code PopulationAndInfrastructure.java:606-617}).
+         */
+        private boolean growing;
+        /** Test seam: an industry whose reconcile throws, standing in for any engine-side blow-up. */
+        private boolean broken;
         private SpecialItemData special;
         private String upgradeTarget;
         private int finishCalls;
         private int startBuildCalls;
+        private int startUpgradeCalls;
         private int setSpecialCalls;
         private Industry cached;
 
@@ -538,7 +795,12 @@ class CoopColonyManagementTest {
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getId" -> id;
                         case "getSpec" -> spec;
-                        case "getAICoreId" -> aiCoreId;
+                        case "getAICoreId" -> {
+                            if (broken) {
+                                throw new IllegalStateException("industry " + id + " is broken");
+                            }
+                            yield aiCoreId;
+                        }
                         case "setAICoreId" -> {
                             aiCoreId = (String) args[0];
                             yield null;
@@ -549,20 +811,31 @@ class CoopColonyManagementTest {
                             yield null;
                         }
                         case "isBuilding" -> building || upgrading;
-                        case "isUpgrading" -> upgrading;
-                        case "canUpgrade" -> upgradeTarget != null;
+                        case "isUpgrading" -> upgrading || growing;
+                        // BaseIndustry.canUpgrade() is a hardcoded `return true`
+                        // (BaseIndustry.java:1627), so it guards nothing.
+                        case "canUpgrade" -> true;
                         case "startBuilding" -> {
                             building = true;
                             startBuildCalls++;
                             yield null;
                         }
+                        // BaseIndustry.startUpgrading dereferences the upgrade spec unconditionally
+                        // (BaseIndustry.java:575-579), so on a spec with no upgrade it throws exactly
+                        // this, which is the live failure that aborted a whole colony reconcile.
                         case "startUpgrading" -> {
+                            if (upgradeTarget == null) {
+                                throw new NullPointerException("Cannot invoke \"IndustrySpecAPI"
+                                        + ".getBuildTime()\" because \"upgrade\" is null");
+                            }
                             upgrading = true;
+                            startUpgradeCalls++;
                             yield null;
                         }
                         case "finishBuildingOrUpgrading" -> {
                             building = false;
                             upgrading = false;
+                            growing = false;
                             finishCalls++;
                             yield null;
                         }

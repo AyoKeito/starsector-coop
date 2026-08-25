@@ -188,13 +188,26 @@ public final class CoopCampaignReplicator
     private final CoopColonySync.Ledger colonyLedger = new CoopColonySync.Ledger();
     private CoopColonySync.ColonizationCapture colonyCapture;
 
-    // Phase 24 milestone 3: colony management, diffed on close. Bidirectional like the two channels
-    // above -- whoever edited the colony ships the resulting absolute state, the host canonicalizes
-    // and rebroadcasts, the ledger absorbs the echo. The Phase 10 interaction gate is a global
-    // first-come lockout on dialogs, so the two players are never in colony screens at once and there
-    // is no conflict to resolve.
+    // Phase 24 milestone 3: colony management. Bidirectional like the two channels above -- whoever
+    // edited the colony ships the resulting absolute state, the host canonicalizes and rebroadcasts,
+    // the ledger absorbs the echo. The Phase 10 interaction gate is a global first-come lockout on
+    // dialogs, so the two players are never in colony screens at once and there is no conflict to
+    // resolve.
+    //
+    // Two capture routes into one send helper: the content poll is the primary one (it is the only
+    // route that sees a colony managed remotely from the command UI, which docks nowhere and fires no
+    // market callback), and the open/close diff is the low-latency assist for the docked case vanilla
+    // does report. See CoopColonyManagement.
     private final CoopColonyManagement.Ledger colonyMgmtLedger = new CoopColonyManagement.Ledger();
     private final CoopColonyManagement.Diff colonyMgmtDiff = new CoopColonyManagement.Diff();
+    private final CoopColonyManagement.Poll colonyMgmtPoll = new CoopColonyManagement.Poll();
+    /**
+     * Colony-management poll cadence. Two seconds is the same figure the bar pool uses and is well
+     * inside human reaction time for "I toggled free port and my partner's colony followed"; the tick
+     * itself is a walk of the player's colonies reading a few fields each.
+     */
+    static final long COLONY_MGMT_POLL_INTERVAL_MILLIS = 2000L;
+    private long lastColonyMgmtPollMillis;
 
     // Phase 24 milestone 3: colony income. No money crosses the wire -- both engines pay their own
     // player the full local colony net at month end, and each deducts its own half. COLONY_INCOME
@@ -303,8 +316,13 @@ public final class CoopCampaignReplicator
                     "Could not register coop economy month-end listener; colony income will not split", ex);
         }
         // Phase 24 M3: a (re)start re-arms the host's warning rebroadcast so a fresh connection gets
-        // the full set, and drops any management baseline left over from the last session.
+        // the full set, and drops any management baseline left over from the last session. The
+        // management poll re-arms too: a hash from the last session says nothing about what the peer
+        // on the other end of this connection holds, and the host's first tick after the edge
+        // re-sends every colony to heal whatever diverged while the channel was down.
         colonyMgmtDiff.reset();
+        colonyMgmtPoll.armBaseline();
+        lastColonyMgmtPollMillis = 0L;
         resetExpeditionWarningStreams();
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
@@ -359,6 +377,8 @@ public final class CoopCampaignReplicator
         }
         colonyIncomeCapture = null;
         colonyMgmtDiff.reset();
+        colonyMgmtPoll.reset();
+        lastColonyMgmtPollMillis = 0L;
         colonyMgmtLedger.clear();
         pendingIncomeBanners.clear();
         pendingHostColonyNet = null;
@@ -1720,17 +1740,77 @@ public final class CoopCampaignReplicator
      * case, because a player docks at their own colony to trade far more often than to build.
      */
     private void reportColonyMgmtOnClose(MarketAPI market) {
-        CoopColonyManagement.State state = colonyMgmtDiff.onClosed(session.localPlayerId(), market);
-        if (state == null) {
+        sendColonyMgmt(colonyMgmtDiff.onClosed(session.localPlayerId(), market), "close");
+    }
+
+    /**
+     * Phase 24 M3 change poll: the primary management capture.
+     *
+     * <p>Runs on every client, not just the host: either player can edit either colony (the two shared
+     * a faction), and the channel has always been bidirectional. Divergence is not a risk here because
+     * the payload is absolute and the {@link CoopColonyManagement.Poll} only speaks when the local
+     * content actually moved off what the peer last confirmed.
+     */
+    public void tickColonyManagement() {
+        if (!isActive()) {
+            return;
+        }
+        long nowMillis = now();
+        if (nowMillis - lastColonyMgmtPollMillis < COLONY_MGMT_POLL_INTERVAL_MILLIS) {
+            return;
+        }
+        lastColonyMgmtPollMillis = nowMillis;
+        try {
+            for (CoopColonyManagement.State state
+                    : colonyMgmtPoll.poll(session.localPlayerId(), playerColonies(), isHost())) {
+                sendColonyMgmt(state, "poll");
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to poll colony management state", ex);
+        }
+    }
+
+    /**
+     * Every player-owned colony on the local engine. Hyperspace is excluded for the same reason the
+     * orbit and skeleton scans exclude it: nothing colonizable lives there, and a market that somehow
+     * reports it is not a colony either engine can reconcile.
+     */
+    private List<MarketAPI> playerColonies() {
+        SectorAPI sector = Global.getSector();
+        if (sector == null || sector.getEconomy() == null) {
+            return List.of();
+        }
+        List<MarketAPI> colonies = new ArrayList<>();
+        for (MarketAPI market : sector.getEconomy().getMarketsCopy()) {
+            if (market == null || !market.isInEconomy() || !market.isPlayerOwned()
+                    || market.isPlanetConditionMarketOnly()) {
+                continue;
+            }
+            LocationAPI location = market.getContainingLocation();
+            if (location == null || location.isHyperspace()) {
+                continue;
+            }
+            colonies.add(market);
+        }
+        return colonies;
+    }
+
+    /**
+     * The single outbound path for both capture routes, so the ledger entry that kills the host's echo
+     * and the known-synced hash that stops the poll re-sending are always taken together.
+     */
+    private void sendColonyMgmt(CoopColonyManagement.State state, String source) {
+        if (state == null || !isActive()) {
             return;
         }
         // The ledger entry taken now is what makes the host's rebroadcast a no-op when it comes back.
         if (!colonyMgmtLedger.apply(state)) {
             return;
         }
+        colonyMgmtPoll.markSynced(state);
         send(CoopMessages.colonyMgmt(session.sessionId(), service.nextSeq(), now(), state.encode()));
         CoopLog.info(CoopCampaignReplicator.class, "Coop captured COLONY_MGMT market="
-                + state.marketId() + " id=" + state.reportId()
+                + state.marketId() + " id=" + state.reportId() + " via=" + source
                 + " industries=" + state.industries().size() + " queue=" + state.queue().size()
                 + " freePort=" + state.freePort());
     }
@@ -1739,6 +1819,10 @@ public final class CoopCampaignReplicator
         CoopColonyManagement.State state = CoopColonyManagement.decode(
                 CoopMessages.requiredPayloadString(message, "mgmt"));
         boolean firstApply = colonyMgmtLedger.apply(state);
+        // Whether or not the engine apply runs, this state is now what the peer holds for that market:
+        // marking it synced is what stops both polls re-reporting an engine-driven transition that
+        // fired on both engines at once, forever.
+        colonyMgmtPoll.markSynced(state);
         if (firstApply) {
             replayGuard.begin();
             try {
@@ -3798,6 +3882,10 @@ public final class CoopCampaignReplicator
 
     public CoopColonyManagement.Diff colonyMgmtDiff() {
         return colonyMgmtDiff;
+    }
+
+    public CoopColonyManagement.Poll colonyMgmtPoll() {
+        return colonyMgmtPoll;
     }
 
     /** Test/diagnostic seam: month-end banners not yet posted to the campaign UI. */

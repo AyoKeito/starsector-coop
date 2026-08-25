@@ -7,10 +7,12 @@ import com.fs.starfarer.api.campaign.SpecialItemData;
 import com.fs.starfarer.api.campaign.econ.Industry;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue;
+import com.fs.starfarer.api.loading.IndustrySpecAPI;
 import coop.campaign.CoopDelimited;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -23,12 +25,31 @@ import java.util.Set;
  * Phase 24 milestone 3: replication of colony <em>management</em> — the industries, construction
  * queue and colony toggles either player edits from their own client.
  *
- * <p><b>Model: diff on close, ship absolute state.</b> Opening a player-owned market snapshots its
- * management state; closing it snapshots again. If nothing changed, nothing is sent. If something
- * changed, the whole post-close state ships as one {@code COLONY_MGMT} — not the diff. The diff only
- * decides <em>whether</em> to send; the payload is absolute, which makes a duplicate delivery, the
- * host's rebroadcast and a late arrival all idempotent, and means a mirror that had drifted converges
- * on the next edit instead of compounding.
+ * <p><b>Model: poll for changes, ship absolute state.</b> Every {@link Poll} tick each player-owned
+ * market is snapshotted and compared, by {@link State#contentHash()}, against the last state known to
+ * be shared with the peer. A difference ships the whole current state as one {@code COLONY_MGMT} —
+ * not the diff. The comparison only decides <em>whether</em> to send; the payload is absolute, which
+ * makes a duplicate delivery, the host's rebroadcast and a late arrival all idempotent, and means a
+ * mirror that had drifted converges on the next send instead of compounding.
+ *
+ * <p><b>Why a poll and not just the market-open/close callbacks.</b> The milestone shipped with only
+ * {@link Diff} — a snapshot on {@code reportPlayerOpenedMarket}, a second one on
+ * {@code reportPlayerClosedMarket}, send on difference — and a live session on 2026-08-25 showed that
+ * trigger is structurally unreliable. Vanilla's close callback fires on some trade-screen exit paths
+ * and not others (the same quirk Phase 18 recorded), so a free-port toggle produced a
+ * {@code COLONY_MGMT} on roughly one docked visit in several; and the colony screen reached from the
+ * command/intel UI never docks at all, so it fires <em>neither</em> callback and could never be
+ * captured. The poll is now the primary capture and the open/close diff stays as the low-latency
+ * assist for the case it does fire on. Both routes send through the same helper and both mark the
+ * market synced.
+ *
+ * <p><b>Suppression is what keeps the poll from ping-ponging.</b> Engine-driven transitions — a queue
+ * entry popping into a building industry, a build finishing — happen on <em>both</em> engines within a
+ * frame or two of each other, so both polls see a change and both may send once. Each inbound state is
+ * then content-identical to what the receiver already has: the apply is a no-op (guarded by an
+ * explicit content-equality check in {@link #applyToEngine}) and it marks the market synced, so
+ * neither side re-sends. "Known synced" is updated on send <em>and</em> on apply for exactly that
+ * reason.
  *
  * <p><b>Concurrency is solved by construction, not by this class.</b> The Phase 10 interaction gate is
  * a global first-come lockout on dialogs, so the two players are never inside colony screens at the
@@ -217,6 +238,33 @@ public final class CoopColonyManagement {
                     && queue.equals(other.queue);
         }
 
+        /**
+         * The comparison key the {@link Poll} suppresses on: everything {@link #sameStateAs} compares
+         * and nothing else, so the report id and the acting player id — which differ on every capture
+         * and on every engine — cannot make two identical colonies look different.
+         *
+         * <p>It is the content itself, canonically encoded, not a digest. A colony's management state
+         * is a handful of short records; hashing it down to an int would buy nothing but the chance of
+         * a collision silently suppressing a real change. Order-stable by construction: the industry
+         * list is in market order and the queue list is in build order, both of which the wire already
+         * has to preserve.
+         */
+        public String contentHash() {
+            StringBuilder out = new StringBuilder(160);
+            out.append(CoopDelimited.field(marketId))
+                    .append(FIELD_SEPARATOR).append(freePort)
+                    .append(FIELD_SEPARATOR).append(immigrationClosed)
+                    .append(FIELD_SEPARATOR).append(immigrationIncentives)
+                    .append(FIELD_SEPARATOR).append(useStockpilesForShortages);
+            for (IndustryState industry : industries) {
+                out.append(RECORD_SEPARATOR).append(industry.encode());
+            }
+            for (QueueItem item : queue) {
+                out.append(RECORD_SEPARATOR).append(item.encode());
+            }
+            return out.toString();
+        }
+
         /** The same state under a new report id; used to mint the outbound report from a snapshot. */
         public State withReportId(String newReportId) {
             return new State(newReportId, marketId, actingPlayerId, freePort, immigrationClosed,
@@ -381,18 +429,8 @@ public final class CoopColonyManagement {
     public static final String BASELINE_REPORT_ID = "baseline";
 
     private static IndustryState captureIndustry(Industry industry) {
-        BuildState state;
-        if (industry.isUpgrading()) {
-            state = BuildState.UPGRADING;
-        } else if (industry.isBuilding()) {
-            state = BuildState.BUILDING;
-        } else {
-            state = BuildState.NONE;
-        }
-        String upgradeId = "";
-        if (state == BuildState.UPGRADING && industry.getSpec() != null) {
-            upgradeId = industry.getSpec().getUpgrade();
-        }
+        BuildState state = liveBuildState(industry);
+        String upgradeId = state == BuildState.UPGRADING ? specUpgradeId(industry) : "";
         SpecialItemData special = industry.getSpecialItem();
         return new IndustryState(industry.getId(), industry.getAICoreId(), industry.isImproved(),
                 state, upgradeId, special == null ? null : special.getId(),
@@ -400,8 +438,57 @@ public final class CoopColonyManagement {
     }
 
     /**
+     * What this industry is <em>actually</em> doing, as opposed to what {@code isBuilding()} and
+     * {@code isUpgrading()} say.
+     *
+     * <p><b>Those two predicates are not safe to read directly, and a live session proved it.</b>
+     * {@code PopulationAndInfrastructure} overrides both to render the colony's growth toward its
+     * maximum size as a construction bar ({@code PopulationAndInfrastructure.java:606-617}):
+     * {@code isUpgrading()} returns true for <em>any</em> colony below max size, and
+     * {@code isBuilding()} returns true as soon as that growth is above zero, with
+     * {@code getBuildOrUpgradeProgress()} reporting the growth fraction and the panel labelling it
+     * "total growth: N%". Nothing is being built. Taken at face value that made the host report
+     * "population is UPGRADING" for every ordinary colony, and the mirror then called
+     * {@code startUpgrading()} on a spec with no upgrade — {@code population} has an empty
+     * {@code upgrade} column in {@code industries.csv} — which threw
+     * {@code NullPointerException: ... because "upgrade" is null} out of
+     * {@code BaseIndustry.startUpgrading} ({@code BaseIndustry.java:575-579}) and aborted the whole
+     * reconcile. In the other direction, a report of {@code NONE} against that same false
+     * {@code isBuilding()} called {@code finishBuildingOrUpgrading()}, which fires vanilla's
+     * "Construction completed" message and pops the next construction-queue entry early
+     * ({@code BaseIndustry.buildingFinished}).
+     *
+     * <p>The disambiguation is the spec: a genuine upgrade has a target to upgrade <em>into</em>, and
+     * an industry whose spec has no {@code upgrade} can never be upgrading no matter what the
+     * predicate claims. A genuine first-time build is unaffected — {@code startBuilding()} leaves
+     * {@code upgradeId} null, so {@code isUpgrading()} is false and the {@code isBuilding()} reading
+     * stands.
+     */
+    static BuildState liveBuildState(Industry industry) {
+        if (industry == null) {
+            return BuildState.NONE;
+        }
+        if (industry.isUpgrading()) {
+            return specUpgradeId(industry).isEmpty() ? BuildState.NONE : BuildState.UPGRADING;
+        }
+        return industry.isBuilding() ? BuildState.BUILDING : BuildState.NONE;
+    }
+
+    /** The spec this industry can upgrade into, or {@code ""} when it has none. */
+    static String specUpgradeId(Industry industry) {
+        IndustrySpecAPI spec = industry == null ? null : industry.getSpec();
+        String upgrade = spec == null ? null : spec.getUpgrade();
+        return upgrade == null ? "" : upgrade.trim();
+    }
+
+    /**
      * The open/close bookkeeping. One baseline per market id, taken when the local player opens a
      * player-owned market and consumed when they close it.
+     *
+     * <p><b>The low-latency assist, not the capture.</b> When vanilla's close callback does fire this
+     * reports an edit in the same frame the player left the screen instead of up to a {@link Poll}
+     * interval later. When it does not fire — and it often does not, see the class doc — the poll
+     * catches the same edit shortly after. Nothing depends on this class running.
      *
      * <p>No baseline means no report. That is deliberate: without an open-time snapshot there is
      * nothing to diff against, and shipping the state anyway would let any close of a colony screen
@@ -456,6 +543,90 @@ public final class CoopColonyManagement {
         }
     }
 
+    /**
+     * The change poll: the primary capture since 2026-08-25.
+     *
+     * <p>One {@link State#contentHash()} per market id, holding the last content this engine knows the
+     * peer has — written both when this engine sends a state and when it applies one. A market whose
+     * live content still hashes to that value has nothing to say, which is the overwhelmingly common
+     * case, so a tick over a handful of colonies costs a few list walks and a string compare.
+     *
+     * <p><b>The session edge is a baseline, not a resume.</b> {@link #armBaseline()} drops every hash,
+     * because a hash from the previous session says nothing about what the peer on the other end of a
+     * new connection holds. The first tick after that is asymmetric on purpose: the <em>host</em> sends
+     * every colony unconditionally, which heals whatever diverged while the channel was down, and the
+     * <em>guest</em> records the hashes without sending, because the host is canonical on reconnect and
+     * a guest baseline-send would race the host's with the older of the two states. The guest's normal
+     * change-driven sends resume as soon as the host's baseline has landed and marked the markets
+     * synced.
+     */
+    public static final class Poll {
+        private final Map<String, String> syncedContent = new LinkedHashMap<>();
+        private long counter;
+        private boolean baselineArmed = true;
+
+        /** Session (re)start: nothing is known-synced any more, and the next tick is the baseline. */
+        public void armBaseline() {
+            syncedContent.clear();
+            baselineArmed = true;
+        }
+
+        /**
+         * One tick.
+         *
+         * @param baselineSend true for the engine that owns the reconnect baseline (the host). Ignored
+         *                     once the baseline tick has been consumed.
+         * @return the states to send, in market order; empty when nothing changed.
+         */
+        public List<State> poll(String actingPlayerId, Collection<MarketAPI> markets,
+                                boolean baselineSend) {
+            boolean baseline = baselineArmed;
+            baselineArmed = false;
+            List<State> reports = new ArrayList<>();
+            if (markets == null) {
+                return reports;
+            }
+            for (MarketAPI market : markets) {
+                if (!isManaged(market)) {
+                    continue;
+                }
+                State current = capture(BASELINE_REPORT_ID, actingPlayerId, market);
+                String content = current.contentHash();
+                boolean send = baseline ? baselineSend : !content.equals(syncedContent.get(market.getId()));
+                syncedContent.put(market.getId(), content);
+                if (send) {
+                    reports.add(current.withReportId(nextReportId(actingPlayerId)));
+                }
+            }
+            return reports;
+        }
+
+        /** This state is now what both engines hold: sent by us, or applied from the peer. */
+        public void markSynced(State state) {
+            if (state == null) {
+                return;
+            }
+            syncedContent.put(state.marketId(), state.contentHash());
+        }
+
+        private String nextReportId(String actingPlayerId) {
+            return (actingPlayerId == null || actingPlayerId.isBlank() ? "local" : actingPlayerId)
+                    + ":poll:" + (++counter);
+        }
+
+        /** Session teardown: ids restart and no hash may survive into the next session. */
+        public void reset() {
+            counter = 0;
+            syncedContent.clear();
+            baselineArmed = true;
+        }
+
+        /** Test/diagnostic seam: how many markets have a known-synced hash. */
+        public int syncedCount() {
+            return syncedContent.size();
+        }
+    }
+
     /** Only player colonies are managed; every other market is Phase 12's business. */
     static boolean isManaged(MarketAPI market) {
         return market != null && market.getId() != null && market.isPlayerOwned()
@@ -475,6 +646,19 @@ public final class CoopColonyManagement {
             CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT names market "
                     + state.marketId() + ", which does not exist here; dropped");
             return;
+        }
+        // The two engines run the same colony through the same vanilla code, so a queue entry popping
+        // into a build lands on both within a frame or two and both polls report it. Reading the local
+        // state once and comparing content is cheaper than the reconcile, and it keeps the no-op case
+        // genuinely no-op rather than relying on every step's own inspect-before-write.
+        try {
+            if (capture(BASELINE_REPORT_ID, state.actingPlayerId(), market).contentHash()
+                    .equals(state.contentHash())) {
+                return;
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopColonyManagement.class,
+                    "Could not read local colony state for " + state.marketId() + "; applying anyway", ex);
         }
         applyToMarket(market, state);
     }
@@ -584,12 +768,17 @@ public final class CoopColonyManagement {
                         || wanted.contains(industry.getId())) {
                     continue;
                 }
-                // null mode is the silent removal: it refunds no credits (the UI does that, never
-                // removeIndustry) and returns no AI core or special item to any cargo
-                // (BaseIndustry.getCargoForInteractionMode returns null for a null mode,
-                // BaseIndustry.java:690-696). Vanilla's own scripted removals pass null too.
-                market.removeIndustry(industry.getId(), null, false);
-                changed = true;
+                try {
+                    // null mode is the silent removal: it refunds no credits (the UI does that, never
+                    // removeIndustry) and returns no AI core or special item to any cargo
+                    // (BaseIndustry.getCargoForInteractionMode returns null for a null mode,
+                    // BaseIndustry.java:690-696). Vanilla's own scripted removals pass null too.
+                    market.removeIndustry(industry.getId(), null, false);
+                    changed = true;
+                } catch (RuntimeException | LinkageError ex) {
+                    CoopLog.warn(CoopColonyManagement.class, "Failed to remove coop colony industry "
+                            + industry.getId() + " from market " + state.marketId(), ex);
+                }
             }
         }
 
@@ -597,21 +786,35 @@ public final class CoopColonyManagement {
             if (satisfiedByUpgrade.contains(reported.industryId())) {
                 continue;
             }
-            boolean freshlyAdded = false;
-            if (!market.hasIndustry(reported.industryId())) {
-                market.addIndustry(reported.industryId());
-                freshlyAdded = true;
-                changed = true;
+            // Per industry, not per market: one industry that throws must not starve the ones after
+            // it. The live failure this guard exists for cost a colony its whole reconcile -- the
+            // population industry threw first and the spaceport behind it was never added at all.
+            try {
+                changed |= applyIndustry(market, state, reported);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony industry "
+                        + reported.industryId() + " on market " + state.marketId(), ex);
             }
-            Industry industry = market.getIndustry(reported.industryId());
-            if (industry == null) {
-                CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT could not add industry "
-                        + reported.industryId() + " to market " + state.marketId());
-                continue;
-            }
-            changed |= applyBuildState(industry, reported, freshlyAdded);
-            changed |= applyIndustryItems(industry, reported);
         }
+        return changed;
+    }
+
+    private static boolean applyIndustry(MarketAPI market, State state, IndustryState reported) {
+        boolean freshlyAdded = false;
+        boolean changed = false;
+        if (!market.hasIndustry(reported.industryId())) {
+            market.addIndustry(reported.industryId());
+            freshlyAdded = true;
+            changed = true;
+        }
+        Industry industry = market.getIndustry(reported.industryId());
+        if (industry == null) {
+            CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT could not add industry "
+                    + reported.industryId() + " to market " + state.marketId());
+            return changed;
+        }
+        changed |= applyBuildState(industry, reported, freshlyAdded);
+        changed |= applyIndustryItems(industry, reported);
         return changed;
     }
 
@@ -630,14 +833,25 @@ public final class CoopColonyManagement {
      *       new build it does not replicate for free.</li>
      *   <li><b>Freshly added and reported building</b> &rarr; {@code startBuilding()}, because
      *       {@code addIndustry} produces a <em>finished</em> industry ({@code Market.addIndustry}
-     *       calls {@code apply()} straight away).</li>
+     *       adds the plugin and calls {@code apply()} straight away — verified against the engine's
+     *       own {@code Market.addIndustry}, which never touches {@code startBuilding}).</li>
      * </ul>
+     *
+     * <p>Every branch reads {@link #liveBuildState} rather than {@code isBuilding()} /
+     * {@code isUpgrading()} directly, and the upgrade branch will not call {@code startUpgrading()}
+     * on a spec with nothing to upgrade into: {@code BaseIndustry.canUpgrade()} returns a hardcoded
+     * {@code true} ({@code BaseIndustry.java:1627}) and is therefore no guard at all, while
+     * {@code startUpgrading()} dereferences the upgrade spec unconditionally and throws when there is
+     * none. A report that claims an impossible upgrade is logged and treated as no transition, which
+     * leaves the industry finished and functional — the closest correct state, and one the next
+     * absolute report will overwrite anyway.
      */
     private static boolean applyBuildState(Industry industry, IndustryState reported,
                                            boolean freshlyAdded) {
+        BuildState live = liveBuildState(industry);
         switch (reported.buildState()) {
             case NONE -> {
-                if (industry.isBuilding()) {
+                if (live != BuildState.NONE) {
                     industry.finishBuildingOrUpgrading();
                     return true;
                 }
@@ -649,7 +863,13 @@ public final class CoopColonyManagement {
                 }
             }
             case UPGRADING -> {
-                if (!industry.isBuilding() && industry.canUpgrade()) {
+                if (specUpgradeId(industry).isEmpty()) {
+                    CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT reports industry "
+                            + reported.industryId() + " upgrading, but its spec has no upgrade here;"
+                            + " left as-is rather than upgraded into nothing");
+                    return false;
+                }
+                if (live == BuildState.NONE && industry.canUpgrade()) {
                     industry.startUpgrading();
                     return true;
                 }

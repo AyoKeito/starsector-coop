@@ -64,6 +64,16 @@ import java.util.Set;
  * {@link CoopColonyManagement.QueueItem} and its codec and reconciler verbatim rather than a second
  * format for the same thing.
  *
+ * <p><b>The mirror does not re-build the founding industries, and never did.</b> A live session on
+ * 2026-08-25 reported the guest visibly constructing "Population &amp; Infrastructure" that the host had
+ * finished at founding. The applier was not the cause: the engine's {@code Market.addIndustry}
+ * instantiates the plugin, appends it and calls {@code apply()}, with no {@code startBuilding} on the
+ * path, and the founding log for that colony reads {@code industries=1}. What renders as a build bar
+ * is vanilla's own {@code PopulationAndInfrastructure} override, which reports a colony below its
+ * maximum size as building/upgrading and labels the growth fraction "total growth: N%" — the host
+ * shows the same thing. The completion message and the premature queue pop were real, and came from
+ * milestone 3 taking that override at face value; see {@code CoopColonyManagement.liveBuildState}.
+ *
  * <p><b>Deliberately not here (milestone 3).</b> AI cores, industry improvements, the admin, and any
  * post-founding management edit. A just-founded colony has none of those, and they belong to the
  * diff-on-close {@code COLONY_MGMT} channel. The payload extends by adding fields to the industry
@@ -622,10 +632,25 @@ public final class CoopColonySync {
             }
             market.reapplyConditions();
         });
+        // An I-line is a finished industry by definition: anything still under construction at founding
+        // time is a Q-line, and anything that starts an upgrade later is milestone 3's business.
+        // MarketAPI.addIndustry already produces a finished one -- the engine's own Market.addIndustry
+        // instantiates the plugin, adds it to the list and calls apply(), and never touches
+        // startBuilding -- so the finish below is a backstop for the one case addIndustry cannot cover:
+        // the industry was already present here and mid-build, from a partially applied earlier state.
+        // It reads CoopColonyManagement.liveBuildState rather than isBuilding(), because
+        // PopulationAndInfrastructure reports a growing colony as "building" and finishing that
+        // non-build fires vanilla's "construction completed" message and pops the queue early.
         step(event, "industries", () -> {
             for (String industryId : event.industries()) {
                 if (!market.hasIndustry(industryId)) {
                     market.addIndustry(industryId);
+                }
+                Industry industry = market.getIndustry(industryId);
+                if (industry != null
+                        && CoopColonyManagement.liveBuildState(industry)
+                        != CoopColonyManagement.BuildState.NONE) {
+                    industry.finishBuildingOrUpgrading();
                 }
             }
         });

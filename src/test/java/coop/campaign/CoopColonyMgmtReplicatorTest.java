@@ -5,6 +5,7 @@ import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.Industry;
@@ -120,6 +121,155 @@ class CoopColonyMgmtReplicatorTest {
 
         assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(),
                 "re-driving a remote report must not be recaptured as a fresh edit");
+    }
+
+    // ---- COLONY_MGMT poll ----------------------------------------------------------------------
+
+    /**
+     * Defect 1, the reason the poll exists: a colony managed from the command/intel UI never docks, so
+     * vanilla fires neither {@code reportPlayerOpenedMarket} nor {@code reportPlayerClosedMarket} and
+     * the diff can never see the edit. Nothing here opens or closes a market.
+     */
+    @Test
+    void theManagementPollShipsAnEditNoMarketCallbackEverSaw() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        service.sent.clear();
+
+        market.freePort = true;
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        List<CoopMessages.Message> mgmt = of(service, CoopMessages.Type.COLONY_MGMT);
+        assertEquals(1, mgmt.size());
+        CoopColonyManagement.State state = CoopColonyManagement.decode(
+                CoopMessages.requiredPayloadString(mgmt.get(0), "mgmt"));
+        assertTrue(state.freePort());
+        assertEquals("host-player:poll:2", state.reportId());
+        assertTrue(replicator.colonyMgmtLedger().isApplied("host-player:poll:2"),
+                "a polled send takes the same ledger entry the close path does");
+    }
+
+    @Test
+    void aPollTickThatSeesNoChangeShipsNothing() {
+        sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        service.sent.clear();
+
+        clock[0] += 10 * CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+        clock[0] += 10 * CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty());
+    }
+
+    @Test
+    void thePollWaitsOutItsInterval() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        service.sent.clear();
+        market.freePort = true;
+
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS - 1;
+        replicator.tickColonyManagement();
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty());
+
+        clock[0] += 1;
+        replicator.tickColonyManagement();
+        assertEquals(1, of(service, CoopMessages.Type.COLONY_MGMT).size());
+    }
+
+    /**
+     * The reconnect baseline. The host re-sends every colony to heal whatever diverged while the
+     * channel was down; the guest, whose copy is the derived one, records and stays quiet.
+     */
+    @Test
+    void theHostBaselineSendsEveryColonyOnTheSessionEdgeAndTheGuestDoesNot() {
+        sector.addColony("market_planet_eos");
+        sector.addColony("market_planet_ithaca");
+
+        RecordingNetService hostService = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator host = new CoopCampaignReplicator(
+                hostService, activeHostSession(), () -> 1_000_000L);
+        host.registerOn(sector.proxy());
+        host.tickColonyManagement();
+
+        assertEquals(2, of(hostService, CoopMessages.Type.COLONY_MGMT).size());
+
+        RecordingNetService guestService = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator guest = new CoopCampaignReplicator(
+                guestService, activeGuestSession(), () -> 1_000_000L);
+        guest.registerOn(sector.proxy());
+        guest.tickColonyManagement();
+
+        assertTrue(of(guestService, CoopMessages.Type.COLONY_MGMT).isEmpty());
+        assertEquals(2, guest.colonyMgmtPoll().syncedCount(),
+                "the guest still learns what it is holding, so its next real edit ships");
+    }
+
+    /**
+     * Both engines run the same colony through the same vanilla code, so an engine-driven transition
+     * lands on both at once and both polls speak. The apply has to mark the market synced or the two
+     * answer each other forever.
+     */
+    @Test
+    void applyingAnInboundReportStopsThePollFromEchoingIt() {
+        sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+
+        replicator.handle(mgmtMessage("host-player:1"));
+        service.sent.clear();
+
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(),
+                "what we just applied is by definition what the peer already holds");
+    }
+
+    /** Both capture routes go through one send helper, so the close path arms the poll too. */
+    @Test
+    void anEditReportedOnCloseIsNotReportedAgainByThePoll() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        service.sent.clear();
+
+        replicator.onPlayerOpenedMarket(market.proxy(), false);
+        market.freePort = true;
+        replicator.onPlayerClosedMarket(market.proxy());
+        assertEquals(1, of(service, CoopMessages.Type.COLONY_MGMT).size());
+
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertEquals(1, of(service, CoopMessages.Type.COLONY_MGMT).size(),
+                "the poll must not re-ship what the close already shipped");
     }
 
     // ---- COLONY_MGMT apply ---------------------------------------------------------------------
@@ -324,11 +474,14 @@ class CoopColonyMgmtReplicatorTest {
         replicator.onPlayerOpenedMarket(market.proxy(), false);
         assertEquals(1, replicator.colonyMgmtLedger().size());
         assertEquals(1, replicator.colonyMgmtDiff().baselineCount());
+        assertEquals(1, replicator.colonyMgmtPoll().syncedCount());
 
         replicator.dispose(sector.proxy());
 
         assertEquals(0, replicator.colonyMgmtLedger().size());
         assertEquals(0, replicator.colonyMgmtDiff().baselineCount());
+        assertEquals(0, replicator.colonyMgmtPoll().syncedCount(),
+                "a hash from a dead session says nothing about the next peer");
         assertEquals(0, replicator.pendingIncomeBannerCount());
         assertTrue(replicator.desiredExpeditionWarnings().isEmpty());
         assertNull(sector.listenerOfType(EconomyTickListener.class));
@@ -411,6 +564,19 @@ class CoopColonyMgmtReplicatorTest {
     private static final class FakeMarket {
         private final String id;
         private boolean freePort;
+        private boolean inEconomy = true;
+        /** The management poll skips hyperspace, so a colony needs a location that is not it. */
+        private final LocationAPI location = (LocationAPI) Proxy.newProxyInstance(
+                LocationAPI.class.getClassLoader(),
+                new Class<?>[]{LocationAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getId" -> "star_system";
+                    case "isHyperspace" -> false;
+                    case "toString" -> "Location";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> defaultValue(method.getReturnType());
+                });
         private final List<String> industries = new ArrayList<>();
         private final Map<String, Industry> industryProxies = new LinkedHashMap<>();
         private final ConstructionQueue queue = new ConstructionQueue();
@@ -451,6 +617,8 @@ class CoopColonyMgmtReplicatorTest {
                         case "getName" -> id;
                         case "isPlayerOwned" -> true;
                         case "isPlanetConditionMarketOnly" -> false;
+                        case "isInEconomy" -> inEconomy;
+                        case "getContainingLocation" -> location;
                         case "isFreePort" -> freePort;
                         case "setFreePort" -> {
                             freePort = (Boolean) args[0];
@@ -545,7 +713,13 @@ class CoopColonyMgmtReplicatorTest {
                             FakeMarket market = markets.get((String) args[0]);
                             yield market == null ? null : market.proxy();
                         }
-                        case "getMarketsCopy" -> List.<MarketAPI>of();
+                        case "getMarketsCopy" -> {
+                            List<MarketAPI> all = new ArrayList<>();
+                            for (FakeMarket market : markets.values()) {
+                                all.add(market.proxy());
+                            }
+                            yield all;
+                        }
                         case "toString" -> "Economy";
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];
