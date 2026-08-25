@@ -5,6 +5,8 @@ param(
     [int] $Port = 7777,
     [string] $SeedString = 'MN-1234567890123456789',
     [switch] $Diagnostics,
+    # Opens the dormant agent bridge on 127.0.0.1:7802 for tools/starsector-mcp
+    [switch] $Bridge,
     # Extra -D JVM properties appended verbatim, e.g. -ExtraJvmProps '-Dcoop.debug.interactionDelayMs=1500'
     [string[]] $ExtraJvmProps = @(),
     # Explicit consent to join an in-flight campaign with a save that does not belong to it
@@ -67,6 +69,9 @@ if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Port must be in range 1..65535"
 }
 
+# Agent bridge port for the guest instance; tools/starsector-mcp maps 'guest' to this.
+$BridgePort = 7802
+
 $profileRoot = Join-Path ([System.IO.Path]::GetFullPath($TestRoot)) 'guest'
 $exe = Join-Path $profileRoot 'starsector.exe'
 if (-not (Test-Path -LiteralPath $exe)) {
@@ -86,6 +91,11 @@ if ($Diagnostics) {
 if ($AdoptCampaign) {
     $jvmProperties += "-Dcoop.adoptCampaignId=true"
 }
+if ($Bridge) {
+    # Routed through -ExtraJvmProps on purpose: the catch-all -Dcoop.* strip above already
+    # clears a stale bridge port from a previous run, so the switch stays launch-scoped.
+    $ExtraJvmProps += "-Dcoop.debug.bridge=$BridgePort"
+}
 if ($ExtraJvmProps.Count -gt 0) {
     $jvmProperties += $ExtraJvmProps
 }
@@ -94,6 +104,7 @@ Set-CoopVmParams -ProfileRoot $profileRoot -JvmProperties $jvmProperties
 
 $diagNote = if ($Diagnostics) { ' diagnostics=ON' } else { '' }
 if ($AdoptCampaign) { $diagNote += ' adoptCampaign=ON' }
+if ($Bridge) { $diagNote += " bridge=$BridgePort" }
 
 if ($PatchOnly) {
     Write-Host "Patched guest vmparams for coop.connectHost=$HostAddress coop.connectPort=$Port coop.newGameSeed=$SeedString$diagNote"

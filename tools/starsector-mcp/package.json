@@ -1,0 +1,21 @@
+{
+  "name": "starsector-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP stdio server over the coop mod's CoopAgentBridge sockets (host 7801, guest 7802)",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "starsector-mcp": "index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/mock-bridge-test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}

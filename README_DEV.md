@@ -149,3 +149,25 @@ Expected Phase 3 evidence:
 Host log: inbound PING and outbound PONG
 Guest log: outbound PING and inbound PONG
 ```
+
+## Agent Bridge And Starsector MCP (Phase 30)
+
+`coop.debug.CoopAgentBridge` is a dormant localhost TCP listener for driving smoke checks from an agent instead of from two pairs of eyes. It is gated on `-Dcoop.debug.bridge=<port>`: with the property absent, unparsable, or `0`, no socket is opened and nothing is logged. It binds 127.0.0.1 only, accepts one client, and services a few commands per frame on the campaign thread.
+
+Add the switch to either launch script:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\launch-host.ps1' -Bridge
+powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\launch-guest.ps1' -Bridge
+```
+
+| Instance | Property appended | Port |
+| --- | --- | --- |
+| host | `-Dcoop.debug.bridge=7801` | 127.0.0.1:7801 |
+| guest | `-Dcoop.debug.bridge=7802` | 127.0.0.1:7802 |
+
+The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind.
+
+The agent side is `tools/starsector-mcp`, a Node stdio MCP server that wraps both ports into `ss_status`, `ss_dump`, `ss_diff`, `ss_act` and `ss_advance_days`. All state comparison lives there; the bridge only serializes. Setup, the `.mcp.json` registration block, the port env overrides and a worked example per tool are in `tools/starsector-mcp/README.md`. It is not part of the mod jar and ships no runtime dependency into the game.
+
+Four things are deliberately not bridge verbs: market buy/sell, officer hire, bar-offer accept, and market open/close. Each of those is on the smoke checklist because a UI listener drives it (`PlayerMarketTransaction`, the dialog close-diff that produces a hire claim, snapshot-on-open). A bridge verb would call the engine method underneath the listener, which passes whether or not the listener is still wired up, so it would green-light exactly the breakage the check exists to catch. Those four stay manual, alongside the claim race and the motion and stealth feel passes.
