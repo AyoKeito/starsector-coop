@@ -298,7 +298,7 @@ The snapshot overwrites that, so the divergence is only visible in the window be
 
 ### `OpenMarketPlugin.writeReplace` drops stock older than 30 days on save
 
-`OpenMarketPlugin` clears its ship and weapon stock at serialization time when `okToUpdateShipsAndWeapons()` says the last roll is over 30 days old, so a market's shop contents can change across a save/load with no player action and no event. Host and guest save at different moments and reload with different clocks, so the two copies of a market neither has docked at recently can drift apart without either client doing anything.
+`OpenMarketPlugin` clears its ship and weapon stock at serialization time when `okToUpdateShipsAndWeapons()` says the last roll is over 30 days old, so a market's shop contents can change across a save/load with no player action and no event. Host and guest save at different moments with different amounts of accumulated play time, so the two copies of a market neither has docked at recently can drift apart without either client doing anything. *(Mechanism precision, 2026-08-25 bytecode check: `okToUpdateShipsAndWeapons()` reads `sinceLastCargoUpdate`, a frame-dt accumulator on `BaseSubmarketPlugin` — NOT a campaign-clock timestamp — so Phase 7c clock reconciliation does not change this behavior. The clock-adjacent part is the reroll seed, `getMonth() * 170000`, which 7c DOES help by keeping both clients on the same month number.)*
 
 Independent of gap 2e's restock rebroadcast, which only fires on `reportPlayerOpenedMarketAndCargoUpdated`. The converging force is the same one gap 2e relies on: any dock re-runs `updateCargoPrePlayerInteraction` and the host re-broadcasts, so the drift lasts until the next time either player opens that market.
 
