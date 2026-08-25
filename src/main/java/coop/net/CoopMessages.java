@@ -42,6 +42,7 @@ public final class CoopMessages {
         MARKET_SNAPSHOT,
         MARKET_TXN,
         WORLD_DELTA,
+        RAID_RESULT,
         ABILITY_ACTIVATE,
         ORBIT_SNAPSHOT,
         NPC_FLEET_SET,
@@ -340,6 +341,22 @@ public final class CoopMessages {
                         + "\"consumed\":\"" + consumed + "\","
                         + "\"newStateJson\":\"" + escapeJson(newStateJson == null ? "" : newStateJson) + "\","
                         + "\"actingPlayerId\":\"" + escapeJson(actingPlayerId == null ? "" : actingPlayerId) + "\"}");
+    }
+
+    /**
+     * Phase 24 milestone 1: one finished player raid or bombardment against a colony (reliable TCP,
+     * bidirectional). {@code outcome} is the self-contained delimited blob from
+     * {@link coop.colony.CoopRaidOutcomeSync.Outcome#encode()} — header line plus one line per
+     * touched industry and per commodity deficit, because the envelope parser has no arrays.
+     *
+     * <p>It deliberately carries no reputation, no loot, and no decivilization. Rep already reaches
+     * the peer on the {@code REP_DELTA}/{@code GUEST_REP_DELTA} channel, loot is the raider's own by
+     * the same rule salvage follows, and a saturation bombardment that razes the colony travels as
+     * {@code WORLD_DELTA(DECIV)}; see {@link coop.colony.CoopRaidOutcomeSync} for the argument.
+     */
+    public static Message raidResult(String sessionId, long seq, long sentAtMillis, String outcome) {
+        return new Message(Type.RAID_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"outcome\":\"" + escapeJson(requireText(outcome, "outcome")) + "\"}");
     }
 
     public static Message abilityActivate(String sessionId, long seq, long sentAtMillis,

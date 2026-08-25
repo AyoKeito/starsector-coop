@@ -42,6 +42,7 @@ import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
 import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.util.Misc;
 import com.fs.starfarer.api.EveryFrameScript;
+import coop.colony.CoopRaidOutcomeSync;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -80,7 +81,8 @@ import java.util.function.LongSupplier;
  * engine (best-effort, defensive) and to the net service, and is exercised in the two-instance
  * smoke test.
  */
-public final class CoopCampaignReplicator implements CoopCampaignEventListener.Sink {
+public final class CoopCampaignReplicator
+        implements CoopCampaignEventListener.Sink, CoopRaidOutcomeSync.Sink {
 
     /**
      * Re-entrancy guard: while {@link #isReplaying()} the applier is mid-apply of a host-originated
@@ -163,6 +165,12 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
     private long lastSkeletonPollMillis;
     private DecivCapture decivCapture;
 
+    // Phase 24 milestone 1: player raids/bombardments against colonies. Bidirectional -- whoever
+    // performs the act captures the vanilla outcome and reports it; the host canonicalizes and
+    // rebroadcasts, and the ledger absorbs the echo on the originator.
+    private final CoopRaidOutcomeSync.Ledger raidLedger = new CoopRaidOutcomeSync.Ledger();
+    private CoopRaidOutcomeSync.HostileActCapture raidCapture;
+
     // Phase 12c bar pool: the host polls the global portside bar pool and pushes the ordered list on
     // change. Two seconds is well inside a dock-to-bar-click, and the pool only ever changes on
     // BarEventManager's 0.4-0.6 day generation tick or when someone accepts an offer.
@@ -218,6 +226,16 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             CoopLog.warn(CoopCampaignReplicator.class,
                     "Could not register coop deciv listener; DECIV world-deltas will not fire", ex);
         }
+        // Phase 24 M1: raids/bombardments arrive on their own vanilla listener interface, also via
+        // the listener manager rather than the campaign-event list.
+        try {
+            raidCapture = new CoopRaidOutcomeSync.HostileActCapture(this);
+            sector.getListenerManager().addListener(raidCapture, true);
+        } catch (RuntimeException | LinkageError ex) {
+            raidCapture = null;
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Could not register coop hostile-act listener; RAID_RESULT will not fire", ex);
+        }
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
 
@@ -243,6 +261,18 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
                 CoopLog.warn(CoopCampaignReplicator.class, "Failed to remove coop deciv listener", ex);
             }
         }
+        if (sector != null && raidCapture != null) {
+            try {
+                sector.getListenerManager().removeListener(raidCapture);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to remove coop hostile-act listener", ex);
+            }
+        }
+        if (raidCapture != null) {
+            raidCapture.reset();
+        }
+        raidCapture = null;
+        raidLedger.clear();
         decivCapture = null;
         listener = null;
         factionRelationsSeeded = false;
@@ -290,6 +320,7 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
             case MARKET_SNAPSHOT -> applyMarketSnapshot(message);
             case MARKET_TXN -> hostApplyMarketTxn(message);
             case WORLD_DELTA -> handleWorldDelta(message);
+            case RAID_RESULT -> handleRaidResult(message);
             case ABILITY_ACTIVATE -> hostHandleAbilityActivate(message);
             case ORBIT_SNAPSHOT -> applyOrbitSnapshot(message);
             default -> {
@@ -1412,6 +1443,65 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
         send(CoopMessages.worldDelta(session.sessionId(), service.nextSeq(), now(),
                 delta.entityId(), delta.kind().name(), delta.consumed(),
                 delta.newStateJson(), delta.actingPlayerId()));
+    }
+
+    // ---- Phase 24 M1: colony raids + bombardments ----------------------------------------------
+
+    @Override
+    public boolean shouldCaptureRaidOutcome() {
+        // The replay guard is load-bearing here, not defensive: applying a remote outcome re-drives
+        // the same vanilla effects, and without the guard the applier's own listener would capture
+        // them as a fresh act and bounce it back.
+        return isActive() && !replayGuard.isReplaying();
+    }
+
+    @Override
+    public String raidActingPlayerId() {
+        return session.localPlayerId();
+    }
+
+    /**
+     * Either player finished a raid or bombardment locally. Vanilla already applied it here, so this
+     * only reports it; the ledger entry taken now is what makes the host's rebroadcast a no-op when
+     * it comes back.
+     */
+    @Override
+    public void onRaidOutcomeCaptured(CoopRaidOutcomeSync.Outcome outcome) {
+        if (outcome == null || !isActive()) {
+            return;
+        }
+        if (!raidLedger.apply(outcome)) {
+            return;
+        }
+        send(CoopMessages.raidResult(session.sessionId(), service.nextSeq(), now(), outcome.encode()));
+        CoopLog.info(CoopCampaignReplicator.class, "Coop captured RAID_RESULT " + outcome.kind()
+                + " market=" + outcome.marketId() + " id=" + outcome.outcomeId()
+                + " industries=" + outcome.industries().size()
+                + " deficits=" + outcome.deficits().size() + " deciv=" + outcome.decivilized());
+    }
+
+    private void handleRaidResult(CoopMessages.Message message) {
+        CoopRaidOutcomeSync.Outcome outcome = CoopRaidOutcomeSync.decode(
+                CoopMessages.requiredPayloadString(message, "outcome"));
+        boolean firstApply = raidLedger.apply(outcome);
+        if (firstApply) {
+            replayGuard.begin();
+            try {
+                CoopRaidOutcomeSync.applyToEngine(outcome);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply RAID_RESULT", ex);
+            } finally {
+                replayGuard.end();
+            }
+        }
+        // The host owns the canonical market: it integrates the guest's report and rebroadcasts so
+        // both clients converge. The originator's ledger entry kills the echo.
+        if (isHost() && isActive()) {
+            send(CoopMessages.raidResult(session.sessionId(), service.nextSeq(), now(),
+                    outcome.encode()));
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop RAID_RESULT " + outcome.kind() + " market="
+                + outcome.marketId() + " id=" + outcome.outcomeId() + " firstApply=" + firstApply);
     }
 
     private void handleWorldDelta(CoopMessages.Message message) {
@@ -3207,6 +3297,10 @@ public final class CoopCampaignReplicator implements CoopCampaignEventListener.S
 
     public CoopWorldDelta.Ledger worldLedger() {
         return worldLedger;
+    }
+
+    public CoopRaidOutcomeSync.Ledger raidLedger() {
+        return raidLedger;
     }
 
     public CoopSkeletonMutationWatcher skeletonWatcher() {
