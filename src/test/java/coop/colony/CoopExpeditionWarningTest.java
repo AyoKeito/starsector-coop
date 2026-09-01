@@ -1,8 +1,11 @@
 package coop.colony;
 
+import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
+import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -431,6 +434,97 @@ class CoopExpeditionWarningTest {
                 CoopExpeditionWarningIntel.parseStatus("arrived"));
     }
 
+    /**
+     * Only the arrival is an event. The countdown moving is not, and a host-side re-estimate that
+     * puts an arrived threat back to inbound must not announce a second arrival later.
+     */
+    @Test
+    void onlyTheArrivalOfAThreatIsAnnounced() {
+        assertTrue(CoopExpeditionWarningIntel.announcesArrival(
+                CoopExpeditionWarning.Status.INBOUND, CoopExpeditionWarning.Status.ARRIVED));
+        assertFalse(CoopExpeditionWarningIntel.announcesArrival(
+                CoopExpeditionWarning.Status.INBOUND, CoopExpeditionWarning.Status.INBOUND));
+        assertFalse(CoopExpeditionWarningIntel.announcesArrival(
+                CoopExpeditionWarning.Status.ARRIVED, CoopExpeditionWarning.Status.ARRIVED));
+        assertFalse(CoopExpeditionWarningIntel.announcesArrival(
+                CoopExpeditionWarning.Status.ARRIVED, CoopExpeditionWarning.Status.INBOUND));
+    }
+
+    // ---- Guest reconcile against a real intel manager -------------------------------------------
+
+    /**
+     * These three pin the property the reconcile depends on: the mirrored set is re-read from the
+     * intel manager on every pass, so no reconcile can ever mutate an entry that is dead or gone.
+     * A tracking map — the obvious alternative — would survive a save and a load pointing at exactly
+     * such an object, and the update path would then write to nothing forever.
+     */
+    @Test
+    void aLiveEntryIsUpdatedInPlaceRatherThanReAdded() {
+        FakeIntelManager manager = new FakeIntelManager();
+        CoopExpeditionWarningSync.SectorWarningWorld world =
+                new CoopExpeditionWarningSync.SectorWarningWorld(manager.api());
+        CoopExpeditionWarningSync.apply(world, List.of(warning("hegemony", "market_eos", 5)));
+
+        CoopExpeditionWarningSync.Summary summary =
+                CoopExpeditionWarningSync.apply(world, List.of(warning("hegemony", "market_eos", 4)));
+
+        assertEquals(new CoopExpeditionWarningSync.Summary(0, 1, 0), summary);
+        assertEquals(1, manager.intel.size(), "no second entry was created");
+        assertEquals(4, ((CoopExpeditionWarningIntel) manager.intel.get(0)).toRecord().etaDays());
+    }
+
+    /**
+     * An entry that ended itself on the staleness timer can sit in the manager for a long time: the
+     * manager only sweeps ended intel from {@code advance}, which returns early while the game is
+     * paused — and a coop guest spends a lot of its life paused. The reconcile must treat it as
+     * absent and mint a fresh one, not update the corpse.
+     */
+    @Test
+    void anEndedEntryStillInTheManagerIsReplacedNotUpdated() {
+        FakeIntelManager manager = new FakeIntelManager();
+        CoopExpeditionWarningSync.SectorWarningWorld world =
+                new CoopExpeditionWarningSync.SectorWarningWorld(manager.api());
+        CoopExpeditionWarningSync.apply(world, List.of(warning("hegemony", "market_eos", 5)));
+        ((CoopExpeditionWarningIntel) manager.intel.get(0)).endImmediately();
+
+        CoopExpeditionWarningSync.Summary summary =
+                CoopExpeditionWarningSync.apply(world, List.of(warning("hegemony", "market_eos", 4)));
+
+        assertEquals(new CoopExpeditionWarningSync.Summary(1, 0, 0), summary);
+        assertEquals(2, manager.intel.size(), "the dead entry is left for the manager to sweep");
+        assertEquals(1, manager.liveEntries().size());
+        assertEquals(4, manager.liveEntries().get(0).toRecord().etaDays());
+    }
+
+    /** The same for an entry the manager no longer holds at all. */
+    @Test
+    void anEntryMissingFromTheManagerIsAddedBack() {
+        FakeIntelManager manager = new FakeIntelManager();
+        CoopExpeditionWarningSync.SectorWarningWorld world =
+                new CoopExpeditionWarningSync.SectorWarningWorld(manager.api());
+        CoopExpeditionWarningSync.apply(world, List.of(warning("hegemony", "market_eos", 5)));
+        manager.intel.clear();
+
+        CoopExpeditionWarningSync.Summary summary =
+                CoopExpeditionWarningSync.apply(world, List.of(warning("hegemony", "market_eos", 5)));
+
+        assertEquals(new CoopExpeditionWarningSync.Summary(1, 0, 0), summary);
+        assertEquals(1, manager.liveEntries().size());
+    }
+
+    /** Session teardown drops every mirrored entry, dead ones included. */
+    @Test
+    void clearingRemovesEveryMirroredEntry() {
+        FakeIntelManager manager = new FakeIntelManager();
+        CoopExpeditionWarningSync.SectorWarningWorld world =
+                new CoopExpeditionWarningSync.SectorWarningWorld(manager.api());
+        CoopExpeditionWarningSync.apply(world, List.of(
+                warning("hegemony", "market_eos", 5), warning("pirates", "market_yama", 2)));
+
+        assertEquals(2, world.clearAll());
+        assertTrue(manager.intel.isEmpty());
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------
 
     private static String hashOfBucketed(float etaDays) {
@@ -448,6 +542,56 @@ class CoopExpeditionWarningTest {
     private static CoopExpeditionWarning withGoal(String goal) {
         return new CoopExpeditionWarning(CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION, "hegemony",
                 "market_eos", "New Hope", 5, CoopExpeditionWarning.Status.INBOUND, goal);
+    }
+
+    /**
+     * The three intel-manager calls {@code SectorWarningWorld} makes, over a plain list. Proxied
+     * rather than implemented because {@code IntelManagerAPI} carries two dozen methods this has no
+     * opinion about.
+     */
+    private static final class FakeIntelManager {
+        private final List<IntelInfoPlugin> intel = new ArrayList<>();
+
+        IntelManagerAPI api() {
+            return (IntelManagerAPI) Proxy.newProxyInstance(
+                    IntelManagerAPI.class.getClassLoader(),
+                    new Class<?>[]{IntelManagerAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getIntel" -> args == null || args.length == 0
+                                ? new ArrayList<>(intel) : ofClass((Class<?>) args[0]);
+                        case "addIntel" -> {
+                            intel.add((IntelInfoPlugin) args[0]);
+                            yield null;
+                        }
+                        case "removeIntel" -> {
+                            intel.remove(args[0]);
+                            yield null;
+                        }
+                        case "hasIntel" -> intel.contains(args[0]);
+                        default -> throw new UnsupportedOperationException(method.getName());
+                    });
+        }
+
+        private List<IntelInfoPlugin> ofClass(Class<?> type) {
+            List<IntelInfoPlugin> found = new ArrayList<>();
+            for (IntelInfoPlugin item : intel) {
+                if (type.isInstance(item)) {
+                    found.add(item);
+                }
+            }
+            return found;
+        }
+
+        List<CoopExpeditionWarningIntel> liveEntries() {
+            List<CoopExpeditionWarningIntel> found = new ArrayList<>();
+            for (IntelInfoPlugin item : intel) {
+                if (item instanceof CoopExpeditionWarningIntel entry
+                        && !entry.isEnding() && !entry.isEnded()) {
+                    found.add(entry);
+                }
+            }
+            return found;
+        }
     }
 
     private static final class FakeWorld implements CoopExpeditionWarningSync.WarningWorld {

@@ -50,6 +50,13 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
      */
     public static final float STALE_DAYS = 10f;
 
+    /**
+     * The {@code listInfoParam} marker for the "it is here" update, the same shape vanilla uses
+     * ({@code RaidIntel.ENTERED_SYSTEM_UPDATE}, {@code PunitiveExpeditionIntel.ENTERED_SYSTEM_UPDATE}).
+     * Static, so it is not serialised, and identity-only: nothing reads its contents.
+     */
+    public static final Object ARRIVED_UPDATE = new Object();
+
     private String kindName;
     private String factionId;
     private String targetMarketId;
@@ -76,9 +83,54 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
         }
     }
 
-    /** Overwrites the mirrored values and refreshes the staleness timer. */
+    /**
+     * Overwrites the mirrored values and refreshes the staleness timer, and sends the player an
+     * update when the threat has arrived.
+     *
+     * <p><b>Why the update matters beyond the notification.</b> An intel entry the player has clicked
+     * once loses its {@code New} tag permanently ({@code BaseIntelPlugin.reportPlayerClickedOn} nulls
+     * {@code neverClicked}), and the intel screen's category filter is persisted in the save. A player
+     * whose filter is set to {@code New} therefore stops seeing a read entry the moment the list is
+     * rebuilt — on the next screen open, or on the next load. That is vanilla behaviour, and vanilla's
+     * only answer to it is the message feed: every vanilla threat intel pushes an update when its
+     * stage moves ({@code PunitiveExpeditionIntel.notifyEnteredSystem} sends
+     * {@code ENTERED_SYSTEM_UPDATE}). A silently mutating mirror has no such moment, which is what the
+     * 2026-09-01 smoke ran into. The mirrored set only carries one stage change — the arrival — so
+     * that is the one this sends.
+     */
     public final void update(CoopExpeditionWarning warning) {
+        if (warning == null) {
+            return;
+        }
+        CoopExpeditionWarning.Status before = status();
         assign(warning);
+        if (announcesArrival(before, status())) {
+            announceArrival();
+        }
+    }
+
+    /**
+     * The pure half of the update-message decision. Only the arrival is worth the player's attention:
+     * a countdown ticking down is not an event, and a host-side re-estimate that puts an arrived
+     * threat back to inbound must not re-announce.
+     */
+    static boolean announcesArrival(CoopExpeditionWarning.Status before,
+                                    CoopExpeditionWarning.Status after) {
+        return before != CoopExpeditionWarning.Status.ARRIVED
+                && after == CoopExpeditionWarning.Status.ARRIVED;
+    }
+
+    /**
+     * Vanilla's own channel: {@code sendUpdateIfPlayerHasIntel} is a no-op until the entry is
+     * player-visible, so this cannot fire for an entry that never made it into the intel manager.
+     */
+    private void announceArrival() {
+        try {
+            sendUpdateIfPlayerHasIntel(ARRIVED_UPDATE, false);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopExpeditionWarningIntel.class,
+                    "Failed to announce a coop expedition warning arrival", ex);
+        }
     }
 
     /**

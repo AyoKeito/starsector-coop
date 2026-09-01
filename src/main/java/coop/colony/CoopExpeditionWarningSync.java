@@ -466,6 +466,17 @@ public final class CoopExpeditionWarningSync {
             this.intel = Objects.requireNonNull(intel, "intel");
         }
 
+        /**
+         * The mirrored entries, read fresh from the intel manager on every call.
+         *
+         * <p><b>There is deliberately no tracking map.</b> A map of identity to intel object would be
+         * one more thing to keep true across a save, a load and a session edge, and every entry in it
+         * could outlive the object it points at — an entry the manager dropped, or one that ended
+         * itself on the staleness timer. Re-reading is cheap (single digits of entries) and makes the
+         * reconcile self-healing: a dead or missing entry is simply absent from the local set, so
+         * {@link #plan} takes the ADD path and a fresh, live, registered entry replaces it. The
+         * filter below is what makes that true, so it is load-bearing rather than tidy.
+         */
         private List<CoopExpeditionWarningIntel> entries() {
             List<CoopExpeditionWarningIntel> found = new ArrayList<>();
             List<IntelInfoPlugin> items = intel.getIntel(CoopExpeditionWarningIntel.class);
