@@ -19,6 +19,9 @@ public class CoopTimeLock {
     // Phase 11: handed to the guest input blocker so a guest pause-key press flips the shared-pause
     // intent instead of pausing locally. Null until the pump installs it (and in legacy/unit paths).
     private CoopSharedPauseCoordinator pauseCoordinator;
+    // Phase 7b: owns every MethodHandles touch of the engine's fast-forward state. Null until the
+    // pump injects it (and in legacy/unit paths), in which case apply() simply mirrors no speed.
+    private CoopFastForwardLock fastForwardLock;
 
     public CoopTimeLock() {
         this(Global::getSector);
@@ -32,12 +35,16 @@ public class CoopTimeLock {
         this.pauseCoordinator = pauseCoordinator;
     }
 
+    public void setFastForwardLock(CoopFastForwardLock fastForwardLock) {
+        this.fastForwardLock = fastForwardLock;
+    }
+
     public TimeSnapshot capture(long sentAtMillis) {
         SectorAPI sector = requireSector();
         CampaignClockAPI clock = sector.getClock();
-        // Hold-Shift fast-forward is a 2x local clock loop inside CampaignState.advance; it does
-        // NOT set isInFastAdvance()/isFastForwardIteration() (both read false during it, verified).
-        // CampaignUIAPI.isFastForward() is the public getter that reflects that state.
+        // Phase 7b: during a session fast-forward runs in vanilla's toggle mode, so this bit is the
+        // host's persistent CampaignState.fastForward field — the shared time-speed state the guest
+        // mirrors. CampaignUIAPI.isFastForward() is the public getter for that exact field.
         boolean fastForward = hostFastForward(sector);
         return new TimeSnapshot(
                 sector.isPaused(),
@@ -59,16 +66,12 @@ public class CoopTimeLock {
         if (sector.isPaused() != snapshot.paused()) {
             sector.setPaused(snapshot.paused());
         }
-        // setInFastAdvance(true) drives the extra CampaignClock.advance() path in
-        // CampaignEngine.advance(), making the guest's clock run faster to mirror the host. This
-        // cannot block a guest's own local hold-Shift (that loop lives in obfuscated CampaignState
-        // and polls the key directly); guest self-fast-forward is a documented v1 limitation.
-        // Mirror the host's fast-advance flag for animation/UI consistency. This does NOT control
-        // time speed: setInFastAdvance was verified not to change the guest clock rate. Fast-forward
-        // is instead neutralized for both clients by the campaignSpeedupMult=1 override in
-        // data/config/settings.json (hold-Shift then advances at 1x), so clocks stay aligned.
-        if (sector.isInFastAdvance() != snapshot.fastForward()) {
-            sector.setInFastAdvance(snapshot.fastForward());
+        // Phase 7b: mirror the host's fast-forward by writing the guest's own CampaignState
+        // fastForward field (the lock owns that MethodHandles write, and only writes on a change).
+        // The old setInFastAdvance(...) mirror is gone: it was verified not to change the guest clock
+        // rate at all, so it moved nothing but a cosmetic flag.
+        if (fastForwardLock != null) {
+            fastForwardLock.writeFastForward(snapshot.fastForward());
         }
     }
 

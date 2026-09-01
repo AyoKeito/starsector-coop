@@ -74,16 +74,31 @@ class CoopTimeSnapshotTest {
     }
 
     @Test
-    void guestApplySetsPauseAndFastForwardOnTransition() {
+    void guestApplySetsPauseAndRoutesFastForwardToTheLock() {
+        // Phase 7b: apply() no longer touches setInFastAdvance (verified never to change the guest's
+        // clock rate); the host's fast-forward is mirrored by a field write inside the lock.
+        RecordingSector recording = new RecordingSector(false, false, 222333444L, 17);
+        RecordingFastForwardHandles handles = new RecordingFastForwardHandles();
+        CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
+        timeLock.setFastForwardLock(new CoopFastForwardLock(() -> handles, handles, false));
+
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L));
+
+        assertTrue(recording.paused);
+        assertEquals(1, recording.setPausedCalls);
+        assertEquals(0, recording.setFastAdvanceCalls);
+        assertEquals(List.of(true), handles.ffWrites);
+    }
+
+    @Test
+    void guestApplyWithoutAFastForwardLockIsHarmless() {
         RecordingSector recording = new RecordingSector(false, false, 222333444L, 17);
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
 
         timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L));
 
         assertTrue(recording.paused);
-        assertTrue(recording.sectorFastAdvance);
-        assertEquals(1, recording.setPausedCalls);
-        assertEquals(1, recording.setFastAdvanceCalls);
+        assertEquals(0, recording.setFastAdvanceCalls);
     }
 
     @Test
@@ -138,6 +153,46 @@ class CoopTimeSnapshotTest {
         assertEquals(List.of(true), recording.listenerManager.transientFlags);
         assertEquals(List.of(CoopHostPauseInputListener.class), recording.listenerManager.removedClasses);
         assertFalse(recording.listenerManager.hasHostPauseInputListener);
+    }
+
+    /** Both engine seams of {@link CoopFastForwardLock} in one fake — no engine types involved. */
+    private static final class RecordingFastForwardHandles
+            implements CoopFastForwardLock.Handles, CoopFastForwardLock.MultSetting {
+        private boolean toggle = true;
+        private boolean fastForward;
+        private float mult = CoopFastForwardLock.SESSION_MULT;
+        private final List<Boolean> ffWrites = new ArrayList<>();
+
+        @Override
+        public boolean readToggle() {
+            return toggle;
+        }
+
+        @Override
+        public void writeToggle(boolean value) {
+            toggle = value;
+        }
+
+        @Override
+        public boolean readFastForward() {
+            return fastForward;
+        }
+
+        @Override
+        public void writeFastForward(boolean value) {
+            fastForward = value;
+            ffWrites.add(value);
+        }
+
+        @Override
+        public float read() {
+            return mult;
+        }
+
+        @Override
+        public void write(float value) {
+            mult = value;
+        }
     }
 
     private static final class RecordingSector {

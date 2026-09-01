@@ -120,8 +120,14 @@ constant ...<name>`; if uncaught it becomes a **Fatal** crash dialog back to the
 > **⚠️ SUPERSEDED IN PART (2026-06-10, see plan Phase 7b).** Everything below is true only for
 > vanilla's default **hold**-Shift input mode. Vanilla also has a **toggle** fast-forward mode
 > (settings-menu checkbox `Campaign "speed up time" is a toggle`, backed by a static boolean in
-> `com.fs.starfarer.settings.StarfarerSettings`: getter `Oo0000()Z`, public static setter
-> `?00000(Z)V`). In toggle mode the per-frame key poll is skipped entirely; the persistent
+> `com.fs.starfarer.settings.StarfarerSettings`: getter `Oo0000()Z`, static setter `ö00000(Z)V`
+> — U+00F6 then five zeros; the earlier `?00000` reading was `javap` rendering that non-ASCII
+> character, and five *different* static `(boolean)` setters on that class print identically, so the
+> setter must never be looked up by name. Both accessors read/write the private static boolean field
+> literally named `class` (the Java keyword; distinct from the separate field `class.class`), which
+> is what `CoopFastForwardLock` resolves instead, with `findStaticGetter`/`findStaticSetter` on a
+> `privateLookupIn` of that class. Corrected 2026-09-02 by parsing the constant pool of
+> `StarfarerSettings.class` on 0.98a-RC8.) In toggle mode the per-frame key poll is skipped entirely; the persistent
 > `CampaignState.fastForward` field (plain name, private) is flipped only by a consumable
 > `FAST_FORWARD` key event — so the guest's existing pre-core event consumption blocks it, and a
 > `MethodHandles` field write sticks. The speed loop is
@@ -161,6 +167,22 @@ while fast-forwarding, the campaign clock advanced at exactly 2x, yet both
 > Phase 7b removes the static `campaignSpeedupMult:1` override and restores shared fast-forward via
 > toggle mode, re-applying a 1x lock at runtime (`setFloat`) only when the MethodHandles are
 > unavailable.
+>
+> **Built (Phase 7b, 2026-09-02).** `data/config/settings.json` no longer carries the override at
+> all; `coop.time.CoopFastForwardLock` forces toggle mode + `campaignSpeedupMult=2` on both roles
+> for the life of a session, mirrors the host's `CampaignState.fastForward` field onto the guest from
+> `CoopTimeLock.apply`, and restores the player's own toggle preference when the session ends. The
+> `setInFastAdvance(...)` mirror described in the last bullet below is **gone** — it moved nothing
+> but a cosmetic flag. The runtime 1x lock survives only as the degrade path (handles fail to
+> resolve, or `-Dcoop.ff.disable=true`).
+>
+> Two caveats on the forced toggle flag (it is a static on `StarfarerSettings`, process-wide, set
+> false by the class initializer): (1) the restore only runs from the pump's session-end branch, so
+> leaving the campaign mid-session (exit to menu, load another save) leaves toggle mode on until the
+> next coop session ends or the game restarts — harmless in play, hold-Shift simply acts as a tap
+> toggle; (2) if the player opens the vanilla settings menu *during* a session and applies, vanilla
+> writes the current (forced-true) value to its settings file, and the mod cannot tell. Neither is
+> worth a fix in v1; noted so a "my Shift became a toggle" report is recognised.
 
 Because hold-mode fast-forward cannot be mirrored or blocked via public API, the v1 coop session was
 locked to 1x instead:

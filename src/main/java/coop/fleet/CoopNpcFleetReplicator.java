@@ -69,7 +69,13 @@ public final class CoopNpcFleetReplicator {
     private final CoopNpcFleetMotionSmoother motionSmoother = new CoopNpcFleetMotionSmoother();
 
     private long nextSetAtMillis;
-    private long nextMotionAtMillis;
+    /**
+     * Phase 29 line item (landed with 7b): NPC_FLEET_MOTION is a UDP stream stamped with stream time
+     * and consumed by the receiver's interpolation buffer, so its cadence is measured in game time.
+     * The NPC_FLEET_SET timer above stays on the wall clock — reliable TCP, not interpolated.
+     */
+    private final coop.net.CoopStreamCadence motionCadence =
+            new coop.net.CoopStreamCadence(MOTION_INTERVAL_MILLIS);
     private String lastSetHash = "";
     private int lastFleetCount;
     /** Per-fleet {@code fleetHash} last printed by the {@link CoopDebug} roster diagnostic. */
@@ -121,14 +127,13 @@ public final class CoopNpcFleetReplicator {
                 CoopFrameProfiler.sectionRecord(SECTION_SEND_SET, setStart);
             }
         }
-        if (now >= nextMotionAtMillis) {
+        if (motionCadence.shouldSend(streamClock.gameTimeMillis(), now, streamClock.isFrozen())) {
             long motionStart = CoopFrameProfiler.sectionStart();
             try {
                 sendMotion(sector, now);
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopNpcFleetReplicator.class, "Failed to send NPC_FLEET_MOTION", ex);
             } finally {
-                nextMotionAtMillis = now + MOTION_INTERVAL_MILLIS;
                 CoopFrameProfiler.sectionRecord(SECTION_SEND_MOTION, motionStart);
             }
         }
@@ -141,6 +146,7 @@ public final class CoopNpcFleetReplicator {
         loggedFleetHashes.clear();
         guestPresence.reset();
         motionSmoother.reset();
+        motionCadence.reset();
         datagramRedundancy.reset();
         CoopFullFidelitySystemDriver.reset();
     }

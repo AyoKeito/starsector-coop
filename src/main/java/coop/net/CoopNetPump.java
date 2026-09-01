@@ -40,6 +40,7 @@ import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.time.CoopFastForwardLock;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
 import coop.util.CoopDebug;
@@ -93,6 +94,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_BATTLE_BRIDGE = "battle.bridge";
     private static final String SECTION_SHARED_PAUSE = "time.sharedPause";
     private static final String SECTION_TIME_APPLY = "time.applySnapshot";
+    private static final String SECTION_TIME_FAST_FORWARD = "time.fastForwardLock";
     private static final String SECTION_TIME_SEND = "time.sendSnapshot";
     private static final String SECTION_FLEET_MIRROR = "fleet.syncMirror";
     private static final String SECTION_FLEET_DATAGRAMS = "fleet.drainDatagrams";
@@ -151,7 +153,13 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean channelWasConnected;
     private boolean preSessionCampaignDropWarned;
     private long nextTimeSnapshotAtMillis;
-    private long nextFleetSnapshotAtMillis;
+    /**
+     * Phase 29 line item (landed with 7b): the FLEET_SNAPSHOT stream is stamped with stream time and
+     * consumed by the interpolation buffer, so its cadence is measured in game time — under 2x
+     * fast-forward the wall send rate doubles and the buffer keeps the same sample depth.
+     */
+    private final CoopStreamCadence fleetSnapshotCadence =
+            new CoopStreamCadence(FLEET_SNAPSHOT_INTERVAL_MILLIS);
     private long nextGuestSnapshotAtMillis;
     private CoopTimeLock.TimeSnapshot latestTimeSnapshot;
     private final CoopSaveCheckpoint saveCheckpoint = new CoopSaveCheckpoint();
@@ -219,6 +227,12 @@ public class CoopNetPump implements EveryFrameScript {
     private final BooleanSupplier priorCoopSessionSupplier;
     private final CoopTimeLock timeLock;
     private final CoopSharedPauseCoordinator pauseCoordinator = new CoopSharedPauseCoordinator();
+    /**
+     * Phase 7b: forces vanilla's toggle fast-forward mode + the shared 2x multiplier for the life of
+     * the session, and owns the field write that mirrors the host's fast-forward onto the guest.
+     * Constructing it touches no engine state; it resolves its handles lazily on first enforcement.
+     */
+    private final CoopFastForwardLock fastForwardLock = new CoopFastForwardLock();
     // Host: the effective pause we applied last frame, used to detect vanilla auto-pause edges (the
     // host pause key itself is captured by CoopHostPauseInputListener, not here).
     private boolean hostEffectivePauseApplied;
@@ -313,6 +327,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.priorCoopSessionSupplier = Objects.requireNonNull(priorCoopSessionSupplier, "priorCoopSessionSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
         this.timeLock.setPauseCoordinator(pauseCoordinator);
+        this.timeLock.setFastForwardLock(fastForwardLock);
         this.npcFleetRegistry = new CoopFleetMirrorRegistry(CoopFleetMirror::new, clockMillis);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
         this.battleBridge = new CoopBattleBridge(service, sessionState, clockMillis, pauseCoordinator);
@@ -366,7 +381,6 @@ public class CoopNetPump implements EveryFrameScript {
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
-        this.nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
         this.nextGuestSnapshotAtMillis = now;
     }
 
@@ -470,6 +484,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_BATTLE_BRIDGE, t);
         syncSharedPause();
         t = profiler.split(SECTION_SHARED_PAUSE, t);
+        syncFastForwardLock();
+        t = profiler.split(SECTION_TIME_FAST_FORWARD, t);
         maybeApplyTimeSnapshot();
         t = profiler.split(SECTION_TIME_APPLY, t);
         maybeSendTimeSnapshot();
@@ -1491,8 +1507,8 @@ public class CoopNetPump implements EveryFrameScript {
         if (!shouldStreamFleet()) {
             return;
         }
-        long now = clockMillis.getAsLong();
-        if (now < nextFleetSnapshotAtMillis) {
+        if (!fleetSnapshotCadence.shouldSend(streamClock.gameTimeMillis(),
+                clockMillis.getAsLong(), streamClock.isFrozen())) {
             return;
         }
         try {
@@ -1511,8 +1527,19 @@ public class CoopNetPump implements EveryFrameScript {
             service.sendDatagram(datagram);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to capture coop fleet snapshot", ex);
-        } finally {
-            nextFleetSnapshotAtMillis = now + FLEET_SNAPSHOT_INTERVAL_MILLIS;
+        }
+    }
+
+    /**
+     * Phase 7b: while a session is live BOTH roles run vanilla's toggle fast-forward mode and the
+     * same {@code campaignSpeedupMult}; when it ends, the local client goes back to whatever the
+     * player had. Two branches only — the lock tracks the was-enforcing edge itself.
+     */
+    private void syncFastForwardLock() {
+        if (service.role() != CoopConnectionRole.NONE && isGameplaySessionActive()) {
+            fastForwardLock.enforceSessionState();
+        } else {
+            fastForwardLock.restoreDefaultsIfEnforcing();
         }
     }
 

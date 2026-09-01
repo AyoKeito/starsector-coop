@@ -85,10 +85,13 @@ class CoopSectorProcGenTest {
     }
 
     @Test
-    void settingsJsonNeutralizesCampaignFastForward() throws Exception {
+    void settingsJsonNoLongerOverridesCampaignSpeedupMult() throws Exception {
+        // Phase 7b: the static 1x override is gone — the multiplier is now forced at runtime
+        // (2x for a coop session, 1x only when CoopFastForwardLock's handles are unavailable), so a
+        // solo game with the mod enabled gets vanilla fast-forward back.
         String settingsJson = Files.readString(Path.of("data", "config", "settings.json"));
 
-        assertTrue(settingsJson.contains("\"campaignSpeedupMult\":1"));
+        assertFalse(settingsJson.contains("campaignSpeedupMult"));
     }
 
     private static CharacterCreationData recordingCharacterCreationData(Map<String, Object> calls) {

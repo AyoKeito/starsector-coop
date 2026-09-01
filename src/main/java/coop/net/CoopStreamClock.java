@@ -19,15 +19,27 @@ public final class CoopStreamClock {
 
     private double gameSeconds;
     private long epoch;
+    private boolean frozen = true;
 
     /**
      * Advances stream time by one campaign frame. {@code paused} gates to zero — a paused campaign
      * emits samples with frozen stamps, which the interpolator's frozen cursor renders in place.
      */
     public void advance(float dtSeconds, boolean paused) {
-        if (!paused && dtSeconds > 0f) {
+        frozen = paused || dtSeconds <= 0f;
+        if (!frozen) {
             gameSeconds += dtSeconds;
         }
+    }
+
+    /**
+     * Whether stream time stood still on the most recent {@link #advance}. Read by
+     * {@link CoopStreamCadence}: a frozen stream falls back to a wall-clock send cadence so paused
+     * peers keep emitting frozen-stamp samples exactly as they did before the cadence moved to game
+     * time. Starts frozen — nothing has advanced yet.
+     */
+    public boolean isFrozen() {
+        return frozen;
     }
 
     /** Stream time in whole milliseconds (the wire unit; see {@link CoopMessages#datagram}). */
@@ -44,5 +56,6 @@ public final class CoopStreamClock {
     void reset() {
         gameSeconds = 0.0;
         epoch = 0L;
+        frozen = true;
     }
 }

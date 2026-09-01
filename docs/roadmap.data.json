@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built 2026-09-02 (smoke pending)"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 24 built and live-smoke verified (2026-09-01); only the 12c manual residue is left, then 7b",
-  "here": "<b>Phase 24 — shared-faction colonies, industries, and raids — is built and verified: 1108 green tests in one build session (2026-08-25), two-instance live smoke PASSED on 2026-09-01</b>. Three commits in milestone order: raids (<code>04d0239</code> — hostile-act listener capture → <code>RAID_RESULT</code>, absolute post-act values, loot stays local, rep rides the existing channels), colony lifecycle (<code>76342ff</code> — <code>COLONY_FOUNDED/ABANDONED</code>; colonization converts the planet's gen-time market in place so ids match with no mapping; abandon applies vanilla's own <code>DecivTracker.removeColony</code>), and management + income + expedition warning (<code>5bfeba3</code> — diff-on-close <code>COLONY_MGMT</code> with the construction <em>queue</em> as the primary channel; income = <b>local-half deduction on both engines</b> because both economies pay the full colony net and credits are per-player, so a wire transfer would pay 150%; <code>CoopExpeditionWarningIntel</code> is the mod's first custom intel entry, fed by a set-reconciled scan covering both the <code>RaidIntel</code> and <code>FleetGroupIntel</code>/<code>GenericRaidFGI</code> hierarchies — colony-crisis attacks are <em>not</em> RaidIntel and a naive scan would have missed them). Phase 13's base capture also switched to the intel-manager scan so <code>PlayerRelatedPirateBaseManager</code> bases join <code>BASE_SET</code>. Build-time discoveries worth knowing: commodity raids remove nothing from market stock (they hang an availability deficit), the colonization listener's timing is unknowable so founding is captured a frame late, and <code>Misc.createColonyStatic</code> is broken as written (setSize before the flag flip is a no-op). <b>The 2026-09-01 smoke passed every item</b>: raids both directions on the same NPC colony (loot stayed with the raider), guest colonization and host abandon both replicated, coordinated save/resume clean, management edits converging within ~2 s including from the remote command screen, a forced Luddic punitive expedition mirrored with a matching countdown, and a month tick splitting 1250/1250 at zero drift. Three fixes came out of it — expedition-warning goal + highlights (<code>9fc2cfb</code>), arrival announcement (<code>9d2ffa9</code>; the \"missing after reload\" report turned out to be vanilla's New filter, not an orphaned entry), and <code>setImportant(true)</code> on the mirror (<code>b2efe25</code>, plus save-migration companion <code>bf8f78d</code> for entries already reconciled before the fix — both live-verified 2026-09-01) — plus one new accepted divergence: commodity fulfillment and shortage markers can differ between clients because each engine solves its own economy (host is canonical). One question left open: whether hidden-base names converge once the base is discovered. <b>Open before 7b: the 12c manual residue only</b> — claim race, sell-back + hire click-throughs, feel pass.",
+  "hereHead": "You are here — Phase 7b built (2026-09-02), two-instance smoke pending; 12c manual residue still open",
+  "here": "<b>Phase 7b — shared fast-forward — is built: 1210 green tests (2026-09-02), two-instance smoke PENDING.</b> <code>CoopFastForwardLock</code> forces vanilla's toggle fast-forward mode and <code>campaignSpeedupMult=2</code> on both roles for the life of a session, mirrors the host's <code>CampaignState.fastForward</code> field onto the guest from the existing <code>TIME_SNAPSHOT</code> bit, and restores the player's own toggle preference when the session ends; the <code>settings.json</code> 1x override is gone, so solo games with the mod enabled get fast-forward back. Build-day correction worth knowing: the spec named the toggle setter <code>?00000(boolean)</code>, but that <code>?</code> was javap substituting for a non-ASCII character — five different setters print identically. Parsing the class file's constant pool showed the real accessors are <code>Oo0000()</code> / <code>ö00000(boolean)</code> over a static boolean field literally named <code>class</code>, so the build resolves the <em>field</em> with <code>findStaticGetter/Setter</code> and never touches the ambiguous method name. Any handle failure (or <code>-Dcoop.ff.disable=true</code>) degrades to the old 1x lock via public API. Phase 29's deferred line item landed alongside: <code>CoopStreamCadence</code> measures the FLEET_SNAPSHOT and NPC_FLEET_MOTION send interval in <em>stream</em> time (wall-clock fallback only while paused), so 2x fast-forward doubles the wall send rate and the interpolation buffer keeps its depth. <b>Open: the 7b 8-step smoke</b> (host Shift toggles both clients, guest Shift inert, pause/unpause keeps FF, date alignment over cycles, settings-menu untick, fallback drill, solo sanity, post-session restore) <b>and the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next: the 12c manual residue, then Phase 7b",
+      "head": "Next: the 7b smoke, then 7c",
       "state": "you are here",
-      "body": "<span class=\"rp\" data-jump=\"24\">Phase 24</span> — shared-faction colonies, industries, and raids — is <b>built and verified</b>: all three milestones built 2026-08-25 (1108 tests green) and the two-instance live smoke PASSED 2026-09-01, every item — raids both directions, guest colonization and host abandon, coordinated save/resume, management edits converging within ~2 s (including from the remote command screen), a forced punitive expedition mirrored with a matching countdown, and a month tick splitting 1250/1250 at zero drift. One manual pass is still open: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item residue (claim race, refitted sell-back + hire click-throughs, motion/stealth feel pass). After that the order continues 7b/7c → 20 → 29-M2 → 21 → 19."
+      "body": "<span class=\"rp\" data-jump=\"7b\">Phase 7b</span> — shared fast-forward — is <b>built</b> (2026-09-02, 1210 green): toggle mode + a fixed 2x forced on both roles for the session, the host's fastForward field mirrored onto the guest, the settings.json 1x lock removed, and Phase 29's game-time send cadence landed with it. Its two-instance 8-step smoke is the next thing to run (host Shift = both speed up, guest Shift inert, FF survives pause, dates aligned over cycles, fallback drill with <code>-Dcoop.ff.disable=true</code> on both, solo sanity, post-session restore). Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After that the order continues 7c → 20 → 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -269,7 +269,7 @@
       "title": "Fast-Forward Restore",
       "theme": "time",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Restores shared hold-Shift fast-forward as host-controlled 2x by forcing toggle mode and mirroring the fastForward field via MethodHandles.",
       "introduces": [
         "CoopFastForwardLock",
@@ -282,13 +282,10 @@
         "1x degrade path"
       ],
       "residue": [
-        "all steps unchecked (not built)",
-        "remove settings.json 1x lock",
-        "gradle clean test build",
-        "deploy + 8-step smoke test",
-        "in-game Class.forname sandbox confirmation"
+        "two-instance 8-step smoke PENDING (incl. in-game Class.forName sandbox confirmation and the -Dcoop.ff.disable fallback drill)",
+        "eyeball mirror smoothness under 2x FF (Phase 29 cadence rule landed here)"
       ],
-      "note": "Build-order position 11; degrades to Phase 7 1x lock if handles fail."
+      "note": "Built 2026-09-02, 1210 green. Toggle flag resolved as StarfarerSettings' static field `class` (the spec's ?00000 setter name was a javap artifact). Degrades to the Phase 7 1x lock if handles fail. Carries Phase 29's game-time send cadence (CoopStreamCadence)."
     },
     {
       "id": "7c",
