@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built + unit-tested 2026-08-25 (manual smoke pending)"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 24 built (all 3 milestones, 2026-08-25); next: manual smokes (12c residue + 24), then 7b/7c",
-  "here": "<b>Phase 24 — shared-faction colonies, industries, and raids — went build → 1108 green tests in one session (2026-08-25)</b>, three commits in milestone order: raids (<code>04d0239</code> — hostile-act listener capture → <code>RAID_RESULT</code>, absolute post-act values, loot stays local, rep rides the existing channels), colony lifecycle (<code>76342ff</code> — <code>COLONY_FOUNDED/ABANDONED</code>; colonization converts the planet's gen-time market in place so ids match with no mapping; abandon applies vanilla's own <code>DecivTracker.removeColony</code>), and management + income + expedition warning (<code>5bfeba3</code> — diff-on-close <code>COLONY_MGMT</code> with the construction <em>queue</em> as the primary channel; income = <b>local-half deduction on both engines</b> because both economies pay the full colony net and credits are per-player, so a wire transfer would pay 150%; <code>CoopExpeditionWarningIntel</code> is the mod's first custom intel entry, fed by a set-reconciled scan covering both the <code>RaidIntel</code> and <code>FleetGroupIntel</code>/<code>GenericRaidFGI</code> hierarchies — colony-crisis attacks are <em>not</em> RaidIntel and a naive scan would have missed them). Phase 13's base capture also switched to the intel-manager scan so <code>PlayerRelatedPirateBaseManager</code> bases join <code>BASE_SET</code>. Build-time discoveries worth knowing: commodity raids remove nothing from market stock (they hang an availability deficit), the colonization listener's timing is unknowable so founding is captured a frame late, and <code>Misc.createColonyStatic</code> is broken as written (setSize before the flag flip is a no-op). <b>Open before 7b/7c: the manual two-instance smokes</b> — the 12c 3-item residue (claim race, sell-back + hire click-throughs, feel pass) and the Phase 24 pass (raid convergence both directions, colonize/abandon + save/resume, industry queue + income banner + warning countdown).",
+  "hereHead": "You are here — Phase 24 built and live-smoke verified (2026-09-01); only the 12c manual residue is left, then 7b",
+  "here": "<b>Phase 24 — shared-faction colonies, industries, and raids — is built and verified: 1108 green tests in one build session (2026-08-25), two-instance live smoke PASSED on 2026-09-01</b>. Three commits in milestone order: raids (<code>04d0239</code> — hostile-act listener capture → <code>RAID_RESULT</code>, absolute post-act values, loot stays local, rep rides the existing channels), colony lifecycle (<code>76342ff</code> — <code>COLONY_FOUNDED/ABANDONED</code>; colonization converts the planet's gen-time market in place so ids match with no mapping; abandon applies vanilla's own <code>DecivTracker.removeColony</code>), and management + income + expedition warning (<code>5bfeba3</code> — diff-on-close <code>COLONY_MGMT</code> with the construction <em>queue</em> as the primary channel; income = <b>local-half deduction on both engines</b> because both economies pay the full colony net and credits are per-player, so a wire transfer would pay 150%; <code>CoopExpeditionWarningIntel</code> is the mod's first custom intel entry, fed by a set-reconciled scan covering both the <code>RaidIntel</code> and <code>FleetGroupIntel</code>/<code>GenericRaidFGI</code> hierarchies — colony-crisis attacks are <em>not</em> RaidIntel and a naive scan would have missed them). Phase 13's base capture also switched to the intel-manager scan so <code>PlayerRelatedPirateBaseManager</code> bases join <code>BASE_SET</code>. Build-time discoveries worth knowing: commodity raids remove nothing from market stock (they hang an availability deficit), the colonization listener's timing is unknowable so founding is captured a frame late, and <code>Misc.createColonyStatic</code> is broken as written (setSize before the flag flip is a no-op). <b>The 2026-09-01 smoke passed every item</b>: raids both directions on the same NPC colony (loot stayed with the raider), guest colonization and host abandon both replicated, coordinated save/resume clean, management edits converging within ~2 s including from the remote command screen, a forced Luddic punitive expedition mirrored with a matching countdown, and a month tick splitting 1250/1250 at zero drift. Three fixes came out of it — expedition-warning goal + highlights (<code>9fc2cfb</code>), arrival announcement (<code>9d2ffa9</code>; the \"missing after reload\" report turned out to be vanilla's New filter, not an orphaned entry), and <code>setImportant(true)</code> on the mirror (<code>b2efe25</code>, committed after the session, not yet live-verified) — plus one new accepted divergence: commodity fulfillment and shortage markers can differ between clients because each engine solves its own economy (host is canonical). One question left open: whether hidden-base names converge once the base is discovered. <b>Open before 7b: the 12c manual residue only</b> — claim race, sell-back + hire click-throughs, feel pass.",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next: the manual smokes (12c residue + Phase 24), then 7b/7c",
+      "head": "Next: the 12c manual residue, then Phase 7b",
       "state": "you are here",
-      "body": "<span class=\"rp\" data-jump=\"24\">Phase 24</span> — shared-faction colonies, industries, and raids — is <b>built and unit-tested (2026-08-25, all three milestones, 1108 tests green)</b>. Two manual two-instance passes are now open and can share one driven session: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item residue (claim race, refitted sell-back + hire click-throughs, motion/stealth feel pass) and the Phase 24 smoke (each player raids the same NPC colony and the effects converge; guest colonizes → host sees it → coordinated save/resume → abandon; guest queues an industry the host sees, the month tick banners half the colony net on both clients, an incoming expedition shows the mirrored countdown on the guest). After that, the order continues 7b/7c → 20 → 29-M2 → 21 → 19."
+      "body": "<span class=\"rp\" data-jump=\"24\">Phase 24</span> — shared-faction colonies, industries, and raids — is <b>built and verified</b>: all three milestones built 2026-08-25 (1108 tests green) and the two-instance live smoke PASSED 2026-09-01, every item — raids both directions, guest colonization and host abandon, coordinated save/resume, management edits converging within ~2 s (including from the remote command screen), a forced punitive expedition mirrored with a matching countdown, and a month tick splitting 1250/1250 at zero drift. One manual pass is still open: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item residue (claim race, refitted sell-back + hire click-throughs, motion/stealth feel pass). After that the order continues 7b/7c → 20 → 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -78,9 +78,9 @@
     {
       "sev": "scope",
       "sevLabel": "scope",
-      "head": "Phase 24 rescoped INTO V1 (2026-06-10) — BUILT 2026-08-25",
-      "state": "built, manual smoke pending",
-      "body": "Shared-faction colonies, industries, and raids are <b>V1 scope and now built</b> — one shared player faction (separate per-player factions stay out), three milestone commits landed 2026-08-25 with the suite at 1108 green. What remains is the manual two-instance smoke. See <span class=\"rp\" data-jump=\"24\">P24</span>."
+      "head": "Phase 24 rescoped INTO V1 (2026-06-10) — BUILT 2026-08-25, VERIFIED 2026-09-01",
+      "state": "built and smoke-verified",
+      "body": "Shared-faction colonies, industries, and raids are <b>V1 scope, built, and verified</b> — one shared player faction (separate per-player factions stay out), three milestone commits landed 2026-08-25 with the suite at 1108 green, and the two-instance live smoke passed on 2026-09-01. See <span class=\"rp\" data-jump=\"24\">P24</span>."
     },
     {
       "sev": "note",
@@ -817,11 +817,10 @@
         "base capture intel-manager scan"
       ],
       "residue": [
-        "manual two-instance smoke: raid convergence both directions (loot stays with the raider)",
-        "manual smoke: colonize → mirror → coordinated save/resume → abandon",
-        "manual smoke: industry queue + AI core/free port convergence, income banner both clients, expedition warning countdown on the guest"
+        "open question: do hidden pirate/Pather base names converge once the base is discovered? (ids and names are locally generated; location, faction and size already pair)",
+        "b2efe25 (mirror setImportant at construction) was committed after the smoke session — not yet live-verified"
       ],
-      "note": "Built + unit-tested 2026-08-25 (04d0239 raids, 76342ff lifecycle, 5bfeba3 mgmt+income+warning; suite 959 → 1108). Income = local-half deduction (both economies pay full colony net; wire transfer would double-pay). Admin assignment not synced; build-progress + guest HostileActivity meter drift documented in runtime-limitations."
+      "note": "Built + unit-tested 2026-08-25 (04d0239 raids, 76342ff lifecycle, 5bfeba3 mgmt+income+warning; suite 959 → 1108); live two-instance smoke PASSED 2026-09-01, all three milestones. Income = local-half deduction (both economies pay full colony net; wire transfer would double-pay). Admin assignment not synced; build-progress, guest HostileActivity meter drift, and cross-engine commodity fulfillment/shortage markers (new, found in the smoke) documented in runtime-limitations."
     },
     {
       "id": "25",

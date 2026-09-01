@@ -358,7 +358,7 @@ Consistent with the shared world the rest of Phase 12 builds, and the same thing
 
 `CoreScript.markSystemAsEntered` bumps every planet in a newly entered system from NONE to SEEN, and the poll replicates SEEN like any other level (deliberately — the system-map display reads the minimum system survey level, and filtering SEEN out would leave the two maps visibly different). The consequence: one player's travels light up planet markers on the partner's map. That is a shared-exploration feature under this mod's model, but it is a visible departure from two solo campaigns and belongs in any "what's different in co-op" player doc (Phase 23).
 
-## Phase 24 — Shared Colonies: Two Accepted Divergences
+## Phase 24 — Shared Colonies: Three Accepted Divergences
 
 ### The guest's hostile-activity meter runs its own race
 
@@ -375,3 +375,13 @@ Not fixed because suppression would cost more than it buys. `HostileActivityEven
 Reading the true progress across the wire is not cheaply possible: `Industry.getBuildOrUpgradeProgress()` returns a 0..1 fraction that reads `0` whenever the industry is disrupted (`BaseIndustry.java:491-498`), the absolute-days field needs a `BaseIndustry` cast, and the `buildTime` field it is measured against is not readable at all during an upgrade — `getBuildTime()` returns the *spec* value, not the field.
 
 Accepted, because it self-heals with a bound: the first client to finish reports the industry as finished, and the applier forces the lagging mirror to `finishBuildingOrUpgrading()`. The drift is therefore never larger than the gap between the two starts, and it always resolves at completion. The one visible artifact is that the client that finishes second may see its "construction complete" message a moment early.
+
+### Commodity fulfillment and shortage markers on a player colony can differ between clients
+
+Observed live 2026-09-01: the same shared colony showed different demand-met / deficit markers on the two clients — one side flagging a shortage the other did not.
+
+Nothing about the colony itself is out of sync; the economy around it is. Each engine runs its own `EconomyAPI` and solves supply for every market in the sector on its own iteration schedule, so fulfillment is a *derived* value, not replicated state. Two things guarantee the inputs differ: the two clocks sit a couple of days apart (the clock reconciler in Phase 7c is not built yet), and NPC market stockpiles and production are each engine's own simulation. `COLONY_MGMT` replicates the industries and the queue, Phase 12 replicates market contents on open — neither claims to replicate the sector-wide supply solve that decides which commodity reads as short.
+
+Same root as the income drift seen in that session (host 1456 vs guest 1663 in a month where the two colonies were not yet producing the same thing; the next month matched exactly, drift 0).
+
+Accepted. The host is canonical — its reading is the one to trust when the two disagree. Worth revisiting only if this ever turns into a persistent *stability* divergence rather than a display difference: a shortage that sticks on one side long enough to feed the stability penalty would make the two colonies grow apart, which the industry/queue channel would not catch.
