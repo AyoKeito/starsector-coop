@@ -9,6 +9,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
 import com.fs.starfarer.api.ui.SectorMapAPI;
 import com.fs.starfarer.api.ui.TooltipMakerAPI;
+import com.fs.starfarer.api.util.Misc;
 import coop.util.CoopLog;
 
 import java.awt.Color;
@@ -55,6 +56,12 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
     private String targetName;
     private int etaDays;
     private String statusName;
+    /**
+     * Display text for the threat's objective, already resolved host-side ("saturation bombardment",
+     * "raid to disrupt Heavy Industry", "expedition"). Empty when the host could not resolve one, in
+     * which case the line is omitted rather than rendered as "unknown".
+     */
+    private String goal;
     /** Campaign-clock timestamp of the last coop update; {@code getElapsedDaysSince} reads it. */
     private long lastTouchedTimestamp;
 
@@ -92,13 +99,19 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
         this.targetName = warning.targetName();
         this.etaDays = warning.etaDays();
         this.statusName = warning.status().name();
+        this.goal = warning.goal();
         this.lastTouchedTimestamp = clockTimestamp();
     }
 
     /** The record this entry mirrors, for the reconcile's local-set read. */
     public CoopExpeditionWarning toRecord() {
         return new CoopExpeditionWarning(kind(), factionId, targetMarketId, targetName, etaDays,
-                status());
+                status(), goalText());
+    }
+
+    /** Never null: a save written before the field existed loads it as null. */
+    public String goalText() {
+        return goal == null ? "" : goal;
     }
 
     public CoopExpeditionWarning.Kind kind() {
@@ -212,14 +225,33 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
         return target.isEmpty() ? prefix : prefix + " - " + target;
     }
 
+    /**
+     * The intel-list bullets. Highlighted exactly where vanilla highlights: the target colony in the
+     * owning faction's UI colour ({@code RaidIntel.java:334}, {@code PunitiveExpeditionIntel.java:283}),
+     * the goal in the negative-highlight colour ({@code PunitiveExpeditionIntel.java:289}) and the day
+     * count in the standard highlight colour ({@code RaidIntel.java:357}). Vanilla pads the first
+     * bullet and zeroes the rest, so this does too.
+     */
     @Override
     protected void addBulletPoints(TooltipMakerAPI info, ListInfoMode mode, boolean isUpdate,
                                    Color tc, float initPad) {
+        float pad = initPad;
         String target = targetDisplayName();
         if (!target.isEmpty()) {
-            info.addPara("Target: " + target, tc, initPad);
+            info.addPara("Target: %s", pad, tc, targetHighlightColor(), target);
+            pad = 0f;
         }
-        info.addPara(etaLine(), tc, 3f);
+        String goal = goalText();
+        if (!goal.isEmpty()) {
+            info.addPara("Goal: %s", pad, tc, goalHighlightColor(), goal);
+            pad = 0f;
+        }
+        String etaHighlight = etaHighlight();
+        if (etaHighlight.isEmpty()) {
+            info.addPara(etaLine(), tc, pad);
+        } else {
+            info.addPara(etaFormat(), pad, tc, Misc.getHighlightColor(), etaHighlight);
+        }
     }
 
     @Override
@@ -229,24 +261,89 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
                 + " machine and its fleets are mirrored to yours.", pad);
         String faction = factionDisplayName();
         if (!faction.isEmpty()) {
-            info.addPara("Faction: " + faction, pad);
+            info.addPara("Faction: %s", pad, factionHighlightColor(), faction);
         }
         String target = targetDisplayName();
         if (!target.isEmpty()) {
-            info.addPara("Target colony: " + target, pad);
+            info.addPara("Target colony: %s", pad, targetHighlightColor(), target);
         }
-        info.addPara(etaLine(), pad);
+        String goal = goalText();
+        if (!goal.isEmpty()) {
+            info.addPara("Goal: %s", pad, goalHighlightColor(), goal);
+        }
+        String etaHighlight = etaHighlight();
+        if (etaHighlight.isEmpty()) {
+            info.addPara(etaLine(), pad);
+        } else {
+            info.addPara(etaFormat(), pad, Misc.getHighlightColor(), etaHighlight);
+        }
     }
 
-    /** ASCII only, and singular/plural handled: this is player-facing text. */
-    String etaLine() {
+    /**
+     * The ETA sentence with a {@code %s} where the day count goes, so the count can be highlighted.
+     * ASCII only, and singular/plural handled: this is player-facing text.
+     */
+    String etaFormat() {
         if (status() == CoopExpeditionWarning.Status.ARRIVED) {
             return "Status: in the target system now.";
         }
         if (etaDays <= 0) {
             return "Status: arriving imminently.";
         }
-        return "Estimated arrival: " + etaDays + (etaDays == 1 ? " day." : " days.");
+        return "Estimated arrival: %s" + (etaDays == 1 ? " day." : " days.");
+    }
+
+    /** The substring of {@link #etaFormat()} to highlight, or empty when the line has no variable. */
+    String etaHighlight() {
+        if (status() == CoopExpeditionWarning.Status.ARRIVED || etaDays <= 0) {
+            return "";
+        }
+        return String.valueOf(etaDays);
+    }
+
+    /** The fully rendered ETA sentence, for the paths that cannot highlight. */
+    String etaLine() {
+        String highlight = etaHighlight();
+        return highlight.isEmpty() ? etaFormat() : etaFormat().replace("%s", highlight);
+    }
+
+    /**
+     * The threatened colony's colour: the owning faction's, which is what both vanilla hierarchies
+     * use for a target name. Falls back to the plain highlight colour when this engine cannot resolve
+     * the market (the guest normally can — it mirrors player colonies).
+     */
+    private Color targetHighlightColor() {
+        try {
+            MarketAPI market = targetMarket();
+            FactionAPI owner = market == null ? null : market.getFaction();
+            Color color = owner == null ? null : owner.getBaseUIColor();
+            return color == null ? Misc.getHighlightColor() : color;
+        } catch (RuntimeException | LinkageError ex) {
+            return Misc.getHighlightColor();
+        }
+    }
+
+    private Color factionHighlightColor() {
+        try {
+            FactionAPI faction = threatFaction();
+            Color color = faction == null ? null : faction.getBaseUIColor();
+            return color == null ? Misc.getHighlightColor() : color;
+        } catch (RuntimeException | LinkageError ex) {
+            return Misc.getHighlightColor();
+        }
+    }
+
+    /**
+     * Vanilla only ever bullets a "Goal:" line for a saturation bombardment, and paints it with the
+     * negative-highlight colour; every goal this entry shows is an attack on the player's colony, so
+     * they all get that treatment.
+     */
+    private Color goalHighlightColor() {
+        try {
+            return Misc.getNegativeHighlightColor();
+        } catch (RuntimeException | LinkageError ex) {
+            return Misc.getHighlightColor();
+        }
     }
 
     @Override

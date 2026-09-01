@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
 import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
+import com.fs.starfarer.api.campaign.econ.Industry;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
@@ -12,6 +13,7 @@ import com.fs.starfarer.api.impl.campaign.intel.group.FleetGroupIntel;
 import com.fs.starfarer.api.impl.campaign.intel.group.GenericRaidFGI;
 import com.fs.starfarer.api.impl.campaign.intel.inspection.HegemonyInspectionIntel;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionIntel;
+import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
 import com.fs.starfarer.api.impl.campaign.intel.raid.RaidIntel;
 import com.fs.starfarer.api.util.Misc;
 import coop.util.CoopLog;
@@ -20,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -187,24 +190,85 @@ public final class CoopExpeditionWarningSync {
     private static List<CoopExpeditionWarning> toWarnings(IntelInfoPlugin item) {
         if (item instanceof PunitiveExpeditionIntel expedition) {
             return one(CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION, factionId(expedition.getFaction()),
-                    expedition.getTarget(), expedition.getETA());
+                    expedition.getTarget(), expedition.getETA(), punitiveGoal(expedition));
         }
         if (item instanceof HegemonyInspectionIntel inspection) {
+            // No goal: vanilla renders no "Goal:" bullet for an inspection, and the entry's own title
+            // already says what it is. Shipping "" is the documented "omit the line" value.
             return one(CoopExpeditionWarning.Kind.INSPECTION, factionId(inspection.getFaction()),
-                    inspection.getTarget(), inspection.getETA());
+                    inspection.getTarget(), inspection.getETA(), "");
         }
         if (item instanceof GenericRaidFGI raid) {
             // Days until the force is on target, which is what the vanilla panel itself shows
             // (GenericRaidFGI.addNonUpdateBulletPoints reads getETAUntil(PAYLOAD_ACTION)).
             float eta = raid.getETAUntil(GenericRaidFGI.PAYLOAD_ACTION);
             return many(CoopExpeditionWarning.Kind.HOSTILE_ACTIVITY, factionId(raid.getFaction()),
-                    raidTargets(raid), eta);
+                    raidTargets(raid), eta, raidGoalText(nounOf(raid)));
         }
         if (item instanceof RaidIntel raid) {
             return many(CoopExpeditionWarning.Kind.RAID, factionId(raid.getFaction()),
-                    playerMarketsIn(raid.getSystem()), raid.getETA());
+                    playerMarketsIn(raid.getSystem()), raid.getETA(), raidGoalText(null));
         }
         return List.of();
+    }
+
+    // ---- Goal resolution -----------------------------------------------------------------------
+
+    /**
+     * The punitive expedition's objective as display text. {@link PunitiveExpeditionIntel#getGoal()}
+     * is the accessor; the industry name comes from {@link PunitiveExpeditionIntel#getTargetIndustry()}
+     * and is only meaningful for the two raid goals.
+     */
+    private static String punitiveGoal(PunitiveExpeditionIntel expedition) {
+        String industry = null;
+        try {
+            Industry target = expedition.getTargetIndustry();
+            industry = target == null ? null : target.getCurrentName();
+        } catch (RuntimeException | LinkageError ex) {
+            // A half-built expedition with no industry picked yet is not a reason to lose the goal.
+            industry = null;
+        }
+        return punitiveGoalText(expedition.getGoal(), industry);
+    }
+
+    /**
+     * Pure half of the punitive goal, so the wording is testable without an expedition.
+     *
+     * <p>Wording follows vanilla: {@code PunitiveExpeditionIntel} bullets a literal
+     * {@code "Goal: saturation bombardment"} for {@code BOMBARD}, and its long description describes
+     * the two raid goals as disrupting a named industry. Lowercase, because these read as the tail of
+     * a "Goal:" bullet — except for the industry name, which is a proper noun vanilla capitalises.
+     */
+    static String punitiveGoalText(PunitiveExpeditionManager.PunExGoal goal, String industryName) {
+        if (goal == null) {
+            return "";
+        }
+        String industry = industryName == null ? "" : industryName.trim();
+        return switch (goal) {
+            case BOMBARD -> "saturation bombardment";
+            case RAID_PRODUCTION -> industry.isEmpty()
+                    ? "raid to disrupt production" : "raid to disrupt " + industry;
+            case RAID_SPACEPORT -> industry.isEmpty()
+                    ? "raid to disrupt the spaceport" : "raid to disrupt " + industry;
+        };
+    }
+
+    /**
+     * Pure half of the raid-hierarchy goal. {@code GenericRaidFGI.getNoun()} is what vanilla itself
+     * uses to name the operation ("raid", "attack", "expedition", "blockade"), and its subclasses
+     * override it; a plain {@code RaidIntel} has no such accessor, so it falls back to "raid".
+     */
+    static String raidGoalText(String noun) {
+        String text = noun == null ? "" : noun.trim();
+        return text.isEmpty() ? "raid" : text.toLowerCase(Locale.ROOT);
+    }
+
+    private static String nounOf(GenericRaidFGI raid) {
+        try {
+            return raid.getNoun();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
     }
 
     /**
@@ -234,12 +298,13 @@ public final class CoopExpeditionWarningSync {
     }
 
     private static List<CoopExpeditionWarning> one(CoopExpeditionWarning.Kind kind, String factionId,
-                                                   MarketAPI target, float etaDays) {
-        return many(kind, factionId, target == null ? List.of() : List.of(target), etaDays);
+                                                   MarketAPI target, float etaDays, String goal) {
+        return many(kind, factionId, target == null ? List.of() : List.of(target), etaDays, goal);
     }
 
     private static List<CoopExpeditionWarning> many(CoopExpeditionWarning.Kind kind, String factionId,
-                                                    Collection<MarketAPI> targets, float etaDays) {
+                                                    Collection<MarketAPI> targets, float etaDays,
+                                                    String goal) {
         List<CoopExpeditionWarning> warnings = new ArrayList<>();
         if (targets == null) {
             return warnings;
@@ -252,7 +317,7 @@ public final class CoopExpeditionWarningSync {
                 continue;
             }
             warnings.add(new CoopExpeditionWarning(kind, factionId, target.getId(),
-                    target.getName(), eta, status));
+                    target.getName(), eta, status, goal));
         }
         return warnings;
     }
@@ -267,7 +332,7 @@ public final class CoopExpeditionWarningSync {
     public enum ActionType {
         /** Mirrored here, absent from the host set: end it. */
         REMOVE,
-        /** Present on both but the ETA, status or target name differs: update in place. */
+        /** Present on both but an attribute (ETA, status, target name, goal) differs: update in place. */
         UPDATE,
         /** Absent here: create the intel entry. */
         ADD

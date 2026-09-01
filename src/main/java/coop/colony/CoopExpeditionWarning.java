@@ -19,10 +19,17 @@ import java.util.Objects;
  * punitive expeditions from the same faction against the same colony collapse into one warning, which
  * is the right answer for a countdown the player reads.
  *
- * <p>{@link #etaDays()} and {@link #status()} are mutable <em>attributes</em> of that identity.
- * <b>The ETA is bucketed to whole days on capture</b>, and that is load-bearing rather than cosmetic:
- * the underlying value is a float that changes every frame, so an unbucketed set hash would make the
- * host rebroadcast the whole set at 60 Hz for the entire life of an expedition.
+ * <p>{@link #etaDays()}, {@link #status()} and {@link #goal()} are mutable <em>attributes</em> of that
+ * identity. <b>The ETA is bucketed to whole days on capture</b>, and that is load-bearing rather than
+ * cosmetic: the underlying value is a float that changes every frame, so an unbucketed set hash would
+ * make the host rebroadcast the whole set at 60 Hz for the entire life of an expedition.
+ *
+ * <p>{@link #goal()} is resolved to display text <em>host-side</em> ("saturation bombardment",
+ * "raid to disrupt Heavy Industry", "expedition") rather than shipped as an enum the guest maps back:
+ * the two vanilla hierarchies express their objective in incompatible ways (a {@code PunExGoal} plus an
+ * {@code Industry} on one side, a free-form noun on the other), and only the host can read either. An
+ * unresolvable goal ships as the empty string and the guest omits the line rather than printing
+ * "unknown".
  *
  * <p>The envelope JSON parser is flat (no arrays), so a whole set ships as one string: records are
  * newline separated, fields are {@code |} separated, and every field goes through
@@ -30,7 +37,7 @@ import java.util.Objects;
  * exactly. Same shape as {@code CoopBaseRecord}, for the same reason.
  */
 public record CoopExpeditionWarning(Kind kind, String factionId, String targetMarketId,
-                                    String targetName, int etaDays, Status status) {
+                                    String targetName, int etaDays, Status status, String goal) {
 
     /**
      * Which vanilla threat produced the warning.
@@ -60,7 +67,7 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
 
     private static final char FIELD_SEPARATOR = '|';
     private static final char RECORD_SEPARATOR = '\n';
-    private static final int FIELDS = 6;
+    private static final int FIELDS = 7;
     /** Only ever used for in-memory map keys, never encoded, so it may be a control character. */
     private static final String KEY_SEPARATOR = String.valueOf((char) 31);
 
@@ -69,10 +76,20 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
         factionId = CoopDelimited.normalize(factionId);
         targetMarketId = CoopDelimited.normalize(targetMarketId);
         targetName = CoopDelimited.normalize(targetName);
+        goal = CoopDelimited.normalize(goal).trim();
         status = status == null ? Status.INBOUND : status;
         if (etaDays < 0) {
             etaDays = 0;
         }
+    }
+
+    /**
+     * A warning with no resolvable goal. Kept as a real constructor rather than a null-tolerant
+     * canonical one so "there is no goal" is spelled the same way everywhere.
+     */
+    public CoopExpeditionWarning(Kind kind, String factionId, String targetMarketId,
+                                 String targetName, int etaDays, Status status) {
+        this(kind, factionId, targetMarketId, targetName, etaDays, status, "");
     }
 
     /**
@@ -82,7 +99,11 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
         return kind.name() + KEY_SEPARATOR + factionId + KEY_SEPARATOR + targetMarketId;
     }
 
-    /** True when the two records name the same threat but disagree on ETA, status or target name. */
+    /**
+     * True when the two records name the same threat but may disagree on any attribute (ETA, status,
+     * target name, goal). Attribute-only differences are what the reconciler turns into an UPDATE,
+     * which is why none of them are part of the identity.
+     */
     public boolean sameIdentity(CoopExpeditionWarning other) {
         return other != null && kind == other.kind && factionId.equals(other.factionId)
                 && targetMarketId.equals(other.targetMarketId);
@@ -94,7 +115,8 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
                 + FIELD_SEPARATOR + CoopDelimited.field(targetMarketId)
                 + FIELD_SEPARATOR + CoopDelimited.field(targetName)
                 + FIELD_SEPARATOR + etaDays
-                + FIELD_SEPARATOR + CoopDelimited.field(status.name());
+                + FIELD_SEPARATOR + CoopDelimited.field(status.name())
+                + FIELD_SEPARATOR + CoopDelimited.field(goal);
     }
 
     public static CoopExpeditionWarning decode(String line) {
@@ -105,7 +127,7 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
                     "Expected " + FIELDS + " expedition warning fields, got " + fields.size());
         }
         return new CoopExpeditionWarning(parseKind(fields.get(0)), fields.get(1), fields.get(2),
-                fields.get(3), parseEta(fields.get(4)), parseStatus(fields.get(5)));
+                fields.get(3), parseEta(fields.get(4)), parseStatus(fields.get(5)), fields.get(6));
     }
 
     private static Kind parseKind(String raw) {
@@ -158,7 +180,7 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
         List<CoopExpeditionWarning> records = new ArrayList<>();
         if (encoded.isEmpty()) {
             // The empty set, which is a legitimate value: it clears every mirrored warning. A single
-            // all-blank record would still encode as "|||||", so this is unambiguous.
+            // all-blank record would still encode as "||||||", so this is unambiguous.
             return records;
         }
         for (String line : encoded.split(String.valueOf(RECORD_SEPARATOR), -1)) {
@@ -170,7 +192,8 @@ public record CoopExpeditionWarning(Kind kind, String factionId, String targetMa
     /**
      * Order-independent hash over the whole set; the host rebroadcasts only when this changes. Folds
      * in every field, so an ETA ticking down a whole day resends just like an expedition launching or
-     * resolving does — and nothing else does, because the ETA is the only field that moves.
+     * resolving does, and so does a goal that changes mid-flight (a punitive expedition re-picking its
+     * target industry). Nothing else moves on its own, which is what keeps the rebroadcast rare.
      */
     public static String setHash(Collection<CoopExpeditionWarning> records) {
         return CoopChecksum.sha256Text(String.join("\n", encodedLines(records)));

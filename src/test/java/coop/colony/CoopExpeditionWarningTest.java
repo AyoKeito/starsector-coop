@@ -1,5 +1,6 @@
 package coop.colony;
 
+import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -28,22 +29,39 @@ class CoopExpeditionWarningTest {
     void aWarningRoundTrips() {
         CoopExpeditionWarning warning = new CoopExpeditionWarning(
                 CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION, "hegemony", "market_eos",
-                "New Hope", 12, CoopExpeditionWarning.Status.INBOUND);
+                "New Hope", 12, CoopExpeditionWarning.Status.INBOUND, "saturation bombardment");
 
+        CoopExpeditionWarning decoded = CoopExpeditionWarning.decode(warning.encode());
+
+        assertEquals(warning, decoded);
+        assertEquals("saturation bombardment", decoded.goal());
+    }
+
+    /** The six-argument form is how "this threat has no stated goal" is spelled. */
+    @Test
+    void aWarningWithNoGoalRoundTripsAsTheEmptyString() {
+        CoopExpeditionWarning warning = new CoopExpeditionWarning(
+                CoopExpeditionWarning.Kind.INSPECTION, "hegemony", "market_eos", "New Hope", 4,
+                CoopExpeditionWarning.Status.INBOUND);
+
+        assertEquals("", warning.goal());
         assertEquals(warning, CoopExpeditionWarning.decode(warning.encode()));
+        assertEquals("", CoopExpeditionWarning.decode(warning.encode()).goal());
     }
 
     @Test
     void idsAndNamesCarryingDelimiterCharactersRoundTripExactly() {
         CoopExpeditionWarning warning = new CoopExpeditionWarning(
                 CoopExpeditionWarning.Kind.HOSTILE_ACTIVITY, "fac|tion", "market\neos",
-                "New | Hope\nStation", 3, CoopExpeditionWarning.Status.ARRIVED);
+                "New | Hope\nStation", 3, CoopExpeditionWarning.Status.ARRIVED,
+                "raid to disrupt Heavy | Industry");
 
         CoopExpeditionWarning decoded = CoopExpeditionWarning.decode(warning.encode());
 
         assertEquals(warning, decoded);
         assertEquals("New | Hope\nStation", decoded.targetName());
         assertEquals("market\neos", decoded.targetMarketId());
+        assertEquals("raid to disrupt Heavy | Industry", decoded.goal());
     }
 
     @Test
@@ -62,11 +80,14 @@ class CoopExpeditionWarningTest {
     void decodeRejectsMalformedRecords() {
         assertThrows(IllegalArgumentException.class, () -> CoopExpeditionWarning.decode("a|b|c"));
         assertThrows(IllegalArgumentException.class,
-                () -> CoopExpeditionWarning.decode("NOPE|hegemony|market_eos|New Hope|5|INBOUND"));
+                () -> CoopExpeditionWarning.decode("NOPE|hegemony|market_eos|New Hope|5|INBOUND|raid"));
         assertThrows(IllegalArgumentException.class,
-                () -> CoopExpeditionWarning.decode("RAID|hegemony|market_eos|New Hope|five|INBOUND"));
+                () -> CoopExpeditionWarning.decode("RAID|hegemony|market_eos|New Hope|five|INBOUND|raid"));
         assertThrows(IllegalArgumentException.class,
-                () -> CoopExpeditionWarning.decode("RAID|hegemony|market_eos|New Hope|5|LANDED"));
+                () -> CoopExpeditionWarning.decode("RAID|hegemony|market_eos|New Hope|5|LANDED|raid"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopExpeditionWarning.decode("RAID|hegemony|market_eos|New Hope|5|INBOUND"),
+                "a record missing the goal field is malformed, not a goal-less warning");
     }
 
     // ---- Set hash ------------------------------------------------------------------------------
@@ -112,16 +133,69 @@ class CoopExpeditionWarningTest {
         assertEquals(0, CoopExpeditionWarning.bucketEta(Float.NaN));
     }
 
+    /**
+     * A goal that changes mid-flight (an expedition re-picking its target industry) has to reach the
+     * guest, so it is folded into the hash exactly like the ETA is.
+     */
     @Test
-    void identityIsKindFactionAndTargetButNotEtaOrStatus() {
+    void aChangedGoalChangesTheHash() {
+        assertNotEquals(
+                CoopExpeditionWarning.setHash(List.of(withGoal("saturation bombardment"))),
+                CoopExpeditionWarning.setHash(List.of(withGoal("raid to disrupt Heavy Industry"))));
+        assertNotEquals(CoopExpeditionWarning.setHash(List.of(withGoal(""))),
+                CoopExpeditionWarning.setHash(List.of(withGoal("raid"))));
+    }
+
+    @Test
+    void identityIsKindFactionAndTargetButNotEtaStatusOrGoal() {
         CoopExpeditionWarning far = warning("hegemony", "market_eos", 9);
         CoopExpeditionWarning near = new CoopExpeditionWarning(far.kind(), far.factionId(),
-                far.targetMarketId(), far.targetName(), 0, CoopExpeditionWarning.Status.ARRIVED);
+                far.targetMarketId(), far.targetName(), 0, CoopExpeditionWarning.Status.ARRIVED,
+                "saturation bombardment");
 
         assertEquals(far.identityKey(), near.identityKey());
         assertTrue(far.sameIdentity(near));
         assertFalse(far.sameIdentity(warning("pirates", "market_eos", 9)));
         assertFalse(far.sameIdentity(warning("hegemony", "market_yama", 9)));
+    }
+
+    // ---- Goal resolution -----------------------------------------------------------------------
+
+    /** The accessor is {@code PunitiveExpeditionIntel.getGoal()}; this is the wording it maps to. */
+    @Test
+    void thePunitiveGoalResolvesToVanillaWording() {
+        assertEquals("saturation bombardment", CoopExpeditionWarningSync.punitiveGoalText(
+                PunitiveExpeditionManager.PunExGoal.BOMBARD, "Heavy Industry"));
+        assertEquals("raid to disrupt Heavy Industry", CoopExpeditionWarningSync.punitiveGoalText(
+                PunitiveExpeditionManager.PunExGoal.RAID_PRODUCTION, "Heavy Industry"));
+        assertEquals("raid to disrupt Spaceport", CoopExpeditionWarningSync.punitiveGoalText(
+                PunitiveExpeditionManager.PunExGoal.RAID_SPACEPORT, "Spaceport"));
+    }
+
+    /** A half-built expedition has no target industry yet; the goal still has to say something. */
+    @Test
+    void thePunitiveGoalSurvivesAMissingTargetIndustry() {
+        assertEquals("raid to disrupt production", CoopExpeditionWarningSync.punitiveGoalText(
+                PunitiveExpeditionManager.PunExGoal.RAID_PRODUCTION, null));
+        assertEquals("raid to disrupt the spaceport", CoopExpeditionWarningSync.punitiveGoalText(
+                PunitiveExpeditionManager.PunExGoal.RAID_SPACEPORT, "   "));
+        assertEquals("saturation bombardment", CoopExpeditionWarningSync.punitiveGoalText(
+                PunitiveExpeditionManager.PunExGoal.BOMBARD, null));
+    }
+
+    /** No goal at all ships as the empty string, and the guest omits the line rather than guessing. */
+    @Test
+    void anUnresolvableGoalIsTheEmptyString() {
+        assertEquals("", CoopExpeditionWarningSync.punitiveGoalText(null, "Heavy Industry"));
+    }
+
+    /** {@code GenericRaidFGI.getNoun()} for the FGI hierarchy, "raid" for a plain {@code RaidIntel}. */
+    @Test
+    void theRaidGoalUsesTheOperationNounAndFallsBackToRaid() {
+        assertEquals("expedition", CoopExpeditionWarningSync.raidGoalText("expedition"));
+        assertEquals("blockade", CoopExpeditionWarningSync.raidGoalText("Blockade"));
+        assertEquals("raid", CoopExpeditionWarningSync.raidGoalText(null));
+        assertEquals("raid", CoopExpeditionWarningSync.raidGoalText("  "));
     }
 
     // ---- Host capture --------------------------------------------------------------------------
@@ -163,6 +237,23 @@ class CoopExpeditionWarningTest {
 
         assertEquals(1, captured.size());
         assertEquals(3, captured.get(0).etaDays());
+    }
+
+    /** The surviving record keeps its own goal, not the one it displaced. */
+    @Test
+    void aCollapsedDuplicateCarriesTheSurvivingThreatsGoal() {
+        CoopExpeditionWarning far = new CoopExpeditionWarning(
+                CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION, "hegemony", "market_eos", "New Hope",
+                9, CoopExpeditionWarning.Status.INBOUND, "raid to disrupt Heavy Industry");
+        CoopExpeditionWarning near = new CoopExpeditionWarning(
+                CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION, "hegemony", "market_eos", "New Hope",
+                2, CoopExpeditionWarning.Status.INBOUND, "saturation bombardment");
+
+        List<CoopExpeditionWarning> captured =
+                CoopExpeditionWarningSync.captureHostWarnings(type -> List.of(far, near));
+
+        assertEquals(1, captured.size());
+        assertEquals("saturation bombardment", captured.get(0).goal());
     }
 
     @Test
@@ -220,6 +311,37 @@ class CoopExpeditionWarningTest {
         assertEquals(CoopExpeditionWarningSync.ActionType.UPDATE, plan.get(1).type());
         assertEquals(4, plan.get(1).record().etaDays(), "the update carries the DESIRED values");
         assertEquals(CoopExpeditionWarningSync.ActionType.ADD, plan.get(2).type());
+    }
+
+    /**
+     * The goal is an attribute, not part of the identity, so a threat that only changes its stated
+     * goal must reconcile as one UPDATE carrying the new text — never as a remove plus an add, and
+     * never as a no-op that leaves the guest showing the old goal forever.
+     */
+    @Test
+    void aChangedGoalIsAnUpdateNotAnAdd() {
+        List<CoopExpeditionWarningSync.Action> plan = CoopExpeditionWarningSync.plan(
+                List.of(withGoal("saturation bombardment")),
+                List.of(withGoal("raid to disrupt Heavy Industry")));
+
+        assertEquals(1, plan.size());
+        assertEquals(CoopExpeditionWarningSync.ActionType.UPDATE, plan.get(0).type());
+        assertEquals("saturation bombardment", plan.get(0).record().goal());
+    }
+
+    /** The same, end to end: applying converges and the mirrored entry carries the new goal. */
+    @Test
+    void applyingAChangedGoalUpdatesInPlace() {
+        FakeWorld world = new FakeWorld();
+        CoopExpeditionWarningSync.apply(world, List.of(withGoal("raid")));
+
+        CoopExpeditionWarningSync.Summary summary =
+                CoopExpeditionWarningSync.apply(world, List.of(withGoal("saturation bombardment")));
+
+        assertEquals(new CoopExpeditionWarningSync.Summary(0, 1, 0), summary);
+        assertEquals(1, world.entries.size());
+        assertEquals("saturation bombardment",
+                world.entries.get(withGoal("raid").identityKey()).goal());
     }
 
     @Test
@@ -320,6 +442,12 @@ class CoopExpeditionWarningTest {
     private static CoopExpeditionWarning warning(String factionId, String marketId, int etaDays) {
         return new CoopExpeditionWarning(CoopExpeditionWarning.Kind.RAID, factionId, marketId,
                 marketId, etaDays, CoopExpeditionWarning.Status.INBOUND);
+    }
+
+    /** One fixed identity whose only varying attribute is the goal. */
+    private static CoopExpeditionWarning withGoal(String goal) {
+        return new CoopExpeditionWarning(CoopExpeditionWarning.Kind.PUNITIVE_EXPEDITION, "hegemony",
+                "market_eos", "New Hope", 5, CoopExpeditionWarning.Status.INBOUND, goal);
     }
 
     private static final class FakeWorld implements CoopExpeditionWarningSync.WarningWorld {

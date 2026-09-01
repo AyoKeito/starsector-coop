@@ -436,8 +436,9 @@ public final class CoopMessages {
      * Phase 24 milestone 3: the host's full set of live NPC threats aimed at player colonies
      * (reliable TCP, host&rarr;guest). The body is a
      * {@link coop.colony.CoopExpeditionWarning#encodeSet} blob — one
-     * {@code kind|factionId|targetMarketId|etaDays|status} record per line, because the flat envelope
-     * parser has no arrays.
+     * {@code kind|factionId|targetMarketId|targetName|etaDays|status|goal} record per line, because the
+     * flat envelope parser has no arrays. {@code goal} is display text the host already resolved
+     * ("saturation bombardment", "raid to disrupt Heavy Industry"), empty when there is none.
      *
      * <p>Set-reconciled exactly like {@code BASE_SET}: rebroadcast only when the order-independent set
      * hash changes, and an empty set is a legitimate value that clears every mirrored warning. The
