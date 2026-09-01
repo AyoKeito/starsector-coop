@@ -74,6 +74,9 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
 
     public CoopExpeditionWarningIntel(CoopExpeditionWarning warning) {
         assign(warning);
+        // Vanilla flags its counterpart important at construction (PunitiveExpeditionIntel.java:121).
+        // Matched here once, never re-applied on update, so the player stays free to unstar it.
+        setImportant(true);
         // BaseIntelPlugin does not register itself as a script, and without one advanceImpl never
         // runs, so the self-expire would never fire. Vanilla's own intel does exactly this
         // (RaidIntel.java:87, FleetGroupIntel.java:100) and removes it again in notifyEnded().
