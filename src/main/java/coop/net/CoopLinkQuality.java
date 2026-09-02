@@ -403,8 +403,10 @@ public final class CoopLinkQuality {
      */
     public boolean evaluateDegraded(long nowMillis) {
         Integer rtt = rttMillis();
-        boolean bad = (rtt != null && rtt > DEGRADED_RTT_MILLIS)
-                || lossPercent(nowMillis) > DEGRADED_LOSS_PERCENT;
+        // Inclusive (red-team B9): both constants are documented as "at or above this counts as
+        // degraded", and a strict comparison made the documented threshold value itself healthy.
+        boolean bad = (rtt != null && rtt >= DEGRADED_RTT_MILLIS)
+                || lossPercent(nowMillis) >= DEGRADED_LOSS_PERCENT;
         if (bad) {
             healthySinceMillis = 0L;
             if (degradedSinceMillis == 0L) {

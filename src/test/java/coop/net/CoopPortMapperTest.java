@@ -158,4 +158,34 @@ class CoopPortMapperTest {
         assertEquals("PCP", CoopPortMapper.describeTier(CoopPortMapper.Tier.PCP));
         assertEquals("none", CoopPortMapper.describeTier(CoopPortMapper.Tier.NONE));
     }
+
+    @Test
+    void b5_theResultVersionChangesExactlyWhenTheResultDoes() {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        CoopPortMapper mapper = CoopPortMapper.startOffline(27015, clock::get);
+
+        long start = mapper.resultVersion();
+        assertEquals(start, mapper.resultVersion(), "an unchanged result must not move the version");
+
+        int changes = 0;
+        CoopPortMapper.Result seen = mapper.result();
+        for (int i = 0; i < 500 && !mapper.result().finished(); i++) {
+            mapper.tick(clock.addAndGet(100L));
+            long version = mapper.resultVersion();
+            if (!mapper.result().equals(seen)) {
+                changes++;
+                seen = mapper.result();
+                assertTrue(version > start, "a changed result must bump the version");
+                start = version;
+            } else {
+                assertEquals(start, version, "an unchanged result must not bump the version");
+            }
+        }
+
+        // The point of the counter (red-team B5): the host's doctor block and the intel page's
+        // reachability line were published once per session, so a renewal that later broke or
+        // repaired the mapping was never reported and both surfaces kept showing minute one.
+        assertTrue(changes > 0, "the mapper's verdict changed at least once on the way to giving up");
+        assertEquals(start, mapper.resultVersion());
+    }
 }

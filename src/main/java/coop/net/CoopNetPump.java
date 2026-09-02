@@ -192,6 +192,44 @@ public class CoopNetPump implements EveryFrameScript {
      * edge and read nowhere else; no replication decision depends on it.
      */
     private boolean peerDroppedAfterLiveSession;
+    // ---- Phase 20 red-team state -----------------------------------------------------------------
+    /** Shared throttle for every "this could be a packet flood" log line below. */
+    private static final long FAILURE_LOG_INTERVAL_MILLIS = 10_000L;
+    /** A. A14: frames that threw out of the body, and the next frame one may be logged. */
+    private long frameFailureCount;
+    private long nextFrameFailureLogAtMillis;
+    /** A11: state datagrams that failed to parse/apply, and the next frame one may be logged. */
+    private long datagramDecodeFailureCount;
+    private long nextDatagramDecodeLogAtMillis;
+    /** A6/A9: datagrams whose senderId was not the remote coop player's token. */
+    private long datagramSenderMismatchCount;
+    private long nextSenderMismatchLogAtMillis;
+    /**
+     * A8: the newest accepted sender stream-time stamp, in the sender's own milliseconds.
+     * {@link Long#MIN_VALUE} means "nothing accepted yet", which is the one sample that cannot be
+     * bounded -- the two processes' stream clocks start at their own process starts and have no
+     * agreed origin, so the first stamp from a peer is definitionally arbitrary.
+     */
+    private long latestAcceptedSampleMillis = Long.MIN_VALUE;
+    private long rejectedSampleStampCount;
+    private long nextSampleStampLogAtMillis;
+    /** A4: messages refused because the sender had neither a session nor a grace window. */
+    private long unprovenPeerAnswersRefused;
+    private boolean unprovenPeerRefusalLogged;
+    /** B2/C1: the transport's attach counter as of the last frame. */
+    private long lastConnectionGeneration;
+    private boolean connectionGenerationInitialized;
+    /** B5: the port mapper result version last published to the log and the intel page. */
+    private long lastPublishedPortMapperVersion = -1L;
+    /** C6: next frame a FLEET_ROSTER_REQUEST may go out. */
+    private long nextRosterRequestAtMillis;
+    /** C10: wireToken caches, re-derived whenever the id behind them changes. */
+    private String cachedSessionId;
+    private String cachedSessionToken = "";
+    private String cachedLocalPlayerId;
+    private String cachedLocalSenderToken = "";
+    private String cachedRemotePlayerId;
+    private String cachedRemoteSenderToken = "";
     private boolean preSessionCampaignDropWarned;
     private long nextTimeSnapshotAtMillis;
     /**
@@ -517,6 +555,8 @@ public class CoopNetPump implements EveryFrameScript {
         // load replaces the previous session's instance.
         this.saveCheckpoint.setSender(this::sendSaveCheckpoint);
         CoopSaveCheckpoint.setActive(this.saveCheckpoint);
+        // Red-team B4: the other half of the save exemption, which both roles send.
+        CoopStallNotice.setActive(this::sendStallNotice);
         // Same static-seam deal as the profiler: the transport's send hook has no handle on the pump.
         this.wiretap = CoopWiretap.installFresh(clockMillis);
         // Phase 20.2. Built here (not lazily on the first drop) so the configured window is parsed and
@@ -743,6 +783,41 @@ public class CoopNetPump implements EveryFrameScript {
 
     @Override
     public void advance(float amount) {
+        // Red-team A14: nothing below may take the pump down. An EveryFrameScript that throws is
+        // removed by the engine, so one unhandled RuntimeException anywhere in the frame body -- or
+        // one LinkageError from a mod-load skew that only shows up on a rarely-taken branch -- ends
+        // the whole session silently, mid-game, with the world already half-synchronised. The frame
+        // is the right granularity: a frame that fails part way through is recoverable (every
+        // subsystem below is idempotent per frame and re-runs next frame), a dead pump is not.
+        try {
+            advanceFrame(amount);
+        } catch (RuntimeException | LinkageError ex) {
+            noteFrameFailure(ex);
+        }
+    }
+
+    /**
+     * Log-throttled record of a frame that threw. Rate-limited because the failure that reaches here
+     * is by definition one this code did not anticipate, and an every-frame stack trace at 60 Hz is
+     * how a log file becomes a gigabyte.
+     */
+    private void noteFrameFailure(Throwable ex) {
+        frameFailureCount++;
+        long now = clockMillis.getAsLong();
+        if (now < nextFrameFailureLogAtMillis) {
+            return;
+        }
+        nextFrameFailureLogAtMillis = now + FAILURE_LOG_INTERVAL_MILLIS;
+        CoopLog.warn(CoopNetPump.class, "Coop pump frame failed (" + frameFailureCount
+                + " total); the pump keeps running", ex);
+    }
+
+    /** How many frames have thrown out of the body; diagnostics and tests. */
+    long frameFailureCount() {
+        return frameFailureCount;
+    }
+
+    private void advanceFrame(float amount) {
         // Instrumentation only (CoopFrameProfiler): dormant unless -Dcoop.debug.frameProfile=true or
         // the $coopFrameProfile memory flag is set, in which case each split() below is one clock read.
         // Disabled, every call here is a static boolean read and a return.
@@ -917,8 +992,15 @@ public class CoopNetPump implements EveryFrameScript {
         }
         try {
             mapper.tick(clockMillis.getAsLong());
-            if (!portMapperReportLogged && mapper.result().finished()) {
+            // Red-team B5: not once per session, once per distinct verdict. The mapping is renewed
+            // for as long as the host runs, and a renewal can fail or repair it - after which the
+            // log line and the intel page both still showed the verdict from the first minute of the
+            // session. resultVersion() moves exactly when result() would read differently.
+            long version = mapper.resultVersion();
+            if (mapper.result().finished()
+                    && (!portMapperReportLogged || version != lastPublishedPortMapperVersion)) {
                 portMapperReportLogged = true;
+                lastPublishedPortMapperVersion = version;
                 CoopLog.info(CoopNetPump.class,
                         CoopConnectionDoctor.hostReport(mapper.port(), mapper.result(),
                                 !lobbyPassword.isEmpty(), service.peerCapacity()));
@@ -1131,7 +1213,16 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void detectPeerDisconnect() {
         boolean connected = service.isConnected();
-        if (channelWasConnected && !connected && service.role() != CoopConnectionRole.NONE) {
+        // Unconditionally, every frame: the generation has to be tracked even across frames where
+        // there is no link, or the first attach after a quiet stretch reads as a replacement.
+        boolean replaced = consumeConnectionReplaced();
+        if (channelWasConnected && (!connected || replaced)
+                && service.role() != CoopConnectionRole.NONE) {
+            if (replaced && connected) {
+                CoopLog.warn(CoopNetPump.class, "Coop TCP link was replaced without a visible"
+                        + " disconnect (connection generation " + lastConnectionGeneration
+                        + "); treating it as a drop edge");
+            }
             // Read BEFORE anything rewinds: once the lobby is back at HOST_WAITING/GUEST_CONNECTING
             // nothing distinguishes "never had a partner" from "lost the one we had". The HUD
             // needs that distinction to say "guest disconnected, holding" rather than "waiting for
@@ -1145,6 +1236,9 @@ public class CoopNetPump implements EveryFrameScript {
             handshakeManifestSent = false;
             seedLockRequestSent = false;
             preSessionCampaignDropWarned = false;
+            // Red-team A4: one refusal line per connection, so the next stranger gets its own.
+            unprovenPeerRefusalLogged = false;
+            unprovenPeerAnswersRefused = 0L;
             // Phase 20.4: the next connection runs its own password round from scratch. An
             // outstanding nonce belonged to the socket that just died and must not be reusable.
             pendingLobbyNonce = null;
@@ -1157,7 +1251,20 @@ public class CoopNetPump implements EveryFrameScript {
             // Phase 20.2: a live session gets a grace window instead of a teardown. Everything above
             // is transport hygiene that applies either way; the session record itself survives only
             // on the grace path.
-            if (!beginReconnectGrace()) {
+            //
+            // Red-team B1: a SECOND drop while a window is already open is hygiene and nothing else.
+            // beginReconnectGrace() answers false for an already-active window, which the old code
+            // read as "declined, tear down" - so a guest that reconnected and dropped again inside
+            // the same window had its session ended underneath a coordinator that kept holding the
+            // ids. The next resume request then matched the coordinator's cached ids and was
+            // ACCEPTED while sessionState.sessionId() was null: two machines, one believing it had
+            // resumed, the other with no session at all.
+            if (reconnect.active()) {
+                CoopLog.info(CoopNetPump.class, "Coop link dropped again inside the reconnect grace"
+                        + " window; the held session stands and the window keeps running");
+            } else if (!beginReconnectGrace()) {
+                // Red-team B7: nothing else clears this, and the HUD reads it forever after.
+                peerDroppedAfterLiveSession = false;
                 endSessionAfterDrop();
             }
         }
@@ -1166,6 +1273,37 @@ public class CoopNetPump implements EveryFrameScript {
             // Each new socket owes a fresh resume request; while there is no socket, none is pending.
             reconnect.noteChannelDown();
         }
+    }
+
+    /**
+     * Whether the transport attached a <em>different</em> socket since the last frame (red-team
+     * B2/C1).
+     *
+     * <p>{@link CoopNetService#isConnected()} cannot express this. When a half-open link is replaced
+     * inside one poll - the stale slot is closed and the returning peer's connection accepted in the
+     * same {@code pollNetworkLocked} - the flag reads true before and after, so the pump sees no
+     * edge: no token clear, no grace window, and the host stays {@code HOST_CONNECTED}. The guest's
+     * resume request, dispatched later in this very frame, is then answered {@code REJECT_NOT_WAITING}
+     * ("the host is not in a grace window"), the guest tears down, and the host goes on believing it
+     * has a partner. That is a permanent lockout on the exact failure - an RST-style drop - the
+     * reconnect grace exists for.
+     *
+     * <p>Reading it here, before {@link #drainInbound()}, is what makes the ordering work: the drop
+     * edge opens the window, and the resume request already sitting in the inbound queue resolves it
+     * on the same frame.
+     */
+    private boolean consumeConnectionReplaced() {
+        long generation = service.connectionGeneration();
+        if (!connectionGenerationInitialized) {
+            connectionGenerationInitialized = true;
+            lastConnectionGeneration = generation;
+            return false;
+        }
+        if (generation == lastConnectionGeneration) {
+            return false;
+        }
+        lastConnectionGeneration = generation;
+        return true;
     }
 
     // ---- Phase 20.2: in-session reconnect grace ---------------------------------------------------
@@ -1251,6 +1389,22 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void handleSessionResumeRequest(CoopMessages.Message message) {
         if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        // Red-team B1: with no session id there is nothing a resume could restore. The coordinator
+        // may still be holding cached ids from a window that was torn down underneath it, and
+        // matching a request against those alone would hand the session back to a peer while this
+        // side has none - the exact divergence the second-drop bug produced.
+        if (sessionState.sessionId() == null) {
+            CoopMessages.Message reject = CoopMessages.sessionResumeReject(
+                    null, service.nextSeq(), clockMillis.getAsLong(), "no session to resume");
+            service.sendTo(message.senderId(), reject);
+            log("outbound", reject);
+            CoopLog.warn(CoopNetPump.class, "Coop rejected SESSION_RESUME_REQUEST: this side holds"
+                    + " no session id, so there is nothing to give back");
+            return;
+        }
+        if (!checkResumePassword(message)) {
             return;
         }
         String requestSession = CoopMessages.parseResumeSessionId(message);
@@ -1449,6 +1603,11 @@ public class CoopNetPump implements EveryFrameScript {
             long now = clockMillis.getAsLong();
             releaseReconnectHold();
             service.setExpectedSessionToken(null);
+            // Red-team B7: the flag that told the HUD "we lost a partner, we are holding" is only
+            // ever set. Once the window has closed there is nothing left to hold, and leaving it set
+            // makes every later pre-session state render as a reconnect hold for the rest of the
+            // process - including the fresh lobby the player opens next.
+            peerDroppedAfterLiveSession = false;
             endSessionAfterDrop();
             CoopLog.warn(CoopNetPump.class, "Coop reconnect grace closed without a resume as "
                     + service.role() + " (" + reason + "); the session is over");
@@ -1459,7 +1618,7 @@ public class CoopNetPump implements EveryFrameScript {
     private void drainInbound() {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
-            log("inbound", message);
+            logInbound(message);
             // Any inbound TCP message proves the peer's process is alive and its pump is running.
             // That is what lets the UDP-blocked rule tell "the network eats UDP" apart from "the peer
             // is in combat", where both transports go quiet together.
@@ -1471,7 +1630,10 @@ public class CoopNetPump implements EveryFrameScript {
             long dispatchStart = profiler.start();
             try {
                 dispatchInbound(message);
-            } catch (RuntimeException ex) {
+            } catch (RuntimeException | LinkageError ex) {
+                // LinkageError too (red-team C9): a handler that reaches an engine class this build
+                // does not have throws Error, not Exception, and the whole point of this guard is
+                // that no single inbound message may take the pump down.
                 CoopLog.warn(CoopNetPump.class, "Coop dropped malformed/unexpected message type="
                         + message.type() + " seq=" + message.seq(), ex);
             }
@@ -1520,11 +1682,22 @@ public class CoopNetPump implements EveryFrameScript {
             case GUEST_SNAPSHOT -> handleGuestSnapshot(message);
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
             case RESPAWN_PLAYER -> handleRespawnPlayer(message);
-            case PING -> sendPong(message);
+            case PING -> {
+                // Red-team A4: a connected stranger must not get a free reply channel.
+                if (mayAnswerUnprovenPeer(message.type())) {
+                    sendPong(message);
+                }
+            }
             case PONG -> handlePong(message);
+            case STALL_NOTICE -> handleStallNotice(message);
+            case FLEET_ROSTER_REQUEST -> handleFleetRosterRequest(message);
             case LINK_STATUS -> handleLinkStatus(message);
             case FLEET_ROSTER -> handleFleetRoster(message);
-            case SESSION_RESUME_REQUEST -> handleSessionResumeRequest(message);
+            case SESSION_RESUME_REQUEST -> {
+                if (mayAnswerUnprovenPeer(message.type())) {
+                    handleSessionResumeRequest(message);
+                }
+            }
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
             case STATE_DATAGRAM -> {
@@ -1671,27 +1844,22 @@ public class CoopNetPump implements EveryFrameScript {
         if (lobbyPassword.isEmpty()) {
             return true;
         }
-        String proof = CoopMessages.parseLobbyProof(message);
-        if (proof.isEmpty()) {
-            pendingLobbyNonce = newLobbyNonce();
-            CoopMessages.Message challenge = CoopMessages.lobbyChallenge(
-                    service.nextSeq(), clockMillis.getAsLong(), pendingLobbyNonce);
-            service.sendTo(message.senderId(), challenge);
-            log("outbound", challenge);
+        // Red-team A3: a throttled address gets no challenge and no reject. Dropping the connection
+        // on a wrong guess frees the slot, and the transport's connection throttle is only consulted
+        // when no slot is free - so without this, guessing was limited by nothing but reconnect rate.
+        java.net.InetAddress peer = service.activePeerAddress();
+        if (service.isProofThrottled(peer)) {
             return false;
         }
-
-        String expected = CoopMessages.passwordProof(lobbyPassword,
-                pendingLobbyNonce == null ? "" : pendingLobbyNonce);
-        // Constant-time, and only ever against a nonce we actually issued: a proof arriving with no
-        // outstanding challenge is a replay of somebody else's round and is refused outright.
-        boolean accepted = pendingLobbyNonce != null && java.security.MessageDigest.isEqual(
-                expected.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                proof.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        pendingLobbyNonce = null;
-        if (accepted) {
+        String proof = CoopMessages.parseLobbyProof(message);
+        if (proof.isEmpty()) {
+            issueLobbyChallenge(message.senderId());
+            return false;
+        }
+        if (verifyPasswordProof(proof)) {
             return true;
         }
+        service.noteFailedProof(peer);
 
         CoopMessages.Message reject = CoopMessages.lobbyReject(
                 service.nextSeq(), clockMillis.getAsLong(), LOBBY_REJECT_PASSWORD);
@@ -1701,13 +1869,84 @@ public class CoopNetPump implements EveryFrameScript {
         // open would let one guesser hold the single v1 slot open indefinitely.
         service.flushOutbound();
         service.dropActiveConnection(LOBBY_REJECT_PASSWORD);
-        CoopLog.warn(CoopNetPump.class, "Coop lobby rejected a guest with the wrong password"
+        // DEBUG, not WARN (red-team A3): this line is one per guess, i.e. written by the attacker.
+        // The once-per-cooldown WARN in CoopNetService is the one a log reader wants.
+        CoopLog.debug(CoopNetPump.class, "Coop lobby rejected a guest with the wrong password"
                 + " and closed the connection");
         return false;
     }
 
     /**
-     * Guest side: answer the challenge with a second hello. A guest with no password configured
+     * Host side of the password gate on the <em>resume</em> path (red-team A2).
+     *
+     * <p>A {@code SESSION_RESUME_REQUEST} carries a session id and a player id, both of which
+     * travelled in cleartext on the connection that just died. Without this, a captured request
+     * replays: an attacker who watched the lobby can wait for a blip and take the session, and on a
+     * password-protected host the password never enters the exchange at all. It is the same
+     * challenge/nonce/proof round {@code LOBBY_HELLO} already runs, deliberately reusing
+     * {@code LOBBY_CHALLENGE} rather than inventing a second protocol.
+     *
+     * <p>A host with no password configured returns true immediately and the resume exchange is
+     * byte-identical to the pre-fix build.
+     *
+     * @return true when the request may proceed to the coordinator's identity check
+     */
+    private boolean checkResumePassword(CoopMessages.Message message) {
+        if (lobbyPassword.isEmpty()) {
+            return true;
+        }
+        java.net.InetAddress peer = service.activePeerAddress();
+        if (service.isProofThrottled(peer)) {
+            // Silently: the transport logs once per cooldown, and answering at all is the resource
+            // a guesser is after.
+            return false;
+        }
+        String proof = CoopMessages.parseResumeProof(message);
+        if (proof.isEmpty() && pendingLobbyNonce == null) {
+            issueLobbyChallenge(message.senderId());
+            return false;
+        }
+        if (verifyPasswordProof(proof)) {
+            return true;
+        }
+        service.noteFailedProof(peer);
+        CoopMessages.Message reject = CoopMessages.sessionResumeReject(
+                sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                LOBBY_REJECT_PASSWORD);
+        service.sendTo(message.senderId(), reject);
+        log("outbound", reject);
+        service.flushOutbound();
+        service.dropActiveConnection(LOBBY_REJECT_PASSWORD);
+        return false;
+    }
+
+    /** Mints a nonce and sends the challenge; shared by the hello and resume gates. */
+    private void issueLobbyChallenge(String senderId) {
+        pendingLobbyNonce = newLobbyNonce();
+        CoopMessages.Message challenge = CoopMessages.lobbyChallenge(
+                service.nextSeq(), clockMillis.getAsLong(), pendingLobbyNonce);
+        service.sendTo(senderId, challenge);
+        log("outbound", challenge);
+    }
+
+    /**
+     * Constant-time proof check against the nonce this host issued, consuming it either way. A proof
+     * arriving with no outstanding challenge is a replay of somebody else's round and fails.
+     */
+    private boolean verifyPasswordProof(String proof) {
+        String expected = CoopMessages.passwordProof(lobbyPassword,
+                pendingLobbyNonce == null ? "" : pendingLobbyNonce);
+        boolean accepted = pendingLobbyNonce != null && java.security.MessageDigest.isEqual(
+                expected.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                proof.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        pendingLobbyNonce = null;
+        return accepted;
+    }
+
+    /**
+     * Guest side: answer the challenge with a second hello — or, while reconnecting, a second resume
+     * request (red-team A2), because that is the message the host is waiting for and a hello during
+     * a grace window is answered "session in reconnect grace". A guest with no password configured
      * answers with an empty proof rather than going silent — the reject that comes back is what tells
      * the player why, and silence would look like a hung connection.
      */
@@ -1717,6 +1956,10 @@ public class CoopNetPump implements EveryFrameScript {
         }
         lobbyChallengeSeen = true;
         String nonce = CoopMessages.parseLobbyChallengeNonce(message);
+        if (reconnect.guestReconnecting()) {
+            answerResumeChallenge(nonce);
+            return;
+        }
         if (lobbyPassword.isEmpty()) {
             CoopLog.warn(CoopNetPump.class, "Coop host asked for a lobby password and none is"
                     + " configured here; launch with -D" + CoopNetStartupConfig.PASSWORD_PROPERTY
@@ -1729,6 +1972,26 @@ public class CoopNetPump implements EveryFrameScript {
                 lobbyPassword.isEmpty() ? "" : CoopMessages.passwordProof(lobbyPassword, nonce));
         service.send(hello);
         log("outbound", hello);
+    }
+
+    /** The proof-carrying second {@code SESSION_RESUME_REQUEST}; see {@link #checkResumePassword}. */
+    private void answerResumeChallenge(String nonce) {
+        String sessionId = sessionState.sessionId();
+        String playerId = sessionState.localPlayerId();
+        if (sessionId == null || playerId == null) {
+            reconnect.end("local session identity was lost");
+            return;
+        }
+        if (lobbyPassword.isEmpty()) {
+            CoopLog.warn(CoopNetPump.class, "Coop host asked for a lobby password to resume and none"
+                    + " is configured here; launch with -D" + CoopNetStartupConfig.PASSWORD_PROPERTY
+                    + "=<the host's password>. This resume will be rejected.");
+        }
+        CoopMessages.Message request = CoopMessages.sessionResumeRequest(
+                sessionId, service.nextSeq(), clockMillis.getAsLong(), playerId,
+                lobbyPassword.isEmpty() ? "" : CoopMessages.passwordProof(lobbyPassword, nonce));
+        service.send(request);
+        log("outbound", request);
     }
 
     private String newLobbyNonce() {
@@ -2507,6 +2770,8 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void syncFleetMirror() {
+        // Red-team C6: before the teardown check, because a stuck roster is a live-session condition.
+        maybeRequestFleetRoster();
         // Tear the mirror fleet down the moment the session is no longer streaming (disconnect,
         // reject, session end) so a stale AI fleet is never left behind in the world.
         if (!shouldStreamFleet()) {
@@ -2515,6 +2780,7 @@ public class CoopNetPump implements EveryFrameScript {
             // matched against ticks from a different fleet entirely.
             lastSentRosterHash = "";
             rosterCache.reset();
+            nextRosterRequestAtMillis = 0L;
             if (fleetMirror.hasMirrorFleet()) {
                 fleetMirror.dispose();
             }
@@ -2543,8 +2809,8 @@ public class CoopNetPump implements EveryFrameScript {
             // the roster on the same frame the hash changes keeps that window to one round trip.
             maybeSendFleetRoster(snapshot);
             String datagram = datagramRedundancy.compose(
-                    CoopMessages.wireToken(sessionState.sessionId()),
-                    CoopMessages.wireToken(sessionState.localPlayerId()),
+                    sessionToken(),
+                    localSenderToken(),
                     CoopMessages.Type.FLEET_SNAPSHOT,
                     streamClock.nextEpoch(), streamClock.gameTimeMillis(),
                     CoopFleetSnapshot.Tick.of(snapshot).encode());
@@ -2649,6 +2915,92 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to send RESPAWN_PLAYER", ex);
         }
+    }
+
+    /**
+     * Red-team B4: tells the peer this process is about to stop pumping, and stamps the same
+     * exemption locally. Flushed inline, because the stall starts as soon as this returns - a notice
+     * sitting in the outbound queue while the engine writes a save is worth nothing.
+     *
+     * <p>Both roles send it; that is the whole point (see {@link CoopStallNotice}). It is separate
+     * from {@code SAVE_CHECKPOINT}, whose semantics are untouched: that one orders a coordinated
+     * autosave and stays host-only.
+     */
+    void sendStallNotice(String reason, long expectedMillis) {
+        if (service.role() == CoopConnectionRole.NONE || !service.isConnected()
+                || !isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            CoopMessages.Message notice = CoopMessages.stallNotice(sessionState.sessionId(),
+                    service.nextSeq(), clockMillis.getAsLong(), reason, expectedMillis);
+            service.send(notice);
+            log("outbound", notice);
+            service.flushOutbound();
+            // Our own silence measurement is about to be an artefact of our own stall as well.
+            lastSaveCheckpointAtMillis = clockMillis.getAsLong();
+            CoopLog.info(CoopNetPump.class, "Coop announced a local stall (" + reason + ", ~"
+                    + expectedMillis + " ms) so the partner does not read it as a dead link");
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to send STALL_NOTICE", ex);
+        }
+    }
+
+    /** Peer: it is about to go quiet on purpose. Same exemption stamp a SAVE_CHECKPOINT gives. */
+    private void handleStallNotice(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            return;
+        }
+        lastSaveCheckpointAtMillis = clockMillis.getAsLong();
+        CoopLog.info(CoopNetPump.class, "Coop partner announced a stall ("
+                + CoopMessages.parseStallReason(message) + ", ~"
+                + CoopMessages.parseStallExpectedMillis(message) + " ms); the link-death rule is"
+                + " exempt for " + (CoopLinkQuality.DEATH_SAVE_EXEMPT_MILLIS / 1000L) + " s");
+    }
+
+    // ---- Phase 20 red-team C6: roster retry -------------------------------------------------------
+
+    /** How often a stuck roster mismatch may ask the peer to re-send. */
+    private static final long ROSTER_REQUEST_INTERVAL_MILLIS = 5_000L;
+
+    /**
+     * Asks the peer for its {@code FLEET_ROSTER} when the local cache has been stuck on a hash it
+     * does not hold (red-team C6).
+     *
+     * <p>The send side only ever transmits a roster when {@code fleetHash16} changes, so a roster
+     * that was dropped - rejected pre-session, lost to a frame that threw, refused by an outbound
+     * queue - is never re-sent, and the receiving mirror holds its last roster until the peer happens
+     * to gain or lose a ship. {@link coop.fleet.CoopRosterCache} already detects exactly that state
+     * (5 s of ticks naming a roster it does not have); this turns the detection into a repair.
+     */
+    private void maybeRequestFleetRoster() {
+        if (!isGameplaySessionActive() || !rosterCache.mismatchLogged()) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (now < nextRosterRequestAtMillis) {
+            return;
+        }
+        nextRosterRequestAtMillis = now + ROSTER_REQUEST_INTERVAL_MILLIS;
+        CoopMessages.Message request = CoopMessages.fleetRosterRequest(
+                sessionState.sessionId(), service.nextSeq(), now);
+        service.send(request);
+        log("outbound", request);
+        CoopLog.info(CoopNetPump.class, "Coop asked the partner to re-send its FLEET_ROSTER;"
+                + " the local cache has been holding a stale roster");
+    }
+
+    /**
+     * Peer: re-send the roster. Clearing the hash is the whole implementation - the ordinary send
+     * path fires on the next fleet tick because it compares against this field.
+     */
+    private void handleFleetRosterRequest(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            return;
+        }
+        CoopLog.info(CoopNetPump.class, "Coop partner asked for a FLEET_ROSTER re-send;"
+                + " forcing it on the next fleet tick");
+        lastSentRosterHash = "";
     }
 
     /** Partner: banner the wipe, since the only other cue is the mirror teleporting across the sector. */
@@ -2815,6 +3167,16 @@ public class CoopNetPump implements EveryFrameScript {
             if (!sessionMatches(datagram.token())) {
                 return;
             }
+            // Red-team A6/A9: the sender check moved up here from applyFleetSnapshotSection, and it
+            // now covers every datagram type rather than only FLEET_SNAPSHOT. Everything below this
+            // line stores state under the senderId - CoopDatagramWatermark's per-stream table and
+            // CoopLinkQuality's per-sender loss estimate both key on it - so running the check
+            // afterwards let anyone who knew the session token grow two unbounded maps under keys of
+            // their choosing, and corrupt the real peer's loss figures on the way past.
+            if (!isRemoteSender(datagram.senderId())) {
+                noteSenderMismatch(datagram.senderId());
+                return;
+            }
             // The LAST section carries this datagram's own epoch; the earlier one is the redundant
             // copy of the previous send. Counting distinct last-epochs against their span is the raw
             // loss estimate (see CoopLinkQuality).
@@ -2847,9 +3209,103 @@ public class CoopNetPump implements EveryFrameScript {
                     default -> { /* ignore unknown datagram types */ }
                 }
             }
-        } catch (RuntimeException ex) {
-            CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram", ex);
+        } catch (RuntimeException | LinkageError ex) {
+            // Red-team A11: rate-limited. This used to be a WARN with a full stack trace per packet,
+            // which turns one malformed-datagram flood into a log-write denial of service on the
+            // campaign thread. The running count is what keeps the rate limit honest.
+            datagramDecodeFailureCount++;
+            long now = clockMillis.getAsLong();
+            if (now >= nextDatagramDecodeLogAtMillis) {
+                nextDatagramDecodeLogAtMillis = now + FAILURE_LOG_INTERVAL_MILLIS;
+                CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram ("
+                        + datagramDecodeFailureCount + " total)", ex);
+            }
         }
+    }
+
+    /** Whether {@code senderId} is the remote coop player's wire token (red-team A6/A9). */
+    private boolean isRemoteSender(String senderId) {
+        String expected = remoteSenderToken();
+        return !expected.isEmpty() && expected.equals(senderId);
+    }
+
+    private void noteSenderMismatch(String senderId) {
+        datagramSenderMismatchCount++;
+        long now = clockMillis.getAsLong();
+        if (now < nextSenderMismatchLogAtMillis) {
+            return;
+        }
+        nextSenderMismatchLogAtMillis = now + FAILURE_LOG_INTERVAL_MILLIS;
+        CoopLog.warn(CoopNetPump.class, "Coop dropped a state datagram from senderId=" + senderId
+                + ", which is not this session's partner (" + datagramSenderMismatchCount + " total)");
+    }
+
+    /** State datagrams dropped on the sender check; test/bridge read. */
+    long datagramSenderMismatchCount() {
+        return datagramSenderMismatchCount;
+    }
+
+    /** State datagrams that failed to decode; test/bridge read. */
+    long datagramDecodeFailureCount() {
+        return datagramDecodeFailureCount;
+    }
+
+    // ---- Phase 20 red-team A8: sender stream-time validation --------------------------------------
+
+    /**
+     * How far ahead of everything already known a sender stream-time stamp may jump: five game
+     * minutes. Generous by three orders of magnitude against the 100 ms cadence these stamps arrive
+     * on, which is the point - it is a sanity bound, not a jitter filter.
+     */
+    private static final long MAX_SAMPLE_ADVANCE_MILLIS = 300_000L;
+
+    /**
+     * Validates one {@code sentGameTimeMillis} before it is allowed to move the render cursor
+     * (red-team A8). {@link coop.fleet.CoopMotionTimeline#noteSample} only ever raises its high-water
+     * mark, so a single stamp of {@code Long.MAX_VALUE} parks the cursor at the end of time and every
+     * real sample after it is silently older - every mirror freezes for the rest of the session, with
+     * nothing in the log. The same field is read off the TCP {@code NPC_FLEET_SET} payload, so the
+     * check lives here, at each read, rather than inside the timeline.
+     *
+     * <p>The <em>first</em> stamp of a session is accepted whatever it says, and cannot be otherwise:
+     * the two processes' stream clocks start when their processes did and share no origin, so a host
+     * that has been running for three hours legitimately stamps three hours ahead of a guest that
+     * just launched. Every stamp after it is bounded against what has already been accepted.
+     *
+     * @return true when the stamp may be used
+     */
+    private boolean acceptSampleStamp(long sentGameTimeMillis) {
+        if (sentGameTimeMillis < 0L) {
+            noteRejectedSampleStamp(sentGameTimeMillis, "negative");
+            return false;
+        }
+        if (latestAcceptedSampleMillis != Long.MIN_VALUE) {
+            long ceiling = Math.max(latestAcceptedSampleMillis, streamClock.gameTimeMillis())
+                    + MAX_SAMPLE_ADVANCE_MILLIS;
+            if (sentGameTimeMillis > ceiling) {
+                noteRejectedSampleStamp(sentGameTimeMillis, "more than "
+                        + (MAX_SAMPLE_ADVANCE_MILLIS / 1000L) + " s of game time past " + ceiling);
+                return false;
+            }
+        }
+        latestAcceptedSampleMillis = Math.max(latestAcceptedSampleMillis, sentGameTimeMillis);
+        return true;
+    }
+
+    private void noteRejectedSampleStamp(long stamp, String why) {
+        rejectedSampleStampCount++;
+        long now = clockMillis.getAsLong();
+        if (now < nextSampleStampLogAtMillis) {
+            return;
+        }
+        nextSampleStampLogAtMillis = now + FAILURE_LOG_INTERVAL_MILLIS;
+        CoopLog.warn(CoopNetPump.class, "Coop dropped a state sample stamped " + stamp
+                + " ms (" + why + "); " + rejectedSampleStampCount + " so far this session");
+    }
+
+    /** Sample stamps refused by {@link #acceptSampleStamp}; test read. */
+    long rejectedSampleStampCount() {
+        return rejectedSampleStampCount;
     }
 
     /**
@@ -2923,9 +3379,14 @@ public class CoopNetPump implements EveryFrameScript {
      * taken; mirror semantics are unchanged by this phase.
      */
     private void applyFleetSnapshotSection(String senderId, CoopMessages.DatagramSection section) {
-        // Ignore our own echoed datagrams and any sender that is not the remote coop player.
+        // The sender check that used to live here is now in ingestStateDatagram, ahead of the
+        // watermark and the loss estimate (red-team A6/A9); by this point the senderId has been
+        // matched against the remote player's token for every datagram type.
         String remoteId = sessionState.remotePlayerId();
-        if (remoteId == null || !senderId.equals(CoopMessages.wireToken(remoteId))) {
+        if (remoteId == null) {
+            return;
+        }
+        if (!acceptSampleStamp(section.sentGameTimeMillis())) {
             return;
         }
         CoopFleetSnapshot.Tick tick = CoopFleetSnapshot.Tick.decode(section.body());
@@ -2939,6 +3400,9 @@ public class CoopNetPump implements EveryFrameScript {
     private void handleNpcFleetMotion(CoopMessages.DatagramSection section,
                                       List<CoopNpcFleetMotion> motions) {
         if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        if (!acceptSampleStamp(section.sentGameTimeMillis())) {
             return;
         }
         double sampleTimeSeconds = section.sentGameTimeMillis() / 1000.0;
@@ -2976,9 +3440,14 @@ public class CoopNetPump implements EveryFrameScript {
             java.util.Map<String, Object> payload = CoopMessages.decodePayload(message);
             String encoded = String.valueOf(payload.getOrDefault("set", ""));
             // The sender's stream-time stamp (Phase 29 M1) so set-fed positions land in the same
-            // interpolation buffers the UDP motion sections fill.
-            double sampleTimeSeconds =
-                    payload.get("gameTimeMillis") instanceof Number n ? n.longValue() / 1000.0 : 0.0;
+            // interpolation buffers the UDP motion sections fill. Validated exactly as the datagram
+            // sections' stamps are (red-team A8) - same field, same failure, different wire.
+            long stampMillis =
+                    payload.get("gameTimeMillis") instanceof Number n ? n.longValue() : 0L;
+            if (!acceptSampleStamp(stampMillis)) {
+                return;
+            }
+            double sampleTimeSeconds = stampMillis / 1000.0;
             motionTimeline.noteSample(sampleTimeSeconds);
             // Split-stamped so the profiler can separate decode cost from apply cost; both stamps are
             // 0 and noteNpcSetApply is a no-op when profiling is off.
@@ -3009,6 +3478,7 @@ public class CoopNetPump implements EveryFrameScript {
             datagramWatermark.reset();
             datagramRedundancy.reset();
             motionTimeline.reset();
+            latestAcceptedSampleMillis = Long.MIN_VALUE;
             coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
             wiretap.sessionStarted();
             npcReplicationStreaming = true;
@@ -3018,6 +3488,7 @@ public class CoopNetPump implements EveryFrameScript {
             datagramWatermark.reset();
             datagramRedundancy.reset();
             motionTimeline.reset();
+            latestAcceptedSampleMillis = Long.MIN_VALUE;
             coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
             // Final size summary while the numbers still exist — this is the Phase 20.1 histogram.
             wiretap.sessionEnded();
@@ -3181,8 +3652,58 @@ public class CoopNetPump implements EveryFrameScript {
      * of the session id is what the apply paths trust, and the two must never disagree silently.
      */
     private boolean sessionMatches(String datagramToken) {
+        String token = sessionToken();
+        return !token.isEmpty() && token.equals(datagramToken);
+    }
+
+    // ---- Phase 20 red-team C10: cached wire tokens ------------------------------------------------
+    // wireToken is a SHA-256; these three were recomputed per outbound datagram AND per received
+    // section, i.e. tens of hashes a second, for three strings that change only on a session edge.
+    // The cache keys on the id itself, so a session edge invalidates it without anyone remembering to.
+
+    /** {@code wireToken(sessionId)}, or "" when there is no session. */
+    String sessionToken() {
         String sessionId = sessionState.sessionId();
-        return sessionId != null && CoopMessages.wireToken(sessionId).equals(datagramToken);
+        if (sessionId == null) {
+            cachedSessionId = null;
+            cachedSessionToken = "";
+            return "";
+        }
+        if (!sessionId.equals(cachedSessionId)) {
+            cachedSessionId = sessionId;
+            cachedSessionToken = CoopMessages.wireToken(sessionId);
+        }
+        return cachedSessionToken;
+    }
+
+    /** {@code wireToken(localPlayerId)}, or "" before a role is started. */
+    String localSenderToken() {
+        String playerId = sessionState.localPlayerId();
+        if (playerId == null) {
+            cachedLocalPlayerId = null;
+            cachedLocalSenderToken = "";
+            return "";
+        }
+        if (!playerId.equals(cachedLocalPlayerId)) {
+            cachedLocalPlayerId = playerId;
+            cachedLocalSenderToken = CoopMessages.wireToken(playerId);
+        }
+        return cachedLocalSenderToken;
+    }
+
+    /** {@code wireToken(remotePlayerId)}, or "" before a partner is known. */
+    String remoteSenderToken() {
+        String playerId = sessionState.remotePlayerId();
+        if (playerId == null) {
+            cachedRemotePlayerId = null;
+            cachedRemoteSenderToken = "";
+            return "";
+        }
+        if (!playerId.equals(cachedRemotePlayerId)) {
+            cachedRemotePlayerId = playerId;
+            cachedRemoteSenderToken = CoopMessages.wireToken(playerId);
+        }
+        return cachedRemoteSenderToken;
     }
 
     private String localPlayerFactionId() {
@@ -4163,6 +4684,76 @@ public class CoopNetPump implements EveryFrameScript {
         // rather than at each call site so a transition can never post a banner without also being
         // recorded — the two are the same event by construction.
         intelFeed.noteEvent(text);
+    }
+
+    /**
+     * Inbound logging, level-gated by how much the sender has proved (red-team A4).
+     *
+     * <p>Before a peer is accepted, <em>anything</em> on this socket came from whoever managed to
+     * connect: one INFO line per message is a log-write amplifier a stranger drives for free, on the
+     * campaign thread, at whatever rate it can send frames. So the pre-acceptance default is DEBUG
+     * (suppressed at Starsector's default level), with an exception for the control-plane types that
+     * are the only things worth reading in that window and that arrive a handful of times per
+     * connection. Once the session is live nothing changes: the existing high-frequency rule applies
+     * and every INFO line the smoke tests read is still there.
+     */
+    private void logInbound(CoopMessages.Message message) {
+        if (isGameplaySessionActive() || (peerAccepted() && isControlPlane(message.type()))) {
+            log("inbound", message);
+            return;
+        }
+        CoopLog.debug(CoopNetPump.class, "Coop net " + service.role() + " inbound "
+                + message.type() + " seq=" + message.seq());
+    }
+
+    /** True once the lobby has taken this peer into the session's guest/host slot. */
+    private boolean peerAccepted() {
+        CoopLobbyState state = sessionState.connectionState();
+        return state == CoopLobbyState.HOST_CONNECTED || state == CoopLobbyState.GUEST_CONNECTED;
+    }
+
+    /** Lobby / handshake / seed lock / resume / disconnect: the pre-session control plane. */
+    private static boolean isControlPlane(CoopMessages.Type type) {
+        return switch (type) {
+            case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT,
+                 HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
+                 SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
+                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
+                 DISCONNECT -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Whether a message that would make this side <em>answer</em> may be handled (red-team A4).
+     *
+     * <p>{@code PING} and {@code SESSION_RESUME_REQUEST} are the two types whose handlers reply
+     * unconditionally, with no coalesce key, to whoever sent them. From a peer that has neither
+     * proved itself in the lobby nor a grace window to resume into, that is a reply channel a
+     * stranger opens by connecting, and every reply it earns is a permanent entry in an outbound
+     * queue that never drops.
+     *
+     * <p>The gate is "has the lobby accepted this peer", not "is the session live": the seed-lock
+     * window sits between those two, both roles legitimately ping through it, and it is precisely
+     * the window where a half-open connection would otherwise stay invisible.
+     */
+    private boolean mayAnswerUnprovenPeer(CoopMessages.Type type) {
+        if (peerAccepted() || isGameplaySessionActive() || reconnect.active()) {
+            return true;
+        }
+        unprovenPeerAnswersRefused++;
+        if (!unprovenPeerRefusalLogged) {
+            unprovenPeerRefusalLogged = true;
+            CoopLog.warn(CoopNetPump.class, "Coop refusing to answer " + type
+                    + " from a peer with no session and no reconnect grace window"
+                    + " (logged once per connection)");
+        }
+        return false;
+    }
+
+    /** Answers refused by {@link #mayAnswerUnprovenPeer}; test read. */
+    long unprovenPeerAnswersRefused() {
+        return unprovenPeerAnswersRefused;
     }
 
     private void log(String direction, CoopMessages.Message message) {

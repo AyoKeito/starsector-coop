@@ -848,4 +848,44 @@ class CoopBattleBridgeTest {
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
+
+    @Test
+    void b3_aRemoteBattleWithNoStatusForThirtySecondsIsAgedOut() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L, "battle-1",
+                "guest-player", "Corvus", "a pirate armada", "", CoopMessages.BattleKind.PLAYER));
+
+        assertTrue(fixture.bridge.isRemoteBattleActive());
+        fixture.bridge.tickCampaign(null, true, CoopBattleBridge.STATUS_INTERVAL_MILLIS * 10L);
+        assertTrue(fixture.bridge.isRemoteBattleActive(), "a fight in progress is not a stale flag");
+        assertTrue(fixture.pause.eitherInCombat());
+
+        // The partner's link died mid-combat, so BATTLE_END never comes. Pre-fix the flag stood for
+        // the life of the process: it is exemption (a) of the link-death rule AND the host's combat
+        // pause intent, so the host stayed paused in a phantom battle and could never declare the
+        // link dead.
+        fixture.bridge.tickCampaign(null, true, CoopBattleBridge.REMOTE_BATTLE_SILENCE_TIMEOUT_MILLIS);
+
+        assertFalse(fixture.bridge.isRemoteBattleActive());
+        assertFalse(fixture.pause.eitherInCombat(), "the combat pause intent goes with it");
+    }
+
+    @Test
+    void b3_anOngoingStatusStreamKeepsTheRemoteBattleAlive() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L, "battle-1",
+                "guest-player", "Corvus", "a pirate armada", "", CoopMessages.BattleKind.PLAYER));
+
+        // The clock the bridge stamps with is fixed at 0 in this fixture, so a status arriving at any
+        // point re-stamps to 0 - which is what the timeout measures against. Well past the timeout in
+        // campaign time, the flag survives only because the statuses keep arriving.
+        for (long t = 0; t <= CoopBattleBridge.REMOTE_BATTLE_SILENCE_TIMEOUT_MILLIS * 2;
+                t += CoopBattleBridge.STATUS_INTERVAL_MILLIS) {
+            fixture.bridge.handle(CoopMessages.battleStatus("session-a", 2L + t, t, "battle-1",
+                    t / CoopBattleBridge.STATUS_INTERVAL_MILLIS, t, ""));
+            fixture.bridge.tickCampaign(null, true, 1L);
+        }
+
+        assertTrue(fixture.bridge.isRemoteBattleActive());
+    }
 }

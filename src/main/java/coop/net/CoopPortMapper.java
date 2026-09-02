@@ -171,9 +171,6 @@ public final class CoopPortMapper {
     // Lifecycle.
     private long nextRenewMillis = Long.MAX_VALUE;
     private boolean renewing;
-    /** Last value {@link #result()} produced, and a counter bumped whenever it differs; see B5. */
-    private Result publishedResult;
-    private long resultVersion;
     /** Full passes of the state machine the last {@link #shutdown()} spent; the B8 evidence. */
     private int shutdownTicks;
     private final Deque<String> releaseQueue = new ArrayDeque<>();
@@ -246,26 +243,8 @@ public final class CoopPortMapper {
 
     /** Immutable snapshot of the current state; safe to call every frame. */
     public Result result() {
-        Result current = new Result(tier, gatewayAddress, gatewayName, externalAddress, externalPort,
+        return new Result(tier, gatewayAddress, gatewayName, externalAddress, externalPort,
                 isUnroutableExternalAddress(externalAddress), failureText, finished);
-        if (!current.equals(publishedResult)) {
-            publishedResult = current;
-            resultVersion++;
-        }
-        return current;
-    }
-
-    /**
-     * A number that changes exactly when {@link #result()} would return something different
-     * (red-team B5). The mapper's verdict is not write-once: a renewal 30 minutes in can lose the
-     * lease, change the external port, or discover CGNAT, and callers that published the first
-     * verdict — the reachability line, the connection doctor — had no way to notice. Polling one long
-     * per frame is cheaper than diffing eight fields, and it cannot be forgotten the way "call me
-     * again when it changes" can.
-     */
-    public long resultVersion() {
-        result();
-        return resultVersion;
     }
 
     /**
@@ -1178,6 +1157,31 @@ public final class CoopPortMapper {
         void close() {
             closeQuietly(channel);
         }
+    }
+
+    // ---- Phase 20 red-team seam ------------------------------------------------------------------
+    // Appended rather than filed beside result(): this lands alongside a transport rewrite of the
+    // same file, and an appended block that leaves result() untouched cannot collide with it.
+
+    private Result versionedResult;
+    private long resultVersion;
+
+    /**
+     * A counter that changes whenever {@link #result()} would return something different (red-team
+     * B5). The host's connection-doctor block and the intel page's reachability line are published
+     * exactly once today, on the first finished result — so a renewal that later downgrades or
+     * repairs the mapping is never reported, and both surfaces keep showing a verdict that stopped
+     * being true. Callers compare this against the last value they published.
+     *
+     * <p>Computed here rather than inside {@code result()} so the accessor stays a pure snapshot.
+     */
+    public long resultVersion() {
+        Result current = result();
+        if (!current.equals(versionedResult)) {
+            versionedResult = current;
+            resultVersion++;
+        }
+        return resultVersion;
     }
 
     /** Rendering helper shared with the connection doctor. */

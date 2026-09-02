@@ -13,6 +13,8 @@ import coop.net.CoopNetPump;
 import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
 import coop.net.CoopNetStartupConfig;
+import coop.net.CoopStallNotice;
+import coop.ui.CoopSessionIntelFeed;
 import coop.save.CoopGuestSnapshot;
 import coop.save.CoopGuestSnapshotStore;
 import coop.save.CoopSaveCheckpoint;
@@ -55,9 +57,7 @@ public class CoopModPlugin extends BaseModPlugin {
             netService.shutdown();
         }
         if (netPump != null) {
-            // Before the new pump replaces it: releasing the router mapping for a port we are about
-            // to re-open would undo the new session's own mapping (Phase 20.3).
-            netPump.shutdownPortMapper();
+            tearDownPreviousPump(netPump);
             netPump = null;
         }
         // The held guest snapshot belongs to the session that just ended; the copy already written
@@ -94,6 +94,28 @@ public class CoopModPlugin extends BaseModPlugin {
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
     }
 
+    /**
+     * Everything the outgoing pump owns that the engine will not clean up for us. Package-private and
+     * static so it can be tested: {@code onGameLoad} itself needs a live {@code Global.getSector()}.
+     *
+     * @param previous the pump being replaced; null is accepted so the static handles can be cleared
+     *                 without one
+     */
+    static void tearDownPreviousPump(CoopNetPump previous) {
+        if (previous != null) {
+            // Releasing the router mapping for a port we are about to re-open would undo the new
+            // session's own mapping (Phase 20.3), so this must run before the new pump is built.
+            previous.shutdownPortMapper();
+        }
+        // Red-team B6: the intel page's feed handle is installed by every pump and was never taken
+        // down, so the page kept rendering the previous game's session - role, partner name, RTT and
+        // all - over a save that has no coop session in it at all. The new pump installs its own
+        // feed; this is the window between the two.
+        CoopSessionIntelFeed.uninstall();
+        // Same shape for the stall hook: with no pump there is nothing to route beforeGameSave to.
+        CoopStallNotice.setActive(null);
+    }
+
     @Override
     public void onNewGameAfterProcGen() {
         CoopSeedSync.storeCurrentSectorFingerprint();
@@ -125,6 +147,11 @@ public class CoopModPlugin extends BaseModPlugin {
     public void beforeGameSave() {
         CoopFullFidelitySystemDriver.beginSave();
         CoopGuestSnapshotStore.writeIntoCurrentSector();
+        // Red-team B4: both roles announce the stall a save is about to cause, flushed inline, so
+        // the partner's link-death rule does not read a guest's manual save as a dead link. Last,
+        // because the two calls above are what make the save correct and this one is courtesy.
+        CoopStallNotice.notifyLocalStall(CoopStallNotice.REASON_LOCAL_SAVE,
+                CoopStallNotice.SAVE_EXPECTED_MILLIS);
     }
 
     /**

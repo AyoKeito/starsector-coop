@@ -480,6 +480,22 @@ public class CoopNetService {
     }
 
     /**
+     * The address the single v1 peer is pinned to, or null when nothing is attached. The
+     * senderId-less form of {@link #pinnedPeerAddress(String)}, for the callers that only ever have
+     * one peer to talk about — which with a capacity of 1 is all of them.
+     */
+    public InetAddress activePeerAddress() {
+        synchronized (lifecycleLock) {
+            for (CoopPeerLink peer : peers) {
+                if (peer.occupied() && peer.pinnedPeerAddress() != null) {
+                    return peer.pinnedPeerAddress();
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
      * The TCP address pinned to the peer with this sender id, or — when the id names nobody, which is
      * every message that arrives before the peer has stamped one — the address of the single occupied
      * slot. Exists so a caller holding a message can name its sender to {@link #noteFailedProof}.
@@ -1612,6 +1628,7 @@ public class CoopNetService {
         channel.socket().setTcpNoDelay(true);
         InetAddress pinned = peerAddressOf(channel);
         peer.attach(channel, pinned, clockMillis.getAsLong(), role == CoopConnectionRole.HOST);
+        // Red-team B2/C1: the pump watches this for the drop edge isConnected() cannot show it.
         connectionGeneration++;
         refreshConnectedLocked();
         CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role

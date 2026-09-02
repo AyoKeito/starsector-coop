@@ -456,4 +456,22 @@ class CoopLinkQualityTest {
         assertEquals(1_500L, snapshot.tcpSilenceMillis());
         assertEquals(2_000L, snapshot.udpSilenceMillis());
     }
+
+    @Test
+    void b9_theDegradedThresholdsAreInclusive() {
+        CoopLinkQuality quality = new CoopLinkQuality();
+        long now = 1_000L;
+        quality.resetSilence(now);
+
+        // Exactly the documented threshold ("RTT at or above this counts as degraded"), which a
+        // strict comparison declared healthy.
+        quality.notePingSent(1L, now);
+        quality.notePongReceived(1L, now + CoopLinkQuality.DEGRADED_RTT_MILLIS);
+        long at = now + CoopLinkQuality.DEGRADED_RTT_MILLIS;
+        for (long t = at; t <= at + CoopLinkQuality.DEGRADED_SUSTAIN_MILLIS + 1_000L; t += 1_000L) {
+            quality.evaluateDegraded(t);
+        }
+
+        assertTrue(quality.degraded(), "RTT == DEGRADED_RTT_MILLIS is degraded, per the constant's doc");
+    }
 }

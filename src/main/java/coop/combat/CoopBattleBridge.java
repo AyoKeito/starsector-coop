@@ -122,6 +122,18 @@ public final class CoopBattleBridge {
      * the 64 KB frame limit; anything past this is a runaway and is truncated rather than dropped.
      */
     static final int MAX_STATUS_SHIPS = 200;
+    /**
+     * How long the spectator side keeps believing in a battle it has heard nothing about (red-team
+     * B3). 75x {@link #STATUS_INTERVAL_MILLIS}: the engaging client sends a status every 400 ms for
+     * the whole fight, so 30 s of silence is not a slow frame, it is a peer that died mid-combat.
+     *
+     * <p>Without this {@code remoteBattleActive} is set by {@code BATTLE_BEGIN} and cleared only by
+     * {@code BATTLE_END} — which never arrives when the link dies during the fight. The flag is
+     * exemption (a) of the Phase 20.2 link-death rule <em>and</em> the host's combat pause intent, so
+     * a mid-combat death left the host paused in a phantom battle, unable to ever declare the link
+     * dead, for as long as the process ran.
+     */
+    static final long REMOTE_BATTLE_SILENCE_TIMEOUT_MILLIS = 30_000L;
     /** Kill-feed depth carried in every snapshot (it is stateless — the newest snapshot must stand alone). */
     static final int KILL_FEED_DEPTH = 12;
     /**
@@ -183,6 +195,8 @@ public final class CoopBattleBridge {
     /** Host {@code coopFleetId}s the partner reported fighting, from its {@code BATTLE_BEGIN}. */
     private final List<String> remoteBattleNpcFleetIds = new ArrayList<>();
     private CoopBattleStatus remoteStatus;
+    /** Wall clock of the newest BATTLE_BEGIN/BATTLE_STATUS; see the silence timeout above. */
+    private long remoteBattleSignalAtMillis;
     /** Last logged status digest, so the debug line is change-detected rather than per snapshot. */
     private String remoteStatusDigest = "";
     private final Deque<String> pendingBanners = new ArrayDeque<>();
@@ -391,6 +405,9 @@ public final class CoopBattleBridge {
             }
             sessionWasActive = true;
             autosave.tick(sector);
+            // Before the combat-intent write below, so a battle that timed out this frame releases
+            // the shared pause on the same frame rather than one later.
+            maybeExpireRemoteBattle(nowMillis);
             maybeEndLocalBattle(nowMillis);
             drivePendingResult(sector, nowMillis);
             driveEngageDialog(sector);
@@ -403,6 +420,35 @@ public final class CoopBattleBridge {
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop battle bridge tick failed", ex);
         }
+    }
+
+    /**
+     * Red-team B3: drops a remote battle nobody has said anything about for
+     * {@link #REMOTE_BATTLE_SILENCE_TIMEOUT_MILLIS}. Clearing the flag clears both things it feeds —
+     * the link-death exemption and (via the caller, one statement later) the shared combat pause
+     * intent — so the link is free to be declared dead and the world free to run.
+     */
+    private void maybeExpireRemoteBattle(long nowMillis) {
+        if (!remoteBattleActive) {
+            return;
+        }
+        long silence = nowMillis - remoteBattleSignalAtMillis;
+        if (silence < REMOTE_BATTLE_SILENCE_TIMEOUT_MILLIS) {
+            return;
+        }
+        String battleId = remoteBattleId;
+        remoteBattleActive = false;
+        remoteBattleSignalAtMillis = 0L;
+        remoteStatus = null;
+        remoteStatusDigest = "";
+        remoteBattleId = "";
+        List<String> concluded = List.copyOf(remoteBattleNpcFleetIds);
+        remoteBattleNpcFleetIds.clear();
+        notifyBattleConcluded(concluded, false);
+        CoopLog.warn(CoopBattleBridge.class, "Coop no BATTLE_STATUS for " + silence
+                + " ms on battleId=" + battleId + "; treating the partner's battle as over."
+                + " The link-death exemption and the shared combat pause are released;"
+                + " the host's authoritative state reconciles the fight itself.");
     }
 
     /** True while this client is piloting a coop battle (used by the threat watcher's gate). */
@@ -445,6 +491,7 @@ public final class CoopBattleBridge {
         String enemy = CoopMessages.requiredPayloadString(message, "enemySummary");
         String location = CoopMessages.requiredPayloadString(message, "locationName");
         remoteBattleActive = true;
+        remoteBattleSignalAtMillis = clock.getAsLong();
         remoteBattleId = battleId;
         remoteBattleNpcFleetIds.clear();
         remoteBattleNpcFleetIds.addAll(
@@ -462,6 +509,7 @@ public final class CoopBattleBridge {
         if (!CoopBattleStatus.isNewer(battleId, statusSeq, remoteStatus)) {
             return;
         }
+        remoteBattleSignalAtMillis = clock.getAsLong();
         remoteStatus = CoopBattleStatus.decode(battleId, statusSeq,
                 CoopMessages.requiredPayloadLong(message, "elapsedMillis"),
                 CoopMessages.requiredPayloadString(message, "ships"));
@@ -513,6 +561,7 @@ public final class CoopBattleBridge {
         // The survivor line rides on the last status that arrived — no new message fields.
         queueBanner(battleEndBanner(partnerName(), outcome, survivorSummary(remoteStatus)));
         remoteBattleActive = false;
+        remoteBattleSignalAtMillis = 0L;
         remoteStatus = null;
         remoteStatusDigest = "";
         remoteBattleId = "";
@@ -1132,6 +1181,7 @@ public final class CoopBattleBridge {
         engageDialogBecameBattle = false;
         if (remoteBattleActive) {
             remoteBattleActive = false;
+            remoteBattleSignalAtMillis = 0L;
             remoteStatus = null;
             remoteStatusDigest = "";
             queueBanner("Coop: connection lost. Your partner's battle finishes on their machine;"
