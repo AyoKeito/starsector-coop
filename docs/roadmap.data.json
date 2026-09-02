@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built + live smoke PASSED 2026-09-02"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built + live smoke PASSED 2026-09-02; 7c code-complete 2026-09-02 (smoke pending)"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 7b built and live-smoke verified (2026-09-02); next 7c, with the 12c manual residue still open",
-  "here": "<b>Phase 7b — shared fast-forward — is built: 1210 green tests (2026-09-02), two-instance smoke PASSED the same evening.</b> <code>CoopFastForwardLock</code> forces vanilla's toggle fast-forward mode and <code>campaignSpeedupMult=2</code> on both roles for the life of a session, mirrors the host's <code>CampaignState.fastForward</code> field onto the guest from the existing <code>TIME_SNAPSHOT</code> bit, and restores the player's own toggle preference when the session ends; the <code>settings.json</code> 1x override is gone, so solo games with the mod enabled get fast-forward back. Build-day correction worth knowing: the spec named the toggle setter <code>?00000(boolean)</code>, but that <code>?</code> was javap substituting for a non-ASCII character — five different setters print identically. Parsing the class file's constant pool showed the real accessors are <code>Oo0000()</code> / <code>ö00000(boolean)</code> over a static boolean field literally named <code>class</code>, so the build resolves the <em>field</em> with <code>findStaticGetter/Setter</code> and never touches the ambiguous method name. Any handle failure (or <code>-Dcoop.ff.disable=true</code>) degrades to the old 1x lock via public API. Phase 29's deferred line item landed alongside: <code>CoopStreamCadence</code> measures the FLEET_SNAPSHOT and NPC_FLEET_MOTION send interval in <em>stream</em> time (wall-clock fallback only while paused), so 2x fast-forward doubles the wall send rate and the interpolation buffer keeps its depth. <b>Smoke result:</b> host Shift toggled both clients, guest Shift inert, FF survived pause, the settings-menu untick was harmless, the mirror stayed smooth at 2x, no lock warning in either log (the sandbox <code>Class.forName</code> assumption held), and the bridge read the guest 9 game-hours ahead after the cycles — inside the accepted bound and exactly the drift Phase 7c corrects. The fallback drill passed and exposed a missing warning on the property path (fixed <code>3471f9f</code>). Solo sanity was waived; the post-session restore check can't run in the harness because the host is held paused before a session and after a disconnect. <b>Open: Phase 7c next, and the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
+  "hereHead": "You are here — Phase 7c code-complete (2026-09-02, 1233 green); its two-instance smoke is next, with the 12c manual residue still open",
+  "here": "<b>Phase 7c — guest clock reconciliation — is code-complete: 1233 green tests (2026-09-02, 23 new), two-instance smoke pending.</b> <code>CoopClockReconciler</code> reads the drift the <code>TIME_SNAPSHOT</code> stream has carried unused since Phase 7 (host timestamp minus guest timestamp), keeps a 9-sample median ring behind a pause-agreement gate and a self-scaling spike gate, and converges the guest's <code>CampaignClock</code> by a slew bounded to 10% of each frame's own clock advance (30% while more than 0.1 game-day out). Entry at 0.05 game-day, exit below 0.01. During a shared pause it snaps the whole positive drift forward in one write; an unpaused snap needs drift over 2 game-days held across 3 estimates spanning 2 s, and logs at warn. The clock never moves backward: month-end fires on <code>getMonth() != prevMonth</code>, so a backward write across a month boundary would pay monthly income twice. A guest that is ahead slows down, and a guest-ahead condition lasting 60 s logs once. Every write goes through <code>getCal().setTimeInMillis</code> plus a MethodHandles setter on the private <code>timestamp</code> field, in that order; the mirror-motion dt is untouched. <b>Review caught two wiring defects before deploy:</b> the pump re-applies the latest snapshot every frame, which would have filled the ring with one stale stamp at frame rate, so each snapshot object is now fed once; and the pump keeps handing a positive dt while paused, so <code>tick</code> now takes the live pause state and never writes on a paused frame. <code>-Dcoop.clock.disable=true</code> or any handle failure degrades to the pre-7c uncorrected drift with one warning. <b>Open: the 8-step 7c smoke (drift line under <code>-Dcoop.debug.diagnostics=true</code>, induced drift both directions, shared-pause snap, FF cycles, fallback drill), then the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next: Phase 7c (clock reconciliation)",
+      "head": "Next: Phase 7c two-instance smoke",
       "state": "you are here",
-      "body": "<span class=\"rp\" data-jump=\"7b\">Phase 7b</span> — shared fast-forward — is <b>built and live-verified</b> (2026-09-02): both clients speed up on the host's Shift, the guest's Shift is inert, fast-forward survives a shared pause, and the fallback drill degraded cleanly to 1x. The bridge measured the guest 9 game-hours ahead of the host after the FF cycles — bounded, but it is the drift <span class=\"rp\" data-jump=\"7c\">Phase 7c</span> exists to correct, so 7c is next. Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After 7c the order continues 20 → 29-M2 → 21 → 19."
+      "body": "<span class=\"rp\" data-jump=\"7c\">Phase 7c</span> — guest clock reconciliation — is <b>code-complete</b> (2026-09-02, 1233 green) and deployed to the test clients; the 8-step two-instance smoke is next. Launch the guest with <code>-Dcoop.debug.diagnostics=true</code> and grep <code>Coop clock</code> in its log: the drift line every 5 s proves the handle resolved, then induce drift by stalling each process in turn and watch the median return inside 0.05 game-day, the guest date never decreasing. After 7b's fast-forward cycles the bridge read the guest 9 game-hours ahead; that is the case step 5 covers. Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After 7c the order continues 20 → 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -290,26 +290,23 @@
       "title": "Clock Reconciliation",
       "theme": "time",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Guest-side reconciler converges the guest campaign clock to the host via bounded monotonic slew plus forward-only snaps during shared pauses.",
       "introduces": [
         "CoopClockReconciler",
         "getCal()/timestamp MethodHandles",
         "median drift ring buffer",
-        "bounded slew (±10%/±50%)",
+        "bounded slew (10%, 30% above 0.1 day)",
         "forward-only pause snap",
         "0.05-day dead zone",
         "monotonic never-backward invariant",
         "-Dcoop.clock.disable"
       ],
       "residue": [
-        "all steps unchecked (not built)",
-        "verify getCal() on CampaignClockAPI",
-        "gradle clean test build",
-        "deploy + 8-step smoke test",
-        "commit deferred (catch-up commit note)"
+        "8-step two-instance smoke (drift line, induced drift both ways, shared-pause snap, FF cycles, fallback drill)",
+        "no pump wiring test (no injection seam; not observable without the engine)"
       ],
-      "note": "Build-order position 12; independent of 7b but absorbs its toggle-edge skew."
+      "note": "Code-complete 2026-09-02. tick() takes the live guest pause state; each TIME_SNAPSHOT feeds the ring once; unpaused snap targets current + drift. Independent of 7b but absorbs its toggle-edge skew."
     },
     {
       "id": "8",

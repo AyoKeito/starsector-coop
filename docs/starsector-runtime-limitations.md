@@ -208,6 +208,17 @@ locked to 1x instead:
 > Phase 7c builds a guest-side drift reconciler on this basis (bounded monotonic slew + forward-only
 > snaps). The host-pause-hold during connect described below REMAINS correct and primary —
 > prevention still beats correction for the connect gap.
+>
+> **Built 2026-09-02 (`coop.time.CoopClockReconciler`).** `getCal()` is on the public
+> `CampaignClockAPI` (javap of `starfarer.api.jar`), so the only handle the reconciler needs is a
+> `MethodHandles` setter for the private `long timestamp` cache; both are written together, `cal`
+> first, because `cal` is `transient` and `timestamp` is the only persisted representation. The
+> reconciler is guest-only and corrects accumulated *in-session* drift; it does not close a
+> connect-time gap and does not attempt late-join catch-up, so nothing below is retired. Writing the
+> clock also cannot move an on-screen orbit position: every orbit class integrates a private
+> `currAngle` from the frame dt and never reads the clock's absolute value; the 1 Hz orbit snap still
+> owns that. Falls back to the pre-7c behaviour (uncorrected drift, one logged warning) on any handle
+> failure or with `-Dcoop.clock.disable=true`.
 
 There is **no public clock-setter on the API surface** (`CampaignClockAPI` has no `setTimestamp`;
 `SectorAPI` has no `setClock`; `createClock(long)` makes a detached clock that cannot be installed),

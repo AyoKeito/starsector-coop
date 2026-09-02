@@ -40,6 +40,7 @@ import coop.session.CoopIronModeGuard;
 import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.time.CoopClockReconciler;
 import coop.time.CoopFastForwardLock;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
@@ -95,6 +96,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_SHARED_PAUSE = "time.sharedPause";
     private static final String SECTION_TIME_APPLY = "time.applySnapshot";
     private static final String SECTION_TIME_FAST_FORWARD = "time.fastForwardLock";
+    private static final String SECTION_TIME_CLOCK_RECONCILE = "time.clockReconcile";
     private static final String SECTION_TIME_SEND = "time.sendSnapshot";
     private static final String SECTION_FLEET_MIRROR = "fleet.syncMirror";
     private static final String SECTION_FLEET_DATAGRAMS = "fleet.drainDatagrams";
@@ -233,6 +235,20 @@ public class CoopNetPump implements EveryFrameScript {
      * Constructing it touches no engine state; it resolves its handles lazily on first enforcement.
      */
     private final CoopFastForwardLock fastForwardLock = new CoopFastForwardLock();
+    /**
+     * Phase 7c: guest-side campaign-clock drift reconciler. Owns every write to the campaign clock
+     * (cal + the cached timestamp field) and nothing else — in particular it never touches the dt
+     * handed to {@code streamClock.advance} or {@link #advanceMirrorMotion}, which would couple it to
+     * the Phase 29 M1 motion pipeline. Constructing it touches no engine state; the timestamp handle
+     * resolves lazily on the first guest snapshot. No-op for the host role (never ticked below).
+     */
+    private final CoopClockReconciler clockReconciler = new CoopClockReconciler();
+    /** Session edge for the reconciler's sample ring: pre-session samples are meaningless. */
+    private boolean clockReconcilerArmed;
+    /** Guest dialog-open edge; the ring is cleared on open -> closed (pre-dialog samples are stale). */
+    private boolean clockReconcilerDialogWasOpen;
+    /** The snapshot object last fed to the reconciler; each TIME_SNAPSHOT message is one sample. */
+    private CoopTimeLock.TimeSnapshot lastReconciledTimeSnapshot;
     // Host: the effective pause we applied last frame, used to detect vanilla auto-pause edges (the
     // host pause key itself is captured by CoopHostPauseInputListener, not here).
     private boolean hostEffectivePauseApplied;
@@ -488,6 +504,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_TIME_FAST_FORWARD, t);
         maybeApplyTimeSnapshot();
         t = profiler.split(SECTION_TIME_APPLY, t);
+        tickClockReconciler(amount);
+        t = profiler.split(SECTION_TIME_CLOCK_RECONCILE, t);
         maybeSendTimeSnapshot();
         t = profiler.split(SECTION_TIME_SEND, t);
         syncFleetMirror();
@@ -1383,13 +1401,56 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
+        // Phase 7c: read the LOCAL pause state before applying the snapshot. The reconciler's
+        // pause-agreement gate discards samples taken across a pause mirror edge (the two clocks are
+        // legitimately running at different rates for those frames), and timeLock.apply() below is
+        // exactly what closes that edge — reading after it would make the gate a no-op.
+        boolean guestPausedAtMeasurement = isSectorPausedForStream();
+
         try {
             timeLock.apply(latestTimeSnapshot);
             // The guest's clock mirrors the host snapshot; record it so the guest pause key resolves
             // against the observed state instead of blindly toggling a private intent.
             pauseCoordinator.setObservedPaused(latestTimeSnapshot.paused());
+            // The snapshot is re-applied every frame, but it is one measurement: feed it to the
+            // reconciler once, or the ring fills at frame rate with one stale host stamp against an
+            // advancing guest clock and the estimate biases negative by up to a snapshot interval.
+            if (latestTimeSnapshot != lastReconciledTimeSnapshot) {
+                lastReconciledTimeSnapshot = latestTimeSnapshot;
+                clockReconciler.onSnapshot(latestTimeSnapshot.timestampMillis(),
+                        latestTimeSnapshot.paused(), latestTimeSnapshot.fastForward(),
+                        guestPausedAtMeasurement);
+            }
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply coop time snapshot", ex);
+        }
+    }
+
+    /**
+     * Phase 7c frame entry, guest-only. Also owns the reconciler's two ring-invalidating edges: the
+     * session edge (pre-session samples are meaningless) and the guest's interaction-dialog
+     * open&rarr;closed edge (vanilla owned the local clock while the dialog was up, so every sample
+     * taken before it is stale). The host never ticks: its clock is the authority.
+     */
+    private void tickClockReconciler(float amount) {
+        boolean active = isGameplaySessionActive();
+        if (active != clockReconcilerArmed) {
+            clockReconcilerArmed = active;
+            clockReconciler.clearSamples();
+            clockReconcilerDialogWasOpen = false;
+        }
+        if (!active || service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        boolean dialogOpen = isGuestInteractionDialogOpen();
+        if (clockReconcilerDialogWasOpen && !dialogOpen) {
+            clockReconciler.clearSamples();
+        }
+        clockReconcilerDialogWasOpen = dialogOpen;
+        try {
+            clockReconciler.tick(amount, isSectorPausedForStream());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to reconcile the guest campaign clock", ex);
         }
     }
 
