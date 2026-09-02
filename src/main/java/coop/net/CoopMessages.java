@@ -196,6 +196,19 @@ public final class CoopMessages {
     public static Message linkStatus(String sessionId, long seq, long sentAtMillis,
                                      CoopLinkQuality.Snapshot link, String transport,
                                      CoopDatagramStats stats) {
+        return linkStatus(sessionId, seq, sentAtMillis, link, transport,
+                CoopCadenceTier.DEFAULT.hz(), stats);
+    }
+
+    /**
+     * As above, carrying the Phase 29 M2 {@code cadenceHz}: the {@link CoopCadenceTier} this side's
+     * UDP state streams are currently sending at. The host's announcement is what the guest applies;
+     * the guest echoes back what it applied, which is how each side learns the interval its
+     * <em>peer</em> is sending at and can size its interpolation delay in whole send intervals.
+     */
+    public static Message linkStatus(String sessionId, long seq, long sentAtMillis,
+                                     CoopLinkQuality.Snapshot link, String transport,
+                                     int cadenceHz, CoopDatagramStats stats) {
         Objects.requireNonNull(link, "link");
         Objects.requireNonNull(stats, "stats");
         long rtt = link.rttMillis() == null ? -1L : link.rttMillis();
@@ -206,6 +219,7 @@ public final class CoopMessages {
                         + ",\"lossPercent\":" + link.lossPercent()
                         + ",\"udpInboundOk\":\"" + link.udpInboundOk() + "\""
                         + ",\"transport\":\"" + escapeJson(transport == null ? "" : transport) + "\""
+                        + ",\"cadenceHz\":" + cadenceHz
                         + ",\"tcpSilenceMillis\":" + link.tcpSilenceMillis()
                         + ",\"droppedTokenMismatch\":" + stats.droppedTokenMismatch()
                         + ",\"droppedForeignSource\":" + stats.droppedForeignSource()
@@ -229,9 +243,29 @@ public final class CoopMessages {
                              long icmpTransients,
                              long escalatedToTcp,
                              long connectionsThrottled,
-                             long invalidFrames) {
+                             long invalidFrames,
+                             int cadenceHz) {
         public LinkStatus {
             transport = transport == null ? "" : transport;
+        }
+
+        /**
+         * Pre-Phase-29-M2 shape. Kept so the many call sites that never cared about the cadence keep
+         * compiling; the value they get is the tier every build before M2 sent at.
+         */
+        public LinkStatus(int rttMillis, int p95RttMillis, int lossPercent, boolean udpInboundOk,
+                          String transport, long tcpSilenceMillis, long droppedTokenMismatch,
+                          long droppedForeignSource, long pathValidations, long icmpTransients,
+                          long escalatedToTcp, long connectionsThrottled, long invalidFrames) {
+            this(rttMillis, p95RttMillis, lossPercent, udpInboundOk, transport, tcpSilenceMillis,
+                    droppedTokenMismatch, droppedForeignSource, pathValidations, icmpTransients,
+                    escalatedToTcp, connectionsThrottled, invalidFrames,
+                    CoopCadenceTier.DEFAULT.hz());
+        }
+
+        /** The tier the peer announced, refused back to the default when it is not one of ours. */
+        public CoopCadenceTier cadenceTier() {
+            return CoopCadenceTier.fromHz(cadenceHz);
         }
     }
 
@@ -251,7 +285,11 @@ public final class CoopMessages {
                 // Optional: a peer built before 20.4 has no such field, and a link report is not
                 // worth throwing away over a counter.
                 optionalPayloadLong(message, "connectionsThrottled", 0L),
-                optionalPayloadLong(message, "invalidFrames", 0L));
+                optionalPayloadLong(message, "invalidFrames", 0L),
+                // Optional for the same reason, and its default is load-bearing rather than cosmetic:
+                // a peer built before Phase 29 M2 sends at 10 Hz unconditionally, so "field absent"
+                // and "10 Hz" are the same statement about that peer.
+                (int) optionalPayloadLong(message, "cadenceHz", CoopCadenceTier.DEFAULT.hz()));
     }
 
     /**

@@ -19,10 +19,16 @@ package coop.fleet;
 public final class CoopMotionTimeline {
 
     /**
-     * Fixed M1 render delay: two send intervals at the 10 Hz stream rate, the Valve 2-interval rule.
-     * M2 makes this adaptive from measured jitter (Mirror's formula, clamped [0.15, 0.5]).
+     * Default render delay: two send intervals at the 10 Hz default tier, the Valve 2-interval rule.
+     * Since Phase 29 M2 this is the starting value and the session-edge reset value, not a constant —
+     * {@link #setDelaySeconds(double)} resizes it from the measured jitter and the peer's announced
+     * cadence tier. A clean link at the default tier lands back on exactly this number.
      */
     public static final double DELAY_SECONDS = 0.200;
+    /** Lower clamp on the adaptive delay: below two send intervals at 10 Hz nothing buffers. */
+    public static final double MIN_DELAY_SECONDS = 0.150;
+    /** Upper clamp: past half a second the mirror is visibly behind the world it is drawn into. */
+    public static final double MAX_DELAY_SECONDS = 0.500;
     /** ±1 send interval around the target where the timescale is exactly 1. */
     static final double DEAD_ZONE_SECONDS = 0.100;
     static final double CATCHUP_TIMESCALE = 1.02;
@@ -32,9 +38,31 @@ public final class CoopMotionTimeline {
     /** Drift beyond this re-seats the cursor at the target instead of time-scaling toward it. */
     static final double RESEAT_SECONDS = 1.0;
 
+    private double delaySeconds = DELAY_SECONDS;
     private double latestSampleTime = Double.NaN;
     private double cursor = Double.NaN;
     private double driftEma;
+
+    /**
+     * Resizes the render delay (Phase 29 M2). Clamped to
+     * [{@link #MIN_DELAY_SECONDS}, {@link #MAX_DELAY_SECONDS}].
+     *
+     * <p><b>No teleport.</b> Changing the delay moves the <em>target</em>, not the cursor, so the
+     * move is absorbed by the same time-scaling that absorbs ordinary drift: a widening delay pulls
+     * the target back and the cursor runs at ×{@link #SLOWDOWN_TIMESCALE} until it has caught down.
+     * A step smaller than the dead zone is simply absorbed into it and produces no correction at all,
+     * which is the desirable outcome — the delay is a buffer target, not a position. The pump's own
+     * hysteresis keeps steps to whole send intervals and at least five seconds apart, so the cursor
+     * never chases a moving target.
+     */
+    public void setDelaySeconds(double seconds) {
+        delaySeconds = Math.max(MIN_DELAY_SECONDS, Math.min(MAX_DELAY_SECONDS, seconds));
+    }
+
+    /** The render delay currently in force, in game seconds. */
+    public double delaySeconds() {
+        return delaySeconds;
+    }
 
     /** Raises the newest-known sender stamp; older stamps (redundant sections) are ignored. */
     public void noteSample(double sampleTimeSeconds) {
@@ -51,7 +79,7 @@ public final class CoopMotionTimeline {
         if (Double.isNaN(latestSampleTime)) {
             return Double.NaN;
         }
-        double target = latestSampleTime - DELAY_SECONDS;
+        double target = latestSampleTime - delaySeconds;
         if (Double.isNaN(cursor)) {
             cursor = target;
             driftEma = 0.0;
@@ -87,5 +115,6 @@ public final class CoopMotionTimeline {
         latestSampleTime = Double.NaN;
         cursor = Double.NaN;
         driftEma = 0.0;
+        delaySeconds = DELAY_SECONDS;
     }
 }

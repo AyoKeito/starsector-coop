@@ -474,4 +474,100 @@ class CoopLinkQualityTest {
 
         assertTrue(quality.degraded(), "RTT == DEGRADED_RTT_MILLIS is degraded, per the constant's doc");
     }
+
+    // ---- Phase 29 M2: median RTT and inter-arrival jitter ----------------------------------------
+
+    private static void pong(CoopLinkQuality link, long seq, long sentAt, int rttMillis) {
+        link.notePingSent(seq, sentAt);
+        link.notePongReceived(seq, sentAt + rttMillis);
+    }
+
+    @Test
+    void theMedianIsUnknownUntilAPongIsMatchedAndIsTheSampleItselfAfterOne() {
+        CoopLinkQuality link = armed(1_000L);
+        assertNull(link.medianRttMillis());
+
+        pong(link, 1L, 1_000L, 80);
+
+        assertEquals(80, link.medianRttMillis());
+    }
+
+    @Test
+    void theMedianIgnoresTheTailThatTheP95Reports() {
+        CoopLinkQuality link = armed(1_000L);
+        long at = 1_000L;
+        for (int i = 0; i < 24; i++) {
+            pong(link, i, at += 100L, 50);
+        }
+        for (int i = 24; i < 32; i++) {
+            pong(link, i, at += 100L, 800);
+        }
+
+        assertEquals(50, link.medianRttMillis(), "three quarters of the ring is 50 ms");
+        assertEquals(800, link.p95RttMillis());
+    }
+
+    @Test
+    void aStreamArrivingOnAConstantIntervalHasNoJitter() {
+        CoopLinkQuality link = armed(1_000L);
+
+        for (long t = 1_000L; t <= 21_000L; t += 100L) {
+            link.noteStateSampleArrival(t);
+        }
+
+        assertEquals(0, link.jitterStdDevMillis());
+    }
+
+    @Test
+    void aStreamAlternatingFiftyAndOneFiftyMillisecondsReadsAboutFiftyMillisecondsOfJitter() {
+        CoopLinkQuality link = armed(1_000L);
+
+        long at = 1_000L;
+        for (int i = 0; i < 400; i++) {
+            at += (i % 2 == 0) ? 50L : 150L;
+            link.noteStateSampleArrival(at);
+        }
+
+        int jitter = link.jitterStdDevMillis();
+        assertTrue(jitter >= 42 && jitter <= 52,
+                "expected roughly a 50 ms standard deviation, got " + jitter);
+    }
+
+    @Test
+    void aGapPastTheCutoffIsNotJitterAndDoesNotWidenTheEstimate() {
+        CoopLinkQuality link = armed(1_000L);
+        long at = 1_000L;
+        for (int i = 0; i < 200; i++) {
+            at += 100L;
+            link.noteStateSampleArrival(at);
+        }
+        assertEquals(0, link.jitterStdDevMillis());
+
+        // The peer went into a battle for a minute: its pump was not running, so nothing about this
+        // gap describes the path.
+        at += 60_000L;
+        link.noteStateSampleArrival(at);
+        for (int i = 0; i < 20; i++) {
+            at += 100L;
+            link.noteStateSampleArrival(at);
+        }
+
+        assertEquals(0, link.jitterStdDevMillis(),
+                "a stall must not widen the interpolation delay for the minute after it");
+    }
+
+    @Test
+    void aSessionEdgeForgetsTheJitterHistory() {
+        CoopLinkQuality link = armed(1_000L);
+        long at = 1_000L;
+        for (int i = 0; i < 400; i++) {
+            at += (i % 2 == 0) ? 50L : 150L;
+            link.noteStateSampleArrival(at);
+        }
+        assertTrue(link.jitterStdDevMillis() > 0);
+
+        link.reset(at + 1_000L);
+
+        assertEquals(0, link.jitterStdDevMillis());
+    }
 }

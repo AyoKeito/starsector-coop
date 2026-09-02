@@ -132,6 +132,108 @@ class CoopDatagramRedundancyTest {
                 "chunk 0's redundant section must be chunk 0's previous send");
     }
 
+    // ---- Phase 29 M2: the depth escape hatch -----------------------------------------------------
+
+    @Test
+    void theDefaultDepthIsOne() {
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, redundancy.depth());
+    }
+
+    @Test
+    void depthTwoComposesThreeSectionsOldestFirst() {
+        redundancy.setDepth(2);
+
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 1L, 100L, "batch-1");
+        assertEquals(2, CoopMessages.parseDatagram(redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 2L, 200L, "batch-2"))
+                .sections().size(), "the second send has only one previous to carry");
+        String encoded = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 3L, 300L, "batch-3");
+
+        CoopMessages.Datagram datagram = CoopMessages.parseDatagram(encoded);
+        assertEquals(3, datagram.sections().size());
+        assertEquals(1L, datagram.sections().get(0).epoch());
+        assertEquals("batch-1", datagram.sections().get(0).body());
+        assertEquals(2L, datagram.sections().get(1).epoch());
+        assertEquals("batch-2", datagram.sections().get(1).body());
+        assertEquals(3L, datagram.sections().get(2).epoch());
+        assertEquals("batch-3", datagram.sections().get(2).body());
+    }
+
+    @Test
+    void depthNeverExceedsTwoAndNeverDropsBelowOne() {
+        redundancy.setDepth(9);
+        assertEquals(CoopDatagramRedundancy.MAX_DEPTH, redundancy.depth());
+        redundancy.setDepth(0);
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, redundancy.depth());
+        redundancy.setDepth(-3);
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, redundancy.depth());
+    }
+
+    @Test
+    void loweringTheDepthDropsTheSurplusOnTheVeryNextDatagram() {
+        redundancy.setDepth(2);
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 1L, 100L, "batch-1");
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 2L, 200L, "batch-2");
+
+        redundancy.setDepth(1);
+        String encoded = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 3L, 300L, "batch-3");
+
+        CoopMessages.Datagram datagram = CoopMessages.parseDatagram(encoded);
+        assertEquals(2, datagram.sections().size());
+        assertEquals("batch-2", datagram.sections().get(0).body(), "the eldest is the one dropped");
+    }
+
+    @Test
+    void theWatermarkAcceptsThreeSectionsAndDedupsTheOnesItHasSeen() {
+        redundancy.setDepth(2);
+        CoopDatagramWatermark watermark = new CoopDatagramWatermark();
+
+        String first = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 1L, 100L, "batch-1");
+        String second = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 2L, 200L, "batch-2");
+        String third = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 3L, 300L, "batch-3");
+
+        assertEquals(1, watermark.accept(CoopMessages.parseDatagram(first)).size());
+        assertEquals(1, watermark.accept(CoopMessages.parseDatagram(second)).size(),
+                "the carried copy of batch-1 has already been applied");
+        assertEquals(1, watermark.accept(CoopMessages.parseDatagram(third)).size());
+        assertEquals(3L, watermark.watermarkFor(SENDER, CoopMessages.Type.FLEET_SNAPSHOT));
+    }
+
+    @Test
+    void aDepthTwoDatagramRecoversTwoConsecutiveLostSends() {
+        redundancy.setDepth(2);
+        CoopDatagramWatermark watermark = new CoopDatagramWatermark();
+
+        String first = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 1L, 100L, "batch-1");
+        // Sends 2 and 3 are composed but never delivered - the whole point of depth 2.
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 2L, 200L, "batch-2");
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 3L, 300L, "batch-3");
+        String fourth = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.FLEET_SNAPSHOT, 4L, 400L, "batch-4");
+
+        watermark.accept(CoopMessages.parseDatagram(first));
+        java.util.List<CoopMessages.DatagramSection> fresh =
+                watermark.accept(CoopMessages.parseDatagram(fourth));
+
+        assertEquals(3, fresh.size(), "both lost sends plus the current one");
+        assertEquals("batch-2", fresh.get(0).body());
+        assertEquals("batch-3", fresh.get(1).body());
+        assertEquals("batch-4", fresh.get(2).body());
+    }
+
+    @Test
+    void resetPutsTheDepthBack() {
+        redundancy.setDepth(2);
+        redundancy.reset();
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, redundancy.depth());
+    }
+
     @Test
     void resetForgetsHeldSections() {
         redundancy.compose(TOKEN, SENDER, CoopMessages.Type.NPC_FLEET_MOTION, 1L, 100L, "batch-1");

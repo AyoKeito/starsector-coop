@@ -332,7 +332,7 @@ public class CoopSessionIntel extends BaseIntelPlugin {
         info.addPara("Datagram loss: %s", 3f, linkColor(link),
                 CoopSessionIntelModel.formatLoss(link.lossPercent()));
         info.addPara("State stream: %s     Path: %s", 3f, transportColor(link),
-                CoopSessionIntelModel.describeTransport(link.transport()),
+                CoopSessionIntelModel.describeStateStream(link.transport(), link.cadenceHz()),
                 CoopSessionIntelModel.describeUdpPath(link.udpInboundOk()));
         info.addPara("TCP quiet for %s", 3f, highlight,
                 CoopSessionIntelModel.formatDuration(link.tcpSilenceMillis()));
@@ -352,7 +352,7 @@ public class CoopSessionIntel extends BaseIntelPlugin {
                 CoopSessionIntelModel.formatRtt(peer.rttMillis()),
                 CoopSessionIntelModel.formatLoss(peer.lossPercent()));
         info.addPara("State stream: %s     Path: %s", 3f, transportColor(peer),
-                CoopSessionIntelModel.describeTransport(peer.transport()),
+                CoopSessionIntelModel.describeStateStream(peer.transport(), peer.cadenceHz()),
                 CoopSessionIntelModel.describeUdpPath(peer.udpInboundOk()));
     }
 

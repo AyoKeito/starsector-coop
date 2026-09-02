@@ -139,6 +139,27 @@ class CoopSessionIntelModelTest {
         assertFalse(CoopSessionIntelModel.degraded(sample(null, 0, "UDP")));
     }
 
+    // ---- Phase 29 M2: the cadence tier on the state-stream line ---------------------------------
+
+    @Test
+    void theStateStreamLineNamesThePathAndTheRate() {
+        assertEquals("UDP 10 Hz", CoopSessionIntelModel.describeStateStream(
+                CoopSessionIntelModel.TRANSPORT_UDP, 10));
+        assertEquals("TCP fallback 5 Hz", CoopSessionIntelModel.describeStateStream(
+                CoopSessionIntelModel.TRANSPORT_TCP_FALLBACK, 5));
+        assertEquals(CoopSessionIntelModel.UNKNOWN + " 10 Hz",
+                CoopSessionIntelModel.describeStateStream("", 10));
+        assertEquals("UDP", CoopSessionIntelModel.describeStateStream(
+                CoopSessionIntelModel.TRANSPORT_UDP, 0), "an unset rate says nothing rather than 0 Hz");
+    }
+
+    @Test
+    void aSampleBuiltWithoutACadenceCarriesTheDefaultTier() {
+        assertEquals(CoopSessionIntelModel.DEFAULT_CADENCE_HZ,
+                new CoopSessionIntelModel.LinkSample(1, 1, 0, true, "UDP", 0L).cadenceHz());
+        assertEquals(5, new CoopSessionIntelModel.LinkSample(1, 1, 0, true, "UDP", 0L, 5).cadenceHz());
+    }
+
     @Test
     void linkSampleNormalisesTransportAndKnowsTheFallback() {
         assertEquals("", new CoopSessionIntelModel.LinkSample(1, 1, 0, true, null, 0L).transport());

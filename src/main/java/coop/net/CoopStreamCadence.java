@@ -60,8 +60,9 @@ public final class CoopStreamCadence {
     }
 
     /**
-     * Retunes the interval (Phase 20.1 M2 UDP-blocked fallback: 100 ms on UDP, 200 ms once the stream
-     * is wrapped in TCP, back to 100 ms on recovery). Deliberately does <em>not</em> reset the timer:
+     * Retunes the interval. Since Phase 29 M2 the caller is the cadence tier — 100 ms at the default
+     * tier, 200 ms at the floor, which the TCP-wrapped fallback pins. Deliberately does <em>not</em>
+     * reset the timer:
      * the next send is due one new interval after the last one, so a change mid-stream neither stalls
      * the stream nor fires an immediate extra send.
      */

@@ -139,6 +139,73 @@ class CoopNpcFleetReplicatorTest {
         }
     }
 
+    // ---- Phase 29 M2: redundancy depth 2 ---------------------------------------------------------
+
+    @Test
+    void atDepthTwoAFullChunkStillFitsTheBudgetOnceBothBaselinesAreCarried() {
+        CoopNpcFleetReplicator replicator = replicator();
+        replicator.setRedundancyDepth(2);
+
+        // Three ticks: the third is the first one that carries two previous full sections plus its
+        // own delta, which is the largest datagram this configuration can produce.
+        replicator.sendMotionChunks(batch(150));
+        replicator.sendMotionChunks(batch(150));
+        sent.clear();
+        replicator.sendMotionChunks(batch(150));
+
+        assertFalse(sent.isEmpty());
+        boolean sawThreeSections = false;
+        List<CoopNpcFleetMotion> rebuilt = new ArrayList<>();
+        for (String raw : sent) {
+            assertTrue(bytes(raw) <= CoopNetService.MAX_DATAGRAM_BYTES,
+                    "composed datagram was " + bytes(raw) + " B at depth 2");
+            CoopMessages.Datagram datagram = CoopMessages.parseDatagram(raw);
+            if (datagram.sections().size() == 3) {
+                sawThreeSections = true;
+            }
+            List<String> bodies = new ArrayList<>();
+            for (CoopMessages.DatagramSection section : datagram.sections()) {
+                bodies.add(section.body());
+            }
+            List<List<CoopNpcFleetMotion>> decoded = CoopNpcFleetMotion.decodeDatagram(bodies);
+            rebuilt.addAll(decoded.get(decoded.size() - 1));
+        }
+
+        assertTrue(sawThreeSections, "depth 2 must actually put three sections on the wire");
+        assertEquals(batch(150), rebuilt, "the delta still resolves against the section before it");
+    }
+
+    @Test
+    void raisingTheDepthDropsTheBaselinesSoNothingIsSizedUnderTheOldInvariant() {
+        CoopNpcFleetReplicator replicator = replicator();
+
+        replicator.sendMotionChunks(batch(150));
+        replicator.sendMotionChunks(batch(150));
+        replicator.setRedundancyDepth(2);
+        sent.clear();
+        replicator.sendMotionChunks(batch(150));
+
+        for (String raw : sent) {
+            assertEquals(1, CoopMessages.parseDatagram(raw).sections().size(),
+                    "a depth change must re-pack from scratch, not reuse a differently sized batch");
+        }
+        assertEquals(2, replicator.redundancyDepth());
+    }
+
+    @Test
+    void theDepthIsClampedAndAResetPutsItBack() {
+        CoopNpcFleetReplicator replicator = replicator();
+
+        replicator.setRedundancyDepth(7);
+        assertEquals(coop.net.CoopDatagramRedundancy.MAX_DEPTH, replicator.redundancyDepth());
+        replicator.setRedundancyDepth(0);
+        assertEquals(coop.net.CoopDatagramRedundancy.DEFAULT_DEPTH, replicator.redundancyDepth());
+
+        replicator.setRedundancyDepth(2);
+        replicator.reset();
+        assertEquals(coop.net.CoopDatagramRedundancy.DEFAULT_DEPTH, replicator.redundancyDepth());
+    }
+
     @Test
     void aSmallBatchStillGoesOutAsOneChunk() {
         CoopNpcFleetReplicator replicator = replicator();

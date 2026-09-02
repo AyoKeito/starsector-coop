@@ -61,15 +61,18 @@ import java.util.function.Supplier;
 
 public class CoopNetPump implements EveryFrameScript {
     private static final long PING_INTERVAL_MILLIS = 3000L;
-    // Campaign fleet snapshots stream at 10 Hz over UDP (COOP_MP_DESIGN.md section 8.4).
-    private static final long FLEET_SNAPSHOT_INTERVAL_MILLIS = 100L;
+    // Campaign fleet snapshots stream at 10 Hz over UDP (COOP_MP_DESIGN.md section 8.4). Since
+    // Phase 29 M2 the rate is one of CoopCadenceTier's certified tiers rather than a fixed constant;
+    // this is the tier every session starts and re-starts at.
+    private static final long FLEET_SNAPSHOT_INTERVAL_MILLIS =
+            CoopCadenceTier.DEFAULT.intervalMillis();
     /**
-     * Phase 20.1 M2: the state streams drop to 5 Hz while they are wrapped in TCP. A TCP-carried
-     * stream pays head-of-line blocking on every lost segment, so halving the rate is what keeps the
-     * degraded mode usable rather than a stutter. (Phase 29 M2 later folds this into the floor tier
-     * of adaptive cadence — same mechanism, more tiers.)
+     * How long a chosen interpolation delay is held before another change is allowed. Five seconds is
+     * one {@code LINK_STATUS} interval: long enough that the delay is a setting rather than a signal
+     * the cursor is chasing, short enough that a link that genuinely turned jittery is accommodated
+     * inside the first few seconds of it.
      */
-    private static final long FALLBACK_STREAM_INTERVAL_MILLIS = 200L;
+    private static final long INTERP_DELAY_HOLD_MILLIS = 5_000L;
     /** How often each side reports what it is receiving. */
     private static final long LINK_STATUS_INTERVAL_MILLIS = 5_000L;
     /** How often the fallback/degraded rules are evaluated. Cheap; the rules are all time thresholds. */
@@ -81,6 +84,8 @@ public class CoopNetPump implements EveryFrameScript {
     /** Per-kind rate limit for the campaign-feed connection notices. */
     private static final long FEED_MIN_INTERVAL_MILLIS = 30_000L;
     private static final String FEED_FALLBACK = "fallback";
+    private static final String FEED_CADENCE_DOWN = "cadenceDown";
+    private static final String FEED_CADENCE_UP = "cadenceUp";
     private static final String FEED_FALLBACK_RECOVERED = "fallbackRecovered";
     private static final String FEED_DEGRADED = "degraded";
     private static final String FEED_DEGRADED_RECOVERED = "degradedRecovered";
@@ -281,6 +286,23 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean linkSupervisionArmed;
     /** Whether the state streams are currently wrapped in {@code STATE_DATAGRAM} TCP messages. */
     private boolean stateStreamFallbackActive;
+    /**
+     * Phase 29 M2 adaptive cadence. The host runs the controller and announces its answer on
+     * {@code LINK_STATUS}; the guest never evaluates one and applies what it is told, except that
+     * its own TCP fallback pins the floor locally. One decision-maker per link is what keeps both
+     * ends sending at the same rate, which is what makes an interpolation delay measured in send
+     * intervals mean the same thing on both sides.
+     */
+    private final CoopCadenceController cadenceController = new CoopCadenceController();
+    /** The tier this side's UDP state streams are sending at right now. */
+    private CoopCadenceTier stateStreamTier = CoopCadenceTier.DEFAULT;
+    /** The tier the peer last announced; the receive-side interval the interpolation delay is sized in. */
+    private CoopCadenceTier peerCadenceTier = CoopCadenceTier.DEFAULT;
+    /** The interpolation delay currently pushed into {@link #motionTimeline}, in milliseconds. */
+    private long interpolationDelayMillis =
+            Math.round(coop.fleet.CoopMotionTimeline.DELAY_SECONDS * 1000.0);
+    /** Wall clock of the last delay change; the hold half of the delay hysteresis. */
+    private long interpolationDelayChangedAtMillis;
     private long nextLinkStatusAtMillis;
     private long nextLinkEvalAtMillis;
     /** The peer's latest {@code LINK_STATUS}; the other half of the UDP-blocked evidence. */
@@ -745,6 +767,7 @@ public class CoopNetPump implements EveryFrameScript {
         Integer rttMillis = null;
         Integer lossPercent = null;
         String transport = null;
+        Integer cadenceHz = null;
         if (active) {
             long now = clockMillis.getAsLong();
             rttMillis = linkQuality.rttMillis();
@@ -752,10 +775,13 @@ public class CoopNetPump implements EveryFrameScript {
             transport = stateStreamFallbackActive
                     ? CoopHudState.TRANSPORT_TCP_FALLBACK
                     : CoopHudState.TRANSPORT_UDP;
+            // Phase 29 M2: the line only grows a cadence segment when the tier has left default;
+            // formatLine owns that rule, so what goes in here is simply the current tier.
+            cadenceHz = stateStreamTier.hz();
         }
 
         return new CoopHudState(badge, status, paused, pauseHolder, driftGameHours,
-                rttMillis, lossPercent, transport);
+                rttMillis, lossPercent, transport, cadenceHz);
     }
 
     /**
@@ -3404,6 +3430,14 @@ public class CoopNetPump implements EveryFrameScript {
             // and a redundant section covering a lost packet applies normally (oldest first). Chunks
             // of one tick share an epoch and are accepted once each.
             boolean[] fresh = datagramWatermark.acceptedMask(datagram);
+            // Phase 29 M2 jitter sample: one per FLEET_SNAPSHOT datagram whose own (last) section is
+            // new. The redundant earlier section is the previous send arriving a second time and
+            // would double-count every interval; a whole datagram that is pure duplicate contributes
+            // nothing, which is what makes the spacing a measurement of the path.
+            if (datagram.type() == CoopMessages.Type.FLEET_SNAPSHOT
+                    && fresh.length > 0 && fresh[fresh.length - 1]) {
+                linkQuality.noteStateSampleArrival(clockMillis.getAsLong());
+            }
             for (int i = 0; i < fresh.length; i++) {
                 if (!fresh[i]) {
                     continue;
@@ -4644,6 +4678,14 @@ public class CoopNetPump implements EveryFrameScript {
     private void handleLinkStatus(CoopMessages.Message message) {
         peerLinkStatus = CoopMessages.parseLinkStatus(message);
         peerLinkStatusAtMillis = clockMillis.getAsLong();
+        peerCadenceTier = peerLinkStatus.cadenceTier();
+        // Applied on arrival rather than at the next 1 s tick: the host pulls a LINK_STATUS forward
+        // precisely so the guest can follow the tier immediately, and waiting out the tick would
+        // spend most of the saving it was sent to buy. The guest's own fallback still outranks it.
+        if (service.role() == CoopConnectionRole.GUEST && !stateStreamFallbackActive) {
+            applyCadenceTier(peerCadenceTier, "host set " + peerCadenceTier.hz() + " Hz", true,
+                    peerLinkStatusAtMillis);
+        }
         // Phase 20.6: the partner's own reading, so the page can answer "does my partner see the
         // same numbers" without either player having to read a log.
         intelFeed.notePeerLink(peerLinkStatus);
@@ -4716,6 +4758,11 @@ public class CoopNetPump implements EveryFrameScript {
             nextLinkEvalAtMillis = now + LINK_EVAL_INTERVAL_MILLIS;
             boolean fallback = linkQuality.evaluateFallback(now, peerUdpInboundOkOrNull(now));
             applyStateStreamFallback(fallback, linkQuality.fallbackReason(), true, now);
+            // Order matters: the fallback flag is an input to the tier, and the tier is what actually
+            // sets the intervals. Running the cadence pick in the same tick is what makes the
+            // TCP-wrapped mode present as the pinned floor tier rather than as a second mechanism.
+            tickCadence(now, fallback);
+            tickInterpolationDelay(now);
             tickDegradedNotice(now);
             maybeLogGuestDoctor(now, stats);
             maybeDeclareLinkDead(now);
@@ -4756,6 +4803,174 @@ public class CoopNetPump implements EveryFrameScript {
         peerLinkStatusAtMillis = 0L;
         guestDoctorLogged = false;
         feedNextAtMillis.clear();
+        // Phase 29 M2: a session edge is not a connection event, so the tier goes back to default
+        // silently. Without this the next session would inherit the dead link's floor and spend its
+        // first thirty seconds at 5 Hz for no reason.
+        cadenceController.reset();
+        peerCadenceTier = CoopCadenceTier.DEFAULT;
+        applyCadenceTier(CoopCadenceTier.DEFAULT, "session edge", false, now);
+        interpolationDelayMillis = Math.round(coop.fleet.CoopMotionTimeline.DELAY_SECONDS * 1000.0);
+        interpolationDelayChangedAtMillis = 0L;
+        motionTimeline.setDelaySeconds(coop.fleet.CoopMotionTimeline.DELAY_SECONDS);
+    }
+
+    /**
+     * Phase 29 M2 cadence pick, on the 1 s supervision tick.
+     *
+     * <p>The host evaluates and announces; the guest applies. A tier change on the host pulls the
+     * next {@code LINK_STATUS} forward to <em>now</em> rather than waiting up to five seconds for the
+     * regular one: for those seconds the two ends would otherwise be sending at different rates, and
+     * the whole symmetry argument rests on them not doing that.
+     *
+     * <p>The guest's own fallback outranks the announcement. It is the only tier decision the guest
+     * makes, and it is not really a decision — a stream wrapped in TCP on this side is at the floor
+     * whatever the host believes about its own path.
+     */
+    private void tickCadence(long now, boolean fallbackActive) {
+        if (service.role() == CoopConnectionRole.HOST) {
+            CoopCadenceController.Decision decision = cadenceController.evaluate(now,
+                    linkQuality.medianRttMillis(), linkQuality.lossPercent(now),
+                    service.outboundBacklogged(), fallbackActive);
+            if (decision.changed()) {
+                applyCadenceTier(decision.tier(), decision.reason(), true, now);
+                nextLinkStatusAtMillis = now;
+            }
+        } else if (service.role() == CoopConnectionRole.GUEST) {
+            if (fallbackActive) {
+                applyCadenceTier(CoopCadenceTier.FLOOR, CoopCadenceController.REASON_FALLBACK,
+                        true, now);
+            } else {
+                applyCadenceTier(peerCadenceTier, "host set " + peerCadenceTier.hz() + " Hz",
+                        true, now);
+            }
+        }
+        applyRedundancyDepth(now);
+    }
+
+    /**
+     * Phase 29 M2 redundancy-depth escape hatch. A second previous section goes on the wire only
+     * while all three hold: the floor tier is in force, the loss that justifies it has actually been
+     * measured, and the path is still UDP.
+     *
+     * <p>Loss is taken as the worse of this side's measurement and the peer's reported one, because
+     * redundancy protects the <em>outbound</em> direction and only the peer measures that. A missing
+     * or stale peer report leaves the local figure, which on a symmetric path is the same story.
+     *
+     * <p>The two exclusions are not symmetry for its own sake. On the TCP fallback the transport is
+     * already reliable, so a third copy is pure duplicated bytes through a head-of-line-blocked
+     * socket; and a floor tier chosen because the outbound queue is backed up would be made strictly
+     * worse by sending more per datagram.
+     */
+    private void applyRedundancyDepth(long now) {
+        int loss = linkQuality.lossPercent(now);
+        if (peerLinkStatus != null && now - peerLinkStatusAtMillis <= PEER_LINK_STATUS_FRESH_MILLIS) {
+            loss = Math.max(loss, peerLinkStatus.lossPercent());
+        }
+        boolean deep = stateStreamTier == CoopCadenceTier.FLOOR
+                && !stateStreamFallbackActive
+                && loss >= CoopCadenceController.DOWNSHIFT_LOSS_PERCENT;
+        int depth = deep ? CoopDatagramRedundancy.MAX_DEPTH : CoopDatagramRedundancy.DEFAULT_DEPTH;
+        datagramRedundancy.setDepth(depth);
+        npcFleetReplicator.setRedundancyDepth(depth);
+    }
+
+    /**
+     * The single point where a cadence tier becomes the intervals both state streams send at
+     * (Phase 29 M2). Idempotent: the guest calls it every tick with whatever the host announced, and
+     * a tier that has not moved costs one comparison.
+     *
+     * @param announce false on the session edges, where the change is bookkeeping rather than an
+     *                 event a player wants a banner for
+     */
+    private void applyCadenceTier(CoopCadenceTier tier, String reason, boolean announce, long now) {
+        if (tier == null || tier == stateStreamTier) {
+            return;
+        }
+        boolean up = tier.ordinal() > stateStreamTier.ordinal();
+        stateStreamTier = tier;
+        fleetSnapshotCadence.setIntervalMillis(tier.intervalMillis());
+        npcFleetReplicator.setMotionIntervalMillis(tier.intervalMillis());
+        if (!announce) {
+            return;
+        }
+        CoopLog.info(CoopNetPump.class, "Coop state stream cadence -> " + tier.hz() + " Hz ("
+                + tier.intervalMillis() + " ms, " + tier + ") as " + service.role()
+                + "; reason=" + reason
+                + " rttP50=" + linkQuality.medianRttMillis()
+                + " loss=" + linkQuality.lossPercent(now) + "%"
+                + " backlog=" + service.outboundQueueDepth()
+                + " fallback=" + stateStreamFallbackActive);
+        postFeed(up ? FEED_CADENCE_UP : FEED_CADENCE_DOWN, now,
+                "Co-op: state stream " + tier.hz() + " Hz - " + reason,
+                up ? FEED_GOOD_COLOR : FEED_WARN_COLOR);
+    }
+
+    /**
+     * Phase 29 M2 adaptive interpolation delay, on the same 1 s tick and on both roles. Mirror's
+     * dynamic-adjustment formula: how many whole send intervals it takes to cover one interval plus a
+     * standard deviation of jitter, plus one, clamped to
+     * [{@link coop.fleet.CoopMotionTimeline#MIN_DELAY_SECONDS},
+     * {@link coop.fleet.CoopMotionTimeline#MAX_DELAY_SECONDS}].
+     *
+     * <p>The interval is the <em>peer's</em> announced tier, because the delay sizes a buffer of what
+     * the peer sends. On a clean link at the default tier the formula returns exactly the M1 constant
+     * of 200 ms; at the floor tier with no jitter, 400 ms.
+     *
+     * <p>Two hysteresis rules keep the cursor from chasing the target it is measured against: a new
+     * value has to differ by at least a whole send interval, and any value is held
+     * {@link #INTERP_DELAY_HOLD_MILLIS}. The one exception is a target sitting on a clamp bound —
+     * at the floor tier the clamp compresses the reachable targets to 400 and 500 ms, less than one
+     * interval apart, and without the exception the delay would be pinned at 400 forever on exactly
+     * the jittery links the adaptation exists for.
+     */
+    private void tickInterpolationDelay(long now) {
+        long interval = peerCadenceTier.intervalMillis();
+        long jitter = linkQuality.jitterStdDevMillis();
+        long steps = (long) Math.ceil((double) (interval + jitter) / interval) + 1L;
+        long minDelay = Math.round(coop.fleet.CoopMotionTimeline.MIN_DELAY_SECONDS * 1000.0);
+        long maxDelay = Math.round(coop.fleet.CoopMotionTimeline.MAX_DELAY_SECONDS * 1000.0);
+        long target = Math.max(minDelay, Math.min(maxDelay, steps * interval));
+        if (target == interpolationDelayMillis) {
+            return;
+        }
+        boolean atClampBound = target == minDelay || target == maxDelay;
+        if (!atClampBound && Math.abs(target - interpolationDelayMillis) < interval) {
+            return;
+        }
+        if (interpolationDelayChangedAtMillis != 0L
+                && now - interpolationDelayChangedAtMillis < INTERP_DELAY_HOLD_MILLIS) {
+            return;
+        }
+        interpolationDelayMillis = target;
+        interpolationDelayChangedAtMillis = now;
+        motionTimeline.setDelaySeconds(target / 1000.0);
+        CoopLog.info(CoopNetPump.class, "Coop interpolation delay -> " + target
+                + " ms (peer " + peerCadenceTier.hz() + " Hz, jitter sigma " + jitter + " ms)");
+    }
+
+    /** The interpolation delay currently in force, in milliseconds; test/bridge read. */
+    long interpolationDelayMillis() {
+        return interpolationDelayMillis;
+    }
+
+    /** The tier this side's state streams are sending at; test/bridge read. */
+    CoopCadenceTier stateStreamTier() {
+        return stateStreamTier;
+    }
+
+    /** The tier the peer last announced; test read. */
+    CoopCadenceTier peerCadenceTier() {
+        return peerCadenceTier;
+    }
+
+    /** The NPC motion stream's send interval; test read that the two cadences move together. */
+    long npcMotionIntervalMillis() {
+        return npcFleetReplicator.motionIntervalMillis();
+    }
+
+    /** The state streams' redundancy depth; test read. */
+    int stateStreamRedundancyDepth() {
+        return datagramRedundancy.depth();
     }
 
     /** The peer's UDP reading while it is still fresh enough to mean anything, else null. */
@@ -4767,23 +4982,28 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     /**
-     * Applies a fallback transition: both stream cadences drop to 5 Hz (and return to 10 Hz), the
-     * transition is logged with its numbers, and the player gets one feed line.
+     * Applies a fallback transition: the transport the state streams ride on changes, the transition
+     * is logged with its numbers, and the player gets one feed line.
+     *
+     * <p><b>What this method no longer does (Phase 29 M2): set the send intervals.</b> The reduced
+     * rate on the TCP path used to be a second cadence mechanism living here, with its own pair of
+     * constants and its own recovery edge. It is now the floor tier of
+     * {@link CoopCadenceController}, pinned for as long as {@link #stateStreamFallbackActive} holds
+     * and released through the same thirty-second clean window as any other downshift — so the
+     * degraded mode has no code path of its own to develop its own bugs in. All that is left here is
+     * the transport and the announcement.
      */
     private void applyStateStreamFallback(boolean active, String reason, boolean announce, long now) {
         if (active == stateStreamFallbackActive) {
             return;
         }
         stateStreamFallbackActive = active;
-        long interval = active ? FALLBACK_STREAM_INTERVAL_MILLIS : FLEET_SNAPSHOT_INTERVAL_MILLIS;
-        fleetSnapshotCadence.setIntervalMillis(interval);
-        npcFleetReplicator.setMotionIntervalMillis(interval);
         if (!announce) {
             return;
         }
         CoopLog.info(CoopNetPump.class, "Coop state stream "
                 + (active ? "switching to TCP fallback" : "returning to UDP")
-                + " at " + interval + " ms (" + reason
+                + " (" + reason
                 + "; udpSilence=" + linkQuality.udpSilenceMillis(now)
                 + " ms tcpSilence=" + linkQuality.tcpSilenceMillis(now)
                 + " ms peerUdpOk=" + peerUdpInboundOkOrNull(now) + ")");
@@ -4868,12 +5088,14 @@ public class CoopNetPump implements EveryFrameScript {
         // is the whole reason 20.6 was scheduled to ride 20.1 — the data source already exists at
         // exactly the rate a page wants to be refreshed at.
         intelFeed.publishSession(service.role(), hudState(false).status(), remoteDisplayName());
-        intelFeed.publishLink(linkQuality.snapshot(now), linkQuality.transport());
+        intelFeed.publishLink(linkQuality.snapshot(now), linkQuality.transport(),
+                stateStreamTier.hz());
         if (!service.isConnected()) {
             return;
         }
         CoopMessages.Message status = CoopMessages.linkStatus(sessionState.sessionId(),
-                service.nextSeq(), now, linkQuality.snapshot(now), linkQuality.transport(), stats);
+                service.nextSeq(), now, linkQuality.snapshot(now), linkQuality.transport(),
+                stateStreamTier.hz(), stats);
         service.send(status);
         log("outbound", status);
     }

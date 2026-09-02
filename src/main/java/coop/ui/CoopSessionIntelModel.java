@@ -64,6 +64,13 @@ public record CoopSessionIntelModel(CoopConnectionRole localRole,
     public static final String UNKNOWN = "n/a";
 
     /**
+     * Mirrors {@code CoopCadenceTier.DEFAULT.hz()}, which lives in {@code coop.net}. Duplicated for
+     * the same reason the degraded thresholds below are: this file is the engine-free UI model and
+     * the value only ever decides wording.
+     */
+    public static final int DEFAULT_CADENCE_HZ = 10;
+
+    /**
      * Mirrors {@code CoopLinkQuality.DEGRADED_RTT_MILLIS}, which is package-private in
      * {@code coop.net} and therefore not readable from here. Duplicated rather than widened because
      * this copy decides a text colour and nothing else - if the two ever drift, the page paints a
@@ -109,15 +116,24 @@ public record CoopSessionIntelModel(CoopConnectionRole localRole,
      * @param udpInboundOk     inbound UDP was seen recently
      * @param transport        {@link #TRANSPORT_UDP} or {@link #TRANSPORT_TCP_FALLBACK}
      * @param tcpSilenceMillis how long the TCP channel has been quiet
+     * @param cadenceHz        the state streams' current cadence tier, in hertz
      */
     public record LinkSample(Integer rttMillis,
                              Integer p95RttMillis,
                              int lossPercent,
                              boolean udpInboundOk,
                              String transport,
-                             long tcpSilenceMillis) {
+                             long tcpSilenceMillis,
+                             int cadenceHz) {
         public LinkSample {
             transport = transport == null ? "" : transport;
+        }
+
+        /** Pre-Phase-29-M2 shape, defaulting to the tier every build before M2 ran at. */
+        public LinkSample(Integer rttMillis, Integer p95RttMillis, int lossPercent,
+                          boolean udpInboundOk, String transport, long tcpSilenceMillis) {
+            this(rttMillis, p95RttMillis, lossPercent, udpInboundOk, transport, tcpSilenceMillis,
+                    DEFAULT_CADENCE_HZ);
         }
 
         /** The state stream is wrapped in TCP because UDP is being eaten. */
@@ -268,6 +284,16 @@ public record CoopSessionIntelModel(CoopConnectionRole localRole,
         }
         boolean slow = sample.rttMillis() != null && sample.rttMillis() >= DEGRADED_RTT_MILLIS;
         return slow || sample.lossPercent() >= DEGRADED_LOSS_PERCENT;
+    }
+
+    /**
+     * The state-stream line's subject: what carries it and how fast, e.g. {@code UDP 10 Hz} or
+     * {@code TCP fallback 5 Hz}. Both halves in one phrase because they are one fact — the floor tier
+     * and the TCP path are the same degraded mode wearing two labels.
+     */
+    public static String describeStateStream(String transport, int cadenceHz) {
+        String path = describeTransport(transport);
+        return cadenceHz <= 0 ? path : path + " " + cadenceHz + " Hz";
     }
 
     /** The one-phrase verdict on the inbound UDP path. */

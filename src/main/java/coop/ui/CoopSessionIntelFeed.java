@@ -124,11 +124,18 @@ public final class CoopSessionIntelFeed {
      * it is what fills the history ring, and the ring's five-minute span is a consequence of that
      * cadence.
      */
+    public void publishLink(Integer rttMillis, Integer p95RttMillis, int lossPercent,
+                            boolean udpInboundOk, String transport, long tcpSilenceMillis) {
+        publishLink(rttMillis, p95RttMillis, lossPercent, udpInboundOk, transport, tcpSilenceMillis,
+                CoopSessionIntelModel.DEFAULT_CADENCE_HZ);
+    }
+
+    /** As above, carrying the Phase 29 M2 cadence tier this side's state streams are sending at. */
     public synchronized void publishLink(Integer rttMillis, Integer p95RttMillis, int lossPercent,
                                          boolean udpInboundOk, String transport,
-                                         long tcpSilenceMillis) {
+                                         long tcpSilenceMillis, int cadenceHz) {
         this.localLink = new CoopSessionIntelModel.LinkSample(rttMillis, p95RttMillis, lossPercent,
-                udpInboundOk, transport, tcpSilenceMillis);
+                udpInboundOk, transport, tcpSilenceMillis, cadenceHz);
         history.addLast(new CoopSessionIntelModel.HistoryPoint(
                 rttMillis == null || rttMillis < 0 ? null : rttMillis,
                 lossPercent));
@@ -142,11 +149,16 @@ public final class CoopSessionIntelFeed {
      * accessors only, so a field added to {@code CoopLinkQuality.Snapshot} does not break this.
      */
     public void publishLink(CoopLinkQuality.Snapshot snapshot, String transport) {
+        publishLink(snapshot, transport, CoopSessionIntelModel.DEFAULT_CADENCE_HZ);
+    }
+
+    /** The same adapter, carrying the cadence tier the pump has applied to its state streams. */
+    public void publishLink(CoopLinkQuality.Snapshot snapshot, String transport, int cadenceHz) {
         if (snapshot == null) {
             return;
         }
         publishLink(snapshot.rttMillis(), snapshot.p95RttMillis(), snapshot.lossPercent(),
-                snapshot.udpInboundOk(), transport, snapshot.tcpSilenceMillis());
+                snapshot.udpInboundOk(), transport, snapshot.tcpSilenceMillis(), cadenceHz);
     }
 
     /**
@@ -160,15 +172,22 @@ public final class CoopSessionIntelFeed {
         notePeerLink(status.rttMillis() < 0 ? null : status.rttMillis(),
                 status.p95RttMillis() < 0 ? null : status.p95RttMillis(),
                 status.lossPercent(), status.udpInboundOk(), status.transport(),
-                status.tcpSilenceMillis());
+                status.tcpSilenceMillis(), status.cadenceTier().hz());
     }
 
     /** The primitive form, for callers that have the numbers but not the message. */
+    public void notePeerLink(Integer rttMillis, Integer p95RttMillis, int lossPercent,
+                             boolean udpInboundOk, String transport, long tcpSilenceMillis) {
+        notePeerLink(rttMillis, p95RttMillis, lossPercent, udpInboundOk, transport, tcpSilenceMillis,
+                CoopSessionIntelModel.DEFAULT_CADENCE_HZ);
+    }
+
+    /** The primitive form carrying the cadence tier the peer announced. */
     public synchronized void notePeerLink(Integer rttMillis, Integer p95RttMillis, int lossPercent,
                                           boolean udpInboundOk, String transport,
-                                          long tcpSilenceMillis) {
+                                          long tcpSilenceMillis, int cadenceHz) {
         this.peerLink = new CoopSessionIntelModel.LinkSample(rttMillis, p95RttMillis, lossPercent,
-                udpInboundOk, transport, tcpSilenceMillis);
+                udpInboundOk, transport, tcpSilenceMillis, cadenceHz);
         this.peerLinkAtMillis = now();
     }
 

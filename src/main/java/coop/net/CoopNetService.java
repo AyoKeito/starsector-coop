@@ -742,6 +742,20 @@ public class CoopNetService {
     }
 
     /**
+     * Phase 29 M2 cadence input: whether any peer's outbound TCP queue has reached the depth at which
+     * this transport starts coalescing ({@link #COALESCE_BACKLOG_MESSAGES}).
+     *
+     * <p>That threshold is the right one to reuse rather than invent a second number: it is already
+     * defined as "this socket is not draining", it is where the transport itself changes behaviour,
+     * and a state stream that keeps sending at full rate into a socket the OS is not emptying makes
+     * the arrears worse rather than the game smoother. Derived from {@link #outboundQueueDepth()} so
+     * a test's fake service only has to override the one method.
+     */
+    public boolean outboundBacklogged() {
+        return outboundQueueDepth() >= COALESCE_BACKLOG_MESSAGES;
+    }
+
+    /**
      * Coalescing identity, or null for "never coalesce this".
      *
      * <p>The whitelist is only whole-state snapshots, where an older copy carries strictly less

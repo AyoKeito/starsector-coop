@@ -443,6 +443,39 @@ class CoopMessagesTest {
         assertTrue(parsed.udpInboundOk());
     }
 
+    // ---- Phase 29 M2: the announced cadence tier -------------------------------------------------
+
+    @Test
+    void theAnnouncedCadenceTierRoundTrips() {
+        CoopMessages.Message message = CoopMessages.linkStatus("session-a", 4L, 1234L,
+                new CoopLinkQuality.Snapshot(20, 30, 0, true, 0L, 0L),
+                CoopLinkQuality.TRANSPORT_UDP, CoopCadenceTier.FLOOR.hz(),
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, ""));
+
+        CoopMessages.LinkStatus parsed =
+                CoopMessages.parseLinkStatus(CoopMessages.decode(CoopMessages.encode(message)));
+
+        assertEquals(5, parsed.cadenceHz());
+        assertEquals(CoopCadenceTier.FLOOR, parsed.cadenceTier());
+    }
+
+    @Test
+    void aLinkStatusWithoutTheCadenceFieldParsesAsTheDefaultTier() {
+        // Byte-for-byte what a pre-Phase-29-M2 peer puts on the wire: every field but cadenceHz.
+        CoopMessages.Message legacy = new CoopMessages.Message(CoopMessages.Type.LINK_STATUS,
+                "session-a", 4L, 1234L,
+                "{\"rttMillis\":40,\"p95RttMillis\":60,\"lossPercent\":1,\"udpInboundOk\":\"true\","
+                        + "\"transport\":\"UDP\",\"tcpSilenceMillis\":10,\"droppedTokenMismatch\":0,"
+                        + "\"droppedForeignSource\":0,\"pathValidations\":0,\"icmpTransients\":0,"
+                        + "\"escalatedToTcp\":0}");
+
+        CoopMessages.LinkStatus parsed = CoopMessages.parseLinkStatus(legacy);
+
+        assertEquals(10, parsed.cadenceHz(),
+                "field absent and 10 Hz are the same statement about that peer");
+        assertEquals(CoopCadenceTier.DEFAULT, parsed.cadenceTier());
+    }
+
     /**
      * The wrapped payload contains unit separators and can contain newlines; both would break the
      * JSON line framing if the escape were not exact.

@@ -13,6 +13,7 @@ import coop.util.CoopDebug;
 import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -97,12 +98,20 @@ public final class CoopNpcFleetReplicator {
     /** Phase 20.1 M2: the transport router, not the raw UDP send — see {@link coop.net.CoopStateStreamSink}. */
     private final coop.net.CoopStateStreamSink stateStreamSink;
     /**
-     * Phase 20 M4: what each chunk index carried last tick, which is that chunk's delta baseline and
-     * its redundant full section. Keyed by chunk index rather than by fleet because a chunk's
-     * membership is whatever the packer put there — the receiver resolves a delta against the
-     * section physically before it in the same datagram, so the two must agree on the same slice.
+     * Phase 20 M4: what each chunk index carried on its last {@link #redundancyDepth} ticks, oldest
+     * first. The newest is that chunk's delta baseline; all of them ride along as redundant full
+     * sections. Keyed by chunk index rather than by fleet because a chunk's membership is whatever
+     * the packer put there — the receiver resolves a delta against the section physically before it
+     * in the same datagram, so the two must agree on the same slice.
      */
-    private final Map<Integer, MotionChunk> previousChunks = new HashMap<>();
+    private final Map<Integer, ArrayDeque<MotionChunk>> previousChunks = new HashMap<>();
+    /**
+     * Phase 29 M2: how many previous sends of each chunk ride along as redundancy. 1 normally, 2
+     * while the pump's cadence controller is holding the floor tier for a loss reason on a UDP path
+     * (see {@link coop.net.CoopDatagramRedundancy}). Depth is part of the chunk-sizing invariant, so
+     * changing it drops the held baselines and re-packs from scratch.
+     */
+    private int redundancyDepth = coop.net.CoopDatagramRedundancy.DEFAULT_DEPTH;
     /** Cached {@code getMaxSensorRangeToDetect} answers, keyed observer-then-target; see the constants. */
     private final Map<RadiusKey, Float> radiusCache = new HashMap<>();
     private long radiusCacheExpiresAtMillis;
@@ -143,11 +152,44 @@ public final class CoopNpcFleetReplicator {
     }
 
     /**
-     * Retunes the motion cadence (Phase 20.1 M2): 100 ms on UDP, 200 ms while the stream is wrapped
-     * in TCP. The pump owns the decision and drives both stream cadences together.
+     * Retunes the motion cadence: 100 ms at the default cadence tier, 200 ms at the floor. The pump
+     * owns the decision ({@link coop.net.CoopCadenceController}) and drives both UDP state-stream
+     * cadences together, so the receiver's interpolation delay — measured in send intervals — means
+     * the same thing for both streams.
      */
     public void setMotionIntervalMillis(long intervalMillis) {
         motionCadence.setIntervalMillis(intervalMillis);
+    }
+
+    /**
+     * Sets the motion stream's redundancy depth (Phase 29 M2), clamped to
+     * [{@link coop.net.CoopDatagramRedundancy#DEFAULT_DEPTH},
+     * {@link coop.net.CoopDatagramRedundancy#MAX_DEPTH}].
+     *
+     * <p>A change discards every held baseline. It has to: each chunk was packed against the sizing
+     * invariant of the depth in force when it was packed, and keeping a depth-1-sized batch as one of
+     * three sections is exactly the over-budget datagram the invariant exists to prevent. The cost is
+     * one tick of full-form, no-redundancy sends while the chunks re-pack — cheaper than the
+     * fragmentation it avoids, and depth changes are minutes apart by the controller's hysteresis.
+     */
+    public void setRedundancyDepth(int depth) {
+        int clamped = Math.max(coop.net.CoopDatagramRedundancy.DEFAULT_DEPTH,
+                Math.min(coop.net.CoopDatagramRedundancy.MAX_DEPTH, depth));
+        if (clamped == redundancyDepth) {
+            return;
+        }
+        redundancyDepth = clamped;
+        previousChunks.clear();
+    }
+
+    /** The motion stream's redundancy depth currently in force. */
+    public int redundancyDepth() {
+        return redundancyDepth;
+    }
+
+    /** The motion stream's send interval in stream-time milliseconds; diagnostics and tests. */
+    public long motionIntervalMillis() {
+        return motionCadence.intervalMillis();
     }
 
     /**
@@ -209,6 +251,7 @@ public final class CoopNpcFleetReplicator {
         motionSmoother.reset();
         motionCadence.reset();
         previousChunks.clear();
+        redundancyDepth = coop.net.CoopDatagramRedundancy.DEFAULT_DEPTH;
         radiusCache.clear();
         radiusCacheExpiresAtMillis = 0L;
         nextRangeLogAtMillis = 0L;
@@ -359,33 +402,39 @@ public final class CoopNpcFleetReplicator {
      * packet it was supposed to protect. All chunks of a tick share one epoch — the receiver's
      * watermark accepts an equal epoch for a chunk it has not seen — so they may arrive in any order.
      *
-     * <p><b>Why a chunk is packed to half the budget in FULL form.</b> Sizing a chunk against only
-     * the datagram it is going out in is a trap that takes a tick to spring: this tick's batch is
+     * <p><b>Why a chunk is packed to a fraction of the budget in FULL form.</b> Sizing a chunk against
+     * only the datagram it is going out in is a trap that takes a tick to spring: this tick's batch is
      * <em>next</em> tick's redundant full section, so a chunk packed to fill the budget on its own
      * guarantees an over-budget datagram the moment it acquires a baseline. The stable invariant is
-     * therefore per chunk — {@code overhead + 2 * fullFormBytes <= budget} — which makes any two
-     * consecutive chunks fit together, since a delta section is never larger than the full form of
-     * the same records. The observed cost is a first send at ~50% of the budget and every send after
-     * it at ~90%.
+     * therefore per chunk — {@code overhead + (depth + 1) * fullFormBytes <= budget} — which makes any
+     * {@code depth + 1} consecutive sends of a chunk fit together, since a delta section is never
+     * larger than the full form of the same records. At the default depth of 1 that is the original
+     * half-budget rule; at the Phase 29 M2 loss depth of 2 it is a third, so a chunk simply carries
+     * fewer fleets rather than the datagram escalating onto TCP.
      */
     void sendMotionChunks(List<CoopNpcFleetMotion> motions) {
         String token = CoopMessages.wireToken(sessionState.sessionId());
         String senderId = CoopMessages.wireToken(sessionState.localPlayerId());
         long epoch = streamClock.nextEpoch();
         long gameTimeMillis = streamClock.gameTimeMillis();
-        Map<Integer, MotionChunk> next = new HashMap<>();
+        Map<Integer, ArrayDeque<MotionChunk>> next = new HashMap<>();
         int index = 0;
         int chunk = 0;
         while (index < motions.size()) {
-            MotionChunk previous = previousChunks.get(chunk);
+            ArrayDeque<MotionChunk> held = previousChunks.get(chunk);
+            List<MotionChunk> previousSends = held == null ? List.of() : new ArrayList<>(held);
+            // The delta baseline is the newest held send: the section physically before the current
+            // one in the packet, which is what the receiver resolves the delta against.
+            MotionChunk previous = previousSends.isEmpty()
+                    ? null : previousSends.get(previousSends.size() - 1);
             Map<String, CoopNpcFleetMotion> baseline = previous == null
                     ? Map.of() : indexById(previous.motions());
-            String fullBody = previous == null ? null : previous.fullBody();
-            int overhead = composedOverheadBytes(token, senderId, chunk, previous, epoch,
+            int overhead = composedOverheadBytes(token, senderId, chunk, previousSends, epoch,
                     gameTimeMillis) + STAMP_GROWTH_SLACK_BYTES;
-            int used = overhead
-                    + (fullBody == null ? 0 : CoopMessages.utf8Length(fullBody))
-                    + CoopNpcFleetMotion.MODE_DELTA.length();
+            int used = overhead + CoopNpcFleetMotion.MODE_DELTA.length();
+            for (MotionChunk heldSend : previousSends) {
+                used += CoopMessages.utf8Length(heldSend.fullBody());
+            }
             // The full-form size of what this chunk is taking, which is what it will cost as next
             // tick's baseline section.
             int fullForm = CoopNpcFleetMotion.MODE_FULL.length();
@@ -402,7 +451,7 @@ public final class CoopNpcFleetReplicator {
                 int cost = 1 + CoopMessages.utf8Length(record);
                 int fullCost = 1 + CoopMessages.utf8Length(fullRecord);
                 boolean overNow = used + cost > CoopNetService.MAX_DATAGRAM_BYTES;
-                boolean overNextTick = overhead + 2 * (fullForm + fullCost)
+                boolean overNextTick = overhead + (redundancyDepth + 1) * (fullForm + fullCost)
                         > CoopNetService.MAX_DATAGRAM_BYTES;
                 if (!taken.isEmpty() && (overNow || overNextTick)) {
                     break;
@@ -421,12 +470,16 @@ public final class CoopNpcFleetReplicator {
                     break;
                 }
             }
-            stateStreamSink.send(coop.net.CoopDatagramRedundancy.composeWithBaseline(
+            stateStreamSink.send(coop.net.CoopDatagramRedundancy.composeWithBaselines(
                     token, senderId, CoopMessages.Type.NPC_FLEET_MOTION,
-                    previous == null ? epoch : previous.epoch(),
-                    previous == null ? gameTimeMillis : previous.gameTimeMillis(),
-                    chunk, fullBody, epoch, gameTimeMillis, delta.toString()));
-            next.put(chunk, new MotionChunk(taken, full.toString(), epoch, gameTimeMillis));
+                    baselineSections(previousSends, chunk),
+                    epoch, gameTimeMillis, chunk, delta.toString()));
+            ArrayDeque<MotionChunk> updated = new ArrayDeque<>(previousSends);
+            updated.addLast(new MotionChunk(taken, full.toString(), epoch, gameTimeMillis));
+            while (updated.size() > redundancyDepth) {
+                updated.removeFirst();
+            }
+            next.put(chunk, updated);
             chunk++;
         }
         // Chunks the tick no longer fills must not keep a stale baseline: the next tick that reaches
@@ -435,15 +488,26 @@ public final class CoopNpcFleetReplicator {
         previousChunks.putAll(next);
     }
 
-    /** The composed datagram's size with both bodies empty; adding the body lengths is then exact. */
+    /** The held sends as wire sections carrying their full bodies, oldest first. */
+    private static List<CoopMessages.DatagramSection> baselineSections(List<MotionChunk> previousSends,
+                                                                      int chunk) {
+        List<CoopMessages.DatagramSection> sections = new ArrayList<>(previousSends.size());
+        for (MotionChunk send : previousSends) {
+            sections.add(new CoopMessages.DatagramSection(send.epoch(), send.gameTimeMillis(),
+                    chunk, send.fullBody()));
+        }
+        return sections;
+    }
+
+    /** The composed datagram's size with every body empty; adding the body lengths is then exact. */
     private static int composedOverheadBytes(String token, String senderId, int chunk,
-                                             MotionChunk previous, long epoch, long gameTimeMillis) {
-        CoopMessages.DatagramSection current =
-                new CoopMessages.DatagramSection(epoch, gameTimeMillis, chunk, "");
-        List<CoopMessages.DatagramSection> probe = previous == null
-                ? List.of(current)
-                : List.of(new CoopMessages.DatagramSection(previous.epoch(),
-                        previous.gameTimeMillis(), chunk, ""), current);
+                                             List<MotionChunk> previousSends, long epoch,
+                                             long gameTimeMillis) {
+        List<CoopMessages.DatagramSection> probe = new ArrayList<>(previousSends.size() + 1);
+        for (MotionChunk send : previousSends) {
+            probe.add(new CoopMessages.DatagramSection(send.epoch(), send.gameTimeMillis(), chunk, ""));
+        }
+        probe.add(new CoopMessages.DatagramSection(epoch, gameTimeMillis, chunk, ""));
         return CoopMessages.datagramBytes(token, senderId,
                 CoopMessages.Type.NPC_FLEET_MOTION, probe);
     }

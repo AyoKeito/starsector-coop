@@ -43,8 +43,22 @@ public final class CoopLinkQuality {
      * a 3 s ping cadence 16 is 48 s of unanswered pings — far past anything a live link produces.
      */
     static final int MAX_OUTSTANDING_PINGS = 16;
-    /** RTT samples kept for the p95. 32 samples at 3 s is ~1.5 minutes of link history. */
+    /** RTT samples kept for the p95 and the p50. 32 samples at 3 s is ~1.5 minutes of link history. */
     static final int RTT_SAMPLE_RING = 32;
+    /**
+     * Smoothing factor for the inter-arrival jitter estimator (Phase 29 M2), Mirror's
+     * dynamic-adjustment shape: {@code 2 / (N + 1)} for a horizon of N samples, with N = 20 — two
+     * seconds of a 10 Hz state stream. At the 5 Hz floor tier the same alpha is a four-second
+     * horizon, which reads slower and more conservatively; that is the right direction, because the
+     * floor tier has already widened the interpolation delay on its own.
+     */
+    static final double JITTER_EMA_ALPHA = 2.0 / 21.0;
+    /**
+     * Inter-arrival gaps longer than this are not jitter. A peer in combat, a coordinated save, a
+     * loading screen: the pump on the far side simply was not running, and feeding that gap to the
+     * estimator would widen the interpolation delay to its clamp for a minute afterwards.
+     */
+    static final long JITTER_GAP_MILLIS = 2_000L;
     /** Sliding window the raw-loss estimate is computed over. */
     static final long LOSS_WINDOW_MILLIS = 10_000L;
     /** Hard cap on window entries so a flood cannot grow the deque without bound. */
@@ -115,6 +129,13 @@ public final class CoopLinkQuality {
     private long lastUdpInboundMillis;
     private long resetAtMillis;
 
+    /** Jitter estimator state; see {@link #noteStateSampleArrival(long)}. */
+    private boolean arrivalSeen;
+    private long lastArrivalMillis;
+    private boolean jitterPrimed;
+    private double jitterMeanMillis;
+    private double jitterVariance;
+
     private boolean fallbackActive;
     private long fallbackClearSinceMillis;
     private String fallbackReason = "";
@@ -139,6 +160,7 @@ public final class CoopLinkQuality {
         lastInboundTcpMillis = nowMillis;
         lastUdpInboundMillis = nowMillis;
         resetAtMillis = nowMillis;
+        resetJitter();
         fallbackActive = false;
         fallbackClearSinceMillis = 0L;
         fallbackReason = "";
@@ -161,8 +183,18 @@ public final class CoopLinkQuality {
         lastInboundTcpMillis = nowMillis;
         lastUdpInboundMillis = nowMillis;
         resetAtMillis = nowMillis;
+        resetJitter();
         fallbackClearSinceMillis = 0L;
         outstandingPings.clear();
+    }
+
+    /** Drops the inter-arrival history; a link that just came back has none worth keeping. */
+    private void resetJitter() {
+        arrivalSeen = false;
+        lastArrivalMillis = 0L;
+        jitterPrimed = false;
+        jitterMeanMillis = 0.0;
+        jitterVariance = 0.0;
     }
 
     /** Wall clock of the most recent {@link #reset(long)}; the session-start stamp. */
@@ -262,6 +294,50 @@ public final class CoopLinkQuality {
         }
     }
 
+    /**
+     * One <em>fresh</em> {@code FLEET_SNAPSHOT} datagram landed, at wall clock {@code nowMillis}
+     * (Phase 29 M2). This is the jitter estimator's only input, and the three words in that sentence
+     * are all load-bearing:
+     * <ul>
+     *   <li><b>FLEET_SNAPSHOT only.</b> It is the one stream that is sent on a fixed interval by both
+     *       roles regardless of what the sector contains. {@code NPC_FLEET_MOTION} is host-only,
+     *       chunked (several datagrams per tick), and range-filtered, so its arrival spacing measures
+     *       the fleet population as much as the path.</li>
+     *   <li><b>Fresh.</b> One sample per datagram whose current section cleared the watermark; the
+     *       redundant older section riding along is the <em>previous</em> send and would double-count
+     *       every interval.</li>
+     *   <li><b>Wall clock.</b> Jitter is a transport property. The stream stamps are game time, which
+     *       stops under a pause and runs fast under fast-forward.</li>
+     * </ul>
+     *
+     * <p>The estimator is Mirror's exponential moving variance: the mean tracks the interval and the
+     * variance tracks the squared deviation from it, both at {@link #JITTER_EMA_ALPHA}. Gaps past
+     * {@link #JITTER_GAP_MILLIS} are dropped rather than fed (see that constant), and dropping one
+     * re-seats the clock so the next gap is measured from now.
+     */
+    public void noteStateSampleArrival(long nowMillis) {
+        if (!arrivalSeen) {
+            arrivalSeen = true;
+            lastArrivalMillis = nowMillis;
+            return;
+        }
+        long delta = nowMillis - lastArrivalMillis;
+        lastArrivalMillis = nowMillis;
+        if (delta < 0L || delta > JITTER_GAP_MILLIS) {
+            return;
+        }
+        if (!jitterPrimed) {
+            jitterPrimed = true;
+            jitterMeanMillis = delta;
+            jitterVariance = 0.0;
+            return;
+        }
+        double deviation = delta - jitterMeanMillis;
+        jitterMeanMillis += JITTER_EMA_ALPHA * deviation;
+        jitterVariance = (1.0 - JITTER_EMA_ALPHA)
+                * (jitterVariance + JITTER_EMA_ALPHA * deviation * deviation);
+    }
+
     // ---- readouts --------------------------------------------------------------------------------
 
     /** Smoothed RTT, or null when no PONG has been matched yet. */
@@ -271,6 +347,20 @@ public final class CoopLinkQuality {
 
     /** 95th percentile of the retained RTT samples, or null when there are none. */
     public Integer p95RttMillis() {
+        return percentileRtt(0.95);
+    }
+
+    /**
+     * Median of the retained RTT samples, or null when there are none. This is what
+     * {@link CoopCadenceController} keys on rather than the p95 or the EWMA — see that class for the
+     * frame-cap measurement artefact that makes the tail statistic unusable as a control input.
+     */
+    public Integer medianRttMillis() {
+        return percentileRtt(0.5);
+    }
+
+    /** Nearest-rank percentile over the sample ring; {@code fraction} in (0, 1]. */
+    private Integer percentileRtt(double fraction) {
         if (rttRingCount == 0) {
             return null;
         }
@@ -278,8 +368,19 @@ public final class CoopLinkQuality {
         // covers both the partial and the full case.
         int[] sorted = Arrays.copyOf(rttRing, rttRingCount);
         Arrays.sort(sorted);
-        int index = (int) Math.ceil(0.95 * sorted.length) - 1;
+        int index = (int) Math.ceil(fraction * sorted.length) - 1;
         return sorted[Math.max(0, Math.min(sorted.length - 1, index))];
+    }
+
+    /**
+     * Standard deviation of the state stream's inter-arrival spacing, in milliseconds; 0 until two
+     * usable arrivals have been seen. Feeds the adaptive interpolation delay (Phase 29 M2).
+     */
+    public int jitterStdDevMillis() {
+        if (!jitterPrimed || jitterVariance <= 0.0) {
+            return 0;
+        }
+        return (int) Math.round(Math.sqrt(jitterVariance));
     }
 
     /**

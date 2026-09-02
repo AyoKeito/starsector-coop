@@ -265,4 +265,44 @@ class CoopHudStateTest {
         assertEquals("HOST · guest disconnected, holding · paused by reconnect",
                 CoopHudState.formatLine(state, DOT));
     }
+
+    // ---- Phase 29 M2: the cadence segment --------------------------------------------------------
+
+    @Test
+    void theDefaultCadenceIsNotDrawnAtAll() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,
+                40, 0, CoopHudState.TRANSPORT_UDP, CoopHudState.DEFAULT_CADENCE_HZ);
+
+        assertEquals("HOST · session active · 40 ms · loss 0% · udp",
+                CoopHudState.formatLine(state, DOT),
+                "a segment that reads 10 Hz all session long is noise");
+    }
+
+    @Test
+    void aFloorTierCadenceIsDrawnNextToTheTransport() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_GUEST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,
+                310, 12, CoopHudState.TRANSPORT_TCP_FALLBACK, 5);
+
+        assertEquals("GUEST · session active · 310 ms · loss 12% · tcp fallback · 5 Hz",
+                CoopHudState.formatLine(state, DOT));
+    }
+
+    @Test
+    void theCadenceSegmentIsSuppressedWithTheRestOfTheLinkReadoutOutsideASession() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_NO_SESSION, false, null, null, null, null, null, 5);
+
+        assertEquals("HOST · no session", CoopHudState.formatLine(state, DOT));
+    }
+
+    @Test
+    void theEightFieldConstructorLeavesTheCadenceAbsent() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,
+                40, 0, CoopHudState.TRANSPORT_UDP);
+
+        assertNull(state.cadenceHz());
+    }
 }

@@ -26,6 +26,11 @@ import coop.net.CoopConnectionRole;
  * @param lossPercent          raw datagram loss over the last 10 s, or null when there is no session
  * @param transport            {@link #TRANSPORT_UDP} or {@link #TRANSPORT_TCP_FALLBACK}; null when
  *                             there is no session, which is what suppresses the whole link segment
+ * @param cadenceHz            the state streams' current {@code CoopCadenceTier} rate, or null when
+ *                             there is no session. Drawn only when it is not the default tier: a
+ *                             segment that reads "10 Hz" on every healthy link all session long is
+ *                             noise, and the whole point of the readout is that a changed rate is
+ *                             visible
  */
 public record CoopHudState(String roleBadge,
                            String status,
@@ -34,7 +39,8 @@ public record CoopHudState(String roleBadge,
                            Integer clockDriftGameHours,
                            Integer rttMillis,
                            Integer lossPercent,
-                           String transport) {
+                           String transport,
+                           Integer cadenceHz) {
 
     /**
      * Pre-20.6-M2 shape: role, status, pause and drift with no link readout. Kept because the link
@@ -43,7 +49,15 @@ public record CoopHudState(String roleBadge,
      */
     public CoopHudState(String roleBadge, String status, boolean paused, String pauseHolder,
                         Integer clockDriftGameHours) {
-        this(roleBadge, status, paused, pauseHolder, clockDriftGameHours, null, null, null);
+        this(roleBadge, status, paused, pauseHolder, clockDriftGameHours, null, null, null, null);
+    }
+
+    /** Pre-Phase-29-M2 shape: the link readout without a cadence tier. */
+    public CoopHudState(String roleBadge, String status, boolean paused, String pauseHolder,
+                        Integer clockDriftGameHours, Integer rttMillis, Integer lossPercent,
+                        String transport) {
+        this(roleBadge, status, paused, pauseHolder, clockDriftGameHours, rttMillis, lossPercent,
+                transport, null);
     }
 
     public static final String BADGE_HOST = "HOST";
@@ -82,6 +96,12 @@ public record CoopHudState(String roleBadge,
     public static final String TRANSPORT_UDP = "udp";
     /** Transport wording: UDP is blocked and the state stream is wrapped in TCP. */
     public static final String TRANSPORT_TCP_FALLBACK = "tcp fallback";
+    /**
+     * The cadence the HUD stays silent about. Mirrors {@code CoopCadenceTier.DEFAULT.hz()}, which
+     * lives in {@code coop.net}; duplicated rather than depended on because this decides whether one
+     * segment is drawn and nothing else.
+     */
+    public static final int DEFAULT_CADENCE_HZ = 10;
 
     /**
      * The rejected status, carrying the host's reason when there is one.
@@ -189,6 +209,10 @@ public record CoopHudState(String roleBadge,
                 line.append(sep).append("loss ").append(loss).append('%');
             }
             line.append(sep).append(transport);
+            Integer cadence = state.cadenceHz();
+            if (cadence != null && cadence != DEFAULT_CADENCE_HZ) {
+                line.append(sep).append(cadence).append(" Hz");
+            }
         }
         return line.toString();
     }

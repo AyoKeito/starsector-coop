@@ -1389,7 +1389,7 @@ class CoopNetPumpTest {
     }
 
     @Test
-    void udpComingBackReturnsTheStreamToUdpAtFullCadenceAfterTheHysteresis() {
+    void udpComingBackReturnsTheStreamToUdpButHoldsTheFloorTierUntilTheCleanWindowCompletes() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         AtomicLong now = new AtomicLong(1_000L);
         CoopNetPump pump = livePump(service, activeHostSession(), now::get);
@@ -1400,25 +1400,49 @@ class CoopNetPumpTest {
             pump.advance(0f);
         }
         assertTrue(pump.stateStreamFallbackActive());
+        assertEquals(200L, pump.stateStreamIntervalMillis());
 
         for (long t = 12_500L; t <= 16_500L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
             service.noteUdpInboundAt(t);
             now.set(t);
             pump.advance(0f);
         }
         assertTrue(pump.stateStreamFallbackActive(), "4 s of clear evidence is not yet enough");
 
+        service.inbound.add(CoopMessages.ping("session-a", 900L, 17_600L));
         service.noteUdpInboundAt(17_600L);
         now.set(17_600L);
         pump.advance(0f);
 
         assertFalse(pump.stateStreamFallbackActive());
-        assertEquals(100L, pump.stateStreamIntervalMillis());
+        // Phase 29 M2: the transport and the rate are now separate decisions. Datagrams go back on
+        // the UDP wire the instant the path is believed, while the rate unpins into the ordinary
+        // thirty-second clean window rather than jumping straight back to the default tier.
+        assertEquals(200L, pump.stateStreamIntervalMillis(),
+                "leaving the fallback unpins the floor into the clean window, not to default");
         service.sent.clear();
         pump.sendStateDatagram(CoopMessages.datagram(CoopMessages.wireToken("session-a"), "host",
                 CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "body"));
         assertEquals(1, service.datagrams.size());
         assertEquals(0, countOf(service, CoopMessages.Type.STATE_DATAGRAM));
+
+        for (long t = 18_600L; t <= 47_000L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
+            service.noteUdpInboundAt(t);
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertEquals(200L, pump.stateStreamIntervalMillis(), "29 s clean is not yet 30");
+
+        for (long t = 48_000L; t <= 49_000L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
+            service.noteUdpInboundAt(t);
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertEquals(100L, pump.stateStreamIntervalMillis(),
+                "thirty continuously clean seconds put the default tier back");
     }
 
     @Test
@@ -1449,6 +1473,239 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         assertNull(pump.hudState(false).transport(), "no session, no link readout");
+    }
+
+    // ---- Phase 29 M2: adaptive state-stream cadence ---------------------------------------------
+
+    /** Runs the 1 s supervision tick from {@code from} to {@code to}, keeping the link alive. */
+    private static void tickSeconds(RecordingNetService service, CoopNetPump pump, AtomicLong now,
+                                    long from, long to) {
+        for (long t = from; t <= to; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 500_000L + t, t));
+            service.noteUdpInboundAt(t);
+            now.set(t);
+            pump.advance(0f);
+        }
+    }
+
+    private static CoopMessages.Message lastOf(RecordingNetService service, CoopMessages.Type type) {
+        CoopMessages.Message last = null;
+        for (CoopMessages.Message message : service.sent) {
+            if (message.type() == type) {
+                last = message;
+            }
+        }
+        assertNotNull(last, "expected at least one " + type);
+        return last;
+    }
+
+    @Test
+    void aCleanHostSessionNeverLeavesTheDefaultTier() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        tickSeconds(service, pump, now, 2_000L, 120_000L);
+
+        assertEquals(CoopCadenceTier.DEFAULT, pump.stateStreamTier());
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+        assertEquals(100L, pump.npcMotionIntervalMillis());
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, pump.stateStreamRedundancyDepth());
+        assertEquals(200L, pump.interpolationDelayMillis(),
+                "a clean link at the default tier lands on exactly the M1 value");
+    }
+
+    @Test
+    void aHostTierChangeReachesBothCadencesAndShipsAnImmediateLinkStatus() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        tickSeconds(service, pump, now, 2_000L, 6_000L);
+        service.sent.clear();
+
+        // The socket stops draining: the transport is coalescing, so sending faster makes it worse.
+        service.outboundDepth = 64;
+        tickSeconds(service, pump, now, 7_000L, 7_000L);
+
+        assertEquals(CoopCadenceTier.FLOOR, pump.stateStreamTier());
+        assertEquals(200L, pump.stateStreamIntervalMillis());
+        assertEquals(200L, pump.npcMotionIntervalMillis(), "both UDP state streams move together");
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, pump.stateStreamRedundancyDepth(),
+                "a backlog floor must not deepen redundancy");
+
+        CoopMessages.Message status = lastOf(service, CoopMessages.Type.LINK_STATUS);
+        assertEquals(5, CoopMessages.parseLinkStatus(status).cadenceHz(),
+                "the change is announced now, not up to five seconds from now");
+    }
+
+    @Test
+    void aLossDrivenFloorDeepensTheRedundancyAndRecoveryUndoesIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        // The peer reports 20% loss on what it receives from us; redundancy protects that direction.
+        service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 2_000L,
+                new CoopLinkQuality.Snapshot(40, 50, 20, true, 0L, 30_000L),
+                CoopLinkQuality.TRANSPORT_UDP, CoopCadenceTier.DEFAULT.hz(),
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+        service.outboundDepth = 64;
+        tickSeconds(service, pump, now, 2_000L, 3_000L);
+        service.outboundDepth = 0;
+
+        assertEquals(CoopCadenceTier.FLOOR, pump.stateStreamTier());
+        assertEquals(CoopDatagramRedundancy.MAX_DEPTH, pump.stateStreamRedundancyDepth());
+
+        // The peer's report ages out; nothing measures loss any more, so the extra section goes away.
+        tickSeconds(service, pump, now, 4_000L, 20_000L);
+
+        assertEquals(CoopDatagramRedundancy.DEFAULT_DEPTH, pump.stateStreamRedundancyDepth());
+    }
+
+    @Test
+    void theGuestAppliesTheTierTheHostAnnounces() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        pump.advance(0f);
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+
+        service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 2_000L,
+                new CoopLinkQuality.Snapshot(40, 50, 0, true, 0L, 30_000L),
+                CoopLinkQuality.TRANSPORT_UDP, CoopCadenceTier.FLOOR.hz(),
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+        now.set(2_000L);
+        pump.advance(0f);
+
+        assertEquals(CoopCadenceTier.FLOOR, pump.peerCadenceTier());
+        assertEquals(CoopCadenceTier.FLOOR, pump.stateStreamTier());
+        assertEquals(200L, pump.stateStreamIntervalMillis());
+        assertEquals(200L, pump.npcMotionIntervalMillis());
+        assertEquals(400L, pump.interpolationDelayMillis(),
+                "the delay is sized in the intervals the peer is actually sending at");
+
+        // And back up when the host says so.
+        service.inbound.add(CoopMessages.linkStatus("session-a", 8L, 3_000L,
+                new CoopLinkQuality.Snapshot(40, 50, 0, true, 0L, 30_000L),
+                CoopLinkQuality.TRANSPORT_UDP, CoopCadenceTier.DEFAULT.hz(),
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+        now.set(3_000L);
+        pump.advance(0f);
+
+        assertEquals(CoopCadenceTier.DEFAULT, pump.stateStreamTier());
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+    }
+
+    @Test
+    void theGuestsOwnFallbackPinsTheFloorOverTheAnnouncedTier() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        pump.advance(0f);
+
+        // The host is fine and says so; this side is receiving no UDP at all.
+        for (long t = 2_000L; t <= 11_500L; t += 1_000L) {
+            service.inbound.add(CoopMessages.linkStatus("session-a", 100 + t, t,
+                    new CoopLinkQuality.Snapshot(40, 50, 0, true, 0L, 30_000L),
+                    CoopLinkQuality.TRANSPORT_UDP, CoopCadenceTier.DEFAULT.hz(),
+                    new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertTrue(pump.stateStreamFallbackActive());
+        assertEquals(CoopCadenceTier.DEFAULT, pump.peerCadenceTier(), "the host still says 10 Hz");
+        assertEquals(CoopCadenceTier.FLOOR, pump.stateStreamTier(),
+                "a stream wrapped in TCP on this side is at the floor whatever the host believes");
+        assertEquals(200L, pump.stateStreamIntervalMillis());
+    }
+
+    @Test
+    void aSessionEdgePutsTheTierAndTheDelayBackToDefaultSilently() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        service.outboundDepth = 64;
+        tickSeconds(service, pump, now, 2_000L, 3_000L);
+        assertEquals(CoopCadenceTier.FLOOR, pump.stateStreamTier());
+
+        service.connected = false;
+        now.set(4_000L);
+        pump.advance(0f);
+
+        assertEquals(CoopCadenceTier.DEFAULT, pump.stateStreamTier(),
+                "the next session must not inherit the dead link's floor");
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+        assertEquals(100L, pump.npcMotionIntervalMillis());
+        assertEquals(CoopCadenceTier.DEFAULT, pump.peerCadenceTier());
+        assertEquals(200L, pump.interpolationDelayMillis());
+    }
+
+    @Test
+    void everyTierChangeIsRecordedOnTheIntelPageEventLog() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        tickSeconds(service, pump, now, 2_000L, 3_000L);
+
+        service.outboundDepth = 64;
+        tickSeconds(service, pump, now, 4_000L, 4_000L);
+        service.outboundDepth = 0;
+        tickSeconds(service, pump, now, 5_000L, 40_000L);
+
+        assertEquals(CoopCadenceTier.DEFAULT, pump.stateStreamTier());
+        List<String> cadenceEvents = coop.ui.CoopSessionIntelFeed.currentModel().events().stream()
+                .map(coop.ui.CoopSessionIntelModel.Event::line)
+                .filter(line -> line.contains("state stream"))
+                .toList();
+        assertEquals(List.of(
+                "Co-op: state stream 10 Hz - " + CoopCadenceController.REASON_CLEAN,
+                "Co-op: state stream 5 Hz - " + CoopCadenceController.REASON_BACKLOG),
+                cadenceEvents, "newest first: one line per tier change, with its reason");
+    }
+
+    @Test
+    void aJitteryLinkWidensTheInterpolationDelayAndHoldsItForFiveSeconds() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        assertEquals(200L, pump.interpolationDelayMillis());
+
+        // FLEET_SNAPSHOT datagrams from the partner arriving 50/150 ms apart: one send interval of
+        // measured jitter, which the formula turns into a third interval of buffer.
+        String token = CoopMessages.wireToken("session-a");
+        String sender = CoopMessages.wireToken("guest-player");
+        long at = 1_000L;
+        long epoch = 1L;
+        for (int i = 0; i < 400; i++) {
+            at += (i % 2 == 0) ? 50L : 150L;
+            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                    CoopMessages.Type.FLEET_SNAPSHOT, epoch++, at, "x"));
+            now.set(at);
+            pump.advance(0f);
+        }
+
+        assertEquals(300L, pump.interpolationDelayMillis(),
+                "one interval plus a sigma of jitter rounds up to three intervals of buffer");
+        long changedAt = at;
+
+        // The stream goes perfectly regular. The old value is held for five seconds before the
+        // estimator is allowed to narrow it again.
+        for (int i = 0; i < 20; i++) {
+            at += 100L;
+            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                    CoopMessages.Type.FLEET_SNAPSHOT, epoch++, at, "x"));
+            now.set(at);
+            pump.advance(0f);
+        }
+        assertTrue(at - changedAt < 5_000L);
+        assertEquals(300L, pump.interpolationDelayMillis(), "held for at least five seconds");
     }
 
     private static int countOf(RecordingNetService service, CoopMessages.Type type) {
@@ -3206,6 +3463,8 @@ class CoopNetPumpTest {
         private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
                 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "");
         boolean connected = true;
+        /** Phase 29 M2 cadence input: what {@code outboundBacklogged()} is derived from. */
+        int outboundDepth;
 
         RecordingNetService(CoopConnectionRole role) {
             this.role = role;
@@ -3267,6 +3526,11 @@ class CoopNetPumpTest {
         @Override
         public CoopDatagramStats datagramStats() {
             return stats;
+        }
+
+        @Override
+        public int outboundQueueDepth() {
+            return outboundDepth;
         }
 
         private void noteUdpInboundAt(long atMillis) {

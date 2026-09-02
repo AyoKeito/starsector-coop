@@ -121,4 +121,128 @@ class CoopMotionTimelineTest {
         timeline.reset();
         assertTrue(Double.isNaN(timeline.advance(0.016)));
     }
+
+    // ---- Phase 29 M2: the adaptive delay ---------------------------------------------------------
+
+    @Test
+    void theDelayStartsAtTheDefaultAndIsClampedAtBothEnds() {
+        assertEquals(DELAY, timeline.delaySeconds(), 1e-9);
+
+        timeline.setDelaySeconds(0.05);
+        assertEquals(CoopMotionTimeline.MIN_DELAY_SECONDS, timeline.delaySeconds(), 1e-9);
+
+        timeline.setDelaySeconds(2.0);
+        assertEquals(CoopMotionTimeline.MAX_DELAY_SECONDS, timeline.delaySeconds(), 1e-9);
+
+        timeline.setDelaySeconds(0.35);
+        assertEquals(0.35, timeline.delaySeconds(), 1e-9);
+    }
+
+    @Test
+    void resetPutsTheDelayBackToTheDefault() {
+        timeline.setDelaySeconds(CoopMotionTimeline.MAX_DELAY_SECONDS);
+        timeline.reset();
+        assertEquals(DELAY, timeline.delaySeconds(), 1e-9);
+    }
+
+    /**
+     * The tier change a floor downshift produces: 200 ms to 400 ms in one step. The cursor has to
+     * absorb it through the time-scaling path and never through the re-seat, because a re-seat is the
+     * visible teleport this whole mechanism exists to avoid.
+     */
+    /**
+     * Settles the cursor with zero steady-state drift: the sample for frame N+1 is noted after frame
+     * N has advanced, which is the phase a real stream and a real frame loop converge on. Returns the
+     * newest sample stamp.
+     */
+    private double settle(double startStamp, int frames) {
+        timeline.noteSample(startStamp);
+        timeline.advance(0.1);
+        double latest = startStamp;
+        for (int i = 0; i < frames; i++) {
+            timeline.advance(0.1);
+            latest += 0.1;
+            timeline.noteSample(latest);
+        }
+        return latest;
+    }
+
+    /**
+     * The step a floor downshift plus jitter produces: 200 ms to 500 ms. The cursor has to absorb it
+     * through the time-scaling path and never through the re-seat, because a re-seat is the visible
+     * teleport this whole mechanism exists to avoid.
+     */
+    @Test
+    void aWidenedDelayIsAbsorbedByTimeScalingAndNeverByTheReseat() {
+        double latest = settle(10.0, 20);
+
+        timeline.setDelaySeconds(0.500);
+
+        boolean sawSlowdown = false;
+        for (int i = 0; i < 100; i++) {
+            double before = timeline.cursor();
+            timeline.advance(0.1);
+            double moved = timeline.cursor() - before;
+            assertTrue(moved >= 0.1 * CoopMotionTimeline.SLOWDOWN_TIMESCALE - 1e-9
+                            && moved <= 0.1 * CoopMotionTimeline.CATCHUP_TIMESCALE + 1e-9,
+                    "the cursor jumped by " + moved + " - that is a re-seat, not time-scaling");
+            if (Math.abs(moved - 0.1 * CoopMotionTimeline.SLOWDOWN_TIMESCALE) < 1e-9) {
+                sawSlowdown = true;
+            }
+            latest += 0.1;
+            timeline.noteSample(latest);
+        }
+
+        assertTrue(sawSlowdown, "a widened delay must be absorbed by the 0.96 path");
+        double residual = (latest - 0.500) - timeline.cursor();
+        assertTrue(Math.abs(residual) <= DEAD_ZONE + 1e-6,
+                "the correction settles inside the dead zone; residual was " + residual);
+    }
+
+    @Test
+    void aNarrowedDelayIsAbsorbedByTheCatchUpPath() {
+        timeline.setDelaySeconds(0.500);
+        double latest = settle(10.0, 20);
+
+        timeline.setDelaySeconds(0.200);
+
+        boolean sawCatchUp = false;
+        for (int i = 0; i < 100; i++) {
+            double before = timeline.cursor();
+            timeline.advance(0.1);
+            double moved = timeline.cursor() - before;
+            assertTrue(moved >= 0.1 * CoopMotionTimeline.SLOWDOWN_TIMESCALE - 1e-9
+                            && moved <= 0.1 * CoopMotionTimeline.CATCHUP_TIMESCALE + 1e-9,
+                    "the cursor jumped by " + moved + " - that is a re-seat, not time-scaling");
+            if (Math.abs(moved - 0.1 * CoopMotionTimeline.CATCHUP_TIMESCALE) < 1e-9) {
+                sawCatchUp = true;
+            }
+            latest += 0.1;
+            timeline.noteSample(latest);
+        }
+
+        assertTrue(sawCatchUp, "a narrowed delay must be absorbed by the 1.02 path");
+    }
+
+    /**
+     * A one-interval delay step at the default tier is exactly one dead zone wide, so the correct
+     * outcome is that nothing visible happens at all: no re-seat, no rate change, the step lands
+     * inside the guard band. Asserted because "no correction" is the desirable behaviour here and
+     * would otherwise read as the feature not working.
+     */
+    @Test
+    void aOneHundredMillisecondDelayStepProducesNoCorrectionAtAll() {
+        double latest = settle(10.0, 20);
+
+        timeline.setDelaySeconds(DELAY + 0.100);
+
+        for (int i = 0; i < 60; i++) {
+            double before = timeline.cursor();
+            timeline.advance(0.1);
+            assertEquals(0.1, timeline.cursor() - before, 1e-9,
+                    "one dead zone of delay change must not move the cursor off real time");
+            latest += 0.1;
+            timeline.noteSample(latest);
+        }
+    }
 }
