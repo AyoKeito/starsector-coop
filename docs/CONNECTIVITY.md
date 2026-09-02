@@ -178,8 +178,31 @@ Coop port mapper gave up: NAT-PMP gateway 192.168.1.1 did not answer -- host the
 ```
 
 That usually means UPnP is switched off in the router's admin page. It is worth one look; the
-setting is normally under Advanced, NAT, or WAN, and is called UPnP or "NAT traversal". If you would
-rather the game did not try at all, launch with:
+setting is normally under Advanced, NAT, or WAN, and is called UPnP or "NAT traversal".
+
+On a MikroTik running RouterOS, two terminal commands tell you the whole story:
+
+```
+/ip upnp print
+/ip upnp interfaces print
+```
+
+The first must say `enabled: yes`. The second lists which interfaces the SSDP responder listens on,
+and each one is tagged `internal` (LAN side) or `external` (WAN side). The internal entry has to be
+the interface that actually **holds the LAN IP address**. On a bridge-VLAN setup the bridge itself
+carries no address, so naming the bridge silently produces a responder that never hears anything:
+
+```
+/ip upnp interfaces set 0 interface=vlan10-LAN
+```
+
+Substitute whatever `/ip address print` shows as the interface for your LAN subnet.
+
+RouterOS implements UPnP IGD and does not implement NAT-PMP, so the mod's NAT-PMP fallback can never
+answer on a MikroTik. If UPnP is misconfigured there, the log shows both protocols failing and the
+NAT-PMP line is the red herring.
+
+If you would rather the game did not try at all, launch with:
 
 ```
 -Dcoop.portMapping=off
@@ -276,6 +299,7 @@ tier 2 and add the UDP rule.
 | Session works, fleets do not move | UDP is blocked, TCP is not | Add the UDP forwarding rule and the UDP firewall rule. Guest's doctor block will confirm. |
 | `CGNAT/double NAT` in the host log | The ISP, not your router | Tier 1 if you have IPv6, tier 0 otherwise. |
 | Mapper says "no UPnP gateway answered" | UPnP is off, or the router does not speak it | Turn UPnP on in the router, or use tier 2. |
+| Mapper says "no UPnP gateway answered" on a MikroTik, or any router with VLANs | The UPnP internal interface is the bridge, which holds no LAN address | Point it at the interface that holds the LAN address: `/ip upnp interfaces set 0 interface=vlan10-LAN`. |
 | Mapper says `UPnPError 718` twice | Another device owns that external port | Pick a different `coop.hostPort`, for example 7778. |
 | Mapper says `UPnPError 725` | Router refuses timed leases | Nothing to do. The mod retries with a permanent lease automatically and deletes it on exit. |
 | Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both `New-NetFirewallRule` commands from tier 1. |
@@ -286,12 +310,15 @@ tier 2 and add the UDP rule.
 ## Spike results
 
 Recorded 2026-09-02 on the development machine (Windows 11 Pro 26200, LAN `192.168.1.0/24`, host
-`192.168.1.5`, gateway `192.168.1.1`).
+`192.168.1.5`, gateway `192.168.1.1` = MikroTik hAP on RouterOS 7.23.3).
 
 ### UPnP and NAT-PMP against the real router
 
-`CoopPortMapperLiveSpikeTest` mapped port 27015 against whatever was on the LAN. Result: **nothing
-answered**, with UPnP and NAT-PMP both switched on in the router's settings.
+**Tier 3 is verified against real router firmware.** It took two runs and a router fix in between,
+and the failure in the middle is the more instructive half, so both are recorded.
+
+**Run 1: silence.** `CoopPortMapperLiveSpikeTest` asked for port 27015 and nothing answered, even
+with UPnP switched on in the router's settings.
 
 ```
 elapsed           5390 ms
@@ -302,27 +329,60 @@ external port     0
 failureText       NAT-PMP gateway 192.168.1.1 did not answer
 ```
 
-Four independent probes agree that the gateway offers no services to this host, so this is not a
-bug in the mapper:
+Four probes outside the mod agreed, which ruled out a bug in the mapper: SSDP `M-SEARCH` to
+`239.255.255.250:1900` from PowerShell drew zero responders in 4 seconds even for `ST: ssdp:all`;
+a unicast `M-SEARCH` straight to `192.168.1.1:1900` got nothing; NAT-PMP opcode 0 to
+`192.168.1.1:5351` got nothing; and TCP connects to 80, 443, 1900, 2869, 5000, 5431, 8080, 1780,
+7547 and 49152 through 49154 all came back closed. The gateway answered ICMP in under 1 ms and
+routed traffic normally.
 
-- SSDP `M-SEARCH` to `239.255.255.250:1900`, sent from PowerShell rather than from the mod: zero
-  responders in 4 seconds, for `ST: ssdp:all` (not just the gateway search target).
-- Unicast `M-SEARCH` straight to `192.168.1.1:1900`: no reply.
-- NAT-PMP opcode 0 to `192.168.1.1:5351`: no reply.
-- TCP connect to ports 80, 443, 1900, 2869, 5000, 5431, 8080, 1780, 7547 and 49152 through 49154 on
-  `192.168.1.1`: **every one closed**, including the two a router web interface would live on.
+The conclusion drawn from that evidence was wrong. It looked like an ISP-managed box with LAN-side
+management disabled. It was a MikroTik hAP on RouterOS 7.23.3, fully under the user's control, with
+one setting pointed at the wrong interface.
 
-The gateway answers ICMP (`<1 ms`) and routes traffic (first WAN hop `91.77.160.1`, a public
-address, so this connection is not behind CGNAT). A router that forwards packets but exposes no TCP
-port at all is an ISP-managed CPE with LAN-side management disabled, not a UPnP failure.
+**The cause.** `/ip upnp interfaces` listed `bridge` as the internal interface. The LAN subnet
+`192.168.1.0/24` does not live on the bridge; it lives on `vlan10-LAN` in a bridge-VLAN setup, so
+the bridge holds no IP address and the SSDP responder was bound somewhere the M-SEARCH queries never
+arrived. The firewall was never involved: the input chain accepts LAN traffic by fall-through. One
+command fixed it:
 
-**Consequence for the phase:** tier 3 could not be verified against real router firmware here. It
-needs re-running on a second network before the WAN smoke test. What was verified instead is the
-whole UPnP conversation against a stub IGD on loopback (`CoopPortMapperUpnpExchangeTest`): chunked
-descriptor fetch, `GetExternalIPAddress`, `AddPortMapping` for TCP and UDP, the 718 delete-and-retry
-path, the 725 permanent-lease retry, an outright refusal, a gateway with no WAN service, and
-`DeletePortMapping` on shutdown. The live run did verify the failure path end to end: the mapper
-degraded in 5.4 seconds, threw nothing, and produced a correct doctor block.
+```
+/ip upnp interfaces set 0 interface=vlan10-LAN
+```
+
+**Run 2: mapped in 428 milliseconds.**
+
+```
+elapsed           428 ms
+tier              UPNP
+gateway address   192.168.1.1
+gateway name      MikroTik Router (Router OS)
+  friendlyName    MikroTik Router
+  modelName       Router OS
+external address  91.77.x.x
+external port     27015
+cgnat             false
+mapped            true
+failureText
+
+Coop connection doctor:
+  port mapping      UPnP IGD via 192.168.1.1 "MikroTik Router (Router OS)" - external 91.77.x.x:27015
+  CGNAT             no - 91.77.x.x is a public address
+  tier reached      3 - automatic port mapping (UPnP IGD)
+```
+
+428 ms end to end covers SSDP discovery, the chunked descriptor fetch, `GetExternalIPAddress`, and
+both `AddPortMapping` calls. The mapping was deleted again on shutdown, and the external address is
+public, so this connection is not behind CGNAT.
+
+Four error paths this run did not exercise, all covered by `CoopPortMapperUpnpExchangeTest` against
+a stub IGD on loopback instead: the 718 delete-and-retry path, the 725 permanent-lease retry, an
+outright refusal, and a gateway advertising no WAN connection service. Run 1 covered the give-up
+path end to end: the mapper degraded in 5.4 seconds, threw nothing, and printed a correct doctor
+block naming tier 0/unknown.
+
+NAT-PMP remains unverified against any hardware. RouterOS does not implement it, so this LAN cannot
+test it at all.
 
 ### Dual-stack IPv6 binds
 
