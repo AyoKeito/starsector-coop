@@ -113,6 +113,9 @@ compileJava.dependsOn tasks.named('generateCoopBuildInfo')
 
 test {
     useJUnitPlatform()
+    // Opt-in live spike (CoopPortMapperLiveSpikeTest) that talks to the real router on this LAN.
+    // Off by default so ordinary runs never touch network hardware.
+    systemProperty 'coop.spike.upnp', System.getProperty('coop.spike.upnp', 'false')
     // XStream 1.4.10 predates the module system and reflects into java.base during its own static
     // init, so a test that exercises the real bundled XStream (CoopGuestSnapshotTest) needs the same
     // opens the game itself passes. These are a subset of starsector-core/vmparams -- the mod adds no
