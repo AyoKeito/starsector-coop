@@ -232,6 +232,24 @@ plan to host regularly.
 
 ---
 
+## Configuration
+
+Everything the networking layer reads is a JVM property, set in `vmparams` or passed through the
+launch scripts' `-ExtraJvmProps`. All of them are optional; the defaults are what a LAN session uses.
+
+| Property | Default | What it does |
+|---|---|---|
+| `coop.hostPort` | `7777` | The TCP and UDP port the host listens on. Both protocols use the same number. |
+| `coop.connectHost` / `coop.connectPort` | none / `7777` | Guest side: where to connect. `connectHost` takes a hostname, an IPv4 address, or an IPv6 address. |
+| `coop.password` | empty (no password) | Turns on the lobby password gate. Both sides must set the same string. The host answers the first hello with a random nonce and the guest proves it knows the password by returning `SHA-256(password + nonce)`; a wrong proof gets `LOBBY_REJECT` and feeds a per-address cooldown. **This is gatekeeping, not encryption.** The protocol is plaintext, so anyone who can capture your traffic can read a session; the password stops strangers from joining an open port, and nothing more. |
+| `coop.maxGuests` | `1` | Peer-table capacity. The wire format is N-ready, but v1 clamps this to 1 whatever you set. Multi-guest play is Phase 27. |
+| `coop.reconnectGraceSeconds` | `60` | How long a live session survives a dropped link before it is torn down. During the window both players get a countdown dialog with an "End session" option and a "Wait 5 more minutes" option, and the world is held paused. |
+| `coop.portMapping` | `auto` | `auto` asks the router for a port mapping at startup (UPnP first, NAT-PMP second). `off` skips it entirely. Any other value stops the game at startup rather than being silently ignored. |
+| `coop.debug.wiretap` | `false` | Logs sampled decoded payloads in both directions plus a per-message-type composed-size histogram every 60 s. Diagnostic only; it prints your session's game state into the log. |
+| `coop.debug.wiretapSample` | `10` | With the wiretap on, log one payload in every N. |
+
+---
+
 ## Reading the connection doctor
 
 Both sides print a block to `starsector.log` that answers "why can't we connect" in one screen.
@@ -290,6 +308,31 @@ tier 2 and add the UDP rule.
 
 ---
 
+## What happens when the link drops
+
+Nothing is lost the moment a connection dies. The mod treats a drop as something to wait out.
+
+**Detection takes about 15 seconds.** The link is declared dead after 15 s with no inbound TCP
+traffic, and not before: the network pump does not run during combat or while the game is writing a
+save, so a shorter timer would kill sessions that were never actually broken. A peer that is in
+battle, that just announced a save, or whose own process stalled is exempt for as long as that lasts.
+
+**Both players get a dialog with a countdown.** The host's says it is waiting for the guest; the
+guest's says it is reconnecting. The world is held paused on both sides for the whole window, so
+nobody's fleet moves while the other player is away. Each dialog offers "End session" if you would
+rather not wait, and "Wait 5 more minutes" if you would.
+
+**If the guest gets back inside the window, the session continues.** The guest asks to resume with
+the session id it already had, the host accepts it, and the whole world state is rebroadcast so both
+sides start from the same picture. Nothing is rolled back and nothing is re-negotiated.
+
+**If the window expires, the session ends cleanly** on both sides, exactly as it did before the grace
+window existed. That is not the end of play: the guest's ordinary connect retry then reconnects
+through the normal lobby handshake, and as long as both games are on the same campaign it becomes a
+new session with a full resync. You lose the grace window's convenience, not the campaign.
+
+---
+
 ## Troubleshooting
 
 | What you see | Where the problem is | What to do |
@@ -304,6 +347,7 @@ tier 2 and add the UDP rule.
 | Mapper says `UPnPError 725` | Router refuses timed leases | Nothing to do. The mod retries with a permanent lease automatically and deletes it on exit. |
 | Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both `New-NetFirewallRule` commands from tier 1. |
 | Everything is fine but choppy | Latency, not reachability | Check RTT in the guest's doctor block. Above ~250 ms, try a VPN with a closer relay. |
+| Partner's clock runs ahead or behind, both games on one PC | Starsector caps its frame step, so a minimized or background window runs its clock slow | Keep both windows restored and visible. The drift reconciler pulls them back together within a minute once they are. |
 
 ---
 

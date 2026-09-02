@@ -160,6 +160,7 @@ const DATA = {
   planDate: (data.meta && data.meta.planDate) || '',
   repo: (data.meta && data.meta.repo) || '',
   here: data.here,
+  hereHead: data.hereHead,
   buckets: data.buckets,
   phases: data.phases,
   attention: data.attention,

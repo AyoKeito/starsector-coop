@@ -10,19 +10,19 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built + live smoke PASSED 2026-09-02; 7c built + live smoke PASSED 2026-09-02"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b and 7c built + live smoke PASSED 2026-09-02; 20 built + red-teamed + six-profile shaped-loopback matrix PASSED 2026-09-02 (real-Internet smoke still pending)"
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "partially built — Phase 29: M1 motion interpolation landed 2026-08-24, M2 adaptive cadence waits on Phase 20"
+      "note": "partially built. Phase 29: M1 motion interpolation landed 2026-08-24; M2 adaptive cadence was waiting on Phase 20, which landed 2026-09-02, so M2 is now the next build"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "immediate focus — first in the hardening-first order"
+      "note": "immediate focus. Phase 29's remaining M2 milestone (adaptive cadence) runs first now that Phase 20 has landed; this card is the next wholly unbuilt phase after it"
     },
     {
       "key": "queued",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 7c built and live-smoke verified, plus the 20.6 HUD line and the 21 New Game milestones (2026-09-02); next Phase 20, with the 12c manual residue still open",
-  "here": "<b>Phase 7c — guest clock reconciliation — is built and live-verified: 1238 green tests, two-instance smoke PASSED on all 8 steps (2026-09-02).</b> <code>CoopClockReconciler</code> reads the drift the <code>TIME_SNAPSHOT</code> stream has carried unused since Phase 7, filters it through a 9-sample median ring behind a pause-agreement gate and a spike gate, and converges the guest's <code>CampaignClock</code> by a slew bounded to 10% of each frame's own clock advance (30% while more than 0.1 game-day out), entering at 0.05 game-day and exiting below 0.01. Shared pauses snap the whole positive drift forward in one write. The clock never moves backward: month-end fires on <code>getMonth() != prevMonth</code>, so a backward write across a boundary would pay monthly income twice. <b>Smoke numbers:</b> a 10 s guest stall left it 0.5 game-day behind and the median fell to the exit threshold in 25 s; a 12 s host stall left the guest 1.03 game-day ahead across the March month end, and it converged by slow-down alone in 45 s with the guest date holding at Apr 2 until the host caught up; the shared-pause snap put both clocks identical to the millisecond; six fast-forward cycles moved the median at most 0.032 game-day; the disable flag left a 0.96 game-day gap untouched with one warning. <b>Two fixes came out of the build and smoke:</b> review caught the pump re-applying the latest snapshot every frame and handing a positive dt while paused, so each snapshot feeds the ring once and <code>tick</code> takes the live pause state; the first live run then showed the spike gate wedging after a shared pause (ring RMS collapses to seconds, every later sample rejected), fixed with a 0.05 game-day floor and a three-strikes persistent-step escape (<code>e51950f</code>). Side finding: the guest rejoins by loading its Phase 16 autosave, not by New Game on the same seed, which the 6b seed lock rejects as already in flight. <b>Same day, two UI milestones pulled forward at the user's request and live-verified:</b> the 20.6 HUD line (<code>HOST · session active · paused by you</code>, guest clock drift in game-hours; a mod-owned BMFont renderer over the vanilla font, no LazyLib; the pause holder rides in <code>TIME_SNAPSHOT</code> as <code>pausedBy</code>) and the Phase 21 coop-aware New Game dialog (join cue on the Continue option, seed/sector size/star age pinned, real character name sent, dev starts disabled). The \"New Game\" label itself is an obfuscated title-screen constant and cannot be renamed. The partner's mirror is now labelled <code>partner &lt;Name&gt;</code> because vanilla prefixes player-faction fleets with \"Your\". <b>Open: Phase 20 next, plus the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
+  "hereHead": "You are here: Phase 20 built, red-teamed and matrix-passed (2026-09-02); one real-Internet smoke left, then 29-M2 → 21 → 19",
+  "here": "<b>Phase 20, connectivity hardening, is built, red-teamed, and QA-matrix passed (2026-09-02).</b> Nine feature commits took the transport from a LAN protocol to a WAN one: an N-ready datagram envelope with a 16-hex session token and a QUIC-style <code>PATH_PROBE</code> challenge-echo before any new source address is trusted (<code>4425e80</code>); a UPnP/NAT-PMP port mapper, CGNAT verdict and connection doctor (<code>e8649f6</code>); RTT/loss supervision, a symmetric UDP-blocked TCP fallback and bounded outbound queues (<code>1598734</code>); a 60 s in-session reconnect grace with a 15 s link-death rule that exempts combat, saves and stalls (<code>3197379</code>); the payload diet, which cut a 30-ship fleet tick from 9,282 B to 1,008 B and chunks <code>NPC_FLEET_MOTION</code> under 1,200 B (<code>6cfce04</code>); an optional <code>coop.password</code> nonce challenge, per-address abuse limits and the <code>CoopPeerLink</code> peer table (<code>64bef68</code>); and a latency audit that re-derived the <code>ENGAGE_GUEST</code> handoff in time-to-contact terms and closed the market-open race (<code>fe1ee25</code>). <b>Red-team pass:</b> three reviewers over <code>64bef68</code> raised 34 findings and all 34 were fixed (<code>04a8676</code> + <code>0d59163</code>, merged <code>d97094f</code>, 1,773 green). Two were live-reachable: a half-open socket replaced inside one poll produced no disconnect edge and locked the returning guest out for good, and a second drop inside an open grace window tore the session down and then accepted a resume against a null session id. <b>QA matrix (shaped loopback via clumsy, all six profiles PASS):</b> 30 min at 100 ms RTT / 2% loss / 5% reorder with no transitions and 0.04 game-days of drift; a 5% loss spike; a 30 s outage that resumed inside the grace with both dialogs on screen; a 95 s outage that expired at exactly 60 s and tore down cleanly; a full UDP block that flipped both sides into TCP fallback in ~10 s and recovered 5 s after the block lifted; and a 50%-reorder profile with no rubber-banding. The wiretap saw a 920 B maximum composed datagram and <b>zero over 1,200 B across roughly 35,000 samples</b>. Tier 3 is verified against real firmware (MikroTik hAP, RouterOS 7.23.3) after the router's UPnP internal interface was moved off the address-less bridge onto the VLAN that holds the LAN address. <b>Open:</b> the real-Internet smoke (routed guest via <code>-ProxiedJvm</code> plus a password, recipe in the plan) and with it the live wrong-password run; three UX findings from the grace-expiry profile were fixed the same day in <code>2e916b9</code> (a \"Wait 5 more minutes\" button, releasing the coop-owned pause hold when the session goes active, and holding the guest paused while it has no session); and the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back + hire click-throughs, feel pass). Next in the order: <span class=\"rp\" data-jump=\"29\">Phase 29</span> M2 (adaptive cadence), then <span class=\"rp\" data-jump=\"21\">Phase 21</span>, then <span class=\"rp\" data-jump=\"19\">19</span>.",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next: Phase 20 (connectivity + 20.6 HUD)",
-      "state": "you are here",
-      "body": "<span class=\"rp\" data-jump=\"7c\">Phase 7c</span> — guest clock reconciliation — is <b>built and live-verified</b> (2026-09-02, 1238 green, 8/8 smoke steps): induced drift in both directions converged at the designed rates, the shared-pause snap landed both clocks identical, the guest never moved backward across a live month boundary, and the disable flag degraded cleanly. Next in the hardening-first order is <span class=\"rp\" data-jump=\"20\">Phase 20</span> (WAN transport hardening plus the 20.6 link HUD, which now also carries the sync readout). Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After 20 the order continues 29-M2 → 21 → 19."
+      "head": "Next: Phase 29 M2 (adaptive cadence)",
+      "state": "Phase 20 landed; one WAN smoke open",
+      "body": "<span class=\"rp\" data-jump=\"20\">Phase 20</span> is <b>built, red-teamed and matrix-passed</b> (2026-09-02): nine feature commits, 34 red-team findings all fixed, and six shaped-loopback profiles PASS including a 30 s outage that resumed inside the grace window and a full UDP block that fell back to TCP in about 10 seconds. Its one remaining step is the real-Internet smoke between two real networks, which also carries the live wrong-password run; the user paused QA before it. Three UX findings from the grace-expiry profile were fixed the same day in <code>2e916b9</code>. That unblocks <span class=\"rp\" data-jump=\"29\">Phase 29</span> M2 (adaptive cadence), which needs 20's <code>CoopLinkQuality</code>/<code>LINK_STATUS</code> and is next in the order, followed by <span class=\"rp\" data-jump=\"21\">21</span> and then <span class=\"rp\" data-jump=\"19\">19</span>. Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue."
     },
     {
       "sev": "gap",
@@ -701,7 +701,7 @@
       "title": "Connectivity Hardening (LAN to Internet)",
       "theme": "connectivity",
       "track": "v1",
-      "status": "not-built",
+      "status": "built",
       "summary": "Hardens the coop transport so a localhost session works reliably between two households over the Internet with no gameplay change.",
       "introduces": [
         "sequenced UDP epoch guard",
@@ -717,16 +717,16 @@
         "CoopLinkHud + CoopSessionIntel"
       ],
       "residue": [
-        "20.6 M0 BUILT + live-verified 2026-09-02: HUD line (role, session state, pause holder, guest clock drift in game-hours) via CampaignUIRenderingListener + mod-owned BMFont renderer; 20.6 proper adds RTT/loss/transport + mirror-lag ms to the same widget",
-        "all Steps unchecked (phase not built)",
-        "spike: datagram size histogram",
-        "spike: clumsy loopback shaping",
-        "spike: UPnP/dual-stack IPv6 on real routers",
-        "WAN QA matrix on shaped loopback",
-        "real-Internet two-machine smoke",
-        "security smoke (password + stale-sessionId)"
+        "BUILT + red-teamed + shaped-loopback QA matrix PASSED 2026-09-02; nine feature commits, 34 red-team findings all fixed (04a8676 + 0d59163, merged d97094f, 1773 green)",
+        "QA matrix a/b/c/c2/d/e all PASS: 30 min at 100 ms/2%/5% reorder with 0.04 game-day drift, 5% loss spike, 30 s outage resumed in-grace with both dialogs on screen, 95 s outage expired at exactly 60 s and tore down cleanly, full UDP block fell back to TCP in ~10 s and recovered in 5 s, 50% reorder with no rubber-banding",
+        "wiretap: max composed datagram 920 B (NPC_FLEET_MOTION TX), 294 B (FLEET_SNAPSHOT RX), zero over 1200 B across ~35,000 samples; 30-ship fleet tick 9282 B -> 1008 B",
+        "spikes all done: wiretap histogram, clumsy CLI-driven loopback shaping, UPnP tier 3 on a MikroTik hAP (RouterOS 7.23.3, after moving the UPnP internal interface off the address-less bridge), dual-stack IPv6 bind on Windows 11",
+        "20.6 M0 BUILT + live-verified 2026-09-02: HUD line (role, session state, pause holder, guest clock drift in game-hours) via CampaignUIRenderingListener + mod-owned BMFont renderer; 20.6 proper adds RTT/loss/transport to the same widget",
+        "PENDING: real-Internet smoke (routed guest via -ProxiedJvm + coop.password; launch recipe in the plan) and with it the live wrong-password half of the security smoke",
+        "3 UX findings from profile (c2), all fixed in 2e916b9 (1789 green): 'Wait 5 more minutes' on both dialogs, coop-owned pause hold released on the first active frame without becoming the host's intent, guest holds paused whenever it has no session",
+        "accepted artifacts: a throttled background window slows that client's clock (two-windows-one-PC only, reconciler recovers); a guest whose grace expires rejoins via the lobby path by itself; the port-mapper lease is released on the next game load, not at process exit"
       ],
-      "note": "Must ship before the final Phase 19 sign-off (Phase 19's checklist gains a WAN line depending on it)."
+      "note": "Built 2026-09-02. Must still ship its real-Internet smoke before the Phase 19 sign-off (Phase 19's checklist carries the WAN line). Unblocks Phase 29 M2."
     },
     {
       "id": "21",
@@ -953,7 +953,7 @@
         "document frozen calibration values",
         "decide tier set + blend/threshold values at M2 build"
       ],
-      "note": "M1 BUILT + clean-link smoke verified 2026-08-24 (partner-mirror inclusion settled: included); game-time send cadence under FF landed with 7b 2026-09-02; M2 needs Phase 20 (CoopLinkQuality/LINK_STATUS), slots directly after it"
+      "note": "M1 BUILT + clean-link smoke verified 2026-08-24 (partner-mirror inclusion settled: included); game-time send cadence under FF landed with 7b 2026-09-02. M2 needed Phase 20's CoopLinkQuality/LINK_STATUS, which landed 2026-09-02, so M2 is unblocked and next in the order."
     },
     {
       "id": "30",

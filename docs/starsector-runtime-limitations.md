@@ -440,3 +440,55 @@ Nothing about the colony itself is out of sync; the economy around it is. Each e
 Same root as the income drift seen in that session (host 1456 vs guest 1663 in a month where the two colonies were not yet producing the same thing; the next month matched exactly, drift 0).
 
 Accepted. The host is canonical — its reading is the one to trust when the two disagree. Worth revisiting only if this ever turns into a persistent *stability* divergence rather than a display difference: a shortage that sticks on one side long enough to feed the stability penalty would make the two colonies grow apart, which the industry/queue channel would not catch.
+
+
+## Phase 20 — Transport Hardening: Four Runtime Facts
+
+### The network pump does not run during combat or while a save is written
+
+`CoopNetPump` is an `EveryFrameScript` on the campaign engine. Combat runs on a different screen and
+`saveGame` blocks the thread that would otherwise tick it, so during either one the pump stops
+draining inbound bytes and stops sending. On a fast machine a save is a few seconds; on a slow one
+with a large sector it can pass 15 s, which is exactly the link-death threshold.
+
+This is why link death is declared on *inbound TCP silence* rather than on anything the pump measures
+about its own cadence, and why the rule carries three exemptions: the peer is in a battle
+(`BATTLE_STATUS`, aged out after 30 s of silence so a mid-combat drop cannot leave a phantom), a
+`SAVE_CHECKPOINT` passed within the last 60 s, or this process itself stalled. A fourth case, the
+*peer's* own save, has no natural signal at all: the saving side is the one that goes quiet, and it
+cannot send while it is blocked. Both roles therefore announce a `STALL_NOTICE` from `beforeGameSave`
+and flush it immediately, before the block starts.
+
+The same constraint rules out declaring death from silence in `CoopLinkQuality`, which measures RTT
+and loss: quiet is normal there. All death decisions live in `CoopReconnectCoordinator`.
+
+### A throttled game window runs its clock slow, and looks like the *other* client running fast
+
+Starsector caps per-frame `dt`. A minimized or background window gets far fewer frames, so its
+campaign clock advances slower than wall time, and from the other client's point of view the throttled
+side is behind and it is ahead. During the 2026-09-02 QA matrix the guest read up to 2.5 game-days
+ahead of a minimized host; the Phase 7c reconciler pulled it back to 0.01 game-days once both windows
+were visible again.
+
+This is only reachable when both games run on one PC, which is exactly what a two-instance test
+session does. It is not a defect and there is no fix from inside the mod: the engine will not run a
+window it does not have. Rule for two-windows-one-PC sessions, and it is worth telling testers:
+keep both windows restored and visible.
+
+### The agent bridge serves one client at a time
+
+`-Dcoop.debug.bridge` opens a socket that accepts a single connection. A second client gets
+`ECONNRESET` while the first holds the line, which is how a scripted supply drip was refused once a
+minute through profile (e) of the QA matrix while the MCP server was attached. Either accept N
+clients or add an in-game scheduler verb; filed as a Phase 30 follow-up.
+
+### The mod cannot release its UPnP port mapping when the process exits
+
+`CoopPortMapper` releases its lease on the next game load, not at shutdown. There is no engine hook
+for process exit that the sandbox can reach, and a JVM shutdown hook would run on a thread the mod is
+not allowed to build network state on. A mapping therefore outlives a closed game until the next
+launch cleans it up.
+
+Routers with working lease timers expire it on their own within the renewal interval. The case that
+matters is a router that rejects timed leases (`UPnPError 725`): the mod falls back to a permanent
+mapping there, so a crash leaves the port open until the next launch.
