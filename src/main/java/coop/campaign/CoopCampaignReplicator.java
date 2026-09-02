@@ -43,6 +43,9 @@ import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.util.Misc;
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.OptionPanelAPI;
+import com.fs.starfarer.api.campaign.TextPanelAPI;
 import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import coop.colony.CoopColonyIncome;
 import coop.colony.CoopColonyManagement;
@@ -839,6 +842,12 @@ public final class CoopCampaignReplicator
             send(CoopMessages.marketOpen(session.sessionId(), service.nextSeq(), now(),
                     market.getId(), session.localPlayerId()));
             CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_OPEN requested market=" + market.getId());
+            // Phase 20 M6: hold the trade screens shut until that reply lands. Only for a market that
+            // actually has stock to be wrong about -- a procgen derelict never gets a snapshot back,
+            // and there is nothing on its dialog for the gate to disable anyway.
+            if (hasOpenSubmarket(market)) {
+                marketSyncGate.onOpenRequested(market.getId(), now());
+            }
         }
         // When the host opens, its engine market is already canonical; the guest (if it later opens
         // the same market) pulls it via MARKET_OPEN. Simultaneous same-market use is prevented by
@@ -875,6 +884,13 @@ public final class CoopCampaignReplicator
                         "Failed to diff colony management state on market close", ex);
             }
         }
+        // Phase 20 M6: the dialog is gone, so there is nothing left to gate. A snapshot that arrives
+        // after this just applies to a market nobody is looking at, which is the pre-existing model.
+        if (marketSyncGate.onResolved(market.getId())) {
+            CoopLog.info(CoopCampaignReplicator.class,
+                    "Coop market sync gate dropped: the dialog closed before the snapshot arrived"
+                            + " market=" + market.getId());
+        }
         if (marketCloseObserver == null) {
             return;
         }
@@ -902,6 +918,116 @@ public final class CoopCampaignReplicator
 
     public void setMarketCloseObserver(MarketCloseObserver observer) {
         this.marketCloseObserver = observer;
+    }
+
+    // ---- Phase 20 M6: market open-snapshot gate ------------------------------------------------
+
+    private final CoopMarketSyncGate marketSyncGate = new CoopMarketSyncGate();
+
+    /** Test/bridge seam: the pure gate state behind {@link #tickMarketSyncGate()}. */
+    public CoopMarketSyncGate marketSyncGate() {
+        return marketSyncGate;
+    }
+
+    /**
+     * Per-frame (guest): hold the dock dialog's trade options shut while a {@code MARKET_SNAPSHOT} is
+     * outstanding, so nothing can be bought against the guest's own un-synced roll and no snapshot can
+     * land under an open trade screen. See {@link CoopMarketSyncGate} for why both are real defects at
+     * WAN latency and why the gate must always time out.
+     *
+     * <p>The disable is re-asserted every frame rather than once, because the rule engine repopulates
+     * the option panel on its own schedule (any {@code FireBest}/{@code MarketPostOpen} pass rebuilds
+     * it) and a one-shot disable would silently come back enabled.
+     */
+    public void tickMarketSyncGate() {
+        if (marketSyncGate.pendingMarketId() == null) {
+            return;
+        }
+        if (!isGuest() || !isActive()) {
+            marketSyncGate.clear();
+            return;
+        }
+        try {
+            long nowMillis = now();
+            if (marketSyncGate.pollTimedOut(nowMillis)) {
+                CoopLog.warn(CoopCampaignReplicator.class,
+                        "Coop market sync gate timed out after " + CoopMarketSyncGate.TIMEOUT_MILLIS
+                                + " ms with no MARKET_SNAPSHOT market=" + marketSyncGate.pendingMarketId()
+                                + "; opening the trade screens against the local stock");
+                releaseMarketSyncGate("timeout");
+                return;
+            }
+            if (!marketSyncGate.isBlocking(nowMillis)) {
+                return;
+            }
+            OptionPanelAPI options = currentOptionPanel();
+            if (options == null) {
+                return;
+            }
+            boolean gated = setTradeOptionsEnabled(options, false);
+            // Only speak when there was something to hold back. A dialog with no trade options (a
+            // derelict, a colony info screen) is not being gated, so announcing a sync would be noise.
+            if (gated && marketSyncGate.pollAnnounce(nowMillis)) {
+                announceMarketSyncing();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // A gate that cannot reach the UI must fail open, not wedge the dialog.
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply the coop market sync gate", ex);
+            marketSyncGate.clear();
+        }
+    }
+
+    /** Re-enable whatever the gate disabled. Total: a missing dialog just means nothing to restore. */
+    private void releaseMarketSyncGate(String reason) {
+        try {
+            OptionPanelAPI options = currentOptionPanel();
+            if (options != null) {
+                setTradeOptionsEnabled(options, true);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Failed to re-enable market trade options (" + reason + ")", ex);
+        }
+    }
+
+    /** @return true when at least one trade option was present, i.e. the gate is actually holding. */
+    private static boolean setTradeOptionsEnabled(OptionPanelAPI options, boolean enabled) {
+        boolean any = false;
+        for (String id : CoopMarketSyncGate.TRADE_OPTION_IDS) {
+            if (options.hasOption(id)) {
+                options.setEnabled(id, enabled);
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    private static OptionPanelAPI currentOptionPanel() {
+        SectorAPI sector = Global.getSector();
+        CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
+        InteractionDialogAPI dialog = ui == null ? null : ui.getCurrentInteractionDialog();
+        return dialog == null ? null : dialog.getOptionPanel();
+    }
+
+    private void announceMarketSyncing() {
+        SectorAPI sector = Global.getSector();
+        CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
+        InteractionDialogAPI dialog = ui == null ? null : ui.getCurrentInteractionDialog();
+        TextPanelAPI text = dialog == null ? null : dialog.getTextPanel();
+        if (text != null) {
+            text.addPara(CoopMarketSyncGate.SYNCING_TEXT);
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop market sync gate holding trade options"
+                + " market=" + marketSyncGate.pendingMarketId());
+    }
+
+    /** Does this market have the open submarket the snapshot replaces? Total; false on any failure. */
+    private static boolean hasOpenSubmarket(MarketAPI market) {
+        try {
+            return market != null && market.hasSubmarket(Submarkets.SUBMARKET_OPEN);
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
     }
 
     /** Host: a player opened a market; capture the canonical open-market stock and send it. */
@@ -1207,6 +1333,12 @@ public final class CoopCampaignReplicator
         // The hireable pool lives on the market, not in the submarket cargo, so it applies even when
         // the guest has no materialized open-market cargo to replace.
         applyHireablePool(findMarket(marketId), items);
+        // Phase 20 M6: the stock is canonical now, so the trade screens open. Ordering is load-bearing
+        // -- the release happens after applySnapshotToEngine, never before, so there is no frame on
+        // which the options are live and the cargo is still the guest's own roll.
+        if (marketSyncGate.onResolved(marketId)) {
+            releaseMarketSyncGate("snapshot applied");
+        }
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_SNAPSHOT market=" + marketId
                 + " items=" + items.size());
     }

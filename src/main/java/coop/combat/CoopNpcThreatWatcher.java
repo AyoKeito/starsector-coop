@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
 
 /**
@@ -154,10 +155,27 @@ public final class CoopNpcThreatWatcher {
      * work exactly as it does in vanilla, so the guest is dropped into the encounter at contact and not
      * before.
      *
-     * <p><b>Phase 20 obligation:</b> re-derive as {@code 2 x p95 RTT x closing speed + processing
-     * margin} once the latency audit has real WAN numbers. It is loopback-blind today.
+     * <p><b>Phase 20 obligation (done, M6).</b> The flat number above is the <em>floor</em> now, not
+     * the whole margin: {@link #handoffMargin} re-derives it in time-to-contact terms against the
+     * measured link, so a WAN session hands the fight over early enough that the guest is still
+     * outside contact when its {@code BATTLE_BEGIN} comes back. See that method for the derivation and
+     * for why {@code p95 = 0} deliberately short-circuits back to this constant.
      */
     static final float CONTACT_MARGIN_SU = 100f;
+
+    /**
+     * Message-processing slack in the time-to-contact budget: the frames spent turning an inbound
+     * {@code ENGAGE_GUEST} into a started battle on the guest (drain, dialog-free frame check,
+     * autosave kick-off) on top of the two network legs and the scan quantum.
+     */
+    static final long PROCESSING_SLACK_MILLIS = 100L;
+
+    /**
+     * The fastest closing speed the Phase 14 spike measured (a burn-17 patrol running down a stopped
+     * mirror). Used only when the engine cannot supply the pair's real closing speed, so an unreadable
+     * velocity fails toward an earlier handoff rather than a missed one.
+     */
+    static final float SPIKE_CLOSING_SPEED_SU_PER_SEC = 340f;
 
     /**
      * Fallback model only: how close a hostile must be before the synthesized pursuit gives it a
@@ -273,17 +291,24 @@ public final class CoopNpcThreatWatcher {
      * @param pursuitDays    {@code getTacticalModule().getPursuitDays()} — fallback model only
      * @param pursuitBudgetDays vanilla's patience for this chaser: the fallback model's give-up timer
      *                          and the inspection chase's give-up timer both read it
-     * @param contactDistance the chaser's radius + the mirror's radius + {@link #CONTACT_MARGIN_SU}
+     * @param contactDistance the chaser's radius + the mirror's radius + {@link #handoffMargin}
      * @param customsPursuing whether this patrol is already running a synthesized inspection chase
      * @param customsPursuitDays campaign days elapsed since that chase started
      * @param customsUnseenScans consecutive scans of that chase in which the mirror was undetectable
+     * @param closingSpeedSuPerSec how fast the gap between chaser and mirror is actually shrinking —
+     *                             the two velocities projected on the separation vector, clamped at 0
+     *                             for a pair that is not closing. {@link Float#NaN} means the engine
+     *                             could not supply it (no location, no velocity, coincident fleets),
+     *                             and {@link #handoffMargin} then falls back to
+     *                             {@link #SPIKE_CLOSING_SPEED_SU_PER_SEC}.
      */
     public record FleetView(String coopFleetId, String fleetName, String factionId,
                             boolean hostile, boolean engagePick, boolean patrol,
                             boolean combatCapable, boolean visible, boolean huntingMirror,
                             boolean allowedToEngage, float pursuitDays, float pursuitBudgetDays,
                             float distance, float contactDistance,
-                            boolean customsPursuing, float customsPursuitDays, int customsUnseenScans) {
+                            boolean customsPursuing, float customsPursuitDays, int customsUnseenScans,
+                            float closingSpeedSuPerSec) {
     }
 
     /** Live state of one patrol's synthesized inspection chase. Mutable; owned by the watcher. */
@@ -322,27 +347,48 @@ public final class CoopNpcThreatWatcher {
     private final CoopSessionState session;
     private final LongSupplier clock;
     private final BooleanSupplier synthesizedPursuit;
+    private final IntSupplier p95RttMillis;
     private final Cooldowns cooldowns = new Cooldowns();
     /** coopFleetId -> deadline for applying the post-battle do-not-attack window. */
     private final Map<String, Long> pendingPostDefeatGrace = new HashMap<>();
     /** coopFleetId -> live synthesized inspection chase of the dark guest mirror. */
     private final Map<String, CustomsPursuit> customsPursuits = new HashMap<>();
     private final Map<String, Long> lastDiagnosticAtMillis = new HashMap<>();
+    /** Chasers whose latency-derived margin has already been reported once (diagnostics only). */
+    private final Set<String> loggedDerivedMargin = new HashSet<>();
     private long nextScanAtMillis;
     private long lastHandoffAtMillis = Long.MIN_VALUE;
     private int ejectCount;
     private int graceAppliedCount;
 
+    /** Loopback/test constructor: no link measurement, so the handoff keeps its Phase 14 geometry. */
     public CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock) {
-        this(service, session, clock, CoopNpcThreatWatcher::synthesizedPursuitConfigured);
+        this(service, session, clock, () -> 0);
+    }
+
+    /**
+     * @param p95RttMillis the measured 95th-percentile round trip to the guest, or {@code 0} when the
+     *                     link has produced no sample yet (the pump passes
+     *                     {@code CoopLinkQuality::p95RttMillis} with its null mapped to 0). Zero is
+     *                     the loopback contract: see {@link #handoffMargin}.
+     */
+    public CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock,
+                                IntSupplier p95RttMillis) {
+        this(service, session, clock, CoopNpcThreatWatcher::synthesizedPursuitConfigured, p95RttMillis);
     }
 
     CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock,
                          BooleanSupplier synthesizedPursuit) {
+        this(service, session, clock, synthesizedPursuit, () -> 0);
+    }
+
+    CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock,
+                         BooleanSupplier synthesizedPursuit, IntSupplier p95RttMillis) {
         this.service = Objects.requireNonNull(service, "service");
         this.session = Objects.requireNonNull(session, "session");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.synthesizedPursuit = Objects.requireNonNull(synthesizedPursuit, "synthesizedPursuit");
+        this.p95RttMillis = Objects.requireNonNull(p95RttMillis, "p95RttMillis");
     }
 
     // ---- pure decision core ----------------------------------------------------------------------
@@ -489,9 +535,58 @@ public final class CoopNpcThreatWatcher {
         return !coopBattleActive && engageReady && view.distance() <= view.contactDistance();
     }
 
-    /** The handoff distance for one chaser: edge-to-edge contact plus one scan of closing speed. */
+    /**
+     * The handoff distance for one chaser at zero measured latency: edge-to-edge contact plus the flat
+     * Phase 14 margin. Kept as the loopback/test shorthand for
+     * {@link #contactDistance(float, float, float, int)}.
+     */
     public static float contactDistance(float chaserRadius, float mirrorRadius) {
-        return Math.max(0f, chaserRadius) + Math.max(0f, mirrorRadius) + CONTACT_MARGIN_SU;
+        return contactDistance(chaserRadius, mirrorRadius, Float.NaN, 0);
+    }
+
+    /** Edge-to-edge contact plus {@link #handoffMargin} for this pair on this link. */
+    public static float contactDistance(float chaserRadius, float mirrorRadius,
+                                        float closingSpeedSuPerSec, int p95RttMillis) {
+        return Math.max(0f, chaserRadius) + Math.max(0f, mirrorRadius)
+                + handoffMargin(closingSpeedSuPerSec, p95RttMillis);
+    }
+
+    /**
+     * Phase 20 M6: the handoff margin re-derived in time-to-contact terms.
+     *
+     * <pre>margin = max(CONTACT_MARGIN_SU, closingSpeed x (2 x p95Rtt + SCAN_INTERVAL + SLACK) / 1000)</pre>
+     *
+     * <p><b>Why the budget has those three terms.</b> {@code ENGAGE_GUEST} is a round trip, and the
+     * distance that matters is how far the chaser closes while it is in flight: one leg out, the
+     * guest's reply leg back (hence {@code 2 x p95}, and p95 not the mean because the tail is what
+     * produces the visible failure), one {@link #SCAN_INTERVAL_MILLIS} because the watcher can only
+     * notice contact on a scan boundary, and {@link #PROCESSING_SLACK_MILLIS} for the frames the guest
+     * spends turning the message into a started battle. Fire later than that and the two fleets are
+     * already overlapping — or worse, vanilla's own battle-initiation code has pulled the mirror in —
+     * by the time the guest's battle exists.
+     *
+     * <p><b>Why {@code p95 = 0} returns the flat constant exactly.</b> {@link #CONTACT_MARGIN_SU} is
+     * not a raw scan-quantum figure: Phase 14 computed 340 su/s x 0.25 s = 85 su and then rounded it
+     * up to 100 <em>for processing slack</em>. Re-deriving at zero latency therefore double-counts
+     * that slack (340 x 0.35 = 119 su) and would move the handoff point on localhost, where nothing is
+     * wrong with it. The audit's rule is that a measured link may only ever widen the band, never
+     * narrow or move it for free, so an unmeasured link (loopback, or before the first PONG) keeps
+     * Phase 14's geometry byte for byte.
+     *
+     * @param closingSpeedSuPerSec the pair's real closing speed, or {@link Float#NaN} when the engine
+     *                             could not supply it (then {@link #SPIKE_CLOSING_SPEED_SU_PER_SEC}).
+     *                             A receding or stationary pair clamps to 0 and keeps the floor.
+     * @param p95RttMillis         measured p95 RTT; {@code <= 0} means "not measured".
+     */
+    public static float handoffMargin(float closingSpeedSuPerSec, int p95RttMillis) {
+        if (p95RttMillis <= 0) {
+            return CONTACT_MARGIN_SU;
+        }
+        float closing = Float.isNaN(closingSpeedSuPerSec)
+                ? SPIKE_CLOSING_SPEED_SU_PER_SEC
+                : Math.max(0f, closingSpeedSuPerSec);
+        long budgetMillis = 2L * p95RttMillis + SCAN_INTERVAL_MILLIS + PROCESSING_SLACK_MILLIS;
+        return Math.max(CONTACT_MARGIN_SU, closing * budgetMillis / 1000f);
     }
 
     /** Vanilla's pursuit patience for one chaser ({@code StrategicModule.java:554-588}). */
@@ -539,6 +634,7 @@ public final class CoopNpcThreatWatcher {
         pendingPostDefeatGrace.clear();
         customsPursuits.clear();
         lastDiagnosticAtMillis.clear();
+        loggedDerivedMargin.clear();
         nextScanAtMillis = 0L;
         lastHandoffAtMillis = Long.MIN_VALUE;
         ejectCount = 0;
@@ -676,6 +772,7 @@ public final class CoopNpcThreatWatcher {
         boolean synthesized = synthesizedPursuitEnabled();
         boolean transponderOn = transponderOn(mirror);
         boolean diagnostics = CoopDebug.diagnosticsEnabled();
+        int p95Rtt = readP95RttMillis();
         // The handoff round trip has not closed yet: treat it as "a coop battle is starting".
         // The never-fired sentinel must be checked explicitly: nowMillis - Long.MIN_VALUE overflows
         // negative, which read as "inside the grace window" forever and muzzled every ENGAGE_GUEST
@@ -695,11 +792,13 @@ public final class CoopNpcThreatWatcher {
             seenThisScan.add(coopFleetId);
             boolean visible = canSee(fleet, mirror);
             CustomsPursuit pursuit = trackCustomsVisibility(coopFleetId, visible);
-            FleetView view = viewOf(fleet, mirror, coopFleetId, visible, pursuit, elapsedDaysSince(pursuit));
+            FleetView view = viewOf(fleet, mirror, coopFleetId, visible, pursuit,
+                    elapsedDaysSince(pursuit), p95Rtt);
             applyPendingGraceIfQueued(fleet, mirror, view);
             boolean battleBusy = coopBattleActive || handedOff;
             if (diagnostics) {
                 dumpPursuitState(view, synthesized, nowMillis);
+                logDerivedMarginOnce(view, p95Rtt);
             }
             Action action = decide(view, synthesized, transponderOn, battleBusy,
                     cooldowns.isReady(cooldownKey(view.coopFleetId(), Action.ENGAGE_GUEST),
@@ -992,6 +1091,36 @@ public final class CoopNpcThreatWatcher {
         }
     }
 
+    /** Never let a link-quality read take a scan down; an unreadable link is an unmeasured link. */
+    private int readP95RttMillis() {
+        try {
+            return Math.max(0, p95RttMillis.getAsInt());
+        } catch (RuntimeException | LinkageError ex) {
+            return 0;
+        }
+    }
+
+    /**
+     * Dormant diagnostic (CoopDebug): one line per chaser the first time latency actually widened its
+     * handoff band. Once per chaser, not per scan — the point is to show which fleets the WAN margin
+     * is reaching and by how much, and a per-scan version of that is a 4 Hz log flood.
+     */
+    private void logDerivedMarginOnce(FleetView view, int p95Rtt) {
+        float flat = contactDistance(0f, 0f);
+        float derived = handoffMargin(view.closingSpeedSuPerSec(), p95Rtt);
+        if (derived <= flat || !loggedDerivedMargin.add(view.coopFleetId())) {
+            return;
+        }
+        CoopLog.info(CoopNpcThreatWatcher.class, "Coop handoff margin widened by latency"
+                + " fleet=" + view.fleetName() + " (" + view.factionId() + ")"
+                + " p95Rtt=" + p95Rtt + "ms"
+                + " closing=" + (Float.isNaN(view.closingSpeedSuPerSec())
+                        ? "unknown(" + SPIKE_CLOSING_SPEED_SU_PER_SEC + ")"
+                        : String.format("%.1f", view.closingSpeedSuPerSec()) + " su/s")
+                + " margin=" + String.format("%.1f", derived) + " su (flat " + flat + ")"
+                + " contact=" + String.format("%.1f", view.contactDistance()));
+    }
+
     /**
      * Dormant diagnostic (CoopDebug). This is how a smoke test tells the primary model from the
      * fallback: {@code hunting=true} anywhere in the dump means vanilla is targeting the mirror on its
@@ -1022,10 +1151,12 @@ public final class CoopNpcThreatWatcher {
     // ---- engine reads (all best-effort) ----------------------------------------------------------
 
     private static FleetView viewOf(CampaignFleetAPI fleet, CampaignFleetAPI mirror, String coopFleetId,
-                                    boolean visible, CustomsPursuit pursuit, float customsPursuitDays) {
+                                    boolean visible, CustomsPursuit pursuit, float customsPursuitDays,
+                                    int p95RttMillis) {
         TacticalModulePlugin tactical = tacticalModule(fleet);
         StrategicModulePlugin strategic = strategicModule(fleet);
         boolean patrol = isPatrol(fleet);
+        float closingSpeed = closingSpeed(fleet, mirror);
         return new FleetView(
                 coopFleetId,
                 safeName(fleet),
@@ -1040,10 +1171,42 @@ public final class CoopNpcThreatWatcher {
                 pursuitDays(tactical),
                 pursuitBudgetDays(patrol, burnLevel(fleet)),
                 distance(fleet, mirror),
-                contactDistance(radius(fleet), radius(mirror)),
+                contactDistance(radius(fleet), radius(mirror), closingSpeed, p95RttMillis),
                 pursuit != null,
                 customsPursuitDays,
-                pursuit == null ? 0 : pursuit.unseenScans);
+                pursuit == null ? 0 : pursuit.unseenScans,
+                closingSpeed);
+    }
+
+    /**
+     * How fast the gap between two fleets is actually shrinking, in su/s: the relative velocity
+     * projected onto the unit separation vector. Positive means closing; a receding or parallel pair
+     * clamps to 0, and anything the engine will not answer for comes back as {@link Float#NaN} so
+     * {@link #handoffMargin} can fall back rather than silently treat "unknown" as "stationary".
+     */
+    static float closingSpeed(CampaignFleetAPI chaser, CampaignFleetAPI mirror) {
+        try {
+            Vector2f pc = chaser.getLocation();
+            Vector2f pm = mirror.getLocation();
+            Vector2f vc = chaser.getVelocity();
+            Vector2f vm = mirror.getVelocity();
+            if (pc == null || pm == null || vc == null || vm == null) {
+                return Float.NaN;
+            }
+            // Separation points from the chaser to the mirror; the chaser closes when its relative
+            // velocity has a component along it, so the sign convention is (vChaser - vMirror) . sep.
+            float sx = pm.x - pc.x;
+            float sy = pm.y - pc.y;
+            float length = (float) Math.sqrt(sx * sx + sy * sy);
+            if (!(length > 0f)) {
+                // Coincident (or NaN coordinates): there is no separation direction to project onto.
+                return Float.NaN;
+            }
+            float closing = ((vc.x - vm.x) * sx + (vc.y - vm.y) * sy) / length;
+            return Float.isNaN(closing) ? Float.NaN : Math.max(0f, closing);
+        } catch (RuntimeException | LinkageError ex) {
+            return Float.NaN;
+        }
     }
 
     /**

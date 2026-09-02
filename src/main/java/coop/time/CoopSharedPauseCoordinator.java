@@ -93,6 +93,23 @@ public final class CoopSharedPauseCoordinator {
      * Apply a guest manual (key) pause intent with last-writer-wins debounce: an intent whose
      * {@code seq} is not strictly greater than the last applied seq is stale and ignored. Returns true
      * if applied.
+     *
+     * <p><b>Phase 20 M6 latency audit — why this cannot strand the host's clock.</b> The failure this
+     * debounce would produce is "the guest unpaused, the host stayed paused" (or the reverse): an
+     * intent overtaking its successor and the newer one then being discarded as stale. It is
+     * unreachable on this transport. {@code PAUSE_INTENT} travels TCP over the single
+     * {@code activeChannel}, JSON-line framed, and the pump drains that channel in arrival order —
+     * so at 200 ms RTT with 2% loss the loss becomes a retransmit, i.e. <em>delay</em>, and delay
+     * cannot reorder a byte stream. The guest stamps every intent from one monotonic
+     * {@link #nextLocalSeq()} counter shared by both sources, so seqs arrive strictly increasing and
+     * <em>every</em> intent is applied; the debounce never actually discards anything in production.
+     * It is kept as the guard for the one case that can go backwards — a resumed session whose peer is
+     * a fresh process counting from zero, which {@link #resetGuestIntentWatermark()} handles — and for
+     * any future carriage that is not a single ordered stream.
+     *
+     * <p>The two sources sharing one watermark is safe for the same reason: they also share the
+     * sender's counter, so a SCREEN intent can never carry a seq that makes a later KEY intent look
+     * stale.
      */
     public synchronized boolean applyGuestKeyPauseIntent(boolean paused, long seq) {
         if (seq <= appliedGuestSeq) {
@@ -119,6 +136,26 @@ public final class CoopSharedPauseCoordinator {
 
     public synchronized boolean guestScreenPauseIntent() {
         return guestScreenPauseIntent;
+    }
+
+    /**
+     * Session resume: forget the last applied guest intent seq without touching any pause state.
+     *
+     * <p>Found by the Phase 20 M6 audit. The watermark is a property of the <em>sender's counter</em>,
+     * and a guest that comes back as a fresh process (the supported rejoin: restart, load the
+     * coordinated autosave, resume the same session id) starts that counter at zero again while the
+     * host still holds whatever the old process reached. Every pause intent the returning guest sends
+     * is then silently discarded as stale until it counts back past the old high-water mark — the host
+     * ignoring the guest's pause key and screen opens for the first several presses, with nothing in
+     * the log to say why.
+     *
+     * <p>Safe to do unconditionally at resume: the socket that could have carried an older intent is
+     * gone with the old connection, so there is nothing in flight for the watermark to protect
+     * against. The intents themselves are deliberately left alone — the world's pause state must
+     * survive the outage, only the sequencing does not.
+     */
+    public synchronized void resetGuestIntentWatermark() {
+        appliedGuestSeq = Long.MIN_VALUE;
     }
 
     /** Host override: force-clear the guest's manual (key) pause only; never the screen pause. */

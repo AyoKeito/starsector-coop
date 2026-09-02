@@ -155,6 +155,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_REPLICATOR_COLONY_MGMT = "replicator.colonyManagement";
     private static final String SECTION_REPLICATOR_COLONY_INCOME = "replicator.colonyIncome";
     private static final String SECTION_REPLICATOR_EXPEDITIONS = "replicator.expeditionWarnings";
+    private static final String SECTION_REPLICATOR_MARKET_GATE = "replicator.marketSyncGate";
     private static final String SECTION_PING = "net.sendPing";
     private static final String SECTION_LINK_SUPERVISION = "net.linkSupervision";
     private static final String SECTION_RECONNECT = "net.reconnectGrace";
@@ -323,6 +324,9 @@ public class CoopNetPump implements EveryFrameScript {
     private String lastBlockedEntityName;
     /** Phase 18: the local claim the host rejected, until its dialog is actually closed. */
     private final CoopRejectTracker rejectTracker = new CoopRejectTracker();
+    /** Phase 20 M6: the guest's own unanswered-claim timer (the "waiting for the host" notice). */
+    private final coop.interaction.CoopClaimWaitTracker claimWaitTracker =
+            new coop.interaction.CoopClaimWaitTracker();
     /**
      * Phase 18 debug lever ({@link CoopDebug#INTERACTION_DELAY_PROPERTY}): inbound claims held on
      * the host until their release stamp. Empty and untouched unless the property is set.
@@ -464,7 +468,11 @@ public class CoopNetPump implements EveryFrameScript {
         this.npcFleetRegistry = new CoopFleetMirrorRegistry(CoopFleetMirror::new, clockMillis);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
         this.battleBridge = new CoopBattleBridge(service, sessionState, clockMillis, pauseCoordinator);
-        this.npcThreatWatcher = new CoopNpcThreatWatcher(service, sessionState, clockMillis);
+        // Phase 20 M6: the pre-contact handoff band is derived against the measured link, so the
+        // watcher reads p95 RTT from the same place the HUD does. Null (no PONG yet) maps to 0, which
+        // the watcher treats as "unmeasured" and answers with Phase 14's flat loopback geometry.
+        this.npcThreatWatcher = new CoopNpcThreatWatcher(service, sessionState, clockMillis,
+                this::p95RttMillisOrZero);
         // Phase 14: vanilla's battle-result callbacks only enrich the outcome string; the coop battle
         // window itself is opened/closed by the bridge's combat-frame and campaign-resume seams.
         this.campaignReplicator.setBattleObserver(new CoopCampaignReplicator.BattleObserver() {
@@ -849,6 +857,10 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_REPLICATOR_COLONY_INCOME, t);
         campaignReplicator.tickExpeditionWarnings();
         t = profiler.split(SECTION_REPLICATOR_EXPEDITIONS, t);
+        // Phase 20 M6: runs after the inbound drain that would have applied the snapshot, so a
+        // snapshot that arrived this frame releases the gate before the options are re-asserted.
+        campaignReplicator.tickMarketSyncGate();
+        t = profiler.split(SECTION_REPLICATOR_MARKET_GATE, t);
         maybeSendPing();
         t = profiler.split(SECTION_PING, t);
         tickLinkSupervision();
@@ -1408,6 +1420,10 @@ public class CoopNetPump implements EveryFrameScript {
             }
             // Silence timers only: the RTT history is the same two machines on the same path.
             linkQuality.resetSilence(now);
+            // Phase 20 M6: the guest may be a fresh process counting PAUSE_INTENT seqs from zero
+            // again, and a stale high-water mark would eat its first several pause presses. Nothing
+            // older can still be in flight -- the connection that carried them is gone.
+            pauseCoordinator.resetGuestIntentWatermark();
             // Every clock sample spans a stalled link, so none of them says anything about drift.
             clockReconciler.clearSamples();
             // Phase 20 M4: both roles owe the peer a roster on a resume, and neither may trust the
@@ -2130,6 +2146,23 @@ public class CoopNetPump implements EveryFrameScript {
         latestTimeSnapshot = CoopTimeLock.fromMessage(message);
     }
 
+    /**
+     * <b>Phase 20 M6 latency audit — the hold has no deadline, and that is the design.</b> The one
+     * failure a slow handshake could produce here would be a timeout that gave up on the hold and let
+     * the host's clock run while the guest was still negotiating; at 200 ms RTT with 2% loss the
+     * lobby/handshake/seed-lock exchange is several round trips of TCP with retransmits, so any fixed
+     * budget would eventually be the thing that broke. There is no such budget: the predicate is
+     * purely {@code role == HOST && !isGameplaySessionActive()}, evaluated every frame, and the only
+     * exit is the session actually becoming active. A handshake that never completes leaves the host
+     * paused forever, which is the correct outcome — there is no public clock setter and no drivable
+     * fast-advance, so campaign time the guest missed cannot be given back.
+     *
+     * <p>The counterpart risk, the hold outliving its reason, is covered by the same predicate: the
+     * frame {@code isGameplaySessionActive()} goes true this stops asserting anything and the normal
+     * shared-pause path takes the clock over, seeding {@code hostPauseIntent} from whatever it
+     * observes (see {@link #syncHostSharedPause()}) so the hold does not silently become a permanent
+     * host pause intent.
+     */
     private void maybeHoldHostPausedUntilSessionReady() {
         // Hold the host paused from the moment it starts hosting until the coop session is fully
         // established (guest connected + handshake validated + seed lock done). Otherwise host time
@@ -3263,6 +3296,9 @@ public class CoopNetPump implements EveryFrameScript {
                 CoopMessages.requiredPayloadString(message, "entityName"),
                 CoopMessages.requiredPayloadLong(message, "hostSeq"));
         interactionGate.applyAccepted(claim);
+        // The host has ruled on this entity, so the wait is over whichever way it went. Nothing is
+        // posted for an answer that arrives late: the accept simply leaves the dialog where it is.
+        claimWaitTracker.onAnswered(claim.entityId());
     }
 
     /**
@@ -3286,6 +3322,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
         String entityId = CoopMessages.requiredPayloadString(message, "entityId");
         String reason = CoopMessages.requiredPayloadString(message, "reason");
+        claimWaitTracker.onAnswered(entityId);
         if (rejectTracker.onRejected(entityId)) {
             CoopLog.warn(CoopNetPump.class, "Coop interaction rejected entityId=" + entityId + " "
                     + reason + "; closing the local dialog");
@@ -3316,9 +3353,39 @@ public class CoopNetPump implements EveryFrameScript {
             }
             detectLocalInteraction(sector);
             applyLocalBlocking(sector);
+            pollClaimWait();
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync coop interaction gate", ex);
         }
+    }
+
+    /**
+     * Phase 20 M6: tell the guest once when the host has not answered its claim within
+     * {@code max(1000, 4 x p95 RTT)} ms. The dialog stays open and usable either way — this is an
+     * affordance, not a gate. Bypasses {@link #postFeed}'s per-kind rate limit on purpose: the tracker
+     * already emits at most one line per claim, and two different docks a few seconds apart are two
+     * things the player wants to hear about, not a flap.
+     */
+    private void pollClaimWait() {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        String entityName = claimWaitTracker.pendingEntityName();
+        String warning = claimWaitTracker.pollWarning(clockMillis.getAsLong(), p95RttMillisOrZero());
+        if (warning == null) {
+            return;
+        }
+        coop.ui.CoopFeed.post(warning, FEED_WARN_COLOR);
+        intelFeed.noteEvent(warning + " (" + entityName + ")");
+        CoopLog.info(CoopNetPump.class, "Coop interaction claim unanswered after "
+                + coop.interaction.CoopClaimWaitTracker.waitThresholdMillis(p95RttMillisOrZero())
+                + " ms entity=" + entityName);
+    }
+
+    /** The measured p95 RTT with "no sample yet" folded to 0 (the unmeasured/loopback contract). */
+    private int p95RttMillisOrZero() {
+        Integer p95 = linkQuality.p95RttMillis();
+        return p95 == null ? 0 : p95;
     }
 
     private void detectLocalInteraction(SectorAPI sector) {
@@ -3459,10 +3526,16 @@ public class CoopNetPump implements EveryFrameScript {
                     entityId, entityName, localPlayerId);
             service.send(claim);
             log("outbound", claim);
+            // Phase 20 M6: start the round-trip clock. The dialog is already open (optimistic model);
+            // this only decides when the player is told that the confirmation is taking a while.
+            claimWaitTracker.onClaimSent(entityId, entityName, clockMillis.getAsLong());
         }
     }
 
     private void sendInteractionRelease(String entityId) {
+        // The player closed the dialog. Whatever the host was going to say about it no longer needs
+        // a "still waiting" notice attached to a screen that is gone.
+        claimWaitTracker.onAnswered(entityId);
         CoopMessages.Message release = CoopMessages.interactionRelease(
                 sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
                 entityId, sessionState.localPlayerId());
@@ -3499,6 +3572,7 @@ public class CoopNetPump implements EveryFrameScript {
         // Session end / disconnect also ends any pending forced close and drops parked claims: the
         // dialog the rejection referred to belongs to a session that no longer exists.
         boolean hadRejection = rejectTracker.clear();
+        claimWaitTracker.clear();
         boolean hadDelayedClaims = !delayedInteractionClaims.isEmpty();
         delayedInteractionClaims.clear();
         if (localInteractionEntityId == null && lastBlockedEntityName == null

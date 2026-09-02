@@ -3125,6 +3125,162 @@ class CoopNetPumpTest {
         return session;
     }
 
+    // ---- Phase 20 M6: the unanswered-claim affordance ------------------------------------------
+
+    @Test
+    void theGuestIsToldOnceWhenTheHostDoesNotAnswerItsClaim() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_CLAIM));
+        assertEquals(0, waitingNotices(ui));
+
+        now.set(1999L);
+        pump.advance(0f);
+        assertEquals(0, waitingNotices(ui),
+                "still inside max(1000, 4 x p95); an unmeasured link uses the 1 s floor");
+
+        now.set(2000L);
+        pump.advance(0f);
+        assertEquals(1, waitingNotices(ui));
+        // The dialog is untouched: the optimistic-open model is unchanged by the notice.
+        assertEquals(0, ui.dismissCount);
+
+        now.set(5000L);
+        pump.advance(0f);
+        assertEquals(1, waitingNotices(ui), "the notice is once per claim, not once per frame");
+    }
+
+    @Test
+    void aLateAcceptAddsNothingToTheFeed() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        now.set(2000L);
+        pump.advance(0f);
+        int afterWarning = ui.messages.size();
+
+        now.set(2400L);
+        service.inbound.add(CoopMessages.interactionAccept(
+                "session-a", 9L, 2300L, "market-1", "guest-player", "Jangala", 1L));
+        pump.advance(0f);
+        now.set(3000L);
+        pump.advance(0f);
+
+        assertEquals(afterWarning, ui.messages.size(),
+                "a late answer says nothing more: the answer itself is the feedback");
+    }
+
+    @Test
+    void aPromptAcceptNeverWarnsAtAll() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        now.set(1200L);
+        service.inbound.add(CoopMessages.interactionAccept(
+                "session-a", 9L, 1100L, "market-1", "guest-player", "Jangala", 1L));
+        pump.advance(0f);
+        now.set(9000L);
+        pump.advance(0f);
+
+        assertEquals(0, waitingNotices(ui));
+    }
+
+    private static long waitingNotices(RecordingCampaignUi ui) {
+        return ui.messages.stream().filter(m -> m.startsWith("Waiting for the host")).count();
+    }
+
+    // ---- Phase 20 M6: PAUSE_INTENT under a delayed, never-reordered link ------------------------
+
+    @Test
+    void delayedPauseIntentsStillApplyInOrderAndLeaveTheClockWhereTheGuestPutIt() {
+        // The 200 ms + 2% loss walk: TCP turns loss into retransmission, so the guest's intents reach
+        // the host late but never out of order. Replayed here through the Phase 18 latency lever,
+        // which parks PAUSE_INTENT in the same FIFO as the claims and releases in receive order.
+        String saved = System.getProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
+        System.setProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY, "400");
+        try {
+            forceDebugToggleRefresh();
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            CoopSessionState session = activeHostSession();
+            RecordingSector sector = new RecordingSector(false);
+            Global.setSector(sector.proxy());
+            AtomicLong now = new AtomicLong(1000L);
+            CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+            // Guest opens a screen, then closes it again before either intent has been delivered.
+            service.inbound.add(CoopMessages.pauseIntent(
+                    "session-a", 8L, 1000L, CoopMessages.PauseSource.SCREEN, true, 1L));
+            pump.advance(0f);
+            assertFalse(sector.paused, "the pause is still in flight");
+
+            service.inbound.add(CoopMessages.pauseIntent(
+                    "session-a", 9L, 1100L, CoopMessages.PauseSource.SCREEN, false, 2L));
+            now.set(1200L);
+            pump.advance(0f);
+
+            now.set(1400L);
+            pump.advance(0f);
+            assertTrue(sector.paused, "the first intent lands first, and only the first");
+
+            now.set(1600L);
+            pump.advance(0f);
+            assertFalse(sector.paused,
+                    "the unpause must win: a delayed link may not strand the host paused");
+        } finally {
+            if (saved == null) {
+                System.clearProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
+            } else {
+                System.setProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY, saved);
+            }
+            forceDebugToggleRefresh();
+        }
+    }
+
+    @Test
+    void aSlowHandshakeNeverTimesOutTheConnectTimePauseHold() {
+        // The hold has no deadline on purpose: at 200 ms RTT with retransmits the lobby + handshake +
+        // seed-lock exchange is several round trips, and any fixed budget would be the thing that
+        // broke. Ten simulated minutes of an incomplete handshake must still hold the clock.
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        for (long t = 1000L; t <= 601_000L; t += 60_000L) {
+            now.set(t);
+            sector.paused = false; // the player keeps trying to unpause; the hold keeps winning
+            pump.advance(0f);
+            assertTrue(sector.paused, "the hold must still be asserted at t=" + t);
+        }
+    }
+
     private static CoopSessionState activeGuestSession() {
         CoopSessionState session = new CoopSessionState(() -> "guest-player");
         session.startGuest("Guest");

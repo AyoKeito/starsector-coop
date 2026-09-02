@@ -23,6 +23,8 @@ class CoopNpcThreatWatcherTest {
 
     /** Contact for the fixtures below: two 150 su fleets plus the 100 su scan margin. */
     private static final float CONTACT = 400f;
+    /** The decision core never reads the closing speed; only the margin derivation does. */
+    private static final float UNKNOWN_CLOSING = Float.NaN;
     /** Vanilla's patrol pursuit patience with no burn bonus (StrategicModule:554-588). */
     private static final float PATROL_PATIENCE_DAYS = 3f;
     private static final boolean PURSUING = true;
@@ -112,7 +114,7 @@ class CoopNpcThreatWatcherTest {
     void theFallbackRespectsTheVisibilityGate() {
         // A guest running dark is invisible; a chaser that cannot see it must not acquire it.
         FleetView blind = new FleetView("fleet-a", "Raiders", "pirates", true, true, false, true,
-                false, false, true, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0);
+                false, false, true, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 blind, SYNTHESIZED_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -122,7 +124,7 @@ class CoopNpcThreatWatcherTest {
     void theFallbackRespectsIsAllowedToEngage() {
         // This is the do-not-attack tracker, the ignore flags and the assignment vetoes in one read.
         FleetView vetoed = new FleetView("fleet-a", "Raiders", "pirates", true, true, false, true,
-                true, false, false, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0);
+                true, false, false, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 vetoed, SYNTHESIZED_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -197,7 +199,7 @@ class CoopNpcThreatWatcherTest {
     @Test
     void aNonPatrolCivilianFleetNeverStopsTheGuest() {
         FleetView trader = new FleetView("f", "Trader", "independent", false, false, false, true,
-                true, false, true, 0f, 1.5f, 100f, CONTACT, NOT_PURSUING, 0f, 0);
+                true, false, true, 0f, 1.5f, 100f, CONTACT, NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 trader, VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
@@ -291,7 +293,7 @@ class CoopNpcThreatWatcherTest {
         // The chase owns an INTERCEPT on the patrol. If the hostile branch could claim the fleet while
         // that assignment was still live, nothing would ever remove it — the permanent-siege shape.
         FleetView turned = new FleetView("fleet-p", "Fast Picket", "hegemony", true, true, true, true,
-                true, true, true, 0f, PATROL_PATIENCE_DAYS, 50f, CONTACT, PURSUING, 0.2f, 0);
+                true, true, true, 0f, PATROL_PATIENCE_DAYS, 50f, CONTACT, PURSUING, 0.2f, 0, UNKNOWN_CLOSING);
 
         assertEquals(Action.CUSTOMS_GIVE_UP, CoopNpcThreatWatcher.decide(
                 turned, VANILLA_MODEL, TRANSPONDER_OFF, NO_BATTLE, READY, READY, READY));
@@ -351,9 +353,9 @@ class CoopNpcThreatWatcherTest {
     @Test
     void nonCombatFleetsAndUnresolvedDistancesAreSkipped() {
         FleetView station = new FleetView("f", "Station", "hegemony", true, true, false, false,
-                true, true, true, 0f, 1.5f, 10f, CONTACT, NOT_PURSUING, 0f, 0);
+                true, true, true, 0f, 1.5f, 10f, CONTACT, NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
         FleetView elsewhere = new FleetView("f", "Ghost", "pirates", true, true, false, true,
-                true, true, true, 0f, 1.5f, -1f, CONTACT, NOT_PURSUING, 0f, 0);
+                true, true, true, 0f, 1.5f, -1f, CONTACT, NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 station, VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -534,7 +536,7 @@ class CoopNpcThreatWatcherTest {
         // Vanilla is not hunting, but every synthesized gate passes: the fallback chases, the primary
         // model stays out of it. This is the flag's whole behavioural difference.
         FleetView notHunted = new FleetView("fleet-a", "Raiders", "pirates", true, true, false, true,
-                true, false, true, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0);
+                true, false, true, 0f, 1.5f, 800f, CONTACT, NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
 
         assertEquals(Action.NONE, CoopNpcThreatWatcher.decide(
                 notHunted, VANILLA_MODEL, TRANSPONDER_ON, NO_BATTLE, READY, READY, READY));
@@ -570,7 +572,7 @@ class CoopNpcThreatWatcherTest {
                                      boolean engagePick, boolean allowedToEngage, float pursuitDays) {
         return new FleetView("fleet-a", "Raiders", "pirates", true, engagePick, false, true,
                 visible, huntingMirror, allowedToEngage, pursuitDays, 1.5f, distance, CONTACT,
-                NOT_PURSUING, 0f, 0);
+                NOT_PURSUING, 0f, 0, UNKNOWN_CLOSING);
     }
 
     /** A patrol that has not started an inspection chase yet. */
@@ -588,7 +590,7 @@ class CoopNpcThreatWatcherTest {
                                     float pursuitDays, int unseenScans) {
         return new FleetView("fleet-p", "Fast Picket", "hegemony", false, false, true, true,
                 visible, false, true, 0f, PATROL_PATIENCE_DAYS, distance, CONTACT,
-                pursuing, pursuitDays, unseenScans);
+                pursuing, pursuitDays, unseenScans, UNKNOWN_CLOSING);
     }
 
     /** A non-hostile patrol whose strength read makes it pick engage (the 2026-08-20 regression). */
@@ -596,6 +598,6 @@ class CoopNpcThreatWatcherTest {
                                                  float pursuitDays, int unseenScans) {
         return new FleetView("fleet-p", "Fast Picket", "hegemony", false, true, true, true,
                 visible, false, true, 0f, PATROL_PATIENCE_DAYS, distance, CONTACT,
-                pursuing, pursuitDays, unseenScans);
+                pursuing, pursuitDays, unseenScans, UNKNOWN_CLOSING);
     }
 }
