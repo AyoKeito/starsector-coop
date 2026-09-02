@@ -3,6 +3,7 @@ package coop.net;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopDatagramRedundancyTest {
 
@@ -69,6 +70,66 @@ class CoopDatagramRedundancyTest {
         assertEquals(1, chunkOne.sections().get(0).chunk());
         assertEquals("c1-e2", chunkOne.sections().get(1).body());
         assertEquals(1, chunkOne.sections().get(1).chunk());
+    }
+
+
+    // ---- Phase 20 M4 baseline composition ---------------------------------------------------------
+
+    @Test
+    void aBaselineComposedDatagramCarriesTheFullPreviousThenTheDelta() {
+        String encoded = CoopDatagramRedundancy.composeWithBaseline(TOKEN, SENDER,
+                CoopMessages.Type.NPC_FLEET_MOTION, 4L, 400L, 2, "F\nfull-previous",
+                5L, 500L, "D\ndelta-current");
+
+        CoopMessages.Datagram datagram = CoopMessages.parseDatagram(encoded);
+        assertEquals(2, datagram.sections().size());
+        assertEquals(4L, datagram.sections().get(0).epoch());
+        assertEquals(400L, datagram.sections().get(0).sentGameTimeMillis());
+        assertEquals("F\nfull-previous", datagram.sections().get(0).body());
+        assertEquals(5L, datagram.sections().get(1).epoch());
+        assertEquals("D\ndelta-current", datagram.sections().get(1).body());
+        assertEquals(2, datagram.sections().get(0).chunk());
+        assertEquals(2, datagram.sections().get(1).chunk(),
+                "both sections describe the same slice of the batch");
+    }
+
+    @Test
+    void theFirstSendOfAChunkHasNoBaselineSection() {
+        String encoded = CoopDatagramRedundancy.composeWithBaseline(TOKEN, SENDER,
+                CoopMessages.Type.NPC_FLEET_MOTION, 0L, 0L, 3, null, 5L, 500L, "D\ndelta-current");
+
+        CoopMessages.Datagram datagram = CoopMessages.parseDatagram(encoded);
+        assertEquals(1, datagram.sections().size());
+        assertEquals(5L, datagram.sections().get(0).epoch());
+        assertEquals(3, datagram.sections().get(0).chunk());
+    }
+
+    @Test
+    void theSizeHelperMatchesWhatComposeActuallyProduces() {
+        // The chunk packer sizes candidates arithmetically instead of composing; if the two ever
+        // disagree the budget silently stops being a budget.
+        String encoded = CoopDatagramRedundancy.composeWithBaseline(TOKEN, SENDER,
+                CoopMessages.Type.NPC_FLEET_MOTION, 4L, 400L, 12, "F\nfull",
+                5L, 500L, "D\ndelta with a é in it");
+        int predicted = CoopMessages.datagramBytes(TOKEN, SENDER,
+                CoopMessages.Type.NPC_FLEET_MOTION,
+                CoopMessages.parseDatagram(encoded).sections());
+
+        assertEquals(encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length, predicted);
+        assertTrue(predicted > CoopMessages.utf8Length("F\nfull"));
+    }
+
+    @Test
+    void previousSectionsAreTrackedPerChunkNotPerType() {
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.NPC_FLEET_MOTION, 1L, 100L, 0, "c0-t1");
+        redundancy.compose(TOKEN, SENDER, CoopMessages.Type.NPC_FLEET_MOTION, 1L, 100L, 1, "c1-t1");
+
+        String encoded = redundancy.compose(
+                TOKEN, SENDER, CoopMessages.Type.NPC_FLEET_MOTION, 2L, 200L, 0, "c0-t2");
+
+        CoopMessages.Datagram datagram = CoopMessages.parseDatagram(encoded);
+        assertEquals("c0-t1", datagram.sections().get(0).body(),
+                "chunk 0's redundant section must be chunk 0's previous send");
     }
 
     @Test

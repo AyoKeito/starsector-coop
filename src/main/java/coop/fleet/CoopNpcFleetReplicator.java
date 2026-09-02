@@ -51,6 +51,37 @@ public final class CoopNpcFleetReplicator {
     private static final long SET_SYNC_INTERVAL_MILLIS = 1000L;
     private static final long MOTION_INTERVAL_MILLIS = 100L;
 
+    /**
+     * Phase 20 M4 motion range filter. A fleet gets 10 Hz motion only while it is within
+     * {@code max(RANGE_FLOOR_SU, RANGE_MARGIN * observer.getMaxSensorRangeToDetect(fleet))} of a
+     * player position in its own location; everything else rides the {@code NPC_FLEET_SET} alone.
+     *
+     * <p>Detection is observer-strength times target-profile, so the radius has to be derived from
+     * the engine's own answer rather than guessed at with a constant — a fleet running dark and a
+     * fleet on sustained burn differ by an order of magnitude. The 1.5x margin covers the swing
+     * between two samples of that answer; the 3,000 su floor means a fleet that is about to become
+     * detectable has already been streaming for a while, so it does not pop into motion at the exact
+     * frame it becomes visible. Without this the hyperspace case is unbounded: one player in
+     * hyperspace makes every in-transit fleet in the sector eligible, 100+ fleets with no cap.
+     */
+    static final float RANGE_FLOOR_SU = 3000f;
+    static final float RANGE_MARGIN = 1.5f;
+    /**
+     * How long one {@code getMaxSensorRangeToDetect} answer is reused. The call is an engine stat
+     * read per (player, fleet) pair and this path runs at 10 Hz over every fleet in a player's
+     * location, so it is cached for a second; a profile can swing inside that second, which is
+     * exactly what the 1.5x margin is for.
+     */
+    private static final long RADIUS_CACHE_MILLIS = 1000L;
+    /** Diagnostic cadence for the eligible/filtered counts; {@link CoopDebug}-gated. */
+    private static final long RANGE_LOG_INTERVAL_MILLIS = 60_000L;
+    /**
+     * Slack the chunk packer holds back for stamps that grow between ticks. A chunk's budget is
+     * computed from this tick's epoch and stream time, but the invariant it enforces has to hold on
+     * the next tick too, where either number may have gained a decimal digit.
+     */
+    private static final int STAMP_GROWTH_SLACK_BYTES = 8;
+
     // CoopFrameProfiler section keys, compile-time constants so the hot path never builds a string.
     // Together these account for the pump's npc.syncReplication total on the host.
     private static final String SECTION_SYSTEM_DRIVER = "npc.systemDriver";
@@ -65,8 +96,18 @@ public final class CoopNpcFleetReplicator {
     private final coop.net.CoopStreamClock streamClock;
     /** Phase 20.1 M2: the transport router, not the raw UDP send — see {@link coop.net.CoopStateStreamSink}. */
     private final coop.net.CoopStateStreamSink stateStreamSink;
-    private final coop.net.CoopDatagramRedundancy datagramRedundancy =
-            new coop.net.CoopDatagramRedundancy();
+    /**
+     * Phase 20 M4: what each chunk index carried last tick, which is that chunk's delta baseline and
+     * its redundant full section. Keyed by chunk index rather than by fleet because a chunk's
+     * membership is whatever the packer put there — the receiver resolves a delta against the
+     * section physically before it in the same datagram, so the two must agree on the same slice.
+     */
+    private final Map<Integer, MotionChunk> previousChunks = new HashMap<>();
+    /** Cached {@code getMaxSensorRangeToDetect} answers, keyed observer-then-target; see the constants. */
+    private final Map<String, Float> radiusCache = new HashMap<>();
+    private long radiusCacheExpiresAtMillis;
+    private long nextRangeLogAtMillis;
+    private boolean oversizedRecordWarned;
     private final CoopGuestPresence guestPresence = new CoopGuestPresence();
     private final CoopNpcFleetMotionSmoother motionSmoother = new CoopNpcFleetMotionSmoother();
 
@@ -169,7 +210,11 @@ public final class CoopNpcFleetReplicator {
         guestPresence.reset();
         motionSmoother.reset();
         motionCadence.reset();
-        datagramRedundancy.reset();
+        previousChunks.clear();
+        radiusCache.clear();
+        radiusCacheExpiresAtMillis = 0L;
+        nextRangeLogAtMillis = 0L;
+        oversizedRecordWarned = false;
         CoopFullFidelitySystemDriver.reset();
     }
 
@@ -257,15 +302,25 @@ public final class CoopNpcFleetReplicator {
         // O(1) handle, not a sector scan: this runs at 10 Hz and wants the same fleet the presence
         // pass already resolved (see CoopGuestMirrorHandle).
         CampaignFleetAPI guestMirror = CoopGuestMirrorHandle.current();
-        Set<String> playerLocations = playerOccupiedLocationIds(sector, guestMirror);
+        List<CampaignFleetAPI> observers = playerObservers(sector, guestMirror);
+        if (observers.isEmpty()) {
+            return;
+        }
+        Set<String> playerLocations = observerLocationIds(observers);
         if (playerLocations.isEmpty()) {
             return;
         }
+        expireRadiusCache(now);
         List<CoopNpcFleetMotion> motions = new ArrayList<>();
         LocationAPI hostLocation = hostCurrentLocation(sector);
+        int[] filtered = new int[1];
         forEachReplicatedFleet(sector, fleet -> {
             LocationAPI loc = fleet.getContainingLocation();
             if (loc == null || !playerLocations.contains(loc.getId())) {
+                return;
+            }
+            if (!withinStreamRange(observers, fleet, loc)) {
+                filtered[0]++;
                 return;
             }
             CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
@@ -273,14 +328,220 @@ public final class CoopNpcFleetReplicator {
                     motion.x(), motion.y(), motion.velocityX(), motion.velocityY(),
                     CoopSensorSync.capture(fleet)));
         });
+        reportRangeFilter(now, motions.size(), filtered[0]);
         if (motions.isEmpty()) {
+            previousChunks.clear();
             return;
         }
-        stateStreamSink.send(datagramRedundancy.compose(
-                CoopMessages.wireToken(sessionState.sessionId()),
-                CoopMessages.wireToken(sessionState.localPlayerId()),
-                CoopMessages.Type.NPC_FLEET_MOTION, streamClock.nextEpoch(),
-                streamClock.gameTimeMillis(), CoopNpcFleetMotion.encodeBatch(motions)));
+        sendMotionChunks(motions);
+    }
+
+    // ---- Phase 20 M4: MTU-safe chunking ----------------------------------------------------------
+
+    /** One chunk index's previous send: its batch and the stamps that section went out under. */
+    private record MotionChunk(List<CoopNpcFleetMotion> motions, long epoch, long gameTimeMillis) {
+    }
+
+    /**
+     * Packs the tick's motion records into as many chunk datagrams as it takes for every
+     * <em>composed</em> datagram — envelope, the redundant full section, and the delta section
+     * together — to stay within {@link CoopNetService#MAX_DATAGRAM_BYTES}.
+     *
+     * <p>Fit is measured, not estimated ({@link CoopMessages#datagramBytes}): the budget exists to
+     * keep a datagram inside one IP packet, and an estimate that is one byte optimistic fragments the
+     * packet it was supposed to protect. All chunks of a tick share one epoch — the receiver's
+     * watermark accepts an equal epoch for a chunk it has not seen — so they may arrive in any order.
+     *
+     * <p><b>Why a chunk is packed to half the budget in FULL form.</b> Sizing a chunk against only
+     * the datagram it is going out in is a trap that takes a tick to spring: this tick's batch is
+     * <em>next</em> tick's redundant full section, so a chunk packed to fill the budget on its own
+     * guarantees an over-budget datagram the moment it acquires a baseline. The stable invariant is
+     * therefore per chunk — {@code overhead + 2 * fullFormBytes <= budget} — which makes any two
+     * consecutive chunks fit together, since a delta section is never larger than the full form of
+     * the same records. The observed cost is a first send at ~50% of the budget and every send after
+     * it at ~90%.
+     */
+    void sendMotionChunks(List<CoopNpcFleetMotion> motions) {
+        String token = CoopMessages.wireToken(sessionState.sessionId());
+        String senderId = CoopMessages.wireToken(sessionState.localPlayerId());
+        long epoch = streamClock.nextEpoch();
+        long gameTimeMillis = streamClock.gameTimeMillis();
+        Map<Integer, MotionChunk> next = new HashMap<>();
+        int index = 0;
+        int chunk = 0;
+        while (index < motions.size()) {
+            MotionChunk previous = previousChunks.get(chunk);
+            Map<String, CoopNpcFleetMotion> baseline = previous == null
+                    ? Map.of() : indexById(previous.motions());
+            String fullBody = previous == null
+                    ? null : CoopNpcFleetMotion.encodeFullSection(previous.motions());
+            int overhead = composedOverheadBytes(token, senderId, chunk, previous, epoch,
+                    gameTimeMillis) + STAMP_GROWTH_SLACK_BYTES;
+            int used = overhead
+                    + (fullBody == null ? 0 : CoopMessages.utf8Length(fullBody))
+                    + CoopNpcFleetMotion.MODE_DELTA.length();
+            // The full-form size of what this chunk is taking, which is what it will cost as next
+            // tick's baseline section.
+            int fullForm = CoopNpcFleetMotion.MODE_FULL.length();
+            StringBuilder delta = new StringBuilder(512).append(CoopNpcFleetMotion.MODE_DELTA);
+            List<CoopNpcFleetMotion> taken = new ArrayList<>();
+            while (index < motions.size()) {
+                CoopNpcFleetMotion motion = motions.get(index);
+                String record = CoopNpcFleetMotion.encodeRecord(motion,
+                        baseline.get(motion.coopFleetId()));
+                int cost = 1 + CoopMessages.utf8Length(record);
+                int fullCost = 1 + CoopMessages.utf8Length(
+                        CoopNpcFleetMotion.encodeRecord(motion, null));
+                boolean overNow = used + cost > CoopNetService.MAX_DATAGRAM_BYTES;
+                boolean overNextTick = overhead + 2 * (fullForm + fullCost)
+                        > CoopNetService.MAX_DATAGRAM_BYTES;
+                if (!taken.isEmpty() && (overNow || overNextTick)) {
+                    break;
+                }
+                delta.append('\n').append(record);
+                used += cost;
+                fullForm += fullCost;
+                taken.add(motion);
+                index++;
+                if (used > CoopNetService.MAX_DATAGRAM_BYTES) {
+                    // A single record that does not fit on its own. Impossible with today's field
+                    // set (a record is ~70 B), so this is a format change nobody sized — ship it and
+                    // let the transport's own cap and the escalation path decide, but say so once.
+                    warnOversizedMotionRecord(used);
+                    break;
+                }
+            }
+            stateStreamSink.send(coop.net.CoopDatagramRedundancy.composeWithBaseline(
+                    token, senderId, CoopMessages.Type.NPC_FLEET_MOTION,
+                    previous == null ? epoch : previous.epoch(),
+                    previous == null ? gameTimeMillis : previous.gameTimeMillis(),
+                    chunk, fullBody, epoch, gameTimeMillis, delta.toString()));
+            next.put(chunk, new MotionChunk(taken, epoch, gameTimeMillis));
+            chunk++;
+        }
+        // Chunks the tick no longer fills must not keep a stale baseline: the next tick that reaches
+        // that index would delta-code against a batch from an arbitrary point in the past.
+        previousChunks.clear();
+        previousChunks.putAll(next);
+    }
+
+    /** The composed datagram's size with both bodies empty; adding the body lengths is then exact. */
+    private static int composedOverheadBytes(String token, String senderId, int chunk,
+                                             MotionChunk previous, long epoch, long gameTimeMillis) {
+        CoopMessages.DatagramSection current =
+                new CoopMessages.DatagramSection(epoch, gameTimeMillis, chunk, "");
+        List<CoopMessages.DatagramSection> probe = previous == null
+                ? List.of(current)
+                : List.of(new CoopMessages.DatagramSection(previous.epoch(),
+                        previous.gameTimeMillis(), chunk, ""), current);
+        return CoopMessages.datagramBytes(token, senderId,
+                CoopMessages.Type.NPC_FLEET_MOTION, probe);
+    }
+
+    private void warnOversizedMotionRecord(int bytes) {
+        if (oversizedRecordWarned) {
+            return;
+        }
+        oversizedRecordWarned = true;
+        CoopLog.warn(CoopNpcFleetReplicator.class, "Coop a single NPC_FLEET_MOTION record composes to "
+                + bytes + " B, above the " + CoopNetService.MAX_DATAGRAM_BYTES
+                + " B budget; it cannot be chunked further");
+    }
+
+    private static Map<String, CoopNpcFleetMotion> indexById(List<CoopNpcFleetMotion> motions) {
+        Map<String, CoopNpcFleetMotion> byId = new HashMap<>(Math.max(4, motions.size() * 2));
+        for (CoopNpcFleetMotion motion : motions) {
+            byId.put(motion.coopFleetId(), motion);
+        }
+        return byId;
+    }
+
+    // ---- Phase 20 M4: motion range filter --------------------------------------------------------
+
+    /** True when any observer in the fleet's own location is close enough to be streamed its motion. */
+    private boolean withinStreamRange(List<CampaignFleetAPI> observers, CampaignFleetAPI fleet,
+                                      LocationAPI loc) {
+        Vector2f target = safeLocation(fleet);
+        if (target == null) {
+            // No position to compare: stream it rather than silently freeze a mirror.
+            return true;
+        }
+        for (CampaignFleetAPI observer : observers) {
+            LocationAPI observerLoc = safeContainingLocation(observer);
+            if (observerLoc == null || !loc.getId().equals(observerLoc.getId())) {
+                continue;
+            }
+            Vector2f eye = safeLocation(observer);
+            if (eye == null) {
+                continue;
+            }
+            if (withinRange(eye.x, eye.y, target.x, target.y, cachedRadius(observer, fleet))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The streaming radius for one detection range; see {@link #RANGE_FLOOR_SU}. */
+    static float streamRadius(float maxSensorRangeToDetect) {
+        if (!Float.isFinite(maxSensorRangeToDetect) || maxSensorRangeToDetect <= 0f) {
+            return RANGE_FLOOR_SU;
+        }
+        return Math.max(RANGE_FLOOR_SU, RANGE_MARGIN * maxSensorRangeToDetect);
+    }
+
+    /** Squared-distance test; pure so the filter's arithmetic is testable without a sector. */
+    static boolean withinRange(float observerX, float observerY, float targetX, float targetY,
+                               float radius) {
+        float dx = observerX - targetX;
+        float dy = observerY - targetY;
+        return dx * dx + dy * dy <= radius * radius;
+    }
+
+    private float cachedRadius(CampaignFleetAPI observer, CampaignFleetAPI fleet) {
+        String key = safeId(observer) + "->" + safeId(fleet);
+        Float cached = radiusCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        float radius = streamRadius(maxSensorRangeToDetect(observer, fleet));
+        radiusCache.put(key, radius);
+        return radius;
+    }
+
+    /** Whole-cache expiry rather than per-entry: one comparison per tick, and it cannot leak. */
+    private void expireRadiusCache(long now) {
+        if (now < radiusCacheExpiresAtMillis) {
+            return;
+        }
+        radiusCache.clear();
+        radiusCacheExpiresAtMillis = now + RADIUS_CACHE_MILLIS;
+    }
+
+    private static float maxSensorRangeToDetect(CampaignFleetAPI observer, CampaignFleetAPI target) {
+        try {
+            return observer.getMaxSensorRangeToDetect(target);
+        } catch (RuntimeException | LinkageError ex) {
+            return -1f;
+        }
+    }
+
+    /**
+     * One line a minute naming how much the filter is actually saving; {@link CoopDebug}-gated
+     * because this runs at 10 Hz and a per-tick count would be a log flood.
+     */
+    private void reportRangeFilter(long now, int eligible, int filtered) {
+        if (!CoopDebug.diagnosticsEnabled()) {
+            nextRangeLogAtMillis = 0L;
+            return;
+        }
+        if (now < nextRangeLogAtMillis) {
+            return;
+        }
+        nextRangeLogAtMillis = now + RANGE_LOG_INTERVAL_MILLIS;
+        CoopLog.info(CoopNpcFleetReplicator.class, "Coop motion range filter eligible=" + eligible
+                + " filtered=" + filtered + " (floor=" + (int) RANGE_FLOOR_SU + "su margin="
+                + RANGE_MARGIN + "x)");
     }
 
     private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now,
@@ -352,25 +613,63 @@ public final class CoopNpcFleetReplicator {
         }
     }
 
-    private Set<String> playerOccupiedLocationIds(SectorAPI sector, CampaignFleetAPI guestMirror) {
-        Set<String> ids = new HashSet<>();
+    /**
+     * The two fleets that define "where a player is": the host's own fleet and the Phase 8 guest
+     * mirror. Since Phase 20 M4 the motion filter needs the fleets themselves, not just their
+     * location ids — the streaming radius is derived per (observer, target) pair from the engine's
+     * detection math.
+     */
+    private static List<CampaignFleetAPI> playerObservers(SectorAPI sector,
+                                                          CampaignFleetAPI guestMirror) {
+        List<CampaignFleetAPI> observers = new ArrayList<>(2);
         try {
             CampaignFleetAPI player = sector.getPlayerFleet();
-            if (player != null && player.getContainingLocation() != null) {
-                ids.add(player.getContainingLocation().getId());
+            if (player != null) {
+                observers.add(player);
             }
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             // best-effort
         }
-        // The guest's location is wherever the Phase 8 guest-player mirror ($coopMirrorFleet) is.
-        try {
-            if (guestMirror != null && guestMirror.getContainingLocation() != null) {
-                ids.add(guestMirror.getContainingLocation().getId());
+        if (guestMirror != null) {
+            observers.add(guestMirror);
+        }
+        return observers;
+    }
+
+    private static Set<String> observerLocationIds(List<CampaignFleetAPI> observers) {
+        Set<String> ids = new HashSet<>();
+        for (CampaignFleetAPI observer : observers) {
+            LocationAPI loc = safeContainingLocation(observer);
+            if (loc != null) {
+                ids.add(loc.getId());
             }
-        } catch (RuntimeException ignored) {
-            // best-effort
         }
         return ids;
+    }
+
+    private static LocationAPI safeContainingLocation(CampaignFleetAPI fleet) {
+        try {
+            return fleet.getContainingLocation();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private static Vector2f safeLocation(CampaignFleetAPI fleet) {
+        try {
+            return fleet.getLocation();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private static String safeId(CampaignFleetAPI fleet) {
+        try {
+            String id = fleet.getId();
+            return id == null ? "" : id;
+        } catch (RuntimeException | LinkageError ex) {
+            return "";
+        }
     }
 
     /** Iterates every real NPC fleet: not the local player, not a coop mirror, not a station. */

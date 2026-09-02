@@ -35,6 +35,14 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
     private static final int SENSOR_FIELD_OFFSET = 9;
     private static final int MEMBER_COUNT_INDEX = HEADER_FIELD_COUNT - 1;
 
+    /**
+     * Hex characters of {@link #fleetHash} that go on the wire (Phase 20 M4 payload diet). Sixteen
+     * hex is 64 bits of SHA-256; what the receiver does with it is "did this one fleet's roster
+     * change since the roster I hold", and 64 bits answers that with room to spare while saving
+     * 48 bytes on every tick of a 10 Hz stream.
+     */
+    public static final int WIRE_HASH_CHARS = 16;
+
     public CoopFleetSnapshot {
         playerId = normalize(playerId);
         username = normalize(username);
@@ -152,13 +160,135 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         return CoopChecksum.sha256Text(canonical.toString());
     }
 
+    /** The first {@link #WIRE_HASH_CHARS} of {@link #fleetHash}; what the wire and the cache compare. */
+    public String fleetHash16() {
+        return hash16(fleetHash);
+    }
+
+    /** {@link #fleetHash16()} for a hash that arrived from somewhere else; shorter strings pass through. */
+    public static String hash16(String fleetHash) {
+        if (fleetHash == null) {
+            return "";
+        }
+        return fleetHash.length() <= WIRE_HASH_CHARS ? fleetHash : fleetHash.substring(0, WIRE_HASH_CHARS);
+    }
+
     /**
-     * The wire form. Position, velocity, CR/hull and the sensor terms are quantized here and only here
+     * The volatile half of a fleet snapshot: everything that changes tick to tick, and nothing that
+     * does not (Phase 20 M4 roster split). This is what rides the 10 Hz UDP {@code FLEET_SNAPSHOT}
+     * datagram; the immutable roster travels once per change on reliable TCP as a
+     * {@link CoopFleetRoster}, and {@link CoopRosterCache} recombines the two into the full
+     * {@link CoopFleetSnapshot} the mirror consumes.
+     *
+     * <p>Measured motivation: on 9 of 10 ticks 63-95% of the old body was ids, hull/variant/name
+     * strings and a 64-char hash that {@code CoopFleetMirror.refreshRosterIfChanged} discards
+     * unread — a 30-ship fleet composed to ~4.3-5.4 KB, i.e. 3-4 IP fragments per packet ten times
+     * a second.
+     *
+     * <p>No {@code playerId} either: the datagram envelope's {@code senderId} already identifies the
+     * sender, and it is the field the transport has validated. The pump matches that against the
+     * remote player rather than trusting a body field a spoofer would get to choose.
+     *
+     * <p>Per-ship state is positional — {@code members.get(i)} is the roster's member {@code i} —
+     * because a member id costs 20-40 bytes and buys nothing the shared {@code fleetHash16} does not
+     * already guarantee: a roster whose order or membership changed has a different hash, and a tick
+     * whose hash does not match the cached roster is never applied to it.
+     */
+    public record Tick(String locationId, float x, float y, float velocityX, float velocityY,
+                       boolean transponderOn, CoopSensorSync.Profile sensors, String fleetHash16,
+                       List<MemberState> members) {
+
+        /** Header fields before the per-member pairs: location, 4 motion, transponder, sensors, hash, count. */
+        private static final int HEADER_FIELD_COUNT = 8 + CoopSensorSync.FIELD_COUNT;
+        private static final int SENSOR_FIELD_OFFSET = 6;
+        private static final int MEMBER_COUNT_INDEX = HEADER_FIELD_COUNT - 1;
+
+        public Tick {
+            locationId = normalize(locationId);
+            fleetHash16 = normalize(fleetHash16);
+            sensors = sensors == null ? CoopSensorSync.Profile.UNKNOWN : sensors;
+            members = members == null ? List.of() : List.copyOf(members);
+        }
+
+        /** The tick view of a full snapshot, in the snapshot's own member order. */
+        public static Tick of(CoopFleetSnapshot snapshot) {
+            Objects.requireNonNull(snapshot, "snapshot");
+            List<MemberState> states = new ArrayList<>(snapshot.members().size());
+            for (Member member : snapshot.members()) {
+                states.add(new MemberState(member.cr(), member.hullFraction()));
+            }
+            return new Tick(snapshot.locationId(), snapshot.x(), snapshot.y(),
+                    snapshot.velocityX(), snapshot.velocityY(), snapshot.transponderOn(),
+                    snapshot.sensors(), snapshot.fleetHash16(), states);
+        }
+
+        /**
+         * One line, pipe delimited: the header fields followed by {@code cr|hull} per member. Flat
+         * rather than line-per-member because a member record here is two short numbers and a
+         * newline would be 8% of it.
+         */
+        public String encode() {
+            StringBuilder out = new StringBuilder(96 + members.size() * 12);
+            out.append(CoopFleetCodec.escape(locationId))
+                    .append('|').append(CoopFleetCodec.encodeFloat(x, CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(CoopFleetCodec.encodeFloat(y, CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(CoopFleetCodec.encodeFloat(velocityX, CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(CoopFleetCodec.encodeFloat(velocityY, CoopFleetCodec.POSITION_STEP))
+                    .append('|').append(transponderOn ? '1' : '0');
+            CoopSensorSync.append(out, sensors);
+            out.append('|').append(CoopFleetCodec.escape(fleetHash16))
+                    .append('|').append(Integer.toString(members.size()));
+            for (MemberState state : members) {
+                out.append('|').append(CoopFleetCodec.encodeFloat(state.cr(), CoopFleetCodec.FRACTION_STEP))
+                        .append('|').append(CoopFleetCodec.encodeFloat(state.hullFraction(),
+                                CoopFleetCodec.FRACTION_STEP));
+            }
+            return out.toString();
+        }
+
+        public static Tick decode(String encoded) {
+            Objects.requireNonNull(encoded, "encoded");
+            List<String> fields = CoopFleetCodec.split(encoded);
+            if (fields.size() < HEADER_FIELD_COUNT) {
+                throw new IllegalArgumentException("Expected at least " + HEADER_FIELD_COUNT
+                        + " tick fields, got " + fields.size());
+            }
+            int memberCount = Integer.parseInt(fields.get(MEMBER_COUNT_INDEX));
+            if (memberCount < 0 || fields.size() != HEADER_FIELD_COUNT + memberCount * 2) {
+                throw new IllegalArgumentException("Declared " + memberCount
+                        + " members but the record carries " + (fields.size() - HEADER_FIELD_COUNT)
+                        + " state fields");
+            }
+            List<MemberState> states = new ArrayList<>(memberCount);
+            for (int i = 0; i < memberCount; i++) {
+                int base = HEADER_FIELD_COUNT + i * 2;
+                states.add(new MemberState(Float.parseFloat(fields.get(base)),
+                        Float.parseFloat(fields.get(base + 1))));
+            }
+            return new Tick(fields.get(0),
+                    Float.parseFloat(fields.get(1)), Float.parseFloat(fields.get(2)),
+                    Float.parseFloat(fields.get(3)), Float.parseFloat(fields.get(4)),
+                    "1".equals(fields.get(5)),
+                    CoopSensorSync.parse(fields, SENSOR_FIELD_OFFSET),
+                    fields.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), states);
+        }
+    }
+
+    /** The two per-ship numbers that move on their own between roster changes. */
+    public record MemberState(float cr, float hullFraction) {
+    }
+
+    /**
+     * The full wire form, roster included. Since Phase 20 M4 this is <b>not</b> what the 10 Hz UDP
+     * stream carries ({@link Tick} is) — it stays because the bridge dumps, the wiretap fixtures and
+     * the round-trip tests all want one string that holds an entire snapshot.
+     *
+     * <p>Position, velocity, CR/hull and the sensor terms are quantized here and only here
      * ({@link CoopFleetCodec#quantize}) — a full-precision float costs 8-11 decimal digits per field
      * at 10 Hz for no benefit anyone can see. {@link #fleetHash} is computed before this from the
      * unquantized members, so nothing about the rebuild gate moves.
      */
-    public String encode() {
+    public String encodeFull() {
         StringBuilder out = new StringBuilder(128 + members.size() * 48);
         out.append(CoopFleetCodec.escape(playerId))
                 .append('|').append(CoopFleetCodec.escape(username))
@@ -179,7 +309,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         return out.toString();
     }
 
-    public static CoopFleetSnapshot decode(String encoded) {
+    public static CoopFleetSnapshot decodeFull(String encoded) {
         Objects.requireNonNull(encoded, "encoded");
         String[] lines = encoded.split("\n", -1);
         if (lines.length == 0) {

@@ -121,15 +121,16 @@ class CoopNpcFleetSetSnapshotTest {
                 new CoopNpcFleetMotion("f1", "corvus", 10.5f, -20.25f, 1.5f, -0.5f, sensors(220.5f, 90f)),
                 new CoopNpcFleetMotion("f|2", "hyper\nspace", 0f, 0f, 0f, 0f, CoopSensorSync.Profile.UNKNOWN));
 
-        List<CoopNpcFleetMotion> decoded = CoopNpcFleetMotion.decodeBatch(
-                CoopNpcFleetMotion.encodeBatch(motions));
+        List<CoopNpcFleetMotion> decoded = CoopNpcFleetMotion.decodeSection(
+                CoopNpcFleetMotion.encodeFullSection(motions), null);
 
         assertEquals(motions, decoded);
     }
 
     @Test
     void emptyMotionBatchRoundTrips() {
-        assertEquals(List.of(), CoopNpcFleetMotion.decodeBatch(CoopNpcFleetMotion.encodeBatch(List.of())));
+        assertEquals(List.of(), CoopNpcFleetMotion.decodeSection(
+                CoopNpcFleetMotion.encodeFullSection(List.of()), null));
     }
 
     /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */

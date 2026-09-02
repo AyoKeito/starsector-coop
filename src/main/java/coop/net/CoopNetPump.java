@@ -221,6 +221,16 @@ public class CoopNetPump implements EveryFrameScript {
     private final coop.fleet.CoopMotionTimeline motionTimeline = new coop.fleet.CoopMotionTimeline();
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
     /**
+     * Phase 20 M4 roster split: the remote player's last {@code FLEET_ROSTER}, recombined with each
+     * UDP tick into the full snapshot the mirror consumes. See {@link coop.fleet.CoopRosterCache}.
+     */
+    private final coop.fleet.CoopRosterCache rosterCache = new coop.fleet.CoopRosterCache();
+    /** The 16-hex fleet hash of the last roster this side put on the wire; "" means "send one". */
+    private String lastSentRosterHash = "";
+    /** Types already warned about for exceeding the UDP budget; a 10 Hz stream may log once. */
+    private final java.util.EnumSet<CoopMessages.Type> escalationLoggedTypes =
+            java.util.EnumSet.noneOf(CoopMessages.Type.class);
+    /**
      * Phase 20.1 M2 link supervision: RTT/loss/silence measurement and the UDP-blocked decision. It
      * only ever measures and reports — the TCP socket closing stays the sole disconnect trigger,
      * because a peer in combat or writing a coordinated autosave is legitimately silent for minutes
@@ -1296,6 +1306,10 @@ public class CoopNetPump implements EveryFrameScript {
         baseAuthority.reset();
         datagramWatermark.reset();
         datagramRedundancy.reset();
+        // Phase 20 M4: the returning peer holds no roster, so this side owes it one before its next
+        // tick can be applied to anything.
+        lastSentRosterHash = "";
+        rosterCache.reset();
         // The returning guest's clock is frozen until the first snapshot lands, so it does not wait
         // out the 5 Hz cadence; the guest snapshot is cheap and re-establishes the save material.
         nextTimeSnapshotAtMillis = 0L;
@@ -1349,6 +1363,11 @@ public class CoopNetPump implements EveryFrameScript {
             linkQuality.resetSilence(now);
             // Every clock sample spans a stalled link, so none of them says anything about drift.
             clockReconciler.clearSamples();
+            // Phase 20 M4: both roles owe the peer a roster on a resume, and neither may trust the
+            // one it cached across the outage. The host's forceFullRebroadcast below repeats this;
+            // it is here so the guest branch gets it too.
+            lastSentRosterHash = "";
+            rosterCache.reset();
             if (previous == CoopReconnectCoordinator.State.HOST_WAIT) {
                 forceFullRebroadcast();
             } else {
@@ -1440,6 +1459,7 @@ public class CoopNetPump implements EveryFrameScript {
             case PING -> sendPong(message);
             case PONG -> handlePong(message);
             case LINK_STATUS -> handleLinkStatus(message);
+            case FLEET_ROSTER -> handleFleetRoster(message);
             case SESSION_RESUME_REQUEST -> handleSessionResumeRequest(message);
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
@@ -2290,8 +2310,15 @@ public class CoopNetPump implements EveryFrameScript {
     private void syncFleetMirror() {
         // Tear the mirror fleet down the moment the session is no longer streaming (disconnect,
         // reject, session end) so a stale AI fleet is never left behind in the world.
-        if (!shouldStreamFleet() && fleetMirror.hasMirrorFleet()) {
-            fleetMirror.dispose();
+        if (!shouldStreamFleet()) {
+            // Both halves of the roster split reset on the same edge (Phase 20 M4): a new session
+            // owes the peer a fresh FLEET_ROSTER, and a cached roster from the last one would be
+            // matched against ticks from a different fleet entirely.
+            lastSentRosterHash = "";
+            rosterCache.reset();
+            if (fleetMirror.hasMirrorFleet()) {
+                fleetMirror.dispose();
+            }
         }
     }
 
@@ -2313,15 +2340,63 @@ public class CoopNetPump implements EveryFrameScript {
             if (snapshot == null) {
                 return;
             }
+            // Reliable half first: a tick naming a roster the peer has never seen is held, so sending
+            // the roster on the same frame the hash changes keeps that window to one round trip.
+            maybeSendFleetRoster(snapshot);
             String datagram = datagramRedundancy.compose(
                     CoopMessages.wireToken(sessionState.sessionId()),
                     CoopMessages.wireToken(sessionState.localPlayerId()),
                     CoopMessages.Type.FLEET_SNAPSHOT,
-                    streamClock.nextEpoch(), streamClock.gameTimeMillis(), snapshot.encode());
+                    streamClock.nextEpoch(), streamClock.gameTimeMillis(),
+                    CoopFleetSnapshot.Tick.of(snapshot).encode());
             sendStateDatagram(datagram);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to capture coop fleet snapshot", ex);
         }
+    }
+
+    /**
+     * Phase 20 M4 roster split, send side: the immutable half of the local fleet goes out on reliable
+     * TCP when it changes, and only then. "Changes" covers the session edges too, because
+     * {@link #lastSentRosterHash} is cleared whenever this side stops streaming and on an accepted
+     * resume — a returning peer has no roster and would otherwise hold its mirror until the local
+     * player happened to gain or lose a ship.
+     *
+     * @return true when a roster went out (test seam)
+     */
+    boolean maybeSendFleetRoster(CoopFleetSnapshot snapshot) {
+        if (snapshot == null || snapshot.fleetHash16().equals(lastSentRosterHash)) {
+            return false;
+        }
+        CoopMessages.Message roster = CoopMessages.fleetRoster(sessionState.sessionId(),
+                service.nextSeq(), clockMillis.getAsLong(),
+                coop.fleet.CoopFleetRoster.of(snapshot).encode());
+        service.send(roster);
+        log("outbound", roster);
+        lastSentRosterHash = snapshot.fleetHash16();
+        CoopLog.info(CoopNetPump.class, "Coop sent FLEET_ROSTER ships=" + snapshot.members().size()
+                + " fleetHash16=" + lastSentRosterHash);
+        return true;
+    }
+
+    /** Host or guest: the peer's roster, cached until its hash changes. */
+    private void handleFleetRoster(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            return;
+        }
+        coop.fleet.CoopFleetRoster roster;
+        try {
+            roster = coop.fleet.CoopFleetRoster.decode(CoopMessages.parseFleetRoster(message));
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to decode coop FLEET_ROSTER", ex);
+            return;
+        }
+        if (!roster.playerId().equals(sessionState.remotePlayerId())) {
+            return;
+        }
+        rosterCache.accept(roster);
+        CoopLog.info(CoopNetPump.class, "Coop cached FLEET_ROSTER from " + roster.playerId()
+                + " ships=" + roster.members().size() + " fleetHash16=" + roster.fleetHash16());
     }
 
     /**
@@ -2549,13 +2624,27 @@ public class CoopNetPump implements EveryFrameScript {
                         datagram.sections().get(datagram.sections().size() - 1).epoch(),
                         clockMillis.getAsLong());
             }
+            // Decode BEFORE the watermark filter (Phase 20 M4): an NPC_FLEET_MOTION delta section is
+            // coded against the section physically before it in this same datagram, so section 2 only
+            // decodes if section 1 was decoded too — even when section 1 was already applied and the
+            // watermark is about to drop it.
+            List<List<CoopNpcFleetMotion>> motionSections =
+                    datagram.type() == CoopMessages.Type.NPC_FLEET_MOTION
+                            ? CoopNpcFleetMotion.decodeDatagram(sectionBodies(datagram))
+                            : null;
             // Sections at or below the (senderId, type) epoch watermark are dropped here: a reordered
             // datagram applies nothing, a redundant section that already arrived applies nothing,
-            // and a redundant section covering a lost packet applies normally (oldest first).
-            for (CoopMessages.DatagramSection section : datagramWatermark.accept(datagram)) {
+            // and a redundant section covering a lost packet applies normally (oldest first). Chunks
+            // of one tick share an epoch and are accepted once each.
+            boolean[] fresh = datagramWatermark.acceptedMask(datagram);
+            for (int i = 0; i < fresh.length; i++) {
+                if (!fresh[i]) {
+                    continue;
+                }
+                CoopMessages.DatagramSection section = datagram.sections().get(i);
                 switch (datagram.type()) {
-                    case FLEET_SNAPSHOT -> applyFleetSnapshotSection(section);
-                    case NPC_FLEET_MOTION -> handleNpcFleetMotion(section);
+                    case FLEET_SNAPSHOT -> applyFleetSnapshotSection(datagram.senderId(), section);
+                    case NPC_FLEET_MOTION -> handleNpcFleetMotion(section, motionSections.get(i));
                     default -> { /* ignore unknown datagram types */ }
                 }
             }
@@ -2574,7 +2663,12 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         if (!stateStreamFallbackActive) {
-            service.sendDatagram(datagram);
+            int bytes = CoopMessages.utf8Length(datagram);
+            if (bytes <= CoopNetService.MAX_DATAGRAM_BYTES) {
+                service.sendDatagram(datagram);
+                return;
+            }
+            escalateOversizedDatagram(datagram, bytes);
             return;
         }
         // The wiretap's send hook lives in the transport's UDP flush, which this path bypasses; call
@@ -2584,22 +2678,70 @@ public class CoopNetPump implements EveryFrameScript {
                 clockMillis.getAsLong(), datagram));
     }
 
-    private void applyFleetSnapshotSection(CoopMessages.DatagramSection section) {
-        CoopFleetSnapshot snapshot = CoopFleetSnapshot.decode(section.body());
-        // Ignore our own echoed datagrams and any sender that is not the remote coop player.
-        if (!snapshot.playerId().equals(sessionState.remotePlayerId())) {
+    /**
+     * Phase 20 M4 escalation: a composed datagram above {@link CoopNetService#MAX_DATAGRAM_BYTES}
+     * goes out wrapped in TCP rather than as an IP-fragmented UDP packet, which on a lossy path is
+     * strictly worse than the reliable wire. This should never fire — the producers pack to fit — so
+     * it is logged once per type and counted, which is what turns "never" into evidence.
+     *
+     * <p>No Deflate layer: the plan lists compression as conditional, and the reliable path is
+     * already there. Compressing to sneak under an MTU would trade a bounded, observable behaviour
+     * for a size that depends on the payload's entropy.
+     */
+    private void escalateOversizedDatagram(String datagram, int bytes) {
+        CoopMessages.Type type;
+        try {
+            type = CoopMessages.parseDatagramHeader(datagram).type();
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop cannot escalate an unparseable datagram", ex);
             return;
         }
+        service.noteDatagramEscalatedToTcp();
+        wiretap.recordEscalation(type);
+        if (escalationLoggedTypes.add(type)) {
+            CoopLog.warn(CoopNetPump.class, "Coop " + type + " composed to " + bytes + " B, above the "
+                    + CoopNetService.MAX_DATAGRAM_BYTES
+                    + " B UDP budget; routing it over TCP (logged once per type)");
+        }
+        wiretap.recordSend(datagram, bytes);
+        service.send(CoopMessages.stateDatagram(sessionState.sessionId(), service.nextSeq(),
+                clockMillis.getAsLong(), datagram));
+    }
+
+    /** The section bodies of one datagram, in wire order; the joint motion decode consumes these. */
+    private static List<String> sectionBodies(CoopMessages.Datagram datagram) {
+        List<String> bodies = new java.util.ArrayList<>(datagram.sections().size());
+        for (CoopMessages.DatagramSection section : datagram.sections()) {
+            bodies.add(section.body());
+        }
+        return bodies;
+    }
+
+    /**
+     * Phase 20 M4: the tick carries no identity of its own, so the sender is the envelope's
+     * {@code senderId} — the field the transport validated — rather than a body field a spoofer would
+     * get to choose. The roster cache turns the tick back into the snapshot the mirror has always
+     * taken; mirror semantics are unchanged by this phase.
+     */
+    private void applyFleetSnapshotSection(String senderId, CoopMessages.DatagramSection section) {
+        // Ignore our own echoed datagrams and any sender that is not the remote coop player.
+        String remoteId = sessionState.remotePlayerId();
+        if (remoteId == null || !senderId.equals(CoopMessages.wireToken(remoteId))) {
+            return;
+        }
+        CoopFleetSnapshot.Tick tick = CoopFleetSnapshot.Tick.decode(section.body());
+        CoopFleetSnapshot snapshot = rosterCache.compose(tick, remoteId, sessionState.remoteName(),
+                clockMillis.getAsLong());
         double sampleTimeSeconds = section.sentGameTimeMillis() / 1000.0;
         motionTimeline.noteSample(sampleTimeSeconds);
         fleetMirror.apply(snapshot, localPlayerFactionId(), sampleTimeSeconds);
     }
 
-    private void handleNpcFleetMotion(CoopMessages.DatagramSection section) {
+    private void handleNpcFleetMotion(CoopMessages.DatagramSection section,
+                                      List<CoopNpcFleetMotion> motions) {
         if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
             return;
         }
-        List<CoopNpcFleetMotion> motions = CoopNpcFleetMotion.decodeBatch(section.body());
         double sampleTimeSeconds = section.sentGameTimeMillis() / 1000.0;
         motionTimeline.noteSample(sampleTimeSeconds);
         npcFleetRegistry.applyMotion(motions, sampleTimeSeconds);
@@ -3555,6 +3697,16 @@ public class CoopNetPump implements EveryFrameScript {
     /** The receive-side epoch watermark, so tests can assert a datagram reached the apply path. */
     CoopDatagramWatermark datagramWatermark() {
         return datagramWatermark;
+    }
+
+    /** The peer's cached fleet roster (Phase 20 M4); test/bridge read. */
+    coop.fleet.CoopRosterCache rosterCache() {
+        return rosterCache;
+    }
+
+    /** The 16-hex hash of the last roster this side sent; test read. */
+    String lastSentRosterHash() {
+        return lastSentRosterHash;
     }
 
     private void sendPong(CoopMessages.Message ping) {

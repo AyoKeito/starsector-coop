@@ -71,7 +71,18 @@ public class CoopNetService {
     /** UDP receive buffer — sized for the datagram path, not the TCP frame cap. */
     private static final int DATAGRAM_BUFFER_BYTES = 64 * 1024;
     private static final int READ_BUFFER_BYTES = 8 * 1024;
-    private static final int MAX_DATAGRAM_BYTES = 60 * 1024;
+    /**
+     * Hard cap on a composed UDP datagram, in UTF-8 bytes (Phase 20 M4). 1,200 B is the WAN payload
+     * budget the whole payload diet is sized to: it clears the smallest MTU any consumer path
+     * realistically presents, so a datagram is never IP-fragmented and a 1% link loss stays a 1%
+     * datagram loss instead of the 3-4% that fragmenting into 3-4 packets would make it.
+     *
+     * <p>Nothing should ever reach this check: {@link CoopNetPump#sendStateDatagram} escalates an
+     * over-budget datagram onto TCP before it is queued, and the producers pack to fit. It is the
+     * backstop for a producer that grows a body without noticing, and the counter is how that shows
+     * up as evidence rather than as a mirror that quietly stops moving.
+     */
+    public static final int MAX_DATAGRAM_BYTES = 1200;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
     private static final String EXTRA_CONNECTION_REJECT_REASON = "Host already has an active connection";
     /**
@@ -195,6 +206,8 @@ public class CoopNetService {
     private long keepalivesReceived;
     private long icmpTransients;
     private long oversizedDatagrams;
+    /** Composed datagrams the pump rerouted onto TCP for exceeding {@link #MAX_DATAGRAM_BYTES}. */
+    private long escalatedToTcp;
     private ByteBuffer pendingWrite;
     private int inboundFrameLength;
     private String connectHost;
@@ -246,12 +259,25 @@ public class CoopNetService {
         }
     }
 
+    /**
+     * Records that one composed datagram went out over TCP instead of UDP because it exceeded
+     * {@link #MAX_DATAGRAM_BYTES} (Phase 20 M4). The decision belongs to the pump — it owns the
+     * transport router — but the counter belongs here beside the other datagram evidence, so
+     * {@code LINK_STATUS} and the connection doctor report one set of numbers.
+     */
+    public void noteDatagramEscalatedToTcp() {
+        synchronized (lifecycleLock) {
+            escalatedToTcp++;
+        }
+    }
+
     /** Immutable snapshot of the UDP transport counters; see {@link CoopDatagramStats}. */
     public CoopDatagramStats datagramStats() {
         synchronized (lifecycleLock) {
             return new CoopDatagramStats(droppedNoToken, droppedTokenMismatch, droppedForeignSource,
                     droppedMalformed, probesSent, probeEchoesReceived, pathValidations, keepalivesSent,
-                    keepalivesReceived, icmpTransients, oversizedDatagrams, lastInboundDatagramAtMillis,
+                    keepalivesReceived, icmpTransients, oversizedDatagrams, escalatedToTcp,
+                    lastInboundDatagramAtMillis,
                     validatedUdpAddress == null ? "" : validatedUdpAddress.toString());
         }
     }

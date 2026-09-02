@@ -28,6 +28,12 @@ public final class CoopMessages {
         TIME_SNAPSHOT,
         PAUSE_INTENT,
         FLEET_SNAPSHOT,
+        /**
+         * Phase 20 M4 roster split: the immutable half of a player fleet, on reliable TCP, sent on
+         * {@code fleetHash16} change / session start / resume. The 10 Hz {@code FLEET_SNAPSHOT}
+         * datagram carries only the volatile tick that references it.
+         */
+        FLEET_ROSTER,
         INTERACTION_CLAIM,
         INTERACTION_ACCEPT,
         INTERACTION_REJECT,
@@ -184,7 +190,8 @@ public final class CoopMessages {
                         + ",\"droppedTokenMismatch\":" + stats.droppedTokenMismatch()
                         + ",\"droppedForeignSource\":" + stats.droppedForeignSource()
                         + ",\"pathValidations\":" + stats.pathValidations()
-                        + ",\"icmpTransients\":" + stats.icmpTransients() + "}");
+                        + ",\"icmpTransients\":" + stats.icmpTransients()
+                        + ",\"escalatedToTcp\":" + stats.escalatedToTcp() + "}");
     }
 
     /** Decoded {@link Type#LINK_STATUS} payload; -1 rtt/p95 mean "the peer had no sample yet". */
@@ -197,7 +204,8 @@ public final class CoopMessages {
                              long droppedTokenMismatch,
                              long droppedForeignSource,
                              long pathValidations,
-                             long icmpTransients) {
+                             long icmpTransients,
+                             long escalatedToTcp) {
         public LinkStatus {
             transport = transport == null ? "" : transport;
         }
@@ -214,7 +222,8 @@ public final class CoopMessages {
                 requiredPayloadLong(message, "droppedTokenMismatch"),
                 requiredPayloadLong(message, "droppedForeignSource"),
                 requiredPayloadLong(message, "pathValidations"),
-                requiredPayloadLong(message, "icmpTransients"));
+                requiredPayloadLong(message, "icmpTransients"),
+                requiredPayloadLong(message, "escalatedToTcp"));
     }
 
     /**
@@ -679,6 +688,23 @@ public final class CoopMessages {
                         + "\"targetJson\":\"" + escapeJson(targetJson == null ? "" : targetJson) + "\"}");
     }
 
+    /**
+     * Phase 20 M4: one player's immutable fleet roster ({@link coop.fleet.CoopFleetRoster#encode()}),
+     * on reliable TCP because losing it is not a dropped frame of motion — it is a mirror built from
+     * the wrong ships. The matching volatile state rides the UDP {@code FLEET_SNAPSHOT} tick and
+     * joins to this by {@code fleetHash16}.
+     */
+    public static Message fleetRoster(String sessionId, long seq, long sentAtMillis,
+                                      String encodedRoster) {
+        return new Message(Type.FLEET_ROSTER, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"roster\":\"" + escapeJson(encodedRoster == null ? "" : encodedRoster) + "\"}");
+    }
+
+    /** The encoded roster carried by a {@link Type#FLEET_ROSTER} message. */
+    public static String parseFleetRoster(Message message) {
+        return requiredPayloadString(message, "roster");
+    }
+
     public static Message orbitSnapshot(String sessionId, long seq, long sentAtMillis,
                                         String locationId, String encodedOrbits) {
         return new Message(Type.ORBIT_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
@@ -974,6 +1000,53 @@ public final class CoopMessages {
                     .append(DATAGRAM_SEPARATOR).append(section.body());
         }
         return out.toString();
+    }
+
+    /**
+     * The UTF-8 byte length {@link #datagram(String, String, Type, List)} would produce, computed
+     * arithmetically instead of by building the string (Phase 20 M4).
+     *
+     * <p>The chunk packer asks "does this record still fit" once per record per tick, and answering
+     * it by composing the whole datagram again is quadratic in the batch size at 10 Hz. This is exact
+     * rather than an estimate — the budget is a hard cap, and an estimate that is one byte optimistic
+     * is a fragmented packet.
+     */
+    public static int datagramBytes(String token, String senderId, Type type,
+                                    List<DatagramSection> sections) {
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(sections, "sections");
+        int bytes = utf8Length(token) + 1 + utf8Length(senderId) + 1 + type.name().length();
+        for (DatagramSection section : sections) {
+            bytes += 4
+                    + Long.toString(section.epoch()).length()
+                    + Long.toString(section.sentGameTimeMillis()).length()
+                    + Integer.toString(section.chunk()).length()
+                    + utf8Length(section.body());
+        }
+        return bytes;
+    }
+
+    /** UTF-8 byte length without allocating the array; the packer calls this per candidate record. */
+    public static int utf8Length(String text) {
+        if (text == null) {
+            return 0;
+        }
+        int bytes = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < text.length()
+                    && Character.isLowSurrogate(text.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 
     /** Single-section convenience for chunk 0 (every call site today). */

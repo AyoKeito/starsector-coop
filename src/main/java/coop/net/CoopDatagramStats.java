@@ -21,6 +21,7 @@ package coop.net;
  * @param keepalivesReceived    {@code UDP_PROBE} datagrams received from the peer
  * @param icmpTransients        transient socket/ICMP errors absorbed without closing the channel
  * @param oversized             outbound datagrams dropped for exceeding the size cap
+ * @param escalatedToTcp        composed datagrams rerouted onto TCP for exceeding the size budget
  * @param lastInboundDatagramAtMillis wall clock of the last accepted inbound datagram, 0 if none
  * @param validatedRemote       the current send target as text, or "" when nothing is validated
  */
@@ -36,6 +37,7 @@ public record CoopDatagramStats(
         long keepalivesReceived,
         long icmpTransients,
         long oversized,
+        long escalatedToTcp,
         long lastInboundDatagramAtMillis,
         String validatedRemote) {
 

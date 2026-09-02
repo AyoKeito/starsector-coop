@@ -7,6 +7,8 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopFleetSnapshotTest {
     private static CoopFleetSnapshot.Member member(String id, String hull, String variant) {
@@ -65,7 +67,7 @@ class CoopFleetSnapshotTest {
                 sensors(650f, 420f),
                 List.of(member("m1", "wolf", "wolf_Assault"), member("m2", "lasher", "lasher_CS")));
 
-        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decodeFull(snapshot.encodeFull());
 
         assertEquals(snapshot, decoded);
     }
@@ -77,7 +79,7 @@ class CoopFleetSnapshotTest {
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
                 "p|id", "Na|me\nBreak", "loc\nid", 0f, 0f, 0f, 0f, "fac|tion", false, sensors(650f, 420f), List.of(tricky));
 
-        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decodeFull(snapshot.encodeFull());
 
         assertEquals(snapshot, decoded);
         assertEquals("ISS Pipe|Wolf", decoded.members().get(0).shipName());
@@ -97,7 +99,7 @@ class CoopFleetSnapshotTest {
                 "p" + sep + "1", "Ali" + sep + "ce", "cor" + sep + "vus",
                 0f, 0f, 0f, 0f, "play" + sep + "er", true, sensors(650f, 420f), List.of(tricky));
 
-        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decodeFull(snapshot.encodeFull());
 
         assertEquals(snapshot, decoded);
         assertEquals("ISS" + sep + "Wolf", decoded.members().get(0).shipName());
@@ -112,7 +114,7 @@ class CoopFleetSnapshotTest {
                 List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault",
                         "ISS" + sep + "Wolf", "Cpt", 0.7f, 0.9f)));
 
-        assertFalse(snapshot.encode().contains(sep),
+        assertFalse(snapshot.encodeFull().contains(sep),
                 "a raw U+001F in the encoded payload would split the datagram record");
     }
 
@@ -137,7 +139,7 @@ class CoopFleetSnapshotTest {
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
                 "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true, sensors(650f, 420f), members);
 
-        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decodeFull(snapshot.encodeFull());
 
         assertEquals(snapshot, decoded);
         assertEquals("", decoded.members().get(0).dmodIds());
@@ -195,7 +197,7 @@ class CoopFleetSnapshotTest {
                 List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela",
                         0.85f, 0.667f)));
 
-        assertEquals(snapshot, CoopFleetSnapshot.decode(snapshot.encode()));
+        assertEquals(snapshot, CoopFleetSnapshot.decodeFull(snapshot.encodeFull()));
     }
 
     @Test
@@ -208,7 +210,7 @@ class CoopFleetSnapshotTest {
                 List.of(new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela",
                         0.84999996f, 0.6666667f)));
 
-        String[] lines = snapshot.encode().split("\n", -1);
+        String[] lines = snapshot.encodeFull().split("\n", -1);
         List<String> header = CoopFleetCodec.split(lines[0]);
         List<String> member = CoopFleetCodec.split(lines[1]);
 
@@ -219,11 +221,11 @@ class CoopFleetSnapshotTest {
         assertEquals("0.85", member.get(5));
         assertEquals("0.667", member.get(6));
 
-        CoopFleetSnapshot decoded = CoopFleetSnapshot.decode(snapshot.encode());
+        CoopFleetSnapshot decoded = CoopFleetSnapshot.decodeFull(snapshot.encodeFull());
         assertEquals(-2324.5f, decoded.x());
         assertEquals(0.85f, decoded.members().get(0).cr());
         // Quantized once, stable forever: re-encoding the decoded snapshot is byte-identical.
-        assertEquals(snapshot.encode(), decoded.encode());
+        assertEquals(snapshot.encodeFull(), decoded.encodeFull());
     }
 
     @Test
@@ -238,7 +240,7 @@ class CoopFleetSnapshotTest {
                 "p1", "Alice", "corvus", -2324.3894f, 14625.111f, -14.077f, 3.3333333f, "player", true,
                 sensors(650.37f, 419.9666f), members);
 
-        String encoded = snapshot.encode();
+        String encoded = snapshot.encodeFull();
 
         assertEquals(CoopFleetSnapshot.computeFleetHash(members), snapshot.fleetHash());
         assertEquals(-2324.3894f, snapshot.x());
@@ -260,6 +262,100 @@ class CoopFleetSnapshotTest {
                 CoopFleetCodec.quantize(Float.POSITIVE_INFINITY, CoopFleetCodec.POSITION_STEP));
         assertEquals(Float.MAX_VALUE,
                 CoopFleetCodec.quantize(Float.MAX_VALUE, CoopFleetCodec.POSITION_STEP));
+    }
+
+
+    // ---- Phase 20 M4 roster split -----------------------------------------------------------------
+
+    @Test
+    void theWireHashIsTheFirstSixteenHexOfTheFullHash() {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create("p1", "Alice", "corvus", 1f, 2f, 3f, 4f,
+                "player", true, sensors(300f, 200f), List.of(member("m1", "wolf", "wolf_Assault")));
+
+        assertEquals(16, snapshot.fleetHash16().length());
+        assertTrue(snapshot.fleetHash().startsWith(snapshot.fleetHash16()));
+        assertEquals("abc", CoopFleetSnapshot.hash16("abc"), "shorter hashes pass through");
+        assertEquals("", CoopFleetSnapshot.hash16(null));
+    }
+
+    @Test
+    void aTickRoundTripsEverythingTheMirrorReadsPerFrame() {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create("p1", "Alice", "corvus",
+                -2324.25f, 14625.0f, -14f, 3.25f, "player", true,
+                new CoopSensorSync.Profile(650.5f, 120.5f, 25.5f, 0.875f, 419.5f),
+                List.of(member("m1", "wolf", "wolf_Assault"), member("m2", "lasher", "lasher_CS")));
+
+        CoopFleetSnapshot.Tick tick = CoopFleetSnapshot.Tick.of(snapshot);
+        CoopFleetSnapshot.Tick decoded = CoopFleetSnapshot.Tick.decode(tick.encode());
+
+        assertEquals(tick, decoded);
+        assertEquals("corvus", decoded.locationId());
+        assertEquals(-2324.25f, decoded.x());
+        assertEquals(snapshot.fleetHash16(), decoded.fleetHash16());
+        assertEquals(2, decoded.members().size());
+        assertEquals(0.7f, decoded.members().get(0).cr());
+        assertEquals(0.9f, decoded.members().get(1).hullFraction());
+    }
+
+    @Test
+    void anEmptyFleetTickRoundTrips() {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create("p1", "Alice", "corvus", 0f, 0f, 0f, 0f,
+                "player", false, sensors(300f, 200f), List.of());
+
+        CoopFleetSnapshot.Tick tick = CoopFleetSnapshot.Tick.of(snapshot);
+
+        assertEquals(tick, CoopFleetSnapshot.Tick.decode(tick.encode()));
+        assertFalse(CoopFleetSnapshot.Tick.decode(tick.encode()).transponderOn());
+    }
+
+    @Test
+    void aTickWhoseMemberCountDisagreesWithItsPayloadIsRejected() {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create("p1", "Alice", "corvus", 0f, 0f, 0f, 0f,
+                "player", true, sensors(300f, 200f), List.of(member("m1", "wolf", "wolf_Assault")));
+        String encoded = CoopFleetSnapshot.Tick.of(snapshot).encode();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopFleetSnapshot.Tick.decode(encoded + "|0.5"));
+    }
+
+    @Test
+    void aLocationIdBearingSeparatorsSurvivesTheTickEncoding() {
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create("p1", "Alice", "weird|id\nhere",
+                0f, 0f, 0f, 0f, "player", true, sensors(300f, 200f), List.of());
+
+        CoopFleetSnapshot.Tick tick = CoopFleetSnapshot.Tick.of(snapshot);
+
+        assertEquals("weird|id\nhere", CoopFleetSnapshot.Tick.decode(tick.encode()).locationId());
+    }
+
+    @Test
+    void aThirtyShipTickComposesWellInsideTheWanBudget() {
+        // The plan's acceptance number: a 30-ship fleet at 10 Hz used to compose to 4.3-5.4 KB, i.e.
+        // 3-4 IP fragments per packet. Composed here means envelope plus BOTH sections, since the
+        // redundancy layer always ships the previous tick alongside the current one.
+        List<CoopFleetSnapshot.Member> members = new java.util.ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            members.add(new CoopFleetSnapshot.Member("PL" + i + "-1234567890", "onslaught",
+                    "onslaught_xiv_Elite", "ISS Nevermore " + i, "Captain Vela Solvang",
+                    0.673f, 0.812f, "damaged_engines,structural_damage", "safetyoverrides", ""));
+        }
+        CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
+                "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "Alice Longname",
+                "system_askonia_inner", -14625.25f, 3080.75f, -14f, 3.25f, "player", true,
+                new CoopSensorSync.Profile(650.5f, 120.5f, 25.5f, 0.875f, 419.5f), members);
+
+        String body = CoopFleetSnapshot.Tick.of(snapshot).encode();
+        String composed = coop.net.CoopMessages.datagram(
+                coop.net.CoopMessages.wireToken("session"), coop.net.CoopMessages.wireToken("player"),
+                coop.net.CoopMessages.Type.FLEET_SNAPSHOT,
+                List.of(new coop.net.CoopMessages.DatagramSection(4001L, 987654321L, 0, body),
+                        new coop.net.CoopMessages.DatagramSection(4002L, 987654421L, 0, body)));
+        int composedBytes = composed.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+
+        assertTrue(composedBytes <= coop.net.CoopNetService.MAX_DATAGRAM_BYTES,
+                "composed 30-ship FLEET_SNAPSHOT was " + composedBytes + " B");
+        assertTrue(snapshot.encodeFull().length() > body.length() * 3,
+                "the full form is what made this stream fragment");
     }
 
     /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */

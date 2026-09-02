@@ -161,6 +161,38 @@ class CoopWiretapTest {
         assertEquals(2, lines.size(), "nothing was received, so there is no RX line: " + lines);
     }
 
+
+    @Test
+    void escalationsToTcpAreCountedPerTypeInTheSummary() {
+        CoopWiretap.setSampleIntervalForTesting(1000);
+        wiretap.recordSend(datagramOfSize(CoopMessages.Type.NPC_FLEET_MOTION, 1, 1400), 1400);
+        wiretap.recordEscalation(CoopMessages.Type.NPC_FLEET_MOTION);
+        wiretap.recordEscalation(CoopMessages.Type.NPC_FLEET_MOTION);
+        lines.clear();
+
+        wiretap.summarize("test");
+
+        String escalation = lines.get(lines.size() - 1);
+        assertTrue(escalation.startsWith("Coop wiretap sizes TX NPC_FLEET_MOTION escalatedToTcp=2"),
+                escalation);
+    }
+
+    @Test
+    void aSessionEdgeDropsTheEscalationCountsWithEverythingElse() {
+        CoopWiretap.setSampleIntervalForTesting(1000);
+        wiretap.recordSend(datagramOfSize(CoopMessages.Type.NPC_FLEET_MOTION, 1, 1400), 1400);
+        wiretap.recordEscalation(CoopMessages.Type.NPC_FLEET_MOTION);
+
+        wiretap.sessionStarted();
+        wiretap.recordSend(datagramOfSize(CoopMessages.Type.NPC_FLEET_MOTION, 2, 400), 400);
+        lines.clear();
+        wiretap.summarize("test");
+
+        for (String line : lines) {
+            assertFalse(line.contains("escalatedToTcp"), line);
+        }
+    }
+
     @Test
     void aDatagramExactlyOnTheBudgetIsNotCountedAsOverIt() {
         CoopWiretap.setSampleIntervalForTesting(1000);

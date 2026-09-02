@@ -97,6 +97,8 @@ public final class CoopWiretap {
     private final Consumer<String> logSink;
     private final Map<CoopMessages.Type, Stream> sent = new EnumMap<>(CoopMessages.Type.class);
     private final Map<CoopMessages.Type, Stream> received = new EnumMap<>(CoopMessages.Type.class);
+    /** Phase 20 M4: composed datagrams sent over TCP instead of UDP for being over budget, per type. */
+    private final Map<CoopMessages.Type, Long> escalated = new EnumMap<>(CoopMessages.Type.class);
 
     private long sessionStartMillis;
     private long nextSummaryAtMillis;
@@ -185,12 +187,25 @@ public final class CoopWiretap {
     }
 
     /**
+     * Phase 20 M4: one composed datagram of {@code type} was rerouted onto TCP for exceeding the UDP
+     * budget. Counted per type here rather than only in {@code CoopDatagramStats} because the
+     * question the summary answers is "which stream is too big", and a single total cannot say.
+     */
+    public void recordEscalation(CoopMessages.Type type) {
+        if (!enabled || type == null) {
+            return;
+        }
+        escalated.merge(type, 1L, Long::sum);
+    }
+
+    /**
      * Session-edge entry: drops the previous session's accumulators so a second session in the same
      * game process reports its own numbers rather than folding both together.
      */
     public void sessionStarted() {
         sent.clear();
         received.clear();
+        escalated.clear();
         long now = clockMillis.getAsLong();
         sessionStartMillis = now;
         nextSummaryAtMillis = now + SUMMARY_INTERVAL_MILLIS;
@@ -251,6 +266,10 @@ public final class CoopWiretap {
                 + " budget=" + WAN_BUDGET_BYTES + "B, fragmentation=1472B");
         summarizeDirection("TX", sent);
         summarizeDirection("RX", received);
+        for (Map.Entry<CoopMessages.Type, Long> entry : escalated.entrySet()) {
+            logSink.accept("Coop wiretap sizes TX " + entry.getKey() + " escalatedToTcp="
+                    + entry.getValue() + " (over " + WAN_BUDGET_BYTES + "B, sent on the reliable wire)");
+        }
     }
 
     private void summarizeDirection(String direction, Map<CoopMessages.Type, Stream> streams) {

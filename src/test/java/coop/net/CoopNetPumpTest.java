@@ -31,6 +31,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopNetPumpTest {
+    /** A valid, empty {@code NPC_FLEET_MOTION} section body (Phase 20 M4 v2 format). */
+    private static final String EMPTY_MOTION_BODY =
+            coop.fleet.CoopNpcFleetMotion.encodeFullSection(java.util.List.of());
+
     @AfterEach
     void clearGlobalSector() {
         Global.setSector(null);
@@ -1248,7 +1252,7 @@ class CoopNetPumpTest {
         service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 1_000L,
                 new CoopLinkQuality.Snapshot(42, 60, 3, false, 120L, 11_000L),
                 CoopLinkQuality.TRANSPORT_UDP,
-                new CoopDatagramStats(0L, 1L, 2L, 0L, 0L, 0L, 3L, 0L, 0L, 4L, 0L, 0L, "")));
+                new CoopDatagramStats(0L, 1L, 2L, 0L, 0L, 0L, 3L, 0L, 0L, 4L, 0L, 0L, 0L, "")));
         pump.advance(0f);
 
         CoopMessages.LinkStatus peer = pump.peerLinkStatus();
@@ -1277,10 +1281,10 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         service.inboundDatagrams.add(CoopMessages.datagram(token, "sender-udp",
-                CoopMessages.Type.NPC_FLEET_MOTION, 4L, 0L, "motion"));
+                CoopMessages.Type.NPC_FLEET_MOTION, 4L, 0L, EMPTY_MOTION_BODY));
         service.inbound.add(CoopMessages.stateDatagram("session-a", 8L, 1_000L,
                 CoopMessages.datagram(token, "sender-tcp",
-                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, "motion")));
+                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, EMPTY_MOTION_BODY)));
         pump.advance(0f);
 
         assertEquals(4L, pump.datagramWatermark()
@@ -1298,7 +1302,7 @@ class CoopNetPumpTest {
 
         service.inbound.add(CoopMessages.stateDatagram("session-a", 8L, 1_000L,
                 CoopMessages.datagram(CoopMessages.wireToken("someone-else"), "sender-x",
-                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, "motion")));
+                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, EMPTY_MOTION_BODY)));
         pump.advance(0f);
 
         assertEquals(Long.MIN_VALUE, pump.datagramWatermark()
@@ -1343,7 +1347,7 @@ class CoopNetPumpTest {
         service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 2_000L,
                 new CoopLinkQuality.Snapshot(40, 50, 0, false, 0L, 30_000L),
                 CoopLinkQuality.TRANSPORT_UDP,
-                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
         now.set(2_500L);
         pump.advance(0f);
 
@@ -1423,6 +1427,183 @@ class CoopNetPumpTest {
                 .toList();
         assertEquals(1, matches.size(), "expected exactly one " + type);
         return matches.get(0);
+    }
+
+
+    // ---- Phase 20 M4: roster split, chunked motion, oversize escalation ---------------------------
+
+    private static coop.fleet.CoopFleetSnapshot playerSnapshot(String playerId, int ships) {
+        java.util.List<coop.fleet.CoopFleetSnapshot.Member> members = new ArrayList<>();
+        for (int i = 0; i < ships; i++) {
+            members.add(new coop.fleet.CoopFleetSnapshot.Member("m" + i, "wolf", "wolf_Assault",
+                    "Ship " + i, "Captain", 0.7f, 0.9f));
+        }
+        return coop.fleet.CoopFleetSnapshot.create(playerId, "Guest", "corvus", 10f, 20f, 1f, 2f,
+                "player", true, new coop.fleet.CoopSensorSync.Profile(300f, 0f, 0f, 1f, 200f),
+                members);
+    }
+
+    private static long rosterCount(RecordingNetService service) {
+        return service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.FLEET_ROSTER).count();
+    }
+
+    @Test
+    void theFleetRosterGoesOutOnceAndThenOnlyWhenTheShipsChange() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = livePump(service, activeHostSession(), () -> 1_000L);
+
+        assertTrue(pump.maybeSendFleetRoster(playerSnapshot("host-player", 3)));
+        assertFalse(pump.maybeSendFleetRoster(playerSnapshot("host-player", 3)),
+                "an unchanged roster is 10 Hz of bytes nobody reads");
+        assertTrue(pump.maybeSendFleetRoster(playerSnapshot("host-player", 4)));
+
+        assertEquals(2L, rosterCount(service));
+        CoopMessages.Message roster = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.FLEET_ROSTER)
+                .reduce((a, b) -> b).orElseThrow();
+        coop.fleet.CoopFleetRoster decoded =
+                coop.fleet.CoopFleetRoster.decode(CoopMessages.parseFleetRoster(roster));
+        assertEquals(4, decoded.members().size());
+        assertEquals("wolf_Assault", decoded.members().get(0).variantId());
+    }
+
+    @Test
+    void aSessionEdgeMakesThisSideOweTheRosterAgain() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = livePump(service, activeHostSession(), () -> 1_000L);
+        pump.maybeSendFleetRoster(playerSnapshot("host-player", 3));
+        assertEquals(16, pump.lastSentRosterHash().length());
+
+        // The peer went away: whatever comes back has no roster, so the memory of having sent one
+        // is exactly the thing that would leave its mirror empty.
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals("", pump.lastSentRosterHash());
+        assertTrue(pump.maybeSendFleetRoster(playerSnapshot("host-player", 3)));
+    }
+
+    @Test
+    void anInboundRosterIsCachedAndTheNextTickRidesIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = livePump(service, activeHostSession(), () -> 1_000L);
+        pump.advance(0f);
+        coop.fleet.CoopFleetSnapshot remote = playerSnapshot("guest-player", 2);
+
+        service.inbound.add(CoopMessages.fleetRoster("session-a", 1L, 1_000L,
+                coop.fleet.CoopFleetRoster.of(remote).encode()));
+        service.inboundDatagrams.add(CoopMessages.datagram(CoopMessages.wireToken("session-a"),
+                CoopMessages.wireToken("guest-player"), CoopMessages.Type.FLEET_SNAPSHOT,
+                11L, 500L, coop.fleet.CoopFleetSnapshot.Tick.of(remote).encode()));
+        pump.advance(0f);
+
+        assertNotNull(pump.rosterCache().current());
+        assertEquals(2, pump.rosterCache().current().members().size());
+        assertTrue(pump.rosterCache().matches(remote.fleetHash16()));
+        assertEquals(11L, pump.datagramWatermark()
+                        .watermarkFor(CoopMessages.wireToken("guest-player"),
+                                CoopMessages.Type.FLEET_SNAPSHOT),
+                "the tick reached the apply path");
+    }
+
+    @Test
+    void aTickFromSomeoneOtherThanTheRemotePlayerNeverReachesTheRosterCache() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.fleetRoster("session-a", 1L, 1_000L,
+                coop.fleet.CoopFleetRoster.of(playerSnapshot("guest-player", 2)).encode()));
+        pump.advance(0f);
+
+        // A tick naming a roster this side does not hold, from a sender that is not the coop peer.
+        // If the sender check read the body instead of the validated envelope, the cache would enter
+        // (and eventually log) its hold window on a stranger's packet.
+        String foreign = CoopMessages.wireToken("someone-else");
+        coop.fleet.CoopFleetSnapshot other = playerSnapshot("guest-player", 7);
+        for (long at : new long[] {2_000L, 20_000L}) {
+            now.set(at);
+            service.inboundDatagrams.add(CoopMessages.datagram(CoopMessages.wireToken("session-a"),
+                    foreign, CoopMessages.Type.FLEET_SNAPSHOT, 20L + at, at,
+                    coop.fleet.CoopFleetSnapshot.Tick.of(other).encode()));
+            pump.advance(0f);
+        }
+
+        assertTrue(pump.rosterCache().matches(playerSnapshot("guest-player", 2).fleetHash16()));
+        assertFalse(pump.rosterCache().mismatchLogged());
+    }
+
+    @Test
+    void bothSectionsOfAChunkedMotionDatagramDecodeEvenWhenTheFirstIsStale() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "guest-player", "session-a"));
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        CoopNetPump pump = livePump(service, session, () -> 1_000L);
+        pump.advance(0f);
+        String token = CoopMessages.wireToken("session-a");
+        String sender = CoopMessages.wireToken("host-player");
+        java.util.List<coop.fleet.CoopNpcFleetMotion> first = java.util.List.of(
+                new coop.fleet.CoopNpcFleetMotion("npc-1", "corvus", 10f, 20f, 1f, 2f,
+                        new coop.fleet.CoopSensorSync.Profile(300f, 0f, 0f, 1f, 200f)));
+        java.util.List<coop.fleet.CoopNpcFleetMotion> second = java.util.List.of(
+                new coop.fleet.CoopNpcFleetMotion("npc-1", "corvus", 30f, 40f, 1f, 2f,
+                        new coop.fleet.CoopSensorSync.Profile(300f, 0f, 0f, 1f, 200f)));
+
+        // Tick 1, chunk 0.
+        service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                CoopMessages.Type.NPC_FLEET_MOTION, 5L, 500L, 0,
+                coop.fleet.CoopNpcFleetMotion.encodeFullSection(first)));
+        pump.advance(0f);
+        // Tick 2, chunk 0: section 1 is the copy the guest already applied, section 2 is a delta that
+        // only means anything relative to it.
+        service.inboundDatagrams.add(coop.net.CoopDatagramRedundancy.composeWithBaseline(token,
+                sender, CoopMessages.Type.NPC_FLEET_MOTION, 5L, 500L, 0,
+                coop.fleet.CoopNpcFleetMotion.encodeFullSection(first),
+                6L, 600L, coop.fleet.CoopNpcFleetMotion.encodeDeltaSection(second, first)));
+        pump.advance(0f);
+
+        assertEquals(6L, pump.datagramWatermark()
+                        .watermarkFor(sender, CoopMessages.Type.NPC_FLEET_MOTION),
+                "a decode failure on the stale section would have aborted before the watermark");
+    }
+
+    @Test
+    void anOverBudgetDatagramIsEscalatedOntoTcpInsteadOfBeingFragmented() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = livePump(service, activeHostSession(), () -> 1_000L);
+        String oversized = CoopMessages.datagram(CoopMessages.wireToken("session-a"),
+                CoopMessages.wireToken("host-player"), CoopMessages.Type.FLEET_SNAPSHOT,
+                1L, 100L, "x".repeat(CoopNetService.MAX_DATAGRAM_BYTES));
+
+        pump.sendStateDatagram(oversized);
+
+        assertEquals(0, service.datagrams.size(), "nothing above the budget may hit the UDP socket");
+        assertEquals(1, service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.STATE_DATAGRAM).count());
+        assertEquals(oversized, CoopMessages.parseStateDatagram(service.sent.stream()
+                        .filter(m -> m.type() == CoopMessages.Type.STATE_DATAGRAM)
+                        .findFirst().orElseThrow()),
+                "the escalated bytes are the datagram verbatim, so the receiver runs one path");
+    }
+
+    @Test
+    void aDatagramInsideTheBudgetStillTakesTheUdpPath() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = livePump(service, activeHostSession(), () -> 1_000L);
+        String small = CoopMessages.datagram(CoopMessages.wireToken("session-a"),
+                CoopMessages.wireToken("host-player"), CoopMessages.Type.FLEET_SNAPSHOT,
+                1L, 100L, "small");
+
+        pump.sendStateDatagram(small);
+
+        assertEquals(List.of(small), service.datagrams);
+        assertEquals(0, service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.STATE_DATAGRAM).count());
     }
 
     private static CoopNetPump livePump(RecordingNetService service, CoopSessionState session,
@@ -2411,7 +2592,7 @@ class CoopNetPumpTest {
         private final List<String> datagrams = new ArrayList<>();
         private final Queue<String> inboundDatagrams = new ArrayDeque<>();
         private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-                0L, 0L, 0L, "");
+                0L, 0L, 0L, 0L, "");
         boolean connected = true;
 
         RecordingNetService(CoopConnectionRole role) {
@@ -2463,7 +2644,7 @@ class CoopNetPumpTest {
         }
 
         private void noteUdpInboundAt(long atMillis) {
-            stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, atMillis, "");
+            stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, atMillis, "");
         }
     }
 

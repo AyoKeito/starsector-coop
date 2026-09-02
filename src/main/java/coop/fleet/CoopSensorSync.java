@@ -262,6 +262,83 @@ public final class CoopSensorSync {
                         CoopFleetCodec.SENSOR_STEP));
     }
 
+    /** Every field present: the mask an unchanged-nothing record carries. */
+    public static final int MASK_ALL = 0b11111;
+
+    /**
+     * The wire text of one sensor field, by bit index (Phase 20 M4). Splitting {@link #append} into
+     * per-field pieces is what lets the change mask compare <em>encoded</em> values: the mask must
+     * mean "the receiver would decode a different number", and two floats that quantize onto the same
+     * grid point are the same number as far as the wire is concerned.
+     */
+    private static String field(Profile profile, int index) {
+        return switch (index) {
+            case 0 -> CoopFleetCodec.encodePositiveFloat(profile.sensorProfile(),
+                    CoopFleetCodec.SENSOR_STEP);
+            case 1 -> CoopFleetCodec.encodeFloat(profile.detectedRangeFlat(),
+                    CoopFleetCodec.SENSOR_STEP);
+            case 2 -> CoopFleetCodec.encodeFloat(profile.detectedRangePercent(),
+                    CoopFleetCodec.SENSOR_STEP);
+            case 3 -> CoopFleetCodec.encodeFloat(profile.detectedRangeMult(),
+                    CoopFleetCodec.SENSOR_MULT_STEP);
+            case 4 -> CoopFleetCodec.encodePositiveFloat(profile.sensorStrength(),
+                    CoopFleetCodec.SENSOR_STEP);
+            default -> throw new IllegalArgumentException("No sensor field " + index);
+        };
+    }
+
+    /**
+     * Which of {@code current}'s fields differ from {@code baseline} on the wire. The five sensor
+     * terms are ~37% of a motion record and piecewise constant — abilities and terrain swing them
+     * within a second, so they cannot leave the 10 Hz path, but tick to tick they almost never move.
+     * A null baseline means "this fleet is not in the baseline section", which is a full record.
+     */
+    public static int changeMask(Profile current, Profile baseline) {
+        Profile safe = current == null ? Profile.UNKNOWN : current;
+        if (baseline == null) {
+            return MASK_ALL;
+        }
+        int mask = 0;
+        for (int i = 0; i < FIELD_COUNT; i++) {
+            if (!field(safe, i).equals(field(baseline, i))) {
+                mask |= 1 << i;
+            }
+        }
+        return mask;
+    }
+
+    /** Appends only the fields {@code mask} selects, pipe-prefixed, low bit first. */
+    public static void appendMasked(StringBuilder out, Profile profile, int mask) {
+        Profile safe = profile == null ? Profile.UNKNOWN : profile;
+        for (int i = 0; i < FIELD_COUNT; i++) {
+            if ((mask & (1 << i)) != 0) {
+                out.append('|').append(field(safe, i));
+            }
+        }
+    }
+
+    /**
+     * Reverses {@link #appendMasked}: the selected fields come from {@code fields} starting at
+     * {@code offset}, the rest from {@code baseline}. A cleared bit with no baseline is a malformed
+     * record rather than a defaulted one — silently substituting {@link Profile#UNKNOWN} there would
+     * hand the receiver the "no sensor identity" sentinel, which reads as <em>always identified</em>.
+     */
+    public static Profile parseMasked(List<String> fields, int offset, int mask, Profile baseline) {
+        float[] values = new float[FIELD_COUNT];
+        int cursor = offset;
+        for (int i = 0; i < FIELD_COUNT; i++) {
+            if ((mask & (1 << i)) != 0) {
+                values[i] = Float.parseFloat(fields.get(cursor++));
+            } else if (baseline != null) {
+                values[i] = Float.parseFloat(field(baseline, i));
+            } else {
+                throw new IllegalArgumentException(
+                        "Sensor field " + i + " is absent and there is no baseline section for it");
+            }
+        }
+        return new Profile(values[0], values[1], values[2], values[3], values[4]);
+    }
+
     /** Reads the five sensor fields starting at {@code offset} in a split record. */
     public static Profile parse(List<String> fields, int offset) {
         return new Profile(

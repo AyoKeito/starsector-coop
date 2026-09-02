@@ -52,6 +52,36 @@ public final class CoopDatagramRedundancy {
         return CoopMessages.datagram(token, senderId, type, sections);
     }
 
+    /**
+     * The delta-coded form of the same two-section layout (Phase 20 M4, {@code NPC_FLEET_MOTION}):
+     * the redundant previous send goes out as the FULL body it always was, and the current send goes
+     * out as a delta <em>against that section</em>. Both halves are in the same packet by
+     * construction, so the baseline can never be lost separately from the delta that needs it — which
+     * is the whole reason the ack-free mask is safe without Quake 3's acked-baseline machinery.
+     *
+     * <p>Stateless, unlike {@link #compose}: a chunked producer already has to keep its own per-chunk
+     * batch to compute the delta, so having this class keep a second copy of the same thing would be
+     * two sources of truth for one baseline. The caller passes both bodies and both stamps.
+     *
+     * <p>{@code fullPrevBody} may be null, which is the first send of a chunk: a single full section
+     * goes out with the current stamps and nothing is delta-coded.
+     */
+    public static String composeWithBaseline(String token, String senderId, CoopMessages.Type type,
+                                             long prevEpoch, long prevGameTimeMillis, int chunk,
+                                             String fullPrevBody,
+                                             long curEpoch, long curGameTimeMillis,
+                                             String bodyAgainstPrev) {
+        Objects.requireNonNull(type, "type");
+        CoopMessages.DatagramSection current =
+                new CoopMessages.DatagramSection(curEpoch, curGameTimeMillis, chunk, bodyAgainstPrev);
+        if (fullPrevBody == null) {
+            return CoopMessages.datagram(token, senderId, type, List.of(current));
+        }
+        return CoopMessages.datagram(token, senderId, type, List.of(
+                new CoopMessages.DatagramSection(prevEpoch, prevGameTimeMillis, chunk, fullPrevBody),
+                current));
+    }
+
     /** Forgets held sections (session end / replicator reset) so a new session starts clean. */
     public void reset() {
         previousByStream.clear();
