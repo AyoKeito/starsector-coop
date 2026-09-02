@@ -1,8 +1,8 @@
 package coop.newgame;
 
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.OptionPanelAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
-import com.fs.starfarer.api.campaign.TextPanelAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.CharacterCreationData;
 import com.fs.starfarer.api.impl.campaign.NewGameDialogPluginImpl;
@@ -30,11 +30,10 @@ import coop.util.CoopLog;
  * frame while the panel is up, and once more in {@code optionSelected} for Continue before the
  * {@code BeginNewGameCreation} rule fires. Procgen reads the data object, so the last write wins.
  *
- * <p><b>Where the banner goes.</b> {@code super.init} ends with {@code dialog.hideTextPanel()} before
- * showing the panel, so a paragraph added <em>before</em> super would be hidden by it and a paragraph
- * added after would sit in a hidden panel. The banner is therefore added after {@code super.init} and
- * followed by an explicit {@code showTextPanel()}, which is what makes it visible alongside the
- * options panel.
+ * <p><b>Where the join cue goes.</b> Not in the text panel: {@code super.init} hides it, and showing
+ * it again (tried 2026-09-02) pushes the whole options panel to the right while the paragraph still
+ * does not render. The cue is the Continue option itself: a short suffix in its label naming the host
+ * and port, with the full explanation as the option's tooltip. Layout stays vanilla.
  */
 public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
 
@@ -201,15 +200,38 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
             return;
         }
         try {
-            TextPanelAPI textPanel = dialog.getTextPanel();
-            if (textPanel != null) {
-                textPanel.addPara(banner);
+            // The Continue option is the one control the player must use, so the coop cue lives on
+            // it: a short suffix in the label and the full banner as its tooltip. The option's data
+            // is the impl's private OptionId enum; Class.forName plus Enum.valueOf reaches the constant
+            // without java.lang.reflect (the same route Phase 7b uses for the fast-forward class).
+            Object continueId = continueOptionId();
+            OptionPanelAPI options = dialog.getOptionPanel();
+            if (continueId == null || options == null || !options.hasOption(continueId)) {
+                CoopLog.warn(CoopNewGameDialogPlugin.class,
+                        "Coop new game: Continue option not found; no join cue shown");
+                return;
             }
-            // super.init hid the text panel; without this the banner never renders.
-            dialog.showTextPanel();
+            options.setOptionText(continueLabel(), continueId);
+            options.setTooltip(continueId, banner);
         } catch (Throwable ex) {
             CoopLog.warn(CoopNewGameDialogPlugin.class, "Unable to show the coop new game banner", ex);
         }
+    }
+
+    private String continueLabel() {
+        String host = config == null ? "" : config.host();
+        int port = config == null ? 0 : config.port();
+        return role() == CoopConnectionRole.GUEST
+                ? "Continue (join coop host " + host + ":" + port + ")"
+                : "Continue (host coop game on port " + port + ")";
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Object continueOptionId() throws Throwable {
+        Class<?> optionIdClass = Class.forName(
+                NewGameDialogPluginImpl.class.getName() + "$OptionId", true,
+                NewGameDialogPluginImpl.class.getClassLoader());
+        return Enum.valueOf((Class) optionIdClass, CONTINUE_OPTION_NAME);
     }
 
     private CoopConnectionRole role() {
