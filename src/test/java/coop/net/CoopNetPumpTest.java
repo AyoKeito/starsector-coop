@@ -1625,6 +1625,195 @@ class CoopNetPumpTest {
         assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
     }
 
+    // ---- F4/F5: what a guest does with a LOBBY_REJECT --------------------------------------------
+
+    private static final String RETRYABLE_REJECT = "Lobby already has a guest";
+
+    private static CoopNetPump guestPumpWithPassword(RecordingNetService service,
+                                                     CoopSessionState session, String password) {
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L);
+        pump.setLobbyPasswordForTest(password);
+        return pump;
+    }
+
+    private static CoopSessionState connectingGuestSession() {
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        return session;
+    }
+
+    @Test
+    void aPasswordRejectEndsTheConnectLoopAndSaysWhyOnTheHud() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = guestPumpWithPassword(service, session, "wrong-password");
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.lobbyReject(6L, 9100L, CoopNetPump.LOBBY_REJECT_PASSWORD));
+        pump.advance(0f);
+
+        assertEquals(List.of(CoopNetPump.LOBBY_REJECT_PASSWORD), service.stopReconnectingReasons,
+                "the password is a launch property; retrying can only feed the host's cooldown");
+        assertEquals(0, service.lobbyRejectBackoffs, "a terminal reject schedules no retry at all");
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertTrue(session.rejectTerminal());
+        assertEquals(CoopHudState.STATUS_REJECTED_PREFIX + CoopNetPump.LOBBY_REJECT_PASSWORD_HELP,
+                pump.hudState(false).status());
+    }
+
+    @Test
+    void aTerminalPasswordRejectSurvivesTheDropTheHostSendsBehindIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = guestPumpWithPassword(service, session, "wrong-password");
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.lobbyReject(6L, 9100L, CoopNetPump.LOBBY_REJECT_PASSWORD));
+        pump.advance(0f);
+        service.sent.clear();
+
+        // The disconnect edge the closed socket produces must not rewind the explanation away.
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertEquals(CoopHudState.STATUS_REJECTED_PREFIX + CoopNetPump.LOBBY_REJECT_PASSWORD_HELP,
+                pump.hudState(false).status());
+
+        // And a socket that somehow came back is not a second chance: no rearm, no hello.
+        service.connected = true;
+        pump.advance(0f);
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertEquals(0, countOf(service, CoopMessages.Type.LOBBY_HELLO));
+    }
+
+    @Test
+    void aRetryableRejectBacksTheLoopOffAndCarriesItsReasonToTheHud() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = guestPumpWithPassword(service, session, "");
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.lobbyReject(6L, 9100L, RETRYABLE_REJECT));
+        pump.advance(0f);
+
+        assertEquals(1, service.lobbyRejectBackoffs, "the host said no; stop knocking twice a second");
+        assertTrue(service.stopReconnectingReasons.isEmpty(),
+                "the host's answer can change without a relaunch, so the loop must survive");
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertFalse(session.rejectTerminal());
+        assertEquals(CoopHudState.STATUS_REJECTED_PREFIX + RETRYABLE_REJECT,
+                pump.hudState(false).status());
+    }
+
+    @Test
+    void aPlainDropWithNoRejectDoesNotSlowTheRetryLoop() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = guestPumpWithPassword(service, session, "");
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals(0, service.lobbyRejectBackoffs,
+                "the 500 ms retry is what the 20.2 grace and the grace-expiry rejoin ride on");
+        assertTrue(service.stopReconnectingReasons.isEmpty());
+    }
+
+    /**
+     * F5 regression. The host writes {@code LOBBY_REJECT} and closes immediately behind it, so the
+     * guest's transport reports the close on the same frame the message is queued — and the
+     * disconnect edge runs before the inbound drain, so REJECTED is entered right after the only
+     * edge that used to clear it. Pre-fix the next connection then sent nothing at all and sat on the
+     * host's single lobby slot until the 15 s handshake deadline killed it.
+     */
+    @Test
+    void aRejectThatLandsAfterTheDropEdgeStillLeavesTheNextConnectionTalking() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = guestPumpWithPassword(service, session, "");
+        pump.advance(0f);
+
+        service.connected = false;
+        service.inbound.add(CoopMessages.lobbyReject(6L, 9100L, RETRYABLE_REJECT));
+        pump.advance(0f);
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState(),
+                "the reject is applied after the rewind, which is the whole trap");
+
+        service.sent.clear();
+        service.connected = true;
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, session.connectionState());
+        assertEquals(1, countOf(service, CoopMessages.Type.LOBBY_HELLO),
+                "a new connection either opens a lobby round or is terminal — never silent");
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(1, countOf(service, CoopMessages.Type.LOBBY_HELLO),
+                "and the rearm fires once per connect edge, not once per frame");
+    }
+
+    /**
+     * F5's other half: two hellos on one connection is the Phase 20.4 password round (the second
+     * carries the proof), not a repeated lobby attempt. This pins that count so a future rearm bug
+     * cannot hide inside it.
+     */
+    @Test
+    void theOnlySecondHelloOnAConnectionIsTheProofAnswer() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = guestPumpWithPassword(service, session, PASSWORD);
+        pump.advance(0f);
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(1, countOf(service, CoopMessages.Type.LOBBY_HELLO),
+                "one unsolicited hello per connection, however many frames run");
+
+        service.inbound.add(CoopMessages.lobbyChallenge(5L, 9100L, "abcdef0123456789"));
+        pump.advance(0f);
+        pump.advance(0f);
+        List<CoopMessages.Message> hellos = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.LOBBY_HELLO)
+                .toList();
+        assertEquals(2, hellos.size(), "exactly one answer to one challenge");
+        assertEquals("", CoopMessages.parseLobbyProof(hellos.get(0)));
+        assertEquals(CoopMessages.passwordProof(PASSWORD, "abcdef0123456789"),
+                CoopMessages.parseLobbyProof(hellos.get(1)));
+
+        // A rejected round, a drop, a reconnect: one fresh hello, not a second round on top.
+        service.connected = false;
+        service.inbound.add(CoopMessages.lobbyReject(6L, 9200L, RETRYABLE_REJECT));
+        pump.advance(0f);
+        service.connected = true;
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(3, countOf(service, CoopMessages.Type.LOBBY_HELLO));
+    }
+
+    /** A reject arriving during the 20.2 grace window is the coordinator's business, not F4's. */
+    @Test
+    void aRejectDuringTheReconnectGraceLeavesTheWindowAndTheRetryRateAlone() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+
+        service.connected = true;
+        service.inbound.add(CoopMessages.lobbyReject(7L, 1100L,
+                CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE));
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting(),
+                "the host is holding the slot for us; the window is still the right answer");
+        assertEquals(0, service.lobbyRejectBackoffs,
+                "the resume knocking must not be slowed while the window is running");
+        assertTrue(service.stopReconnectingReasons.isEmpty());
+        assertEquals(0, countOf(service, CoopMessages.Type.LOBBY_HELLO),
+                "while reconnecting the guest owes a resume request, never a hello");
+    }
+
     // ---- Phase 20.6: session intel feed ----------------------------------------------------------
 
     @Test
@@ -3010,6 +3199,10 @@ class CoopNetPumpTest {
         /** Datagrams that went out over the real UDP path (Phase 20.1 M2 fallback tests). */
         private final List<String> datagrams = new ArrayList<>();
         private final Queue<String> inboundDatagrams = new ArrayDeque<>();
+        /** F4: reasons passed to {@link CoopNetService#stopReconnecting(String)}. */
+        final List<String> stopReconnectingReasons = new ArrayList<>();
+        /** F4: {@link CoopNetService#noteLobbyRejected()} call count. */
+        int lobbyRejectBackoffs;
         private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
                 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "");
         boolean connected = true;
@@ -3036,6 +3229,20 @@ class CoopNetPumpTest {
         @Override
         public CoopMessages.Message pollInbound() {
             return inbound.poll();
+        }
+
+        /** F4: every {@code stopReconnecting} reason, so a test can prove the loop really ended. */
+        @Override
+        public void stopReconnecting(String reason) {
+            stopReconnectingReasons.add(reason);
+            // The real one closes the socket, and the disconnect edge that follows is load-bearing.
+            connected = false;
+        }
+
+        /** F4: how many times the retry loop was backed off to the post-reject delay. */
+        @Override
+        public void noteLobbyRejected() {
+            lobbyRejectBackoffs++;
         }
 
         @Override

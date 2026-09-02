@@ -21,6 +21,10 @@ public class CoopSessionState {
     private Long seedLong;
     private String seedString;
     private String sectorFingerprint;
+    /** Why the last lobby reject happened; the HUD says it out loud. Null when nothing was rejected. */
+    private String rejectReason;
+    /** True when that reject can never be retried in this launch (wrong lobby password). */
+    private boolean rejectTerminal;
 
     public CoopSessionState() {
         this(() -> UUID.randomUUID().toString());
@@ -87,12 +91,68 @@ public class CoopSessionState {
         clearCanonicalSession();
     }
 
+    /** A retryable reject: the guest reconnects and runs a fresh lobby round. */
     public synchronized void guestRejectLobby(String reason) {
+        guestRejectLobby(reason, false);
+    }
+
+    /**
+     * The host answered {@code LOBBY_REJECT}. The reason is kept ({@link #rejectReason()}) so the HUD
+     * can say <em>which</em> reject this was instead of a bare "connection rejected".
+     *
+     * @param terminal true when this launch can never be accepted no matter how often it retries —
+     *                 today only a wrong lobby password, which is a launch-time JVM property. A
+     *                 terminal reject sticks: {@link #onChannelDisconnected()} stops rewinding out of
+     *                 {@link CoopLobbyState#REJECTED}, so the state (and the HUD line explaining it)
+     *                 survives the drop the host sends right behind the reject.
+     */
+    public synchronized void guestRejectLobby(String reason, boolean terminal) {
         if (role != CoopConnectionRole.GUEST) {
             throw new IllegalStateException("Only a guest lobby can be rejected");
         }
         connectionState = CoopLobbyState.REJECTED;
+        rejectReason = normalizeReason(reason);
+        rejectTerminal = terminal;
         clearCanonicalSession();
+    }
+
+    /**
+     * Connect edge (F5): a guest that reconnected while still holding a retryable
+     * {@link CoopLobbyState#REJECTED} rearms for a fresh lobby round.
+     *
+     * <p>Needed because the reject and the drop that follows it race, and the drop usually wins: the
+     * host writes {@code LOBBY_REJECT} and closes, so the guest's transport reports the close on the
+     * same frame it queues the message, {@link #onChannelDisconnected()} runs <em>before</em> the
+     * inbound drain, and REJECTED is entered a few microseconds after the only edge that clears it.
+     * The guest then reconnected in that dead state and sent nothing at all, holding the host's one
+     * lobby slot until the 15 s handshake deadline killed it. Rearming at the connect edge closes
+     * that hole from the other side: every new connection either sends a hello or is terminal.
+     *
+     * @return true when the state actually moved back to {@link CoopLobbyState#GUEST_CONNECTING}
+     */
+    public synchronized boolean guestRearmLobby() {
+        if (role != CoopConnectionRole.GUEST
+                || connectionState != CoopLobbyState.REJECTED
+                || rejectTerminal) {
+            return false;
+        }
+        connectionState = CoopLobbyState.GUEST_CONNECTING;
+        rejectReason = null;
+        remotePlayerId = null;
+        remoteName = null;
+        provisionalLobbyId = null;
+        clearCanonicalSession();
+        return true;
+    }
+
+    /** The last reject's reason text, or null when nothing was rejected. */
+    public synchronized String rejectReason() {
+        return rejectReason;
+    }
+
+    /** Whether the last reject was terminal for this launch; see {@link #guestRejectLobby(String, boolean)}. */
+    public synchronized boolean rejectTerminal() {
+        return rejectTerminal;
     }
 
     /**
@@ -105,9 +165,13 @@ public class CoopSessionState {
      * from {@link CoopLobbyState#REJECTED}: the rejected peer is gone, and staying dead would block
      * a corrected peer (e.g. fixed mod list) from ever retrying. Returns true when any state was
      * actually dropped.
+     *
+     * <p>Exception: a <em>terminal</em> reject (wrong lobby password) is left standing. There is
+     * nothing to recover to — the guest is not reconnecting — and clearing it would wipe the only
+     * on-screen explanation of why the session never came up.
      */
     public synchronized boolean onChannelDisconnected() {
-        if (role == CoopConnectionRole.NONE) {
+        if (role == CoopConnectionRole.NONE || rejectTerminal) {
             return false;
         }
         CoopLobbyState target = role == CoopConnectionRole.HOST
@@ -232,6 +296,16 @@ public class CoopSessionState {
         seedLong = null;
         seedString = null;
         sectorFingerprint = null;
+        rejectReason = null;
+        rejectTerminal = false;
+    }
+
+    private static String normalizeReason(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private void clearCanonicalSession() {

@@ -113,6 +113,14 @@ public class CoopNetService {
      */
     public static final int MAX_DATAGRAM_BYTES = 1200;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
+    /**
+     * Retry delay after the host answered {@code LOBBY_REJECT} (F4). A reject means the host looked at
+     * this guest and said no — "lobby already has a guest", a seed or handshake mismatch — and none of
+     * those clear inside 500 ms, so knocking ten times a second only costs the host connection slots
+     * and feeds its proof throttle. A plain TCP drop with no reject keeps the 500 ms retry, which is
+     * what the Phase 20.2 reconnect grace and the grace-expiry auto-rejoin depend on.
+     */
+    private static final long REJECTED_RETRY_DELAY_MILLIS = 5_000L;
     private static final String EXTRA_CONNECTION_REJECT_REASON = "Host already has an active connection";
     /**
      * A held connection that has delivered no inbound bytes for this long is presumed half-open, and a
@@ -333,6 +341,10 @@ public class CoopNetService {
     private int connectPort;
     private long nextConnectAttemptAtMillis;
     private boolean connectFailureLogged;
+    /** Delay the next guest retry is scheduled with; raised by {@link #noteLobbyRejected()}. */
+    private long connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
+    /** Set by {@link #stopReconnecting(String)}: the guest connect loop is over for this launch. */
+    private boolean guestConnectStopped;
     /** Frames ingested so far in the current {@link #pollNetworkLocked()}; see {@link #MAX_FRAMES_PER_POLL}. */
     private int framesThisPoll;
 
@@ -872,6 +884,71 @@ public class CoopNetService {
                 dropped = true;
             }
             return dropped;
+        }
+    }
+
+    /**
+     * The host rejected this guest's lobby round (F4). Backs the retry loop off to
+     * {@link #REJECTED_RETRY_DELAY_MILLIS} for the next attempt.
+     *
+     * <p>Called from the reject handler, which can run either side of the close the host sends right
+     * behind the reject — so this sets both the delay {@link #closeLinkLocked} will use and the
+     * deadline itself, and the two orderings converge on the same 5 s. The delay drops back to 500 ms
+     * as soon as a new connection attaches, so a later plain drop is not slowed by an older reject.
+     */
+    public void noteLobbyRejected() {
+        synchronized (lifecycleLock) {
+            if (role != CoopConnectionRole.GUEST) {
+                return;
+            }
+            connectRetryDelayMillis = REJECTED_RETRY_DELAY_MILLIS;
+            nextConnectAttemptAtMillis = System.currentTimeMillis() + REJECTED_RETRY_DELAY_MILLIS;
+        }
+    }
+
+    /**
+     * Ends the guest connect loop for good (F4): no further connection attempts, and any socket still
+     * open is closed so the caller's disconnect edge runs normally.
+     *
+     * <p>For the failure that cannot be retried — a wrong {@code -Dcoop.password}, which is fixed by
+     * relaunching, not by waiting. Before this, the guest reconnected every ~550 ms forever, each
+     * connection dropped unanswered once the host's proof throttle engaged, with nothing on screen to
+     * say why.
+     *
+     * <p>Deliberately not {@link #shutdown()}: the role survives, so the HUD keeps saying GUEST and
+     * can explain itself. Only {@link #connect(String, int)} (via {@code shutdownLocked}) re-arms it.
+     *
+     * @param reason logged once
+     */
+    public void stopReconnecting(String reason) {
+        synchronized (lifecycleLock) {
+            if (role != CoopConnectionRole.GUEST || guestConnectStopped) {
+                return;
+            }
+            guestConnectStopped = true;
+            closeChannel(pendingConnectChannel);
+            pendingConnectChannel = null;
+            for (CoopPeerLink peer : peers) {
+                if (peer.occupied()) {
+                    closeLinkLocked(peer);
+                }
+            }
+            CoopLog.warn(CoopNetService.class, "Coop TCP guest stopped reconnecting: "
+                    + (reason == null || reason.isEmpty() ? "no reason given" : reason));
+        }
+    }
+
+    /** Test seam: when the guest connect loop may next attempt, on the {@code currentTimeMillis} scale. */
+    long nextConnectAttemptAtMillisForTest() {
+        synchronized (lifecycleLock) {
+            return nextConnectAttemptAtMillis;
+        }
+    }
+
+    /** Whether {@link #stopReconnecting(String)} has ended this guest's connect loop. */
+    public boolean reconnectStopped() {
+        synchronized (lifecycleLock) {
+            return guestConnectStopped;
         }
     }
 
@@ -1561,7 +1638,7 @@ public class CoopNetService {
     }
 
     private void progressGuestConnectionLocked() throws Exception {
-        if (role != CoopConnectionRole.GUEST || freeSlotLocked() == null) {
+        if (role != CoopConnectionRole.GUEST || guestConnectStopped || freeSlotLocked() == null) {
             return;
         }
 
@@ -1606,12 +1683,12 @@ public class CoopNetService {
             }
         } catch (Exception ex) {
             scheduleConnectRetryLocked(ex);
-            nextConnectAttemptAtMillis = now + CONNECT_RETRY_DELAY_MILLIS;
+            nextConnectAttemptAtMillis = now + connectRetryDelayMillis;
         }
     }
 
     private void scheduleConnectRetryLocked(Exception ex) {
-        nextConnectAttemptAtMillis = System.currentTimeMillis() + CONNECT_RETRY_DELAY_MILLIS;
+        nextConnectAttemptAtMillis = System.currentTimeMillis() + connectRetryDelayMillis;
         if (!connectFailureLogged) {
             CoopLog.warn(CoopNetService.class,
                     "Coop TCP guest failed to connect to " + connectHost + ":" + connectPort + "; will retry", ex);
@@ -1628,6 +1705,8 @@ public class CoopNetService {
         channel.socket().setTcpNoDelay(true);
         InetAddress pinned = peerAddressOf(channel);
         peer.attach(channel, pinned, clockMillis.getAsLong(), role == CoopConnectionRole.HOST);
+        // A fresh connection earns the fast retry back: only the connection that was rejected is slow.
+        connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
         // Red-team B2/C1: the pump watches this for the drop edge isConnected() cannot show it.
         connectionGeneration++;
         refreshConnectedLocked();
@@ -1826,7 +1905,7 @@ public class CoopNetService {
         CoopLog.info(CoopNetService.class, "Coop TCP channel inactive as " + role
                 + " on peer slot " + peer.slot());
         if (role == CoopConnectionRole.GUEST) {
-            nextConnectAttemptAtMillis = System.currentTimeMillis() + CONNECT_RETRY_DELAY_MILLIS;
+            nextConnectAttemptAtMillis = System.currentTimeMillis() + connectRetryDelayMillis;
         }
     }
 
@@ -1860,6 +1939,8 @@ public class CoopNetService {
         connectPort = 0;
         nextConnectAttemptAtMillis = 0L;
         connectFailureLogged = false;
+        connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
+        guestConnectStopped = false;
         framesThisPoll = 0;
         role = CoopConnectionRole.NONE;
     }

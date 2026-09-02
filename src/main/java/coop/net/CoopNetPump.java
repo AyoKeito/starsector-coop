@@ -313,6 +313,12 @@ public class CoopNetPump implements EveryFrameScript {
      */
     static final String LOBBY_REJECT_PASSWORD = "password rejected";
     /**
+     * What the guest's HUD says after that reject (F4). The wire reason plus the only thing the
+     * player can actually do about it, because the password is fixed at launch.
+     */
+    static final String LOBBY_REJECT_PASSWORD_HELP =
+            LOBBY_REJECT_PASSWORD + ", relaunch with the host's password";
+    /**
      * The configured lobby password, "" for none. Read once per pump: it is a launch-time setting,
      * and re-reading it mid-session would let a property change split the two ends of a live lobby.
      */
@@ -675,7 +681,7 @@ public class CoopNetPump implements EveryFrameScript {
                 case HOST_CONNECTED -> active
                         ? CoopHudState.STATUS_SESSION_ACTIVE
                         : CoopHudState.STATUS_HANDSHAKING;
-                case REJECTED -> CoopHudState.STATUS_REJECTED;
+                case REJECTED -> CoopHudState.rejectedStatus(sessionState.rejectReason());
                 case NONE -> CoopHudState.STATUS_NO_SESSION;
                 // HOST_WAITING covers both "never had a guest" and the 12b post-drop rewind; the
                 // pump's disconnect edge is the only thing that can tell them apart.
@@ -690,7 +696,7 @@ public class CoopNetPump implements EveryFrameScript {
                 case GUEST_CONNECTED -> active
                         ? CoopHudState.STATUS_SESSION_ACTIVE
                         : CoopHudState.STATUS_HANDSHAKING;
-                case REJECTED -> CoopHudState.STATUS_REJECTED;
+                case REJECTED -> CoopHudState.rejectedStatus(sessionState.rejectReason());
                 case NONE -> CoopHudState.STATUS_NO_SESSION;
                 default -> peerDroppedAfterLiveSession
                         ? CoopHudState.STATUS_RECONNECTING
@@ -1275,11 +1281,44 @@ public class CoopNetPump implements EveryFrameScript {
                 endSessionAfterDrop();
             }
         }
+        if (connected && !channelWasConnected) {
+            noteChannelConnected();
+        }
         channelWasConnected = connected;
         if (!connected) {
             // Each new socket owes a fresh resume request; while there is no socket, none is pending.
             reconnect.noteChannelDown();
         }
+    }
+
+    /**
+     * Disconnected&rarr;connected edge (F5). Guarantees the guest never sits silent on the host's one
+     * lobby slot: a new connection either opens a lobby round or is terminal.
+     *
+     * <p>The hole it closes: the host writes {@code LOBBY_REJECT} and closes the socket immediately
+     * behind it, so the guest's transport reports the close on the same frame the message lands in
+     * the inbound queue. {@link #detectPeerDisconnect} runs before {@link #drainInbound}, so the drop
+     * edge rewinds the lobby and <em>then</em> the reject sets {@link CoopLobbyState#REJECTED} — a
+     * state nothing else clears while disconnected. The guest reconnected 500 ms later,
+     * {@link #maybeSendLobbyHello} refused to send in REJECTED, and the connection sat mute until the
+     * host's 15 s handshake deadline killed it. Twice per reject cycle, for as long as the player
+     * left the game running.
+     *
+     * <p>A terminal reject (wrong password) does not rearm — there is no reconnect to rearm for, and
+     * the state is the HUD's only explanation.
+     */
+    private void noteChannelConnected() {
+        if (service.role() != CoopConnectionRole.GUEST || reconnect.guestReconnecting()) {
+            return;
+        }
+        if (!sessionState.guestRearmLobby()) {
+            return;
+        }
+        lobbyHelloSent = false;
+        handshakeManifestSent = false;
+        seedLockRequestSent = false;
+        CoopLog.info(CoopNetPump.class, "Coop guest reconnected after a lobby reject; starting a fresh"
+                + " lobby round on the new connection");
     }
 
     /**
@@ -2082,12 +2121,43 @@ public class CoopNetPump implements EveryFrameScript {
                         + " guestPlayerId=" + sessionState.localPlayerId());
     }
 
+    /**
+     * Guest side of {@code LOBBY_REJECT}, in two flavours (F4).
+     *
+     * <p>A <b>password</b> reject is terminal for this launch: the password is a JVM property read at
+     * startup, so no amount of retrying can turn it into an accept, and every retry costs the host a
+     * connection slot and pushes its proof throttle further out (three failures buy a 30 s silent
+     * refusal, doubling to 10 minutes). The connect loop stops, one WARN says what to do about it,
+     * and the reason reaches the HUD line and the campaign feed — before this, the only symptom a
+     * player saw was a guest that never connected and never said why.
+     *
+     * <p>Every other reason — "Lobby already has a guest", a seed or handshake mismatch, the grace
+     * window's {@link CoopReconnectCoordinator#LOBBY_REJECT_IN_GRACE} — is retryable, because the
+     * host's answer can change without either side relaunching. Those keep the retry loop but back it
+     * off to 5 s; a plain TCP drop with no reject still retries at 500 ms.
+     */
     private void handleLobbyReject(CoopMessages.Message message) {
         // Parse once: the second parse used to run after guestRejectLobby had already changed state,
         // so a malformed payload threw from the log line rather than the state transition.
         String reason = CoopMessages.requiredPayloadString(message, "reason");
-        if (service.role() == CoopConnectionRole.GUEST) {
-            sessionState.guestRejectLobby(reason);
+        if (service.role() != CoopConnectionRole.GUEST) {
+            CoopLog.warn(CoopNetPump.class, "Coop lobby rejected: " + reason);
+            return;
+        }
+        if (LOBBY_REJECT_PASSWORD.equals(reason)) {
+            sessionState.guestRejectLobby(LOBBY_REJECT_PASSWORD_HELP, true);
+            service.stopReconnecting(LOBBY_REJECT_PASSWORD);
+            CoopLog.warn(CoopNetPump.class, "Coop lobby rejected: the host's lobby password did not"
+                    + " match. Not retrying — relaunch this client with -D"
+                    + CoopNetStartupConfig.PASSWORD_PROPERTY + "=<the host's password>.");
+            coop.ui.CoopFeed.post("Co-op: wrong lobby password - relaunch with the host's password.",
+                    FEED_WARN_COLOR);
+            intelFeed.noteEvent("lobby rejected: " + LOBBY_REJECT_PASSWORD_HELP);
+            return;
+        }
+        sessionState.guestRejectLobby(reason);
+        if (!reconnect.guestReconnecting()) {
+            service.noteLobbyRejected();
         }
         CoopLog.warn(CoopNetPump.class, "Coop lobby rejected: " + reason);
     }

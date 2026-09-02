@@ -445,6 +445,73 @@ class CoopNetServiceTest {
         return hostConnected && guestConnected;
     }
 
+    // ---- F4: what a lobby reject does to the guest connect loop ----------------------------------
+
+    /** Drives a poll (the connected flag is cached, so asking alone never discovers a close). */
+    private boolean sawDrop(CoopNetService guest) {
+        guest.pollInbound();
+        return !guest.isConnected();
+    }
+
+    @Test
+    void aPlainDropRetriesFastButALobbyRejectBacksOffToFiveSeconds() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+
+            long droppedAt = System.currentTimeMillis();
+            host.dropActiveConnection("plain drop, no reject");
+            waitUntil(() -> sawDrop(guest), "the guest saw the plain drop");
+            long fastRetryIn = guest.nextConnectAttemptAtMillisForTest() - droppedAt;
+            assertTrue(fastRetryIn <= 1_500L,
+                    "a plain drop keeps the 500 ms retry the reconnect grace rides on, was " + fastRetryIn);
+
+            waitUntil(() -> bothConnected(host, guest), "the guest reconnected");
+
+            guest.noteLobbyRejected();
+            long rejectedAt = System.currentTimeMillis();
+            host.dropActiveConnection("closing behind a LOBBY_REJECT");
+            waitUntil(() -> sawDrop(guest), "the guest saw the post-reject drop");
+            long slowRetryIn = guest.nextConnectAttemptAtMillisForTest() - rejectedAt;
+            assertTrue(slowRetryIn >= 4_000L,
+                    "a reject must back the loop off to 5 s, was " + slowRetryIn);
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
+    void stopReconnectingEndsTheGuestConnectLoopForGood() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+
+            guest.stopReconnecting("password rejected");
+            assertTrue(guest.reconnectStopped());
+            assertTrue(sawDrop(guest), "stopping closes the socket it was holding");
+            // The role survives so the HUD can still say GUEST and explain itself.
+            assertEquals(CoopConnectionRole.GUEST, guest.role());
+
+            // Well past the 500 ms the loop used to retry on, with the host still listening.
+            Thread.sleep(900L);
+            assertTrue(sawDrop(guest), "a terminal reject must not reconnect");
+            assertTrue(sawDrop(host), "and must not take the host's slot again either");
+
+            // Only an explicit connect() re-arms it.
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "an explicit connect re-arms the loop");
+            assertFalse(guest.reconnectStopped());
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
     // ---- Phase 12b -------------------------------------------------------------------------------
 
     @Test

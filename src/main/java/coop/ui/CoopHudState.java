@@ -56,6 +56,8 @@ public record CoopHudState(String roleBadge,
     public static final String STATUS_HANDSHAKING = "handshaking";
     public static final String STATUS_SESSION_ACTIVE = "session active";
     public static final String STATUS_REJECTED = "connection rejected";
+    /** Prefix of the reason-carrying form; see {@link #rejectedStatus}. */
+    public static final String STATUS_REJECTED_PREFIX = "rejected: ";
     /** Host side of a 12b reconnect hold: the peer dropped after a live session and time is held. */
     public static final String STATUS_GUEST_DISCONNECTED_HOLDING = "guest disconnected, holding";
     /** Guest side of the same drop. */
@@ -80,6 +82,22 @@ public record CoopHudState(String roleBadge,
     public static final String TRANSPORT_UDP = "udp";
     /** Transport wording: UDP is blocked and the state stream is wrapped in TCP. */
     public static final String TRANSPORT_TCP_FALLBACK = "tcp fallback";
+
+    /**
+     * The rejected status, carrying the host's reason when there is one.
+     *
+     * <p>"connection rejected" on its own sent players to the log to find out which reject they had
+     * hit — and the one that matters most, a wrong lobby password, cannot be fixed without a
+     * relaunch, so it has to be readable on screen.
+     *
+     * @param reason the host's reason text, or null/blank for the bare wording
+     */
+    public static String rejectedStatus(String reason) {
+        if (reason == null || reason.trim().isEmpty()) {
+            return STATUS_REJECTED;
+        }
+        return STATUS_REJECTED_PREFIX + reason.trim();
+    }
 
     /**
      * Maps a raw holder token (the wire/coordinator vocabulary, always host-relative) to the wording
