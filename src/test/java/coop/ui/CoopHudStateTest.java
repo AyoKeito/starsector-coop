@@ -1,5 +1,6 @@
 package coop.ui;
 
+import coop.net.CoopConnectionRole;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -125,6 +126,65 @@ class CoopHudStateTest {
         assertEquals("", CoopHudState.formatLine(null, DOT));
         assertEquals("COOP | no session",
                 CoopHudState.formatLine(new CoopHudState(null, null, false, null, null), null));
+    }
+
+    // ---- displayHolder: raw wire token -> wording for whoever is reading ------------------------
+
+    @Test
+    void displayHolderOnTheHostCallsTheHostYou() {
+        assertEquals("you", CoopHudState.displayHolder(CoopHudState.HOLDER_HOST, CoopConnectionRole.HOST));
+        assertEquals("guest", CoopHudState.displayHolder(CoopHudState.HOLDER_GUEST, CoopConnectionRole.HOST));
+        assertEquals("guest's screen",
+                CoopHudState.displayHolder(CoopHudState.HOLDER_GUEST_SCREEN, CoopConnectionRole.HOST));
+        assertEquals("combat", CoopHudState.displayHolder(CoopHudState.HOLDER_COMBAT, CoopConnectionRole.HOST));
+    }
+
+    @Test
+    void displayHolderOnTheGuestCallsTheGuestYou() {
+        assertEquals("host", CoopHudState.displayHolder(CoopHudState.HOLDER_HOST, CoopConnectionRole.GUEST));
+        assertEquals("you", CoopHudState.displayHolder(CoopHudState.HOLDER_GUEST, CoopConnectionRole.GUEST));
+        assertEquals("your screen",
+                CoopHudState.displayHolder(CoopHudState.HOLDER_GUEST_SCREEN, CoopConnectionRole.GUEST));
+        assertEquals("combat", CoopHudState.displayHolder(CoopHudState.HOLDER_COMBAT, CoopConnectionRole.GUEST));
+    }
+
+    @Test
+    void displayHolderMapsNobodyToTheEmptyString() {
+        assertEquals("", CoopHudState.displayHolder(null, CoopConnectionRole.HOST));
+        assertEquals("", CoopHudState.displayHolder("", CoopConnectionRole.GUEST));
+        assertEquals("", CoopHudState.displayHolder("   ", CoopConnectionRole.GUEST));
+        assertEquals("", CoopHudState.displayHolder(null, null));
+    }
+
+    @Test
+    void displayHolderPassesThroughWhenThereIsNoLocalRole() {
+        assertEquals("host", CoopHudState.displayHolder(CoopHudState.HOLDER_HOST, CoopConnectionRole.NONE));
+        assertEquals("guest", CoopHudState.displayHolder(CoopHudState.HOLDER_GUEST, null));
+    }
+
+    @Test
+    void displayHolderPassesThroughAnUnknownTokenInsteadOfDroppingIt() {
+        assertEquals("some future holder",
+                CoopHudState.displayHolder("some future holder", CoopConnectionRole.GUEST));
+        assertEquals("some future holder",
+                CoopHudState.displayHolder("some future holder", CoopConnectionRole.HOST));
+    }
+
+    @Test
+    void displayHolderFeedsTheRenderedLine() {
+        for (String raw : new String[] {CoopHudState.HOLDER_HOST, CoopHudState.HOLDER_GUEST,
+                CoopHudState.HOLDER_GUEST_SCREEN, CoopHudState.HOLDER_COMBAT}) {
+            CoopHudState guest = new CoopHudState(CoopHudState.BADGE_GUEST,
+                    CoopHudState.STATUS_SESSION_ACTIVE, true,
+                    CoopHudState.displayHolder(raw, CoopConnectionRole.GUEST), null);
+            assertEquals("GUEST · session active · paused by "
+                            + CoopHudState.displayHolder(raw, CoopConnectionRole.GUEST),
+                    CoopHudState.formatLine(guest, DOT));
+        }
+        CoopHudState hostSelfPause = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, true,
+                CoopHudState.displayHolder(CoopHudState.HOLDER_HOST, CoopConnectionRole.HOST), null);
+        assertEquals("HOST · session active · paused by you", CoopHudState.formatLine(hostSelfPause, DOT));
     }
 
     @Test

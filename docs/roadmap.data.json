@@ -717,7 +717,7 @@
         "CoopLinkHud + CoopSessionIntel"
       ],
       "residue": [
-        "20.6 HUD also carries a sync readout (clock drift in game-hours + mirror lag ms, guest side; added 2026-09-02)",
+        "20.6 M0 BUILT 2026-09-02: HUD line (role, session state, pause holder, guest clock drift in game-hours) via CampaignUIRenderingListener + mod-owned BMFont renderer; 20.6 proper adds RTT/loss/transport + mirror-lag ms to the same widget",
         "all Steps unchecked (phase not built)",
         "spike: datagram size histogram",
         "spike: clumsy loopback shaping",
@@ -745,7 +745,10 @@
         "all-ready gate",
         "input-blocker suspend"
       ],
-      "residue": [],
+      "residue": [
+        "M0 BUILT 2026-09-02: coop-aware New Game dialog (Continue-option join cue + tooltip, seed/size/age pinned every frame, real character name sent, dev-start rows disabled); 'New Game' label itself cannot be renamed (obfuscated title constant, no hook)",
+        "connecting screen: pre-procgen connect (reachability, build parity, campaign-id adoption prompt) + fetch seed/world options from host"
+      ],
       "note": "Pulled into V1 2026-08-24 (user decision): the lobby’s force-pause-until-all-ready fixes the host-starts-unpaused-before-guest issue. Whole phase after 20 (split declined); slots after 29-M2, before 19."
     },
     {

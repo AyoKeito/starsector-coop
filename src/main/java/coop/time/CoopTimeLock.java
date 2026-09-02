@@ -39,7 +39,15 @@ public class CoopTimeLock {
         this.fastForwardLock = fastForwardLock;
     }
 
-    public TimeSnapshot capture(long sentAtMillis) {
+    /**
+     * Captures the host's clock state for the wire. {@code pausedBy} is passed in rather than read
+     * here: the lock owns the engine clock, but only the pump's pause coordinator knows which
+     * intent is holding the shared pause.
+     *
+     * @param pausedBy raw shared-pause holder token ({@code host}, {@code guest},
+     *                 {@code guest screen}, {@code combat}), or {@code ""}/null for nobody
+     */
+    public TimeSnapshot capture(long sentAtMillis, String pausedBy) {
         SectorAPI sector = requireSector();
         CampaignClockAPI clock = sector.getClock();
         // Phase 7b: during a session fast-forward runs in vanilla's toggle mode, so this bit is the
@@ -51,7 +59,8 @@ public class CoopTimeLock {
                 fastForward,
                 clock.getTimestamp(),
                 clock.getDay(),
-                sentAtMillis);
+                sentAtMillis,
+                pausedBy == null ? "" : pausedBy);
     }
 
     public void apply(TimeSnapshot snapshot) {
@@ -177,7 +186,9 @@ public class CoopTimeLock {
                 Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "fastForward")),
                 CoopMessages.requiredPayloadLong(message, "timestampMillis"),
                 CoopMessages.requiredPayloadLong(message, "campaignDay"),
-                CoopMessages.requiredPayloadLong(message, "sentAtMillis"));
+                CoopMessages.requiredPayloadLong(message, "sentAtMillis"),
+                // Optional on purpose: a peer built before the field existed still parses, as "nobody".
+                CoopMessages.optionalPayloadString(message, "pausedBy", ""));
     }
 
     private SectorAPI requireSector() {
@@ -196,7 +207,13 @@ public class CoopTimeLock {
         }
     }
 
+    /**
+     * @param pausedBy raw shared-pause holder as the host computed it ({@code host}, {@code guest},
+     *                 {@code guest screen}, {@code combat}), or {@code ""} when nobody holds it.
+     *                 Never a display string — {@code CoopHudState.displayHolder} resolves the
+     *                 wording per reading role.
+     */
     public record TimeSnapshot(boolean paused, boolean fastForward, long timestampMillis,
-                               long campaignDay, long sentAtMillis) {
+                               long campaignDay, long sentAtMillis, String pausedBy) {
     }
 }

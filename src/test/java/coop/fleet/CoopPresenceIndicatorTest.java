@@ -15,14 +15,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopPresenceIndicatorTest {
     @Test
-    void presenceLabelUsesUsernameTrimmed() {
-        assertEquals("Alice", CoopPresenceIndicator.presenceLabel("  Alice  "));
+    void presenceLabelIsANounPhraseThatReadsAfterTheFactionArticle() {
+        // The mirror is a player-faction fleet, so vanilla draws it as
+        // "<player.faction displayNameWithArticle> <name>" — "Your Alice" with the bare username,
+        // and "The Foo Republic Alice" once colonies have renamed the faction.
+        assertEquals("partner Alice", CoopPresenceIndicator.presenceLabel("  Alice  "));
     }
 
     @Test
     void presenceLabelFallsBackWhenUsernameMissing() {
-        assertEquals("Coop Player", CoopPresenceIndicator.presenceLabel(null));
-        assertEquals("Coop Player", CoopPresenceIndicator.presenceLabel("   "));
+        assertEquals("coop partner", CoopPresenceIndicator.presenceLabel(null));
+        assertEquals("coop partner", CoopPresenceIndicator.presenceLabel("   "));
     }
 
     @Test

@@ -22,14 +22,15 @@ class CoopTimeSnapshotTest {
     @Test
     void timeSnapshotMessageCarriesPhaseSevenPayloadFields() {
         CoopTimeLock.TimeSnapshot snapshot =
-                new CoopTimeLock.TimeSnapshot(true, false, 123456789L, 42L, 9000L);
+                new CoopTimeLock.TimeSnapshot(true, false, 123456789L, 42L, 9000L, "");
 
         CoopMessages.Message message = CoopMessages.timeSnapshot("session-a", 12L,
                 snapshot.paused(),
                 snapshot.fastForward(),
                 snapshot.timestampMillis(),
                 snapshot.campaignDay(),
-                snapshot.sentAtMillis());
+                snapshot.sentAtMillis(),
+                snapshot.pausedBy());
         CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(message));
 
         assertEquals(CoopMessages.Type.TIME_SNAPSHOT, decoded.type());
@@ -41,12 +42,43 @@ class CoopTimeSnapshotTest {
         assertEquals(123456789L, CoopMessages.requiredPayloadLong(decoded, "timestampMillis"));
         assertEquals(42L, CoopMessages.requiredPayloadLong(decoded, "campaignDay"));
         assertEquals(9000L, CoopMessages.requiredPayloadLong(decoded, "sentAtMillis"));
+        assertEquals("", CoopMessages.requiredPayloadString(decoded, "pausedBy"));
+    }
+
+    @Test
+    void timeSnapshotCarriesThePauseHolderThroughTheWire() {
+        CoopTimeLock.TimeSnapshot snapshot =
+                new CoopTimeLock.TimeSnapshot(true, false, 123456789L, 42L, 9000L, "guest screen");
+
+        CoopMessages.Message encoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.timeSnapshot("session-a", 12L,
+                        snapshot.paused(),
+                        snapshot.fastForward(),
+                        snapshot.timestampMillis(),
+                        snapshot.campaignDay(),
+                        snapshot.sentAtMillis(),
+                        snapshot.pausedBy())));
+
+        assertEquals("guest screen", CoopMessages.requiredPayloadString(encoded, "pausedBy"));
+        assertEquals(snapshot, CoopTimeLock.fromMessage(encoded));
+    }
+
+    @Test
+    void timeSnapshotWithoutThePauseHolderFieldStillParsesAsNobody() {
+        // Exactly what a peer built before the pausedBy field existed puts on the wire.
+        CoopMessages.Message legacy = CoopMessages.decode(CoopMessages.encode(new CoopMessages.Message(
+                CoopMessages.Type.TIME_SNAPSHOT, "session-a", 13L, 11000L,
+                "{\"paused\":\"false\",\"fastForward\":\"true\",\"timestampMillis\":987654321,"
+                        + "\"campaignDay\":128,\"sentAtMillis\":11000}")));
+
+        assertEquals(new CoopTimeLock.TimeSnapshot(false, true, 987654321L, 128L, 11000L, ""),
+                CoopTimeLock.fromMessage(legacy));
     }
 
     @Test
     void timeSnapshotRoundTripsThroughMessagePayload() {
         CoopTimeLock.TimeSnapshot snapshot =
-                new CoopTimeLock.TimeSnapshot(false, true, 987654321L, 128L, 11000L);
+                new CoopTimeLock.TimeSnapshot(false, true, 987654321L, 128L, 11000L, "");
 
         CoopTimeLock.TimeSnapshot decoded = CoopTimeLock.fromMessage(
                 CoopMessages.timeSnapshot("session-a", 13L,
@@ -54,7 +86,8 @@ class CoopTimeSnapshotTest {
                         snapshot.fastForward(),
                         snapshot.timestampMillis(),
                         snapshot.campaignDay(),
-                        snapshot.sentAtMillis()));
+                        snapshot.sentAtMillis(),
+                        snapshot.pausedBy()));
 
         assertEquals(snapshot, decoded);
     }
@@ -64,13 +97,23 @@ class CoopTimeSnapshotTest {
         RecordingSector recording = new RecordingSector(true, false, true, 222333444L, 17);
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
 
-        CoopTimeLock.TimeSnapshot snapshot = timeLock.capture(12000L);
+        CoopTimeLock.TimeSnapshot snapshot = timeLock.capture(12000L, "guest");
 
         assertTrue(snapshot.paused());
         assertTrue(snapshot.fastForward());
         assertEquals(222333444L, snapshot.timestampMillis());
         assertEquals(17L, snapshot.campaignDay());
         assertEquals(12000L, snapshot.sentAtMillis());
+        // The lock cannot know the holder, so it just carries what the pump handed it.
+        assertEquals("guest", snapshot.pausedBy());
+    }
+
+    @Test
+    void captureNormalisesANullPauseHolderToNobody() {
+        RecordingSector recording = new RecordingSector(false, false, 222333444L, 17);
+        CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
+
+        assertEquals("", timeLock.capture(12000L, null).pausedBy());
     }
 
     @Test
@@ -82,7 +125,7 @@ class CoopTimeSnapshotTest {
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
         timeLock.setFastForwardLock(new CoopFastForwardLock(() -> handles, handles, false));
 
-        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L));
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L, ""));
 
         assertTrue(recording.paused);
         assertEquals(1, recording.setPausedCalls);
@@ -95,7 +138,7 @@ class CoopTimeSnapshotTest {
         RecordingSector recording = new RecordingSector(false, false, 222333444L, 17);
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
 
-        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L));
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, true, 222333555L, 18L, 13000L, ""));
 
         assertTrue(recording.paused);
         assertEquals(0, recording.setFastAdvanceCalls);
@@ -110,14 +153,14 @@ class CoopTimeSnapshotTest {
         CoopTimeLock timeLock = new CoopTimeLock(recording::proxy);
 
         // Already paused, not fast-forwarding; applying the same state repeatedly must be a no-op.
-        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, false, 222333555L, 18L, 13000L));
-        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, false, 222333666L, 19L, 13200L));
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, false, 222333555L, 18L, 13000L, ""));
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(true, false, 222333666L, 19L, 13200L, ""));
 
         assertEquals(0, recording.setPausedCalls);
         assertEquals(0, recording.setFastAdvanceCalls);
 
         // A real transition still flips the clock exactly once.
-        timeLock.apply(new CoopTimeLock.TimeSnapshot(false, false, 222333777L, 20L, 13400L));
+        timeLock.apply(new CoopTimeLock.TimeSnapshot(false, false, 222333777L, 20L, 13400L, ""));
         assertFalse(recording.paused);
         assertEquals(1, recording.setPausedCalls);
     }

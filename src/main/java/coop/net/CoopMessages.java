@@ -160,14 +160,23 @@ public final class CoopMessages {
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
     }
 
+    /**
+     * Host&rarr;guest 5 Hz clock mirror. {@code pausedBy} carries the shared-pause holder, which only
+     * the host can compute (the guest deliberately does not store its own key-press intent locally,
+     * see {@code CoopSharedPauseCoordinator#recordGuestPauseKeyPress}). Values are the raw holder
+     * tokens {@code host}, {@code guest}, {@code guest screen}, {@code combat}, or {@code ""} for
+     * "nobody"; the reader maps them to display wording per its own role.
+     */
     public static Message timeSnapshot(String sessionId, long seq, boolean paused, boolean fastForward,
-                                       long timestampMillis, long campaignDay, long sentAtMillis) {
+                                       long timestampMillis, long campaignDay, long sentAtMillis,
+                                       String pausedBy) {
         return new Message(Type.TIME_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"paused\":\"" + paused + "\","
                         + "\"fastForward\":\"" + fastForward + "\","
                         + "\"timestampMillis\":" + timestampMillis + ","
                         + "\"campaignDay\":" + campaignDay + ","
-                        + "\"sentAtMillis\":" + sentAtMillis + "}");
+                        + "\"sentAtMillis\":" + sentAtMillis + ","
+                        + "\"pausedBy\":\"" + escapeJson(pausedBy == null ? "" : pausedBy) + "\"}");
     }
 
     /** Source of a guest pause intent: {@code KEY} = manual pause-key, {@code SCREEN} = open screen. */
@@ -806,6 +815,16 @@ public final class CoopMessages {
 
     public static String requiredPayloadString(Message message, String name) {
         return requiredString(decodePayload(message), name);
+    }
+
+    /**
+     * Reads a string payload field that may be absent, so a message built by an older peer (before
+     * the field existed) still parses. Returns {@code fallback} when the field is missing or is not
+     * a string.
+     */
+    public static String optionalPayloadString(Message message, String name, String fallback) {
+        Object value = decodePayload(message).get(name);
+        return value instanceof String stringValue ? stringValue : fallback;
     }
 
     public static long requiredPayloadLong(Message message, String name) {

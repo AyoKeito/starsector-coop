@@ -352,7 +352,7 @@ class CoopNetPumpTest {
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
         AtomicLong now = new AtomicLong(1000L);
         RecordingTimeLock timeLock = new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(true, false, 222333444L, 17L, 1200L));
+                new CoopTimeLock.TimeSnapshot(true, false, 222333444L, 17L, 1200L, ""));
         CoopNetPump pump = new CoopNetPump(service, session, now::get,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
@@ -386,13 +386,14 @@ class CoopNetPumpTest {
         session.guestAcceptHandshake("session-a");
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
         CoopTimeLock.TimeSnapshot hostSnapshot =
-                new CoopTimeLock.TimeSnapshot(true, true, 222333444L, 17L, 1500L);
+                new CoopTimeLock.TimeSnapshot(true, true, 222333444L, 17L, 1500L, "");
         service.inbound.add(CoopMessages.timeSnapshot("session-a", 5L,
                 hostSnapshot.paused(),
                 hostSnapshot.fastForward(),
                 hostSnapshot.timestampMillis(),
                 hostSnapshot.campaignDay(),
-                hostSnapshot.sentAtMillis()));
+                hostSnapshot.sentAtMillis(),
+                hostSnapshot.pausedBy()));
         RecordingTimeLock timeLock = new RecordingTimeLock(hostSnapshot);
         CoopNetPump pump = new CoopNetPump(service, session, () -> 1600L,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
@@ -416,7 +417,7 @@ class CoopNetPumpTest {
         ui.showingMenu = true;
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         pump.advance(0f);
         pump.advance(0f);
@@ -448,7 +449,7 @@ class CoopNetPumpTest {
         service.inbound.add(CoopMessages.pauseIntent(
                 "session-a", 8L, 1200L, CoopMessages.PauseSource.SCREEN, true, 1L));
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1300L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         pump.advance(0f);
 
@@ -469,7 +470,7 @@ class CoopNetPumpTest {
         RecordingSector sector = new RecordingSector(false);
         Global.setSector(sector.proxy());
         RecordingTimeLock timeLock = new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, ""));
         CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
@@ -498,7 +499,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(entity);
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         pump.advance(0f);
 
@@ -528,7 +529,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(entity);
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
         pump.advance(0f);
         service.sent.clear();
 
@@ -551,7 +552,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(entity);
         Global.setSector(new RecordingSector(false, ui).proxy());
         RecordingTimeLock timeLock = new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, ""));
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, timeLock);
 
         pump.advance(0f);
@@ -589,7 +590,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(null);
         Global.setSector(new RecordingSector(false, ui).proxy());
         RecordingTimeLock timeLock = new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, ""));
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, timeLock);
 
         service.inbound.add(CoopMessages.interactionAccept(
@@ -621,7 +622,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(entity);
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         // The guest opens optimistically and claims; the host says no.
         pump.advance(0f);
@@ -647,7 +648,7 @@ class CoopNetPumpTest {
         ui.dismissClosesDialog = false;
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         pump.advance(0f);
         service.inbound.add(CoopMessages.interactionReject(
@@ -671,7 +672,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(entity);
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         pump.advance(0f);
         service.inbound.add(CoopMessages.interactionReject(
@@ -696,7 +697,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(entity);
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         pump.advance(0f);
         service.inbound.add(CoopMessages.interactionReject(
@@ -720,7 +721,7 @@ class CoopNetPumpTest {
             Global.setSector(new RecordingSector(false, ui).proxy());
             AtomicLong now = new AtomicLong(1000L);
             CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
-                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
             service.inbound.add(CoopMessages.interactionClaim(
                     "session-a", 7L, 1000L, "market-1", "Jangala", "guest-player"));
@@ -754,7 +755,7 @@ class CoopNetPumpTest {
         RecordingCampaignUi ui = new RecordingCampaignUi(null);
         Global.setSector(new RecordingSector(false, ui).proxy());
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         service.inbound.add(CoopMessages.interactionClaim(
                 "session-a", 7L, 1000L, "market-1", "Jangala", "guest-player"));
@@ -779,7 +780,7 @@ class CoopNetPumpTest {
             Global.setSector(sector.proxy());
             AtomicLong now = new AtomicLong(1000L);
             CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
-                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
             service.inbound.add(CoopMessages.pauseIntent(
                     "session-a", 8L, 1000L, CoopMessages.PauseSource.SCREEN, true, 1L));
@@ -1287,7 +1288,8 @@ class CoopNetPumpTest {
         assertNull(pump.hudState(false).pauseHolder());
 
         pump.pauseCoordinatorForBridge().setHostPauseIntent(true);
-        assertEquals("host", pump.hudState(true).pauseHolder());
+        // The host reading its own intent sees "you", not "host".
+        assertEquals("you", pump.hudState(true).pauseHolder());
     }
 
     @Test
@@ -1299,17 +1301,17 @@ class CoopNetPumpTest {
         assertEquals("combat", pump.hudState(true).pauseHolder());
 
         pump.pauseCoordinatorForBridge().applyGuestScreenPauseIntent(true, 1L);
-        assertEquals("guest screen", pump.hudState(true).pauseHolder());
+        assertEquals("guest's screen", pump.hudState(true).pauseHolder());
 
         pump.pauseCoordinatorForBridge().applyGuestKeyPauseIntent(true, 2L);
         assertEquals("guest", pump.hudState(true).pauseHolder());
 
         pump.pauseCoordinatorForBridge().setHostPauseIntent(true);
-        assertEquals("host", pump.hudState(true).pauseHolder());
+        assertEquals("you", pump.hudState(true).pauseHolder());
     }
 
     @Test
-    void hudStateAttributesTheGuestSidePauseToTheHost() {
+    void hudStateAttributesTheGuestSidePauseToTheHostWithoutASnapshotHolder() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopNetPump pump = activeGuestPump(service, () -> 1000L);
 
@@ -1317,6 +1319,64 @@ class CoopNetPumpTest {
 
         pump.pauseCoordinatorForBridge().setObservedPaused(true);
         assertEquals("host", pump.hudState(true).pauseHolder());
+    }
+
+    @Test
+    void hudStateOnTheGuestNamesTheGuestsOwnPauseAsYou() {
+        // Regression: the guest's own pause-key press used to read "paused by host", because the
+        // guest deliberately does not store its own intent locally. The holder now rides the
+        // host's TIME_SNAPSHOT.
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1000L);
+
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 7L,
+                true, false, 222333444L, 17L, 900L, "guest"));
+        pump.advance(0f);
+
+        assertEquals("you", pump.hudState(true).pauseHolder());
+    }
+
+    @Test
+    void hudStateOnTheGuestNamesTheGuestsScreenPauseAsYourScreen() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1000L);
+
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 7L,
+                true, false, 222333444L, 17L, 900L, "guest screen"));
+        pump.advance(0f);
+
+        assertEquals("your screen", pump.hudState(true).pauseHolder());
+    }
+
+    @Test
+    void hostShipsThePauseHolderInTheTimeSnapshot() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(true, false, 222333444L, 17L, 1200L, ""));
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = new CoopNetPump(service, session, now::get,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed",
+                timeLock);
+        pump.pauseCoordinatorForBridge().applyGuestKeyPauseIntent(true, 1L);
+
+        pump.advance(0f);
+        now.set(1200L);
+        pump.advance(0f);
+
+        CoopMessages.Message snapshot = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.TIME_SNAPSHOT)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("guest", CoopMessages.requiredPayloadString(snapshot, "pausedBy"));
+        assertEquals(List.of("guest"), timeLock.capturedPauseHolders);
     }
 
     @Test
@@ -1686,7 +1746,7 @@ class CoopNetPumpTest {
         snapshot.setCredits(4242d);
         service.inbound.add(CoopMessages.guestSnapshot("session-a", 9L, 1000L, snapshot.encodeBody()));
         CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
         try {
             pump.advance(0f);
 
@@ -1707,7 +1767,7 @@ class CoopNetPumpTest {
         // The pump registers itself as the checkpoint sink in its constructor, which is how the
         // ModPlugin's afterGameSave() reaches it.
         pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         coop.save.CoopSaveCheckpoint.notifyLocalGameSaved("host save");
 
@@ -1728,7 +1788,7 @@ class CoopNetPumpTest {
         CoopSessionState session = activeGuestSession();
         Global.setSector(new RecordingSector(false).proxy());
         pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
-                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L)));
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
 
         coop.save.CoopSaveCheckpoint.notifyLocalGameSaved("host save");
 
@@ -1787,19 +1847,22 @@ class CoopNetPumpTest {
         private final List<CoopTimeLock.TimeSnapshot> applied = new ArrayList<>();
         private final List<Boolean> inputBlockerStates = new ArrayList<>();
         private final List<InteractionBlock> interactionBlocks = new ArrayList<>();
+        private final List<String> capturedPauseHolders = new ArrayList<>();
 
         private RecordingTimeLock(CoopTimeLock.TimeSnapshot snapshot) {
             this.snapshot = snapshot;
         }
 
         @Override
-        public CoopTimeLock.TimeSnapshot capture(long sentAtMillis) {
+        public CoopTimeLock.TimeSnapshot capture(long sentAtMillis, String pausedBy) {
+            capturedPauseHolders.add(pausedBy);
             return new CoopTimeLock.TimeSnapshot(
                     snapshot.paused(),
                     snapshot.fastForward(),
                     snapshot.timestampMillis(),
                     snapshot.campaignDay(),
-                    sentAtMillis);
+                    sentAtMillis,
+                    pausedBy);
         }
 
         @Override

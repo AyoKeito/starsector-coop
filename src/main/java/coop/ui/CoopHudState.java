@@ -1,5 +1,7 @@
 package coop.ui;
 
+import coop.net.CoopConnectionRole;
+
 /**
  * One frame's worth of link status for the Phase 20.6 HUD line: who you are, what the session is
  * doing, who is holding the clock, and (guest only) how far the guest's campaign clock sits from the
@@ -14,8 +16,9 @@ package coop.ui;
  * @param paused               the live {@code sector.isPaused()} read; presentation only (it picks
  *                             the line's colour), never wording — the wording comes from
  *                             {@code pauseHolder}
- * @param pauseHolder          who is holding the shared pause ("host", "guest", "guest screen",
- *                             "combat"), or null when nobody is
+ * @param pauseHolder          the DISPLAY wording for whoever holds the shared pause, already
+ *                             resolved for the local role by {@link #displayHolder} (so the local
+ *                             player reads as "you"), or null when nobody holds it
  * @param clockDriftGameHours  guest clock offset in whole game hours, positive when the guest is
  *                             BEHIND the host; null on the host, and null when it rounds to zero
  */
@@ -39,6 +42,61 @@ public record CoopHudState(String roleBadge,
     public static final String STATUS_GUEST_DISCONNECTED_HOLDING = "guest disconnected, holding";
     /** Guest side of the same drop. */
     public static final String STATUS_RECONNECTING = "reconnecting";
+
+    /** Raw holder token: the host's own pause intent. */
+    public static final String HOLDER_HOST = "host";
+    /** Raw holder token: the guest's manual pause-key intent. */
+    public static final String HOLDER_GUEST = "guest";
+    /** Raw holder token: the guest has a blocking screen open. */
+    public static final String HOLDER_GUEST_SCREEN = "guest screen";
+    /** Raw holder token: either player is in combat. */
+    public static final String HOLDER_COMBAT = "combat";
+
+    /**
+     * Maps a raw holder token (the wire/coordinator vocabulary, always host-relative) to the wording
+     * the local player should read, so whoever is looking at the HUD sees themselves as "you".
+     *
+     * <table>
+     *   <caption>raw &rarr; display</caption>
+     *   <tr><th>raw</th><th>on HOST</th><th>on GUEST</th></tr>
+     *   <tr><td>host</td><td>you</td><td>host</td></tr>
+     *   <tr><td>guest</td><td>guest</td><td>you</td></tr>
+     *   <tr><td>guest screen</td><td>guest's screen</td><td>your screen</td></tr>
+     *   <tr><td>combat</td><td>combat</td><td>combat</td></tr>
+     * </table>
+     *
+     * <p>A null/blank raw holder maps to {@code ""} (nobody). An unrecognised token is passed
+     * through unchanged so a newer peer's vocabulary degrades to literal text rather than vanishing.
+     *
+     * @param rawHolder raw token, or null/blank for nobody
+     * @param localRole the role of the client doing the reading; null or
+     *                  {@link CoopConnectionRole#NONE} passes the raw token through
+     */
+    public static String displayHolder(String rawHolder, CoopConnectionRole localRole) {
+        if (rawHolder == null) {
+            return "";
+        }
+        String raw = rawHolder.trim();
+        if (raw.isEmpty()) {
+            return "";
+        }
+        if (localRole == CoopConnectionRole.HOST) {
+            return switch (raw) {
+                case HOLDER_HOST -> "you";
+                case HOLDER_GUEST -> "guest";
+                case HOLDER_GUEST_SCREEN -> "guest's screen";
+                default -> raw;
+            };
+        }
+        if (localRole == CoopConnectionRole.GUEST) {
+            return switch (raw) {
+                case HOLDER_GUEST -> "you";
+                case HOLDER_GUEST_SCREEN -> "your screen";
+                default -> raw;
+            };
+        }
+        return raw;
+    }
 
     /** Preferred separator: U+00B7 MIDDLE DOT, used when the loaded font actually has that glyph. */
     public static final String SEPARATOR_DOT = " · ";

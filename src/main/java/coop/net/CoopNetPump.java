@@ -507,23 +507,25 @@ public class CoopNetPump implements EveryFrameScript {
             status = CoopHudState.STATUS_NO_SESSION;
         }
 
-        String pauseHolder = null;
+        String rawHolder = "";
         if (active) {
             if (role == CoopConnectionRole.HOST) {
-                if (pauseCoordinator.hostPauseIntent()) {
-                    pauseHolder = "host";
-                } else if (pauseCoordinator.guestKeyPauseIntent()) {
-                    pauseHolder = "guest";
-                } else if (pauseCoordinator.guestScreenPauseIntent()) {
-                    pauseHolder = "guest screen";
-                } else if (pauseCoordinator.eitherInCombat()) {
-                    pauseHolder = "combat";
+                rawHolder = hostPauseHolder();
+            } else if (role == CoopConnectionRole.GUEST) {
+                // Only the host can name the holder: the guest deliberately does not store its own
+                // pause-key intent locally (see CoopSharedPauseCoordinator#recordGuestPauseKeyPress),
+                // so it would otherwise attribute its own press to the host. The host ships the
+                // holder in the 5 Hz TIME_SNAPSHOT; the pre-field fallback is "it came from the host".
+                String fromHost = latestTimeSnapshot == null ? "" : latestTimeSnapshot.pausedBy();
+                if (fromHost != null && !fromHost.isEmpty()) {
+                    rawHolder = fromHost;
+                } else if (pauseCoordinator.observedPaused()) {
+                    rawHolder = CoopHudState.HOLDER_HOST;
                 }
-            } else if (role == CoopConnectionRole.GUEST && pauseCoordinator.observedPaused()) {
-                // The guest never owns the shared pause; whatever it observes came from the host.
-                pauseHolder = "host";
             }
         }
+        String display = CoopHudState.displayHolder(rawHolder, role);
+        String pauseHolder = display.isEmpty() ? null : display;
 
         Integer driftGameHours = null;
         if (role == CoopConnectionRole.GUEST && active) {
@@ -535,6 +537,27 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         return new CoopHudState(badge, status, paused, pauseHolder, driftGameHours);
+    }
+
+    /**
+     * Raw shared-pause holder token as only the host can compute it, in coordinator precedence order.
+     * Feeds both the host's own HUD line and the {@code pausedBy} field of the outbound
+     * {@code TIME_SNAPSHOT} that lets the guest label its HUD correctly. Empty string = nobody.
+     */
+    private String hostPauseHolder() {
+        if (pauseCoordinator.hostPauseIntent()) {
+            return CoopHudState.HOLDER_HOST;
+        }
+        if (pauseCoordinator.guestKeyPauseIntent()) {
+            return CoopHudState.HOLDER_GUEST;
+        }
+        if (pauseCoordinator.guestScreenPauseIntent()) {
+            return CoopHudState.HOLDER_GUEST_SCREEN;
+        }
+        if (pauseCoordinator.eitherInCombat()) {
+            return CoopHudState.HOLDER_COMBAT;
+        }
+        return "";
     }
 
     @Override
@@ -1613,7 +1636,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         try {
-            CoopTimeLock.TimeSnapshot snapshot = timeLock.capture(now);
+            CoopTimeLock.TimeSnapshot snapshot = timeLock.capture(now, hostPauseHolder());
             CoopMessages.Message message = CoopMessages.timeSnapshot(
                     sessionState.sessionId(),
                     service.nextSeq(),
@@ -1621,7 +1644,8 @@ public class CoopNetPump implements EveryFrameScript {
                     snapshot.fastForward(),
                     snapshot.timestampMillis(),
                     snapshot.campaignDay(),
-                    snapshot.sentAtMillis());
+                    snapshot.sentAtMillis(),
+                    snapshot.pausedBy());
             service.send(message);
             log("outbound", message);
         } catch (RuntimeException ex) {

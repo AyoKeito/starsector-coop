@@ -53,15 +53,25 @@ public final class CoopPresenceIndicator {
      */
     static final float PLAYER_DETECTION_MULT = 50f;
 
-    private static final String DEFAULT_LABEL = "Coop Player";
+    /** Used when no username is known; still a noun phrase, so the faction article reads correctly. */
+    private static final String DEFAULT_LABEL = "coop partner";
 
-    /** Campaign-map label for the mirror fleet: the remote username, with a stable fallback. */
+    /**
+     * Campaign-map label for the mirror fleet.
+     *
+     * <p>The mirror belongs to the local player's faction, and vanilla prefixes every player-faction
+     * fleet with that faction's {@code displayNameWithArticle} — "Your" out of
+     * {@code data/world/factions/player.faction}, or "The Foo Republic" once colonies have named the
+     * faction. So the label has to be a noun phrase that reads after either prefix: the bare username
+     * gave "Your Alice". Prefixing the name with "partner" makes it "Your partner Alice" /
+     * "The Foo Republic partner Alice".
+     */
     public static String presenceLabel(String username) {
         if (username == null) {
             return DEFAULT_LABEL;
         }
         String trimmed = username.trim();
-        return trimmed.isEmpty() ? DEFAULT_LABEL : trimmed;
+        return trimmed.isEmpty() ? DEFAULT_LABEL : "partner " + trimmed;
     }
 
     /**
