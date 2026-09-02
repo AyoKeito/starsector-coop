@@ -16,6 +16,8 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1029,16 +1031,17 @@ class CoopNetServiceTest {
         int port = reserveLocalPort();
         AtomicLong clock = new AtomicLong(1_000L);
         CoopNetService host = new CoopNetService(clock::get);
-        CoopNetService guest = new CoopNetService();
         try {
+            // Updated for red-team A3 and its known-peer exemption. This used to park a real guest on
+            // the slot so every attempt met the reject path, and that shape cannot survive the
+            // exemption: on loopback the guest's address IS the flooder's address, so a session peer
+            // here would make the whole flood exempt. It also no longer needs one — the throttle now
+            // gates the accept itself, so a free slot is the honest place to measure it, and the
+            // absence of a session is what keeps a flooder from ever becoming a remembered peer.
             host.startHost(port);
-            guest.connect("127.0.0.1", port);
-            waitUntil(() -> bothConnected(host, guest), "the only slot is taken");
-
-            // Attempt 1 was the guest above. Attempts 2..5 are ordinary extra connections.
-            for (int attempt = 2; attempt <= CoopNetService.MAX_CONNECTION_ATTEMPTS_PER_WINDOW; attempt++) {
-                assertTrue(knock(host, port).contains("LOBBY_REJECT"),
-                        "attempt " + attempt + " is inside the limit and must get a reject frame");
+            for (int attempt = 1; attempt <= CoopNetService.MAX_CONNECTION_ATTEMPTS_PER_WINDOW; attempt++) {
+                assertTrue(connectAndDisconnect(host, port),
+                        "attempt " + attempt + " is inside the limit and must be admitted");
             }
             assertEquals(0L, host.datagramStats().connectionsThrottled());
 
@@ -1048,25 +1051,20 @@ class CoopNetServiceTest {
             assertEquals(CoopNetService.MAX_CONNECTION_ATTEMPTS_PER_WINDOW + 1L,
                     host.datagramStats().connectionAttempts());
 
-            // A peer that keeps knocking through its cooldown — which is exactly what the guest's own
-            // 500 ms reconnect loop does — must not extend it by knocking.
+            // An address that keeps knocking through its cooldown must not be able to extend it.
             for (int i = 0; i < 5; i++) {
                 clock.addAndGet(CoopNetService.CONNECTION_THROTTLE_COOLDOWN_MILLIS / 10L);
-                keepHeldConnectionFresh(host, guest);
                 assertEquals("", knock(host, port), "still inside the cooldown");
             }
 
             // Still throttled a millisecond short of the cooldown.
             clock.addAndGet(CoopNetService.CONNECTION_THROTTLE_COOLDOWN_MILLIS / 2L - 1L);
-            keepHeldConnectionFresh(host, guest);
             assertEquals("", knock(host, port), "the cooldown ended a millisecond early");
 
             clock.addAndGet(2L);
-            keepHeldConnectionFresh(host, guest);
-            assertTrue(knock(host, port).contains("LOBBY_REJECT"),
+            assertTrue(connectAndDisconnect(host, port),
                     "past the cooldown the address is served normally again");
         } finally {
-            guest.shutdown();
             host.shutdown();
         }
     }
@@ -1202,6 +1200,532 @@ class CoopNetServiceTest {
         }
     }
 
+    // ---- red-team hardening ---------------------------------------------------------------------
+
+    /**
+     * The slot-denial hole A1 names: the garbage-strike rule only counted undecodable frames, the
+     * half-open replacement rule only fires on silence, and both were satisfied by a stranger that
+     * sends a single newline every few seconds. It held the only guest slot for as long as it liked.
+     */
+    @Test
+    void a1_aByteTricklingStrangerIsDroppedAtTheHandshakeDeadline() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        try {
+            host.startHost(port);
+            // Deliberately no session token: this connection never proves anything.
+            try (java.net.Socket stranger = new java.net.Socket()) {
+                stranger.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host adopted the stranger");
+
+                // Trickle. Every one of these refreshes the silence clock the half-open rule reads.
+                for (long at : new long[] {6_000L, 11_000L, 14_999L}) {
+                    clock.set(at);
+                    stranger.getOutputStream().write('\n');
+                    stranger.getOutputStream().flush();
+                    Thread.sleep(20L);
+                    host.flushOutbound();
+                }
+                assertTrue(host.isConnected(), "inside the deadline the stranger still holds the slot");
+                assertEquals(0L, host.datagramStats().handshakeDeadlineDrops());
+
+                clock.set(1_000L + CoopNetService.HANDSHAKE_DEADLINE_MILLIS);
+                host.flushOutbound();
+
+                assertFalse(host.isConnected(),
+                        "past the deadline an unproven connection must not still hold the slot");
+                assertEquals(1L, host.datagramStats().handshakeDeadlineDrops());
+            }
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /** The other half of A1: an empty frame is a frame the sender chose to send, so it takes a strike. */
+    @Test
+    void a1_emptyFramesCountTowardThePreSessionStrikeLimit() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        try {
+            host.startHost(port);
+            try (java.net.Socket stranger = new java.net.Socket()) {
+                stranger.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host adopted the stranger");
+
+                byte[] newlines = new byte[CoopNetService.PRE_SESSION_INVALID_FRAME_LIMIT];
+                java.util.Arrays.fill(newlines, (byte) '\n');
+                stranger.getOutputStream().write(newlines);
+                stranger.getOutputStream().flush();
+
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.datagramStats().connectionsDroppedForGarbage() > 0;
+                }, "host dropped the newline-only connection");
+            }
+            assertFalse(host.isConnected());
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /**
+     * A3: the throttle verdict used to be consulted only when no slot was free, so an attacker that
+     * kept the slot free — by disconnecting after every attempt, which is exactly what a password
+     * guesser does — never met it.
+     */
+    @Test
+    void a3_aThrottledAddressIsRefusedEvenWhenASlotIsFree() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        try {
+            host.startHost(port);
+            for (int attempt = 1; attempt <= CoopNetService.MAX_CONNECTION_ATTEMPTS_PER_WINDOW; attempt++) {
+                assertTrue(connectAndDisconnect(host, port),
+                        "attempt " + attempt + " is inside the limit and the slot is free");
+            }
+            assertEquals(0L, host.datagramStats().connectionsThrottled());
+
+            assertFalse(connectAndDisconnect(host, port),
+                    "past the limit the connection must be closed even though the slot is free");
+            assertEquals(1L, host.datagramStats().connectionsThrottled());
+
+            clock.addAndGet(CoopNetService.CONNECTION_THROTTLE_COOLDOWN_MILLIS + 1L);
+            assertTrue(connectAndDisconnect(host, port), "past the cooldown the address is served again");
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /**
+     * A3's second half: a wrong password drops the connection, which frees the slot, so the
+     * connection-attempt throttle saw every guess as a fresh first attempt. The pump reports the
+     * failed proof here and the next connection from that source is closed with no reply.
+     */
+    @Test
+    void a3_repeatedFailedProofsPutAnAddressIntoAnExponentialCooldown() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        try {
+            host.startHost(port);
+            for (int i = 0; i < CoopNetService.MAX_FAILED_PROOFS - 1; i++) {
+                host.noteFailedProof(loopback);
+                assertFalse(host.isProofThrottled(loopback), "a typo is not an attack");
+            }
+            host.noteFailedProof(loopback);
+            assertTrue(host.isProofThrottled(loopback));
+
+            assertFalse(connectAndDisconnect(host, port), "a guesser gets no frame and no slot");
+            assertEquals(1L, host.datagramStats().proofThrottled());
+
+            clock.addAndGet(CoopNetService.FAILED_PROOF_COOLDOWN_MILLIS + 1L);
+            assertFalse(host.isProofThrottled(loopback), "the first cooldown is finite");
+
+            // Each further failure doubles the wait, up to the cap.
+            host.noteFailedProof(loopback);
+            clock.addAndGet(CoopNetService.FAILED_PROOF_COOLDOWN_MILLIS + 1L);
+            assertTrue(host.isProofThrottled(loopback), "the fourth failure is worth more than 30 s");
+
+            for (int i = 0; i < 20; i++) {
+                host.noteFailedProof(loopback);
+            }
+            clock.addAndGet(CoopNetService.FAILED_PROOF_MAX_COOLDOWN_MILLIS + 1L);
+            assertFalse(host.isProofThrottled(loopback), "the doubling is capped, not unbounded");
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The cost A3 would otherwise put on the peer it least wants to refuse. A guest whose link died
+     * knocks every 500 ms while the host's OS finishes tearing the old socket down, so it crosses a
+     * 5-attempts-per-10-s limit in 2.5 s and would then sit out a 30 s cooldown inside its own
+     * reconnect grace — the transport locking out the exact peer the grace window exists for.
+     *
+     * <p>A known peer is therefore exempt from both gates and its attempts are not counted. It stays
+     * known for {@link CoopNetService#KNOWN_PEER_MEMORY_MILLIS} after its link goes away, and only
+     * because that link had proved a session — which is what keeps a password guesser out of the
+     * exemption (see {@code a3_repeatedFailedProofsPutAnAddressIntoAnExponentialCooldown}).
+     */
+    @Test
+    void a3_aReconnectingKnownPeerIsNeverThrottled() throws Exception {
+        int knocks = 20;
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "the guest took the slot");
+            // A proved session is what makes this address a known peer at all.
+            host.setExpectedSessionToken(TOKEN);
+
+            // 20 knocks across 5 s, four times the throttle limit for the window. Every one of them
+            // must be answered with a frame rather than closed silently.
+            for (int attempt = 1; attempt <= knocks; attempt++) {
+                clock.addAndGet(250L);
+                assertTrue(knock(host, port).contains("LOBBY_REJECT"),
+                        "knock " + attempt + " from the known peer was closed with no reply");
+            }
+            assertEquals(0L, host.datagramStats().connectionsThrottled(),
+                    "a returning guest must never be throttled by its own reconnect loop");
+
+            // ...and the half-open replacement still admits it. The held link has now been silent
+            // past HALF_OPEN_REPLACE_MILLIS, so the next connection takes the slot off it.
+            clock.addAndGet(CoopNetService.HALF_OPEN_REPLACE_MILLIS + 1L);
+            try (java.net.Socket returning = new java.net.Socket()) {
+                returning.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                CoopMessages.Message hello = CoopMessages.ping(SESSION_ID, 1L, 4_000L);
+                returning.getOutputStream().write((CoopMessages.encode(hello) + "\n").getBytes());
+                returning.getOutputStream().flush();
+
+                CoopMessages.Message delivered = waitForMessage(host,
+                        "the replacing connection's first frame");
+                assertEquals(CoopMessages.Type.PING, delivered.type(),
+                        "the returning peer must own the slot, not be refused by the throttle");
+            }
+
+            // With the slot free again the exemption comes from the remembered address rather than
+            // from an attached link, and the address is still nowhere near the attempt limit's mercy.
+            waitUntil(() -> {
+                host.flushOutbound();
+                return !host.isConnected();
+            }, "the host reaped the closed link");
+            assertTrue(connectAndDisconnect(host, port),
+                    "a known peer is admitted even 20-odd attempts into the window");
+            assertEquals(0L, host.datagramStats().connectionsThrottled());
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * A4: coalescing bounds nothing on its own — it only ever replaces a snapshot with a newer
+     * snapshot, and a queue of semantic events grows one entry per event forever against a peer whose
+     * socket has stopped draining. No channel is attached here, which is that state exactly.
+     */
+    @Test
+    void a4_theOutboundQueueIsHardCappedAndTheLinkGoesWhenNothingCanBeTrimmed() {
+        CoopNetService service = new CoopNetService();
+        try {
+            for (int i = 0; i < CoopNetService.QUEUE_HARD_CAP_MESSAGES; i++) {
+                service.send(CoopMessages.interactionClaim(SESSION_ID, service.nextSeq(), 1000L,
+                        "entity-" + i, "Entity", "player-a"));
+            }
+            assertEquals(CoopNetService.QUEUE_HARD_CAP_MESSAGES, service.outboundQueueDepth());
+            assertEquals(0L, service.datagramStats().queueOverflowDrops());
+
+            // Past the cap a superseded snapshot is what gets discarded; the events keep their places.
+            service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), false, false,
+                    1L, 1L, 1L, ""));
+            assertEquals(CoopNetService.QUEUE_HARD_CAP_MESSAGES, service.outboundQueueDepth(),
+                    "the queue must stop growing at its hard cap");
+            assertEquals(1L, service.datagramStats().queueOverflowDrops());
+
+            // Nothing left to trim: one message past 2x the cap, the peer is treated as gone.
+            int toTheDropThreshold = CoopNetService.QUEUE_DROP_LINK_MESSAGES
+                    - CoopNetService.QUEUE_HARD_CAP_MESSAGES + 1;
+            for (int i = 0; i < toTheDropThreshold; i++) {
+                service.send(CoopMessages.interactionClaim(SESSION_ID, service.nextSeq(), 2000L,
+                        "late-" + i, "Entity", "player-a"));
+            }
+
+            assertEquals(0, service.outboundQueueDepth(), "the dropped link's queue goes with it");
+            assertEquals(CoopNetService.QUEUE_DROP_LINK_MESSAGES + 2L,
+                    service.datagramStats().queueOverflowDrops(),
+                    "the trimmed snapshot plus every message the dropped link was still holding");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /**
+     * A5/A15: the old guard asked whether the 64 KB receive buffer had filled up, which no UDP
+     * datagram can do (the largest payload that exists is 65,507 bytes), so nothing bounded the size
+     * of an inbound packet at all.
+     */
+    @Test
+    void a5_anOversizedInboundDatagramIsDroppedAndCounted() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        try {
+            host.startHost(port);
+            host.setExpectedSessionToken(TOKEN);
+            try (DatagramSocket sender = new DatagramSocket()) {
+                send(sender, port, snapshot(GUEST_SENDER, 1L,
+                        "x".repeat(CoopNetService.MAX_INBOUND_DATAGRAM_BYTES)));
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.datagramStats().droppedOversizedInbound() > 0;
+                }, "host dropped the oversized datagram");
+
+                assertNull(host.pollDatagram(), "nothing oversized may reach the drain");
+                assertEquals(1L, host.datagramStats().droppedOversizedInbound());
+
+                // A normal-sized one from the same source still lands, so this is a cap, not a wall.
+                String ok = snapshot(GUEST_SENDER, 2L, "small");
+                send(sender, port, ok);
+                assertEquals(ok, waitForDatagram(host, "the in-budget datagram"));
+            }
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /**
+     * A12: the ceiling was checked once per 8 KB read rather than per frame, so one buffer of
+     * one-byte frames bought thousands of framer passes. The bytes past the ceiling are this peer's
+     * TCP stream and must be carried to the next poll, never dropped.
+     */
+    @Test
+    void a12_aFloodOfEmptyFramesCannotExceedThePerPollFrameCeiling() throws Exception {
+        int frames = CoopNetService.MAX_FRAMES_PER_POLL * 4;
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        try {
+            host.startHost(port);
+            // A session exists, so the strike rule does not end the connection mid-test.
+            host.setExpectedSessionToken(TOKEN);
+            try (java.net.Socket peer = new java.net.Socket()) {
+                peer.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host adopted the peer");
+
+                byte[] newlines = new byte[frames];
+                java.util.Arrays.fill(newlines, (byte) '\n');
+                peer.getOutputStream().write(newlines);
+                peer.getOutputStream().flush();
+
+                AtomicLong firstPollFrames = new AtomicLong(-1L);
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    if (firstPollFrames.get() < 0 && host.framesInLastPoll() > 0) {
+                        firstPollFrames.set(host.framesInLastPoll());
+                    }
+                    return host.datagramStats().invalidFrames() >= frames;
+                }, "host framed the whole burst across several polls");
+
+                assertEquals(CoopNetService.MAX_FRAMES_PER_POLL, firstPollFrames.get(),
+                        "one poll must stop at the ceiling, not at the end of the read buffer");
+                assertEquals(frames, host.datagramStats().invalidFrames(),
+                        "the bytes past the ceiling are parked, not discarded");
+                assertTrue(host.isConnected(), "the session peer is not dropped for this");
+            }
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /**
+     * A13: an IPv6 host is routinely delegated a whole /64, so a per-address record is a table of
+     * one-shot entries and a rate limit that never fires.
+     */
+    @Test
+    void a13_theConnectionThrottleIsKeyedByTheIpv6Prefix() throws Exception {
+        String first = CoopNetService.throttleKey(InetAddress.getByName("2001:db8:1:2::1"));
+        String second = CoopNetService.throttleKey(InetAddress.getByName("2001:db8:1:2:dead:beef:0:9"));
+        String otherPrefix = CoopNetService.throttleKey(InetAddress.getByName("2001:db8:1:3::1"));
+
+        assertEquals(first, second, "two addresses in one /64 are one throttle identity");
+        assertNotEquals(first, otherPrefix, "a different /64 is a different identity");
+        assertEquals("20010db800010002::/64", first);
+
+        // IPv4 keeps full-address granularity; there is no prefix to hide behind.
+        assertNotEquals(CoopNetService.throttleKey(InetAddress.getByName("198.51.100.1")),
+                CoopNetService.throttleKey(InetAddress.getByName("198.51.100.2")));
+        assertNull(CoopNetService.throttleKey(null));
+    }
+
+    /**
+     * C2: one motion tick is several chunk datagrams sharing a type and a sender. Without the chunk
+     * in the key, a backlogged TCP fallback superseded every chunk of the tick with the last one and
+     * delivered a batch missing most of its fleets — which reads as fleets that stopped moving.
+     */
+    @Test
+    void c2_backloggedStateDatagramChunksDoNotSupersedeEachOther() {
+        CoopNetService service = new CoopNetService();
+        try {
+            for (int i = 0; i < CoopNetService.COALESCE_BACKLOG_MESSAGES; i++) {
+                service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), false, false,
+                        1000L + i, 1L, 1000L + i, ""));
+            }
+            int backlogged = service.outboundQueueDepth();
+
+            for (int chunk = 0; chunk < 3; chunk++) {
+                service.send(CoopMessages.stateDatagram(SESSION_ID, service.nextSeq(), 2000L,
+                        CoopMessages.datagram(TOKEN, HOST_SENDER, CoopMessages.Type.NPC_FLEET_MOTION,
+                                5L, 0L, chunk, "chunk-" + chunk)));
+            }
+            assertEquals(backlogged + 3, service.outboundQueueDepth(),
+                    "three chunks of one tick are three queue entries");
+
+            service.send(CoopMessages.stateDatagram(SESSION_ID, service.nextSeq(), 2100L,
+                    CoopMessages.datagram(TOKEN, HOST_SENDER, CoopMessages.Type.NPC_FLEET_MOTION,
+                            6L, 0L, 1, "chunk-1-newer")));
+            assertEquals(backlogged + 3, service.outboundQueueDepth(),
+                    "a newer sample of chunk 1 replaces chunk 1, and only chunk 1");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /**
+     * C5: the reject frame used to be written on a socket switched to <em>blocking</em> mode, inside
+     * the campaign frame. A peer that connects and never reads is an ordinary WAN event, and against
+     * one the write loop had nothing bounding it.
+     */
+    @Test
+    void c5_anExtraConnectionThatNeverReadsIsRejectedWithoutStallingTheFrame() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "the only slot is taken");
+
+            try (java.net.Socket silent = new java.net.Socket()) {
+                silent.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                silent.setSoTimeout(20);
+                // Never reads a byte until the check below. Every poll must return promptly anyway.
+                waitUntil(() -> {
+                    long start = System.nanoTime();
+                    host.flushOutbound();
+                    long elapsedMillis = (System.nanoTime() - start) / 1_000_000L;
+                    assertTrue(elapsedMillis < 1_000L,
+                            "a poll took " + elapsedMillis + " ms; the reject write is blocking again");
+                    try {
+                        return silent.getInputStream().read() < 0;
+                    } catch (java.net.SocketTimeoutException timeout) {
+                        return false;
+                    } catch (IOException closed) {
+                        return true;
+                    }
+                }, "the host closed the extra connection");
+            }
+            assertTrue(bothConnected(host, guest), "the real session is untouched");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * C8: {@code setExpectedSessionToken} claimed in a comment to clear the validated return address
+     * and did not. On the host that address is learned from the wire and must be re-earned by the
+     * path challenge when the session changes; on the guest it is the configured host address, and
+     * clearing it would silence the guest's own stream.
+     */
+    @Test
+    void c8_aNewSessionTokenClearsTheHostsValidatedUdpAddressAndNotTheGuests() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+            validateUdpPath(host, guest);
+            assertFalse(host.datagramStats().validatedRemote().isEmpty());
+            String guestTarget = guest.datagramStats().validatedRemote();
+            assertFalse(guestTarget.isEmpty());
+
+            String nextSession = CoopMessages.wireToken("session-b");
+            host.setExpectedSessionToken(nextSession);
+            guest.setExpectedSessionToken(nextSession);
+
+            assertEquals("", host.datagramStats().validatedRemote(),
+                    "the host must re-earn the return address for the new session");
+            assertEquals(guestTarget, guest.datagramStats().validatedRemote(),
+                    "the guest's target is configured, not learned");
+
+            // Re-setting the same token is not a session change and must not disturb anything.
+            guest.setExpectedSessionToken(nextSession);
+            assertEquals(guestTarget, guest.datagramStats().validatedRemote());
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The seam B2/C1 need: a close and an attach inside one poll produce no {@code isConnected()}
+     * edge, so a monotonic count of attaches is the only thing that tells the pump the slot is held
+     * by a different socket than it was.
+     */
+    @Test
+    void connectionGenerationRisesOnEveryAttach() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            assertEquals(0L, host.connectionGeneration());
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+            assertEquals(1L, host.connectionGeneration());
+
+            host.dropActiveConnection("test");
+            waitUntil(() -> {
+                host.flushOutbound();
+                guest.flushOutbound();
+                return host.connectionGeneration() == 2L;
+            }, "the guest's retry produced a second attach");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * Opens a connection, lets the host decide what to do with it, then closes it.
+     *
+     * @return true when the host adopted it, false when the host closed it with no reply
+     */
+    private boolean connectAndDisconnect(CoopNetService host, int port) throws Exception {
+        boolean adopted;
+        try (java.net.Socket socket = new java.net.Socket()) {
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+            socket.setSoTimeout(20);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            Boolean verdict = null;
+            while (verdict == null && System.nanoTime() < deadline) {
+                host.flushOutbound();
+                if (host.isConnected()) {
+                    verdict = Boolean.TRUE;
+                    break;
+                }
+                try {
+                    if (socket.getInputStream().read() < 0) {
+                        verdict = Boolean.FALSE;
+                    }
+                } catch (java.net.SocketTimeoutException ignored) {
+                    // keep pumping; the host accepts only inside a poll
+                }
+            }
+            assertNotNull(verdict, "the host neither adopted nor closed the connection");
+            adopted = verdict;
+        }
+        if (adopted) {
+            waitUntil(() -> {
+                host.flushOutbound();
+                return !host.isConnected();
+            }, "the host noticed the connection close");
+        }
+        return adopted;
+    }
+
     /**
      * One TCP connection attempt from a throwaway socket. Returns the frame the host answered with,
      * or "" when it closed without saying anything.
@@ -1226,19 +1750,5 @@ class CoopNetServiceTest {
             }
             throw new AssertionError("Host never answered or closed the knocking connection");
         }
-    }
-
-    /**
-     * Pushes a byte across the held connection so its silence clock follows the fake clock. Without
-     * this the half-open replacement rule would hand the held slot to the next knock as soon as the
-     * test advances time, which is a different rule than the one under test.
-     */
-    private void keepHeldConnectionFresh(CoopNetService host, CoopNetService guest) throws Exception {
-        guest.send(CoopMessages.ping(null, guest.nextSeq(), 1L));
-        guest.flushOutbound();
-        waitUntil(() -> {
-            host.flushOutbound();
-            return host.pollInbound() != null;
-        }, "the held connection delivered a keepalive ping");
     }
 }

@@ -152,6 +152,20 @@ public class CoopNetService {
     static final int COALESCE_BACKLOG_MESSAGES = 32;
     /** Queue depth that gets a one-time warning. Nothing is dropped; this is a "look here" marker. */
     static final int QUEUE_DEPTH_WARN_MESSAGES = 1_024;
+    /**
+     * Queue depth past which superseded snapshots are actually discarded (red-team A4). Coalescing
+     * alone bounds nothing: a peer that never reads still accumulates one queued message per
+     * <em>event</em> forever, and "the peer is gone but the socket has not noticed" is a normal WAN
+     * state, not an exotic one. 4096 messages is minutes of arrears at the control rates — far past
+     * the point the link is useful, and far short of a heap problem.
+     */
+    static final int QUEUE_HARD_CAP_MESSAGES = 4_096;
+    /**
+     * Depth at which the link itself is dropped. Reaching it means the queue is all events — nothing
+     * left that may be discarded silently — so the honest move is to admit the peer is gone and let
+     * the ordinary disconnect edge (and the reconnect grace behind it) run.
+     */
+    static final int QUEUE_DROP_LINK_MESSAGES = 8_192;
 
     // ---- Phase 20.4 abuse limits -------------------------------------------------------------------
 
@@ -163,6 +177,48 @@ public class CoopNetService {
     static final long CONNECTION_THROTTLE_COOLDOWN_MILLIS = 30_000L;
     /** Undecodable frames a pre-handshake connection is allowed before it is dropped. */
     static final int PRE_SESSION_INVALID_FRAME_LIMIT = 20;
+    /**
+     * How long an accepted connection may hold the peer slot without a session existing (red-team
+     * A1). The hole this closes: the garbage-strike rule only counts undecodable frames, and the
+     * half-open replacement rule only fires on <em>silence</em>, so a stranger that sends a single
+     * newline every few seconds refreshed the silence clock, took no strikes, and denied the slot to
+     * the real guest for as long as it cared to keep going.
+     *
+     * <p>Measured from attach, never from the last byte: a deadline a peer can push back by sending
+     * is not a deadline. Host role only — the guest has no slot worth denying, and a guest that
+     * dropped its own link every 15 s while waiting for a host to finish its lobby round would spend
+     * the session in a reconnect loop.
+     *
+     * <p>15 s against a lobby exchange that completes in well under a second, and against a
+     * reconnect-grace resume whose request goes out on the resuming peer's first flush after attach.
+     * The grace window is minutes; this is not the thing that ends it.
+     */
+    static final long HANDSHAKE_DEADLINE_MILLIS = 15_000L;
+    /**
+     * Failed password proofs from one source before its cooldown starts (red-team A3). A wrong guess
+     * drops the connection, which frees the slot, which is why the connection-attempt throttle never
+     * saw guessing as abuse: every guess looked like a first attempt.
+     */
+    static final int MAX_FAILED_PROOFS = 3;
+    /** First cooldown after {@link #MAX_FAILED_PROOFS}; doubles per further failure. */
+    static final long FAILED_PROOF_COOLDOWN_MILLIS = 30_000L;
+    /** Ceiling on the doubling, so a fat-fingered password is not a ten-hour lockout. */
+    static final long FAILED_PROOF_MAX_COOLDOWN_MILLIS = 600_000L;
+    /**
+     * How long an address that held a <em>proved</em> session stays exempt from both abuse gates
+     * after its link goes away.
+     *
+     * <p>Why the exemption exists at all: A3 made the throttle decide the fate of every accepted
+     * connection, and a guest whose link died is knocking every 500 ms against a host slot the OS
+     * has not finished tearing down. Without this it throttles itself out after 2.5 s and spends
+     * half its own reconnect grace in a cooldown earned by trying to come back — the transport
+     * refusing the exact peer the grace window exists for.
+     *
+     * <p>Why 120 s: it has to outlast the {@link #HALF_OPEN_REPLACE_MILLIS} window the returning
+     * guest is knocking through, with room for the reconnect grace around it, and it has to expire
+     * well inside a session so a stranger cannot inherit a departed guest's address indefinitely.
+     */
+    static final long KNOWN_PEER_MEMORY_MILLIS = 120_000L;
     /** Inbound ceilings per poll, so a flood waits in the kernel buffer instead of in our frame. */
     static final int MAX_DATAGRAMS_PER_POLL = 256;
     static final int MAX_FRAMES_PER_POLL = 256;
@@ -172,6 +228,14 @@ public class CoopNetService {
      * address that stopped knocking long enough for 256 others to knock.
      */
     private static final int MAX_ATTEMPT_RECORDS = 256;
+    /**
+     * Largest inbound datagram accepted (red-team A5/A15). {@link #MAX_DATAGRAM_BYTES} is the
+     * outbound budget; this is the receiving half of it, with headroom. Anything above is either a
+     * corrupted stream or a sender asking us to parse a payload it chose the size of, and the
+     * previous guard — "the receive buffer filled up" on a 64 KB buffer — could not fire at all,
+     * because the largest UDP payload that exists is 65,507 bytes.
+     */
+    static final int MAX_INBOUND_DATAGRAM_BYTES = 4 * 1024;
 
     /** Allocated once: the frame framer takes a callback and this one carries no per-peer state. */
     private static final Runnable OVERSIZED_FRAME_WARNING =
@@ -199,8 +263,12 @@ public class CoopNetService {
      * what the pre-connection and post-drop windows rely on.
      */
     private final List<CoopPeerLink> peers;
-    /** Per-source connection-attempt bookkeeping; see {@link AttemptRecord}. */
-    private final Map<InetAddress, AttemptRecord> attemptsByAddress = new LinkedHashMap<>();
+    /**
+     * Per-source connection-attempt bookkeeping; see {@link AttemptRecord}. Keyed by
+     * {@link #throttleKey(InetAddress)} rather than by the address, because an IPv6 host is normally
+     * handed a whole /64 and can therefore present a fresh "address" per attempt (red-team A13).
+     */
+    private final Map<String, AttemptRecord> attemptsByAddress = new LinkedHashMap<>();
 
     private CoopConnectionRole role = CoopConnectionRole.NONE;
     private ServerSocketChannel serverChannel;
@@ -215,6 +283,7 @@ public class CoopNetService {
     private boolean noTokenWarned;
     private boolean tokenMismatchWarned;
     private boolean malformedDatagramWarned;
+    private boolean oversizedInboundWarned;
     /** Session token every inbound datagram must carry; null before handshake and after teardown. */
     private String expectedSessionToken;
     /** Full local player id stamped onto outbound TCP messages (Phase 20.5). */
@@ -239,6 +308,27 @@ public class CoopNetService {
     private long connectionsThrottled;
     private long invalidFrames;
     private long connectionsDroppedForGarbage;
+    private long droppedOversizedInbound;
+    private long droppedBadEpoch;
+    private long droppedBadChunk;
+    private long handshakeDeadlineDrops;
+    private long proofThrottled;
+    private long queueOverflowDrops;
+    /**
+     * Monotonic count of channels ever attached to the peer table (red-team B2/C1 seam). The pump
+     * reads it to notice a half-open replacement: close-then-attach inside one poll produces no
+     * {@code isConnected()} edge at all, so without this the pump cannot tell "the same connection
+     * all along" from "a different socket now holds the slot" — and answers the returning guest's
+     * resume request as if nothing had happened. Never reset; a value that can repeat is not an edge
+     * detector.
+     */
+    private long connectionGeneration;
+    /**
+     * The address of the last peer that was attached <em>while a session existed</em>, and when its
+     * link went away. See {@link #KNOWN_PEER_MEMORY_MILLIS} and {@link #isKnownPeerLocked}.
+     */
+    private InetAddress lastKnownPeerAddress;
+    private long lastKnownPeerAtMillis;
     private String connectHost;
     private int connectPort;
     private long nextConnectAttemptAtMillis;
@@ -298,6 +388,7 @@ public class CoopNetService {
      */
     public void setExpectedSessionToken(String token) {
         synchronized (lifecycleLock) {
+            boolean changed = !java.util.Objects.equals(expectedSessionToken, token);
             expectedSessionToken = token;
             long now = clockMillis.getAsLong();
             for (CoopPeerLink peer : peers) {
@@ -307,8 +398,104 @@ public class CoopNetService {
                 if (token != null) {
                     peer.noteDatagramSent(now);
                 }
+                // Red-team C8: that claim used to be a comment only. On the host the validated return
+                // address is learned from the wire and must be re-earned through the path challenge
+                // when the session changes; on the guest it is the configured host address, which no
+                // session change invalidates and clearing which would silence the guest's own stream.
+                if (changed && role == CoopConnectionRole.HOST) {
+                    peer.setValidatedUdpAddress(null);
+                }
                 peer.forgetCandidate();
             }
+        }
+    }
+
+    /**
+     * Channels attached over this service's life; see {@link #connectionGeneration}. A change between
+     * two frames means the slot is held by a different socket than it was, whether or not the
+     * transport ever reported a disconnect in between.
+     */
+    public long connectionGeneration() {
+        synchronized (lifecycleLock) {
+            return connectionGeneration;
+        }
+    }
+
+    /**
+     * Records one failed password proof from {@code source} and, past {@link #MAX_FAILED_PROOFS},
+     * puts that source into an exponential cooldown during which its connections are closed with no
+     * reply at all (red-team A3).
+     *
+     * <p>Called by the pump from its password check, because only the pump knows a proof failed —
+     * from the transport's side a wrong password is an ordinary message on an ordinary connection.
+     * The cooldown lives here because this is where connections are accepted, and refusing the
+     * <em>next</em> connection is the only thing that actually costs a guesser anything: the wrong
+     * guess drops the socket, which frees the slot, so the connection-attempt throttle saw every
+     * guess as a fresh first attempt.
+     *
+     * <p>Cooldown: 30 s at the third failure, doubling per failure after it, capped at 10 minutes.
+     * A null source (address unreadable) is ignored rather than throttling everyone.
+     *
+     * @param source the peer address the failed proof arrived from; IPv6 is counted per /64
+     */
+    public void noteFailedProof(InetAddress source) {
+        String key = throttleKey(source);
+        if (key == null) {
+            return;
+        }
+        synchronized (lifecycleLock) {
+            long now = clockMillis.getAsLong();
+            AttemptRecord record = recordForLocked(key);
+            record.failedProofs++;
+            if (record.failedProofs < MAX_FAILED_PROOFS) {
+                return;
+            }
+            long cooldown = FAILED_PROOF_COOLDOWN_MILLIS;
+            for (int doubling = MAX_FAILED_PROOFS; doubling < record.failedProofs
+                    && cooldown < FAILED_PROOF_MAX_COOLDOWN_MILLIS; doubling++) {
+                cooldown *= 2L;
+            }
+            cooldown = Math.min(cooldown, FAILED_PROOF_MAX_COOLDOWN_MILLIS);
+            record.proofThrottledUntilMillis = now + cooldown;
+            record.proofThrottleLogged = false;
+            CoopLog.warn(CoopNetService.class, "Coop TCP refusing connections from "
+                    + source.getHostAddress() + " for " + cooldown + " ms after "
+                    + record.failedProofs + " failed lobby password proofs");
+        }
+    }
+
+    /**
+     * Whether {@code source} is inside the cooldown {@link #noteFailedProof} put it in. Exposed for
+     * the pump and for tests; the accept path consults it itself.
+     */
+    public boolean isProofThrottled(InetAddress source) {
+        String key = throttleKey(source);
+        if (key == null) {
+            return false;
+        }
+        synchronized (lifecycleLock) {
+            AttemptRecord record = attemptsByAddress.get(key);
+            return record != null && clockMillis.getAsLong() < record.proofThrottledUntilMillis;
+        }
+    }
+
+    /**
+     * The TCP address pinned to the peer with this sender id, or — when the id names nobody, which is
+     * every message that arrives before the peer has stamped one — the address of the single occupied
+     * slot. Exists so a caller holding a message can name its sender to {@link #noteFailedProof}.
+     */
+    public InetAddress pinnedPeerAddress(String senderId) {
+        synchronized (lifecycleLock) {
+            CoopPeerLink named = peerBySenderIdLocked(senderId);
+            if (named != null) {
+                return named.pinnedPeerAddress();
+            }
+            for (CoopPeerLink peer : peers) {
+                if (peer.occupied() && peer.pinnedPeerAddress() != null) {
+                    return peer.pinnedPeerAddress();
+                }
+            }
+            return null;
         }
     }
 
@@ -339,7 +526,8 @@ public class CoopNetService {
                     droppedMalformed, probesSent, probeEchoesReceived, pathValidations, keepalivesSent,
                     keepalivesReceived, icmpTransients, oversizedDatagrams, escalatedToTcp,
                     connectionAttempts, connectionsThrottled, invalidFrames, connectionsDroppedForGarbage,
-                    lastInbound, validated);
+                    droppedOversizedInbound, droppedBadEpoch, droppedBadChunk, handshakeDeadlineDrops,
+                    proofThrottled, queueOverflowDrops, lastInbound, validated);
         }
     }
 
@@ -470,9 +658,32 @@ public class CoopNetService {
             CoopLog.warn(CoopNetService.class, "Coop TCP outbound queue for peer slot " + peer.slot()
                     + " is " + peer.outboundDepth() + " messages deep (warn threshold "
                     + QUEUE_DEPTH_WARN_MESSAGES
-                    + "); the peer's socket is not draining. Nothing is dropped — superseded"
-                    + " snapshots coalesce, events queue.");
+                    + "); the peer's socket is not draining. Superseded snapshots coalesce and, past "
+                    + QUEUE_HARD_CAP_MESSAGES + ", are dropped oldest-first.");
         }
+        enforceQueueCapLocked(peer);
+    }
+
+    /**
+     * The queue's hard bound (red-team A4). Past {@link #QUEUE_HARD_CAP_MESSAGES} the oldest
+     * superseded snapshot is discarded per message queued, which holds the depth flat while the
+     * events behind it keep their order; past {@link #QUEUE_DROP_LINK_MESSAGES} — reachable only when
+     * there is nothing left to discard, i.e. the whole queue is semantic events — the link is dropped
+     * so the disconnect edge and the reconnect grace can do their job instead of the heap growing.
+     */
+    private void enforceQueueCapLocked(CoopPeerLink peer) {
+        while (peer.outboundDepth() > QUEUE_HARD_CAP_MESSAGES && peer.dropOldestCoalescable()) {
+            queueOverflowDrops++;
+        }
+        if (peer.outboundDepth() <= QUEUE_DROP_LINK_MESSAGES) {
+            return;
+        }
+        CoopLog.warn(CoopNetService.class, "Coop TCP dropping peer slot " + peer.slot()
+                + ": its outbound queue reached " + peer.outboundDepth() + " undroppable messages (cap "
+                + QUEUE_DROP_LINK_MESSAGES + "). The socket has not drained for a long time; treating"
+                + " the peer as gone so the reconnect path can run.");
+        closeLinkLocked(peer);
+        queueOverflowDrops += peer.discardOutbound();
     }
 
     private CoopPeerLink peerBySenderIdLocked(String senderId) {
@@ -525,7 +736,11 @@ public class CoopNetService {
                 try {
                     CoopMessages.DatagramHeader header =
                             CoopMessages.parseDatagramHeader(CoopMessages.parseStateDatagram(message));
-                    return "STATE_DATAGRAM|" + header.type().name() + '|' + header.senderId();
+                    // Red-team C2: the chunk belongs in the key. Without it, a backlogged TCP
+                    // fallback superseded chunk 0..n-1 of a tick with chunk n and delivered a batch
+                    // missing most of its fleets, which reads as fleets that simply stopped moving.
+                    return "STATE_DATAGRAM|" + header.type().name() + '|' + header.senderId()
+                            + '|' + header.chunk();
                 } catch (RuntimeException ex) {
                     return null;
                 }
@@ -662,9 +877,31 @@ public class CoopNetService {
         }
         for (CoopPeerLink peer : peers) {
             readAvailableLocked(peer);
+            enforceHandshakeDeadlineLocked(peer);
         }
         readDatagramsLocked();
         refreshConnectedLocked();
+    }
+
+    /**
+     * Drops a host-side connection that has held the slot past {@link #HANDSHAKE_DEADLINE_MILLIS}
+     * without a session ever coming into existence (red-team A1). {@code expectedSessionToken} is set
+     * at the instant the handshake (or a resume) is accepted, so it is the honest test for "this peer
+     * proved itself"; measured from attach so the peer cannot push the deadline back by sending.
+     */
+    private void enforceHandshakeDeadlineLocked(CoopPeerLink peer) {
+        if (role != CoopConnectionRole.HOST || expectedSessionToken != null || !peer.occupied()) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (now - peer.attachedAtMillis() < HANDSHAKE_DEADLINE_MILLIS) {
+            return;
+        }
+        handshakeDeadlineDrops++;
+        CoopLog.warn(CoopNetService.class, "Coop TCP dropping peer slot " + peer.slot()
+                + ": it has held the slot for " + (now - peer.attachedAtMillis())
+                + " ms without a session (deadline " + HANDSHAKE_DEADLINE_MILLIS + " ms)");
+        closeLinkLocked(peer);
     }
 
     /** Recomputes the {@link #isConnected()} cache from the peer table. Cheap: one pass, two reads. */
@@ -730,12 +967,17 @@ public class CoopNetService {
                 return;
             }
             received++;
-            if (!datagramBuffer.hasRemaining()) {
-                // Buffer filled to capacity: the datagram was at least as large as the buffer and may
-                // be truncated. Decoding it would yield a corrupt payload, so discard it.
-                droppedMalformed++;
-                CoopLog.warn(CoopNetService.class, "Coop UDP discarding truncated datagram from " + source
-                        + " (filled the " + datagramBuffer.capacity() + "-byte buffer)");
+            if (datagramBuffer.position() > MAX_INBOUND_DATAGRAM_BYTES) {
+                // Red-team A5/A15: replaces a truncated-buffer check that could never fire (no UDP
+                // payload reaches 64 KB). Everything this transport composes is under 1200 bytes, so
+                // anything past the cap is work a sender chose the size of.
+                droppedOversizedInbound++;
+                if (!oversizedInboundWarned) {
+                    oversizedInboundWarned = true;
+                    CoopLog.warn(CoopNetService.class, "Coop UDP dropping oversized datagram from "
+                            + source + " (" + datagramBuffer.position() + " bytes, cap "
+                            + MAX_INBOUND_DATAGRAM_BYTES + "); further ones are counted, not logged");
+                }
                 continue;
             }
             datagramBuffer.flip();
@@ -791,6 +1033,18 @@ public class CoopNetService {
                 CoopLog.warn(CoopNetService.class, "Coop UDP dropping datagram from " + source
                         + " with a foreign session token (type " + header.type() + ")");
             }
+            return;
+        }
+        // Red-team A5/A7: stamp sanity before anything is learned from the packet. The full parse
+        // enforces the same bounds on every section; these two are the cheap first-section checks the
+        // envelope prefix already paid for, and they are what keeps a single crafted stamp from
+        // reaching the receiver's per-stream tables at all.
+        if (header.chunk() < 0 || header.chunk() >= CoopMessages.MAX_DATAGRAM_CHUNKS) {
+            droppedBadChunk++;
+            return;
+        }
+        if (header.epoch() < 0L) {
+            droppedBadEpoch++;
             return;
         }
 
@@ -1039,7 +1293,28 @@ public class CoopNetService {
         connectionAttempts++;
         long now = clockMillis.getAsLong();
         InetAddress source = peerAddressOf(accepted);
-        boolean throttled = noteConnectionAttemptLocked(source, now);
+        String key = throttleKey(source);
+        // Red-team A3: the throttle verdict now gates the whole accept, not just the reject path. A
+        // slot that happens to be free was a way around it, and slot availability is exactly what a
+        // flood is trying to control; a source in its cooldown gets no frame and no slot.
+        //
+        // Both gates skip a known peer, and its attempts are not counted either: a returning guest
+        // knocking through a half-open window must never be able to throttle itself out of its own
+        // reconnect grace. See isKnownPeerLocked for why that is not a hole.
+        if (!isKnownPeerLocked(source, now)) {
+            if (isProofThrottledLocked(key, now)) {
+                proofThrottled++;
+                logProofThrottleOnceLocked(key, source, now);
+                closeChannel(accepted);
+                return;
+            }
+            if (noteConnectionAttemptLocked(key, now)) {
+                connectionsThrottled++;
+                logThrottleOnceLocked(key, source, now);
+                closeChannel(accepted);
+                return;
+            }
+        }
 
         CoopPeerLink free = freeSlotLocked();
         if (free == null) {
@@ -1057,15 +1332,6 @@ public class CoopNetService {
         }
 
         if (free == null) {
-            // Nothing can be done with this connection, which is exactly the case the throttle is for:
-            // the reject frame below is written on a *blocking* socket, and that is the work a flood
-            // was buying. A throttled address gets no frame and no work at all.
-            if (throttled) {
-                connectionsThrottled++;
-                logThrottleOnceLocked(source, now);
-                closeChannel(accepted);
-                return;
-            }
             CoopLog.warn(CoopNetService.class, "Coop TCP rejecting extra connection");
             rejectExtraConnectionLocked(accepted);
             return;
@@ -1075,29 +1341,27 @@ public class CoopNetService {
     }
 
     /**
-     * Counts one accepted connection from {@code source} and reports whether that address is in its
-     * cooldown. Deliberately does <em>not</em> decide the connection's fate: an attempt that can be
-     * admitted into a free slot is always admitted, because a legitimate guest reconnecting every
-     * 500 ms through a half-open window would otherwise throttle itself out of its own grace period.
-     * The throttle only ever suppresses the reject path, which is the expensive one.
+     * Counts one accepted connection from a throttle key and reports whether that key is in its
+     * cooldown.
+     *
+     * <p>The verdict now decides the connection's fate outright (red-team A3). It used to suppress
+     * only the reject path, on the reasoning that a guest reconnecting every 500 ms through a
+     * half-open window must not throttle itself out of its own grace period — but slot availability
+     * is precisely what a flood is trying to control, so "there happened to be a free slot" was a way
+     * around the limit, and password guessing sailed straight through it because every wrong guess
+     * frees the slot it just took.
+     *
+     * <p>The reconnect cost is real and bounded: a guest knocking at 500 ms against an occupied slot
+     * is refused after {@link #MAX_CONNECTION_ATTEMPTS_PER_WINDOW} attempts and waits out
+     * {@link #CONNECTION_THROTTLE_COOLDOWN_MILLIS}, which is half of a default grace window rather
+     * than all of it. Attempts made <em>during</em> a cooldown are deliberately not counted, so the
+     * cooldown cannot be extended by continuing to knock.
      */
-    private boolean noteConnectionAttemptLocked(InetAddress source, long now) {
-        if (source == null) {
+    private boolean noteConnectionAttemptLocked(String key, long now) {
+        if (key == null) {
             return false;
         }
-        AttemptRecord record = attemptsByAddress.get(source);
-        if (record == null) {
-            record = new AttemptRecord();
-            if (attemptsByAddress.size() >= MAX_ATTEMPT_RECORDS) {
-                Iterator<Map.Entry<InetAddress, AttemptRecord>> oldest =
-                        attemptsByAddress.entrySet().iterator();
-                if (oldest.hasNext()) {
-                    oldest.next();
-                    oldest.remove();
-                }
-            }
-            attemptsByAddress.put(source, record);
-        }
+        AttemptRecord record = recordForLocked(key);
         if (now < record.throttledUntilMillis) {
             // Deliberately not counted. Counting knocks that are already being refused would let a
             // peer that keeps retrying — which is exactly what the guest's own 500 ms reconnect loop
@@ -1122,25 +1386,116 @@ public class CoopNetService {
         return false;
     }
 
+    /** The record for one throttle key, creating it and evicting the eldest when the table is full. */
+    private AttemptRecord recordForLocked(String key) {
+        AttemptRecord record = attemptsByAddress.get(key);
+        if (record != null) {
+            return record;
+        }
+        record = new AttemptRecord();
+        if (attemptsByAddress.size() >= MAX_ATTEMPT_RECORDS) {
+            Iterator<Map.Entry<String, AttemptRecord>> oldest = attemptsByAddress.entrySet().iterator();
+            if (oldest.hasNext()) {
+                oldest.next();
+                oldest.remove();
+            }
+        }
+        attemptsByAddress.put(key, record);
+        return record;
+    }
+
+    /**
+     * Whether {@code source} is a peer this transport already knows: it holds a slot right now, or a
+     * link of its was torn down within {@link #KNOWN_PEER_MEMORY_MILLIS} while a session token
+     * existed. Such an address is exempt from both abuse gates, and its attempts are not counted.
+     *
+     * <p><b>Why this does not undo A3.</b> The memory is only written for a link that had
+     * <em>proved</em> a session — the token is set at the instant the handshake is accepted, and it
+     * is still set when the link dies, because the pump clears it only after it observes the
+     * disconnect edge. A password guesser never gets that far: its connection is dropped during the
+     * lobby exchange, before any handshake, so it is never remembered and the failed-proof cooldown
+     * still applies to it in full. Exactly one class of address is exempt, and it is the one whose
+     * whole problem is that it is trying to come back.
+     *
+     * <p>Matched on the full address rather than the {@link #throttleKey} prefix: this is a
+     * permission, and a permission granted to a /64 is a permission granted to everyone behind it.
+     */
+    private boolean isKnownPeerLocked(InetAddress source, long now) {
+        if (source == null) {
+            return false;
+        }
+        for (CoopPeerLink peer : peers) {
+            if (peer.occupied() && source.equals(peer.pinnedPeerAddress())) {
+                return true;
+            }
+        }
+        return lastKnownPeerAddress != null && source.equals(lastKnownPeerAddress)
+                && now - lastKnownPeerAtMillis < KNOWN_PEER_MEMORY_MILLIS;
+    }
+
+    private boolean isProofThrottledLocked(String key, long now) {
+        AttemptRecord record = key == null ? null : attemptsByAddress.get(key);
+        return record != null && now < record.proofThrottledUntilMillis;
+    }
+
+    /**
+     * Throttle identity for a source address (red-team A13). IPv4 is the address; IPv6 is the /64
+     * prefix, because a residential IPv6 host is routinely delegated a /64 (often a /56 or /48) and
+     * can therefore source every attempt from an address it has never used before — per-address
+     * records would then be a table of one-shot entries and a rate limit that never fires.
+     */
+    static String throttleKey(InetAddress source) {
+        if (source == null) {
+            return null;
+        }
+        byte[] bytes = source.getAddress();
+        if (bytes == null || bytes.length != 16) {
+            return source.getHostAddress();
+        }
+        StringBuilder prefix = new StringBuilder(20);
+        for (int i = 0; i < 8; i++) {
+            prefix.append(Character.forDigit((bytes[i] >>> 4) & 0x0f, 16));
+            prefix.append(Character.forDigit(bytes[i] & 0x0f, 16));
+        }
+        return prefix.append("::/64").toString();
+    }
+
     /** One line per address per cooldown; a flood must not be able to write the log. */
-    private void logThrottleOnceLocked(InetAddress source, long now) {
-        AttemptRecord record = source == null ? null : attemptsByAddress.get(source);
+    private void logThrottleOnceLocked(String key, InetAddress source, long now) {
+        AttemptRecord record = key == null ? null : attemptsByAddress.get(key);
         if (record == null || record.throttleLogged) {
             return;
         }
         record.throttleLogged = true;
         CoopLog.warn(CoopNetService.class, "Coop TCP throttling connection attempts from "
-                + source.getHostAddress() + ": more than " + MAX_CONNECTION_ATTEMPTS_PER_WINDOW
+                + (source == null ? key : source.getHostAddress()) + ": more than "
+                + MAX_CONNECTION_ATTEMPTS_PER_WINDOW
                 + " in " + CONNECTION_ATTEMPT_WINDOW_MILLIS + " ms. Further attempts are closed with"
                 + " no reply for " + (record.throttledUntilMillis - now) + " ms.");
     }
 
-    /** Per-source connection-attempt window plus its cooldown; see {@link #noteConnectionAttemptLocked}. */
+    /** As above for the failed-password cooldown; one line per cooldown, not per refused connection. */
+    private void logProofThrottleOnceLocked(String key, InetAddress source, long now) {
+        AttemptRecord record = key == null ? null : attemptsByAddress.get(key);
+        if (record == null || record.proofThrottleLogged) {
+            return;
+        }
+        record.proofThrottleLogged = true;
+        CoopLog.warn(CoopNetService.class, "Coop TCP closing connections from "
+                + (source == null ? key : source.getHostAddress()) + " with no reply for "
+                + (record.proofThrottledUntilMillis - now) + " ms after " + record.failedProofs
+                + " failed lobby password proofs");
+    }
+
+    /** Per-source connection-attempt window plus its cooldowns; see {@link #noteConnectionAttemptLocked}. */
     private static final class AttemptRecord {
         private long windowStartMillis;
         private int attempts;
         private long throttledUntilMillis;
         private boolean throttleLogged;
+        private int failedProofs;
+        private long proofThrottledUntilMillis;
+        private boolean proofThrottleLogged;
     }
 
     private CoopPeerLink freeSlotLocked() {
@@ -1161,9 +1516,17 @@ public class CoopNetService {
         return null;
     }
 
+    /**
+     * Tells an extra connection why it is being closed, on a best-effort basis (red-team C5). One
+     * non-blocking write, then close: this runs on the campaign thread, and the previous blocking
+     * write-until-done loop handed any peer that opened a connection and never read from it — a
+     * zero-window socket, deliberate or not — the ability to park the whole frame inside
+     * {@code channel.write}. The reject is a courtesy; the guest's reconnect loop does not need it,
+     * and a frame that stalls the game to deliver a courtesy is the wrong trade.
+     */
     private void rejectExtraConnectionLocked(SocketChannel channel) {
         try {
-            channel.configureBlocking(true);
+            channel.configureBlocking(false);
             channel.socket().setTcpNoDelay(true);
             CoopMessages.Message reject = CoopMessages.lobbyReject(
                     nextSeq(),
@@ -1171,10 +1534,9 @@ public class CoopNetService {
                     EXTRA_CONNECTION_REJECT_REASON);
             ByteBuffer frame = ByteBuffer.wrap((CoopMessages.encode(reject) + "\n")
                     .getBytes(StandardCharsets.UTF_8));
-            while (frame.hasRemaining()) {
-                channel.write(frame);
-            }
-            CoopLog.warn(CoopNetService.class, "Coop TCP rejected extra connection with lobby reject");
+            channel.write(frame);
+            CoopLog.warn(CoopNetService.class, "Coop TCP rejected extra connection with lobby reject"
+                    + (frame.hasRemaining() ? " (partially written; closing anyway)" : ""));
         } catch (Exception ex) {
             CoopLog.warn(CoopNetService.class, "Coop TCP failed to reject extra connection cleanly", ex);
         } finally {
@@ -1250,6 +1612,7 @@ public class CoopNetService {
         channel.socket().setTcpNoDelay(true);
         InetAddress pinned = peerAddressOf(channel);
         peer.attach(channel, pinned, clockMillis.getAsLong(), role == CoopConnectionRole.HOST);
+        connectionGeneration++;
         refreshConnectedLocked();
         CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role
                 + " on peer slot " + peer.slot()
@@ -1267,6 +1630,19 @@ public class CoopNetService {
         Runnable oversized = OVERSIZED_FRAME_WARNING;
 
         try {
+            // Bytes a previous poll could not frame within its ceiling come first, in stream order.
+            ByteBuffer deferred = peer.deferredInbound();
+            if (deferred != null) {
+                boolean drained = consumeInboundBytesLocked(peer, deferred, frameSink, oversized);
+                peer.deferInbound(drained ? null : deferred);
+                if (!drained || peer.channel() == null) {
+                    return;
+                }
+            }
+            if (framesThisPoll >= MAX_FRAMES_PER_POLL) {
+                return;
+            }
+
             readBuffer.clear();
             int read = channel.read(readBuffer);
             if (read > 0) {
@@ -1274,8 +1650,16 @@ public class CoopNetService {
             }
             while (read > 0) {
                 readBuffer.flip();
-                while (readBuffer.hasRemaining()) {
-                    peer.appendInboundByte(readBuffer.get(), frameSink, oversized);
+                if (!consumeInboundBytesLocked(peer, readBuffer, frameSink, oversized)) {
+                    // Red-team A12: the ceiling is enforced per frame, not per 8 KB read, so a sender
+                    // of one-byte frames cannot buy 8192 frames of work with a single buffer. What is
+                    // left of the buffer is this peer's stream and is parked, never discarded.
+                    peer.deferInbound(readBuffer);
+                    return;
+                }
+                if (peer.channel() == null) {
+                    // The link was closed by a handler mid-buffer (garbage strikes, queue cap).
+                    return;
                 }
                 readBuffer.clear();
                 if (framesThisPoll >= MAX_FRAMES_PER_POLL) {
@@ -1294,35 +1678,67 @@ public class CoopNetService {
         }
     }
 
+    /**
+     * Feeds {@code buffer} through the peer's framer, stopping at the per-poll frame ceiling.
+     *
+     * @return true when the buffer was drained; false when the ceiling stopped it with bytes left
+     */
+    private boolean consumeInboundBytesLocked(CoopPeerLink peer, ByteBuffer buffer,
+                                              java.util.function.Consumer<String> frameSink,
+                                              Runnable oversized) {
+        while (buffer.hasRemaining()) {
+            if (peer.channel() == null) {
+                // Closed mid-buffer by a handler; the rest of this peer's stream is moot.
+                buffer.position(buffer.limit());
+                return true;
+            }
+            if (framesThisPoll >= MAX_FRAMES_PER_POLL) {
+                return false;
+            }
+            peer.appendInboundByte(buffer.get(), frameSink, oversized);
+        }
+        return true;
+    }
+
     private void handleFrame(CoopPeerLink peer, String frame) {
+        // Red-team A1/A12: counted before anything else. An empty or whitespace-only line is a frame
+        // the sender chose to send; leaving it free of both the poll ceiling and the strike count is
+        // what let a stranger hold the slot indefinitely by trickling newlines, and let one read
+        // buffer of newlines cost thousands of framer passes.
+        framesThisPoll++;
         if (frame.isEmpty()) {
+            noteBadFrameLocked(peer, "an empty frame", null);
             return;
         }
-        framesThisPoll++;
         CoopMessages.Message message;
         try {
             message = CoopMessages.decode(frame);
         } catch (RuntimeException ex) {
-            invalidFrames++;
-            int strikes = peer.noteInvalidFrame();
-            // First strike only: a garbage flood must show up in the counters, not in the log.
-            if (strikes == 1) {
-                CoopLog.warn(CoopNetService.class, "Coop TCP received invalid frame on peer slot "
-                        + peer.slot() + " (further ones are counted, not logged)", ex);
-            }
-            // A handshake-complete session is allowed to resynchronise; a stranger on an
-            // Internet-open port is not. expectedSessionToken is set at the exact instant the
-            // handshake is accepted, which makes it the honest "this peer has proved itself" test.
-            if (expectedSessionToken == null && strikes >= PRE_SESSION_INVALID_FRAME_LIMIT) {
-                connectionsDroppedForGarbage++;
-                CoopLog.warn(CoopNetService.class, "Coop TCP dropping a pre-session connection after "
-                        + strikes + " undecodable frames on peer slot " + peer.slot());
-                closeLinkLocked(peer);
-            }
+            noteBadFrameLocked(peer, "an invalid frame", ex);
             return;
         }
         peer.learnSenderId(message.senderId());
         inbound.add(message);
+    }
+
+    /** One strike for a frame that carried nothing usable, and the pre-session drop rule behind it. */
+    private void noteBadFrameLocked(CoopPeerLink peer, String what, RuntimeException ex) {
+        invalidFrames++;
+        int strikes = peer.noteInvalidFrame();
+        // First strike only: a garbage flood must show up in the counters, not in the log.
+        if (strikes == 1) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP received " + what + " on peer slot "
+                    + peer.slot() + " (further ones are counted, not logged)", ex);
+        }
+        // A handshake-complete session is allowed to resynchronise; a stranger on an
+        // Internet-open port is not. expectedSessionToken is set at the exact instant the
+        // handshake is accepted, which makes it the honest "this peer has proved itself" test.
+        if (expectedSessionToken == null && strikes >= PRE_SESSION_INVALID_FRAME_LIMIT) {
+            connectionsDroppedForGarbage++;
+            CoopLog.warn(CoopNetService.class, "Coop TCP dropping a pre-session connection after "
+                    + strikes + " undecodable frames on peer slot " + peer.slot());
+            closeLinkLocked(peer);
+        }
     }
 
     private void flushOutboundLocked(CoopPeerLink peer) {
@@ -1381,6 +1797,12 @@ public class CoopNetService {
         if (channel == null) {
             return;
         }
+        if (expectedSessionToken != null && peer.pinnedPeerAddress() != null) {
+            // A link that had proved a session is a peer worth letting back in; see isKnownPeerLocked.
+            // Read before detach(), which forgets the pinned address.
+            lastKnownPeerAddress = peer.pinnedPeerAddress();
+            lastKnownPeerAtMillis = clockMillis.getAsLong();
+        }
         peer.detach();
         closeChannel(channel);
         refreshConnectedLocked();
@@ -1409,11 +1831,14 @@ public class CoopNetService {
         noTokenWarned = false;
         tokenMismatchWarned = false;
         malformedDatagramWarned = false;
+        oversizedInboundWarned = false;
         inboundDatagrams.clear();
         // TCP queues too: a session restarted inside the same game process would otherwise replay
         // leftovers (a stale HANDSHAKE_RESULT, say) into the fresh connection.
         inbound.clear();
         attemptsByAddress.clear();
+        lastKnownPeerAddress = null;
+        lastKnownPeerAtMillis = 0L;
         connectHost = null;
         connectPort = 0;
         nextConnectAttemptAtMillis = 0L;

@@ -4,6 +4,7 @@ import coop.session.CoopPlayerInfo;
 import coop.handshake.CoopHandshakeManifest;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -279,6 +280,78 @@ class CoopMessagesTest {
                 () -> CoopMessages.parseDatagramHeader("token\u001fsender\u001fPING"));
         assertThrows(IllegalArgumentException.class,
                 () -> CoopMessages.parseDatagramHeader("token\u001fsender\u001fNOT_A_TYPE\u001f1\u001f2\u001f0\u001fbody"));
+    }
+
+    // ---- red-team A5/C2: bounded stamps, and the chunk in the header -----------------------------
+
+    @Test
+    void a5_aDatagramWithAnOutOfRangeChunkIsRejectedAtParse() {
+        String encoded = CoopMessages.datagram("token", "sender",
+                CoopMessages.Type.FLEET_SNAPSHOT, 1L, 2L, 7, "body");
+
+        // The chunk index keys receiver-side per-chunk state; an unbounded index is an unbounded map.
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagram(
+                encoded.replace("\u001f7\u001f", "\u001f-1\u001f")));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagram(
+                encoded.replace("\u001f7\u001f", "\u001f" + CoopMessages.MAX_DATAGRAM_CHUNKS + "\u001f")));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagram(
+                encoded.replace("\u001f7\u001f", "\u001f2000000000\u001f")));
+
+        // The last legal index still parses, so the bound is a bound and not an off-by-one.
+        assertEquals(CoopMessages.MAX_DATAGRAM_CHUNKS - 1, CoopMessages.parseDatagram(
+                        encoded.replace("\u001f7\u001f",
+                                "\u001f" + (CoopMessages.MAX_DATAGRAM_CHUNKS - 1) + "\u001f"))
+                .sections().get(0).chunk());
+    }
+
+    @Test
+    void a5_aDatagramWithMoreSectionsThanTheCapIsRejectedAtParse() {
+        List<CoopMessages.DatagramSection> tooMany = new ArrayList<>();
+        for (int i = 0; i <= CoopMessages.MAX_DATAGRAM_SECTIONS; i++) {
+            tooMany.add(new CoopMessages.DatagramSection(i + 1, i * 10L, 0, "body-" + i));
+        }
+        String encoded = CoopMessages.datagram("token", "sender",
+                CoopMessages.Type.NPC_FLEET_MOTION, tooMany);
+
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagram(encoded));
+
+        // Redundancy composes two; the cap is only ever reached by a sender that chose to.
+        assertEquals(CoopMessages.MAX_DATAGRAM_SECTIONS,
+                CoopMessages.parseDatagram(CoopMessages.datagram("token", "sender",
+                                CoopMessages.Type.NPC_FLEET_MOTION,
+                                tooMany.subList(0, CoopMessages.MAX_DATAGRAM_SECTIONS)))
+                        .sections().size());
+    }
+
+    @Test
+    void c2_theDatagramHeaderCarriesTheFirstSectionsEpochAndChunk() {
+        String encoded = CoopMessages.datagram("0123456789abcdef", "fedcba9876543210",
+                CoopMessages.Type.NPC_FLEET_MOTION, 41L, 400L, 3, "body");
+
+        CoopMessages.DatagramHeader header = CoopMessages.parseDatagramHeader(encoded);
+
+        assertEquals(41L, header.epoch());
+        assertEquals(3, header.chunk(), "the TCP fallback keys its coalescing on this");
+
+        // Redundancy's two-section form: the header reports the OLDEST section, which is the one the
+        // envelope leads with, so the key is stable across a datagram and its redundant predecessor.
+        String withPrevious = CoopMessages.datagram("0123456789abcdef", "fedcba9876543210",
+                CoopMessages.Type.NPC_FLEET_MOTION,
+                List.of(new CoopMessages.DatagramSection(40L, 300L, 3, "prev"),
+                        new CoopMessages.DatagramSection(41L, 400L, 3, "cur")));
+        assertEquals(3, CoopMessages.parseDatagramHeader(withPrevious).chunk());
+        assertEquals(40L, CoopMessages.parseDatagramHeader(withPrevious).epoch());
+    }
+
+    @Test
+    void c2_aHeaderWithAnUnparseableSectionStampIsMalformed() {
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagramHeader(
+                "token\u001fsender\u001fFLEET_SNAPSHOT\u001fnot-a-number\u001f2\u001f0\u001fbody"));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagramHeader(
+                "token\u001fsender\u001fFLEET_SNAPSHOT\u001f1\u001f2\u001fnot-a-chunk\u001fbody"));
+        // A section stamp that is cut short is not a datagram this transport emits either.
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagramHeader(
+                "token\u001fsender\u001fFLEET_SNAPSHOT\u001f1\u001f2"));
     }
 
     // ---- Phase 20.1 wire token ------------------------------------------------------------------

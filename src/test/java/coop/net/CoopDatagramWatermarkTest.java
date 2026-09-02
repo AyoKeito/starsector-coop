@@ -139,8 +139,11 @@ class CoopDatagramWatermarkTest {
             assertEquals(1, fresh.size(), "chunk " + chunk);
             assertEquals("c" + chunk, fresh.get(0).body());
         }
-        assertEquals(Set.of(0, 1, 2, 3),
-                watermark.chunksAtWatermark(SENDER_A, CoopMessages.Type.NPC_FLEET_MOTION));
+        // Red-team C7: the mark is per (sender, type, chunk), so each chunk carries its own epoch
+        // instead of a shared epoch plus a set of chunks seen at it.
+        for (int chunk = 0; chunk < 4; chunk++) {
+            assertEquals(7L, watermark.watermarkFor(SENDER_A, CoopMessages.Type.NPC_FLEET_MOTION, chunk));
+        }
     }
 
     @Test
@@ -161,17 +164,58 @@ class CoopDatagramWatermarkTest {
                 CoopMessages.Type.NPC_FLEET_MOTION, chunked(7L, 2, "c2-again"))));
     }
 
+    /**
+     * Updated for red-team C7. This used to assert that a higher epoch on <em>one</em> chunk made the
+     * old epoch stale for <em>every</em> chunk — which is exactly the recovery hole C7 names: chunk
+     * 5's datagram is lost, chunk 2's next tick arrives, and the redundancy copy that would have
+     * recovered chunk 5 is thrown away because a different chunk moved the shared mark. With a mark
+     * per chunk, each chunk goes stale only on its own newer send.
+     */
     @Test
-    void aHigherEpochResetsTheSeenChunkSet() {
+    void aNewerEpochOnOneChunkDoesNotMakeAnotherChunksTickStale() {
         watermark.accept(datagram("s", CoopMessages.Type.NPC_FLEET_MOTION, chunked(7L, 2, "c2")));
 
         assertEquals(1, watermark.accept(datagram("s",
                 CoopMessages.Type.NPC_FLEET_MOTION, chunked(8L, 2, "next-c2"))).size());
-        assertEquals(Set.of(2),
-                watermark.chunksAtWatermark(SENDER_A, CoopMessages.Type.NPC_FLEET_MOTION));
-        // The old epoch is now stale for every chunk, seen or not.
+        assertEquals(8L, watermark.watermarkFor(SENDER_A, CoopMessages.Type.NPC_FLEET_MOTION, 2));
+        // Chunk 2's own epoch 7 stays stale...
         assertEquals(List.of(), watermark.accept(datagram("s",
-                CoopMessages.Type.NPC_FLEET_MOTION, chunked(7L, 5, "late-c5"))));
+                CoopMessages.Type.NPC_FLEET_MOTION, chunked(7L, 2, "late-c2"))));
+        // ...while chunk 5's lost epoch-7 send is still recoverable, which is the point of C7.
+        assertEquals(1, watermark.accept(datagram("s",
+                CoopMessages.Type.NPC_FLEET_MOTION, chunked(7L, 5, "late-c5"))).size());
+    }
+
+    // ---- red-team A5/A7: bounded epochs and a bounded table --------------------------------------
+
+    @Test
+    void a7_anAbsurdEpochIsRejectedInsteadOfWedgingTheStreamForever() {
+        watermark.accept(datagram("s", CoopMessages.Type.FLEET_SNAPSHOT, section(5, "real")));
+
+        assertEquals(List.of(), watermark.accept(datagram("s",
+                        CoopMessages.Type.FLEET_SNAPSHOT, section(Long.MAX_VALUE, "wedge"))),
+                "a Long.MAX_VALUE epoch must not be believed");
+        assertEquals(List.of(), watermark.accept(datagram("s",
+                        CoopMessages.Type.FLEET_SNAPSHOT, section(-1L, "negative"))),
+                "a negative epoch is not a stamp any sender produces");
+        assertEquals(2L, watermark.rejectedBadEpoch());
+
+        assertEquals(1, watermark.accept(
+                        datagram("s", CoopMessages.Type.FLEET_SNAPSHOT, section(6, "next"))).size(),
+                "the real stream must still be alive after the crafted stamps");
+        assertEquals(1, watermark.accept(datagram("s", CoopMessages.Type.FLEET_SNAPSHOT,
+                        section(6L + CoopDatagramWatermark.EPOCH_WINDOW, "big-but-legal"))).size(),
+                "a jump inside the window is a real sender's, not an attack");
+    }
+
+    @Test
+    void a5_theStreamTableIsBoundedNoMatterWhatSenderIdsArrive() {
+        for (int i = 0; i < CoopDatagramWatermark.MAX_STREAMS * 2; i++) {
+            watermark.accept(datagram("s", "sender-" + i, CoopMessages.Type.FLEET_SNAPSHOT,
+                    section(1, "body")));
+        }
+
+        assertEquals(CoopDatagramWatermark.MAX_STREAMS, watermark.trackedStreams());
     }
 
     @Test

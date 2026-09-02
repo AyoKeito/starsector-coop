@@ -1034,11 +1034,16 @@ public final class CoopMessages {
      * including hostile ones, and parsing N section bodies to answer "wrong session" is work an
      * attacker would get to choose the size of.
      */
-    public record DatagramHeader(String token, String senderId, Type type) {
+    public record DatagramHeader(String token, String senderId, Type type, long epoch, int chunk) {
         public DatagramHeader {
             Objects.requireNonNull(type, "type");
             token = token == null ? "" : token;
             senderId = senderId == null ? "" : senderId;
+        }
+
+        /** Header without the first section's stamps; kept so older call sites read unchanged. */
+        public DatagramHeader(String token, String senderId, Type type) {
+            this(token, senderId, type, 0L, 0);
         }
     }
 
@@ -1047,6 +1052,19 @@ public final class CoopMessages {
     private static final int DATAGRAM_HEADER_TOKENS = 3;
     /** Fields per section: epoch, sentGameTimeMillis, chunk, body. */
     private static final int DATAGRAM_SECTION_TOKENS = 4;
+    /**
+     * Chunk indices a datagram may claim, exclusive upper bound (red-team A5). Producers split a
+     * batch into at most a handful of MTU-sized chunks, and the receiver keys per-chunk state on this
+     * number - so an unbounded chunk id is an unbounded map. 64 is far above anything the packer can
+     * emit and small enough that a crafted packet buys nothing.
+     */
+    public static final int MAX_DATAGRAM_CHUNKS = 64;
+    /**
+     * Sections one datagram may carry (red-team A5). Redundancy composes exactly two - previous plus
+     * current - so anything past a handful is a crafted packet asking the receiver to do work per
+     * section at a size the sender chose.
+     */
+    public static final int MAX_DATAGRAM_SECTIONS = 8;
 
     public static String datagram(String token, String senderId, Type type,
                                   List<DatagramSection> sections) {
@@ -1139,15 +1157,27 @@ public final class CoopMessages {
         String senderId = tokens[1];
         Type type = Type.valueOf(tokens[2]);
         int sectionCount = (tokens.length - DATAGRAM_HEADER_TOKENS) / DATAGRAM_SECTION_TOKENS;
+        if (sectionCount > MAX_DATAGRAM_SECTIONS) {
+            // Red-team A5: the section count is attacker-chosen and every section is per-packet work
+            // the receiver does. Nothing this transport composes exceeds two.
+            throw new IllegalArgumentException("Coop datagram carries " + sectionCount
+                    + " sections, cap " + MAX_DATAGRAM_SECTIONS);
+        }
         List<DatagramSection> sections = new ArrayList<>(sectionCount);
         for (int i = 0; i < sectionCount; i++) {
             int base = DATAGRAM_HEADER_TOKENS + i * DATAGRAM_SECTION_TOKENS;
+            int chunk;
             try {
+                chunk = Integer.parseInt(tokens[base + 2]);
                 sections.add(new DatagramSection(Long.parseLong(tokens[base]),
-                        Long.parseLong(tokens[base + 1]), Integer.parseInt(tokens[base + 2]),
-                        tokens[base + 3]));
+                        Long.parseLong(tokens[base + 1]), chunk, tokens[base + 3]));
             } catch (NumberFormatException ex) {
                 throw new IllegalArgumentException("Malformed coop datagram section stamp", ex);
+            }
+            // Red-team A5: the chunk index keys receiver-side per-chunk state, so it is bounded at
+            // the one point every inbound datagram passes through.
+            if (chunk < 0 || chunk >= MAX_DATAGRAM_CHUNKS) {
+                throw new IllegalArgumentException("Coop datagram section chunk out of range: " + chunk);
             }
         }
         return new Datagram(token, senderId, type, sections);
@@ -1170,10 +1200,28 @@ public final class CoopMessages {
             // emits — reject it here rather than let a header-only packet through the filter.
             throw new IllegalArgumentException("Malformed coop datagram envelope");
         }
+        // The first section's epoch and chunk are part of the prefix (red-team C2/A7): the TCP
+        // fallback's coalescing key needs the chunk or it censors every chunk but the last, and the
+        // transport's epoch sanity check needs the stamp before any body is looked at. Three more
+        // separator scans and two integer parses - still nothing an attacker chooses the size of.
+        int fourth = raw.indexOf(DATAGRAM_SEPARATOR, third + 1);
+        int fifth = fourth < 0 ? -1 : raw.indexOf(DATAGRAM_SEPARATOR, fourth + 1);
+        int sixth = fifth < 0 ? -1 : raw.indexOf(DATAGRAM_SEPARATOR, fifth + 1);
+        if (sixth < 0) {
+            throw new IllegalArgumentException("Malformed coop datagram envelope");
+        }
+        long epoch;
+        int chunk;
+        try {
+            epoch = Long.parseLong(raw.substring(third + 1, fourth));
+            chunk = Integer.parseInt(raw.substring(fifth + 1, sixth));
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException("Malformed coop datagram section stamp", ex);
+        }
         String typeName = raw.substring(second + 1, third);
         try {
             return new DatagramHeader(raw.substring(0, first), raw.substring(first + 1, second),
-                    Type.valueOf(typeName));
+                    Type.valueOf(typeName), epoch, chunk);
         } catch (IllegalArgumentException ex) {
             throw new IllegalArgumentException("Unknown coop datagram type: " + typeName, ex);
         }

@@ -171,6 +171,11 @@ public final class CoopPortMapper {
     // Lifecycle.
     private long nextRenewMillis = Long.MAX_VALUE;
     private boolean renewing;
+    /** Last value {@link #result()} produced, and a counter bumped whenever it differs; see B5. */
+    private Result publishedResult;
+    private long resultVersion;
+    /** Full passes of the state machine the last {@link #shutdown()} spent; the B8 evidence. */
+    private int shutdownTicks;
     private final Deque<String> releaseQueue = new ArrayDeque<>();
 
     /**
@@ -241,8 +246,36 @@ public final class CoopPortMapper {
 
     /** Immutable snapshot of the current state; safe to call every frame. */
     public Result result() {
-        return new Result(tier, gatewayAddress, gatewayName, externalAddress, externalPort,
+        Result current = new Result(tier, gatewayAddress, gatewayName, externalAddress, externalPort,
                 isUnroutableExternalAddress(externalAddress), failureText, finished);
+        if (!current.equals(publishedResult)) {
+            publishedResult = current;
+            resultVersion++;
+        }
+        return current;
+    }
+
+    /**
+     * A number that changes exactly when {@link #result()} would return something different
+     * (red-team B5). The mapper's verdict is not write-once: a renewal 30 minutes in can lose the
+     * lease, change the external port, or discover CGNAT, and callers that published the first
+     * verdict — the reachability line, the connection doctor — had no way to notice. Polling one long
+     * per frame is cheaper than diffing eight fields, and it cannot be forgotten the way "call me
+     * again when it changes" can.
+     */
+    public long resultVersion() {
+        result();
+        return resultVersion;
+    }
+
+    /**
+     * How many times the last {@link #shutdown()} actually ran the state machine (red-team B8).
+     * Package-private evidence: the loop is a busy wait with no thread to hand off to, so the only
+     * thing that can be asserted about it is that it does not run the machine thousands of times
+     * against a clock that has not moved.
+     */
+    int shutdownTicks() {
+        return shutdownTicks;
     }
 
     /** The internal port the mapper was asked to expose. */
@@ -276,9 +309,12 @@ public final class CoopPortMapper {
                 }
             }
         } catch (Throwable throwable) {
-            // A port mapper must never be able to take the campaign frame down with it.
+            // A port mapper must never be able to take the campaign frame down with it. Routed
+            // through failMapping rather than fail (red-team B5): thrown during a renewal, fail()
+            // marked a mapping that is still live in the router as failed and stopped every future
+            // renewal, so one transient socket error 30 minutes in ended port mapping for the session.
             CoopLog.warn(CoopPortMapper.class, "Coop port mapper aborted: " + throwable, throwable);
-            fail("port mapping aborted: " + describe(throwable));
+            failMapping(nowMillis, "port mapping aborted: " + describe(throwable));
         }
     }
 
@@ -316,13 +352,32 @@ public final class CoopPortMapper {
                 stage = Stage.CLOSED;
             }
 
+            // Red-team B8: the state machine is driven by wall-clock comparisons, so ticking it twice
+            // inside one millisecond re-runs every timeout check against a clock that has not moved
+            // and cannot change the outcome. The old loop did exactly that: its 200,000-iteration
+            // guard was reached in a few milliseconds of spinning, so it burned 200,000 full passes of
+            // the machine and then gave up long before the 1.2 s budget it was written to spend. Now
+            // at most one tick per millisecond runs (~1200 in the budget), and the guard counts only
+            // *consecutive* passes where the clock did not move - which is the injected-fixed-clock
+            // case, and the only way this loop can fail to terminate on its own.
             long deadline = clock.getAsLong() + SHUTDOWN_BUDGET_MILLIS;
-            int guard = 0;
-            while (stage != Stage.CLOSED && stage != Stage.FAILED && guard++ < SHUTDOWN_TICK_GUARD) {
+            long lastTickMillis = Long.MIN_VALUE;
+            int frozenSpins = 0;
+            shutdownTicks = 0;
+            while (stage != Stage.CLOSED && stage != Stage.FAILED) {
                 long now = clock.getAsLong();
                 if (now > deadline) {
                     break;
                 }
+                if (now == lastTickMillis) {
+                    if (++frozenSpins > SHUTDOWN_TICK_GUARD) {
+                        break;
+                    }
+                    continue;
+                }
+                frozenSpins = 0;
+                lastTickMillis = now;
+                shutdownTicks++;
                 tick(now);
             }
             if (stage != Stage.CLOSED && stage != Stage.FAILED) {
@@ -815,7 +870,9 @@ public final class CoopPortMapper {
             stage = nextStage;
             stageStartMillis = now;
         } catch (Exception ex) {
-            fail("cannot reach " + url + ": " + describe(ex));
+            // Renewal-aware for the reason on tick()'s catch (red-team B5): a router that refuses one
+            // connection during a renewal has not invalidated the mapping it already holds.
+            failMapping(now, "cannot reach " + url + ": " + describe(ex));
         }
     }
 

@@ -68,6 +68,30 @@ class CoopPortMapperTest {
         assertTrue(mapper.result().finished());
     }
 
+    /**
+     * B5's publish half: the mapper's verdict is not write-once. A renewal 30 minutes in can lose the
+     * lease, change the external port or discover CGNAT, and every caller that published the first
+     * verdict - the reachability line, the connection doctor - had no way to notice.
+     */
+    @Test
+    void b5_resultVersionChangesExactlyWhenTheResultDoes() {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        CoopPortMapper mapper = CoopPortMapper.startOffline(27015, clock::get);
+
+        long initial = mapper.resultVersion();
+        assertEquals(initial, mapper.resultVersion(), "polling an unchanged result must not churn it");
+
+        for (int i = 0; i < 500 && !mapper.result().finished(); i++) {
+            mapper.tick(clock.addAndGet(100L));
+        }
+
+        long afterVerdict = mapper.resultVersion();
+        assertTrue(afterVerdict > initial, "the verdict changed and a publisher has to be told");
+
+        mapper.tick(clock.addAndGet(60_000L));
+        assertEquals(afterVerdict, mapper.resultVersion(), "a settled mapper stops changing");
+    }
+
     @Test
     void classifiesCarrierGradeAndPrivateAddressesAsUnroutable() {
         for (String address : new String[]{

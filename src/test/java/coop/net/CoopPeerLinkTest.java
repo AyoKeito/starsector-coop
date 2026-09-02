@@ -243,12 +243,20 @@ class CoopPeerLinkTest {
         assertTrue(link.shouldWarnQueueDepth());
         assertFalse(link.shouldWarnQueueDepth());
 
+        assertTrue(link.shouldWarnDatagramSendFailure());
+        assertFalse(link.shouldWarnDatagramSendFailure());
+
         link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
 
         assertTrue(link.shouldWarnForeignSource(), "a fresh connection deserves its own warning");
         assertTrue(link.shouldLogCandidateTimeout());
-        assertFalse(link.shouldWarnQueueDepth(),
-                "queue depth belongs to the queue, which survives a reconnect");
+        // Updated for red-team C8. These two used to survive attach, on the reasoning that the queue
+        // survives a reconnect. But the thing being warned about is a socket that will not drain and
+        // a UDP path that will not send - both properties of the connection, not of the queue - so
+        // leaving the flags set meant the first bad connection of a session silenced the warning for
+        // every connection after it, which is the run where the evidence was wanted.
+        assertTrue(link.shouldWarnQueueDepth(), "a fresh connection re-arms the queue-depth warning");
+        assertTrue(link.shouldWarnDatagramSendFailure());
     }
 
     private static CoopMessages.Message snapshot(long seq) {

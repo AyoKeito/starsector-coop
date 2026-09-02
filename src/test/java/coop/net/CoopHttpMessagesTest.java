@@ -113,13 +113,37 @@ class CoopHttpMessagesTest {
         assertEquals("192.168.1.1:5000", url.authority());
     }
 
+    /** Updated for red-team C4: the host used to be "gateway.local", which is no longer accepted. */
     @Test
     void urlWithoutPortDefaultsTo80AndUrlWithoutPathDefaultsToRoot() {
-        CoopHttpMessages.Url url = CoopHttpMessages.parseUrl("http://gateway.local");
+        CoopHttpMessages.Url url = CoopHttpMessages.parseUrl("http://192.168.1.1");
 
-        assertEquals("gateway.local", url.host());
+        assertEquals("192.168.1.1", url.host());
         assertEquals(80, url.port());
         assertEquals("/", url.path());
+    }
+
+    /**
+     * Every URL the mapper parses arrives in an unauthenticated LAN packet. A name in one would be
+     * resolved on the campaign thread, where the resolver's timeout is a visible freeze of the game
+     * that anything on the LAN can trigger.
+     */
+    @Test
+    void c4_aUrlWithANameHostIsRejectedSoNoDnsRunsOnTheCampaignThread() {
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopHttpMessages.parseUrl("http://gateway.local/rootDesc.xml"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopHttpMessages.parseUrl("http://evil.example.com:5000/rootDesc.xml"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopHttpMessages.parseUrl("http://localhost:8080/x"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopHttpMessages.parseUrl("http://999.1.1.1/x"), "not a dotted quad either");
+
+        // Literals of both families keep working, including a scoped IPv6 one.
+        assertEquals("10.0.0.138", CoopHttpMessages.parseUrl("http://10.0.0.138:49152/d.xml").host());
+        assertEquals("fe80::1%eth0", CoopHttpMessages.parseUrl("http://[fe80::1%eth0]:80/d.xml").host());
+        assertEquals("::ffff:192.168.0.1",
+                CoopHttpMessages.parseUrl("http://[::ffff:192.168.0.1]/d.xml").host());
     }
 
     @Test

@@ -51,10 +51,20 @@ public final class CoopHttpMessages {
     }
 
     /**
-     * Splits an absolute {@code http://} URL. Hand-rolled rather than {@code java.net.URL} because
-     * that class drags in the stream machinery the script sandbox blocks.
+     * Splits an absolute {@code http://} URL.
      *
-     * @throws IllegalArgumentException when the URL is not an absolute http URL
+     * <p>Hand-rolled rather than {@code java.net.URL} because that class drags in the stream
+     * machinery the script sandbox blocks.
+     *
+     * <p><b>The host must be an IP literal</b> (red-team C4). Every URL that reaches this comes from
+     * an unauthenticated LAN packet: the {@code LOCATION} header of an SSDP announcement, or a
+     * {@code controlURL} inside the descriptor that announcement pointed at. A name there would be
+     * resolved by {@code InetAddress.getByName} on the campaign thread, where a DNS lookup that takes
+     * the resolver's timeout is a multi-second freeze of the game that anything on the LAN can
+     * trigger. Real IGDs announce literals; a name is either a broken device or someone testing what
+     * this code does with one, and the answer is to refuse the device and keep listening.
+     *
+     * @throws IllegalArgumentException when the URL is not an absolute http URL with a literal host
      */
     public static Url parseUrl(String url) {
         Objects.requireNonNull(url, "url");
@@ -94,7 +104,101 @@ public final class CoopHttpMessages {
         if (host.isEmpty()) {
             throw new IllegalArgumentException("URL has no host: " + url);
         }
+        if (!isIpLiteral(host)) {
+            throw new IllegalArgumentException("URL host must be an IP literal (no DNS on the campaign"
+                    + " thread): " + url);
+        }
         return new Url(host, port, path);
+    }
+
+    /**
+     * Whether {@code host} is an IPv4 or IPv6 literal, decided by syntax alone. Deliberately not
+     * {@code InetAddress.getByName}: for a name, that method <em>is</em> the DNS lookup this check
+     * exists to prevent.
+     */
+    static boolean isIpLiteral(String host) {
+        if (host == null || host.isEmpty()) {
+            return false;
+        }
+        int zone = host.indexOf('%');
+        String bare = zone < 0 ? host : host.substring(0, zone);
+        return bare.indexOf(':') >= 0 ? isIpv6Literal(bare) : isIpv4Literal(bare);
+    }
+
+    private static boolean isIpv4Literal(String host) {
+        int octets = 0;
+        int start = 0;
+        while (start <= host.length()) {
+            int dot = host.indexOf('.', start);
+            String part = dot < 0 ? host.substring(start) : host.substring(start, dot);
+            if (part.isEmpty() || part.length() > 3) {
+                return false;
+            }
+            int value = 0;
+            for (int i = 0; i < part.length(); i++) {
+                char c = part.charAt(i);
+                if (c < '0' || c > '9') {
+                    return false;
+                }
+                value = value * 10 + (c - '0');
+            }
+            if (value > 255) {
+                return false;
+            }
+            octets++;
+            if (dot < 0) {
+                break;
+            }
+            start = dot + 1;
+        }
+        return octets == 4;
+    }
+
+    private static boolean isIpv6Literal(String host) {
+        // Structural check, not a full RFC 4291 parser: hex groups separated by colons, at most one
+        // "::", an optional trailing IPv4 tail. Anything a resolver would have to think about is
+        // rejected, which is the whole point.
+        int doubleColon = host.indexOf("::");
+        if (doubleColon >= 0 && host.indexOf("::", doubleColon + 1) >= 0) {
+            return false;
+        }
+        int groups = 0;
+        int start = 0;
+        boolean sawIpv4Tail = false;
+        while (start <= host.length()) {
+            int colon = host.indexOf(':', start);
+            String part = colon < 0 ? host.substring(start) : host.substring(start, colon);
+            if (!part.isEmpty()) {
+                if (part.indexOf('.') >= 0) {
+                    if (colon >= 0 || !isIpv4Literal(part)) {
+                        return false;
+                    }
+                    sawIpv4Tail = true;
+                    groups += 2;
+                } else {
+                    if (part.length() > 4) {
+                        return false;
+                    }
+                    for (int i = 0; i < part.length(); i++) {
+                        if (Character.digit(part.charAt(i), 16) < 0) {
+                            return false;
+                        }
+                    }
+                    groups++;
+                }
+            }
+            if (colon < 0) {
+                break;
+            }
+            start = colon + 1;
+        }
+        if (groups == 0 && doubleColon < 0) {
+            return false;
+        }
+        if (sawIpv4Tail && groups > 8) {
+            return false;
+        }
+        return doubleColon >= 0 ? groups <= 8 : groups == 8;
     }
 
     private static int parsePort(String value, String url) {

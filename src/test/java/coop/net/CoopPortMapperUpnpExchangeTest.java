@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -139,6 +140,91 @@ class CoopPortMapperUpnpExchangeTest {
         assertFalse(result.mapped());
         assertTrue(result.failureText().contains("no WAN connection service"), result.failureText());
         mapper.shutdown();
+    }
+
+    // ---- red-team B5/B8 --------------------------------------------------------------------------
+
+    /**
+     * B5: a renewal that the router refuses must not retract a mapping the router is still holding,
+     * and must not be the last renewal ever attempted. Routing a renewal failure through
+     * {@code fail()} did both — it wrote a failureText over a live mapping and parked the state
+     * machine in FAILED, where {@code tickActive} never runs again.
+     */
+    @Test
+    void b5_aRefusedRenewalKeepsTheMappingAndKeepsRenewing() throws Exception {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        CoopPortMapper mapper = CoopPortMapper.startFromDescriptor(
+                MAPPED_PORT, clock::get, igd.descriptorUrl());
+        driveUntilFinished(mapper, clock);
+        assertTrue(mapper.result().mapped(), mapper.result().failureText());
+        long version = mapper.resultVersion();
+        int addsBeforeRenewal = countAdds();
+
+        igd.refuseEveryAddWith(714, "NoSuchEntryInArray");
+        clock.addAndGet(CoopPortMapper.RENEW_INTERVAL_MILLIS + 1L);
+        driveTicks(mapper, clock, 400);
+
+        assertTrue(countAdds() > addsBeforeRenewal, "the renewal must actually have been attempted");
+        CoopPortMapper.Result after = mapper.result();
+        assertTrue(after.mapped(), "the mapping in the router outlives one refused renewal");
+        assertEquals("", after.failureText());
+        assertEquals(CoopPortMapper.Tier.UPNP, after.tier());
+        assertEquals(version, mapper.resultVersion(), "nothing a publisher cares about changed");
+
+        int addsAfterFirstRenewal = countAdds();
+        clock.addAndGet(CoopPortMapper.RENEW_INTERVAL_MILLIS + 1L);
+        driveTicks(mapper, clock, 400);
+        assertTrue(countAdds() > addsAfterFirstRenewal,
+                "the next renewal must still be attempted; one failure is not the end of renewals");
+    }
+
+    /**
+     * B8: the shutdown release is a busy wait — there is no thread to hand off to and sleeping is not
+     * allowed on the campaign thread — but the state machine it drives is made of wall-clock
+     * comparisons, so running it twice inside one millisecond cannot change anything. It used to run
+     * up to 200,000 full passes; now it runs one per millisecond, and a clock that does not move at
+     * all buys exactly one.
+     */
+    @Test
+    void b8_theShutdownReleaseLoopTicksOnlyWhenTheClockMoves() throws Exception {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        CoopPortMapper mapper = CoopPortMapper.startFromDescriptor(
+                MAPPED_PORT, clock::get, igd.descriptorUrl());
+        driveUntilFinished(mapper, clock);
+        assertTrue(mapper.result().mapped(), mapper.result().failureText());
+
+        // driveUntilFinished leaves the clock where it stopped, so shutdown sees a frozen one.
+        mapper.shutdown();
+
+        assertEquals(1, mapper.shutdownTicks(),
+                "a frozen clock must buy one pass of the state machine, not two hundred thousand");
+    }
+
+    private int countAdds() {
+        int adds = 0;
+        for (String action : igd.actions()) {
+            if (action.equals("AddPortMapping")) {
+                adds++;
+            }
+        }
+        return adds;
+    }
+
+    /** Drives the mapper on an injected clock; real sockets need real time, hence the short sleep. */
+    private void driveTicks(CoopPortMapper mapper, AtomicLong clock, int ticks) throws Exception {
+        for (int i = 0; i < ticks; i++) {
+            mapper.tick(clock.addAndGet(5L));
+            mapper.result();
+            Thread.sleep(1L);
+        }
+    }
+
+    private void driveUntilFinished(CoopPortMapper mapper, AtomicLong clock) throws Exception {
+        long start = System.currentTimeMillis();
+        while (!mapper.result().finished() && System.currentTimeMillis() - start < 15_000L) {
+            mapper.tick(clock.addAndGet(5L));
+            Thread.sleep(1L);
+        }
     }
 
     /**

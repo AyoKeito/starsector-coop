@@ -55,6 +55,18 @@ public final class CoopPeerLink {
     private int inboundFrameLength;
     private boolean discardingOversizedFrame;
     private long lastInboundFrameAtMillis;
+    /**
+     * When the current channel attached (red-team A1). The handshake deadline is measured from here
+     * rather than from the last byte received, because a stranger controls when bytes arrive and
+     * therefore controls any clock that resets on them.
+     */
+    private long attachedAtMillis;
+    /**
+     * Bytes read from the socket but not yet framed, parked because the poll hit its frame ceiling
+     * (red-team A12). They belong to this peer's stream and must survive to the next poll: the
+     * ceiling exists to bound work per poll, not to punch holes in a TCP stream.
+     */
+    private ByteBuffer deferredInbound;
 
     /**
      * The peer's full player id, learned from the first TCP message it stamps (Phase 20.5). Null
@@ -130,11 +142,18 @@ public final class CoopPeerLink {
         this.inboundFrameLength = 0;
         this.discardingOversizedFrame = false;
         this.lastInboundFrameAtMillis = nowMillis;
+        this.attachedAtMillis = nowMillis;
+        this.deferredInbound = null;
         this.pinnedPeerAddress = pinnedPeerAddress;
         this.senderId = null;
         this.invalidFrames = 0;
         this.foreignDatagramWarned = false;
         this.candidateTimeoutLogged = false;
+        // Red-team C8: the warn-once flags describe a socket, not a peer. Left set, the first
+        // connection's stalled queue or dead UDP path silenced the warning for every connection after
+        // it - which is the run where the evidence was needed.
+        this.queueDepthWarned = false;
+        this.datagramSendFailureLogged = false;
         forgetCandidate();
         if (clearValidatedUdpAddress) {
             this.validatedUdpAddress = null;
@@ -147,6 +166,7 @@ public final class CoopPeerLink {
         this.pendingWrite = null;
         this.inboundFrameLength = 0;
         this.discardingOversizedFrame = false;
+        this.deferredInbound = null;
     }
 
     SocketChannel channel() {
@@ -164,6 +184,32 @@ public final class CoopPeerLink {
 
     long lastInboundFrameAtMillis() {
         return lastInboundFrameAtMillis;
+    }
+
+    /** When this slot's current channel attached; 0 when nothing is attached. See {@link #attach}. */
+    long attachedAtMillis() {
+        return attachedAtMillis;
+    }
+
+    /** Bytes carried over from a poll that hit its frame ceiling, or null. */
+    ByteBuffer deferredInbound() {
+        return deferredInbound;
+    }
+
+    /** Parks whatever is left of {@code buffer} for the next poll; an empty remainder parks nothing. */
+    void deferInbound(ByteBuffer buffer) {
+        if (buffer == null || !buffer.hasRemaining()) {
+            deferredInbound = null;
+            return;
+        }
+        // Copied, not aliased: the service reuses one read buffer for every peer in the table.
+        byte[] copy = new byte[buffer.remaining()];
+        buffer.get(copy);
+        deferredInbound = ByteBuffer.wrap(copy);
+    }
+
+    void clearDeferredInbound() {
+        deferredInbound = null;
     }
 
     void noteInboundBytes(long nowMillis) {
@@ -278,6 +324,33 @@ public final class CoopPeerLink {
 
     void enqueue(CoopMessages.Message message) {
         outbound.add(message);
+    }
+
+    /**
+     * Discards the oldest message the coalescing whitelist calls a superseded snapshot (red-team A4).
+     * Called only at the queue's hard cap, and only ever on a snapshot: past the cap something must
+     * go, and the one class of message whose loss changes nothing is the one a newer copy of is
+     * already queued behind it.
+     *
+     * @return true when a message was dropped; false when the whole queue is semantic events, which
+     *         is the case the caller escalates to dropping the link
+     */
+    boolean dropOldestCoalescable() {
+        ListIterator<CoopMessages.Message> cursor = outbound.listIterator();
+        while (cursor.hasNext()) {
+            if (CoopNetService.coalesceKey(cursor.next()) != null) {
+                cursor.remove();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Discards everything queued for a link being dropped; @return how many messages were lost. */
+    int discardOutbound() {
+        int dropped = outbound.size();
+        outbound.clear();
+        return dropped;
     }
 
     /** One warning per link per queue-depth excursion; a stalled socket must not log per message. */
@@ -445,7 +518,9 @@ public final class CoopPeerLink {
         pendingWrite = null;
         inboundFrameLength = 0;
         discardingOversizedFrame = false;
+        deferredInbound = null;
         lastInboundFrameAtMillis = 0L;
+        attachedAtMillis = 0L;
         senderId = null;
         pinnedPeerAddress = null;
         validatedUdpAddress = null;
