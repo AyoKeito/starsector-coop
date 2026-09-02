@@ -1,7 +1,9 @@
 {
 	"plugins":{
 		"newGameSectorProcGen":"coop.seed.CoopSectorProcGen",
+		"newGameDialogPlugin":"coop.newgame.CoopNewGameDialogPlugin",
 		"coopBattleStatusPlugin":"coop.combat.CoopBattleStatusCombatPlugin"
 	},
+	"comment_newGameDialogPlugin":"Replaces vanilla's NewGameDialogPluginImpl. Subclasses it, so a non-coop launch behaves exactly like vanilla; on a host/guest launch it adds a banner and pins seed, sector size and star age onto the CharacterCreationData so the two clients generate the same sector.",
 	"comment_coopBattleStatusPlugin":"Phase 14 (re the plugins entry above; comments inside the plugins map crash the loader, which instantiates every value as a class): the only mod code that runs inside a battle. Campaign EveryFrameScripts do not advance in the COMBAT state, so this EveryFrameCombatPlugin is what detects battle start, captures BATTLE_STATUS at 2.5 Hz, and flushes the outbound TCP queue while the pump is frozen. Inert unless a coop session is active (see CoopBattleBridge.onCombatFrame)."
 }

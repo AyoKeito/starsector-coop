@@ -11,6 +11,7 @@ import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopTimeLock;
+import coop.ui.CoopHudState;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -1221,6 +1222,260 @@ class CoopNetPumpTest {
 
         assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.PING),
                 "pings must flow through the seed-lock window");
+    }
+
+    // ---- Phase 20.6: link HUD state ----------------------------------------------------------
+
+    @Test
+    void hudStateReportsNoSessionBeforeAnyLobby() {
+        CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.NONE), () -> 1000L);
+
+        CoopHudState state = pump.hudState(false);
+
+        assertEquals(CoopHudState.BADGE_COOP, state.roleBadge());
+        assertEquals(CoopHudState.STATUS_NO_SESSION, state.status());
+        assertNull(state.pauseHolder());
+        assertNull(state.clockDriftGameHours());
+    }
+
+    @Test
+    void hudStateReportsHostWaitingForGuest() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(() -> "host-player");
+        session.startHost("Host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
+
+        CoopHudState state = pump.hudState(true);
+
+        assertEquals(CoopHudState.BADGE_HOST, state.roleBadge());
+        assertEquals(CoopHudState.STATUS_WAITING_FOR_GUEST, state.status());
+        assertTrue(state.paused());
+        // Pre-session the host is force-held paused by the pump, not by anyone's intent.
+        assertNull(state.pauseHolder());
+    }
+
+    @Test
+    void hudStateReportsGuestConnecting() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
+
+        assertEquals(CoopHudState.STATUS_CONNECTING, pump.hudState(false).status());
+        assertEquals(CoopHudState.BADGE_GUEST, pump.hudState(false).roleBadge());
+    }
+
+    @Test
+    void hudStateReportsHandshakingBeforeTheSeedLockLands() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        session.hostAcceptHandshake();
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
+
+        assertEquals(CoopHudState.STATUS_HANDSHAKING, pump.hudState(false).status());
+    }
+
+    @Test
+    void hudStateReportsSessionActiveAndTheHostPauseHolder() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = activeHostPump(service, () -> 1000L);
+
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, pump.hudState(false).status());
+        assertNull(pump.hudState(false).pauseHolder());
+
+        pump.pauseCoordinatorForBridge().setHostPauseIntent(true);
+        assertEquals("host", pump.hudState(true).pauseHolder());
+    }
+
+    @Test
+    void hudStatePauseHolderFollowsTheCoordinatorPrecedence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = activeHostPump(service, () -> 1000L);
+
+        pump.pauseCoordinatorForBridge().setEitherInCombat(true);
+        assertEquals("combat", pump.hudState(true).pauseHolder());
+
+        pump.pauseCoordinatorForBridge().applyGuestScreenPauseIntent(true, 1L);
+        assertEquals("guest screen", pump.hudState(true).pauseHolder());
+
+        pump.pauseCoordinatorForBridge().applyGuestKeyPauseIntent(true, 2L);
+        assertEquals("guest", pump.hudState(true).pauseHolder());
+
+        pump.pauseCoordinatorForBridge().setHostPauseIntent(true);
+        assertEquals("host", pump.hudState(true).pauseHolder());
+    }
+
+    @Test
+    void hudStateAttributesTheGuestSidePauseToTheHost() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1000L);
+
+        assertNull(pump.hudState(false).pauseHolder());
+
+        pump.pauseCoordinatorForBridge().setObservedPaused(true);
+        assertEquals("host", pump.hudState(true).pauseHolder());
+    }
+
+    @Test
+    void hudStateReportsNoDriftWithoutClockSamples() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1000L);
+
+        // No TIME_SNAPSHOT has ever reached the reconciler, so there is nothing to claim.
+        assertNull(pump.hudState(false).clockDriftGameHours());
+    }
+
+    @Test
+    void hudStateNeverReportsDriftOnTheHost() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = activeHostPump(service, () -> 1000L);
+
+        assertNull(pump.hudState(false).clockDriftGameHours());
+    }
+
+    @Test
+    void hudStateDistinguishesAReconnectHoldFromAFirstConnect() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, pump.hudState(false).status());
+
+        service.connected = false;
+        pump.advance(0f);
+
+        // Same lobby state a never-connected host sits in (HOST_WAITING); only the disconnect edge
+        // knows a live session was lost here.
+        assertEquals(CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING, pump.hudState(true).status());
+        assertNull(pump.hudState(true).pauseHolder(), "no session, so nobody owns the shared pause");
+    }
+
+    @Test
+    void hudStateReportsReconnectingOnTheGuestAfterADrop() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1000L);
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals(CoopHudState.STATUS_RECONNECTING, pump.hudState(false).status());
+    }
+
+    @Test
+    void hudStateReportsARejectedHandshake() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.rejectHandshake("mod list mismatch");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
+
+        assertEquals(CoopHudState.STATUS_REJECTED, pump.hudState(false).status());
+    }
+
+    private static CoopNetPump activeHostPump(RecordingNetService service, java.util.function.LongSupplier clock) {
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a", "session-b"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        return new CoopNetPump(service, session, clock,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+    }
+
+    private static CoopNetPump activeGuestPump(RecordingNetService service, java.util.function.LongSupplier clock) {
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        return new CoopNetPump(service, session, clock,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+    }
+
+    @Test
+    void localPlayerNameFallsBackToTheRoleLiteralWithoutACharacterName() {
+        CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.HOST), () -> 1000L);
+        pump.setCharacterNameSupplier(() -> "");
+
+        withoutPlayerNameProperty(() -> {
+            assertEquals("Host", pump.localPlayerName(CoopConnectionRole.HOST));
+            assertEquals("Guest", pump.localPlayerName(CoopConnectionRole.GUEST));
+        });
+    }
+
+    @Test
+    void localPlayerNameUsesTheLocalCharacterName() {
+        CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.GUEST), () -> 1000L);
+        pump.setCharacterNameSupplier(() -> "  Ayo Keito  ");
+
+        withoutPlayerNameProperty(() ->
+                assertEquals("Ayo Keito", pump.localPlayerName(CoopConnectionRole.GUEST)));
+    }
+
+    @Test
+    void playerNamePropertyBeatsTheCharacterName() {
+        CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.GUEST), () -> 1000L);
+        pump.setCharacterNameSupplier(() -> "Ayo Keito");
+
+        String previous = System.getProperty(PLAYER_NAME_PROPERTY);
+        System.setProperty(PLAYER_NAME_PROPERTY, "  Override  ");
+        try {
+            assertEquals("Override", pump.localPlayerName(CoopConnectionRole.GUEST));
+        } finally {
+            restorePlayerNameProperty(previous);
+        }
+    }
+
+    @Test
+    void productionCharacterNameLookupSurvivesAMissingSector() {
+        // Default supplier reads Global.getSector().getPlayerPerson(); with no sector it must fall
+        // through to the role literal rather than throw.
+        Global.setSector(null);
+        CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.HOST), () -> 1000L);
+
+        withoutPlayerNameProperty(() -> assertEquals("Host", pump.localPlayerName(CoopConnectionRole.HOST)));
+    }
+
+    @Test
+    void productionCharacterNameLookupSurvivesASectorThatCannotAnswer() {
+        // RecordingSector's proxy throws for getPlayerPerson, which stands in for any engine failure.
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = new CoopNetPump(new RecordingNetService(CoopConnectionRole.GUEST), () -> 1000L);
+
+        withoutPlayerNameProperty(() -> assertEquals("Guest", pump.localPlayerName(CoopConnectionRole.GUEST)));
+    }
+
+    private static final String PLAYER_NAME_PROPERTY = "coop.playerName";
+
+    private static void withoutPlayerNameProperty(Runnable body) {
+        String previous = System.getProperty(PLAYER_NAME_PROPERTY);
+        System.clearProperty(PLAYER_NAME_PROPERTY);
+        try {
+            body.run();
+        } finally {
+            restorePlayerNameProperty(previous);
+        }
+    }
+
+    private static void restorePlayerNameProperty(String previous) {
+        if (previous == null) {
+            System.clearProperty(PLAYER_NAME_PROPERTY);
+        } else {
+            System.setProperty(PLAYER_NAME_PROPERTY, previous);
+        }
     }
 
     private static final class RecordingNetService extends CoopNetService {

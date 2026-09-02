@@ -8,12 +8,15 @@ public final class CoopNetPumpInstaller {
     private CoopNetPumpInstaller() {
     }
 
-    public static void install(SectorAPI sector, CoopNetService service) {
+    /** @return the pump just installed, for callers that need a handle on it (the Phase 20.6 HUD). */
+    public static CoopNetPump install(SectorAPI sector, CoopNetService service) {
         Objects.requireNonNull(sector, "sector");
         Objects.requireNonNull(service, "service");
 
         sector.removeScriptsOfClass(CoopNetPump.class);
         sector.removeTransientScriptsOfClass(CoopNetPump.class);
-        sector.addTransientScript(new CoopNetPump(service));
+        CoopNetPump pump = new CoopNetPump(service);
+        sector.addTransientScript(pump);
+        return pump;
     }
 }

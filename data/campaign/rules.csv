@@ -88,3 +88,17 @@ NGCAddCharacterPoints 1
 NGCSetStartingLocation Corvus -2500 3000
 NGCAddStandardStartingScript
 NGCDone",,,
+,,,,,,
+"# (3) DEV-MODE QUICK STARTS REMOVED. The two vanilla >>(dev) quick start options are gated on",,,,,,
+"# $global.isDevMode and run their own script bodies straight to NGCDone -- they never fire",,,,,,
+"# NGCDifficultyOptions, so the forced-normal/skip-tutorial row above cannot reach them. They also",,,,,,
+"# set NGCSetWithTimePass false and drop the player in hyperspace at -10000/-10000 with a hand-built",,,,,,
+"# fleet, i.e. a different starting world state per client if only one player picks one. Four rows,",,,,,,
+"# all replaced by id: the two AddNewGameChoices rows stop the options from being offered at all,",,,,,,
+"# and the two NewGameOptionSelected rows are neutered as well so a stale $option value cannot",,,,,,
+"# reach the vanilla script body. $coopDevStartsDisabled is never set anywhere, and a missing",,,,,,
+"# memory key evaluates false, so all four conditions are permanently unsatisfiable.",,,,,,
+initNewGameChoicesDev,AddNewGameChoices,$coopDevStartsDisabled,,,,
+initNewGameChoicesDev2,AddNewGameChoices,$coopDevStartsDisabled,,,,
+ngcDevStartOption,NewGameOptionSelected,$coopDevStartsDisabled,,,,
+ngcDevStartOption2,NewGameOptionSelected,$coopDevStartsDisabled,,,,

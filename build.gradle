@@ -39,6 +39,9 @@ def starsectorJars = files(
     "${starsectorCore}/xstream-1.4.10.jar",
     "${starsectorCore}/log4j-1.2.9.jar",
     "${starsectorCore}/json.jar",
+    // GL11 for coop.ui.CoopBitmapFont: the engine hands a CampaignUIRenderingListener no text-draw
+    // call, so the HUD emits its own textured quads (same approach as LazyLib's LazyFont).
+    "${starsectorCore}/lwjgl.jar",
     "${starsectorCore}/lwjgl_util.jar"
 )
 

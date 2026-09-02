@@ -383,6 +383,18 @@ public final class CoopClockReconciler {
         consecutiveSpikeRejections = 0;
     }
 
+    /**
+     * Read-only drift readout for the Phase 20.6 link HUD: the current median of the sample ring, in
+     * game-time milliseconds, positive when the guest is BEHIND the host. Returns 0 whenever there is
+     * nothing to report — no samples buffered, or the reconciler never resolved its clock port — so a
+     * caller never has to distinguish "no estimate" from "no drift" (both mean: say nothing).
+     *
+     * <p>Pure getter. It does not touch the ring, the episode state, or the clock.
+     */
+    public long driftEstimateMillisForHud() {
+        return sampleCount == 0 ? 0L : driftEstimateMillis;
+    }
+
     // ---- test/diagnostic seams ------------------------------------------------------------------
 
     long driftEstimateMillis() {

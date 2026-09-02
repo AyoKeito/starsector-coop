@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.characters.PersonAPI;
 import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopCampaignReplicator;
@@ -44,6 +45,7 @@ import coop.time.CoopClockReconciler;
 import coop.time.CoopFastForwardLock;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
+import coop.ui.CoopHudState;
 import coop.util.CoopDebug;
 import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
@@ -153,6 +155,12 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean handshakeManifestSent;
     private boolean seedLockRequestSent;
     private boolean channelWasConnected;
+    /**
+     * Phase 20.6 HUD only. True when the last transport drop happened while a gameplay session was
+     * live, i.e. we are in a 12b reconnect hold rather than a first connect. Set on the disconnect
+     * edge and read nowhere else; no replication decision depends on it.
+     */
+    private boolean peerDroppedAfterLiveSession;
     private boolean preSessionCampaignDropWarned;
     private long nextTimeSnapshotAtMillis;
     /**
@@ -265,6 +273,12 @@ public class CoopNetPump implements EveryFrameScript {
      * rides the pump's injected clock.
      */
     private final CoopWiretap wiretap;
+    /**
+     * Local character name for {@link #localPlayerName(CoopConnectionRole)}. A field rather than a
+     * constructor parameter so the existing eight constructor overloads stay as they are; tests
+     * replace it through {@link #setCharacterNameSupplier(Supplier)}.
+     */
+    private Supplier<String> characterNameSupplier = CoopNetPump::characterNameFromSector;
 
     public CoopNetPump(CoopNetService service) {
         this(service, System::currentTimeMillis);
@@ -441,6 +455,86 @@ public class CoopNetPump implements EveryFrameScript {
      */
     public static boolean blockingScreenOpenForBridge(SectorAPI sector) {
         return sector != null && isVanillaBlockingScreenOpen(sector);
+    }
+
+    // ---- Phase 20.6 link HUD accessor ------------------------------------------------------------
+
+    /**
+     * Read-only snapshot of the link for {@link coop.ui.CoopLinkHud}. Pure: it reads the session
+     * record, the pause coordinator and the clock reconciler, and mutates nothing.
+     *
+     * <p>Deliberately engine-free — the caller passes its own {@code sector.isPaused()} read in
+     * rather than this method taking one — so the whole role/status/holder/drift mapping can be
+     * tested against a fake transport with no {@code Global.getSector()} in sight.
+     *
+     * @param paused the caller's live {@code sector.isPaused()}; drives the HUD's colour only
+     */
+    public CoopHudState hudState(boolean paused) {
+        CoopConnectionRole role = service.role();
+        CoopLobbyState lobby = sessionState.connectionState();
+        boolean active = isGameplaySessionActive();
+
+        String badge;
+        String status;
+        if (role == CoopConnectionRole.HOST) {
+            badge = CoopHudState.BADGE_HOST;
+            status = switch (lobby) {
+                case HOST_CONNECTED -> active
+                        ? CoopHudState.STATUS_SESSION_ACTIVE
+                        : CoopHudState.STATUS_HANDSHAKING;
+                case REJECTED -> CoopHudState.STATUS_REJECTED;
+                case NONE -> CoopHudState.STATUS_NO_SESSION;
+                // HOST_WAITING covers both "never had a guest" and the 12b post-drop rewind; the
+                // pump's disconnect edge is the only thing that can tell them apart.
+                default -> peerDroppedAfterLiveSession
+                        ? CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING
+                        : CoopHudState.STATUS_WAITING_FOR_GUEST;
+            };
+        } else if (role == CoopConnectionRole.GUEST) {
+            badge = CoopHudState.BADGE_GUEST;
+            status = switch (lobby) {
+                case GUEST_CONNECTED -> active
+                        ? CoopHudState.STATUS_SESSION_ACTIVE
+                        : CoopHudState.STATUS_HANDSHAKING;
+                case REJECTED -> CoopHudState.STATUS_REJECTED;
+                case NONE -> CoopHudState.STATUS_NO_SESSION;
+                default -> peerDroppedAfterLiveSession
+                        ? CoopHudState.STATUS_RECONNECTING
+                        : CoopHudState.STATUS_CONNECTING;
+            };
+        } else {
+            badge = CoopHudState.BADGE_COOP;
+            status = CoopHudState.STATUS_NO_SESSION;
+        }
+
+        String pauseHolder = null;
+        if (active) {
+            if (role == CoopConnectionRole.HOST) {
+                if (pauseCoordinator.hostPauseIntent()) {
+                    pauseHolder = "host";
+                } else if (pauseCoordinator.guestKeyPauseIntent()) {
+                    pauseHolder = "guest";
+                } else if (pauseCoordinator.guestScreenPauseIntent()) {
+                    pauseHolder = "guest screen";
+                } else if (pauseCoordinator.eitherInCombat()) {
+                    pauseHolder = "combat";
+                }
+            } else if (role == CoopConnectionRole.GUEST && pauseCoordinator.observedPaused()) {
+                // The guest never owns the shared pause; whatever it observes came from the host.
+                pauseHolder = "host";
+            }
+        }
+
+        Integer driftGameHours = null;
+        if (role == CoopConnectionRole.GUEST && active) {
+            long driftMillis = clockReconciler.driftEstimateMillisForHud();
+            long hours = Math.round(driftMillis / 3_600_000.0);
+            if (hours != 0L) {
+                driftGameHours = (int) hours;
+            }
+        }
+
+        return new CoopHudState(badge, status, paused, pauseHolder, driftGameHours);
     }
 
     @Override
@@ -647,12 +741,48 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
-    private String localPlayerName(CoopConnectionRole role) {
+    /**
+     * Name this client announces in {@code LOBBY_HELLO}; it becomes {@link CoopPlayerInfo#name()} and
+     * is what the presence indicator and the partner's mirror fleet are labelled with.
+     *
+     * <p>Resolution order: {@code -Dcoop.playerName}, then the local character's own name, then the
+     * role literal. The character name is only readable once the sector exists, which it does at
+     * every call site -- both {@code maybeStartFrom*} paths run from {@link #advance(float)}, i.e.
+     * after the campaign is up. The result is not cached here; it is captured once by
+     * {@code CoopSessionState.startHost/startGuest} at session start, which is the same moment.
+     */
+    String localPlayerName(CoopConnectionRole role) {
         String configured = System.getProperty(PLAYER_NAME_PROPERTY);
         if (configured != null && !configured.trim().isEmpty()) {
             return configured.trim();
         }
+        String characterName = characterNameSupplier.get();
+        if (characterName != null && !characterName.trim().isEmpty()) {
+            return characterName.trim();
+        }
         return role == CoopConnectionRole.HOST ? "Host" : "Guest";
+    }
+
+    /** Test seam: the production supplier reads the sector, which a unit test does not have. */
+    void setCharacterNameSupplier(Supplier<String> supplier) {
+        this.characterNameSupplier = Objects.requireNonNull(supplier, "characterNameSupplier");
+    }
+
+    private static String characterNameFromSector() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return "";
+            }
+            PersonAPI player = sector.getPlayerPerson();
+            if (player == null) {
+                return "";
+            }
+            String name = player.getNameString();
+            return name == null ? "" : name.trim();
+        } catch (Throwable ex) {
+            return "";
+        }
     }
 
     private int parsePort(Object value, String flagName) {
@@ -682,6 +812,11 @@ public class CoopNetPump implements EveryFrameScript {
     private void detectPeerDisconnect() {
         boolean connected = service.isConnected();
         if (channelWasConnected && !connected && service.role() != CoopConnectionRole.NONE) {
+            // Read BEFORE the rewind: afterwards the lobby is back at HOST_WAITING/GUEST_CONNECTING
+            // and nothing distinguishes "never had a partner" from "lost the one we had". The HUD
+            // needs that distinction to say "guest disconnected, holding" rather than "waiting for
+            // guest". Assignment, not OR: a drop during handshake really is not a lost session.
+            peerDroppedAfterLiveSession = isGameplaySessionActive();
             boolean changed = sessionState.onChannelDisconnected();
             lobbyHelloSent = false;
             handshakeManifestSent = false;

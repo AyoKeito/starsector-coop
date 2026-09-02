@@ -9,6 +9,7 @@ import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorOrphanSweeper;
 import coop.debug.CoopAgentBridge;
 import coop.fleet.CoopSystemDriveFrameHook;
+import coop.net.CoopNetPump;
 import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
 import coop.net.CoopNetStartupConfig;
@@ -16,6 +17,7 @@ import coop.save.CoopGuestSnapshot;
 import coop.save.CoopGuestSnapshotStore;
 import coop.save.CoopSaveCheckpoint;
 import coop.seed.CoopSeedSync;
+import coop.ui.CoopLinkHud;
 import coop.util.CoopLog;
 
 public class CoopModPlugin extends BaseModPlugin {
@@ -59,7 +61,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // it captures the engine's per-frame delta for the full-fidelity guest-system drive and is the
         // always-on observer that releases the drive when the pump stops ticking it.
         CoopSystemDriveFrameHook.install(Global.getSector());
-        CoopNetPumpInstaller.install(Global.getSector(), netService);
+        CoopNetPump pump = CoopNetPumpInstaller.install(Global.getSector(), netService);
+        // Phase 20.6 milestone 0: the always-on link status line. Cosmetic and self-disabling, so it
+        // goes in right after the pump it reads from and before anything that could fail on its own.
+        CoopLinkHud.install(Global.getSector(), pump);
         // Phase 30 dev tooling, dormant unless -Dcoop.debug.bridge=<port> is set: no socket, no log
         // line and no script when it is absent. Installed here rather than inside the pump because it
         // has to answer before and without a coop session, and always as a TRANSIENT script — it owns

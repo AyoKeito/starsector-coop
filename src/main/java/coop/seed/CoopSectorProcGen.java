@@ -57,7 +57,13 @@ public class CoopSectorProcGen extends SectorProcGen {
                         + " configuredCoopSeed=" + (configured.isEmpty() ? "<none>" : configured));
     }
 
-    static void applyCoopSeedIfPresent(CharacterCreationData data) {
+    /**
+     * Forces {@code -Dcoop.newGameSeed} onto the character-creation data, or does nothing when the
+     * property is absent. Public because {@code coop.newgame.CoopNewGameDialogPlugin} pins the same
+     * seed from the New Game dialog -- one derivation, two call sites, so the dialog and procgen
+     * cannot disagree about what the property means.
+     */
+    public static void applyCoopSeedIfPresent(CharacterCreationData data) {
         if (data == null) {
             return;
         }
