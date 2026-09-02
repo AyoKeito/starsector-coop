@@ -236,6 +236,28 @@ rather than close it.
 Pause itself is a real lever: `setPaused`/`isPaused` is read by the engine every frame, so the guest
 pause lock works fully.
 
+## Title Screen And New Game Dialog (2026-09-02)
+
+### The "New Game" button cannot be renamed
+
+The label is a string constant inside the obfuscated title-screen class (`com.fs.starfarer.title.C`). It is not in `data/strings`, not in `settings.json`, and the title screen is built before `onApplicationLoad` returns, so no mod hook can reach it. A guest launch therefore still starts with "New Game". The coop cue lives on the new-game dialog's Continue option instead (`coop.newgame.CoopNewGameDialogPlugin`, registered through the `newGameDialogPlugin` key the mod's `settings.json` already owns for procgen).
+
+### The new-game options panel is one atomic widget
+
+`VisualPanelAPI.showNewGameOptionsPanel(data)` is the only entry point for name, portrait, gender, seed field, sector size and star age. There is no per-field enable/disable, and the panel writes seed, `sectorSize` and `sectorAge` back onto `CharacterCreationData` whenever its state changes. The only way to hold coop values is to overwrite them after the panel: the plugin pins on `init`, on every `advance` frame, and once more on Continue. Procgen reads the data object last, so the last write wins.
+
+### Do not re-show the text panel next to the options panel
+
+`NewGameDialogPluginImpl.init` ends with `dialog.hideTextPanel()`. Calling `showTextPanel()` after it reserves the left column for the text panel, which pushes the options panel to the right of center, and the added paragraph still does not render. Tried and reverted the same day.
+
+### Player-faction fleet names carry the faction article
+
+Vanilla renders every fleet as `<faction display name with article> <fleet name>`, and `data/world/factions/player.faction` sets `displayNameWithArticle` to `Your`. A player-faction fleet named `Alice` therefore shows as "Your Alice"; once colonies name the faction it becomes "<Faction> Alice". The partner's mirror fleet is named `partner <Name>` so both prefixes read as a sentence. Any future player-faction fleet the mod names needs a noun phrase, not a bare name.
+
+### Guest rejoin is by loading the coordinated autosave
+
+A guest that quit mid-session rejoins by loading the save that Phase 16's coordinated autosave wrote, whose stored campaign id matches the host's. A New Game on the same seed is rejected at seed lock ("this campaign is already in flight and this guest campaign is brand new") and only `launch-guest.ps1 -AdoptCampaign` (`-Dcoop.adoptCampaignId=true`) forces it through, at the cost of the guest's progress. To find the right save, grep the host campaign id from the reject line across `saves/save_*/campaign.xml`.
+
 ## Regression Tests
 
 Keep these tests aligned with the rules above:

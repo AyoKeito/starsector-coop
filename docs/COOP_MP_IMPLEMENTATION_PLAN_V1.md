@@ -115,7 +115,11 @@ Core Java modules must keep these names unless a later phase explicitly changes 
 - `coop.net.CoopLinkQuality` *(Phase 20: RTT/loss tracking, LINK_STATUS, UDP→TCP fallback decision)*
 - `coop.net.CoopReconnectCoordinator` *(Phase 20: in-session reconnect grace window)*
 - `coop.net.CoopPortMapper` *(Phase 20: UPnP IGD / NAT-PMP port mapping + CGNAT detection)*
-- `coop.ui.CoopLinkHud` *(Phase 20.6: `CampaignUIRenderingListener` ping/loss/transport-state widget)*
+- `coop.ui.CoopLinkHud` *(Phase 20.6: `CampaignUIRenderingListener` widget; **milestone 0 built 2026-09-02**: role badge, session state, pause holder, guest clock drift; 20.6 proper adds RTT/loss/transport)*
+- `coop.ui.CoopBitmapFont` *(20.6 M0, built 2026-09-02: BMFont parser + GL11 text renderer over the vanilla `insignia15LTaa` page; the mod's only on-screen text path)*
+- `coop.ui.CoopHudState` *(20.6 M0, built 2026-09-02: immutable HUD record + line formatting + pause-holder display mapping)*
+- `coop.newgame.CoopNewGameDialogPlugin` *(Phase 21 M0, built 2026-09-02: coop-aware New Game dialog, `newGameDialogPlugin` settings hook)*
+- `coop.newgame.CoopNewGameChoices` *(Phase 21 M0, built 2026-09-02: pure sector-size/star-age/banner decisions)*
 - `coop.ui.CoopSessionIntel` *(Phase 20.6: "Coop Session" intel entry; Phase 21 adds the stats page)*
 - `coop.ui.CoopLobbyDialog` *(Phase 21, in V1 since 2026-08-24: in-campaign lobby with ready-up)*
 - `coop.ui.CoopDesyncDialog` *(Phase 21, in V1 since 2026-08-24: cause+remedy dialogs on loud-failure points)*
@@ -138,7 +142,7 @@ Core Java modules must keep these names unless a later phase explicitly changes 
 - `coop.campaign.CoopBarSync` *(Phase 12: bar sync; its `resolveHandles()` (lines ~170–178 as of 2026-08-25) is the canonical sandbox-safe MethodHandles pattern cited by 7b/7c/13 — it exists, do not recreate it)*
 - `coop.net.CoopNetStartupConfig` *(Phase 3/4 era: launch/connection `-D` properties; modified by 20/27/28)*
 - `coop.time.CoopFastForwardLock` *(Phase 7b: shared fast-forward restore)*
-- `coop.time.CoopClockReconciler` *(Phase 7c: campaign-date drift correction)*
+- `coop.time.CoopClockReconciler` *(Phase 7c, built + smoke-verified 2026-09-02: campaign-date drift correction)*
 - `coop.fleet.CoopMirrorOrphanSweeper` *(Phase 12b: solo-load orphan sweep)*
 - `coop.campaign.CoopBaseRecord` *(Phase 13: base-authority record)*
 - `coop.save.CoopGuestSnapshot` *(Phase 16: guest fleet/cargo/credits DTO in host save persistentData)*
@@ -505,7 +509,7 @@ Implement Phase 7 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Host owns campaign pau
 
 **Steps:**
 
-- [x] Define `TIME_SNAPSHOT` payload fields: `paused`, `fastForward`, `timestampMillis`, `campaignDay`, `sentAtMillis`.
+- [x] Define `TIME_SNAPSHOT` payload fields: `paused`, `fastForward`, `timestampMillis`, `campaignDay`, `sentAtMillis`. *(2026-09-02: plus optional `pausedBy` = `host` / `guest` / `guest screen` / `combat` / empty, for the 20.6 HUD; absent parses as empty.)*
 - [x] Host sends `TIME_SNAPSHOT` at 5 Hz while connected.
 - [x] Guest applies `Global.getSector().setPaused(hostPaused)` each frame. **Fast-forward correction:** the plan's `setFastForwardIteration(hostFastForward)` assumption is wrong — that flag is internal/overwritten and has no effect, and `setInFastAdvance` sticks but does not change the guest clock rate. Hold-Shift fast-forward is a 2x loop inside obfuscated `CampaignState` with no public on/off lever (verified Phase 7; see `mods/coop/docs/starsector-runtime-limitations.md`). Resolved by locking the session to 1x via `data/config/settings.json` `"campaignSpeedupMult":1` so no client can fast-forward; `apply()` still mirrors the FF flag via `setInFastAdvance` for animation/UI consistency only.
 - [x] Implement `CampaignInputListener.processCampaignInputPreCore` to consume pause/fast-forward inputs on guest. **Control-name correction:** the campaign pause control is `GENERAL_PAUSE`, not `PAUSE` (passing `PAUSE` to `isControlActivated` threw `IllegalArgumentException` and crashed the client). FF control is `FAST_FORWARD`.
@@ -636,7 +640,7 @@ Established 2026-06-10 from `javap` disassembly of `starsector-core/starfarer_ob
    - `getCal()` — **verified 2026-08-20: it IS on `CampaignClockAPI`** (confirmed by javap of `starfarer.api.jar`), so call `Global.getSector().getClock().getCal()` directly; no handle, no lookup. (The fallback `findVirtual` sketch is obsolete.)
    - After every calendar write, the cached `timestamp` field must be re-synced or `getTimestamp()` is stale until the engine's next `advance()`: `MethodHandles.privateLookupIn(clock.getClass(), MethodHandles.lookup()).findSetter(clock.getClass(), "timestamp", long.class)`. **Always write `cal` and `timestamp` together, in that order, to the same value.**
 5. **No compile-time dependency needed:** the clock instance comes from `Global.getSector().getClock()` and its runtime class from `getClass()` — no class-name strings, no obf jar on the classpath (same approach as Phase 7b fact 6).
-6. **`TIME_SNAPSHOT` already carries everything needed to measure drift** — payload is `paused`, `fastForward`, `timestampMillis`, `campaignDay`, `sentAtMillis` (`CoopMessages.timeSnapshot`, `CoopMessages.java:157-165`), sent ≤5 Hz wall-clock (`CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS = 200`, re-armed `now + interval` so frame-quantized). **Verified 2026-08-25: `timestampMillis` and `campaignDay` are transported but never consumed** — `CoopTimeLock.apply` reads only `paused`/`fastForward`; the drift signal has been on the wire unused since Phase 7. No protocol changes.
+6. **`TIME_SNAPSHOT` already carries everything needed to measure drift** — payload is `paused`, `fastForward`, `timestampMillis`, `campaignDay`, `sentAtMillis` (plus, since 2026-09-02, the optional `pausedBy` for the HUD) (`CoopMessages.timeSnapshot`, `CoopMessages.java:157-165`), sent ≤5 Hz wall-clock (`CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS = 200`, re-armed `now + interval` so frame-quantized). **Verified 2026-08-25: `timestampMillis` and `campaignDay` are transported but never consumed** — `CoopTimeLock.apply` reads only `paused`/`fastForward`; the drift signal has been on the wire unused since Phase 7. No protocol changes.
 7. **What must NEVER be used to correct the clock:** do not call extra `CampaignEngine.advance()` (it advances the entire sim, not just the clock); do not use `clock.advance()` for corrections (goes through the same int truncation, and `setTimeInMillis` is exact); do not use `SectorAPI.setInFastAdvance` (verified in Phase 7 to not change the clock rate); and do not implement "slew" by scaling any `advance(float)` dt handed to other systems (see fact 12).
 
 Facts 8–12 established 2026-08-25 from a full-engine bytecode sweep (all 2484 classes in `starfarer_obf.jar` + all 1947 API sources; every class referencing `CampaignClock`/`CampaignClockAPI` was disassembled and its call sites classified):

@@ -143,6 +143,10 @@ After both clients load a campaign, inspect coop log lines from both profiles:
 powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\tail-two-client-logs.ps1'
 ```
 
+On screen, both clients draw a coop line under the vanilla fps overlay (top-right): `HOST · session active`, `GUEST · session active · paused by host`, and on the guest the clock drift in whole game-hours once it reaches an hour. `-Dcoop.hud.disable=true` turns it off. The guest's New Game dialog shows the join target on its Continue option and pins seed, sector size and star age; `-Dcoop.sectorSize=small|normal` and `-Dcoop.sectorAge=young|average|old|mixed` override the panel defaults on both roles when a non-default world is wanted. `-Dcoop.clock.disable=true` turns off the Phase 7c clock reconciler (guest only).
+
+Rejoining after the guest quits: load the guest's coordinated autosave, not New Game. A fresh same-seed campaign is rejected at seed lock unless the guest is launched with `-AdoptCampaign`, which discards the guest's progress.
+
 Expected Phase 3 evidence:
 
 ```text
