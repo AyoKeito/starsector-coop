@@ -9,6 +9,9 @@ param(
     [switch] $Bridge,
     # Extra -D JVM properties appended verbatim, e.g. -ExtraJvmProps '-Dcoop.debug.interactionDelayMs=1500'
     [string[]] $ExtraJvmProps = @(),
+    # Phase 20 WAN smoke: skip starsector.exe and run the JVM directly as jre\bin\coopguest-java.exe
+    # (a copy of java.exe) so a per-app proxy that matches by executable name can route only this client.
+    [switch] $ProxiedJvm,
     # Explicit consent to join an in-flight campaign with a save that does not belong to it
     # (fresh re-roll or wrong save). This is the supported save-less-guest rejoin path.
     [switch] $AdoptCampaign,
@@ -111,5 +114,17 @@ if ($PatchOnly) {
     return
 }
 
-Start-Process -FilePath $exe -WorkingDirectory $profileRoot
+if ($ProxiedJvm) {
+    $jvm = Join-Path $profileRoot 'jre\bin\coopguest-java.exe'
+    if (-not (Test-Path -LiteralPath $jvm)) {
+        Copy-Item -LiteralPath (Join-Path $profileRoot 'jre\bin\java.exe') -Destination $jvm
+    }
+    # vmparams is the exact java.exe command line the launcher runs from starsector-core.
+    $vmArgs = (Get-Content -LiteralPath (Join-Path $profileRoot 'vmparams') -Raw).Trim()
+    $vmArgs = $vmArgs -replace '^java\.exe\s+', ''
+    Start-Process -FilePath $jvm -ArgumentList $vmArgs -WorkingDirectory (Join-Path $profileRoot 'starsector-core')
+    $diagNote += ' proxiedJvm=ON'
+} else {
+    Start-Process -FilePath $exe -WorkingDirectory $profileRoot
+}
 Write-Host "Launched coop guest test client connecting to $HostAddress`:$Port with seed $SeedString$diagNote"
