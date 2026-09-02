@@ -104,7 +104,7 @@ public final class CoopNpcFleetReplicator {
      */
     private final Map<Integer, MotionChunk> previousChunks = new HashMap<>();
     /** Cached {@code getMaxSensorRangeToDetect} answers, keyed observer-then-target; see the constants. */
-    private final Map<String, Float> radiusCache = new HashMap<>();
+    private final Map<RadiusKey, Float> radiusCache = new HashMap<>();
     private long radiusCacheExpiresAtMillis;
     private long nextRangeLogAtMillis;
     private boolean oversizedRecordWarned;
@@ -336,8 +336,17 @@ public final class CoopNpcFleetReplicator {
 
     // ---- Phase 20 M4: MTU-safe chunking ----------------------------------------------------------
 
-    /** One chunk index's previous send: its batch and the stamps that section went out under. */
-    private record MotionChunk(List<CoopNpcFleetMotion> motions, long epoch, long gameTimeMillis) {
+    /**
+     * One chunk index's previous send: its batch, the already-encoded full section that batch will
+     * ride as next tick's redundant copy, and the stamps that section went out under.
+     *
+     * <p>{@code fullBody} is carried rather than recomputed (red-team C10). The packer below already
+     * encodes every record in full form to size it -- that is what {@code fullCost} measures -- and
+     * the old code threw those strings away, then called {@code encodeFullSection} on the same batch
+     * one tick later, encoding every replicated fleet twice per tick for nothing.
+     */
+    private record MotionChunk(List<CoopNpcFleetMotion> motions, String fullBody,
+                               long epoch, long gameTimeMillis) {
     }
 
     /**
@@ -371,8 +380,7 @@ public final class CoopNpcFleetReplicator {
             MotionChunk previous = previousChunks.get(chunk);
             Map<String, CoopNpcFleetMotion> baseline = previous == null
                     ? Map.of() : indexById(previous.motions());
-            String fullBody = previous == null
-                    ? null : CoopNpcFleetMotion.encodeFullSection(previous.motions());
+            String fullBody = previous == null ? null : previous.fullBody();
             int overhead = composedOverheadBytes(token, senderId, chunk, previous, epoch,
                     gameTimeMillis) + STAMP_GROWTH_SLACK_BYTES;
             int used = overhead
@@ -382,14 +390,17 @@ public final class CoopNpcFleetReplicator {
             // tick's baseline section.
             int fullForm = CoopNpcFleetMotion.MODE_FULL.length();
             StringBuilder delta = new StringBuilder(512).append(CoopNpcFleetMotion.MODE_DELTA);
+            // Built alongside the delta out of the full-form records the sizing pass already
+            // encodes; this is what the chunk hands the next tick as its baseline section.
+            StringBuilder full = new StringBuilder(512).append(CoopNpcFleetMotion.MODE_FULL);
             List<CoopNpcFleetMotion> taken = new ArrayList<>();
             while (index < motions.size()) {
                 CoopNpcFleetMotion motion = motions.get(index);
                 String record = CoopNpcFleetMotion.encodeRecord(motion,
                         baseline.get(motion.coopFleetId()));
+                String fullRecord = CoopNpcFleetMotion.encodeRecord(motion, null);
                 int cost = 1 + CoopMessages.utf8Length(record);
-                int fullCost = 1 + CoopMessages.utf8Length(
-                        CoopNpcFleetMotion.encodeRecord(motion, null));
+                int fullCost = 1 + CoopMessages.utf8Length(fullRecord);
                 boolean overNow = used + cost > CoopNetService.MAX_DATAGRAM_BYTES;
                 boolean overNextTick = overhead + 2 * (fullForm + fullCost)
                         > CoopNetService.MAX_DATAGRAM_BYTES;
@@ -397,6 +408,7 @@ public final class CoopNpcFleetReplicator {
                     break;
                 }
                 delta.append('\n').append(record);
+                full.append('\n').append(fullRecord);
                 used += cost;
                 fullForm += fullCost;
                 taken.add(motion);
@@ -414,7 +426,7 @@ public final class CoopNpcFleetReplicator {
                     previous == null ? epoch : previous.epoch(),
                     previous == null ? gameTimeMillis : previous.gameTimeMillis(),
                     chunk, fullBody, epoch, gameTimeMillis, delta.toString()));
-            next.put(chunk, new MotionChunk(taken, epoch, gameTimeMillis));
+            next.put(chunk, new MotionChunk(taken, full.toString(), epoch, gameTimeMillis));
             chunk++;
         }
         // Chunks the tick no longer fills must not keep a stale baseline: the next tick that reaches
@@ -496,8 +508,17 @@ public final class CoopNpcFleetReplicator {
         return dx * dx + dy * dy <= radius * radius;
     }
 
+    /**
+     * The (observer, target) pair this cache is keyed by. A record rather than the concatenated
+     * {@code "a->b"} string it replaced (red-team C10): this runs at 10 Hz for every observer-fleet
+     * pair in a location, and the string form allocated a builder plus a String per lookup, on the
+     * hot path, purely to be hashed and thrown away.
+     */
+    private record RadiusKey(String observerId, String targetId) {
+    }
+
     private float cachedRadius(CampaignFleetAPI observer, CampaignFleetAPI fleet) {
-        String key = safeId(observer) + "->" + safeId(fleet);
+        RadiusKey key = new RadiusKey(safeId(observer), safeId(fleet));
         Float cached = radiusCache.get(key);
         if (cached != null) {
             return cached;

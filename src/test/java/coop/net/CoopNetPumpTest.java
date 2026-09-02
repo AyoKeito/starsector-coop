@@ -72,7 +72,12 @@ class CoopNetPumpTest {
     void hostRepliesWithPongForInboundPing() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         service.inbound.add(CoopMessages.ping("session-a", 42L, 3000L));
-        CoopNetPump pump = new CoopNetPump(service, () -> 5000L);
+        // Accepted peer: red-team A4 refuses to answer a ping from one that is neither in the
+        // session nor in a grace window (see a4PingFromAnUnprovenPeerIsNotAnswered).
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 5000L);
 
         pump.advance(0f);
 
@@ -828,7 +833,12 @@ class CoopNetPumpTest {
     @Test
     void malformedMessageIsDroppedAndLaterMessagesStillProcess() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
-        CoopNetPump pump = new CoopNetPump(service, () -> 1000L);
+        // Lobby-accepted, because since red-team A4 a PONG is only owed to an accepted peer and the
+        // PONG is this test's proof that dispatch survived the bad message.
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
 
         // INTERACTION_RELEASE without the required "entityId" field: the handler's
         // requiredPayloadString throws, which pre-12b escaped advance() and killed the pump.
@@ -846,7 +856,11 @@ class CoopNetPumpTest {
     @Test
     void unknownPauseIntentSourceIsDroppedWithoutKillingThePump() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
-        CoopNetPump pump = new CoopNetPump(service, () -> 1000L);
+        // Lobby-accepted; see malformedMessageIsDroppedAndLaterMessagesStillProcess.
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
 
         // PauseSource.valueOf throws IllegalArgumentException on an unknown value.
         service.inbound.add(new CoopMessages.Message(
@@ -870,13 +884,17 @@ class CoopNetPumpTest {
         service.inbound.add(new CoopMessages.Message(
                 CoopMessages.Type.HANDSHAKE_MANIFEST, "session-a", 1L, 1000L,
                 "{\"manifestJson\":\"{}\"}"));
-        service.inbound.add(CoopMessages.ping("session-a", 2L, 1000L));
+        // The "dispatch continued" probe is a lobby hello rather than a ping: this host is
+        // deliberately still HOST_WAITING, and since red-team A4 an unaccepted peer gets no PONG.
+        service.inbound.add(CoopMessages.lobbyHello(2L, 1000L,
+                new CoopPlayerInfo("guest-player", "Guest")));
 
         pump.advance(0f);
 
         assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.HANDSHAKE_RESULT),
                 "an out-of-order manifest must not produce a handshake result");
-        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.PONG),
+        assertTrue(service.sent.stream().anyMatch(m -> m.type() == CoopMessages.Type.LOBBY_ACCEPT
+                        || m.type() == CoopMessages.Type.LOBBY_REJECT),
                 "expected dispatch to continue after an out-of-order manifest");
     }
 
@@ -1283,17 +1301,26 @@ class CoopNetPumpTest {
         // The session-start edge resets the watermark table (syncNpcReplication); stream afterwards.
         pump.advance(0f);
 
-        service.inboundDatagrams.add(CoopMessages.datagram(token, "sender-udp",
+        // One sender, because red-team A6 drops any datagram whose senderId is not the partner's
+        // token whichever wire carried it. The two wires are therefore separated in time instead:
+        // UDP raises the mark, then TCP raises the same mark further.
+        String sender = CoopMessages.wireToken("guest-player");
+        service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
                 CoopMessages.Type.NPC_FLEET_MOTION, 4L, 0L, EMPTY_MOTION_BODY));
-        service.inbound.add(CoopMessages.stateDatagram("session-a", 8L, 1_000L,
-                CoopMessages.datagram(token, "sender-tcp",
-                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, EMPTY_MOTION_BODY)));
         pump.advance(0f);
 
         assertEquals(4L, pump.datagramWatermark()
-                .watermarkFor("sender-udp", CoopMessages.Type.NPC_FLEET_MOTION));
+                .watermarkFor(sender, CoopMessages.Type.NPC_FLEET_MOTION),
+                "the UDP datagram must reach the watermark");
+
+        service.inbound.add(CoopMessages.stateDatagram("session-a", 8L, 1_000L,
+                CoopMessages.datagram(token, sender,
+                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, EMPTY_MOTION_BODY)));
+        pump.advance(0f);
+
         assertEquals(7L, pump.datagramWatermark()
-                .watermarkFor("sender-tcp", CoopMessages.Type.NPC_FLEET_MOTION));
+                .watermarkFor(sender, CoopMessages.Type.NPC_FLEET_MOTION),
+                "a TCP-carried datagram must reach the identical watermark");
     }
 
     @Test
@@ -2109,12 +2136,13 @@ class CoopNetPumpTest {
         assertEquals("reconnect", pump.hudState(true).pauseHolder(),
                 "the session, not a player, is what is holding the clock");
 
-        // Past the grace, the pre-20.2 teardown runs and the lobby rewinds to HOST_WAITING; only the
-        // disconnect edge knows a live session was lost here.
+        // Past the grace, the pre-20.2 teardown runs and the lobby rewinds to HOST_WAITING.
+        // Red-team B7: the badge goes back to "waiting for guest" there, because nothing is being
+        // held any more - it used to stay on "disconnected, holding" for the life of the process.
         now.set(1000L + 61_000L);
         pump.advance(0f);
 
-        assertEquals(CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING, pump.hudState(true).status());
+        assertEquals(CoopHudState.STATUS_WAITING_FOR_GUEST, pump.hudState(true).status());
         assertNull(pump.hudState(true).pauseHolder(), "no session, so nobody owns the shared pause");
     }
 
@@ -2458,7 +2486,9 @@ class CoopNetPumpTest {
                 "guest-a", "Corvus", "a pirate armada", "", CoopMessages.BattleKind.PLAYER));
         pump.advance(0f);
 
-        for (long t = 2_000L; t <= 120_000L; t += 1_000L) {
+        // Bounded below the red-team B3 timeout: the exemption is real, but it is not eternal
+        // (see b3ARemoteBattleWithNoStatusForThirtySecondsIsAgedOut).
+        for (long t = 2_000L; t <= 25_000L; t += 1_000L) {
             now.set(t);
             pump.advance(0f);
         }
@@ -2814,7 +2844,7 @@ class CoopNetPumpTest {
     private static class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
-        private final List<CoopMessages.Message> sent = new ArrayList<>();
+        final List<CoopMessages.Message> sent = new ArrayList<>();
         /** Every setExpectedSessionToken call, nulls included — the clear is as load-bearing as the set. */
         private final List<String> expectedTokens = new ArrayList<>();
         /** Datagrams that went out over the real UDP path (Phase 20.1 M2 fallback tests). */
@@ -3300,6 +3330,551 @@ class CoopNetPumpTest {
                 () -> "fingerprint-host",
                 () -> "coop-seed",
                 timeLock);
+    }
+
+    // ---- Phase 20 red-team regressions -----------------------------------------------------------
+    // One test per finding, named after it. Everything below reproduces a defect the review found in
+    // this pump at 64bef68; each one failed before the corresponding fix.
+
+    /** A transport whose peer address, proof throttle and attach generation the test drives. */
+    private static class RedTeamNetService extends RecordingNetService {
+        private final java.net.InetAddress peerAddress;
+        private final List<java.net.InetAddress> failedProofs = new ArrayList<>();
+        private boolean proofThrottled;
+        private long generation;
+        private int linkageErrorsToThrow;
+
+        private RedTeamNetService(CoopConnectionRole role) {
+            super(role);
+            java.net.InetAddress address = null;
+            try {
+                address = java.net.InetAddress.getByName("203.0.113.7");
+            } catch (java.net.UnknownHostException ignored) {
+                // fixed literal; cannot happen
+            }
+            this.peerAddress = address;
+        }
+
+        @Override
+        public java.net.InetAddress activePeerAddress() {
+            return peerAddress;
+        }
+
+        @Override
+        public void noteFailedProof(java.net.InetAddress source) {
+            failedProofs.add(source);
+        }
+
+        @Override
+        public boolean isProofThrottled(java.net.InetAddress source) {
+            return proofThrottled;
+        }
+
+        @Override
+        public long connectionGeneration() {
+            return generation;
+        }
+
+        @Override
+        public void sendTo(String senderId, CoopMessages.Message message) {
+            if (linkageErrorsToThrow > 0) {
+                linkageErrorsToThrow--;
+                throw new NoSuchMethodError("simulated mod-load skew inside a handler");
+            }
+            super.sendTo(senderId, message);
+        }
+    }
+
+    /** Host holding a live session that has just lost its socket: the grace window is open. */
+    private static CoopNetPump hostInGraceWindow(RecordingNetService service, CoopSessionState session,
+                                                 AtomicLong now) {
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.connected = true;
+        service.sent.clear();
+        return pump;
+    }
+
+    @Test
+    void a2_aResumeRequestIsChallengedAndOnlyAcceptedWithThePasswordProof() {
+        RedTeamNetService service = new RedTeamNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+        pump.setLobbyPasswordForTest(PASSWORD);
+
+        // Exactly what a passive listener could replay off the wire: session id and player id, both
+        // of which travelled in cleartext before the drop. Pre-fix this was ACCEPTED outright.
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(),
+                "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.SESSION_RESUME_ACCEPT),
+                "a resume must not bypass the lobby password");
+        CoopMessages.Message challenge = onlyOf(service, CoopMessages.Type.LOBBY_CHALLENGE);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(),
+                "an unproven request must not end the wait");
+
+        String nonce = CoopMessages.parseLobbyChallengeNonce(challenge);
+        service.sent.clear();
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 10L, now.get(),
+                "guest-player", CoopMessages.passwordProof(PASSWORD, nonce)));
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.SESSION_RESUME_ACCEPT));
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+    }
+
+    @Test
+    void a2_aReconnectingGuestAnswersTheChallengeWithAProofCarryingResumeRequest() {
+        RedTeamNetService service = new RedTeamNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.setLobbyPasswordForTest(PASSWORD);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.connected = true;
+        service.sent.clear();
+
+        service.inbound.add(CoopMessages.lobbyChallenge(3L, now.get(), "abcdef0123456789"));
+        pump.advance(0f);
+
+        // A hello here would be answered "session in reconnect grace" and the resume would never
+        // happen; the challenge has to be answered in the vocabulary the host is waiting for.
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_HELLO));
+        List<CoopMessages.Message> requests = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.SESSION_RESUME_REQUEST)
+                .toList();
+        assertFalse(requests.isEmpty(), "the guest owes a proof-carrying resume request");
+        CoopMessages.Message proven = requests.get(requests.size() - 1);
+        assertEquals(CoopMessages.passwordProof(PASSWORD, "abcdef0123456789"),
+                CoopMessages.parseResumeProof(proven));
+    }
+
+    @Test
+    void a3_aWrongPasswordIsReportedToTheThrottleAndAThrottledAddressIsNotEvenChallenged() {
+        RedTeamNetService service = new RedTeamNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
+
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7_000L,
+                new CoopPlayerInfo("guest-player", "Guest")));
+        pump.advance(0f);
+        String nonce = CoopMessages.parseLobbyChallengeNonce(
+                onlyOf(service, CoopMessages.Type.LOBBY_CHALLENGE));
+        assertNotNull(nonce);
+
+        service.inbound.add(CoopMessages.lobbyHello(2L, 7_000L,
+                new CoopPlayerInfo("guest-player", "Guest"),
+                CoopMessages.passwordProof("wrong", nonce)));
+        pump.advance(0f);
+
+        assertEquals(1, service.failedProofs.size(),
+                "a wrong guess must reach the per-address cooldown, not just close the socket");
+        assertEquals(service.activePeerAddress(), service.failedProofs.get(0));
+
+        // Once the address is in its cooldown the host does no work at all for it: no nonce minted,
+        // no challenge, no reject. Answering is the resource the guesser is after.
+        service.proofThrottled = true;
+        service.sent.clear();
+        service.inbound.add(CoopMessages.lobbyHello(3L, 7_000L,
+                new CoopPlayerInfo("guest-player", "Guest")));
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE));
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_REJECT));
+    }
+
+    @Test
+    void a4_pingAndResumeFromAPeerWithNoSessionAndNoGraceWindowAreNotAnswered() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1_000L);
+
+        for (int i = 0; i < 20; i++) {
+            service.inbound.add(CoopMessages.ping("session-a", i, 1_000L));
+        }
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 99L, 1_000L, "stranger"));
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.PONG),
+                "a connected stranger must not get a free reply channel");
+        assertEquals(0, countOfType(service, CoopMessages.Type.SESSION_RESUME_REJECT));
+        assertEquals(21L, pump.unprovenPeerAnswersRefused());
+    }
+
+    @Test
+    void a4_anAcceptedPeerIsStillAnsweredThroughTheSeedLockWindow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1_000L);
+
+        // Lobby-accepted but not yet seed-locked: the host holds paused through this window, and it
+        // is exactly where a half-open connection would otherwise stay invisible.
+        service.inbound.add(CoopMessages.ping("session-a", 1L, 1_000L));
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.PONG));
+        assertEquals(0L, pump.unprovenPeerAnswersRefused());
+    }
+
+    @Test
+    void a6_aDatagramFromAForeignSenderIdNeverReachesTheWatermarkOrTheLinkQuality() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        String token = CoopMessages.wireToken("session-a");
+        String foreign = CoopMessages.wireToken("someone-else");
+        service.inboundDatagrams.add(CoopMessages.datagram(token, foreign,
+                CoopMessages.Type.NPC_FLEET_MOTION, 5L, 0L, EMPTY_MOTION_BODY));
+        pump.advance(0f);
+
+        assertEquals(Long.MIN_VALUE, pump.datagramWatermark()
+                .watermarkFor(foreign, CoopMessages.Type.NPC_FLEET_MOTION),
+                "an attacker-chosen senderId must not create a per-stream watermark entry");
+        assertEquals(1L, pump.datagramSenderMismatchCount());
+    }
+
+    @Test
+    void a8_aSampleStampFarInTheFutureIsRejectedAndTheMirrorsKeepAdvancing() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        String token = CoopMessages.wireToken("session-a");
+        String sender = CoopMessages.wireToken("guest-player");
+        String tick = coop.fleet.CoopFleetSnapshot.Tick
+                .of(playerSnapshot("guest-player", 2)).encode();
+
+        service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                CoopMessages.Type.FLEET_SNAPSHOT, 1L, 1_000L, tick));
+        pump.advance(0f);
+        assertEquals(0L, pump.rejectedSampleStampCount());
+
+        // The stamp CoopMotionTimeline would latch forever, because noteSample only ever rises.
+        service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                CoopMessages.Type.FLEET_SNAPSHOT, 2L, Long.MAX_VALUE, tick));
+        pump.advance(0f);
+        assertEquals(1L, pump.rejectedSampleStampCount());
+
+        // And the stream is not poisoned: an ordinary sample after it is still accepted.
+        service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                CoopMessages.Type.FLEET_SNAPSHOT, 3L, 1_100L, tick));
+        pump.advance(0f);
+        assertEquals(1L, pump.rejectedSampleStampCount());
+    }
+
+    @Test
+    void a11_datagramDecodeFailuresAreCountedRatherThanLoggedPerPacket() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        String token = CoopMessages.wireToken("session-a");
+        String sender = CoopMessages.wireToken("guest-player");
+        for (int i = 1; i <= 50; i++) {
+            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                    CoopMessages.Type.FLEET_SNAPSHOT, i, 1_000L, "this is not a tick"));
+        }
+        pump.advance(0f);
+
+        assertEquals(50L, pump.datagramDecodeFailureCount(),
+                "every failure is counted even though at most one may be logged per 10 s");
+    }
+
+    @Test
+    void a14_aFrameThatThrowsIsCaughtAndThePumpKeepsRunning() {
+        ThrowingPollNetService service = new ThrowingPollNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = activeHostPump(service, () -> 1_000L);
+
+        service.throwOnNextPoll = true;
+        pump.advance(0f);
+        assertEquals(1L, pump.frameFailureCount());
+
+        // Still alive: an EveryFrameScript that lets an exception out is removed by the engine, and
+        // that would end the session silently, mid-game.
+        pump.advance(0f);
+        assertEquals(1L, pump.frameFailureCount());
+        assertFalse(pump.isDone());
+    }
+
+    @Test
+    void c9_aHandlerThrowingALinkageErrorDoesNotSkipTheRestOfTheInboundQueue() {
+        RedTeamNetService service = new RedTeamNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1_000L);
+
+        service.linkageErrorsToThrow = 1;
+        service.inbound.add(CoopMessages.ping("session-a", 1L, 1_000L));
+        service.inbound.add(CoopMessages.ping("session-a", 2L, 1_000L));
+        pump.advance(0f);
+
+        assertEquals(0L, pump.frameFailureCount(),
+                "the per-message catch must handle it, not the frame guard");
+        assertEquals(1, countOfType(service, CoopMessages.Type.PONG),
+                "the message behind the throwing one must still be dispatched");
+    }
+
+    @Test
+    void b1_aSecondDropInsideTheGraceWindowKeepsTheHeldSession() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+
+        // The guest's socket comes back and dies again inside the same window - a flapping link, the
+        // ordinary case this feature exists for. Pre-fix the second edge ran the full teardown while
+        // the coordinator went on holding the ids, and the resume below was then ACCEPTED against a
+        // session this side no longer had.
+        now.addAndGet(1_000L);
+        pump.advance(0f);
+        service.connected = false;
+        now.addAndGet(1_000L);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(),
+                "the window must keep running across a second drop");
+        assertEquals("session-a", session.sessionId(),
+                "the held session must survive the second drop");
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+
+        service.connected = true;
+        service.sent.clear();
+        now.addAndGet(1_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 20L, now.get(),
+                "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.SESSION_RESUME_ACCEPT));
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals("session-a", session.sessionId());
+    }
+
+    @Test
+    void b1_aResumeIsRefusedWhenThisSideHoldsNoSessionId() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+
+        // Whatever put this side into "grace window open, but no session id" - the second-drop bug
+        // was one route - a resume must not be granted against the coordinator's cached ids alone.
+        session.onChannelDisconnected();
+        assertNull(session.sessionId());
+
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 21L, now.get(),
+                "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.SESSION_RESUME_ACCEPT));
+        assertEquals(1, countOfType(service, CoopMessages.Type.SESSION_RESUME_REJECT));
+    }
+
+    @Test
+    void b2_aHalfOpenReplacementIsTreatedAsADropEdgeSoTheResumeResolves() {
+        RedTeamNetService service = new RedTeamNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.sent.clear();
+
+        // The transport closed the stale slot and accepted the returning guest inside one poll, so
+        // isConnected() never went false. Pre-fix the host saw no edge at all: it stayed
+        // HOST_CONNECTED, answered the resume "not waiting", and the guest was locked out for good.
+        service.generation++;
+        now.addAndGet(1_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 30L, now.get(),
+                "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.SESSION_RESUME_ACCEPT),
+                "the drop edge must open the window before the resume request is dispatched");
+        assertEquals(0, countOfType(service, CoopMessages.Type.SESSION_RESUME_REJECT));
+        assertEquals("session-a", session.sessionId());
+    }
+
+    @Test
+    void b4_aStallNoticeStampsTheSameExemptionASaveCheckpointDoes() {
+        DroppingNetService service = new DroppingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        // The guest is saving. Pre-fix nothing said so - SAVE_CHECKPOINT is host-only - and the host
+        // declared the link dead on a partner sitting at a save.
+        service.inbound.add(CoopMessages.stallNotice("session-a", 4L, 1_000L, "local save", 15_000L));
+        pump.advance(0f);
+        for (long t = 2_000L; t <= 50_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertEquals(List.of(), service.drops, "a peer that announced a stall is not a dead peer");
+
+        for (long t = 51_000L; t <= 75_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertEquals(1, service.drops.size(), "past the exempt window the silence is a verdict again");
+    }
+
+    @Test
+    void b4_bothRolesAnnounceTheirOwnStallAndFlushItImmediately() {
+        for (CoopConnectionRole role : List.of(CoopConnectionRole.HOST, CoopConnectionRole.GUEST)) {
+            RecordingNetService service = new RecordingNetService(role);
+            CoopNetPump pump = role == CoopConnectionRole.HOST
+                    ? activeHostPump(service, () -> 1_000L)
+                    : activeGuestPump(service, () -> 1_000L);
+            pump.advance(0f);
+            service.sent.clear();
+
+            coop.net.CoopStallNotice.notifyLocalStall(coop.net.CoopStallNotice.REASON_LOCAL_SAVE,
+                    coop.net.CoopStallNotice.SAVE_EXPECTED_MILLIS);
+
+            CoopMessages.Message notice = onlyOf(service, CoopMessages.Type.STALL_NOTICE);
+            assertEquals(coop.net.CoopStallNotice.REASON_LOCAL_SAVE,
+                    CoopMessages.parseStallReason(notice));
+            assertEquals(coop.net.CoopStallNotice.SAVE_EXPECTED_MILLIS,
+                    CoopMessages.parseStallExpectedMillis(notice));
+        }
+    }
+
+    @Test
+    void b7_thePeerDroppedBadgeIsClearedWhenTheGraceWindowCloses() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertEquals(CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING, pump.hudState(true).status());
+
+        now.addAndGet(61_000L);
+        pump.advance(0f);
+
+        // Pre-fix the flag was set and never cleared, so this host advertised a hold it was not
+        // performing for the rest of the process - including through the next lobby it opened.
+        assertEquals(CoopHudState.STATUS_WAITING_FOR_GUEST, pump.hudState(true).status());
+    }
+
+    @Test
+    void c6_aStuckRosterMismatchAsksThePeerToResendAndTheRequestForcesOne() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        // A roster arrives, then the peer's fleet changes and the new roster is lost. Ticks now name
+        // a hash this side does not hold, for good: the sender only re-sends on a hash change.
+        service.inbound.add(CoopMessages.fleetRoster("session-a", 1L, 1_000L,
+                coop.fleet.CoopFleetRoster.of(playerSnapshot("guest-player", 2)).encode()));
+        pump.advance(0f);
+
+        String token = CoopMessages.wireToken("session-a");
+        String sender = CoopMessages.wireToken("guest-player");
+        String tick = coop.fleet.CoopFleetSnapshot.Tick
+                .of(playerSnapshot("guest-player", 7)).encode();
+        long epoch = 10L;
+        for (long at : new long[] {2_000L, 3_000L, 20_000L}) {
+            now.set(at);
+            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                    CoopMessages.Type.FLEET_SNAPSHOT, epoch++, at, tick));
+            pump.advance(0f);
+        }
+
+        assertTrue(pump.rosterCache().mismatchLogged(), "the cache must have detected the stuck hold");
+        // The mismatch is detected in the datagram drain, which runs after syncFleetMirror; the ask
+        // therefore goes out on the following frame.
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.FLEET_ROSTER_REQUEST));
+
+        // Rate limited: the mismatch persists but the ask does not repeat every frame.
+        now.set(21_000L);
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.FLEET_ROSTER_REQUEST));
+        now.set(30_000L);
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.FLEET_ROSTER_REQUEST));
+
+        // And the answering side clears its hash so the next fleet tick re-sends the roster.
+        RecordingNetService peer = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump peerPump = activeGuestPump(peer, () -> 1_000L);
+        peerPump.advance(0f);
+        peerPump.maybeSendFleetRoster(playerSnapshot("guest-player", 2));
+        assertFalse(peerPump.lastSentRosterHash().isEmpty());
+        peer.inbound.add(CoopMessages.fleetRosterRequest("session-a", 5L, 1_000L));
+        peerPump.advance(0f);
+        assertEquals("", peerPump.lastSentRosterHash());
+    }
+
+    @Test
+    void c10_theWireTokensAreCachedAndRecomputedWhenTheIdBehindThemChanges() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableSessionState session = new MutableSessionState();
+        CoopNetPump pump = livePump(service, session, new AtomicLong(1_000L)::get);
+
+        assertEquals(CoopMessages.wireToken("session-a"), pump.sessionToken());
+        assertSame(pump.sessionToken(), pump.sessionToken(), "a second read must not re-hash");
+        assertEquals(CoopMessages.wireToken("host-player"), pump.localSenderToken());
+        assertEquals(CoopMessages.wireToken("guest-player"), pump.remoteSenderToken());
+
+        session.overrideSessionId = "session-b";
+        assertEquals(CoopMessages.wireToken("session-b"), pump.sessionToken(),
+                "the cache keys on the id, so a session edge invalidates it by itself");
+
+        session.overrideSessionId = null;
+        assertEquals("", pump.sessionToken(), "no session, no token");
+    }
+
+    /** A live host session whose session id the test can move, which the real one cannot. */
+    private static final class MutableSessionState extends CoopSessionState {
+        private String overrideSessionId = "session-a";
+        private boolean overrideActive = true;
+
+        private MutableSessionState() {
+            super(new SequencedIds("lobby-a", "host-player", "session-a"));
+            startHost("Host");
+            hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+            hostAcceptHandshake();
+            recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        }
+
+        @Override
+        public synchronized String sessionId() {
+            return overrideActive ? overrideSessionId : super.sessionId();
+        }
+    }
+
+    /** Makes one frame body throw, from outside every per-message guard the pump already has. */
+    private static final class ThrowingPollNetService extends RecordingNetService {
+        private boolean throwOnNextPoll;
+
+        private ThrowingPollNetService(CoopConnectionRole role) {
+            super(role);
+        }
+
+        @Override
+        public CoopMessages.Message pollInbound() {
+            if (throwOnNextPoll) {
+                throwOnNextPoll = false;
+                throw new IllegalStateException("simulated transport failure mid-frame");
+            }
+            return super.pollInbound();
+        }
     }
 
     private static final class RecordingTimeLock extends CoopTimeLock {

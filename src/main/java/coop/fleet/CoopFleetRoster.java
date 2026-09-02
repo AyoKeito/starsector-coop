@@ -65,6 +65,12 @@ public record CoopFleetRoster(String playerId, String username, String factionId
                     + " roster header fields, got " + header.size());
         }
         int memberCount = Integer.parseInt(header.get(4));
+        // Explicit rather than left to ArrayList's capacity check (red-team A15): a negative count
+        // sails past the "enough lines present" test below, and the exception a reader eventually
+        // gets names a capacity rather than the malformed field that caused it.
+        if (memberCount < 0) {
+            throw new IllegalArgumentException("Negative roster member count: " + memberCount);
+        }
         if (lines.length - 1 < memberCount) {
             throw new IllegalArgumentException("Declared " + memberCount + " members but only "
                     + (lines.length - 1) + " member lines present");

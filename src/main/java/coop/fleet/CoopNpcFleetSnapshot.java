@@ -88,6 +88,10 @@ public record CoopNpcFleetSnapshot(String coopFleetId, String factionId, String 
                     + " header fields, got " + header.size());
         }
         int memberCount = Integer.parseInt(header.get(MEMBER_COUNT_INDEX));
+        // See CoopFleetRoster.decode: a negative count passes the line-count test below (red-team A15).
+        if (memberCount < 0) {
+            throw new IllegalArgumentException("Negative NPC fleet member count: " + memberCount);
+        }
         if (lines.length - 1 < memberCount) {
             throw new IllegalArgumentException("Declared " + memberCount + " members but only "
                     + (lines.length - 1) + " member lines present");
@@ -97,8 +101,8 @@ public record CoopNpcFleetSnapshot(String coopFleetId, String factionId, String 
             members.add(CoopFleetCodec.parseMember(CoopFleetCodec.split(lines[i + 1])));
         }
         return new CoopNpcFleetSnapshot(header.get(0), header.get(1), header.get(2), header.get(3),
-                Float.parseFloat(header.get(4)), Float.parseFloat(header.get(5)),
-                Float.parseFloat(header.get(6)), Float.parseFloat(header.get(7)),
+                CoopFleetCodec.parseFiniteFloat(header.get(4)), CoopFleetCodec.parseFiniteFloat(header.get(5)),
+                CoopFleetCodec.parseFiniteFloat(header.get(6)), CoopFleetCodec.parseFiniteFloat(header.get(7)),
                 "1".equals(header.get(8)),
                 CoopSensorSync.parse(header, SENSOR_FIELD_OFFSET),
                 header.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT),

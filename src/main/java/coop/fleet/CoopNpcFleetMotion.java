@@ -156,8 +156,8 @@ public record CoopNpcFleetMotion(String coopFleetId, String locationId,
             }
             CoopNpcFleetMotion previous = byId.get(fields.get(0));
             motions.add(new CoopNpcFleetMotion(fields.get(0), fields.get(1),
-                    Float.parseFloat(fields.get(2)), Float.parseFloat(fields.get(3)),
-                    Float.parseFloat(fields.get(4)), Float.parseFloat(fields.get(5)),
+                    CoopFleetCodec.parseFiniteFloat(fields.get(2)), CoopFleetCodec.parseFiniteFloat(fields.get(3)),
+                    CoopFleetCodec.parseFiniteFloat(fields.get(4)), CoopFleetCodec.parseFiniteFloat(fields.get(5)),
                     CoopSensorSync.parseMasked(fields, SENSOR_FIELD_OFFSET, mask,
                             previous == null ? null : previous.sensors())));
         }

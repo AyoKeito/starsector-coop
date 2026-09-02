@@ -99,7 +99,21 @@ public final class CoopMessages {
         UDP_PROBE,
         /** Datagram-only: QUIC-style path challenge/echo that proves a new UDP source before it is streamed to. */
         PATH_PROBE,
-        DISCONNECT
+        DISCONNECT,
+        /**
+         * Phase 20 red-team B4: "my process is about to stop pumping, and it is not a battle." Sent
+         * by <em>both</em> roles from {@code beforeGameSave} and flushed inline, so the peer's
+         * link-death rule gets the same exemption a {@code SAVE_CHECKPOINT} gives it. Deliberately
+         * separate from {@code SAVE_CHECKPOINT}: that message <em>orders a coordinated autosave</em>
+         * and only the host may send it, whereas this one only says "expect silence".
+         */
+        STALL_NOTICE,
+        /**
+         * Phase 20 red-team C6: "re-send me your {@code FLEET_ROSTER}." A roster that was dropped or
+         * rejected is otherwise never retried — the sender only re-sends on a hash change — leaving
+         * the receiving mirror stuck on a tick whose roster never arrives.
+         */
+        FLEET_ROSTER_REQUEST
     }
 
     /**
@@ -1465,5 +1479,66 @@ public final class CoopMessages {
         private IllegalArgumentException error(String message) {
             return new IllegalArgumentException(message + " at index " + index);
         }
+    }
+
+    // ---- Phase 20 red-team additions -------------------------------------------------------------
+    // Deliberately at the end of the file rather than beside their thematic neighbours: this block
+    // was written on a branch that runs alongside a transport rewrite of the same file, and a purely
+    // appended block is the one shape that cannot collide with edits made higher up.
+
+    /**
+     * Both roles: "this process is about to stop pumping for {@code expectedMillis}, because
+     * {@code reason}." Flushed inline by the sender, so it is on the wire before the stall starts.
+     *
+     * <p>{@code expectedMillis} is advisory — a save takes as long as it takes — and the receiver
+     * uses a fixed exemption window rather than trusting it, so a hostile value buys nothing.
+     */
+    public static Message stallNotice(String sessionId, long seq, long sentAtMillis,
+                                      String reason, long expectedMillis) {
+        return new Message(Type.STALL_NOTICE, trimToNullable(sessionId), seq, sentAtMillis,
+                "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\","
+                        + "\"expectedMillis\":" + Math.max(0L, expectedMillis) + "}");
+    }
+
+    /** Why the peer is about to go quiet, or "" when it did not say. */
+    public static String parseStallReason(Message message) {
+        return optionalPayloadString(message, "reason", "");
+    }
+
+    /** The peer's own estimate of the stall, in wall-clock milliseconds; 0 when absent or negative. */
+    public static long parseStallExpectedMillis(Message message) {
+        Object value = decodePayload(message).get("expectedMillis");
+        return value instanceof Number number ? Math.max(0L, number.longValue()) : 0L;
+    }
+
+    /** "Re-send me your fleet roster." Carries nothing: there is exactly one roster per peer in v1. */
+    public static Message fleetRosterRequest(String sessionId, long seq, long sentAtMillis) {
+        return new Message(Type.FLEET_ROSTER_REQUEST, trimToNullable(sessionId), seq, sentAtMillis,
+                "{}");
+    }
+
+    /**
+     * The proof-carrying second {@code SESSION_RESUME_REQUEST} (red-team A2). A resume otherwise
+     * bypasses the lobby password entirely: session id and player id travel in cleartext, so a
+     * captured request replays. The host answers the first request with the ordinary
+     * {@link Type#LOBBY_CHALLENGE} and accepts only a request whose proof matches the nonce it
+     * issued — the same machinery {@code LOBBY_HELLO} already uses, so there is one password
+     * protocol rather than two.
+     *
+     * <p>A host with no password never challenges, and the wire is byte-identical to the four-field
+     * request above.
+     */
+    public static Message sessionResumeRequest(String sessionId, long seq, long sentAtMillis,
+                                               String playerId, String proof) {
+        String session = requireText(sessionId, "sessionId");
+        return new Message(Type.SESSION_RESUME_REQUEST, session, seq, sentAtMillis,
+                "{\"sessionId\":\"" + escapeJson(session) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
+                        + "\"proof\":\"" + escapeJson(proof == null ? "" : proof) + "\"}");
+    }
+
+    /** The proof a resume request carries, or "" for the first (and for any pre-fix sender). */
+    public static String parseResumeProof(Message message) {
+        return optionalPayloadString(message, "proof", "");
     }
 }

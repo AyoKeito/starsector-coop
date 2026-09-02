@@ -248,7 +248,8 @@ class CoopFleetSnapshotTest {
         assertEquals(650.37f, snapshot.sensors().sensorProfile());
         // The hash on the wire is the one computed from the unquantized members.
         assertEquals(snapshot.fleetHash(),
-                CoopFleetCodec.split(encoded.split("\n", -1)[0]).get(14));
+                CoopFleetCodec.split(encoded.split("\n", -1)[0])
+                        .get(9 + CoopSensorSync.FIELD_COUNT));
     }
 
     @Test

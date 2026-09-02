@@ -262,12 +262,12 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             List<MemberState> states = new ArrayList<>(memberCount);
             for (int i = 0; i < memberCount; i++) {
                 int base = HEADER_FIELD_COUNT + i * 2;
-                states.add(new MemberState(Float.parseFloat(fields.get(base)),
-                        Float.parseFloat(fields.get(base + 1))));
+                states.add(new MemberState(CoopFleetCodec.parseFiniteFloat(fields.get(base)),
+                        CoopFleetCodec.parseFiniteFloat(fields.get(base + 1))));
             }
             return new Tick(fields.get(0),
-                    Float.parseFloat(fields.get(1)), Float.parseFloat(fields.get(2)),
-                    Float.parseFloat(fields.get(3)), Float.parseFloat(fields.get(4)),
+                    CoopFleetCodec.parseFiniteFloat(fields.get(1)), CoopFleetCodec.parseFiniteFloat(fields.get(2)),
+                    CoopFleetCodec.parseFiniteFloat(fields.get(3)), CoopFleetCodec.parseFiniteFloat(fields.get(4)),
                     "1".equals(fields.get(5)),
                     CoopSensorSync.parse(fields, SENSOR_FIELD_OFFSET),
                     fields.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), states);
@@ -321,6 +321,10 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     + " header fields, got " + header.size());
         }
         int memberCount = Integer.parseInt(header.get(MEMBER_COUNT_INDEX));
+        // See CoopFleetRoster.decode: a negative count passes the line-count test below (red-team A15).
+        if (memberCount < 0) {
+            throw new IllegalArgumentException("Negative snapshot member count: " + memberCount);
+        }
         if (lines.length - 1 < memberCount) {
             throw new IllegalArgumentException("Declared " + memberCount + " members but only "
                     + (lines.length - 1) + " member lines present");
@@ -330,8 +334,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             members.add(CoopFleetCodec.parseMember(CoopFleetCodec.split(lines[i + 1])));
         }
         return new CoopFleetSnapshot(header.get(0), header.get(1), header.get(2),
-                Float.parseFloat(header.get(3)), Float.parseFloat(header.get(4)),
-                Float.parseFloat(header.get(5)), Float.parseFloat(header.get(6)),
+                CoopFleetCodec.parseFiniteFloat(header.get(3)), CoopFleetCodec.parseFiniteFloat(header.get(4)),
+                CoopFleetCodec.parseFiniteFloat(header.get(5)), CoopFleetCodec.parseFiniteFloat(header.get(6)),
                 header.get(7), "1".equals(header.get(8)),
                 CoopSensorSync.parse(header, SENSOR_FIELD_OFFSET),
                 header.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), members);

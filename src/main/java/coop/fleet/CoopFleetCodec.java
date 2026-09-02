@@ -92,6 +92,24 @@ final class CoopFleetCodec {
         return Float.toString(snapped);
     }
 
+    /**
+     * The one float parser every wire decoder in this package uses (red-team A10).
+     *
+     * <p>{@link Float#parseFloat} accepts {@code NaN}, {@code Infinity} and {@code -Infinity}, and
+     * nothing downstream of the decoders re-checks: a NaN position sets a mirror's coordinates to
+     * NaN, which propagates through the engine's own distance and camera math for the rest of the
+     * session, and a NaN CR or sensor mult poisons the corresponding {@code StatBonus}. None of
+     * these values can be produced by the encoders, so rejecting them costs nothing and drops the
+     * whole malformed section instead of the frame that reads it.
+     */
+    static float parseFiniteFloat(String text) {
+        float value = Float.parseFloat(text);
+        if (!Float.isFinite(value)) {
+            throw new IllegalArgumentException("Non-finite float on the wire: " + text);
+        }
+        return value;
+    }
+
     /** Escapes a single field so the field/record separators survive a round-trip. */
     static String escape(String value) {
         String text = value == null ? "" : value;
@@ -200,7 +218,7 @@ final class CoopFleetCodec {
                     + " member fields, got " + fields.size());
         }
         return new CoopFleetSnapshot.Member(fields.get(0), fields.get(1), fields.get(2), fields.get(3),
-                fields.get(4), Float.parseFloat(fields.get(5)), Float.parseFloat(fields.get(6)),
+                fields.get(4), parseFiniteFloat(fields.get(5)), parseFiniteFloat(fields.get(6)),
                 fields.get(7), fields.get(8), fields.get(9));
     }
 }

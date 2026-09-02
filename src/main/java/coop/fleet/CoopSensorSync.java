@@ -87,21 +87,50 @@ public final class CoopSensorSync {
 
     private static final String MODIFIER_DESC = "Coop mirror";
 
-    /** Number of pipe-delimited fields {@link #append}/{@link #parse} occupy on the wire. */
-    public static final int FIELD_COUNT = 5;
+    /**
+     * Number of pipe-delimited fields {@link #append}/{@link #parse} occupy on the wire.
+     *
+     * <p>Bumped 5 &rarr; 8 by the Phase 20 red-team pass (finding C3): the detection formula reads
+     * three aggregates off the <em>observer</em> too, and a mirror that carries only the target-side
+     * three is detected at the wrong range by any observer running a sensor ability.
+     */
+    public static final int FIELD_COUNT = 8;
 
     private CoopSensorSync() {
     }
 
     /**
      * A fleet's sensor identity as the detection formula sees it: the raw profile, the three
-     * {@code detectedRangeMod} aggregates (target side of the formula), and the sensor strength
-     * (observer side, replicated so the mirror's detection-range ring has the right radius).
+     * {@code detectedRangeMod} aggregates (target side of the formula), the sensor strength and the
+     * three {@code sensorRangeMod} aggregates (observer side).
      *
-     * <p>{@code detectedRangeMult} defaults to 1 (identity), never 0 — see {@link #UNKNOWN}.
+     * <p><b>Why the observer side is here too (red-team C3).</b> The formula above is symmetric: a
+     * fleet is <em>both</em> a target other fleets detect and an observer that detects them, and
+     * {@code getMaxSensorRangeToDetect} reads {@code observer.sensorRangeMod}'s flat/percent/mult
+     * exactly as it reads the target's {@code detectedRangeMod}'s. An active sensor burst is a
+     * {@code sensorRangeMod} mult on the burning fleet; without these three fields a mirror of that
+     * fleet detects at the unmodified range, and — via
+     * {@code CoopNpcFleetReplicator.withinStreamRange}, which asks the observer for exactly this
+     * number — the host under-streams NPC motion to a guest whose real detection reaches further,
+     * so fleets the guest can plainly see sit frozen.
+     *
+     * <p>{@code detectedRangeMult} and {@code sensorRangeMult} default to 1 (identity), never 0 —
+     * see {@link #UNKNOWN}.
      */
     public record Profile(float sensorProfile, float detectedRangeFlat, float detectedRangePercent,
-                          float detectedRangeMult, float sensorStrength) {
+                          float detectedRangeMult, float sensorStrength,
+                          float sensorRangeFlat, float sensorRangePercent, float sensorRangeMult) {
+
+        /**
+         * The pre-C3 five-field form, meaning "no observer-side modifiers". Kept because the great
+         * majority of call sites (fixtures, mirrors of fleets with no sensor abilities running) mean
+         * exactly that, and spelling {@code 0f, 0f, 1f} at each of them says nothing.
+         */
+        public Profile(float sensorProfile, float detectedRangeFlat, float detectedRangePercent,
+                       float detectedRangeMult, float sensorStrength) {
+            this(sensorProfile, detectedRangeFlat, detectedRangePercent, detectedRangeMult,
+                    sensorStrength, 0f, 0f, 1f);
+        }
 
         /** No sensor identity known yet (pre-Phase-14b peer, or a fleet whose reads all threw). */
         public static final Profile UNKNOWN = new Profile(0f, 0f, 0f, 1f, 0f);
@@ -132,13 +161,32 @@ public final class CoopSensorSync {
             float profile = fleet.getSensorProfile();
             float strength = fleet.getSensorStrength();
             StatBonus detectedRange = fleet.getDetectedRangeMod();
+            StatBonus sensorRange = sensorRangeModOf(fleet);
+            float sensorFlat = sensorRange == null ? 0f : sensorRange.getFlatBonus();
+            float sensorPercent = sensorRange == null ? 0f : sensorRange.getPercentMod();
+            float sensorMult = sensorRange == null ? 1f : sensorRange.getMult();
             if (detectedRange == null) {
-                return new Profile(profile, 0f, 0f, 1f, strength);
+                return new Profile(profile, 0f, 0f, 1f, strength,
+                        sensorFlat, sensorPercent, sensorMult);
             }
             return new Profile(profile, detectedRange.getFlatBonus(), detectedRange.getPercentMod(),
-                    detectedRange.getMult(), strength);
+                    detectedRange.getMult(), strength, sensorFlat, sensorPercent, sensorMult);
         } catch (RuntimeException | LinkageError ex) {
             return Profile.UNKNOWN;
+        }
+    }
+
+    /**
+     * The observer-side aggregate. Read through {@code getStats()} rather than the
+     * {@code SectorEntityToken} shortcut so a mirror and a real fleet resolve the same
+     * {@link StatBonus} instance the abilities write into.
+     */
+    private static StatBonus sensorRangeModOf(CampaignFleetAPI fleet) {
+        try {
+            MutableFleetStatsAPI stats = fleet.getStats();
+            return stats == null ? null : stats.getSensorRangeMod();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
         }
     }
 
@@ -167,8 +215,46 @@ public final class CoopSensorSync {
             // sensor identity is never worth aborting a frame over
         }
         wrote |= applyDetectedRange(mirror, profile);
+        wrote |= applySensorRange(mirror, profile);
         wrote |= applySensorStrength(mirror, profile);
         return wrote;
+    }
+
+    /**
+     * The observer-side twin of {@link #applyDetectedRange}, pinned the same way and for the same
+     * reason (red-team C3): the local engine re-applies its own terrain/ability mods to the mirror
+     * every frame, so the correction is re-derived against whatever is natively there rather than
+     * added on top of it.
+     */
+    static boolean applySensorRangeForTest(CampaignFleetAPI mirror, Profile profile) {
+        return applySensorRange(mirror, profile);
+    }
+
+    private static boolean applySensorRange(CampaignFleetAPI mirror, Profile profile) {
+        try {
+            MutableFleetStatsAPI stats = mirror.getStats();
+            if (stats == null) {
+                return false;
+            }
+            StatBonus mod = stats.getSensorRangeMod();
+            if (mod == null) {
+                return false;
+            }
+            if (mod.getFlatBonus() == profile.sensorRangeFlat()
+                    && mod.getPercentMod() == profile.sensorRangePercent()
+                    && mod.getMult() == profile.sensorRangeMult()) {
+                return false;
+            }
+            mod.unmodify(MODIFIER_ID);
+            mod.modifyFlat(MODIFIER_ID, profile.sensorRangeFlat() - mod.getFlatBonus(), MODIFIER_DESC);
+            mod.modifyPercent(MODIFIER_ID, profile.sensorRangePercent() - mod.getPercentMod(),
+                    MODIFIER_DESC);
+            mod.modifyMult(MODIFIER_ID, multCorrection(profile.sensorRangeMult(), mod.getMult()),
+                    MODIFIER_DESC);
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
     }
 
     private static boolean applyDetectedRange(CampaignFleetAPI mirror, Profile profile) {
@@ -259,11 +345,17 @@ public final class CoopSensorSync {
                 .append('|').append(CoopFleetCodec.encodeFloat(safe.detectedRangeMult(),
                         CoopFleetCodec.SENSOR_MULT_STEP))
                 .append('|').append(CoopFleetCodec.encodePositiveFloat(safe.sensorStrength(),
-                        CoopFleetCodec.SENSOR_STEP));
+                        CoopFleetCodec.SENSOR_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(safe.sensorRangeFlat(),
+                        CoopFleetCodec.SENSOR_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(safe.sensorRangePercent(),
+                        CoopFleetCodec.SENSOR_STEP))
+                .append('|').append(CoopFleetCodec.encodeFloat(safe.sensorRangeMult(),
+                        CoopFleetCodec.SENSOR_MULT_STEP));
     }
 
     /** Every field present: the mask an unchanged-nothing record carries. */
-    public static final int MASK_ALL = 0b11111;
+    public static final int MASK_ALL = 0b11111111;
 
     /**
      * The wire text of one sensor field, by bit index (Phase 20 M4). Splitting {@link #append} into
@@ -283,6 +375,12 @@ public final class CoopSensorSync {
                     CoopFleetCodec.SENSOR_MULT_STEP);
             case 4 -> CoopFleetCodec.encodePositiveFloat(profile.sensorStrength(),
                     CoopFleetCodec.SENSOR_STEP);
+            case 5 -> CoopFleetCodec.encodeFloat(profile.sensorRangeFlat(),
+                    CoopFleetCodec.SENSOR_STEP);
+            case 6 -> CoopFleetCodec.encodeFloat(profile.sensorRangePercent(),
+                    CoopFleetCodec.SENSOR_STEP);
+            case 7 -> CoopFleetCodec.encodeFloat(profile.sensorRangeMult(),
+                    CoopFleetCodec.SENSOR_MULT_STEP);
             default -> throw new IllegalArgumentException("No sensor field " + index);
         };
     }
@@ -328,24 +426,28 @@ public final class CoopSensorSync {
         int cursor = offset;
         for (int i = 0; i < FIELD_COUNT; i++) {
             if ((mask & (1 << i)) != 0) {
-                values[i] = Float.parseFloat(fields.get(cursor++));
+                values[i] = CoopFleetCodec.parseFiniteFloat(fields.get(cursor++));
             } else if (baseline != null) {
-                values[i] = Float.parseFloat(field(baseline, i));
+                values[i] = CoopFleetCodec.parseFiniteFloat(field(baseline, i));
             } else {
                 throw new IllegalArgumentException(
                         "Sensor field " + i + " is absent and there is no baseline section for it");
             }
         }
-        return new Profile(values[0], values[1], values[2], values[3], values[4]);
+        return new Profile(values[0], values[1], values[2], values[3], values[4],
+                values[5], values[6], values[7]);
     }
 
-    /** Reads the five sensor fields starting at {@code offset} in a split record. */
+    /** Reads the {@link #FIELD_COUNT} sensor fields starting at {@code offset} in a split record. */
     public static Profile parse(List<String> fields, int offset) {
         return new Profile(
-                Float.parseFloat(fields.get(offset)),
-                Float.parseFloat(fields.get(offset + 1)),
-                Float.parseFloat(fields.get(offset + 2)),
-                Float.parseFloat(fields.get(offset + 3)),
-                Float.parseFloat(fields.get(offset + 4)));
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 1)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 2)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 3)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 4)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 5)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 6)),
+                CoopFleetCodec.parseFiniteFloat(fields.get(offset + 7)));
     }
 }

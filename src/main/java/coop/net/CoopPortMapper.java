@@ -1123,6 +1123,31 @@ public final class CoopPortMapper {
         }
     }
 
+    // ---- Phase 20 red-team seam ------------------------------------------------------------------
+    // Appended rather than filed beside result(): this lands alongside a transport rewrite of the
+    // same file, and an appended block that leaves result() untouched cannot collide with it.
+
+    private Result versionedResult;
+    private long resultVersion;
+
+    /**
+     * A counter that changes whenever {@link #result()} would return something different (red-team
+     * B5). The host's connection-doctor block and the intel page's reachability line are published
+     * exactly once today, on the first finished result — so a renewal that later downgrades or
+     * repairs the mapping is never reported, and both surfaces keep showing a verdict that stopped
+     * being true. Callers compare this against the last value they published.
+     *
+     * <p>Computed here rather than inside {@code result()} so the accessor stays a pure snapshot.
+     */
+    public long resultVersion() {
+        Result current = result();
+        if (!current.equals(versionedResult)) {
+            versionedResult = current;
+            resultVersion++;
+        }
+        return resultVersion;
+    }
+
     /** Rendering helper shared with the connection doctor. */
     static String describeTier(Tier tier) {
         return switch (tier) {

@@ -1250,6 +1250,8 @@ public class CoopNetService {
         channel.socket().setTcpNoDelay(true);
         InetAddress pinned = peerAddressOf(channel);
         peer.attach(channel, pinned, clockMillis.getAsLong(), role == CoopConnectionRole.HOST);
+        // Red-team B2/C1: the pump watches this for the drop edge isConnected() cannot show it.
+        connectionGeneration++;
         refreshConnectedLocked();
         CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role
                 + " on peer slot " + peer.slot()
@@ -1431,5 +1433,121 @@ public class CoopNetService {
         } catch (Exception ex) {
             CoopLog.warn(CoopNetService.class, "Coop TCP failed to close channel", ex);
         }
+    }
+
+    // ---- Phase 20 red-team seams -----------------------------------------------------------------
+    // Appended rather than filed beside their neighbours because this block lands alongside a
+    // transport rewrite of the same file; an appended block cannot collide with edits made above it.
+
+    /** 3 failed proofs from one address arms the cooldown; see {@link #noteFailedProof}. */
+    private static final int PROOF_FAILURES_BEFORE_COOLDOWN = 3;
+    /** First cooldown, doubled on each further failure. */
+    private static final long PROOF_COOLDOWN_BASE_MILLIS = 30_000L;
+    /** Ceiling for the doubling. */
+    private static final long PROOF_COOLDOWN_MAX_MILLIS = 600_000L;
+    /** Same bound and eviction policy as {@link #attemptsByAddress}: a guesser must not grow the map. */
+    private static final int MAX_PROOF_RECORDS = 256;
+
+    private final Map<InetAddress, ProofRecord> proofFailuresByAddress = new LinkedHashMap<>();
+    private long connectionGeneration;
+
+    /**
+     * Monotonic counter of TCP attachments (red-team B2/C1). A half-open socket replaced inside one
+     * poll — close then accept — leaves {@link #isConnected()} true for the whole frame, so the pump
+     * never sees a disconnect edge and the returning peer is answered as a stranger. The generation
+     * is the edge the flag cannot express: it changes on <em>every</em> attach, whether or not the
+     * link was up before.
+     */
+    public long connectionGeneration() {
+        synchronized (lifecycleLock) {
+            return connectionGeneration;
+        }
+    }
+
+    /** The address the single v1 peer is pinned to, or null when nothing is attached. */
+    public InetAddress activePeerAddress() {
+        synchronized (lifecycleLock) {
+            for (CoopPeerLink peer : peers) {
+                if (peer.occupied() && peer.pinnedPeerAddress() != null) {
+                    return peer.pinnedPeerAddress();
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Records one failed password proof from {@code source} (red-team A3). The connection throttle
+     * alone does not cover password guessing: a wrong guess drops the connection, which frees the
+     * slot, and the throttle is only consulted when no slot is free — so a guesser could spend
+     * attempts at whatever rate it could reconnect at. Three failures arm a 30 s cooldown that
+     * doubles per further failure to a 10-minute cap.
+     */
+    public void noteFailedProof(InetAddress source) {
+        if (source == null) {
+            return;
+        }
+        synchronized (lifecycleLock) {
+            long now = clockMillis.getAsLong();
+            ProofRecord record = proofFailuresByAddress.get(source);
+            if (record == null) {
+                if (proofFailuresByAddress.size() >= MAX_PROOF_RECORDS) {
+                    Iterator<Map.Entry<InetAddress, ProofRecord>> oldest =
+                            proofFailuresByAddress.entrySet().iterator();
+                    if (oldest.hasNext()) {
+                        oldest.next();
+                        oldest.remove();
+                    }
+                }
+                record = new ProofRecord();
+                proofFailuresByAddress.put(source, record);
+            }
+            record.failures++;
+            if (record.failures < PROOF_FAILURES_BEFORE_COOLDOWN) {
+                return;
+            }
+            long steps = record.failures - PROOF_FAILURES_BEFORE_COOLDOWN;
+            long cooldown = PROOF_COOLDOWN_BASE_MILLIS;
+            for (long i = 0; i < steps && cooldown < PROOF_COOLDOWN_MAX_MILLIS; i++) {
+                cooldown *= 2L;
+            }
+            record.cooldownUntilMillis = now + Math.min(cooldown, PROOF_COOLDOWN_MAX_MILLIS);
+            record.cooldownLogged = false;
+        }
+    }
+
+    /**
+     * Whether {@code source} is inside a password cooldown. Logs at most one line per cooldown: the
+     * caller polls this per attempt and a hostile peer must not be able to write the log for us.
+     */
+    public boolean isProofThrottled(InetAddress source) {
+        if (source == null) {
+            return false;
+        }
+        synchronized (lifecycleLock) {
+            ProofRecord record = proofFailuresByAddress.get(source);
+            if (record == null) {
+                return false;
+            }
+            long now = clockMillis.getAsLong();
+            if (now >= record.cooldownUntilMillis) {
+                return false;
+            }
+            if (!record.cooldownLogged) {
+                record.cooldownLogged = true;
+                CoopLog.warn(CoopNetService.class, "Coop refusing password attempts from "
+                        + source.getHostAddress() + " after " + record.failures
+                        + " failures; no challenge and no accept for "
+                        + (record.cooldownUntilMillis - now) + " ms.");
+            }
+            return true;
+        }
+    }
+
+    /** Per-address failed-proof tally and its cooldown; see {@link #noteFailedProof}. */
+    private static final class ProofRecord {
+        private int failures;
+        private long cooldownUntilMillis;
+        private boolean cooldownLogged;
     }
 }
