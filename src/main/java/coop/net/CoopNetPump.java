@@ -87,6 +87,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_RECONNECT_WAIT = "reconnectWait";
     private static final String FEED_RECONNECT_RESUMED = "reconnectResumed";
     private static final String FEED_RECONNECT_ENDED = "reconnectEnded";
+    private static final String FEED_RECONNECT_EXTENDED = "reconnectExtended";
     private static final java.awt.Color FEED_WARN_COLOR = new java.awt.Color(255, 220, 120);
     private static final java.awt.Color FEED_BAD_COLOR = new java.awt.Color(255, 170, 90);
     private static final java.awt.Color FEED_GOOD_COLOR = new java.awt.Color(150, 230, 150);
@@ -120,7 +121,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_MIRROR_SHIELDS = "fleet.mirrorShields";
     private static final String SECTION_HANDSHAKE_MANIFEST = "handshake.manifest";
     private static final String SECTION_SEED_LOCK_REQUEST = "seed.lockRequest";
-    private static final String SECTION_HOLD_HOST_PAUSED = "session.holdHostPaused";
+    private static final String SECTION_HOLD_PAUSED = "session.holdPaused";
     private static final String SECTION_BATTLE_BRIDGE = "battle.bridge";
     private static final String SECTION_SHARED_PAUSE = "time.sharedPause";
     private static final String SECTION_TIME_APPLY = "time.applySnapshot";
@@ -406,6 +407,12 @@ public class CoopNetPump implements EveryFrameScript {
     // host pause key itself is captured by CoopHostPauseInputListener, not here).
     private boolean hostEffectivePauseApplied;
     private boolean hostSharedPauseInitialized;
+    /**
+     * Phase 20 live QA (F2/F3): true while the pause currently on this client's clock is one the pump
+     * itself applied because no gameplay session was active. It is the difference between "coop is
+     * holding the world" and "the player pressed pause", and only the first is coop's to release.
+     */
+    private boolean coopHoldPaused;
     /**
      * Frame profiler (diagnostic only, dormant unless {@code coop.debug.frameProfile} is on). Freshly
      * installed per pump so a game reload starts from clean accumulators rather than folding a dead
@@ -869,8 +876,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_HANDSHAKE_MANIFEST, t);
         maybeSendSeedLockRequest();
         t = profiler.split(SECTION_SEED_LOCK_REQUEST, t);
-        maybeHoldHostPausedUntilSessionReady();
-        t = profiler.split(SECTION_HOLD_HOST_PAUSED, t);
+        maybeHoldPausedUntilSessionReady();
+        t = profiler.split(SECTION_HOLD_PAUSED, t);
         // Phase 14 runs before syncSharedPause so a battle that began (or ended) this frame is already
         // reflected in the combat intent when the host computes its effective pause.
         tickBattleBridge();
@@ -1474,6 +1481,33 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.PONG;
     }
 
+    /**
+     * The dialogs' "wait more" option (Phase 20 live QA, finding F1). Pushes the deadline back by
+     * {@link CoopReconnectCoordinator#WAIT_MORE_MILLIS} and leaves everything else exactly as it was:
+     * the hold stands, the dialog stays up, and its countdown picks the new number up on its own.
+     *
+     * <p>Called from the engine's option handler rather than from {@code advance()}, so like every
+     * other UI callback it swallows what it might throw — a dialog press must never be able to take
+     * the pump down.
+     */
+    private void extendReconnectWait() {
+        try {
+            long now = clockMillis.getAsLong();
+            if (!reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, now)) {
+                return;
+            }
+            CoopLog.info(CoopNetPump.class, "Coop reconnect wait extended by "
+                    + (CoopReconnectCoordinator.WAIT_MORE_MILLIS / 1000L) + " s as " + service.role()
+                    + "; " + reconnect.remainingSeconds(now) + " s left on session "
+                    + sessionState.sessionId());
+            postFeed(FEED_RECONNECT_EXTENDED, now, "Co-op: still waiting - "
+                    + (CoopReconnectCoordinator.WAIT_MORE_MILLIS / 60_000L)
+                    + " more minutes on the clock.", FEED_WARN_COLOR);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not extend the reconnect wait", ex);
+        }
+    }
+
     /** Clears the shared hold and takes the dialog down; safe to call when neither is engaged. */
     private void releaseReconnectHold() {
         pauseCoordinator.setReconnectHold(false);
@@ -1537,6 +1571,9 @@ public class CoopNetPump implements EveryFrameScript {
             long now = clockMillis.getAsLong();
             long seconds = graceMillis / 1000L;
             pauseCoordinator.setReconnectHold(true);
+            // Before the hold reaches the clock: from here the pause on screen is coop's, and it has
+            // to still be coop's after an expiry hands the clock to the no-session hold (F2).
+            claimCoopPauseHoldForReconnect();
             // One warning per window, not one per session: a second blip deserves its own line.
             graceTrafficDropWarned = false;
             if (state == CoopReconnectCoordinator.State.HOST_WAIT) {
@@ -1547,6 +1584,7 @@ public class CoopNetPump implements EveryFrameScript {
                 reconnectDialogs.request(new coop.ui.CoopReconnectHostDialog(
                         sessionState.remoteName(),
                         () -> reconnect.remainingSeconds(clockMillis.getAsLong()),
+                        CoopNetPump.this::extendReconnectWait,
                         () -> reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER)));
             } else {
                 holdGuestClockForReconnect();
@@ -1557,6 +1595,7 @@ public class CoopNetPump implements EveryFrameScript {
                 reconnectDialogs.request(new coop.ui.CoopReconnectGuestDialog(
                         sessionState.remoteName(),
                         () -> reconnect.remainingSeconds(clockMillis.getAsLong()),
+                        CoopNetPump.this::extendReconnectWait,
                         () -> reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER)));
             }
         }
@@ -2415,35 +2454,121 @@ public class CoopNetPump implements EveryFrameScript {
      * the host's clock run while the guest was still negotiating; at 200 ms RTT with 2% loss the
      * lobby/handshake/seed-lock exchange is several round trips of TCP with retransmits, so any fixed
      * budget would eventually be the thing that broke. There is no such budget: the predicate is
-     * purely {@code role == HOST && !isGameplaySessionActive()}, evaluated every frame, and the only
+     * purely {@code role != NONE && !isGameplaySessionActive()}, evaluated every frame, and the only
      * exit is the session actually becoming active. A handshake that never completes leaves the host
      * paused forever, which is the correct outcome — there is no public clock setter and no drivable
      * fast-advance, so campaign time the guest missed cannot be given back.
      *
-     * <p>The counterpart risk, the hold outliving its reason, is covered by the same predicate: the
-     * frame {@code isGameplaySessionActive()} goes true this stops asserting anything and the normal
-     * shared-pause path takes the clock over, seeding {@code hostPauseIntent} from whatever it
-     * observes (see {@link #syncHostSharedPause()}) so the hold does not silently become a permanent
-     * host pause intent.
+     * <p><b>The counterpart risk — the hold outliving its reason — is what the live QA caught
+     * (finding F2).</b> The old comment claimed the hold could not become a permanent pause intent
+     * because {@link #syncHostSharedPause()} seeds {@code hostPauseIntent} from whatever it observes
+     * on the first active frame. That seeding was the bug: the thing it observed was <em>this
+     * method's own {@code setPaused(true)}</em>, so the moment the session went live the hold was
+     * promoted to "the host player pressed pause" and nothing but a key press could clear it. On a
+     * fresh start that merely cost the host one keystroke; after a reconnect-grace expiry and a
+     * lobby rejoin it stranded a live session paused with no player able to say why.
+     *
+     * <p>So the hold is now <em>owned</em>: {@link #coopHoldPaused} records that this pump, not the
+     * player, put the clock where it is, and the release in {@code syncHostSharedPause} both skips
+     * the intent seeding and lets {@code effectivePaused} unpause the sector. A pause the pump did
+     * not apply is never claimed and therefore never released — a host who paused before hosting, or
+     * a vanilla auto-pause, still owns its own pause across the whole hold.
+     *
+     * <p><b>Guest half (finding F3).</b> Solo play is not supported (mod enabled = coop rules), and a
+     * guest between sessions was the one client still free-running: during the host's 95 s hold the
+     * guest's clock ran 1.4 game-days ahead and the Phase 7c reconciler had to slew it back after the
+     * rejoin. It holds on the same terms now, with one exemption that is not negotiable: never force
+     * {@code setPaused} while an interaction dialog is open. That is the memory rule behind the
+     * blank-options trade-tab freeze, and it covers the reconnect dialog too — that dialog is itself
+     * an interaction dialog, so vanilla is already pausing the game while it is up.
      */
-    private void maybeHoldHostPausedUntilSessionReady() {
-        // Hold the host paused from the moment it starts hosting until the coop session is fully
-        // established (guest connected + handshake validated + seed lock done). Otherwise host time
-        // advances during the multi-second connect and the guest starts several campaign days
-        // behind; there is no public clock-setter or drivable fast-advance to let the guest catch
-        // up afterwards, so we prevent the gap instead of closing it. Once the session is active we
-        // stop forcing pause and the host's normal pause/unpause mirrors to the guest.
-        if (service.role() != CoopConnectionRole.HOST || isGameplaySessionActive()) {
+    private void maybeHoldPausedUntilSessionReady() {
+        // Hold the local clock from the moment this client takes a coop role until the session is
+        // fully established (peer connected + handshake validated + seed lock done). Otherwise time
+        // advances during the multi-second connect and the two campaigns start days apart; there is
+        // no public clock-setter or drivable fast-advance to let either side catch up afterwards, so
+        // we prevent the gap instead of closing it. Once the session is active the hold is released
+        // and the host's normal pause/unpause mirrors to the guest.
+        CoopConnectionRole role = service.role();
+        if (role == CoopConnectionRole.NONE || isGameplaySessionActive()) {
             return;
         }
         try {
             SectorAPI sector = Global.getSector();
-            if (sector != null && !sector.isPaused()) {
-                sector.setPaused(true);
-                CoopLog.info(CoopNetPump.class, "Coop host holding campaign paused until session is ready");
+            if (sector == null) {
+                return;
+            }
+            if (role == CoopConnectionRole.GUEST && isGuestInteractionDialogOpen()) {
+                // Vanilla owns the clock while a dialog is up and pauses it anyway; forcing pause
+                // underneath one is what froze the guest's station dialog with no options.
+                return;
+            }
+            if (sector.isPaused()) {
+                // Either our own hold from an earlier frame, or somebody else's pause. Both mean
+                // there is nothing to do; the ownership flag already says which it is.
+                return;
+            }
+            sector.setPaused(true);
+            if (!coopHoldPaused) {
+                coopHoldPaused = true;
+                CoopLog.info(CoopNetPump.class, "Coop " + role
+                        + " holding the campaign paused: no gameplay session is active");
             }
         } catch (RuntimeException | LinkageError ex) {
             // No active sector yet (e.g. still on a menu); nothing to pause.
+        }
+    }
+
+    /**
+     * The other half of {@link #maybeHoldPausedUntilSessionReady()}: the session is live, so the
+     * pump's own hold is over. Clears the ownership flag and reports whether this frame is the one
+     * that ended it, which is what tells the host's shared-pause seeding not to mistake the hold for
+     * a pause the player asked for.
+     *
+     * <p>Deliberately does not touch the clock itself. On the host the release is
+     * {@code setPaused(effectivePaused)} in {@link #syncHostSharedPause()}, which is the one place
+     * allowed to drive that clock; on the guest it is the host's {@code TIME_SNAPSHOT}, re-applied
+     * every frame by {@link #maybeApplyTimeSnapshot()}. Unpausing the guest here instead would let it
+     * run for the 0-200 ms before the first snapshot lands — the exact free-running the guest hold
+     * exists to stop.
+     */
+    private boolean consumeCoopHoldRelease() {
+        if (!coopHoldPaused || pauseCoordinator.reconnectHold()) {
+            // A reconnect window is the other reason coop holds the clock, and on the host the
+            // session stays active right through it — so "the session is live" is not on its own
+            // enough to say the hold is over.
+            return false;
+        }
+        coopHoldPaused = false;
+        CoopLog.info(CoopNetPump.class, "Coop " + service.role()
+                + " releasing its pause hold: the gameplay session is active");
+        return true;
+    }
+
+    /**
+     * Claims the pause a reconnect window is about to put on the clock (Phase 20 live QA, F2). The
+     * window's hold is coop's, exactly like the no-session hold, and it has to be recorded as such
+     * <em>before</em> it is applied: after an expiry the sector is left paused by it, the no-session
+     * hold then finds the clock already stopped and applies nothing, and without this claim nothing
+     * would remember whose pause it is. That is the live path that stranded a rejoined session paused
+     * with {@code hostIntent=true} and no player able to say why.
+     *
+     * <p>A clock that is <em>already</em> paused when the window opens is deliberately not claimed:
+     * that pause belongs to the player (or to vanilla), and coop must not release what it did not
+     * take.
+     */
+    private void claimCoopPauseHoldForReconnect() {
+        if (coopHoldPaused) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null || sector.isPaused()) {
+                return;
+            }
+            coopHoldPaused = true;
+        } catch (RuntimeException | LinkageError ex) {
+            // No sector to hold; the window still runs, there is just no clock to own.
         }
     }
 
@@ -2467,6 +2592,9 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() == CoopConnectionRole.HOST) {
             syncHostSharedPause();
         } else if (service.role() == CoopConnectionRole.GUEST) {
+            // The guest's clock is the host snapshot's to drive; all the release does here is stop
+            // this pump from re-asserting the hold (see consumeCoopHoldRelease).
+            consumeCoopHoldRelease();
             syncGuestSharedPauseIntent();
         }
     }
@@ -2483,10 +2611,18 @@ public class CoopNetPump implements EveryFrameScript {
         }
         try {
             boolean observed = sector.isPaused();
+            // Phase 20 live QA (F2): the clock may still be paused by the pump's own no-session hold,
+            // and that pause belongs to coop, not to the host player. Consumed here, on the first
+            // active frame, because this is the only place that decides what the pause means.
+            boolean releasedCoopHold = consumeCoopHoldRelease();
             if (!hostSharedPauseInitialized) {
-                // First active frame: seed the host's intent from the current clock state (it may
-                // still be paused from the connect-time hold) rather than treating it as an edge.
-                pauseCoordinator.setHostPauseIntent(observed);
+                // First active frame: seed the host's intent from the current clock state rather than
+                // treating it as an edge — unless what we are looking at is our own hold, in which
+                // case seeding it would turn "waiting for the guest" into a permanent host pause that
+                // only a key press could clear. Anything the player actually asserted during the hold
+                // (a pre-hold pause, a vanilla auto-pause) is already in hostPauseIntent or is a
+                // pause the hold never claimed, so it survives either way.
+                pauseCoordinator.setHostPauseIntent(observed && !releasedCoopHold);
                 hostSharedPauseInitialized = true;
             } else if (observed != hostEffectivePauseApplied) {
                 // The clock changed without us setting it AND not via the pause key (that is consumed

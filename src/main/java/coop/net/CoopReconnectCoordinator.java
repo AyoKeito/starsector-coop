@@ -86,6 +86,15 @@ public final class CoopReconnectCoordinator {
     /** Reject text a {@code LOBBY_HELLO} gets while a window is open. */
     public static final String LOBBY_REJECT_IN_GRACE = "session in reconnect grace";
 
+    /**
+     * How much one press of the dialogs' "wait more" option adds to the window (Phase 20 live QA,
+     * finding F1). Five minutes because the option exists for the outage the configured grace was
+     * never sized for — a router reboot, a laptop that went to sleep, a partner walking back to their
+     * desk — and a player who has decided to keep waiting should not have to keep clicking. The
+     * dialogs' option label states this number; keep the two in step.
+     */
+    public static final long WAIT_MORE_MILLIS = 300_000L;
+
     private final long graceMillis;
     private final Listener listener;
 
@@ -183,6 +192,27 @@ public final class CoopReconnectCoordinator {
         this.graceEndsAtMillis = nowMillis + graceMillis;
         this.resumeRequestSent = false;
         listener.onGraceStarted(target, graceMillis);
+    }
+
+    /**
+     * Pushes the deadline back, which is all the dialogs' "wait more" option does. Unlimited presses:
+     * the whole point is that only the player knows whether the partner is coming back, so the
+     * machine must not out-stubborn them. Extending is deliberately not a state change — the window
+     * stays in the same state with the same identity, so a resume that lands mid-extension is
+     * accepted exactly as it would have been.
+     *
+     * <p>Measured from the later of the current deadline and {@code nowMillis}: an extension pressed
+     * on the frame the window was already due to expire still buys the full {@code extraMillis}
+     * rather than a fraction of it.
+     *
+     * @return true when a window was open and the deadline actually moved
+     */
+    public boolean extend(long extraMillis, long nowMillis) {
+        if (state == State.IDLE || extraMillis <= 0L) {
+            return false;
+        }
+        graceEndsAtMillis = Math.max(graceEndsAtMillis, nowMillis) + extraMillis;
+        return true;
     }
 
     /**

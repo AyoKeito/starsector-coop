@@ -495,13 +495,17 @@ class CoopNetPumpTest {
 
         assertTrue(sector.paused);
 
-        sector.paused = false;
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
         pump.advance(0f);
 
+        // Phase 20 live QA (F2): coop releases what coop paused, with no key press from the host.
+        // This assertion used to be reachable only because the test unpaused the sector by hand.
         assertFalse(sector.paused);
+        assertFalse(pump.pauseCoordinatorForBridge().hostPauseIntent(),
+                "the connect-time hold is not the host player pressing pause");
+        assertFalse(pump.pauseCoordinatorForBridge().effectivePaused());
     }
 
     @Test
@@ -2452,6 +2456,162 @@ class CoopNetPumpTest {
 
         assertFalse(pump.reconnectCoordinatorForTest().active());
         assertNull(session.sessionId());
+    }
+
+    // ---- Phase 20 live QA: the coop pause hold (findings F2/F3) -----------------------------------
+
+    @Test
+    void aPauseTheHostSetItselfBeforeTheHoldSurvivesTheSessionGoingLive() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        // The player paused before hosting: coop never applied that pause and must not take it away.
+        RecordingSector sector = new RecordingSector(true);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+        assertTrue(sector.paused);
+
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        pump.advance(0f);
+
+        assertTrue(sector.paused, "coop must only release the pause it applied itself");
+        assertTrue(pump.pauseCoordinatorForBridge().hostPauseIntent(),
+                "a pause coop did not apply is the host's, and the guest is told so");
+    }
+
+    /**
+     * The live QA sequence behind F2, end to end: a 95 s outage against a 60 s window, the host tears
+     * down, the guest comes back through the ordinary lobby, and the new session went active with the
+     * host still paused because the grace hold had been promoted to the host's own pause intent.
+     */
+    @Test
+    void aHostThatOutlastsTheGraceReleasesItsOwnHoldWhenTheGuestRejoins() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a", "session-b"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        pump.advance(0f);
+        assertFalse(sector.paused, "a live session runs");
+
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(sector.paused, "the grace window holds the world");
+
+        now.set(1000L + 60_000L);
+        pump.advance(0f);
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertTrue(sector.paused, "and the no-session hold takes the clock straight over");
+
+        // The supported rejoin: a fresh lobby round on a new connection, new session id.
+        service.connected = true;
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        pump.advance(0f);
+
+        assertFalse(sector.paused, "F2: the rejoined session must not stay paused waiting for a key press");
+        assertFalse(pump.pauseCoordinatorForBridge().hostPauseIntent());
+        assertFalse(pump.pauseCoordinatorForBridge().effectivePaused());
+    }
+
+    @Test
+    void aGuestWithNoSessionHoldsItsCampaignPausedInsteadOfRunningOnAlone() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        // Connecting: role taken, nothing handshaken. F3's guest ran 1.4 game-days ahead here.
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+
+        assertTrue(sector.paused);
+    }
+
+    @Test
+    void theGuestHoldNeverForcesPauseUnderAnOpenInteractionDialog() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        RecordingCampaignUi ui = new RecordingCampaignUi(new RecordingEntity("market-1", "Jangala"));
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+
+        assertFalse(sector.paused,
+                "vanilla owns the clock under a dialog; forcing pause there is the trade-tab freeze");
+
+        // The moment the dialog closes the hold applies as usual.
+        ui.target = null;
+        pump.advance(0f);
+        assertTrue(sector.paused);
+    }
+
+    @Test
+    void theGuestStopsHoldingOnceItsSessionIsActive() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        assertTrue(sector.paused);
+
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        pump.advance(0f);
+
+        // The guest's clock is the host snapshot's to drive (RecordingTimeLock does not touch the
+        // sector), so what the release has to prove is that the pump stops re-asserting the hold.
+        sector.paused = false;
+        pump.advance(0f);
+        assertFalse(sector.paused, "F3: an active session is the host's to pause, not the hold's");
+    }
+
+    @Test
+    void aGuestHoldSurvivesTheReconnectWindowAndIsReleasedOnResume() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+        assertTrue(pump.pauseCoordinatorForBridge().reconnectHold());
+
+        service.connected = true;
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 3L, 2000L));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+        // Released: the resumed session's clock follows the host again, so nothing re-pauses locally.
+        sector.paused = false;
+        pump.advance(0f);
+        assertFalse(sector.paused);
     }
 
     // ---- Phase 20.2: link death -------------------------------------------------------------------

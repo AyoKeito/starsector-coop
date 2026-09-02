@@ -12,8 +12,8 @@ import java.util.Map;
 import java.util.function.IntSupplier;
 
 /**
- * Shared body of the two Phase 20.2 reconnect dialogs: a headline, a live countdown paragraph, and
- * one option that ends the session immediately.
+ * Shared body of the two Phase 20.2 reconnect dialogs: a headline, a live countdown paragraph, an
+ * option that buys more waiting time, and one that ends the session immediately.
  *
  * <p><b>Why a real interaction dialog.</b> The 20.6 integration rule (corrected 2026-08-26): a real
  * {@link InteractionDialogPlugin} shown through {@code CampaignUIAPI.showInteractionDialog} is the
@@ -34,18 +34,29 @@ import java.util.function.IntSupplier;
  */
 public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlugin {
 
-    /** The single option's id; an object identity, so nothing else can collide with it. */
+    /** The options' ids; object identities, so nothing else can collide with them. */
     private static final Object OPTION_END = new Object();
+    private static final Object OPTION_WAIT_MORE = new Object();
+
+    /**
+     * Label of the "wait more" option, both roles. The number matches
+     * {@code CoopReconnectCoordinator.WAIT_MORE_MILLIS}, which is what the press actually adds; the
+     * two are stated in different modules on purpose (the dialogs must not depend on the net layer)
+     * so keep them in step by hand.
+     */
+    static final String WAIT_MORE_OPTION_TEXT = "Wait 5 more minutes";
 
     private final IntSupplier remainingSeconds;
+    private final Runnable onWaitMore;
     private final Runnable onEndSession;
 
     private InteractionDialogAPI dialog;
     private int lastRenderedSeconds = Integer.MIN_VALUE;
     private boolean bodyRendered;
 
-    CoopReconnectDialogPlugin(IntSupplier remainingSeconds, Runnable onEndSession) {
+    CoopReconnectDialogPlugin(IntSupplier remainingSeconds, Runnable onWaitMore, Runnable onEndSession) {
         this.remainingSeconds = remainingSeconds == null ? () -> 0 : remainingSeconds;
+        this.onWaitMore = onWaitMore == null ? () -> { } : onWaitMore;
         this.onEndSession = onEndSession == null ? () -> { } : onEndSession;
     }
 
@@ -55,7 +66,10 @@ public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlug
     /** Second line's template; {@code seconds} is the live countdown. */
     abstract String countdownText(int seconds);
 
-    /** Label of the one option. */
+    /** Tooltip for the "wait more" option, in the local role's terms. */
+    abstract String waitMoreOptionTooltip();
+
+    /** Label of the terminal option. */
     abstract String endOptionText();
 
     /** Tooltip explaining that the option is irreversible. */
@@ -76,6 +90,11 @@ public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlug
 
     @Override
     public void advance(float amount) {
+        refreshCountdown();
+    }
+
+    /** Rewrites the countdown paragraph, at most once per whole second of change. */
+    private void refreshCountdown() {
         int seconds = remainingSeconds.getAsInt();
         if (seconds == lastRenderedSeconds) {
             return;
@@ -96,6 +115,23 @@ public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlug
 
     @Override
     public void optionSelected(String optionText, Object optionData) {
+        if (optionData == OPTION_WAIT_MORE) {
+            try {
+                onWaitMore.run();
+            } catch (Throwable ex) {
+                CoopLog.warn(getClass(), "Coop reconnect dialog could not extend the wait", ex);
+            }
+            // Stays open: the whole point is to keep waiting, and the next advance() picks the new
+            // countdown up. Refresh here too so the number moves on the click rather than a frame
+            // later, which is what makes the press feel like it did something.
+            refreshCountdown();
+            // Re-assert the options. This is the only coop dialog a player can leave open after
+            // pressing something, and a dialog with an empty option panel is the trapped-player bug
+            // in its purest form: modal on screen, no key that does anything. Cheap insurance
+            // against any engine build that clears the panel on selection.
+            renderOptions();
+            return;
+        }
         if (optionData != OPTION_END) {
             return;
         }
@@ -164,6 +200,9 @@ public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlug
                 return;
             }
             options.clearOptions();
+            // Waiting first: it is the reversible one, and the destructive option should never be
+            // what the eye lands on first in a dialog that appeared unannounced.
+            options.addOption(WAIT_MORE_OPTION_TEXT, OPTION_WAIT_MORE, waitMoreOptionTooltip());
             options.addOption(endOptionText(), OPTION_END, endOptionTooltip());
         } catch (Throwable ex) {
             CoopLog.warn(getClass(), "Coop reconnect dialog could not render its options", ex);

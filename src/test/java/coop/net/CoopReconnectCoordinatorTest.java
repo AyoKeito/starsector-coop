@@ -202,6 +202,98 @@ class CoopReconnectCoordinatorTest {
                 listener.events);
     }
 
+    // ---- wait more (Phase 20 live QA, finding F1) -------------------------------------------------
+
+    @Test
+    void extendingPushesTheDeadlineBackWithoutChangingTheWindow() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 1_000L);
+
+        assertTrue(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 41_000L));
+
+        // 20 s were left of the original 60; the extension adds to the deadline, not to "now".
+        assertEquals(20_000L + CoopReconnectCoordinator.WAIT_MORE_MILLIS,
+                reconnect.remainingMillis(41_000L));
+        assertEquals(320, reconnect.remainingSeconds(41_000L));
+        // Same window, same identity: a resume that lands mid-extension is still the same session's.
+        assertTrue(reconnect.hostWaiting());
+        assertEquals(SESSION, reconnect.sessionId());
+        assertEquals(GRACE, reconnect.graceMillis());
+        assertEquals(List.of("started:HOST_WAIT:60000"), listener.events);
+    }
+
+    @Test
+    void expiryFiresAtTheExtendedDeadlineNotTheOriginalOne() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginGuestReconnect(SESSION, GUEST, 1_000L);
+        reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 41_000L);
+
+        // The original deadline comes and goes with the window still open.
+        assertFalse(reconnect.tick(61_000L));
+        assertTrue(reconnect.guestReconnecting());
+        assertFalse(reconnect.tick(360_999L));
+
+        assertTrue(reconnect.tick(361_000L));
+        assertFalse(reconnect.active());
+        assertEquals(List.of("started:GUEST_RECONNECTING:60000",
+                "ended:GUEST_RECONNECTING:" + CoopReconnectCoordinator.REASON_GRACE_EXPIRED),
+                listener.events);
+    }
+
+    @Test
+    void pressingWaitMoreRepeatedlyKeepsAddingTime() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 1_000L);
+
+        for (int press = 0; press < 5; press++) {
+            assertTrue(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 1_000L));
+        }
+
+        assertEquals(GRACE + 5 * CoopReconnectCoordinator.WAIT_MORE_MILLIS,
+                reconnect.remainingMillis(1_000L));
+    }
+
+    @Test
+    void anExtensionPressedAfterTheDeadlineStillBuysTheFullTime() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 1_000L);
+
+        // The option handler runs between frames, so it can land after the deadline but before the
+        // tick that would have closed the window.
+        reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 70_000L);
+
+        assertEquals(CoopReconnectCoordinator.WAIT_MORE_MILLIS, reconnect.remainingMillis(70_000L));
+        assertFalse(reconnect.tick(70_000L));
+    }
+
+    @Test
+    void extendingAnIdleWindowIsANoOp() {
+        CoopReconnectCoordinator reconnect = coordinator();
+
+        assertFalse(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 1_000L));
+
+        assertFalse(reconnect.active());
+        assertEquals(0L, reconnect.remainingMillis(1_000L));
+        assertEquals(List.of(), listener.events);
+
+        // Nor after the window has closed: a stale dialog press must not resurrect a dead session.
+        reconnect.beginHostWait(SESSION, GUEST, 1_000L);
+        reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER);
+        assertFalse(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 2_000L));
+        assertFalse(reconnect.active());
+    }
+
+    @Test
+    void aNonPositiveExtensionChangesNothing() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 1_000L);
+
+        assertFalse(reconnect.extend(0L, 1_000L));
+        assertFalse(reconnect.extend(-5_000L, 1_000L));
+
+        assertEquals(GRACE, reconnect.remainingMillis(1_000L));
+    }
+
     // ---- guards ----------------------------------------------------------------------------------
 
     @Test
