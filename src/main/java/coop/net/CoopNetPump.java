@@ -2148,7 +2148,7 @@ public class CoopNetPump implements EveryFrameScript {
             sessionState.guestRejectLobby(LOBBY_REJECT_PASSWORD_HELP, true);
             service.stopReconnecting(LOBBY_REJECT_PASSWORD);
             CoopLog.warn(CoopNetPump.class, "Coop lobby rejected: the host's lobby password did not"
-                    + " match. Not retrying — relaunch this client with -D"
+                    + " match. Not retrying; relaunch this client with -D"
                     + CoopNetStartupConfig.PASSWORD_PROPERTY + "=<the host's password>.");
             coop.ui.CoopFeed.post("Co-op: wrong lobby password - relaunch with the host's password.",
                     FEED_WARN_COLOR);
