@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built 2026-09-02 (smoke pending)"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built + live smoke PASSED 2026-09-02"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 7b built (2026-09-02), two-instance smoke pending; 12c manual residue still open",
-  "here": "<b>Phase 7b — shared fast-forward — is built: 1210 green tests (2026-09-02), two-instance smoke PENDING.</b> <code>CoopFastForwardLock</code> forces vanilla's toggle fast-forward mode and <code>campaignSpeedupMult=2</code> on both roles for the life of a session, mirrors the host's <code>CampaignState.fastForward</code> field onto the guest from the existing <code>TIME_SNAPSHOT</code> bit, and restores the player's own toggle preference when the session ends; the <code>settings.json</code> 1x override is gone, so solo games with the mod enabled get fast-forward back. Build-day correction worth knowing: the spec named the toggle setter <code>?00000(boolean)</code>, but that <code>?</code> was javap substituting for a non-ASCII character — five different setters print identically. Parsing the class file's constant pool showed the real accessors are <code>Oo0000()</code> / <code>ö00000(boolean)</code> over a static boolean field literally named <code>class</code>, so the build resolves the <em>field</em> with <code>findStaticGetter/Setter</code> and never touches the ambiguous method name. Any handle failure (or <code>-Dcoop.ff.disable=true</code>) degrades to the old 1x lock via public API. Phase 29's deferred line item landed alongside: <code>CoopStreamCadence</code> measures the FLEET_SNAPSHOT and NPC_FLEET_MOTION send interval in <em>stream</em> time (wall-clock fallback only while paused), so 2x fast-forward doubles the wall send rate and the interpolation buffer keeps its depth. <b>Open: the 7b 8-step smoke</b> (host Shift toggles both clients, guest Shift inert, pause/unpause keeps FF, date alignment over cycles, settings-menu untick, fallback drill, solo sanity, post-session restore) <b>and the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
+  "hereHead": "You are here — Phase 7b built and live-smoke verified (2026-09-02); next 7c, with the 12c manual residue still open",
+  "here": "<b>Phase 7b — shared fast-forward — is built: 1210 green tests (2026-09-02), two-instance smoke PASSED the same evening.</b> <code>CoopFastForwardLock</code> forces vanilla's toggle fast-forward mode and <code>campaignSpeedupMult=2</code> on both roles for the life of a session, mirrors the host's <code>CampaignState.fastForward</code> field onto the guest from the existing <code>TIME_SNAPSHOT</code> bit, and restores the player's own toggle preference when the session ends; the <code>settings.json</code> 1x override is gone, so solo games with the mod enabled get fast-forward back. Build-day correction worth knowing: the spec named the toggle setter <code>?00000(boolean)</code>, but that <code>?</code> was javap substituting for a non-ASCII character — five different setters print identically. Parsing the class file's constant pool showed the real accessors are <code>Oo0000()</code> / <code>ö00000(boolean)</code> over a static boolean field literally named <code>class</code>, so the build resolves the <em>field</em> with <code>findStaticGetter/Setter</code> and never touches the ambiguous method name. Any handle failure (or <code>-Dcoop.ff.disable=true</code>) degrades to the old 1x lock via public API. Phase 29's deferred line item landed alongside: <code>CoopStreamCadence</code> measures the FLEET_SNAPSHOT and NPC_FLEET_MOTION send interval in <em>stream</em> time (wall-clock fallback only while paused), so 2x fast-forward doubles the wall send rate and the interpolation buffer keeps its depth. <b>Smoke result:</b> host Shift toggled both clients, guest Shift inert, FF survived pause, the settings-menu untick was harmless, the mirror stayed smooth at 2x, no lock warning in either log (the sandbox <code>Class.forName</code> assumption held), and the bridge read the guest 9 game-hours ahead after the cycles — inside the accepted bound and exactly the drift Phase 7c corrects. The fallback drill passed and exposed a missing warning on the property path (fixed <code>3471f9f</code>). Solo sanity was waived; the post-session restore check can't run in the harness because the host is held paused before a session and after a disconnect. <b>Open: Phase 7c next, and the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next: the 7b smoke, then 7c",
+      "head": "Next: Phase 7c (clock reconciliation)",
       "state": "you are here",
-      "body": "<span class=\"rp\" data-jump=\"7b\">Phase 7b</span> — shared fast-forward — is <b>built</b> (2026-09-02, 1210 green): toggle mode + a fixed 2x forced on both roles for the session, the host's fastForward field mirrored onto the guest, the settings.json 1x lock removed, and Phase 29's game-time send cadence landed with it. Its two-instance 8-step smoke is the next thing to run (host Shift = both speed up, guest Shift inert, FF survives pause, dates aligned over cycles, fallback drill with <code>-Dcoop.ff.disable=true</code> on both, solo sanity, post-session restore). Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After that the order continues 7c → 20 → 29-M2 → 21 → 19."
+      "body": "<span class=\"rp\" data-jump=\"7b\">Phase 7b</span> — shared fast-forward — is <b>built and live-verified</b> (2026-09-02): both clients speed up on the host's Shift, the guest's Shift is inert, fast-forward survives a shared pause, and the fallback drill degraded cleanly to 1x. The bridge measured the guest 9 game-hours ahead of the host after the FF cycles — bounded, but it is the drift <span class=\"rp\" data-jump=\"7c\">Phase 7c</span> exists to correct, so 7c is next. Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After 7c the order continues 20 → 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -281,11 +281,8 @@
         "-Dcoop.ff.disable fallback",
         "1x degrade path"
       ],
-      "residue": [
-        "two-instance 8-step smoke PENDING (incl. in-game Class.forName sandbox confirmation and the -Dcoop.ff.disable fallback drill)",
-        "eyeball mirror smoothness under 2x FF (Phase 29 cadence rule landed here)"
-      ],
-      "note": "Built 2026-09-02, 1210 green. Toggle flag resolved as StarfarerSettings' static field `class` (the spec's ?00000 setter name was a javap artifact). Degrades to the Phase 7 1x lock if handles fail. Carries Phase 29's game-time send cadence (CoopStreamCadence)."
+      "residue": [],
+      "note": "Built 2026-09-02 (1210 green) and two-instance smoke PASSED the same evening: host Shift toggles both, guest Shift inert, FF survives pause, dates within 9 game-hours after cycles (7c's job), fallback drill clean (+ warning fix 3471f9f). Toggle flag = StarfarerSettings' static field `class`; degrades to the Phase 7 1x lock if handles fail. Carries Phase 29's game-time send cadence."
     },
     {
       "id": "7c",
