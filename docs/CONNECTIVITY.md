@@ -495,3 +495,8 @@ it sits on the host's slot until the 15 s handshake deadline drops it. Neither w
 which rejected and throttled as designed. One practical consequence for testers: relaunching a guest
 while the old process is still knocking extends the cooldown, so the corrected guest looks unable to
 connect until it expires.
+
+Both were fixed the same night in `080eaaf`. A password reject now ends the retry loop for that
+launch, the HUD line reads `rejected: password rejected, relaunch with the host's password`, and the
+campaign feed says the same; any other reject retries after 5 s instead of 500 ms; and a fresh
+connection always opens a lobby round, so nothing sits mute on the host's slot.
