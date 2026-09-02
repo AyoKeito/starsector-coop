@@ -947,13 +947,12 @@
         "TCP-fallback floor pin"
       ],
       "residue": [
-        "spike: artifact characterization on shaped harness",
-        "M1 interpolator wired into mirror registry + tuning + commit",
-        "M2 cadence controller + tier surfacing + certification + commit",
+        "M1 QA: shaped-loopback loss/reorder pass (needs Phase 20 harness; decides whether the 200 ms interp delay rises)",
+        "M2 cadence controller + LINK_STATUS tier + adaptive interp delay + HUD/intel surfacing + TCP-fallback floor unification + tier certification + commit",
         "document frozen calibration values",
-        "decide partner-mirror inclusion, tier set, blend/threshold values"
+        "decide tier set + blend/threshold values at M2 build"
       ],
-      "note": "M1 needs Phases 8/9 + Phase 20 shaped harness; M2 needs Phase 20 (CoopLinkQuality/LINK_STATUS)"
+      "note": "M1 BUILT + clean-link smoke verified 2026-08-24 (partner-mirror inclusion settled: included); game-time send cadence under FF landed with 7b 2026-09-02; M2 needs Phase 20 (CoopLinkQuality/LINK_STATUS), slots directly after it"
     },
     {
       "id": "30",
