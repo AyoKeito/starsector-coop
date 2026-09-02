@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built + live smoke PASSED 2026-09-02; 7c code-complete 2026-09-02 (smoke pending)"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b built + live smoke PASSED 2026-09-02; 7c built + live smoke PASSED 2026-09-02"
     },
     {
       "key": "partial",
@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here — Phase 7c code-complete (2026-09-02, 1233 green); its two-instance smoke is next, with the 12c manual residue still open",
-  "here": "<b>Phase 7c — guest clock reconciliation — is code-complete: 1233 green tests (2026-09-02, 23 new), two-instance smoke pending.</b> <code>CoopClockReconciler</code> reads the drift the <code>TIME_SNAPSHOT</code> stream has carried unused since Phase 7 (host timestamp minus guest timestamp), keeps a 9-sample median ring behind a pause-agreement gate and a self-scaling spike gate, and converges the guest's <code>CampaignClock</code> by a slew bounded to 10% of each frame's own clock advance (30% while more than 0.1 game-day out). Entry at 0.05 game-day, exit below 0.01. During a shared pause it snaps the whole positive drift forward in one write; an unpaused snap needs drift over 2 game-days held across 3 estimates spanning 2 s, and logs at warn. The clock never moves backward: month-end fires on <code>getMonth() != prevMonth</code>, so a backward write across a month boundary would pay monthly income twice. A guest that is ahead slows down, and a guest-ahead condition lasting 60 s logs once. Every write goes through <code>getCal().setTimeInMillis</code> plus a MethodHandles setter on the private <code>timestamp</code> field, in that order; the mirror-motion dt is untouched. <b>Review caught two wiring defects before deploy:</b> the pump re-applies the latest snapshot every frame, which would have filled the ring with one stale stamp at frame rate, so each snapshot object is now fed once; and the pump keeps handing a positive dt while paused, so <code>tick</code> now takes the live pause state and never writes on a paused frame. <code>-Dcoop.clock.disable=true</code> or any handle failure degrades to the pre-7c uncorrected drift with one warning. <b>Open: the 8-step 7c smoke (drift line under <code>-Dcoop.debug.diagnostics=true</code>, induced drift both directions, shared-pause snap, FF cycles, fallback drill), then the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
+  "hereHead": "You are here — Phase 7c built and live-smoke verified (2026-09-02); next Phase 20, with the 12c manual residue still open",
+  "here": "<b>Phase 7c — guest clock reconciliation — is built and live-verified: 1238 green tests, two-instance smoke PASSED on all 8 steps (2026-09-02).</b> <code>CoopClockReconciler</code> reads the drift the <code>TIME_SNAPSHOT</code> stream has carried unused since Phase 7, filters it through a 9-sample median ring behind a pause-agreement gate and a spike gate, and converges the guest's <code>CampaignClock</code> by a slew bounded to 10% of each frame's own clock advance (30% while more than 0.1 game-day out), entering at 0.05 game-day and exiting below 0.01. Shared pauses snap the whole positive drift forward in one write. The clock never moves backward: month-end fires on <code>getMonth() != prevMonth</code>, so a backward write across a boundary would pay monthly income twice. <b>Smoke numbers:</b> a 10 s guest stall left it 0.5 game-day behind and the median fell to the exit threshold in 25 s; a 12 s host stall left the guest 1.03 game-day ahead across the March month end, and it converged by slow-down alone in 45 s with the guest date holding at Apr 2 until the host caught up; the shared-pause snap put both clocks identical to the millisecond; six fast-forward cycles moved the median at most 0.032 game-day; the disable flag left a 0.96 game-day gap untouched with one warning. <b>Two fixes came out of the build and smoke:</b> review caught the pump re-applying the latest snapshot every frame and handing a positive dt while paused, so each snapshot feeds the ring once and <code>tick</code> takes the live pause state; the first live run then showed the spike gate wedging after a shared pause (ring RMS collapses to seconds, every later sample rejected), fixed with a 0.05 game-day floor and a three-strikes persistent-step escape (<code>e51950f</code>). Side finding: the guest rejoins by loading its Phase 16 autosave, not by New Game on the same seed, which the 6b seed lock rejects as already in flight. <b>Open: Phase 20 next, plus the 12c manual residue</b> (claim race, sell-back + hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Next: Phase 7c two-instance smoke",
+      "head": "Next: Phase 20 (connectivity + 20.6 HUD)",
       "state": "you are here",
-      "body": "<span class=\"rp\" data-jump=\"7c\">Phase 7c</span> — guest clock reconciliation — is <b>code-complete</b> (2026-09-02, 1233 green) and deployed to the test clients; the 8-step two-instance smoke is next. Launch the guest with <code>-Dcoop.debug.diagnostics=true</code> and grep <code>Coop clock</code> in its log: the drift line every 5 s proves the handle resolved, then induce drift by stalling each process in turn and watch the median return inside 0.05 game-day, the guest date never decreasing. After 7b's fast-forward cycles the bridge read the guest 9 game-hours ahead; that is the case step 5 covers. Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After 7c the order continues 20 → 29-M2 → 21 → 19."
+      "body": "<span class=\"rp\" data-jump=\"7c\">Phase 7c</span> — guest clock reconciliation — is <b>built and live-verified</b> (2026-09-02, 1238 green, 8/8 smoke steps): induced drift in both directions converged at the designed rates, the shared-pause snap landed both clocks identical, the guest never moved backward across a live month boundary, and the disable flag degraded cleanly. Next in the hardening-first order is <span class=\"rp\" data-jump=\"20\">Phase 20</span> (WAN transport hardening plus the 20.6 link HUD, which now also carries the sync readout). Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue. After 20 the order continues 29-M2 → 21 → 19."
     },
     {
       "sev": "gap",
@@ -303,10 +303,10 @@
         "-Dcoop.clock.disable"
       ],
       "residue": [
-        "8-step two-instance smoke (drift line, induced drift both ways, shared-pause snap, FF cycles, fallback drill)",
-        "no pump wiring test (no injection seam; not observable without the engine)"
+        "no pump wiring test (no injection seam; not observable without the engine)",
+        "steady-state residual up to 0.05 game-day by design (dead zone); a HUD readout rounds to whole hours (20.6)"
       ],
-      "note": "Code-complete 2026-09-02. tick() takes the live guest pause state; each TIME_SNAPSHOT feeds the ring once; unpaused snap targets current + drift. Independent of 7b but absorbs its toggle-edge skew."
+      "note": "Built + smoke PASSED 2026-09-02 (8/8). tick() takes the live guest pause state; each TIME_SNAPSHOT feeds the ring once; unpaused snap targets current + drift; spike gate has a 0.05-day floor and a three-strikes persistent-step escape. Independent of 7b but absorbs its toggle-edge skew."
     },
     {
       "id": "8",
