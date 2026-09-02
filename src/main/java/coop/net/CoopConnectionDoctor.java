@@ -52,11 +52,17 @@ public final class CoopConnectionDoctor {
     }
 
     /** Host-side block, enumerating this machine's addresses. */
-    public static String hostReport(int port, CoopPortMapper.Result result) {
-        return hostReport(port, result, enumerateLocalAddresses());
+    public static String hostReport(int port, CoopPortMapper.Result result,
+                                    boolean passwordRequired, int peerCapacity) {
+        return hostReport(port, result, enumerateLocalAddresses(), passwordRequired, peerCapacity);
     }
 
     static String hostReport(int port, CoopPortMapper.Result result, LocalAddresses addresses) {
+        return hostReport(port, result, addresses, false, 1);
+    }
+
+    static String hostReport(int port, CoopPortMapper.Result result, LocalAddresses addresses,
+                             boolean passwordRequired, int peerCapacity) {
         Objects.requireNonNull(result, "result");
         Objects.requireNonNull(addresses, "addresses");
 
@@ -65,6 +71,15 @@ public final class CoopConnectionDoctor {
 
         StringBuilder report = new StringBuilder(HEADER);
         line(report, "role", "host, listening on port " + port + " (TCP+UDP)");
+        // Phase 20.4/20.5. Two facts a host on an Internet-open port needs at a glance, and the two
+        // most common "why won't my partner connect" answers: the gate is on and they do not know
+        // the password, or the slot is already taken.
+        line(report, "password", passwordRequired
+                ? "required (guests must launch with -Dcoop.password=<same value>)"
+                : "none - anyone who reaches this port may join");
+        line(report, "peer capacity", peerCapacity + (peerCapacity == 1
+                ? " guest (v1; extra connections are rejected)"
+                : " guests"));
         line(report, "local IPv4", addresses.ipv4().isEmpty() ? "none" : String.join(", ", addresses.ipv4()));
         line(report, "global IPv6", addresses.hasGlobalIpv6()
                 ? String.join(", ", addresses.globalIpv6())
@@ -137,6 +152,13 @@ public final class CoopConnectionDoctor {
             line(report, "keepalives", "sent " + stats.keepalivesSent()
                     + ", received " + stats.keepalivesReceived()
                     + "; ICMP transients " + stats.icmpTransients());
+            // Phase 20.4. On the guest these are almost always zero; a non-zero invalid-frame count
+            // is the one line that separates "the host is not answering" from "something on this
+            // port is answering and it is not a coop host".
+            line(report, "abuse counters", "connection attempts " + stats.connectionAttempts()
+                    + ", throttled " + stats.connectionsThrottled()
+                    + ", invalid frames " + stats.invalidFrames()
+                    + ", dropped for garbage " + stats.connectionsDroppedForGarbage());
         }
         line(report, "next step", guestNextStep(host, port, tcpUp, udpPathUp));
         return report.toString();

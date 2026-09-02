@@ -23,6 +23,25 @@ public final class CoopNetStartupConfig {
      * keeping reachable for anyone debugging a teardown path.
      */
     public static final String RECONNECT_GRACE_PROPERTY = "coop.reconnectGraceSeconds";
+    /**
+     * Phase 20.4 optional lobby password. Set on both installs; unset (or blank) on the host means no
+     * password is asked for and the lobby exchange is byte-identical to the pre-20.4 one.
+     *
+     * <p>Explicitly a gatekeeper, not encryption: the protocol is plaintext, the proof is
+     * {@code SHA-256(password + nonce)} over a fresh host nonce, and what it buys is that a port
+     * scanner who finds the open port cannot join. Confidentiality is the VPN tier's job.
+     */
+    public static final String PASSWORD_PROPERTY = "coop.password";
+    /**
+     * Phase 20.5 peer-table capacity. Any value other than {@link #MAX_GUESTS_V1} is clamped with a
+     * warning: the transport is N-ready, the <em>gameplay</em> arbitration is not (Phase 27), and
+     * silently honouring {@code coop.maxGuests=3} would produce a session that connects and then
+     * misbehaves in ways no test covers.
+     */
+    public static final String MAX_GUESTS_PROPERTY = "coop.maxGuests";
+
+    /** The only supported guest count in v1. */
+    public static final int MAX_GUESTS_V1 = 1;
 
     /** Long enough for a NAT rebind or a Wi-Fi roam, short enough not to strand a player. */
     public static final int DEFAULT_RECONNECT_GRACE_SECONDS = 60;
@@ -34,7 +53,7 @@ public final class CoopNetStartupConfig {
 
     private static final CoopNetStartupConfig EMPTY =
             new CoopNetStartupConfig(false, CoopConnectionRole.NONE, "", 0, "", true,
-                    DEFAULT_RECONNECT_GRACE_SECONDS);
+                    DEFAULT_RECONNECT_GRACE_SECONDS, "", MAX_GUESTS_V1);
 
     private final boolean present;
     private final CoopConnectionRole role;
@@ -43,10 +62,12 @@ public final class CoopNetStartupConfig {
     private final String newGameSeed;
     private final boolean portMappingEnabled;
     private final int reconnectGraceSeconds;
+    private final String password;
+    private final int maxGuests;
 
     private CoopNetStartupConfig(boolean present, CoopConnectionRole role, String host, int port,
                                  String newGameSeed, boolean portMappingEnabled,
-                                 int reconnectGraceSeconds) {
+                                 int reconnectGraceSeconds, String password, int maxGuests) {
         this.present = present;
         this.role = Objects.requireNonNull(role, "role");
         this.host = Objects.requireNonNull(host, "host");
@@ -54,6 +75,8 @@ public final class CoopNetStartupConfig {
         this.newGameSeed = Objects.requireNonNull(newGameSeed, "newGameSeed");
         this.portMappingEnabled = portMappingEnabled;
         this.reconnectGraceSeconds = reconnectGraceSeconds;
+        this.password = Objects.requireNonNull(password, "password");
+        this.maxGuests = maxGuests;
     }
 
     public static CoopNetStartupConfig fromSystemProperties() {
@@ -62,6 +85,21 @@ public final class CoopNetStartupConfig {
 
     public static String newGameSeedFromSystemProperties() {
         return trimToEmpty(System.getProperty(NEW_GAME_SEED_PROPERTY));
+    }
+
+    /**
+     * The lobby password on its own, without parsing (and possibly rejecting) the rest of the
+     * startup properties. Both the pump's lobby gate and the connection doctor need it in situations
+     * where the role properties may be absent or malformed, and a bad {@code coop.connectPort} must
+     * not be able to turn a password-protected host into an open one.
+     */
+    public static String passwordFromSystemProperties() {
+        return trimToEmpty(System.getProperty(PASSWORD_PROPERTY));
+    }
+
+    /** The clamped peer capacity on its own; see {@link #MAX_GUESTS_PROPERTY}. */
+    public static int maxGuestsFromSystemProperties() {
+        return parseMaxGuests(System.getProperty(MAX_GUESTS_PROPERTY));
     }
 
     public static CoopNetStartupConfig from(Properties properties) {
@@ -73,6 +111,8 @@ public final class CoopNetStartupConfig {
         String newGameSeed = trimToEmpty(properties.getProperty(NEW_GAME_SEED_PROPERTY));
         boolean portMappingEnabled = parsePortMapping(properties.getProperty(PORT_MAPPING_PROPERTY));
         int reconnectGrace = parseReconnectGrace(properties.getProperty(RECONNECT_GRACE_PROPERTY));
+        String password = trimToEmpty(properties.getProperty(PASSWORD_PROPERTY));
+        int maxGuests = parseMaxGuests(properties.getProperty(MAX_GUESTS_PROPERTY));
 
         boolean hostConfigured = hostPort != null;
         boolean guestConfigured = connectHost != null || connectPort != null;
@@ -81,15 +121,17 @@ public final class CoopNetStartupConfig {
         }
         if (hostConfigured) {
             return new CoopNetStartupConfig(true, CoopConnectionRole.HOST, "",
-                    parsePort(hostPort, HOST_PORT_PROPERTY), newGameSeed, portMappingEnabled, reconnectGrace);
+                    parsePort(hostPort, HOST_PORT_PROPERTY), newGameSeed, portMappingEnabled,
+                    reconnectGrace, password, maxGuests);
         }
         if (!guestConfigured) {
             if (newGameSeed.isEmpty() && portMappingEnabled
-                    && reconnectGrace == DEFAULT_RECONNECT_GRACE_SECONDS) {
+                    && reconnectGrace == DEFAULT_RECONNECT_GRACE_SECONDS
+                    && password.isEmpty() && maxGuests == MAX_GUESTS_V1) {
                 return EMPTY;
             }
             return new CoopNetStartupConfig(false, CoopConnectionRole.NONE, "", 0, newGameSeed,
-                    portMappingEnabled, reconnectGrace);
+                    portMappingEnabled, reconnectGrace, password, maxGuests);
         }
         if (connectHost == null) {
             throw new IllegalArgumentException(CONNECT_HOST_PROPERTY + " is required when connecting as guest");
@@ -98,7 +140,8 @@ public final class CoopNetStartupConfig {
             throw new IllegalArgumentException(CONNECT_PORT_PROPERTY + " is required when connecting as guest");
         }
         return new CoopNetStartupConfig(true, CoopConnectionRole.GUEST, connectHost,
-                parsePort(connectPort, CONNECT_PORT_PROPERTY), newGameSeed, portMappingEnabled, reconnectGrace);
+                parsePort(connectPort, CONNECT_PORT_PROPERTY), newGameSeed, portMappingEnabled,
+                reconnectGrace, password, maxGuests);
     }
 
     public boolean isPresent() {
@@ -141,6 +184,24 @@ public final class CoopNetStartupConfig {
     /** The same value in milliseconds, which is what {@link CoopReconnectCoordinator} takes. */
     public long reconnectGraceMillis() {
         return reconnectGraceSeconds * 1000L;
+    }
+
+    /**
+     * The lobby password, trimmed; {@code ""} means none. Never logged — the doctor prints
+     * "required"/"none" and nothing else, which is the only fact a log reader needs.
+     */
+    public String password() {
+        return password;
+    }
+
+    /** Whether a password gate is configured on this install. */
+    public boolean passwordRequired() {
+        return !password.isEmpty();
+    }
+
+    /** Peer-table capacity, already clamped to {@link #MAX_GUESTS_V1}. */
+    public int maxGuests() {
+        return maxGuests;
     }
 
     private static String trimToNull(String value) {
@@ -187,6 +248,34 @@ public final class CoopNetStartupConfig {
                     + MAX_RECONNECT_GRACE_SECONDS);
         }
         return seconds;
+    }
+
+    /**
+     * Clamps rather than throws. A launch script that asks for three guests should still start a
+     * playable one-guest session — refusing to load the game over a forward-looking setting would be
+     * the worse failure — but it must say so, once, loudly enough to explain why the second guest is
+     * being turned away.
+     */
+    private static int parseMaxGuests(String value) {
+        String trimmed = trimToNull(value);
+        if (trimmed == null) {
+            return MAX_GUESTS_V1;
+        }
+        int requested;
+        try {
+            requested = Integer.parseInt(trimmed);
+        } catch (NumberFormatException ex) {
+            coop.util.CoopLog.warn(CoopNetStartupConfig.class, MAX_GUESTS_PROPERTY + "=" + trimmed
+                    + " is not an integer; using " + MAX_GUESTS_V1);
+            return MAX_GUESTS_V1;
+        }
+        if (requested != MAX_GUESTS_V1) {
+            coop.util.CoopLog.warn(CoopNetStartupConfig.class, MAX_GUESTS_PROPERTY + "=" + requested
+                    + " is not supported in v1 and has been clamped to " + MAX_GUESTS_V1
+                    + ". The transport is N-ready; the gameplay arbitration for more than one guest"
+                    + " is a later phase.");
+        }
+        return MAX_GUESTS_V1;
     }
 
     private static int parsePort(String value, String propertyName) {

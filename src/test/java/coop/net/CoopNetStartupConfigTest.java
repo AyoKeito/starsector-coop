@@ -212,4 +212,71 @@ class CoopNetStartupConfigTest {
             assertTrue(failure.getMessage().contains("coop.reconnectGraceSeconds"), failure.getMessage());
         }
     }
+
+    // ---- Phase 20.4/20.5: lobby password and peer capacity ---------------------------------------
+
+    @Test
+    void parsesAndTrimsTheLobbyPassword() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.password", "  hunter2  ");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertEquals("hunter2", config.password());
+        assertTrue(config.passwordRequired());
+    }
+
+    @Test
+    void anAbsentOrBlankPasswordMeansNoGate() {
+        assertEquals("", CoopNetStartupConfig.from(new Properties()).password());
+        assertFalse(CoopNetStartupConfig.from(new Properties()).passwordRequired());
+
+        Properties blank = new Properties();
+        blank.setProperty("coop.password", "   ");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(blank);
+
+        assertEquals("", config.password());
+        assertFalse(config.passwordRequired());
+    }
+
+    @Test
+    void aPasswordAloneIsReadableWithoutARole() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.password", "hunter2");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertFalse(config.isPresent());
+        assertEquals("hunter2", config.password());
+    }
+
+    @Test
+    void maxGuestsDefaultsToOne() {
+        assertEquals(1, CoopNetStartupConfig.from(new Properties()).maxGuests());
+    }
+
+    @Test
+    void maxGuestsIsClampedToOneRatherThanRejected() {
+        for (String value : new String[]{"3", "0", "-2", "many"}) {
+            Properties properties = new Properties();
+            properties.setProperty("coop.maxGuests", value);
+
+            CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+            assertEquals(CoopNetStartupConfig.MAX_GUESTS_V1, config.maxGuests(),
+                    "coop.maxGuests=" + value + " must clamp, not fail the launch");
+        }
+    }
+
+    @Test
+    void anExplicitMaxGuestsOfOneStaysTheEmptyConfig() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.maxGuests", "1");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertFalse(config.isPresent());
+        assertEquals(1, config.maxGuests());
+    }
 }

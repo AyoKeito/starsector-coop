@@ -18,6 +18,7 @@ import coop.save.CoopGuestSnapshotStore;
 import coop.save.CoopSaveCheckpoint;
 import coop.seed.CoopSeedSync;
 import coop.ui.CoopLinkHud;
+import coop.ui.CoopSessionIntel;
 import coop.util.CoopLog;
 
 public class CoopModPlugin extends BaseModPlugin {
@@ -79,6 +80,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // Phase 20.6 milestone 0: the always-on link status line. Cosmetic and self-disabling, so it
         // goes in right after the pump it reads from and before anything that could fail on its own.
         CoopLinkHud.install(Global.getSector(), pump);
+        // Phase 20.6: the "Coop Session" intel page. Registered after the pump because the pump's
+        // constructor installs the feed the page reads; the entry itself is permanent and hides
+        // itself when no coop role is active, so a solo save shows no coop clutter.
+        CoopSessionIntel.ensureRegistered(Global.getSector());
         // Phase 30 dev tooling, dormant unless -Dcoop.debug.bridge=<port> is set: no socket, no log
         // line and no script when it is absent. Installed here rather than inside the pump because it
         // has to answer before and without a coop session, and always as a TRANSIENT script — it owns

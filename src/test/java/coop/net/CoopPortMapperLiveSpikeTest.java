@@ -48,7 +48,7 @@ class CoopPortMapperLiveSpikeTest {
             System.out.println("mapped            " + result.mapped());
             System.out.println("failureText       " + result.failureText());
             System.out.println();
-            System.out.println(CoopConnectionDoctor.hostReport(SPIKE_PORT, result));
+            System.out.println(CoopConnectionDoctor.hostReport(SPIKE_PORT, result, false, 1));
             System.out.println("=== end spike ===");
 
             assertTrue(result.finished(), "port mapper did not settle within " + BUDGET_MILLIS + " ms");

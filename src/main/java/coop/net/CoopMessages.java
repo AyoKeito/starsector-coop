@@ -18,6 +18,12 @@ public final class CoopMessages {
     public enum Type {
         HELLO,
         LOBBY_HELLO,
+        /**
+         * Phase 20.4: host &rarr; guest, "this session wants a password; prove it against this
+         * nonce". Sent <em>instead of</em> {@code LOBBY_ACCEPT} and without taking a session slot, so
+         * a wrong guess costs the host nothing but a nonce.
+         */
+        LOBBY_CHALLENGE,
         LOBBY_ACCEPT,
         LOBBY_REJECT,
         HANDSHAKE_MANIFEST,
@@ -191,7 +197,9 @@ public final class CoopMessages {
                         + ",\"droppedForeignSource\":" + stats.droppedForeignSource()
                         + ",\"pathValidations\":" + stats.pathValidations()
                         + ",\"icmpTransients\":" + stats.icmpTransients()
-                        + ",\"escalatedToTcp\":" + stats.escalatedToTcp() + "}");
+                        + ",\"escalatedToTcp\":" + stats.escalatedToTcp()
+                        + ",\"connectionsThrottled\":" + stats.connectionsThrottled()
+                        + ",\"invalidFrames\":" + stats.invalidFrames() + "}");
     }
 
     /** Decoded {@link Type#LINK_STATUS} payload; -1 rtt/p95 mean "the peer had no sample yet". */
@@ -205,7 +213,9 @@ public final class CoopMessages {
                              long droppedForeignSource,
                              long pathValidations,
                              long icmpTransients,
-                             long escalatedToTcp) {
+                             long escalatedToTcp,
+                             long connectionsThrottled,
+                             long invalidFrames) {
         public LinkStatus {
             transport = transport == null ? "" : transport;
         }
@@ -223,7 +233,11 @@ public final class CoopMessages {
                 requiredPayloadLong(message, "droppedForeignSource"),
                 requiredPayloadLong(message, "pathValidations"),
                 requiredPayloadLong(message, "icmpTransients"),
-                requiredPayloadLong(message, "escalatedToTcp"));
+                requiredPayloadLong(message, "escalatedToTcp"),
+                // Optional: a peer built before 20.4 has no such field, and a link report is not
+                // worth throwing away over a counter.
+                optionalPayloadLong(message, "connectionsThrottled", 0L),
+                optionalPayloadLong(message, "invalidFrames", 0L));
     }
 
     /**
@@ -312,6 +326,58 @@ public final class CoopMessages {
         return new Message(Type.LOBBY_HELLO, null, seq, sentAtMillis,
                 "{\"playerId\":\"" + escapeJson(playerInfo.playerId()) + "\","
                         + "\"playerName\":\"" + escapeJson(playerInfo.name()) + "\"}");
+    }
+
+    /**
+     * Phase 20.4: the second hello, answering a {@link Type#LOBBY_CHALLENGE}. The proof field is
+     * absent from the first hello on purpose — the guest cannot know whether the host wants a
+     * password until it is asked, and a host with no password configured must see byte-identical
+     * traffic to the pre-20.4 build.
+     */
+    public static Message lobbyHello(long seq, long sentAtMillis, CoopPlayerInfo playerInfo, String proof) {
+        Objects.requireNonNull(playerInfo, "playerInfo");
+        return new Message(Type.LOBBY_HELLO, null, seq, sentAtMillis,
+                "{\"playerId\":\"" + escapeJson(playerInfo.playerId()) + "\","
+                        + "\"playerName\":\"" + escapeJson(playerInfo.name()) + "\","
+                        + "\"proof\":\"" + escapeJson(proof == null ? "" : proof) + "\"}");
+    }
+
+    /** Host &rarr; guest password challenge; {@code nonce} is fresh per attempt. */
+    public static Message lobbyChallenge(long seq, long sentAtMillis, String nonce) {
+        return new Message(Type.LOBBY_CHALLENGE, null, seq, sentAtMillis,
+                "{\"nonce\":\"" + escapeJson(requireText(nonce, "nonce")) + "\"}");
+    }
+
+    public static String parseLobbyChallengeNonce(Message message) {
+        return requiredPayloadString(message, "nonce");
+    }
+
+    /** The proof a hello carries, or "" for the first hello (and for every pre-20.4 sender). */
+    public static String parseLobbyProof(Message message) {
+        return optionalPayloadString(message, "proof", "");
+    }
+
+    /**
+     * The password proof: full 64-hex SHA-256 of {@code password + nonce}.
+     *
+     * <p>Full width, unlike {@link #wireToken(String)} — this one rides the wire once per lobby
+     * attempt rather than 10 times a second, so there is no budget reason to truncate it, and a
+     * proof is exactly the field where truncation is the wrong trade.
+     */
+    public static String passwordProof(String password, String nonce) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(((password == null ? "" : password)
+                    + (nonce == null ? "" : nonce)).getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                out.append(Character.forDigit((b >>> 4) & 0x0f, 16));
+                out.append(Character.forDigit(b & 0x0f, 16));
+            }
+            return out.toString();
+        } catch (Exception ex) {
+            throw new IllegalStateException("Unable to derive coop password proof", ex);
+        }
     }
 
     public static Message lobbyAccept(long seq, long sentAtMillis, String provisionalLobbyId,
@@ -1198,6 +1264,12 @@ public final class CoopMessages {
 
     public static long requiredPayloadLong(Message message, String name) {
         return requiredLong(decodePayload(message), name);
+    }
+
+    /** Long counterpart of {@link #optionalPayloadString}, for counters added to shipped messages. */
+    public static long optionalPayloadLong(Message message, String name, long fallback) {
+        Object value = decodePayload(message).get(name);
+        return value instanceof Long longValue ? longValue : fallback;
     }
 
     /** Reads a float field that was encoded as a quoted string (see Phase 12 builders). */

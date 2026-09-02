@@ -38,6 +38,9 @@ class CoopNetPumpTest {
     @AfterEach
     void clearGlobalSector() {
         Global.setSector(null);
+        // Phase 20.6: every pump installs itself as the static intel feed, so one test's session
+        // would otherwise still be on the page when the next one asks.
+        coop.ui.CoopSessionIntelFeed.uninstall();
     }
 
     @Test
@@ -1252,7 +1255,7 @@ class CoopNetPumpTest {
         service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 1_000L,
                 new CoopLinkQuality.Snapshot(42, 60, 3, false, 120L, 11_000L),
                 CoopLinkQuality.TRANSPORT_UDP,
-                new CoopDatagramStats(0L, 1L, 2L, 0L, 0L, 0L, 3L, 0L, 0L, 4L, 0L, 0L, 0L, "")));
+                new CoopDatagramStats(0L, 1L, 2L, 0L, 0L, 0L, 3L, 0L, 0L, 4L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
         pump.advance(0f);
 
         CoopMessages.LinkStatus peer = pump.peerLinkStatus();
@@ -1347,7 +1350,7 @@ class CoopNetPumpTest {
         service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 2_000L,
                 new CoopLinkQuality.Snapshot(40, 50, 0, false, 0L, 30_000L),
                 CoopLinkQuality.TRANSPORT_UDP,
-                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
         now.set(2_500L);
         pump.advance(0f);
 
@@ -1427,6 +1430,232 @@ class CoopNetPumpTest {
                 .toList();
         assertEquals(1, matches.size(), "expected exactly one " + type);
         return matches.get(0);
+    }
+
+    // ---- Phase 20.4: optional lobby password -----------------------------------------------------
+
+    private static final String PASSWORD = "hunter2";
+
+    private static CoopNetPump hostPumpWithPassword(RecordingNetService service,
+                                                    CoopSessionState session, String password) {
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 8000L);
+        pump.setLobbyPasswordForTest(password);
+        return pump;
+    }
+
+    @Test
+    void aHostWithNoPasswordAcceptsTheFirstHelloWithNoChallengeAtAll() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = hostPumpWithPassword(service, session, "");
+
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE),
+                "an unconfigured password must leave the lobby exchange byte-identical");
+        assertEquals(CoopMessages.Type.LOBBY_ACCEPT, onlyOf(service, CoopMessages.Type.LOBBY_ACCEPT).type());
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+    }
+
+    @Test
+    void aHostWithAPasswordChallengesTheFirstHelloWithoutTakingTheGuestSlot() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
+
+        pump.advance(0f);
+
+        CoopMessages.Message challenge = onlyOf(service, CoopMessages.Type.LOBBY_CHALLENGE);
+        assertEquals(16, CoopMessages.parseLobbyChallengeNonce(challenge).length(),
+                "the nonce is 64 bits of hex");
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_ACCEPT));
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState(),
+                "a guess must not be able to occupy the session while it guesses");
+        assertNull(session.remotePlayerId());
+    }
+
+    @Test
+    void aHostAcceptsTheSecondHelloCarryingTheCorrectProof() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
+        pump.advance(0f);
+        String nonce = CoopMessages.parseLobbyChallengeNonce(onlyOf(service, CoopMessages.Type.LOBBY_CHALLENGE));
+
+        service.inbound.add(CoopMessages.lobbyHello(2L, 7100L,
+                new CoopPlayerInfo("guest-player", "Guest"),
+                CoopMessages.passwordProof(PASSWORD, nonce)));
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+        assertEquals("guest-player", session.remotePlayerId());
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_REJECT));
+        assertEquals(CoopMessages.Type.LOBBY_ACCEPT, onlyOf(service, CoopMessages.Type.LOBBY_ACCEPT).type());
+    }
+
+    @Test
+    void aWrongProofIsRejectedAndTheNonceIsNotReusable() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
+        pump.advance(0f);
+        String nonce = CoopMessages.parseLobbyChallengeNonce(onlyOf(service, CoopMessages.Type.LOBBY_CHALLENGE));
+
+        service.inbound.add(CoopMessages.lobbyHello(2L, 7100L,
+                new CoopPlayerInfo("guest-player", "Guest"),
+                CoopMessages.passwordProof("wrong-password", nonce)));
+        pump.advance(0f);
+
+        CoopMessages.Message reject = onlyOf(service, CoopMessages.Type.LOBBY_REJECT);
+        assertEquals("{\"reason\":\"password rejected\"}", reject.payloadJson());
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_ACCEPT));
+
+        // Replaying the round the attacker just watched must not work: the nonce is consumed.
+        service.inbound.add(CoopMessages.lobbyHello(3L, 7200L,
+                new CoopPlayerInfo("guest-player", "Guest"),
+                CoopMessages.passwordProof(PASSWORD, nonce)));
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_ACCEPT),
+                "a proof with no outstanding challenge is a replay, not a login");
+        assertEquals(2, countOfType(service, CoopMessages.Type.LOBBY_REJECT));
+    }
+
+    @Test
+    void aGuestAnswersAChallengeWithASecondHelloCarryingTheProof() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L);
+        pump.setLobbyPasswordForTest(PASSWORD);
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.lobbyChallenge(5L, 9100L, "abcdef0123456789"));
+        pump.advance(0f);
+
+        List<CoopMessages.Message> hellos = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.LOBBY_HELLO)
+                .toList();
+        assertEquals(2, hellos.size(), "the challenge is answered with a second hello");
+        assertEquals("", CoopMessages.parseLobbyProof(hellos.get(0)),
+                "the first hello cannot carry a proof: no nonce exists yet");
+        assertEquals(CoopMessages.passwordProof(PASSWORD, "abcdef0123456789"),
+                CoopMessages.parseLobbyProof(hellos.get(1)));
+    }
+
+    @Test
+    void aGuestWithNoPasswordAnswersAChallengeWithAnEmptyProofRatherThanGoingSilent() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L);
+        pump.setLobbyPasswordForTest("");
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.lobbyChallenge(5L, 9100L, "abcdef0123456789"));
+        pump.advance(0f);
+
+        List<CoopMessages.Message> hellos = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.LOBBY_HELLO)
+                .toList();
+        assertEquals(2, hellos.size());
+        assertEquals("", CoopMessages.parseLobbyProof(hellos.get(1)),
+                "an empty proof earns the reject that tells the player why");
+    }
+
+    /** The host end of the same case: an empty proof is a wrong proof. */
+    @Test
+    void anEmptyProofFromAPasswordlessGuestIsRejected() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
+        pump.advance(0f);
+
+        // An explicit empty-string proof reads as "no proof" and gets challenged again rather than
+        // rejected: the host cannot distinguish it from a first hello, and re-challenging is the
+        // cheaper of the two mistakes.
+        service.inbound.add(CoopMessages.lobbyHello(2L, 7100L,
+                new CoopPlayerInfo("guest-player", "Guest"), ""));
+        pump.advance(0f);
+
+        assertEquals(2, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE));
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_ACCEPT));
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+    }
+
+    // ---- Phase 20.6: session intel feed ----------------------------------------------------------
+
+    @Test
+    void theIntelFeedIsPublishedOnTheLinkStatusCadence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        pump.advance(0f);
+        assertEquals(CoopConnectionRole.NONE,
+                coop.ui.CoopSessionIntelFeed.currentModel().localRole(),
+                "nothing is published before the first LINK_STATUS interval elapses");
+
+        now.set(6_001L);
+        pump.advance(0f);
+
+        coop.ui.CoopSessionIntelModel model = coop.ui.CoopSessionIntelFeed.currentModel();
+        assertEquals(CoopConnectionRole.HOST, model.localRole());
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, model.sessionState());
+        assertNotNull(model.localLink(), "the page's own reading comes from the same snapshot");
+        assertEquals(1, model.history().size(), "one sample per interval, not one per frame");
+    }
+
+    @Test
+    void anInboundLinkStatusReachesTheIntelFeedAsThePartnersReading() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 1_000L,
+                new CoopLinkQuality.Snapshot(42, 60, 3, false, 120L, 11_000L),
+                CoopLinkQuality.TRANSPORT_TCP_FALLBACK,
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+        pump.advance(0f);
+
+        coop.ui.CoopSessionIntelModel.LinkSample peer =
+                coop.ui.CoopSessionIntelFeed.currentModel().peerLink();
+        assertNotNull(peer);
+        assertEquals(42, peer.rttMillis());
+        assertEquals(3, peer.lossPercent());
+        assertTrue(peer.onFallback(), "the partner reports it is on the TCP fallback");
+    }
+
+    @Test
+    void everyFeedBannerIsAlsoRecordedAsAnIntelEvent() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        // Live TCP and no datagram ever: that is the UDP-blocked rule, and it posts a banner.
+        for (long t = 2_000L; t <= 11_500L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertTrue(pump.stateStreamFallbackActive());
+
+        List<coop.ui.CoopSessionIntelModel.Event> events =
+                coop.ui.CoopSessionIntelFeed.currentModel().events();
+        assertTrue(events.stream().anyMatch(e -> e.line().contains("UDP blocked")),
+                "the transition posted a banner, so it must also be in the event log: " + events);
     }
 
 
@@ -2592,7 +2821,7 @@ class CoopNetPumpTest {
         private final List<String> datagrams = new ArrayList<>();
         private final Queue<String> inboundDatagrams = new ArrayDeque<>();
         private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-                0L, 0L, 0L, 0L, "");
+                0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "");
         boolean connected = true;
 
         RecordingNetService(CoopConnectionRole role) {
@@ -2644,7 +2873,7 @@ class CoopNetPumpTest {
         }
 
         private void noteUdpInboundAt(long atMillis) {
-            stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, atMillis, "");
+            stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, atMillis, "");
         }
     }
 

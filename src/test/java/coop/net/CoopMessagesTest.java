@@ -339,7 +339,7 @@ class CoopMessagesTest {
         CoopMessages.Message message = CoopMessages.linkStatus("session-a", 4L, 1234L,
                 new CoopLinkQuality.Snapshot(87, 210, 4, false, 1500L, 12_000L),
                 CoopLinkQuality.TRANSPORT_TCP_FALLBACK,
-                new CoopDatagramStats(0L, 5L, 6L, 0L, 0L, 0L, 7L, 0L, 0L, 8L, 0L, 9L, 0L, ""));
+                new CoopDatagramStats(0L, 5L, 6L, 0L, 0L, 0L, 7L, 0L, 0L, 8L, 0L, 9L, 0L, 3L, 4L, 0L, 0L, ""));
 
         CoopMessages.LinkStatus parsed =
                 CoopMessages.parseLinkStatus(CoopMessages.decode(CoopMessages.encode(message)));
@@ -361,7 +361,7 @@ class CoopMessagesTest {
         CoopMessages.Message message = CoopMessages.linkStatus("session-a", 4L, 1234L,
                 new CoopLinkQuality.Snapshot(null, null, 0, true, 0L, 0L),
                 CoopLinkQuality.TRANSPORT_UDP,
-                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, ""));
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, ""));
 
         CoopMessages.LinkStatus parsed = CoopMessages.parseLinkStatus(message);
 

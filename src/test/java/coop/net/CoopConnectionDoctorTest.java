@@ -146,7 +146,7 @@ class CoopConnectionDoctorTest {
         link.notePingSent(1L, 0L);
         link.notePongReceived(1L, 80L);
         CoopDatagramStats stats = new CoopDatagramStats(0L, 2L, 3L, 0L, 4L, 0L, 0L, 5L, 0L, 1L, 0L,
-                0L, 0L, "");
+                0L, 0L, 0L, 0L, 0L, 0L, "");
 
         String report = CoopConnectionDoctor.guestReport("203.0.113.7", 27015, true, false,
                 link.snapshot(15_000L), stats);
@@ -167,7 +167,7 @@ class CoopConnectionDoctorTest {
         link.reset(0L);
         link.noteUdpInbound(1_000L);
         CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 1L, 1L, 1L, 2L, 2L, 0L, 0L,
-                0L, 1_000L, "/203.0.113.9:7890");
+                0L, 0L, 0L, 0L, 0L, 1_000L, "/203.0.113.9:7890");
 
         String report = CoopConnectionDoctor.guestReport("203.0.113.7", 27015, true, true,
                 link.snapshot(2_000L), stats);

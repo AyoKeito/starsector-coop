@@ -190,7 +190,7 @@ class CoopSessionIntelFeedTest {
     @Test
     void peerStatusFromAWireMessageDropsTheNegativeSentinels() {
         CoopMessages.LinkStatus status = new CoopMessages.LinkStatus(-1, -1, 4, true,
-                CoopSessionIntelModel.TRANSPORT_UDP, 120L, 0L, 0L, 0L, 0L, 0L);
+                CoopSessionIntelModel.TRANSPORT_UDP, 120L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
 
         feed.notePeerLink(status);
         CoopSessionIntelModel.LinkSample peer = feed.snapshot().peerLink();

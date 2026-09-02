@@ -417,6 +417,10 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
         Set<String> tags = super.getIntelTags(map);
         tags.add(Tags.INTEL_MILITARY);
         tags.add(Tags.INTEL_COLONIES);
+        // Phase 20.6: the intel screen builds its filter list from the tags registered entries carry,
+        // so sharing this one puts every coop-owned entry behind a single "Coop" tab. The vanilla
+        // tags stay: a colony threat still belongs under Military and Colonies.
+        tags.add(coop.ui.CoopSessionIntel.TAG_COOP);
         if (factionId != null && !factionId.isEmpty()) {
             tags.add(factionId);
         }

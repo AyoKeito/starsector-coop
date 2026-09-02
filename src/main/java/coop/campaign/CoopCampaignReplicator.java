@@ -922,11 +922,19 @@ public final class CoopCampaignReplicator
                             + " (uncolonized/procgen entity; the guest keeps its local one)");
             return;
         }
-        broadcastMarketSnapshot(market);
+        // Phase 20.5: a snapshot answers the player who opened the market. With one guest this is the
+        // same wire bytes as a broadcast; with more, a market opened in one corner of the sector has
+        // no business landing in everyone else's economy view.
+        broadcastMarketSnapshot(market, message.senderId());
     }
 
-    /** Host: capture the canonical open-market stock (all item kinds) and broadcast it. */
+    /** Host: capture the canonical open-market stock (all item kinds) and send it. */
     private void broadcastMarketSnapshot(MarketAPI market) {
+        broadcastMarketSnapshot(market, null);
+    }
+
+    /** @param toSenderId the peer that asked, or null to broadcast (a host-local market open). */
+    private void broadcastMarketSnapshot(MarketAPI market, String toSenderId) {
         // The host is canonical, so it must be *stocked* before it is canonical: a market the host has
         // never docked at has never had its stock generated, and snapshotting it would hand the guest
         // an empty shop. See ensureOpenMarketStocked.
@@ -934,7 +942,7 @@ public final class CoopCampaignReplicator
         List<CoopMarketSync.StockItem> items = captureOpenMarketStock(market);
         items.addAll(captureHireablePool(market));
         marketSync.applySnapshot(market.getId(), items);
-        send(CoopMessages.marketSnapshot(session.sessionId(), service.nextSeq(), now(),
+        sendTo(toSenderId, CoopMessages.marketSnapshot(session.sessionId(), service.nextSeq(), now(),
                 market.getId(), CoopMarketSync.encodeStock(items)));
         CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_SNAPSHOT market=" + market.getId()
                 + " items=" + items.size() + " " + kindBreakdown(items));
@@ -1024,13 +1032,13 @@ public final class CoopCampaignReplicator
         String playerId = CoopMessages.requiredPayloadString(message, "playerId");
         CoopMissionBoardSync.ClaimResult result = missionBoard.arbitrate(missionId, playerId);
         if (result.accepted()) {
-            send(CoopMessages.missionClaimAccept(session.sessionId(), service.nextSeq(), now(),
-                    missionId, playerId, result.hostSeq()));
+            sendTo(message.senderId(), CoopMessages.missionClaimAccept(session.sessionId(),
+                    service.nextSeq(), now(), missionId, playerId, result.hostSeq()));
             CoopLog.info(CoopCampaignReplicator.class, "Coop mission claim accepted missionId=" + missionId
                     + " playerId=" + playerId + " hostSeq=" + result.hostSeq());
         } else {
-            send(CoopMessages.missionClaimReject(session.sessionId(), service.nextSeq(), now(),
-                    missionId, result.rejectReason()));
+            sendTo(message.senderId(), CoopMessages.missionClaimReject(session.sessionId(),
+                    service.nextSeq(), now(), missionId, result.rejectReason()));
             CoopLog.info(CoopCampaignReplicator.class, "Coop mission claim rejected missionId=" + missionId
                     + " requester=" + playerId + " " + result.rejectReason());
         }
@@ -3824,6 +3832,15 @@ public final class CoopCampaignReplicator
 
     private void send(CoopMessages.Message message) {
         service.send(message);
+    }
+
+    /**
+     * Phase 20.5 unicast: an answer that is only meaningful to the peer that asked. A null or unknown
+     * id falls back to a broadcast inside the transport, which is what every pre-lobby and
+     * host-originated case wants.
+     */
+    private void sendTo(String senderId, CoopMessages.Message message) {
+        service.sendTo(senderId, message);
     }
 
     private long now() {

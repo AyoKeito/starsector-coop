@@ -124,15 +124,13 @@ public final class CoopNpcFleetReplicator {
     /** Per-fleet {@code fleetHash} last printed by the {@link CoopDebug} roster diagnostic. */
     private final Map<String, String> loggedFleetHashes = new HashMap<>();
 
-    public CoopNpcFleetReplicator(CoopNetService service, CoopSessionState sessionState,
-                                  LongSupplier clockMillis, coop.net.CoopStreamClock streamClock) {
-        this(service, sessionState, clockMillis, streamClock, service::sendDatagram);
-    }
-
     /**
-     * @param stateStreamSink where composed motion datagrams go. The pump passes its own router here
-     *                        (Phase 20.1 M2) so the stream follows the UDP-blocked fallback; the
-     *                        four-argument constructor keeps the direct-to-UDP behaviour.
+     * @param stateStreamSink where composed motion datagrams go. Mandatory since Phase 20.5: the
+     *                        convenience constructor that defaulted it to {@code service::sendDatagram}
+     *                        bypassed the pump's escalation router, so a caller who took it got a
+     *                        motion stream that ignored the UDP-blocked fallback <em>and</em> the
+     *                        over-budget TCP escalation. There is exactly one correct sink and the
+     *                        pump owns it, so it is now passed rather than defaulted.
      */
     public CoopNpcFleetReplicator(CoopNetService service, CoopSessionState sessionState,
                                   LongSupplier clockMillis, coop.net.CoopStreamClock streamClock,

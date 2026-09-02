@@ -265,6 +265,34 @@ public class CoopNetPump implements EveryFrameScript {
     /** Guest: what it dialled, so the connection-doctor block can name it. */
     private String guestConnectHost = "";
     private int guestConnectPort;
+
+    // ---- Phase 20.4 lobby password ---------------------------------------------------------------
+    /**
+     * Reject text for a failed password. Deliberately says nothing about which half was wrong and
+     * never quotes the attempt: the log line and the wire both carry the same three words.
+     */
+    static final String LOBBY_REJECT_PASSWORD = "password rejected";
+    /**
+     * The configured lobby password, "" for none. Read once per pump: it is a launch-time setting,
+     * and re-reading it mid-session would let a property change split the two ends of a live lobby.
+     */
+    private String lobbyPassword = readLobbyPassword();
+    /** Host: the nonce of the challenge currently outstanding, or null. No session slot is held. */
+    private String pendingLobbyNonce;
+    /** Guest: whether this connection was ever challenged, so a password with no gate is reported. */
+    private boolean lobbyChallengeSeen;
+    /** Guest: one warning per pump for "you set a password and the host does not want one". */
+    private boolean lobbyPasswordUnusedWarned;
+    /** Source of the challenge nonces; the same 64-bit width the UDP path challenge uses. */
+    private final java.security.SecureRandom lobbyNonceSource = new java.security.SecureRandom();
+
+    // ---- Phase 20.6 session intel ----------------------------------------------------------------
+    /**
+     * Feed behind the "Coop Session" intel page. Owned by the pump because everything the page shows
+     * is something the pump already computes for {@code LINK_STATUS}, the connection doctor or the
+     * feed banners; the page itself holds no state (see {@link coop.ui.CoopSessionIntel}).
+     */
+    private final coop.ui.CoopSessionIntelFeed intelFeed = new coop.ui.CoopSessionIntelFeed();
     /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
      * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
@@ -487,6 +515,10 @@ public class CoopNetPump implements EveryFrameScript {
         // logged while a bad property is still a startup problem rather than a mid-session surprise.
         this.reconnect = new CoopReconnectCoordinator(configuredReconnectGraceMillis(),
                 new ReconnectListener());
+        // Phase 20.6: the intel page is constructed by XStream on load and holds no state, so the
+        // static handle is how it reaches this pump's feed. Newest pump wins, exactly like the save
+        // checkpoint above — a game load replaces the previous session's feed.
+        coop.ui.CoopSessionIntelFeed.install(this.intelFeed);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextLinkStatusAtMillis = now + LINK_STATUS_INTERVAL_MILLIS;
@@ -876,7 +908,11 @@ public class CoopNetPump implements EveryFrameScript {
             if (!portMapperReportLogged && mapper.result().finished()) {
                 portMapperReportLogged = true;
                 CoopLog.info(CoopNetPump.class,
-                        CoopConnectionDoctor.hostReport(mapper.port(), mapper.result()));
+                        CoopConnectionDoctor.hostReport(mapper.port(), mapper.result(),
+                                !lobbyPassword.isEmpty(), service.peerCapacity()));
+                // Phase 20.6: the same verdict, on the intel page, where a host can read it without
+                // opening starsector.log.
+                intelFeed.noteReachability(mapper.result());
             }
         } catch (RuntimeException | LinkageError ex) {
             // The mapper swallows its own failures, so reaching here means something structural.
@@ -1097,6 +1133,10 @@ public class CoopNetPump implements EveryFrameScript {
             handshakeManifestSent = false;
             seedLockRequestSent = false;
             preSessionCampaignDropWarned = false;
+            // Phase 20.4: the next connection runs its own password round from scratch. An
+            // outstanding nonce belonged to the socket that just died and must not be reusable.
+            pendingLobbyNonce = null;
+            lobbyChallengeSeen = false;
             // The link measurements belonged to the dead connection; carrying them into the next one
             // would let a pre-drop RTT sample or UDP silence decide the new link's transport.
             linkSupervisionArmed = false;
@@ -1127,6 +1167,9 @@ public class CoopNetPump implements EveryFrameScript {
     private void endSessionAfterDrop() {
         boolean changed = sessionState.onChannelDisconnected();
         latestTimeSnapshot = null;
+        // Phase 20.6: drop every live reading but keep the event log, so the page still explains what
+        // happened after the session it described is gone.
+        intelFeed.endSession();
         if (changed) {
             CoopLog.warn(CoopNetPump.class, "Coop peer disconnected; session reset, awaiting reconnect as "
                     + service.role());
@@ -1206,7 +1249,7 @@ public class CoopNetPump implements EveryFrameScript {
             String reason = CoopReconnectCoordinator.rejectReason(decision);
             CoopMessages.Message reject = CoopMessages.sessionResumeReject(
                     sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(), reason);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop rejected SESSION_RESUME_REQUEST (" + reason
                     + "); the grace window keeps running");
@@ -1214,7 +1257,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
         CoopMessages.Message accept = CoopMessages.sessionResumeAccept(
                 sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong());
-        service.send(accept);
+        service.sendTo(message.senderId(), accept);
         log("outbound", accept);
         // Only after the accept is queued: the resume re-sets the datagram token and forces the
         // rebroadcast, and both belong strictly after the guest has been told it may keep the session.
@@ -1257,6 +1300,10 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.SESSION_RESUME_ACCEPT
                 || type == CoopMessages.Type.SESSION_RESUME_REJECT
                 || type == CoopMessages.Type.LOBBY_HELLO
+                // The answer to the hello above, when the host runs a password gate. Without it a
+                // guest that reconnects on a password-protected host would be told to prove itself
+                // and then have its own proof round silently dropped.
+                || type == CoopMessages.Type.LOBBY_CHALLENGE
                 || type == CoopMessages.Type.PING
                 || type == CoopMessages.Type.PONG;
     }
@@ -1435,6 +1482,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
         switch (message.type()) {
             case LOBBY_HELLO -> handleLobbyHello(message);
+            case LOBBY_CHALLENGE -> handleLobbyChallenge(message);
             case LOBBY_ACCEPT -> handleLobbyAccept(message);
             case LOBBY_REJECT -> handleLobbyReject(message);
             case HANDSHAKE_MANIFEST -> handleHandshakeManifest(message);
@@ -1547,8 +1595,14 @@ public class CoopNetPump implements EveryFrameScript {
                     service.nextSeq(),
                     clockMillis.getAsLong(),
                     CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
+            return;
+        }
+
+        // Phase 20.4: the password gate runs before anything touches the session record, so a wrong
+        // guess never takes the guest slot and never has to be rolled back out of it.
+        if (!checkLobbyPassword(message)) {
             return;
         }
 
@@ -1562,7 +1616,7 @@ public class CoopNetPump implements EveryFrameScript {
                     service.nextSeq(),
                     clockMillis.getAsLong(),
                     reason);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             return;
         }
@@ -1573,7 +1627,7 @@ public class CoopNetPump implements EveryFrameScript {
                 clockMillis.getAsLong(),
                 sessionState.provisionalLobbyId(),
                 sessionState.localPlayerInfo());
-        service.send(accept);
+        service.sendTo(message.senderId(), accept);
         log("outbound", accept);
         CoopLog.info(CoopNetPump.class,
                 "Coop lobby accepted provisionalLobbyId=" + sessionState.provisionalLobbyId()
@@ -1581,9 +1635,121 @@ public class CoopNetPump implements EveryFrameScript {
                         + " guestPlayerId=" + sessionState.remotePlayerId());
     }
 
+    // ---- Phase 20.4: optional lobby password -----------------------------------------------------
+
+    /**
+     * Host side of the password gate. Returns true when the hello may proceed to the accept path.
+     *
+     * <p>The flow exists in this shape because {@code LOBBY_HELLO} is the <em>first</em> message on a
+     * fresh connection: there is no host-issued id yet for a proof to be bound to, so the proof
+     * cannot ride the first hello. The host answers a challenge carrying a fresh nonce instead,
+     * without touching {@link CoopSessionState} — no slot is taken, so an attacker spraying guesses
+     * cannot occupy the session while it guesses — and the guest sends a <em>second</em> hello with
+     * {@code SHA-256(password + nonce)}. A wrong proof gets the ordinary {@code LOBBY_REJECT} and the
+     * connection is dropped, which puts the guesser back at the transport's rate limiter.
+     *
+     * <p>With no password configured this method returns true immediately and the wire is
+     * byte-identical to the pre-20.4 build: no challenge, no extra field, no extra round trip.
+     */
+    private boolean checkLobbyPassword(CoopMessages.Message message) {
+        if (lobbyPassword.isEmpty()) {
+            return true;
+        }
+        String proof = CoopMessages.parseLobbyProof(message);
+        if (proof.isEmpty()) {
+            pendingLobbyNonce = newLobbyNonce();
+            CoopMessages.Message challenge = CoopMessages.lobbyChallenge(
+                    service.nextSeq(), clockMillis.getAsLong(), pendingLobbyNonce);
+            service.sendTo(message.senderId(), challenge);
+            log("outbound", challenge);
+            return false;
+        }
+
+        String expected = CoopMessages.passwordProof(lobbyPassword,
+                pendingLobbyNonce == null ? "" : pendingLobbyNonce);
+        // Constant-time, and only ever against a nonce we actually issued: a proof arriving with no
+        // outstanding challenge is a replay of somebody else's round and is refused outright.
+        boolean accepted = pendingLobbyNonce != null && java.security.MessageDigest.isEqual(
+                expected.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                proof.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        pendingLobbyNonce = null;
+        if (accepted) {
+            return true;
+        }
+
+        CoopMessages.Message reject = CoopMessages.lobbyReject(
+                service.nextSeq(), clockMillis.getAsLong(), LOBBY_REJECT_PASSWORD);
+        service.sendTo(message.senderId(), reject);
+        log("outbound", reject);
+        // Push the reject onto the wire before the socket goes, then close: leaving the connection
+        // open would let one guesser hold the single v1 slot open indefinitely.
+        service.flushOutbound();
+        service.dropActiveConnection(LOBBY_REJECT_PASSWORD);
+        CoopLog.warn(CoopNetPump.class, "Coop lobby rejected a guest with the wrong password"
+                + " and closed the connection");
+        return false;
+    }
+
+    /**
+     * Guest side: answer the challenge with a second hello. A guest with no password configured
+     * answers with an empty proof rather than going silent — the reject that comes back is what tells
+     * the player why, and silence would look like a hung connection.
+     */
+    private void handleLobbyChallenge(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        lobbyChallengeSeen = true;
+        String nonce = CoopMessages.parseLobbyChallengeNonce(message);
+        if (lobbyPassword.isEmpty()) {
+            CoopLog.warn(CoopNetPump.class, "Coop host asked for a lobby password and none is"
+                    + " configured here; launch with -D" + CoopNetStartupConfig.PASSWORD_PROPERTY
+                    + "=<the host's password>. This connection will be rejected.");
+        }
+        CoopMessages.Message hello = CoopMessages.lobbyHello(
+                service.nextSeq(),
+                clockMillis.getAsLong(),
+                sessionState.localPlayerInfo(),
+                lobbyPassword.isEmpty() ? "" : CoopMessages.passwordProof(lobbyPassword, nonce));
+        service.send(hello);
+        log("outbound", hello);
+    }
+
+    private String newLobbyNonce() {
+        byte[] bytes = new byte[8];
+        lobbyNonceSource.nextBytes(bytes);
+        StringBuilder nonce = new StringBuilder(16);
+        for (byte b : bytes) {
+            nonce.append(Character.forDigit((b >>> 4) & 0x0f, 16));
+            nonce.append(Character.forDigit(b & 0x0f, 16));
+        }
+        return nonce.toString();
+    }
+
+    /** Launch-time read, defaulting to "no password" if the property stack is unusable. */
+    private static String readLobbyPassword() {
+        try {
+            return CoopNetStartupConfig.passwordFromSystemProperties();
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Unusable "
+                    + CoopNetStartupConfig.PASSWORD_PROPERTY + "; hosting without a password", ex);
+            return "";
+        }
+    }
+
+    /** Test seam: the password is a launch property everywhere else. */
+    void setLobbyPasswordForTest(String password) {
+        this.lobbyPassword = password == null ? "" : password.trim();
+    }
+
     private void handleLobbyAccept(CoopMessages.Message message) {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
+        }
+        if (!lobbyPassword.isEmpty() && !lobbyChallengeSeen && !lobbyPasswordUnusedWarned) {
+            lobbyPasswordUnusedWarned = true;
+            CoopLog.warn(CoopNetPump.class, "Coop host did not ask for a password; the one configured"
+                    + " here was not used. The session is unprotected on the host's port.");
         }
 
         CoopPlayerInfo host = new CoopPlayerInfo(
@@ -1627,7 +1793,7 @@ public class CoopNetPump implements EveryFrameScript {
                     service.nextSeq(),
                     clockMillis.getAsLong(),
                     diff);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop handshake rejected:\n" + diff);
             return;
@@ -1641,7 +1807,7 @@ public class CoopNetPump implements EveryFrameScript {
                 service.nextSeq(),
                 clockMillis.getAsLong(),
                 sessionId);
-        service.send(accept);
+        service.sendTo(message.senderId(), accept);
         log("outbound", accept);
         CoopLog.info(CoopNetPump.class, "Coop handshake accepted sessionId=" + sessionId);
     }
@@ -1809,7 +1975,7 @@ public class CoopNetPump implements EveryFrameScript {
                     service.nextSeq(),
                     clockMillis.getAsLong(),
                     seedMismatch);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + seedMismatch);
             return;
@@ -1823,7 +1989,7 @@ public class CoopNetPump implements EveryFrameScript {
                     service.nextSeq(),
                     clockMillis.getAsLong(),
                     mismatch);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + mismatch);
             dumpCanonicalFingerprint("guest fingerprint comparison failed");
@@ -1837,7 +2003,7 @@ public class CoopNetPump implements EveryFrameScript {
                 service.nextSeq(),
                 clockMillis.getAsLong(),
                 guestFingerprint);
-        service.send(ack);
+        service.sendTo(message.senderId(), ack);
         log("outbound", ack);
         CoopLog.info(CoopNetPump.class,
                 "Coop seed lock accepted seedLong=" + seedLong
@@ -1916,7 +2082,7 @@ public class CoopNetPump implements EveryFrameScript {
                 service.nextSeq(),
                 clockMillis.getAsLong(),
                 reason);
-        service.send(reject);
+        service.sendTo(message.senderId(), reject);
         log("outbound", reject);
         CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
         return false;
@@ -1936,7 +2102,7 @@ public class CoopNetPump implements EveryFrameScript {
                     service.nextSeq(),
                     clockMillis.getAsLong(),
                     mismatch);
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected after guest ACK: " + mismatch);
             dumpCanonicalFingerprint("host rejecting after guest ack");
@@ -3070,7 +3236,7 @@ public class CoopNetPump implements EveryFrameScript {
             CoopMessages.Message accept = CoopMessages.interactionAccept(
                     sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
                     entityId, playerId, entityName, result.hostSeq());
-            service.send(accept);
+            service.sendTo(message.senderId(), accept);
             log("outbound", accept);
             CoopLog.info(CoopNetPump.class, "Coop interaction claim accepted entityId=" + entityId
                     + " playerId=" + playerId + " hostSeq=" + result.hostSeq());
@@ -3078,7 +3244,7 @@ public class CoopNetPump implements EveryFrameScript {
             CoopMessages.Message reject = CoopMessages.interactionReject(
                     sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
                     entityId, result.rejectReason());
-            service.send(reject);
+            service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.info(CoopNetPump.class, "Coop interaction claim rejected entityId=" + entityId
                     + " requester=" + playerId + " " + result.rejectReason());
@@ -3677,6 +3843,9 @@ public class CoopNetPump implements EveryFrameScript {
     private void handleLinkStatus(CoopMessages.Message message) {
         peerLinkStatus = CoopMessages.parseLinkStatus(message);
         peerLinkStatusAtMillis = clockMillis.getAsLong();
+        // Phase 20.6: the partner's own reading, so the page can answer "does my partner see the
+        // same numbers" without either player having to read a log.
+        intelFeed.notePeerLink(peerLinkStatus);
     }
 
     /** The peer's latest report, or null when none has arrived; test/bridge read. */
@@ -3715,7 +3884,8 @@ public class CoopNetPump implements EveryFrameScript {
                 service.nextSeq(),
                 clockMillis.getAsLong(),
                 ping.seq());
-        service.send(pong);
+        // A pong answers one ping: it is only meaningful to the peer whose RTT sample it closes.
+        service.sendTo(ping.senderId(), pong);
         log("outbound", pong);
     }
 
@@ -3893,6 +4063,11 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void sendLinkStatus(long now, CoopDatagramStats stats) {
+        // Phase 20.6: the intel page is fed on the LINK_STATUS cadence rather than per frame, which
+        // is the whole reason 20.6 was scheduled to ride 20.1 — the data source already exists at
+        // exactly the rate a page wants to be refreshed at.
+        intelFeed.publishSession(service.role(), hudState(false).status(), remoteDisplayName());
+        intelFeed.publishLink(linkQuality.snapshot(now), linkQuality.transport());
         if (!service.isConnected()) {
             return;
         }
@@ -3910,6 +4085,10 @@ public class CoopNetPump implements EveryFrameScript {
         }
         feedNextAtMillis.put(kind, now + FEED_MIN_INTERVAL_MILLIS);
         coop.ui.CoopFeed.post(text, color);
+        // Phase 20.6: the feed line scrolls away, the intel page's event log does not. Hooked here
+        // rather than at each call site so a transition can never post a banner without also being
+        // recorded — the two are the same event by construction.
+        intelFeed.noteEvent(text);
     }
 
     private void log(String direction, CoopMessages.Message message) {

@@ -22,6 +22,11 @@ package coop.net;
  * @param icmpTransients        transient socket/ICMP errors absorbed without closing the channel
  * @param oversized             outbound datagrams dropped for exceeding the size cap
  * @param escalatedToTcp        composed datagrams rerouted onto TCP for exceeding the size budget
+ * @param connectionAttempts    TCP connections the host accepted, throttled or not (Phase 20.4)
+ * @param connectionsThrottled  TCP connections closed with no reply because their source was in its
+ *                              rate-limit cooldown
+ * @param invalidFrames         undecodable TCP frames received across all peers
+ * @param connectionsDroppedForGarbage pre-handshake connections dropped for repeated garbage frames
  * @param lastInboundDatagramAtMillis wall clock of the last accepted inbound datagram, 0 if none
  * @param validatedRemote       the current send target as text, or "" when nothing is validated
  */
@@ -38,6 +43,10 @@ public record CoopDatagramStats(
         long icmpTransients,
         long oversized,
         long escalatedToTcp,
+        long connectionAttempts,
+        long connectionsThrottled,
+        long invalidFrames,
+        long connectionsDroppedForGarbage,
         long lastInboundDatagramAtMillis,
         String validatedRemote) {
 
