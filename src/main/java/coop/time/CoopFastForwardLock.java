@@ -196,7 +196,17 @@ public final class CoopFastForwardLock {
     }
 
     private boolean ensureResolved() {
-        if (disabledByProperty || failed) {
+        if (disabledByProperty) {
+            if (!warned) {
+                warned = true;
+                CoopLog.warn(CoopFastForwardLock.class, "-D" + DISABLE_PROPERTY
+                        + "=true: shared fast-forward disabled by debug property; coop session falls"
+                        + " back to a locked 1x campaign speed (dates DRIFT if the other client"
+                        + " is not also running this flag)");
+            }
+            return false;
+        }
+        if (failed) {
             return false;
         }
         if (!resolveAttempted) {
