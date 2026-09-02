@@ -108,4 +108,60 @@ class CoopNetStartupConfigTest {
 
         assertEquals("", config.newGameSeed());
     }
+
+    @Test
+    void portMappingDefaultsToAuto() {
+        assertTrue(CoopNetStartupConfig.from(new Properties()).portMappingEnabled());
+    }
+
+    @Test
+    void portMappingAutoEnablesTheMapperForAHost() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.hostPort", "27015");
+        properties.setProperty("coop.portMapping", "auto");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertEquals(CoopConnectionRole.HOST, config.role());
+        assertTrue(config.portMappingEnabled());
+    }
+
+    @Test
+    void portMappingOffDisablesTheMapper() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.hostPort", "27015");
+        properties.setProperty("coop.portMapping", "off");
+
+        assertFalse(CoopNetStartupConfig.from(properties).portMappingEnabled());
+    }
+
+    @Test
+    void portMappingValueIsCaseAndWhitespaceInsensitive() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.portMapping", "  OFF  ");
+
+        assertFalse(CoopNetStartupConfig.from(properties).portMappingEnabled());
+    }
+
+    @Test
+    void portMappingIsReadableWithoutAnyRoleConfiguration() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.portMapping", "off");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertFalse(config.isPresent());
+        assertFalse(config.portMappingEnabled());
+    }
+
+    @Test
+    void rejectsAnUnknownPortMappingValue() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.portMapping", "upnp");
+
+        IllegalArgumentException failure =
+                assertThrows(IllegalArgumentException.class, () -> CoopNetStartupConfig.from(properties));
+
+        assertTrue(failure.getMessage().contains("coop.portMapping"), failure.getMessage());
+    }
 }

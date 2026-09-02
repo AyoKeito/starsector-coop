@@ -69,4 +69,53 @@ class CoopNetServiceSandboxCompatibilityTest {
         assertFalse(source.contains("ByteArrayOutputStream"),
                 "Frame buffering must avoid java.io stream types inside Starsector's script sandbox");
     }
+
+    @Test
+    void portMappingCodeAvoidsTheApisTheScriptClassloaderBlocks() throws IOException {
+        // The port mapper speaks HTTP and SOAP, which is exactly the shape of code that reaches for
+        // HttpURLConnection, URL.openStream or an XML parser. All three drag in java.io, which the
+        // Starsector script classloader refuses at runtime while compiling and unit-testing green.
+        List<String> classes = List.of(
+                "CoopPortMapper.java",
+                "CoopConnectionDoctor.java",
+                "CoopHttpMessages.java",
+                "CoopSsdpMessages.java",
+                "CoopUpnpDescriptor.java",
+                "CoopUpnpSoap.java",
+                "CoopNatPmpMessages.java");
+
+        List<String> offenders = new ArrayList<>();
+        for (String className : classes) {
+            Path path = PROJECT_ROOT.resolve("src/main/java/coop/net").resolve(className);
+            // Comments name these APIs on purpose (explaining why they are avoided), so scan code only.
+            String source = stripComments(Files.readString(path, StandardCharsets.UTF_8));
+            for (String banned : List.of("java.io.", "java.nio.file", "java.lang.reflect",
+                    "HttpURLConnection", "URL.openStream", "javax.xml", "new Thread(")) {
+                if (source.contains(banned)) {
+                    offenders.add(className + " uses " + banned);
+                }
+            }
+        }
+
+        assertEquals(List.of(), offenders);
+    }
+
+    /** Crude but sufficient: the sources scanned here contain no comment markers inside literals. */
+    private static String stripComments(String source) {
+        StringBuilder code = new StringBuilder(source.length());
+        int i = 0;
+        while (i < source.length()) {
+            if (source.startsWith("/*", i)) {
+                int end = source.indexOf("*/", i + 2);
+                i = end < 0 ? source.length() : end + 2;
+            } else if (source.startsWith("//", i)) {
+                int end = source.indexOf('\n', i);
+                i = end < 0 ? source.length() : end;
+            } else {
+                code.append(source.charAt(i));
+                i++;
+            }
+        }
+        return code.toString();
+    }
 }
