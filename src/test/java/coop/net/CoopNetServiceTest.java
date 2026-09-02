@@ -758,6 +758,149 @@ class CoopNetServiceTest {
         throw new AssertionError("Timed out waiting for " + description);
     }
 
+    // ---- Phase 20.1 M2: outbound TCP backpressure ------------------------------------------------
+    //
+    // No channel is attached in these tests, so flushOutbound cannot drain: the queue grows exactly
+    // as it would against a stalled peer socket, which is the only state coalescing is allowed in.
+
+    @Test
+    void anIdleQueueNeverCoalescesSoLocalhostTrafficIsUnchanged() {
+        CoopNetService service = new CoopNetService();
+        try {
+            for (int i = 0; i < CoopNetService.COALESCE_BACKLOG_MESSAGES - 1; i++) {
+                service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), false, false,
+                        1000L + i, 1L, 1000L + i, ""));
+            }
+
+            assertEquals(CoopNetService.COALESCE_BACKLOG_MESSAGES - 1, service.outboundQueueDepth(),
+                    "below the backlog threshold every message is queued as sent");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void aBackloggedQueueKeepsOnlyTheNewestOfEachSupersededSnapshot() {
+        CoopNetService service = new CoopNetService();
+        try {
+            for (int i = 0; i < CoopNetService.COALESCE_BACKLOG_MESSAGES; i++) {
+                service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), false, false,
+                        1000L + i, 1L, 1000L + i, ""));
+            }
+            int depthWhenBacklogged = service.outboundQueueDepth();
+
+            for (int i = 0; i < 50; i++) {
+                service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), true, false,
+                        9000L + i, 9L, 9000L + i, ""));
+            }
+
+            assertEquals(depthWhenBacklogged, service.outboundQueueDepth(),
+                    "50 superseded snapshots must replace one queued snapshot, not grow the queue");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void aBackloggedQueueNeverCoalescesSemanticEvents() {
+        CoopNetService service = new CoopNetService();
+        try {
+            for (int i = 0; i < CoopNetService.COALESCE_BACKLOG_MESSAGES; i++) {
+                service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), false, false,
+                        1000L + i, 1L, 1000L + i, ""));
+            }
+            int depthWhenBacklogged = service.outboundQueueDepth();
+
+            for (int i = 0; i < 10; i++) {
+                service.send(CoopMessages.interactionClaim(SESSION_ID, service.nextSeq(), 2000L,
+                        "entity-" + i, "Entity", "player-a"));
+            }
+
+            assertEquals(depthWhenBacklogged + 10, service.outboundQueueDepth(),
+                    "claims are events: every one of them must still be delivered");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /**
+     * One TCP-fallback stream carries several independent state streams. Keying only on the message
+     * type would let a motion datagram supersede a fleet snapshot and silently censor it.
+     */
+    @Test
+    void backloggedStateDatagramsCoalescePerWrappedStreamNotAcrossThem() {
+        CoopNetService service = new CoopNetService();
+        try {
+            for (int i = 0; i < CoopNetService.COALESCE_BACKLOG_MESSAGES; i++) {
+                service.send(CoopMessages.timeSnapshot(SESSION_ID, service.nextSeq(), false, false,
+                        1000L + i, 1L, 1000L + i, ""));
+            }
+            int depthWhenBacklogged = service.outboundQueueDepth();
+
+            service.send(CoopMessages.stateDatagram(SESSION_ID, service.nextSeq(), 2000L,
+                    snapshot(HOST_SENDER, 1L, "body-1")));
+            service.send(CoopMessages.stateDatagram(SESSION_ID, service.nextSeq(), 2100L,
+                    CoopMessages.datagram(TOKEN, HOST_SENDER, CoopMessages.Type.NPC_FLEET_MOTION,
+                            2L, 0L, "motion-1")));
+            service.send(CoopMessages.stateDatagram(SESSION_ID, service.nextSeq(), 2200L,
+                    snapshot(GUEST_SENDER, 3L, "body-guest")));
+            assertEquals(depthWhenBacklogged + 3, service.outboundQueueDepth(),
+                    "three distinct (type, sender) streams are three queue entries");
+
+            service.send(CoopMessages.stateDatagram(SESSION_ID, service.nextSeq(), 2300L,
+                    snapshot(HOST_SENDER, 4L, "body-2")));
+            assertEquals(depthWhenBacklogged + 3, service.outboundQueueDepth(),
+                    "a newer sample of the same stream replaces the queued one");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void coalescingKeepsTheNewestPayloadInTheOldestSlot() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            // Queue past the threshold before the first flush, so the coalescing path is exercised
+            // and the survivor is then actually written to the socket.
+            for (int i = 0; i < CoopNetService.COALESCE_BACKLOG_MESSAGES; i++) {
+                host.send(CoopMessages.interactionClaim(SESSION_ID, host.nextSeq(), 1000L,
+                        "entity-" + i, "Entity", "host-player"));
+            }
+            host.send(CoopMessages.timeSnapshot(SESSION_ID, host.nextSeq(), false, false,
+                    1L, 1L, 1L, ""));
+            host.send(CoopMessages.timeSnapshot(SESSION_ID, host.nextSeq(), true, false,
+                    777L, 7L, 777L, "host"));
+            host.flushOutbound();
+
+            List<CoopMessages.Message> received = new ArrayList<>();
+            waitUntil(() -> {
+                CoopMessages.Message message;
+                while ((message = guest.pollInbound()) != null) {
+                    received.add(message);
+                }
+                return received.stream().anyMatch(m -> m.type() == CoopMessages.Type.TIME_SNAPSHOT);
+            }, "guest received the coalesced snapshot");
+
+            List<CoopMessages.Message> snapshots = received.stream()
+                    .filter(m -> m.type() == CoopMessages.Type.TIME_SNAPSHOT)
+                    .toList();
+            assertEquals(1, snapshots.size(), "only the newest snapshot survives");
+            assertEquals(777L, CoopMessages.requiredPayloadLong(snapshots.get(0), "timestampMillis"));
+            assertEquals(CoopNetService.COALESCE_BACKLOG_MESSAGES,
+                    received.stream().filter(m -> m.type() == CoopMessages.Type.INTERACTION_CLAIM).count(),
+                    "no event was dropped on the way");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
     private List<String> drainDatagrams(CoopNetService service) {
         List<String> drained = new ArrayList<>();
         String payload;

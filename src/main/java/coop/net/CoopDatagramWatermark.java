@@ -60,6 +60,11 @@ public final class CoopDatagramWatermark {
         return fresh;
     }
 
+    /** The high-water epoch for one stream, or {@link Long#MIN_VALUE} when it has none yet. */
+    long watermarkFor(String senderId, CoopMessages.Type type) {
+        return watermarkByStream.getOrDefault(new StreamKey(senderId, type), Long.MIN_VALUE);
+    }
+
     /** Clears all watermarks (session teardown). */
     public void reset() {
         watermarkByStream.clear();

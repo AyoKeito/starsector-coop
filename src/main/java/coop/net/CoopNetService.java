@@ -91,9 +91,24 @@ public class CoopNetService {
     private static final String PATH_ECHO_PREFIX = "R:";
     /** Nonce width in hex characters; 16 hex = 64 unpredictable bits, QUIC's PATH_CHALLENGE is 64. */
     private static final int PATH_NONCE_HEX_CHARS = 16;
+    /**
+     * Backlog at which newest-wins coalescing switches on (Phase 20.1 M2). Below it the queue is
+     * byte-identical to what it always was — on localhost the socket drains every frame and nothing
+     * is ever coalesced, so the LAN behaviour this project's whole test corpus was tuned against is
+     * untouched. 32 queued messages is already several frames of arrears at the 1-5 Hz control rates.
+     */
+    static final int COALESCE_BACKLOG_MESSAGES = 32;
+    /** Queue depth that gets a one-time warning. Nothing is dropped; this is a "look here" marker. */
+    static final int QUEUE_DEPTH_WARN_MESSAGES = 1_024;
 
     private final Queue<CoopMessages.Message> inbound = new ConcurrentLinkedQueue<>();
-    private final Queue<CoopMessages.Message> outbound = new ConcurrentLinkedQueue<>();
+    /**
+     * Outbound TCP queue. A {@link java.util.LinkedList} guarded by {@link #lifecycleLock} rather
+     * than a concurrent queue: coalescing has to <em>replace</em> a queued message in place, which no
+     * lock-free queue offers, and every producer is the campaign thread anyway (the sandbox forbids
+     * networking threads, so there was never real concurrency here to lose).
+     */
+    private final java.util.LinkedList<CoopMessages.Message> outbound = new java.util.LinkedList<>();
     // High-frequency state datagrams (UDP). Kept separate from the reliable TCP control queues.
     // Netty is deliberately avoided here: Starsector's script sandbox blocks Netty's reflection
     // (see CoopNetServiceSandboxCompatibilityTest), so coop networking uses java.nio throughout.
@@ -174,6 +189,8 @@ public class CoopNetService {
     private boolean connectFailureLogged;
     private boolean discardingOversizedFrame;
     private boolean datagramSendFailureLogged;
+    /** One warning per service lifetime when the outbound queue first crosses the warn threshold. */
+    private boolean queueDepthWarned;
 
     public CoopNetService() {
         this(System::currentTimeMillis);
@@ -306,7 +323,95 @@ public class CoopNetService {
         if (message == null) {
             return;
         }
-        outbound.add(message.withSenderId(localSenderId));
+        synchronized (lifecycleLock) {
+            CoopMessages.Message stamped = message.withSenderId(localSenderId);
+            if (!backloggedLocked() || !replaceQueuedLocked(stamped)) {
+                outbound.add(stamped);
+            }
+            if (outbound.size() > QUEUE_DEPTH_WARN_MESSAGES && !queueDepthWarned) {
+                queueDepthWarned = true;
+                CoopLog.warn(CoopNetService.class, "Coop TCP outbound queue is " + outbound.size()
+                        + " messages deep (warn threshold " + QUEUE_DEPTH_WARN_MESSAGES
+                        + "); the peer's socket is not draining. Nothing is dropped — superseded"
+                        + " snapshots coalesce, events queue.");
+            }
+        }
+    }
+
+    /**
+     * Depth of the outbound TCP queue. Read by the pump for {@code LINK_STATUS} and by tests; it is
+     * the one honest measure of whether the peer's socket is keeping up.
+     */
+    public int outboundQueueDepth() {
+        synchronized (lifecycleLock) {
+            return outbound.size();
+        }
+    }
+
+    /**
+     * Backlogged means the socket is behind: either a half-written frame is parked in
+     * {@link #pendingWrite} (the kernel buffer said "full") or the queue has piled up past
+     * {@link #COALESCE_BACKLOG_MESSAGES}. Only then does coalescing engage.
+     */
+    private boolean backloggedLocked() {
+        return pendingWrite != null || outbound.size() >= COALESCE_BACKLOG_MESSAGES;
+    }
+
+    /**
+     * Newest-wins: replaces the queued message with the same coalescing key, keeping its <em>place</em>
+     * in the queue so relative ordering against everything else is unchanged.
+     *
+     * @return true when an existing message was replaced, false when the caller must enqueue
+     */
+    private boolean replaceQueuedLocked(CoopMessages.Message message) {
+        String key = coalesceKey(message);
+        if (key == null) {
+            return false;
+        }
+        // Newest first: there is only ever one message per key in the queue, and scanning from the
+        // tail finds it in one step for the stream types that produce back-to-back sends.
+        java.util.ListIterator<CoopMessages.Message> cursor = outbound.listIterator(outbound.size());
+        while (cursor.hasPrevious()) {
+            if (key.equals(coalesceKey(cursor.previous()))) {
+                cursor.set(message);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Coalescing identity, or null for "never coalesce this".
+     *
+     * <p>The whitelist is only whole-state snapshots, where an older copy carries strictly less
+     * information than the newer one that superseded it. Everything else — claims, deltas, results,
+     * world deltas, lifecycle, handshakes — is a semantic event whose loss changes the outcome of the
+     * game, and none of it is ever dropped no matter how deep the queue gets.
+     *
+     * <p>{@code STATE_DATAGRAM} keys on the <em>wrapped</em> datagram's type and sender, because one
+     * TCP-fallback stream carries two independent streams ({@code FLEET_SNAPSHOT} and
+     * {@code NPC_FLEET_MOTION}) from potentially several senders, and superseding across them would
+     * silently censor one stream with another. An unparseable wrapper keys as null: something we
+     * cannot identify is something we must not throw away.
+     */
+    private static String coalesceKey(CoopMessages.Message message) {
+        switch (message.type()) {
+            case TIME_SNAPSHOT, NPC_FLEET_SET, PLAYER_REP_SNAPSHOT, MISSION_POOL_SNAPSHOT, LINK_STATUS -> {
+                return message.type().name();
+            }
+            case STATE_DATAGRAM -> {
+                try {
+                    CoopMessages.DatagramHeader header =
+                            CoopMessages.parseDatagramHeader(CoopMessages.parseStateDatagram(message));
+                    return "STATE_DATAGRAM|" + header.type().name() + '|' + header.senderId();
+                } catch (RuntimeException ex) {
+                    return null;
+                }
+            }
+            default -> {
+                return null;
+            }
+        }
     }
 
     /**

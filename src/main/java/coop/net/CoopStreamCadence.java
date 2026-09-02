@@ -20,7 +20,7 @@ package coop.net;
  */
 public final class CoopStreamCadence {
 
-    private final long intervalMillis;
+    private long intervalMillis;
 
     private boolean primed;
     private long lastStreamMillis;
@@ -57,6 +57,24 @@ public final class CoopStreamCadence {
         lastStreamMillis = streamMillis;
         lastWallMillis = wallMillis;
         return true;
+    }
+
+    /**
+     * Retunes the interval (Phase 20.1 M2 UDP-blocked fallback: 100 ms on UDP, 200 ms once the stream
+     * is wrapped in TCP, back to 100 ms on recovery). Deliberately does <em>not</em> reset the timer:
+     * the next send is due one new interval after the last one, so a change mid-stream neither stalls
+     * the stream nor fires an immediate extra send.
+     */
+    public void setIntervalMillis(long intervalMillis) {
+        if (intervalMillis <= 0L) {
+            throw new IllegalArgumentException("intervalMillis must be positive: " + intervalMillis);
+        }
+        this.intervalMillis = intervalMillis;
+    }
+
+    /** The interval currently in force. */
+    public long intervalMillis() {
+        return intervalMillis;
     }
 
     /** Session (re)start: forget the last send so the next poll re-primes. */

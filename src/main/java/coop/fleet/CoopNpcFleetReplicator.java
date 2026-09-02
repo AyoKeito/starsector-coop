@@ -63,6 +63,8 @@ public final class CoopNpcFleetReplicator {
     private final LongSupplier clockMillis;
     /** Pump-owned (Phase 29 M1): outbound epoch + stream-time stamps for motion datagrams and sets. */
     private final coop.net.CoopStreamClock streamClock;
+    /** Phase 20.1 M2: the transport router, not the raw UDP send — see {@link coop.net.CoopStateStreamSink}. */
+    private final coop.net.CoopStateStreamSink stateStreamSink;
     private final coop.net.CoopDatagramRedundancy datagramRedundancy =
             new coop.net.CoopDatagramRedundancy();
     private final CoopGuestPresence guestPresence = new CoopGuestPresence();
@@ -83,10 +85,30 @@ public final class CoopNpcFleetReplicator {
 
     public CoopNpcFleetReplicator(CoopNetService service, CoopSessionState sessionState,
                                   LongSupplier clockMillis, coop.net.CoopStreamClock streamClock) {
+        this(service, sessionState, clockMillis, streamClock, service::sendDatagram);
+    }
+
+    /**
+     * @param stateStreamSink where composed motion datagrams go. The pump passes its own router here
+     *                        (Phase 20.1 M2) so the stream follows the UDP-blocked fallback; the
+     *                        four-argument constructor keeps the direct-to-UDP behaviour.
+     */
+    public CoopNpcFleetReplicator(CoopNetService service, CoopSessionState sessionState,
+                                  LongSupplier clockMillis, coop.net.CoopStreamClock streamClock,
+                                  coop.net.CoopStateStreamSink stateStreamSink) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.streamClock = Objects.requireNonNull(streamClock, "streamClock");
+        this.stateStreamSink = Objects.requireNonNull(stateStreamSink, "stateStreamSink");
+    }
+
+    /**
+     * Retunes the motion cadence (Phase 20.1 M2): 100 ms on UDP, 200 ms while the stream is wrapped
+     * in TCP. The pump owns the decision and drives both stream cadences together.
+     */
+    public void setMotionIntervalMillis(long intervalMillis) {
+        motionCadence.setIntervalMillis(intervalMillis);
     }
 
     /**
@@ -254,7 +276,7 @@ public final class CoopNpcFleetReplicator {
         if (motions.isEmpty()) {
             return;
         }
-        service.sendDatagram(datagramRedundancy.compose(
+        stateStreamSink.send(datagramRedundancy.compose(
                 CoopMessages.wireToken(sessionState.sessionId()),
                 CoopMessages.wireToken(sessionState.localPlayerId()),
                 CoopMessages.Type.NPC_FLEET_MOTION, streamClock.nextEpoch(),

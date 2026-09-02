@@ -21,12 +21,30 @@ import coop.net.CoopConnectionRole;
  *                             player reads as "you"), or null when nobody holds it
  * @param clockDriftGameHours  guest clock offset in whole game hours, positive when the guest is
  *                             BEHIND the host; null on the host, and null when it rounds to zero
+ * @param rttMillis            smoothed round-trip time, or null when there is no session or no
+ *                             PONG has been matched yet
+ * @param lossPercent          raw datagram loss over the last 10 s, or null when there is no session
+ * @param transport            {@link #TRANSPORT_UDP} or {@link #TRANSPORT_TCP_FALLBACK}; null when
+ *                             there is no session, which is what suppresses the whole link segment
  */
 public record CoopHudState(String roleBadge,
                            String status,
                            boolean paused,
                            String pauseHolder,
-                           Integer clockDriftGameHours) {
+                           Integer clockDriftGameHours,
+                           Integer rttMillis,
+                           Integer lossPercent,
+                           String transport) {
+
+    /**
+     * Pre-20.6-M2 shape: role, status, pause and drift with no link readout. Kept because the link
+     * fields are exactly the ones that are absent outside a session, and every caller that does not
+     * have them should not have to write three nulls.
+     */
+    public CoopHudState(String roleBadge, String status, boolean paused, String pauseHolder,
+                        Integer clockDriftGameHours) {
+        this(roleBadge, status, paused, pauseHolder, clockDriftGameHours, null, null, null);
+    }
 
     public static final String BADGE_HOST = "HOST";
     public static final String BADGE_GUEST = "GUEST";
@@ -51,6 +69,11 @@ public record CoopHudState(String roleBadge,
     public static final String HOLDER_GUEST_SCREEN = "guest screen";
     /** Raw holder token: either player is in combat. */
     public static final String HOLDER_COMBAT = "combat";
+
+    /** Transport wording: the state stream is on UDP, which is the normal case. */
+    public static final String TRANSPORT_UDP = "udp";
+    /** Transport wording: UDP is blocked and the state stream is wrapped in TCP. */
+    public static final String TRANSPORT_TCP_FALLBACK = "tcp fallback";
 
     /**
      * Maps a raw holder token (the wire/coordinator vocabulary, always host-relative) to the wording
@@ -127,6 +150,21 @@ public record CoopHudState(String roleBadge,
         if (drift != null && drift != 0) {
             line.append(sep).append("guest ").append(Math.abs(drift)).append('h')
                     .append(drift > 0 ? " behind" : " ahead");
+        }
+
+        // Link segment, session only. The transport is the thing that changes how the game feels, so
+        // it is always shown once there is a session; RTT and loss are omitted only when unmeasured.
+        String transport = state.transport();
+        if (transport != null && !transport.isEmpty()) {
+            Integer rtt = state.rttMillis();
+            if (rtt != null) {
+                line.append(sep).append(rtt).append(" ms");
+            }
+            Integer loss = state.lossPercent();
+            if (loss != null) {
+                line.append(sep).append("loss ").append(loss).append('%');
+            }
+            line.append(sep).append(transport);
         }
         return line.toString();
     }

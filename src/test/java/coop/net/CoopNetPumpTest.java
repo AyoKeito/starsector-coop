@@ -1149,6 +1149,275 @@ class CoopNetPumpTest {
         assertEquals(0L, canonicalReads.get(), "a clean seed lock must not spam the canonical text");
     }
 
+    // ---- Phase 20.1 M2: link supervision, TCP fallback, HUD link fields -------------------------
+
+    @Test
+    void hostPingsThePeerOnTheSameThreeSecondCadenceTheGuestUses() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        pump.advance(0f);
+        now.set(3_999L);
+        pump.advance(0f);
+        assertEquals(0, countOf(service, CoopMessages.Type.PING), "not due yet");
+
+        now.set(4_001L);
+        pump.advance(0f);
+        assertEquals(1, countOf(service, CoopMessages.Type.PING),
+                "the host measures its own RTT now, so it pings too");
+    }
+
+    @Test
+    void aPongIsTimedAndSurfacesAsTheHudRoundTripTime() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        pump.advance(0f);
+        now.set(4_001L);
+        pump.advance(0f);
+        CoopMessages.Message ping = onlyOf(service, CoopMessages.Type.PING);
+
+        now.set(4_121L);
+        service.inbound.add(CoopMessages.pong("session-a", 99L, 4_121L, ping.seq()));
+        pump.advance(0f);
+
+        CoopHudState hud = pump.hudState(false);
+        assertEquals(120, hud.rttMillis());
+        assertEquals(0, hud.lossPercent());
+        assertEquals(CoopHudState.TRANSPORT_UDP, hud.transport());
+        String line = CoopHudState.formatLine(hud, CoopHudState.SEPARATOR_PIPE);
+        assertTrue(line.endsWith("120 ms | loss 0% | udp"), line);
+    }
+
+    /** A PONG that answers no PING we sent must not become a fabricated RTT sample. */
+    @Test
+    void anUnmatchedPongProducesNoRoundTripTime() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.pong("session-a", 99L, 1_500L, 4242L));
+        now.set(1_500L);
+        pump.advance(0f);
+
+        assertNull(pump.hudState(false).rttMillis());
+    }
+
+    @Test
+    void linkStatusGoesOutEveryFiveSecondsWithWhatThisSideIsReceiving() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        pump.advance(0f);
+        now.set(5_999L);
+        pump.advance(0f);
+        assertEquals(0, countOf(service, CoopMessages.Type.LINK_STATUS));
+
+        service.noteUdpInboundAt(5_500L);
+        now.set(6_001L);
+        pump.advance(0f);
+
+        CoopMessages.LinkStatus status = CoopMessages.parseLinkStatus(
+                onlyOf(service, CoopMessages.Type.LINK_STATUS));
+        assertEquals(CoopLinkQuality.TRANSPORT_UDP, status.transport());
+        assertTrue(status.udpInboundOk(), "a datagram arrived 500 ms ago");
+        assertEquals(-1, status.rttMillis(), "no pong has been matched yet");
+        assertEquals(0, status.lossPercent());
+    }
+
+    @Test
+    void anInboundLinkStatusIsStoredAsThePeersHalfOfTheEvidence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 1_000L,
+                new CoopLinkQuality.Snapshot(42, 60, 3, false, 120L, 11_000L),
+                CoopLinkQuality.TRANSPORT_UDP,
+                new CoopDatagramStats(0L, 1L, 2L, 0L, 0L, 0L, 3L, 0L, 0L, 4L, 0L, 0L, "")));
+        pump.advance(0f);
+
+        CoopMessages.LinkStatus peer = pump.peerLinkStatus();
+        assertNotNull(peer);
+        assertEquals(42, peer.rttMillis());
+        assertEquals(60, peer.p95RttMillis());
+        assertEquals(3, peer.lossPercent());
+        assertFalse(peer.udpInboundOk());
+        assertEquals(1L, peer.droppedTokenMismatch());
+        assertEquals(2L, peer.droppedForeignSource());
+        assertEquals(3L, peer.pathValidations());
+        assertEquals(4L, peer.icmpTransients());
+    }
+
+    /**
+     * The fallback exists so a UDP-blocked network still plays. That is only true if a TCP-carried
+     * datagram lands on the identical parse/token/watermark path a UDP one takes.
+     */
+    @Test
+    void aStateDatagramCarriedOnTcpReachesTheSameWatermarkAUdpDatagramWould() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        String token = CoopMessages.wireToken("session-a");
+        // The session-start edge resets the watermark table (syncNpcReplication); stream afterwards.
+        pump.advance(0f);
+
+        service.inboundDatagrams.add(CoopMessages.datagram(token, "sender-udp",
+                CoopMessages.Type.NPC_FLEET_MOTION, 4L, 0L, "motion"));
+        service.inbound.add(CoopMessages.stateDatagram("session-a", 8L, 1_000L,
+                CoopMessages.datagram(token, "sender-tcp",
+                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, "motion")));
+        pump.advance(0f);
+
+        assertEquals(4L, pump.datagramWatermark()
+                .watermarkFor("sender-udp", CoopMessages.Type.NPC_FLEET_MOTION));
+        assertEquals(7L, pump.datagramWatermark()
+                .watermarkFor("sender-tcp", CoopMessages.Type.NPC_FLEET_MOTION));
+    }
+
+    @Test
+    void aStateDatagramForAnotherSessionIsDroppedByTheSameTokenCheck() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.stateDatagram("session-a", 8L, 1_000L,
+                CoopMessages.datagram(CoopMessages.wireToken("someone-else"), "sender-x",
+                        CoopMessages.Type.NPC_FLEET_MOTION, 7L, 0L, "motion")));
+        pump.advance(0f);
+
+        assertEquals(Long.MIN_VALUE, pump.datagramWatermark()
+                .watermarkFor("sender-x", CoopMessages.Type.NPC_FLEET_MOTION));
+    }
+
+    @Test
+    void udpSilenceWithLiveTcpMovesTheStateStreamOntoTcpAtHalfCadence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+
+        // TCP keeps arriving; no datagram ever does. That is a blocked path, not a peer in combat.
+        for (long t = 2_000L; t <= 11_500L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertTrue(pump.stateStreamFallbackActive());
+        assertEquals(200L, pump.stateStreamIntervalMillis(), "5 Hz while the stream rides TCP");
+        assertEquals(CoopHudState.TRANSPORT_TCP_FALLBACK, pump.hudState(false).transport());
+
+        // The sink now wraps instead of sending UDP.
+        pump.sendStateDatagram(CoopMessages.datagram(CoopMessages.wireToken("session-a"), "host",
+                CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "body"));
+        assertEquals(0, service.datagrams.size(), "nothing may go out over the blocked path");
+        assertEquals(1, countOf(service, CoopMessages.Type.STATE_DATAGRAM));
+    }
+
+    @Test
+    void aPeerReportingNoInboundUdpAlsoMovesTheStreamOntoTcp() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        // This side's own UDP is healthy; only the peer's report says the path is one-way broken.
+        service.noteUdpInboundAt(2_000L);
+        service.inbound.add(CoopMessages.linkStatus("session-a", 7L, 2_000L,
+                new CoopLinkQuality.Snapshot(40, 50, 0, false, 0L, 30_000L),
+                CoopLinkQuality.TRANSPORT_UDP,
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "")));
+        now.set(2_500L);
+        pump.advance(0f);
+
+        assertTrue(pump.stateStreamFallbackActive());
+    }
+
+    @Test
+    void udpComingBackReturnsTheStreamToUdpAtFullCadenceAfterTheHysteresis() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        for (long t = 2_000L; t <= 11_500L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertTrue(pump.stateStreamFallbackActive());
+
+        for (long t = 12_500L; t <= 16_500L; t += 1_000L) {
+            service.noteUdpInboundAt(t);
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertTrue(pump.stateStreamFallbackActive(), "4 s of clear evidence is not yet enough");
+
+        service.noteUdpInboundAt(17_600L);
+        now.set(17_600L);
+        pump.advance(0f);
+
+        assertFalse(pump.stateStreamFallbackActive());
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+        service.sent.clear();
+        pump.sendStateDatagram(CoopMessages.datagram(CoopMessages.wireToken("session-a"), "host",
+                CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "body"));
+        assertEquals(1, service.datagrams.size());
+        assertEquals(0, countOf(service, CoopMessages.Type.STATE_DATAGRAM));
+    }
+
+    @Test
+    void losingThePeerClearsTheFallbackAndTheMeasurements() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        for (long t = 2_000L; t <= 11_500L; t += 1_000L) {
+            service.inbound.add(CoopMessages.ping("session-a", 100 + t, t));
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertTrue(pump.stateStreamFallbackActive());
+
+        service.connected = false;
+        now.set(12_000L);
+        pump.advance(0f);
+
+        assertFalse(pump.stateStreamFallbackActive(),
+                "the next connection's transport must not be decided by the dead one's silence");
+        assertEquals(100L, pump.stateStreamIntervalMillis());
+        assertNull(pump.peerLinkStatus());
+        assertNull(pump.hudState(false).transport(), "no session, no link readout");
+    }
+
+    private static int countOf(RecordingNetService service, CoopMessages.Type type) {
+        return (int) service.sent.stream().filter(m -> m.type() == type).count();
+    }
+
+    private static CoopMessages.Message onlyOf(RecordingNetService service, CoopMessages.Type type) {
+        List<CoopMessages.Message> matches = service.sent.stream()
+                .filter(m -> m.type() == type)
+                .toList();
+        assertEquals(1, matches.size(), "expected exactly one " + type);
+        return matches.get(0);
+    }
+
+    private static CoopNetPump livePump(RecordingNetService service, CoopSessionState session,
+                                        java.util.function.LongSupplier clock) {
+        return new CoopNetPump(service, session, clock::getAsLong,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+    }
+
     private static CoopSessionState hostSessionReadyForSeedLock(String sessionIdToMint) {
         CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", sessionIdToMint));
         session.startHost("Host");
@@ -1610,6 +1879,11 @@ class CoopNetPumpTest {
         private final List<CoopMessages.Message> sent = new ArrayList<>();
         /** Every setExpectedSessionToken call, nulls included — the clear is as load-bearing as the set. */
         private final List<String> expectedTokens = new ArrayList<>();
+        /** Datagrams that went out over the real UDP path (Phase 20.1 M2 fallback tests). */
+        private final List<String> datagrams = new ArrayList<>();
+        private final Queue<String> inboundDatagrams = new ArrayDeque<>();
+        private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+                0L, 0L, 0L, "");
         private boolean connected = true;
 
         private RecordingNetService(CoopConnectionRole role) {
@@ -1643,6 +1917,25 @@ class CoopNetPumpTest {
 
         @Override
         public void flushOutbound() {
+        }
+
+        @Override
+        public void sendDatagram(String payload) {
+            datagrams.add(payload);
+        }
+
+        @Override
+        public String pollDatagram() {
+            return inboundDatagrams.poll();
+        }
+
+        @Override
+        public CoopDatagramStats datagramStats() {
+            return stats;
+        }
+
+        private void noteUdpInboundAt(long atMillis) {
+            stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, atMillis, "");
         }
     }
 

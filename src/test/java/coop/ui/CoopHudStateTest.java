@@ -4,6 +4,7 @@ import coop.net.CoopConnectionRole;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class CoopHudStateTest {
 
@@ -185,6 +186,59 @@ class CoopHudStateTest {
                 CoopHudState.STATUS_SESSION_ACTIVE, true,
                 CoopHudState.displayHolder(CoopHudState.HOLDER_HOST, CoopConnectionRole.HOST), null);
         assertEquals("HOST · session active · paused by you", CoopHudState.formatLine(hostSelfPause, DOT));
+    }
+
+    // ---- Phase 20.6 M2: link readout ------------------------------------------------------------
+
+    @Test
+    void theFiveFieldConstructorLeavesTheLinkReadoutAbsent() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null);
+
+        assertNull(state.rttMillis());
+        assertNull(state.lossPercent());
+        assertNull(state.transport());
+        assertEquals("HOST · session active", CoopHudState.formatLine(state, DOT));
+    }
+
+    @Test
+    void aLiveSessionAppendsRttLossAndTransport() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_GUEST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,
+                87, 2, CoopHudState.TRANSPORT_UDP);
+
+        assertEquals("GUEST · session active · 87 ms · loss 2% · udp",
+                CoopHudState.formatLine(state, DOT));
+    }
+
+    @Test
+    void theFallbackTransportIsNamedInTheLine() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,
+                310, 0, CoopHudState.TRANSPORT_TCP_FALLBACK);
+
+        assertEquals("HOST · session active · 310 ms · loss 0% · tcp fallback",
+                CoopHudState.formatLine(state, DOT));
+    }
+
+    /** Before the first PONG lands there is no RTT to show, but the transport is already known. */
+    @Test
+    void anUnmeasuredRttIsOmittedRatherThanShownAsZero() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,
+                null, 0, CoopHudState.TRANSPORT_UDP);
+
+        assertEquals("HOST · session active · loss 0% · udp", CoopHudState.formatLine(state, DOT));
+    }
+
+    @Test
+    void theLinkReadoutSitsAfterThePauseHolderAndTheClockDrift() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_GUEST,
+                CoopHudState.STATUS_SESSION_ACTIVE, true, "host", 3,
+                140, 11, CoopHudState.TRANSPORT_UDP);
+
+        assertEquals("GUEST · session active · paused by host · guest 3h behind · 140 ms · loss 11% · udp",
+                CoopHudState.formatLine(state, DOT));
     }
 
     @Test

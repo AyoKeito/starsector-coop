@@ -64,6 +64,30 @@ public class CoopNetPump implements EveryFrameScript {
     // Campaign fleet snapshots stream at 10 Hz over UDP (COOP_MP_DESIGN.md section 8.4).
     private static final long FLEET_SNAPSHOT_INTERVAL_MILLIS = 100L;
     /**
+     * Phase 20.1 M2: the state streams drop to 5 Hz while they are wrapped in TCP. A TCP-carried
+     * stream pays head-of-line blocking on every lost segment, so halving the rate is what keeps the
+     * degraded mode usable rather than a stutter. (Phase 29 M2 later folds this into the floor tier
+     * of adaptive cadence — same mechanism, more tiers.)
+     */
+    private static final long FALLBACK_STREAM_INTERVAL_MILLIS = 200L;
+    /** How often each side reports what it is receiving. */
+    private static final long LINK_STATUS_INTERVAL_MILLIS = 5_000L;
+    /** How often the fallback/degraded rules are evaluated. Cheap; the rules are all time thresholds. */
+    private static final long LINK_EVAL_INTERVAL_MILLIS = 1_000L;
+    /** A peer LINK_STATUS older than this is no longer evidence about the peer's UDP path. */
+    private static final long PEER_LINK_STATUS_FRESH_MILLIS = 10_000L;
+    /** The guest logs its connection doctor block this long after session start even if no UDP came. */
+    private static final long GUEST_DOCTOR_DEADLINE_MILLIS = 15_000L;
+    /** Per-kind rate limit for the campaign-feed connection notices. */
+    private static final long FEED_MIN_INTERVAL_MILLIS = 30_000L;
+    private static final String FEED_FALLBACK = "fallback";
+    private static final String FEED_FALLBACK_RECOVERED = "fallbackRecovered";
+    private static final String FEED_DEGRADED = "degraded";
+    private static final String FEED_DEGRADED_RECOVERED = "degradedRecovered";
+    private static final java.awt.Color FEED_WARN_COLOR = new java.awt.Color(255, 220, 120);
+    private static final java.awt.Color FEED_BAD_COLOR = new java.awt.Color(255, 170, 90);
+    private static final java.awt.Color FEED_GOOD_COLOR = new java.awt.Color(150, 230, 150);
+    /**
      * Phase 16: how often the guest ships its save-recovery snapshot to the host. It only has to be
      * fresher than the host's save cadence, and it carries the whole cargo manifest, so it is a slow
      * timer rather than a stream.
@@ -129,6 +153,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_REPLICATOR_COLONY_INCOME = "replicator.colonyIncome";
     private static final String SECTION_REPLICATOR_EXPEDITIONS = "replicator.expeditionWarnings";
     private static final String SECTION_PING = "net.sendPing";
+    private static final String SECTION_LINK_SUPERVISION = "net.linkSupervision";
     private static final String SECTION_FLUSH_OUTBOUND_POST = "net.flushOutbound.post";
     /**
      * Per-message-type section keys, precomputed so the inbound drain never concatenates a string:
@@ -190,6 +215,25 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private final coop.fleet.CoopMotionTimeline motionTimeline = new coop.fleet.CoopMotionTimeline();
     private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
+    /**
+     * Phase 20.1 M2 link supervision: RTT/loss/silence measurement and the UDP-blocked decision. It
+     * only ever measures and reports — the TCP socket closing stays the sole disconnect trigger,
+     * because a peer in combat or writing a coordinated autosave is legitimately silent for minutes
+     * (its pump is not running) and no silence threshold can tell that apart from a dead link.
+     */
+    private final CoopLinkQuality linkQuality = new CoopLinkQuality();
+    /** True once a gameplay session has armed the supervision; drives the session-edge reset. */
+    private boolean linkSupervisionArmed;
+    /** Whether the state streams are currently wrapped in {@code STATE_DATAGRAM} TCP messages. */
+    private boolean stateStreamFallbackActive;
+    private long nextLinkStatusAtMillis;
+    private long nextLinkEvalAtMillis;
+    /** The peer's latest {@code LINK_STATUS}; the other half of the UDP-blocked evidence. */
+    private CoopMessages.LinkStatus peerLinkStatus;
+    private long peerLinkStatusAtMillis;
+    private boolean guestDoctorLogged;
+    /** Per-kind next-allowed stamp for the campaign feed notices (see {@link #postFeed}). */
+    private final java.util.Map<String, Long> feedNextAtMillis = new java.util.HashMap<>();
     /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
      * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
@@ -379,7 +423,7 @@ public class CoopNetPump implements EveryFrameScript {
         // tracked once the screen it referred to is confirmed gone.
         this.campaignReplicator.setMarketCloseObserver(this::onLocalMarketClosed);
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis,
-                streamClock);
+                streamClock, this::sendStateDatagram);
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
@@ -410,6 +454,9 @@ public class CoopNetPump implements EveryFrameScript {
         this.wiretap = CoopWiretap.installFresh(clockMillis);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
+        this.nextLinkStatusAtMillis = now + LINK_STATUS_INTERVAL_MILLIS;
+        this.nextLinkEvalAtMillis = now + LINK_EVAL_INTERVAL_MILLIS;
+        this.linkQuality.reset(now);
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
         this.nextGuestSnapshotAtMillis = now;
     }
@@ -536,7 +583,22 @@ public class CoopNetPump implements EveryFrameScript {
             }
         }
 
-        return new CoopHudState(badge, status, paused, pauseHolder, driftGameHours);
+        // Phase 20.6: link numbers only while a session is live — outside one they would be stale
+        // readings of a link that no longer exists.
+        Integer rttMillis = null;
+        Integer lossPercent = null;
+        String transport = null;
+        if (active) {
+            long now = clockMillis.getAsLong();
+            rttMillis = linkQuality.rttMillis();
+            lossPercent = linkQuality.lossPercent(now);
+            transport = stateStreamFallbackActive
+                    ? CoopHudState.TRANSPORT_TCP_FALLBACK
+                    : CoopHudState.TRANSPORT_UDP;
+        }
+
+        return new CoopHudState(badge, status, paused, pauseHolder, driftGameHours,
+                rttMillis, lossPercent, transport);
     }
 
     /**
@@ -592,6 +654,9 @@ public class CoopNetPump implements EveryFrameScript {
         service.flushOutbound();
         t = profiler.split(SECTION_FLUSH_OUTBOUND_PRE, t);
         detectPeerDisconnect();
+        // Before the inbound drain: the session edge resets the link measurements, and a LINK_STATUS
+        // that lands on the same frame the session goes live must survive that reset.
+        syncLinkSupervisionArming();
         t = profiler.split(SECTION_DETECT_DISCONNECT, t);
         syncGuestInputBlocker();
         t = profiler.split(SECTION_GUEST_INPUT_BLOCKER, t);
@@ -674,6 +739,8 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_REPLICATOR_EXPEDITIONS, t);
         maybeSendPing();
         t = profiler.split(SECTION_PING, t);
+        tickLinkSupervision();
+        t = profiler.split(SECTION_LINK_SUPERVISION, t);
         service.flushOutbound();
         profiler.record(SECTION_FLUSH_OUTBOUND_POST, t);
         profiler.endFrame();
@@ -853,6 +920,11 @@ public class CoopNetPump implements EveryFrameScript {
             seedLockRequestSent = false;
             latestTimeSnapshot = null;
             preSessionCampaignDropWarned = false;
+            // The link measurements belonged to the dead connection; carrying them into the next one
+            // would let a pre-drop RTT sample or UDP silence decide the new link's transport.
+            linkSupervisionArmed = false;
+            applyStateStreamFallback(false, "peer disconnected", false, clockMillis.getAsLong());
+            resetLinkSupervision(clockMillis.getAsLong());
             if (changed) {
                 CoopLog.warn(CoopNetPump.class, "Coop peer disconnected; session reset, awaiting reconnect as "
                         + service.role());
@@ -865,6 +937,10 @@ public class CoopNetPump implements EveryFrameScript {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
             log("inbound", message);
+            // Any inbound TCP message proves the peer's process is alive and its pump is running.
+            // That is what lets the UDP-blocked rule tell "the network eats UDP" apart from "the peer
+            // is in combat", where both transports go quiet together.
+            linkQuality.noteInboundTcp(clockMillis.getAsLong());
             // Log-and-drop guard: handlers throw freely (missing payload fields, unknown enum values,
             // out-of-order lobby messages). Letting one escape kills EveryFrameScript.advance() and
             // with it the whole pump, so a version-skewed peer or a stray connection could take the
@@ -907,13 +983,22 @@ public class CoopNetPump implements EveryFrameScript {
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
             case RESPAWN_PLAYER -> handleRespawnPlayer(message);
             case PING -> sendPong(message);
+            case PONG -> handlePong(message);
+            case LINK_STATUS -> handleLinkStatus(message);
+            case STATE_DATAGRAM -> {
+                // Same session gate the UDP path gets from its token check: pre-session state must
+                // never reach the mirrors, whichever wire carried it.
+                if (isGameplaySessionActive()) {
+                    ingestStateDatagram(CoopMessages.parseStateDatagram(message));
+                }
+            }
             default -> {
                 // Session-scoped campaign traffic (snapshots, deltas) must not touch the engine or
                 // the world ledger unless the full lobby/handshake/seed-lock pipeline has run on
                 // THIS connection. The 12b reconnect drill caught a lobby-rejected guest still
                 // applying the host's ORBIT_SNAPSHOT stream to what was effectively a solo campaign.
                 if (!isGameplaySessionActive()) {
-                    if (message.type() != CoopMessages.Type.PONG && !preSessionCampaignDropWarned) {
+                    if (!preSessionCampaignDropWarned) {
                         preSessionCampaignDropWarned = true;
                         CoopLog.warn(CoopNetPump.class,
                                 "Coop ignoring pre-session campaign message type=" + message.type());
@@ -1757,7 +1842,7 @@ public class CoopNetPump implements EveryFrameScript {
                     CoopMessages.wireToken(sessionState.localPlayerId()),
                     CoopMessages.Type.FLEET_SNAPSHOT,
                     streamClock.nextEpoch(), streamClock.gameTimeMillis(), snapshot.encode());
-            service.sendDatagram(datagram);
+            sendStateDatagram(datagram);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to capture coop fleet snapshot", ex);
         }
@@ -1954,29 +2039,67 @@ public class CoopNetPump implements EveryFrameScript {
     private void drainFleetDatagrams() {
         String raw;
         while ((raw = service.pollDatagram()) != null) {
-            try {
-                CoopMessages.Datagram datagram = CoopMessages.parseDatagram(raw);
-                // Wiretap before the session filter and the watermark: a datagram this side decoded
-                // but then discarded is exactly what a desync investigation wants to see. Dormant
-                // unless -Dcoop.debug.wiretap=true / $coopWiretap.
-                wiretap.recordReceive(raw, datagram);
-                if (!sessionMatches(datagram.token())) {
-                    continue;
-                }
-                // Sections at or below the (senderId, type) epoch watermark are dropped here: a reordered
-                // datagram applies nothing, a redundant section that already arrived applies nothing,
-                // and a redundant section covering a lost packet applies normally (oldest first).
-                for (CoopMessages.DatagramSection section : datagramWatermark.accept(datagram)) {
-                    switch (datagram.type()) {
-                        case FLEET_SNAPSHOT -> applyFleetSnapshotSection(section);
-                        case NPC_FLEET_MOTION -> handleNpcFleetMotion(section);
-                        default -> { /* ignore unknown datagram types */ }
-                    }
-                }
-            } catch (RuntimeException ex) {
-                CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram", ex);
-            }
+            ingestStateDatagram(raw);
         }
+    }
+
+    /**
+     * The one apply path for a composed state datagram, whichever transport delivered it: UDP from
+     * {@link #drainFleetDatagrams}, or a {@code STATE_DATAGRAM} TCP message while the Phase 20.1
+     * fallback is on. Sharing it is the point — a fallback with its own parse/filter/apply code is a
+     * second set of semantics that only runs on broken networks, i.e. the one place nobody tests.
+     */
+    private void ingestStateDatagram(String raw) {
+        try {
+            CoopMessages.Datagram datagram = CoopMessages.parseDatagram(raw);
+            // Wiretap before the session filter and the watermark: a datagram this side decoded
+            // but then discarded is exactly what a desync investigation wants to see. Dormant
+            // unless -Dcoop.debug.wiretap=true / $coopWiretap.
+            wiretap.recordReceive(raw, datagram);
+            if (!sessionMatches(datagram.token())) {
+                return;
+            }
+            // The LAST section carries this datagram's own epoch; the earlier one is the redundant
+            // copy of the previous send. Counting distinct last-epochs against their span is the raw
+            // loss estimate (see CoopLinkQuality).
+            if (!datagram.sections().isEmpty()) {
+                linkQuality.noteInboundDatagram(datagram.senderId(),
+                        datagram.sections().get(datagram.sections().size() - 1).epoch(),
+                        clockMillis.getAsLong());
+            }
+            // Sections at or below the (senderId, type) epoch watermark are dropped here: a reordered
+            // datagram applies nothing, a redundant section that already arrived applies nothing,
+            // and a redundant section covering a lost packet applies normally (oldest first).
+            for (CoopMessages.DatagramSection section : datagramWatermark.accept(datagram)) {
+                switch (datagram.type()) {
+                    case FLEET_SNAPSHOT -> applyFleetSnapshotSection(section);
+                    case NPC_FLEET_MOTION -> handleNpcFleetMotion(section);
+                    default -> { /* ignore unknown datagram types */ }
+                }
+            }
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply coop fleet datagram", ex);
+        }
+    }
+
+    /**
+     * The state-stream router both producers send through ({@link CoopStateStreamSink}): UDP
+     * normally, wrapped in a TCP {@code STATE_DATAGRAM} while the fallback is on. The wrapped bytes
+     * are the datagram verbatim, so the receiving side is the same code either way.
+     */
+    void sendStateDatagram(String datagram) {
+        if (datagram == null) {
+            return;
+        }
+        if (!stateStreamFallbackActive) {
+            service.sendDatagram(datagram);
+            return;
+        }
+        // The wiretap's send hook lives in the transport's UDP flush, which this path bypasses; call
+        // it here so a fallback session still log-diffs against the peer's receive side.
+        wiretap.recordSend(datagram, datagram.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        service.send(CoopMessages.stateDatagram(sessionState.sessionId(), service.nextSeq(),
+                clockMillis.getAsLong(), datagram));
     }
 
     private void applyFleetSnapshotSection(CoopMessages.DatagramSection section) {
@@ -2891,8 +3014,13 @@ public class CoopNetPump implements EveryFrameScript {
         return sessionState.handshakeValidated() && sessionState.seedLong() != null;
     }
 
+    /**
+     * Heartbeat, both roles (Phase 20.1 M2 added the host half). The guest's ping has always been the
+     * half-open-connection detector; the host now pings too because RTT is measured by whoever sent
+     * the ping, and a host with no RTT sample cannot fill in its own HUD or {@code LINK_STATUS}.
+     */
     private void maybeSendPing() {
-        if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()) {
+        if (service.role() == CoopConnectionRole.NONE || !service.isConnected()) {
             return;
         }
         if (sessionState.connectionState() != CoopLobbyState.NONE
@@ -2910,8 +3038,41 @@ public class CoopNetPump implements EveryFrameScript {
 
         CoopMessages.Message ping = CoopMessages.ping(sessionState.sessionId(), service.nextSeq(), now);
         service.send(ping);
+        linkQuality.notePingSent(ping.seq(), now);
         log("outbound", ping);
         nextPingAtMillis = now + PING_INTERVAL_MILLIS;
+    }
+
+    /** Times the PONG against the PING it answers; an unmatched seq contributes no sample. */
+    private void handlePong(CoopMessages.Message message) {
+        linkQuality.notePongReceived(CoopMessages.requiredPayloadLong(message, "pingSeq"),
+                clockMillis.getAsLong());
+    }
+
+    /** Stores the peer's report; read by the fallback rule and the connection doctor. */
+    private void handleLinkStatus(CoopMessages.Message message) {
+        peerLinkStatus = CoopMessages.parseLinkStatus(message);
+        peerLinkStatusAtMillis = clockMillis.getAsLong();
+    }
+
+    /** The peer's latest report, or null when none has arrived; test/bridge read. */
+    CoopMessages.LinkStatus peerLinkStatus() {
+        return peerLinkStatus;
+    }
+
+    /** Whether the state streams are currently wrapped in TCP; test/bridge read. */
+    boolean stateStreamFallbackActive() {
+        return stateStreamFallbackActive;
+    }
+
+    /** The interval both state streams are currently sending at; test read. */
+    long stateStreamIntervalMillis() {
+        return fleetSnapshotCadence.intervalMillis();
+    }
+
+    /** The receive-side epoch watermark, so tests can assert a datagram reached the apply path. */
+    CoopDatagramWatermark datagramWatermark() {
+        return datagramWatermark;
     }
 
     private void sendPong(CoopMessages.Message ping) {
@@ -2922,6 +3083,168 @@ public class CoopNetPump implements EveryFrameScript {
                 ping.seq());
         service.send(pong);
         log("outbound", pong);
+    }
+
+    // ---- Phase 20.1 M2 link supervision ---------------------------------------------------------
+
+    /**
+     * Once a frame: feed the transport's UDP stamp into the measurement, then on a 1 s tick run the
+     * UDP-blocked and degraded rules, and on a 5 s tick ship a {@code LINK_STATUS}.
+     *
+     * <p>Nothing here can end a session. See {@link CoopLinkQuality} for why silence is not evidence
+     * of death in this codebase.
+     */
+    private void tickLinkSupervision() {
+        if (!linkSupervisionArmed) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        CoopDatagramStats stats = service.datagramStats();
+        if (stats.lastInboundDatagramAtMillis() > 0L) {
+            // Only the transport knows which datagrams actually came off the UDP socket; ones that
+            // arrived wrapped in TCP must not count as evidence that UDP works, or the fallback could
+            // never be left.
+            linkQuality.noteUdpInbound(stats.lastInboundDatagramAtMillis());
+        }
+
+        if (now >= nextLinkEvalAtMillis) {
+            nextLinkEvalAtMillis = now + LINK_EVAL_INTERVAL_MILLIS;
+            boolean fallback = linkQuality.evaluateFallback(now, peerUdpInboundOkOrNull(now));
+            applyStateStreamFallback(fallback, linkQuality.fallbackReason(), true, now);
+            tickDegradedNotice(now);
+            maybeLogGuestDoctor(now, stats);
+        }
+
+        if (now >= nextLinkStatusAtMillis) {
+            nextLinkStatusAtMillis = now + LINK_STATUS_INTERVAL_MILLIS;
+            sendLinkStatus(now, stats);
+        }
+    }
+
+    /**
+     * Arms and disarms the supervision on the gameplay-session edge. Runs near the TOP of the frame,
+     * before the inbound drain: arming clears the peer's last report and the measurements, and doing
+     * that after the drain would throw away a {@code LINK_STATUS} that arrived on the very frame the
+     * session went live.
+     */
+    private void syncLinkSupervisionArming() {
+        boolean active = service.role() != CoopConnectionRole.NONE && isGameplaySessionActive();
+        if (active == linkSupervisionArmed) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        linkSupervisionArmed = active;
+        // Silent on both edges: a session starting or ending is not a connection event the player
+        // needs a banner for.
+        applyStateStreamFallback(false, active ? "session started" : "session ended", false, now);
+        resetLinkSupervision(now);
+        if (active) {
+            nextLinkStatusAtMillis = now + LINK_STATUS_INTERVAL_MILLIS;
+            nextLinkEvalAtMillis = now + LINK_EVAL_INTERVAL_MILLIS;
+        }
+    }
+
+    private void resetLinkSupervision(long now) {
+        linkQuality.reset(now);
+        peerLinkStatus = null;
+        peerLinkStatusAtMillis = 0L;
+        guestDoctorLogged = false;
+        feedNextAtMillis.clear();
+    }
+
+    /** The peer's UDP reading while it is still fresh enough to mean anything, else null. */
+    private Boolean peerUdpInboundOkOrNull(long now) {
+        if (peerLinkStatus == null || now - peerLinkStatusAtMillis > PEER_LINK_STATUS_FRESH_MILLIS) {
+            return null;
+        }
+        return peerLinkStatus.udpInboundOk();
+    }
+
+    /**
+     * Applies a fallback transition: both stream cadences drop to 5 Hz (and return to 10 Hz), the
+     * transition is logged with its numbers, and the player gets one feed line.
+     */
+    private void applyStateStreamFallback(boolean active, String reason, boolean announce, long now) {
+        if (active == stateStreamFallbackActive) {
+            return;
+        }
+        stateStreamFallbackActive = active;
+        long interval = active ? FALLBACK_STREAM_INTERVAL_MILLIS : FLEET_SNAPSHOT_INTERVAL_MILLIS;
+        fleetSnapshotCadence.setIntervalMillis(interval);
+        npcFleetReplicator.setMotionIntervalMillis(interval);
+        if (!announce) {
+            return;
+        }
+        CoopLog.info(CoopNetPump.class, "Coop state stream "
+                + (active ? "switching to TCP fallback" : "returning to UDP")
+                + " at " + interval + " ms (" + reason
+                + "; udpSilence=" + linkQuality.udpSilenceMillis(now)
+                + " ms tcpSilence=" + linkQuality.tcpSilenceMillis(now)
+                + " ms peerUdpOk=" + peerUdpInboundOkOrNull(now) + ")");
+        if (active) {
+            postFeed(FEED_FALLBACK, now,
+                    "Co-op: UDP blocked on this connection - partner updates now travel over TCP.",
+                    FEED_WARN_COLOR);
+        } else {
+            postFeed(FEED_FALLBACK_RECOVERED, now,
+                    "Co-op: UDP path recovered - partner updates back to normal.", FEED_GOOD_COLOR);
+        }
+    }
+
+    /** Degraded/recovered banner for the feed; the sustain windows live in {@link CoopLinkQuality}. */
+    private void tickDegradedNotice(long now) {
+        boolean was = linkQuality.degraded();
+        boolean isDegraded = linkQuality.evaluateDegraded(now);
+        if (was == isDegraded) {
+            return;
+        }
+        if (isDegraded) {
+            Integer rtt = linkQuality.rttMillis();
+            postFeed(FEED_DEGRADED, now, "Co-op: connection degraded ("
+                    + (rtt == null ? "rtt unknown" : rtt + " ms")
+                    + ", " + linkQuality.lossPercent(now) + "% loss).", FEED_BAD_COLOR);
+        } else {
+            postFeed(FEED_DEGRADED_RECOVERED, now, "Co-op: connection recovered.", FEED_GOOD_COLOR);
+        }
+    }
+
+    /**
+     * The guest's one-shot connection doctor: logged as soon as inbound UDP is observed, or after
+     * {@link #GUEST_DOCTOR_DEADLINE_MILLIS} without any. A guest whose router eats UDP otherwise sees
+     * nothing but a partner mirror that never moves.
+     */
+    private void maybeLogGuestDoctor(long now, CoopDatagramStats stats) {
+        if (guestDoctorLogged || service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        boolean udpObserved = stats.lastInboundDatagramAtMillis() >= linkQuality.resetAtMillis()
+                && stats.lastInboundDatagramAtMillis() > 0L;
+        if (!udpObserved && now - linkQuality.resetAtMillis() < GUEST_DOCTOR_DEADLINE_MILLIS) {
+            return;
+        }
+        guestDoctorLogged = true;
+        CoopLog.info(CoopNetPump.class,
+                CoopLinkQuality.guestDoctorBlock(linkQuality.snapshot(now), stats, udpObserved));
+    }
+
+    private void sendLinkStatus(long now, CoopDatagramStats stats) {
+        if (!service.isConnected()) {
+            return;
+        }
+        CoopMessages.Message status = CoopMessages.linkStatus(sessionState.sessionId(),
+                service.nextSeq(), now, linkQuality.snapshot(now), linkQuality.transport(), stats);
+        service.send(status);
+        log("outbound", status);
+    }
+
+    /** Posts one feed notice per kind per {@link #FEED_MIN_INTERVAL_MILLIS}; a flapping link cannot spam. */
+    private void postFeed(String kind, long now, String text, java.awt.Color color) {
+        Long allowedAt = feedNextAtMillis.get(kind);
+        if (allowedAt != null && now < allowedAt) {
+            return;
+        }
+        feedNextAtMillis.put(kind, now + FEED_MIN_INTERVAL_MILLIS);
+        coop.ui.CoopFeed.post(text, color);
     }
 
     private void log(String direction, CoopMessages.Message message) {
@@ -2944,6 +3267,8 @@ public class CoopNetPump implements EveryFrameScript {
     private static boolean isHighFrequency(CoopMessages.Type type) {
         return type == CoopMessages.Type.PING
                 || type == CoopMessages.Type.PONG
+                || type == CoopMessages.Type.LINK_STATUS
+                || type == CoopMessages.Type.STATE_DATAGRAM
                 || type == CoopMessages.Type.TIME_SNAPSHOT
                 || type == CoopMessages.Type.FLEET_SNAPSHOT
                 || type == CoopMessages.Type.NPC_FLEET_MOTION

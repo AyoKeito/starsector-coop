@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -329,5 +330,62 @@ class CoopMessagesTest {
 
         assertEquals("player-1", stamped.withSenderId("player-2").senderId());
         assertNull(CoopMessages.ping("session-a", 1L, 1000L).withSenderId(null).senderId());
+    }
+
+    // ---- Phase 20.1 M2 ---------------------------------------------------------------------------
+
+    @Test
+    void linkStatusRoundTripsEveryFieldTheFallbackRuleReadsOff() {
+        CoopMessages.Message message = CoopMessages.linkStatus("session-a", 4L, 1234L,
+                new CoopLinkQuality.Snapshot(87, 210, 4, false, 1500L, 12_000L),
+                CoopLinkQuality.TRANSPORT_TCP_FALLBACK,
+                new CoopDatagramStats(0L, 5L, 6L, 0L, 0L, 0L, 7L, 0L, 0L, 8L, 0L, 0L, ""));
+
+        CoopMessages.LinkStatus parsed =
+                CoopMessages.parseLinkStatus(CoopMessages.decode(CoopMessages.encode(message)));
+
+        assertEquals(87, parsed.rttMillis());
+        assertEquals(210, parsed.p95RttMillis());
+        assertEquals(4, parsed.lossPercent());
+        assertFalse(parsed.udpInboundOk());
+        assertEquals(CoopLinkQuality.TRANSPORT_TCP_FALLBACK, parsed.transport());
+        assertEquals(1500L, parsed.tcpSilenceMillis());
+        assertEquals(5L, parsed.droppedTokenMismatch());
+        assertEquals(6L, parsed.droppedForeignSource());
+        assertEquals(7L, parsed.pathValidations());
+        assertEquals(8L, parsed.icmpTransients());
+    }
+
+    @Test
+    void anUnmeasuredRttTravelsAsMinusOneRatherThanZero() {
+        CoopMessages.Message message = CoopMessages.linkStatus("session-a", 4L, 1234L,
+                new CoopLinkQuality.Snapshot(null, null, 0, true, 0L, 0L),
+                CoopLinkQuality.TRANSPORT_UDP,
+                new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, ""));
+
+        CoopMessages.LinkStatus parsed = CoopMessages.parseLinkStatus(message);
+
+        assertEquals(-1, parsed.rttMillis());
+        assertEquals(-1, parsed.p95RttMillis());
+        assertTrue(parsed.udpInboundOk());
+    }
+
+    /**
+     * The wrapped payload contains unit separators and can contain newlines; both would break the
+     * JSON line framing if the escape were not exact.
+     */
+    @Test
+    void aStateDatagramSurvivesTheJsonLineFramingByteForByte() {
+        String datagram = CoopMessages.datagram("token", "sender",
+                CoopMessages.Type.FLEET_SNAPSHOT, 9L, 1L, "body\nwithseparators\"and quotes\"");
+
+        CoopMessages.Message message = CoopMessages.stateDatagram("session-a", 3L, 100L, datagram);
+        String decoded = CoopMessages.parseStateDatagram(
+                CoopMessages.decode(CoopMessages.encode(message)));
+
+        assertEquals(datagram, decoded);
+        assertFalse(CoopMessages.encode(message).contains("\n"), "the frame must stay one line");
+        assertEquals(CoopMessages.Type.FLEET_SNAPSHOT,
+                CoopMessages.parseDatagramHeader(decoded).type());
     }
 }

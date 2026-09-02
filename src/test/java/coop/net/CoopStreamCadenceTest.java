@@ -90,4 +90,26 @@ class CoopStreamCadenceTest {
     void rejectsANonPositiveInterval() {
         assertThrows(IllegalArgumentException.class, () -> new CoopStreamCadence(0L));
     }
+
+    @Test
+    void retuningTheIntervalTakesEffectWithoutStallingOrDoubleFiringTheStream() {
+        CoopStreamCadence cadence = new CoopStreamCadence(100L);
+        cadence.shouldSend(0L, 0L, false);
+        assertTrue(cadence.shouldSend(100L, 100L, false));
+
+        cadence.setIntervalMillis(200L);
+        assertEquals(200L, cadence.intervalMillis());
+        assertFalse(cadence.shouldSend(250L, 250L, false), "the new interval is measured from the last send");
+        assertTrue(cadence.shouldSend(300L, 300L, false));
+
+        cadence.setIntervalMillis(100L);
+        assertTrue(cadence.shouldSend(400L, 400L, false));
+    }
+
+    @Test
+    void aNonPositiveRetuneIsRejected() {
+        CoopStreamCadence cadence = new CoopStreamCadence(100L);
+
+        assertThrows(IllegalArgumentException.class, () -> cadence.setIntervalMillis(0L));
+    }
 }

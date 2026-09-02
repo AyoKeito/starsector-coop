@@ -66,6 +66,13 @@ public final class CoopMessages {
         RESPAWN_PLAYER,
         PING,
         PONG,
+        /** Phase 20.1: each side's ~5 s report of what it is actually receiving (RTT, loss, transport). */
+        LINK_STATUS,
+        /**
+         * Phase 20.1 UDP-blocked fallback: a composed state datagram carried on TCP verbatim, so the
+         * receiver runs the identical parse/token/watermark/apply path either wire delivered it.
+         */
+        STATE_DATAGRAM,
         /** Datagram-only: idle-path UDP keepalive so NAT bindings and link liveness survive quiet stretches. */
         UDP_PROBE,
         /** Datagram-only: QUIC-style path challenge/echo that proves a new UDP source before it is streamed to. */
@@ -139,6 +146,81 @@ public final class CoopMessages {
 
     public static Message pong(String sessionId, long seq, long sentAtMillis, long pingSeq) {
         return new Message(Type.PONG, sessionId, seq, sentAtMillis, "{\"pingSeq\":" + pingSeq + "}");
+    }
+
+    /**
+     * Phase 20.1 link report, sent by both roles every ~5 s while a gameplay session is live. It is
+     * how each side learns what the <em>other</em> side is receiving: the local peer can measure its
+     * own inbound UDP silence but has no way to tell whether its outbound datagrams are landing, and
+     * {@code udpInboundOk} here is exactly that missing half of the UDP-blocked decision.
+     *
+     * <p>{@code rttMillis}/{@code p95RttMillis} are -1 when no PONG has been matched yet; a null on
+     * the wire would cost a nullable type for a field that is a plain number 99% of a session.
+     */
+    public static Message linkStatus(String sessionId, long seq, long sentAtMillis,
+                                     CoopLinkQuality.Snapshot link, String transport,
+                                     CoopDatagramStats stats) {
+        Objects.requireNonNull(link, "link");
+        Objects.requireNonNull(stats, "stats");
+        long rtt = link.rttMillis() == null ? -1L : link.rttMillis();
+        long p95 = link.p95RttMillis() == null ? -1L : link.p95RttMillis();
+        return new Message(Type.LINK_STATUS, sessionId, seq, sentAtMillis,
+                "{\"rttMillis\":" + rtt
+                        + ",\"p95RttMillis\":" + p95
+                        + ",\"lossPercent\":" + link.lossPercent()
+                        + ",\"udpInboundOk\":\"" + link.udpInboundOk() + "\""
+                        + ",\"transport\":\"" + escapeJson(transport == null ? "" : transport) + "\""
+                        + ",\"tcpSilenceMillis\":" + link.tcpSilenceMillis()
+                        + ",\"droppedTokenMismatch\":" + stats.droppedTokenMismatch()
+                        + ",\"droppedForeignSource\":" + stats.droppedForeignSource()
+                        + ",\"pathValidations\":" + stats.pathValidations()
+                        + ",\"icmpTransients\":" + stats.icmpTransients() + "}");
+    }
+
+    /** Decoded {@link Type#LINK_STATUS} payload; -1 rtt/p95 mean "the peer had no sample yet". */
+    public record LinkStatus(int rttMillis,
+                             int p95RttMillis,
+                             int lossPercent,
+                             boolean udpInboundOk,
+                             String transport,
+                             long tcpSilenceMillis,
+                             long droppedTokenMismatch,
+                             long droppedForeignSource,
+                             long pathValidations,
+                             long icmpTransients) {
+        public LinkStatus {
+            transport = transport == null ? "" : transport;
+        }
+    }
+
+    public static LinkStatus parseLinkStatus(Message message) {
+        return new LinkStatus(
+                (int) requiredPayloadLong(message, "rttMillis"),
+                (int) requiredPayloadLong(message, "p95RttMillis"),
+                (int) requiredPayloadLong(message, "lossPercent"),
+                Boolean.parseBoolean(requiredPayloadString(message, "udpInboundOk")),
+                requiredPayloadString(message, "transport"),
+                requiredPayloadLong(message, "tcpSilenceMillis"),
+                requiredPayloadLong(message, "droppedTokenMismatch"),
+                requiredPayloadLong(message, "droppedForeignSource"),
+                requiredPayloadLong(message, "pathValidations"),
+                requiredPayloadLong(message, "icmpTransients"));
+    }
+
+    /**
+     * Phase 20.1 UDP-blocked fallback: one composed datagram, carried verbatim on TCP. The payload is
+     * deliberately the exact string the UDP path would have sent — the receiver unwraps it and feeds
+     * it through the same parse/token/watermark/apply pipeline, so the fallback cannot develop its own
+     * subtly different apply semantics.
+     */
+    public static Message stateDatagram(String sessionId, long seq, long sentAtMillis, String datagram) {
+        return new Message(Type.STATE_DATAGRAM, sessionId, seq, sentAtMillis,
+                "{\"datagram\":\"" + escapeJson(datagram == null ? "" : datagram) + "\"}");
+    }
+
+    /** The composed datagram carried by a {@link Type#STATE_DATAGRAM} message. */
+    public static String parseStateDatagram(Message message) {
+        return requiredPayloadString(message, "datagram");
     }
 
     public static Message lobbyHello(long seq, long sentAtMillis, CoopPlayerInfo playerInfo) {
