@@ -101,6 +101,10 @@ public final class CoopClockReconciler {
     /** NTP's popcorn suppressor: discard beyond {@code SGATE x} the ring's own dispersion. */
     static final double SPIKE_GATE_FACTOR = 3.0;
     static final int SPIKE_GATE_MIN_SAMPLES = 3;
+    /** A deviation inside the entry dead zone is never a spike, whatever the ring's RMS says. */
+    static final long SPIKE_GATE_FLOOR_MILLIS = ENTRY_THRESHOLD_MILLIS;
+    /** This many consecutive rejections = a persistent step, not popcorn: drop the ring, accept. */
+    static final int SPIKE_GATE_MAX_CONSECUTIVE = 3;
 
     /** How often the diagnostics line prints while {@link CoopDebug#diagnosticsEnabled()} is on. */
     static final long DIAGNOSTICS_INTERVAL_MILLIS = 5_000L;
@@ -155,6 +159,8 @@ public final class CoopClockReconciler {
 
     private long pauseGateDiscards;
     private long spikeGateDiscards;
+    private int consecutiveSpikeRejections;
+    private long persistentSteps;
     private long sharedPauseSnaps;
     private long unpausedSnaps;
     private long nextDiagnosticsAtMillis;
@@ -215,17 +221,29 @@ public final class CoopClockReconciler {
             pauseGateDiscards++;
             return;
         }
-        // Gate (b): self-scaling popcorn suppressor. Needs enough samples to have a dispersion
-        // estimate at all; with a perfectly constant ring (RMS 0) there is no scale to compare
-        // against, so the sample is accepted rather than rejected on a divide-by-nothing.
+        // Gate (b): self-scaling popcorn suppressor, with two escapes the first live smoke
+        // (2026-09-02) proved necessary. A shared pause fills the ring with identical samples and
+        // collapses its RMS to a few seconds of game time; without a floor, every sample after the
+        // unpause sat outside 3x that RMS and the gate rejected all of them for good (385 discards
+        // in two minutes, median frozen). So: (1) anything within the entry dead zone of the median
+        // is never a spike, and (2) three consecutive rejections mean the deviation is persistent,
+        // i.e. a real step (an OS stall, a pause-edge burst) rather than one popcorn sample. NTP's
+        // state machine escalates the same way. On a persistent step the buffered samples are stale
+        // by definition, so the ring is dropped and the step sample starts a fresh one.
         if (sampleCount >= SPIKE_GATE_MIN_SAMPLES) {
             long median = median();
-            double rms = rmsDeviation(median);
-            if (rms > 0d && Math.abs(drift - median) > SPIKE_GATE_FACTOR * rms) {
+            double bound = Math.max(SPIKE_GATE_FACTOR * rmsDeviation(median), SPIKE_GATE_FLOOR_MILLIS);
+            if (Math.abs(drift - median) > bound) {
                 spikeGateDiscards++;
-                return;
+                consecutiveSpikeRejections++;
+                if (consecutiveSpikeRejections < SPIKE_GATE_MAX_CONSECUTIVE) {
+                    return;
+                }
+                persistentSteps++;
+                resetRing();
             }
         }
+        consecutiveSpikeRejections = 0;
 
         samples[writeIndex] = drift;
         writeIndex = (writeIndex + 1) % RING_SIZE;
@@ -347,16 +365,22 @@ public final class CoopClockReconciler {
      * immediately command a second, opposite correction.
      */
     public void clearSamples() {
-        Arrays.fill(samples, 0L);
-        sampleCount = 0;
-        writeIndex = 0;
-        driftEstimateMillis = 0L;
+        resetRing();
         correcting = false;
         bigDriftStreak = 0;
         bigDriftFirstSeenMillis = 0L;
         guestAheadTracking = false;
         guestAheadSinceMillis = 0L;
         guestAheadWarned = false;
+    }
+
+    /** Drops the buffered samples and the estimate only; the episode and its timers are untouched. */
+    private void resetRing() {
+        Arrays.fill(samples, 0L);
+        sampleCount = 0;
+        writeIndex = 0;
+        driftEstimateMillis = 0L;
+        consecutiveSpikeRejections = 0;
     }
 
     // ---- test/diagnostic seams ------------------------------------------------------------------
@@ -379,6 +403,10 @@ public final class CoopClockReconciler {
 
     long spikeGateDiscards() {
         return spikeGateDiscards;
+    }
+
+    long persistentSteps() {
+        return persistentSteps;
     }
 
     // ---- internals ------------------------------------------------------------------------------
@@ -490,7 +518,8 @@ public final class CoopClockReconciler {
                 + " hostPaused=" + lastHostPaused + " guestPaused=" + livePaused
                 + " sampleGuestPaused=" + lastGuestPaused
                 + " hostFF=" + lastHostFastForward
-                + " discards[pause=" + pauseGateDiscards + " spike=" + spikeGateDiscards + "]"
+                + " discards[pause=" + pauseGateDiscards + " spike=" + spikeGateDiscards
+                + " steps=" + persistentSteps + "]"
                 + " snaps[sharedPause=" + sharedPauseSnaps + " unpaused=" + unpausedSnaps + "]");
     }
 

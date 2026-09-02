@@ -717,6 +717,7 @@
         "CoopLinkHud + CoopSessionIntel"
       ],
       "residue": [
+        "20.6 HUD also carries a sync readout (clock drift in game-hours + mirror lag ms, guest side; added 2026-09-02)",
         "all Steps unchecked (phase not built)",
         "spike: datagram size histogram",
         "spike: clumsy loopback shaping",

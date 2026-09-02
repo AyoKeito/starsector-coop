@@ -370,16 +370,167 @@ class CoopClockReconcilerTest {
         assertEquals(3, unarmed.sampleCount());
         assertEquals(0L, unarmed.spikeGateDiscards());
 
-        // Same sample, but with three already buffered and a non-zero dispersion to scale against.
+        // Same sample, but with three already buffered. The ring's own RMS here is ~577 ms, so what
+        // the sample is really measured against is the 0.05-game-day floor: only a deviation outside
+        // the entry dead zone can count as a spike at all.
         CoopClockReconciler armed = reconciler(clock, wall);
         armed.onSnapshot(clock.timestamp + 1_000L, false, false, false);
         armed.onSnapshot(clock.timestamp + 1_000L, false, false, false);
         armed.onSnapshot(clock.timestamp + 2_000L, false, false, false);
+        assertTrue(wild - 1_000L > CoopClockReconciler.SPIKE_GATE_FLOOR_MILLIS,
+                "the wild sample must clear the floor or the gate has nothing to reject");
         armed.onSnapshot(clock.timestamp + wild, false, false, false);
 
         assertEquals(3, armed.sampleCount());
         assertEquals(1L, armed.spikeGateDiscards());
         assertEquals(1_000L, armed.driftEstimateMillis());
+    }
+
+    @Test
+    void aDeviationInsideTheEntryDeadZoneIsNeverASpikeNoMatterHowSmallTheRingRms() {
+        // The wedge the first live smoke found: a shared pause leaves nine near-identical samples,
+        // the ring's RMS collapses to a few seconds of game time, and 3x that is smaller than any
+        // real post-unpause sample. Without the floor the gate rejected everything, forever.
+        FakeClock clock = new FakeClock(BASE);
+        Wall wall = new Wall();
+        CoopClockReconciler reconciler = reconciler(clock, wall);
+
+        fillRing(reconciler, clock, 1_000L);
+        long insideTheDeadZone = days(0.04);
+        assertTrue(insideTheDeadZone < CoopClockReconciler.SPIKE_GATE_FLOOR_MILLIS);
+        reconciler.onSnapshot(clock.timestamp + insideTheDeadZone, false, false, false);
+
+        assertEquals(0L, reconciler.spikeGateDiscards());
+        assertEquals(0L, reconciler.persistentSteps());
+        assertEquals(CoopClockReconciler.RING_SIZE, reconciler.sampleCount());
+    }
+
+    @Test
+    void aSteadyDriftWalkAfterASharedPauseNeverWedgesTheGate() {
+        // The measured shape at 1x: ~7,000 calendar-ms of fresh drift per 5 Hz snapshot. Every one of
+        // these is a legitimate sample and has to reach the ring, or the median freezes at the
+        // pause-time value and the reconciler goes blind exactly when drift starts accumulating.
+        FakeClock clock = new FakeClock(BASE);
+        Wall wall = new Wall();
+        CoopClockReconciler reconciler = reconciler(clock, wall);
+
+        long start = days(0.02);
+        fillRing(reconciler, clock, start);
+
+        long walkPerSnapshot = 7_000L;
+        int snapshots = 30;
+        for (int i = 1; i <= snapshots; i++) {
+            reconciler.onSnapshot(clock.timestamp + start + i * walkPerSnapshot, false, false, false);
+        }
+
+        assertEquals(0L, reconciler.spikeGateDiscards());
+        assertEquals(0L, reconciler.persistentSteps());
+        assertEquals(CoopClockReconciler.RING_SIZE, reconciler.sampleCount());
+
+        long lastSample = start + snapshots * walkPerSnapshot;
+        long ringSpan = CoopClockReconciler.RING_SIZE * walkPerSnapshot;
+        assertTrue(reconciler.driftEstimateMillis() > start,
+                "the estimate did not follow the walk at all");
+        assertTrue(lastSample - reconciler.driftEstimateMillis() <= ringSpan,
+                "median " + reconciler.driftEstimateMillis() + " fell more than one ring span behind"
+                        + " the walk's last sample " + lastSample);
+    }
+
+    @Test
+    void threeConsecutiveRejectionsAreTreatedAsAPersistentStepRatherThanPopcorn() {
+        FakeClock clock = new FakeClock(BASE);
+        Wall wall = new Wall();
+        CoopClockReconciler reconciler = reconciler(clock, wall);
+
+        long settled = days(0.02);
+        fillRing(reconciler, clock, settled);
+
+        long popcorn = settled + 40 * DAY;
+        // One far-outside sample is popcorn: dropped, and it moves nothing.
+        reconciler.onSnapshot(clock.timestamp + popcorn, false, false, false);
+        assertEquals(1L, reconciler.spikeGateDiscards());
+        assertEquals(settled, reconciler.driftEstimateMillis());
+        assertEquals(CoopClockReconciler.RING_SIZE, reconciler.sampleCount());
+
+        // Two in a row: still popcorn.
+        reconciler.onSnapshot(clock.timestamp + popcorn, false, false, false);
+        assertEquals(2L, reconciler.spikeGateDiscards());
+        assertEquals(0L, reconciler.persistentSteps());
+        assertEquals(settled, reconciler.driftEstimateMillis());
+
+        // Three in a row is not noise, it is the world having moved. Drop the stale ring and start a
+        // fresh one from the step sample itself.
+        reconciler.onSnapshot(clock.timestamp + popcorn, false, false, false);
+        assertEquals(3L, reconciler.spikeGateDiscards());
+        assertEquals(1L, reconciler.persistentSteps());
+        assertEquals(1, reconciler.sampleCount());
+        assertEquals(popcorn, reconciler.driftEstimateMillis());
+
+        // Samples around the new level are accepted normally...
+        for (int i = 1; i <= 3; i++) {
+            reconciler.onSnapshot(clock.timestamp + popcorn + i * 7_000L, false, false, false);
+        }
+        assertEquals(4, reconciler.sampleCount());
+        assertEquals(3L, reconciler.spikeGateDiscards());
+
+        // ...and the consecutive counter really was reset: the next far-outside sample is popcorn
+        // again, not an instant second step.
+        reconciler.onSnapshot(clock.timestamp + popcorn + 40 * DAY, false, false, false);
+        assertEquals(4L, reconciler.spikeGateDiscards());
+        assertEquals(1L, reconciler.persistentSteps());
+        assertEquals(4, reconciler.sampleCount());
+    }
+
+    @Test
+    void aPersistentStepDropsTheRingWithoutEndingTheCorrectionEpisode() {
+        FakeClock clock = new FakeClock(BASE);
+        Wall wall = new Wall();
+        CoopClockReconciler reconciler = reconciler(clock, wall);
+
+        fillRing(reconciler, clock, days(0.5));
+        clock.timestamp += FRAME_MILLIS;
+        reconciler.tick(FRAME_SECONDS, false);
+        assertTrue(reconciler.isCorrecting());
+
+        long stepped = reconciler.driftEstimateMillis() + 40 * DAY;
+        for (int i = 0; i < CoopClockReconciler.SPIKE_GATE_MAX_CONSECUTIVE; i++) {
+            reconciler.onSnapshot(clock.timestamp + stepped, false, false, false);
+        }
+
+        assertEquals(1L, reconciler.persistentSteps());
+        assertEquals(1, reconciler.sampleCount());
+        // resetRing() drops samples and the estimate; clearSamples() is the one that ends episodes.
+        assertTrue(reconciler.isCorrecting(), "a persistent step must not abandon the episode");
+    }
+
+    @Test
+    void anInducedDriftAfterASharedPauseIsMeasuredAndCorrected() {
+        // Smoke step 3, end to end: the guest's process is stalled for a few seconds right after a
+        // shared pause has flattened the ring, so it comes back a game-day behind. The wedged gate
+        // rejected every one of those samples, so the drift was never even measured.
+        FakeClock clock = new FakeClock(BASE);
+        Wall wall = new Wall();
+        CoopClockReconciler reconciler = reconciler(clock, wall);
+
+        fillRing(reconciler, clock, 2_000L);
+        assertEquals(2_000L, reconciler.driftEstimateMillis());
+
+        for (int i = 0; i < 3; i++) {
+            reconciler.onSnapshot(clock.timestamp + DAY, false, false, false);
+        }
+
+        assertEquals(1L, reconciler.persistentSteps());
+        assertEquals(DAY, reconciler.driftEstimateMillis());
+
+        long beforeEngineAdvance = clock.timestamp;
+        clock.timestamp += FRAME_MILLIS;
+        reconciler.tick(FRAME_SECONDS, false);
+
+        long correction = clock.timestamp - beforeEngineAdvance - FRAME_MILLIS;
+        assertEquals(1, clock.writes.size());
+        assertTrue(correction > 0, "the induced drift must produce a forward correction");
+        assertTrue(correction <= slewCap(CoopClockReconciler.FAST_SLEW_RATE));
+        assertTrue(reconciler.isCorrecting());
     }
 
     // ---- anti-windup ------------------------------------------------------------------------------
