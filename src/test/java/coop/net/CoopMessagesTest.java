@@ -9,7 +9,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopMessagesTest {
     @Test
@@ -17,7 +19,7 @@ class CoopMessagesTest {
         CoopMessages.Message ping = CoopMessages.ping("session-a", 7L, 123456789L);
 
         assertEquals(
-                "{\"type\":\"PING\",\"sessionId\":\"session-a\",\"seq\":7,\"sentAtMillis\":123456789,\"payloadJson\":\"{}\"}",
+                "{\"type\":\"PING\",\"sessionId\":\"session-a\",\"seq\":7,\"sentAtMillis\":123456789,\"payloadJson\":\"{}\",\"senderId\":null}",
                 CoopMessages.encode(ping));
     }
 
@@ -53,7 +55,7 @@ class CoopMessagesTest {
 
         assertEquals(
                 "{\"type\":\"LOBBY_HELLO\",\"sessionId\":null,\"seq\":3,\"sentAtMillis\":4000,"
-                        + "\"payloadJson\":\"{\\\"playerId\\\":\\\"guest-player\\\",\\\"playerName\\\":\\\"Guest\\\"}\"}",
+                        + "\"payloadJson\":\"{\\\"playerId\\\":\\\"guest-player\\\",\\\"playerName\\\":\\\"Guest\\\"}\",\"senderId\":null}",
                 CoopMessages.encode(hello));
 
         Map<String, Object> payload = CoopMessages.decodePayload(hello);
@@ -180,16 +182,29 @@ class CoopMessagesTest {
     void datagramEnvelopeRoundTripsHighFrequencyPayload() {
         String body = "player-a|Guest|corvus\nmember-1|wolf|wolf_Assault";
         String encoded = CoopMessages.datagram(
-                "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 7L, 12345L, body);
+                "0123456789abcdef", "fedcba9876543210", CoopMessages.Type.FLEET_SNAPSHOT, 7L, 12345L, body);
 
         CoopMessages.Datagram decoded = CoopMessages.parseDatagram(encoded);
 
-        assertEquals("session-a", decoded.sessionId());
+        assertEquals("0123456789abcdef", decoded.token());
+        assertEquals("fedcba9876543210", decoded.senderId());
         assertEquals(CoopMessages.Type.FLEET_SNAPSHOT, decoded.type());
         assertEquals(1, decoded.sections().size());
         assertEquals(7L, decoded.sections().get(0).epoch());
         assertEquals(12345L, decoded.sections().get(0).sentGameTimeMillis());
+        assertEquals(0, decoded.sections().get(0).chunk());
         assertEquals(body, decoded.sections().get(0).body());
+    }
+
+    @Test
+    void datagramEnvelopeRoundTripsAnExplicitChunkIndex() {
+        String encoded = CoopMessages.datagram("token", "sender",
+                CoopMessages.Type.NPC_FLEET_MOTION, 9L, 900L, 3, "slice");
+
+        CoopMessages.Datagram decoded = CoopMessages.parseDatagram(encoded);
+
+        assertEquals(3, decoded.sections().get(0).chunk());
+        assertEquals("slice", decoded.sections().get(0).body());
     }
 
     @Test
@@ -198,7 +213,7 @@ class CoopMessagesTest {
         // codecs use newlines and pipes internally, never the envelope's unit separator.
         String older = "3\nfleet-a|corvus|1.0|2.0|0.5|0.5";
         String newer = "3\nfleet-a|corvus|1.5|2.5|0.5|0.5";
-        String encoded = CoopMessages.datagram("session-a", CoopMessages.Type.NPC_FLEET_MOTION,
+        String encoded = CoopMessages.datagram("token", "sender", CoopMessages.Type.NPC_FLEET_MOTION,
                 java.util.List.of(new CoopMessages.DatagramSection(4L, 400L, older),
                         new CoopMessages.DatagramSection(5L, 500L, newer)));
 
@@ -215,11 +230,104 @@ class CoopMessagesTest {
     @Test
     void malformedDatagramEnvelopeIsRejected() {
         assertThrows(IllegalArgumentException.class,
-                () -> CoopMessages.parseDatagram("session-a|FLEET_SNAPSHOT|payload"));
+                () -> CoopMessages.parseDatagram("token|FLEET_SNAPSHOT|payload"));
         // A stamp that is not a number is malformed, not a zero.
         String badStamp = CoopMessages.datagram(
-                        "session-a", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 0L, "body")
-                .replace("10", "x0");
+                        "token", "sender", CoopMessages.Type.FLEET_SNAPSHOT, 10L, 0L, "body")
+                .replace("10", "x0");
         assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagram(badStamp));
+    }
+
+    @Test
+    void datagramSectionWithANonIntegerChunkIsMalformed() {
+        String encoded = CoopMessages.datagram("token", "sender",
+                CoopMessages.Type.FLEET_SNAPSHOT, 1L, 2L, 7, "body");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseDatagram(encoded.replace("\u001f7\u001f", "\u001fx\u001f")));
+    }
+
+    // ---- Phase 20.1 header-only parse -----------------------------------------------------------
+
+    @Test
+    void datagramHeaderParseReadsThePrefixWithoutTheSections() {
+        String encoded = CoopMessages.datagram("0123456789abcdef", "fedcba9876543210",
+                CoopMessages.Type.NPC_FLEET_MOTION, 4L, 400L, "a-body-the-header-parse-never-touches");
+
+        CoopMessages.DatagramHeader header = CoopMessages.parseDatagramHeader(encoded);
+
+        assertEquals("0123456789abcdef", header.token());
+        assertEquals("fedcba9876543210", header.senderId());
+        assertEquals(CoopMessages.Type.NPC_FLEET_MOTION, header.type());
+    }
+
+    /**
+     * The transport runs this on every inbound packet including hostile ones, so it must have exactly
+     * one failure mode: {@link IllegalArgumentException}, never a runtime surprise the receive loop
+     * does not catch.
+     */
+    @Test
+    void datagramHeaderParseRejectsEveryMalformedShapeWithIllegalArgument() {
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagramHeader(null));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagramHeader(""));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseDatagramHeader("token"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseDatagramHeader("token\u001fsender"));
+        // Header with no section at all is not something this transport emits.
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseDatagramHeader("token\u001fsender\u001fPING"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseDatagramHeader("token\u001fsender\u001fNOT_A_TYPE\u001f1\u001f2\u001f0\u001fbody"));
+    }
+
+    // ---- Phase 20.1 wire token ------------------------------------------------------------------
+
+    @Test
+    void wireTokenIsSixteenLowercaseHexCharactersAndDeterministic() {
+        String token = CoopMessages.wireToken("2f2c9a10-0d3c-4f2a-9b6f-6d0a1e5c8b77");
+
+        assertEquals(CoopMessages.WIRE_TOKEN_CHARS, token.length());
+        assertTrue(token.matches("[0-9a-f]{16}"), "token must be lowercase hex: " + token);
+        assertEquals(token, CoopMessages.wireToken("2f2c9a10-0d3c-4f2a-9b6f-6d0a1e5c8b77"),
+                "the same id must always derive the same token — both peers derive it independently");
+    }
+
+    @Test
+    void wireTokenSeparatesDifferentIdsAndTolerantOfNull() {
+        assertNotEquals(CoopMessages.wireToken("session-a"), CoopMessages.wireToken("session-b"));
+        assertEquals(CoopMessages.WIRE_TOKEN_CHARS, CoopMessages.wireToken(null).length());
+    }
+
+    /** The token is the first 16 hex of SHA-256(id) — pinned so a future refactor cannot drift it. */
+    @Test
+    void wireTokenIsThePrefixOfTheSha256OfTheId() {
+        assertEquals(coop.handshake.CoopChecksum.sha256Text("session-a").substring(0, 16),
+                CoopMessages.wireToken("session-a"));
+    }
+
+    // ---- Phase 20.5 TCP senderId ----------------------------------------------------------------
+
+    @Test
+    void tcpEnvelopeCarriesSenderIdAndDecodesMissingOnesAsNull() {
+        CoopMessages.Message stamped =
+                CoopMessages.ping("session-a", 1L, 1000L).withSenderId("player-1");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(stamped));
+        assertEquals("player-1", decoded.senderId());
+
+        // Every factory builds an unstamped message; that has to survive the round trip as null
+        // rather than as the string "null" or a decode failure.
+        CoopMessages.Message unstamped = CoopMessages.decode(
+                CoopMessages.encode(CoopMessages.ping("session-a", 2L, 1000L)));
+        assertNull(unstamped.senderId());
+    }
+
+    @Test
+    void withSenderIdLeavesAnAlreadyStampedMessageAlone() {
+        CoopMessages.Message stamped =
+                CoopMessages.ping("session-a", 1L, 1000L).withSenderId("player-1");
+
+        assertEquals("player-1", stamped.withSenderId("player-2").senderId());
+        assertNull(CoopMessages.ping("session-a", 1L, 1000L).withSenderId(null).senderId());
     }
 }

@@ -52,12 +52,12 @@ class CoopWiretapTest {
 
     /** A composed datagram of a known wire size: body padded so the total lands on {@code wireBytes}. */
     private static String datagramOfSize(CoopMessages.Type type, long epoch, int wireBytes) {
-        String probe = CoopMessages.datagram("s", type, epoch, 7L, "");
+        String probe = CoopMessages.datagram("s", "sender", type, epoch, 7L, "");
         int padding = wireBytes - probe.length();
         if (padding < 0) {
             throw new IllegalArgumentException("envelope alone is " + probe.length() + " bytes");
         }
-        return CoopMessages.datagram("s", type, epoch, 7L, "x".repeat(padding));
+        return CoopMessages.datagram("s", "sender", type, epoch, 7L, "x".repeat(padding));
     }
 
     // ---- sampling ---------------------------------------------------------------------------
@@ -212,9 +212,9 @@ class CoopWiretapTest {
     void traceLineCarriesTheNewestSectionAndStaysOnOneLine() {
         CoopWiretap.setSampleIntervalForTesting(1);
         CoopDatagramRedundancy redundancy = new CoopDatagramRedundancy();
-        redundancy.compose("s", CoopMessages.Type.NPC_FLEET_MOTION, 41L, 100L, "old-body");
+        redundancy.compose("s", "sender", CoopMessages.Type.NPC_FLEET_MOTION, 41L, 100L, "old-body");
         String wire = redundancy.compose(
-                "s", CoopMessages.Type.NPC_FLEET_MOTION, 42L, 200L, "new\nbody");
+                "s", "sender", CoopMessages.Type.NPC_FLEET_MOTION, 42L, 200L, "new\nbody");
 
         wiretap.recordReceive(wire, parse(wire));
 
@@ -242,7 +242,7 @@ class CoopWiretapTest {
     void multiByteCharactersCountAsWireBytesNotCharacters() {
         CoopWiretap.setSampleIntervalForTesting(1000);
         // "é" is two UTF-8 bytes; the receive hook measures the encoded length, not String.length().
-        String wire = CoopMessages.datagram("s", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 2L, "éé");
+        String wire = CoopMessages.datagram("s", "sender", CoopMessages.Type.FLEET_SNAPSHOT, 1L, 2L, "éé");
         wiretap.recordReceive(wire, parse(wire));
         lines.clear();
 

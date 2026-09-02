@@ -10,10 +10,52 @@ import java.nio.channels.DatagramChannel;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
+/**
+ * The coop transport: one TCP control channel (reliable, JSON lines) plus one UDP datagram channel
+ * (best-effort state stream), both non-blocking and both driven from the campaign thread — Starsector
+ * kills mod-created networking threads without saying so, so everything here is a state machine the
+ * pump advances, never a blocking read.
+ *
+ * <p><b>UDP inbound filter (Phase 20.1), in order.</b> Every stage exists because the stage before it
+ * is insufficient on a real network:
+ * <ol>
+ *   <li><b>Pinned source address.</b> The peer's {@link InetAddress} is taken from the established TCP
+ *       connection. Address alone is weak on loopback and behind a shared NAT, where every process
+ *       looks like the same host.</li>
+ *   <li><b>Envelope prefix parse.</b> {@link CoopMessages#parseDatagramHeader} reads token/sender/type
+ *       and nothing more, so a crafted packet cannot make us do work proportional to its size.</li>
+ *   <li><b>Session token.</b> The datagram must carry this session's
+ *       {@link CoopMessages#wireToken(String)}; with no expected token set (pre-handshake) everything
+ *       is dropped. This is the bearer check that replaces "whatever spoke last is the peer".</li>
+ * </ol>
+ * Each rejection increments a counter and warns at most once per reason per service lifetime — a
+ * hostile flood must be visible in {@link #datagramStats()} without being able to write the log.
+ *
+ * <p><b>Return-address validation (host).</b> A matching token proves the sender knows the session; it
+ * does not prove the <em>source address</em> is the peer, because a plaintext token is sniffable
+ * on-path and replayable from anywhere. So the host keeps a {@code validatedUdpAddress} (the send
+ * target) separate from whatever address is currently talking. A token-valid datagram from a different
+ * source is accepted <em>inbound</em> (the watermark defeats replay) but only becomes a candidate: the
+ * host sends it a {@code PATH_PROBE} carrying a fresh random nonce and re-points the stream only when
+ * that exact nonce comes back from that exact address — QUIC's {@code PATH_CHALLENGE} model
+ * (RFC 9000 §8.2). Until then traffic keeps flowing to the previously validated address, so an
+ * off-path attacker cannot redirect the state stream, and a genuine NAT rebind still recovers within a
+ * round trip. The guest needs none of this: its target is the address the player configured.
+ *
+ * <p><b>Keepalive and ICMP.</b> When a send target exists and the stream has been quiet for
+ * {@link #KEEPALIVE_IDLE_MILLIS}, a {@code UDP_PROBE} goes out — it holds the NAT binding open (the
+ * literature records a 10 s timeout floor on at least one gateway) and, from the guest, is what lets a
+ * host with a quiet stream learn and validate the guest's address at all. ICMP port-unreachable
+ * surfaces on Windows as a plain {@code SocketException} for an unconnected channel (JDK-4676710), so
+ * both it and {@code PortUnreachableException} are counted as transient link events and the channel
+ * stays open; a peer rebooting must not kill the socket loop.
+ */
 public class CoopNetService {
     /**
      * TCP frame sanity cap. This is corruption protection, not a transport limit — TCP is a stream,
@@ -32,6 +74,23 @@ public class CoopNetService {
     private static final int MAX_DATAGRAM_BYTES = 60 * 1024;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
     private static final String EXTRA_CONNECTION_REJECT_REASON = "Host already has an active connection";
+    /**
+     * Idle gap before a {@code UDP_PROBE} goes out. 5 s, not the 10 s first specified: measured NAT UDP
+     * timeouts are mostly ≥ 60 s, but a 34-gateway study found one device at 10 s, so 10 s sat on the
+     * tail rather than under it.
+     */
+    static final long KEEPALIVE_IDLE_MILLIS = 5_000L;
+    /** Challenge resend cadence while a candidate address keeps talking. */
+    private static final long PATH_PROBE_RESEND_MILLIS = 1_000L;
+    /** Give up on an unproven candidate after this long without a matching echo. */
+    private static final long PATH_CANDIDATE_TIMEOUT_MILLIS = 5_000L;
+    /** Rate limit for the transient-link warning; a router resetting can produce a burst of them. */
+    private static final long ICMP_WARN_INTERVAL_MILLIS = 10_000L;
+    /** {@code PATH_PROBE} body prefixes: challenge out, echo back. */
+    private static final String PATH_CHALLENGE_PREFIX = "C:";
+    private static final String PATH_ECHO_PREFIX = "R:";
+    /** Nonce width in hex characters; 16 hex = 64 unpredictable bits, QUIC's PATH_CHALLENGE is 64. */
+    private static final int PATH_NONCE_HEX_CHARS = 16;
 
     private final Queue<CoopMessages.Message> inbound = new ConcurrentLinkedQueue<>();
     private final Queue<CoopMessages.Message> outbound = new ConcurrentLinkedQueue<>();
@@ -48,6 +107,9 @@ public class CoopNetService {
     private final ByteBuffer readBuffer = ByteBuffer.allocate(READ_BUFFER_BYTES);
     private final ByteBuffer datagramBuffer = ByteBuffer.allocate(DATAGRAM_BUFFER_BYTES);
     private final byte[] inboundFrame = new byte[MAX_FRAME_BYTES];
+    /** Wall clock; injectable so keepalive and challenge timing are testable without sleeping. */
+    private final LongSupplier clockMillis;
+    private final SecureRandom nonceSource = new SecureRandom();
 
     private CoopConnectionRole role = CoopConnectionRole.NONE;
     private ServerSocketChannel serverChannel;
@@ -60,15 +122,50 @@ public class CoopNetService {
     private volatile boolean connected;
     private SocketChannel pendingConnectChannel;
     private DatagramChannel udpChannel;
-    private SocketAddress udpRemoteAddress;
+    /**
+     * The datagram send target: the guest's configured host address, or on the host the return address
+     * that has passed a {@code PATH_PROBE} challenge. Null on the host until validation completes, and
+     * outbound datagrams are dropped while it is null — the state stream is latest-wins, so buffering
+     * ticks nobody can receive yet only guarantees stale ones get delivered later.
+     */
+    private SocketAddress validatedUdpAddress;
+    /** Unproven source currently being challenged (host only); at most one at a time. */
+    private SocketAddress candidateUdpAddress;
+    private String candidateNonce;
+    private long candidateFirstSeenAtMillis;
+    private long candidateLastProbeAtMillis;
     /**
      * Peer address pinned from the established TCP connection. UDP datagrams are only accepted from
-     * this address, and (on the host) only such a datagram may teach us the UDP return address —
-     * otherwise a stray LAN packet could blackhole the motion stream. The peer's UDP *port* is still
-     * learned from the first valid datagram, since it legitimately differs from the TCP port.
+     * this address — the first and cheapest of the inbound filter's three stages (see the class
+     * Javadoc). The peer's UDP *port* is not pinned: it legitimately differs from the TCP port, and
+     * what proves it now is the session token plus the challenge-echo rather than "first one wins".
      */
     private InetAddress pinnedPeerAddress;
     private boolean foreignDatagramWarned;
+    private boolean noTokenWarned;
+    private boolean tokenMismatchWarned;
+    private boolean malformedDatagramWarned;
+    private boolean candidateTimeoutLogged;
+    /** Session token every inbound datagram must carry; null before handshake and after teardown. */
+    private String expectedSessionToken;
+    /** Full local player id stamped onto outbound TCP messages (Phase 20.5). */
+    private String localSenderId;
+    /** {@link CoopMessages#wireToken} of {@link #localSenderId}, for the datagram envelope. */
+    private String localDatagramSenderId = "";
+    private long lastDatagramSentAtMillis;
+    private long lastInboundDatagramAtMillis;
+    private long lastIcmpWarnAtMillis;
+    private long droppedNoToken;
+    private long droppedTokenMismatch;
+    private long droppedForeignSource;
+    private long droppedMalformed;
+    private long probesSent;
+    private long probeEchoesReceived;
+    private long pathValidations;
+    private long keepalivesSent;
+    private long keepalivesReceived;
+    private long icmpTransients;
+    private long oversizedDatagrams;
     private ByteBuffer pendingWrite;
     private int inboundFrameLength;
     private String connectHost;
@@ -77,6 +174,56 @@ public class CoopNetService {
     private boolean connectFailureLogged;
     private boolean discardingOversizedFrame;
     private boolean datagramSendFailureLogged;
+
+    public CoopNetService() {
+        this(System::currentTimeMillis);
+    }
+
+    /** Test seam: a fake clock drives the keepalive and challenge timers without real waiting. */
+    CoopNetService(LongSupplier clockMillis) {
+        this.clockMillis = clockMillis == null ? System::currentTimeMillis : clockMillis;
+    }
+
+    /**
+     * Sets the full player id stamped onto outbound TCP messages that do not already carry one, and
+     * derives the short sender id used in the datagram envelope. Called once per session start; a null
+     * clears both (session teardown).
+     */
+    public void setLocalSenderId(String playerId) {
+        synchronized (lifecycleLock) {
+            localSenderId = playerId;
+            localDatagramSenderId = playerId == null ? "" : CoopMessages.wireToken(playerId);
+        }
+    }
+
+    /**
+     * Sets the session token every inbound datagram must carry, and that every outbound transport
+     * datagram is stamped with. Null (pre-handshake, post-teardown) means "drop all datagrams": before
+     * a session exists there is nothing legitimate to receive, and accepting anything then is exactly
+     * the hole the token closes.
+     */
+    public void setExpectedSessionToken(String token) {
+        synchronized (lifecycleLock) {
+            expectedSessionToken = token;
+            // A fresh token means a fresh session: an address validated for the previous one proves
+            // nothing about this one, and the keepalive timer restarts from now rather than firing
+            // immediately on the strength of a long-idle previous session.
+            if (token != null) {
+                lastDatagramSentAtMillis = clockMillis.getAsLong();
+            }
+            forgetCandidateLocked();
+        }
+    }
+
+    /** Immutable snapshot of the UDP transport counters; see {@link CoopDatagramStats}. */
+    public CoopDatagramStats datagramStats() {
+        synchronized (lifecycleLock) {
+            return new CoopDatagramStats(droppedNoToken, droppedTokenMismatch, droppedForeignSource,
+                    droppedMalformed, probesSent, probeEchoesReceived, pathValidations, keepalivesSent,
+                    keepalivesReceived, icmpTransients, oversizedDatagrams, lastInboundDatagramAtMillis,
+                    validatedUdpAddress == null ? "" : validatedUdpAddress.toString());
+        }
+    }
 
     public void startHost(int port) {
         synchronized (lifecycleLock) {
@@ -149,8 +296,17 @@ public class CoopNetService {
         return nextSeq.incrementAndGet();
     }
 
+    /**
+     * Queues a TCP message, stamping the local {@code senderId} when the message does not already
+     * carry one. Stamping here rather than in the ~50 factories keeps the id out of every call site
+     * and means one seam owns "who sent this"; an explicitly stamped message (a relay, later) is left
+     * alone.
+     */
     public void send(CoopMessages.Message message) {
-        outbound.add(message);
+        if (message == null) {
+            return;
+        }
+        outbound.add(message.withSenderId(localSenderId));
     }
 
     /**
@@ -162,6 +318,8 @@ public class CoopNetService {
         synchronized (lifecycleLock) {
             pollNetworkLocked();
             flushOutboundLocked();
+            maybeChallengeCandidateLocked();
+            maybeQueueKeepaliveLocked();
             flushDatagramsLocked();
         }
     }
@@ -240,14 +398,18 @@ public class CoopNetService {
             DatagramChannel channel = DatagramChannel.open();
             channel.configureBlocking(false);
             channel.socket().setReuseAddress(true);
+            // Deliberately not connect()ed: a connected DatagramChannel would make every ICMP
+            // port-unreachable a hard error on the next operation, which is the failure mode
+            // the ICMP-tolerance rule exists to avoid.
             channel.bind(bindAddress);
             udpChannel = channel;
-            udpRemoteAddress = remoteAddress;
+            validatedUdpAddress = remoteAddress;
+            lastDatagramSentAtMillis = clockMillis.getAsLong();
             datagramSendFailureLogged = false;
             CoopLog.info(CoopNetService.class, "Coop UDP datagram channel bound to " + bindAddress);
         } catch (Exception ex) {
             udpChannel = null;
-            udpRemoteAddress = null;
+            validatedUdpAddress = null;
             CoopLog.warn(CoopNetService.class, "Coop UDP datagram channel unavailable; "
                     + "campaign state stream disabled (TCP control unaffected)", ex);
         }
@@ -258,56 +420,249 @@ public class CoopNetService {
         if (channel == null) {
             return;
         }
-        try {
-            datagramBuffer.clear();
-            SocketAddress source = channel.receive(datagramBuffer);
-            while (source != null) {
-                boolean full = !datagramBuffer.hasRemaining();
-                if (!isPinnedPeerLocked(source)) {
-                    // Drop before it can teach us a return address. Warn once per session so a noisy
-                    // LAN cannot flood the log.
-                    if (!foreignDatagramWarned) {
-                        foreignDatagramWarned = true;
-                        CoopLog.warn(CoopNetService.class, "Coop UDP ignoring datagram from non-peer source "
-                                + source + " (pinned peer "
-                                + (pinnedPeerAddress == null ? "<none>" : pinnedPeerAddress.getHostAddress()) + ")");
-                    }
-                } else if (full) {
-                    // Buffer filled to capacity: the datagram was at least as large as the buffer and
-                    // may be truncated. Decoding it would yield a corrupt payload, so discard it.
-                    CoopLog.warn(CoopNetService.class, "Coop UDP discarding truncated datagram from " + source
-                            + " (filled the " + datagramBuffer.capacity() + "-byte buffer)");
-                } else {
-                    if (role == CoopConnectionRole.HOST) {
-                        // Learn (or relearn, on guest reconnect) the guest's UDP return address.
-                        udpRemoteAddress = source;
-                    }
-                    datagramBuffer.flip();
-                    byte[] bytes = new byte[datagramBuffer.remaining()];
-                    datagramBuffer.get(bytes);
-                    inboundDatagrams.add(new String(bytes, StandardCharsets.UTF_8));
-                }
+        while (true) {
+            SocketAddress source;
+            try {
                 datagramBuffer.clear();
                 source = channel.receive(datagramBuffer);
+            } catch (Exception ex) {
+                if (isTransientLinkException(ex)) {
+                    // ICMP port-unreachable and friends. The channel is fine; the peer (or a router on
+                    // the way) is momentarily not. Stop draining this poll and try again next frame.
+                    noteTransientLinkEventLocked("receive", ex);
+                } else {
+                    CoopLog.warn(CoopNetService.class, "Coop UDP receive failed", ex);
+                }
+                return;
             }
-        } catch (Exception ex) {
-            CoopLog.warn(CoopNetService.class, "Coop UDP receive failed", ex);
+            if (source == null) {
+                return;
+            }
+            if (!datagramBuffer.hasRemaining()) {
+                // Buffer filled to capacity: the datagram was at least as large as the buffer and may
+                // be truncated. Decoding it would yield a corrupt payload, so discard it.
+                droppedMalformed++;
+                CoopLog.warn(CoopNetService.class, "Coop UDP discarding truncated datagram from " + source
+                        + " (filled the " + datagramBuffer.capacity() + "-byte buffer)");
+                continue;
+            }
+            datagramBuffer.flip();
+            byte[] bytes = new byte[datagramBuffer.remaining()];
+            datagramBuffer.get(bytes);
+            acceptDatagramLocked(source, new String(bytes, StandardCharsets.UTF_8));
         }
     }
 
     /**
-     * True when the datagram may be accepted from this source.
-     *
-     * <p>Two stages. The address is pinned when the TCP connection is established. The <em>port</em>
-     * cannot be pinned then (the peer's UDP port legitimately differs from its TCP port), so it is
-     * locked instead by the first datagram that passes the address check; from that point the full
-     * address+port must match.
-     *
-     * <p>Address-only checking is not enough on its own: on loopback — and behind a shared NAT —
-     * any other process has the same address, so a stray packet would still pass and, on the host,
-     * re-teach the return address and blackhole the motion stream. Locking the port after the first
-     * valid datagram closes that. A reconnect re-establishes TCP, which clears both the pin and the
-     * learned address, so the peer is free to come back on a new port.
+     * Runs the three-stage inbound filter (see the class Javadoc) and either queues the payload or
+     * counts the rejection. Nothing learned from a packet — not the return address, not a candidate —
+     * happens before all three stages pass.
+     */
+    private void acceptDatagramLocked(SocketAddress source, String payload) {
+        if (!isPinnedPeerLocked(source)) {
+            droppedForeignSource++;
+            if (!foreignDatagramWarned) {
+                foreignDatagramWarned = true;
+                CoopLog.warn(CoopNetService.class, "Coop UDP ignoring datagram from non-peer source "
+                        + source + " (pinned peer "
+                        + (pinnedPeerAddress == null ? "<none>" : pinnedPeerAddress.getHostAddress()) + ")");
+            }
+            return;
+        }
+
+        CoopMessages.DatagramHeader header;
+        try {
+            header = CoopMessages.parseDatagramHeader(payload);
+        } catch (RuntimeException ex) {
+            droppedMalformed++;
+            if (!malformedDatagramWarned) {
+                malformedDatagramWarned = true;
+                CoopLog.warn(CoopNetService.class,
+                        "Coop UDP dropping datagram with an unreadable envelope from " + source, ex);
+            }
+            return;
+        }
+
+        if (expectedSessionToken == null) {
+            droppedNoToken++;
+            if (!noTokenWarned) {
+                noTokenWarned = true;
+                CoopLog.warn(CoopNetService.class, "Coop UDP dropping datagram from " + source
+                        + " before a session token exists (type " + header.type() + ")");
+            }
+            return;
+        }
+        if (!expectedSessionToken.equals(header.token())) {
+            droppedTokenMismatch++;
+            if (!tokenMismatchWarned) {
+                tokenMismatchWarned = true;
+                CoopLog.warn(CoopNetService.class, "Coop UDP dropping datagram from " + source
+                        + " with a foreign session token (type " + header.type() + ")");
+            }
+            return;
+        }
+
+        lastInboundDatagramAtMillis = clockMillis.getAsLong();
+        switch (header.type()) {
+            case UDP_PROBE -> keepalivesReceived++;
+            case PATH_PROBE -> handlePathProbeLocked(source, payload);
+            // Transport-level types are handled here and never reach the pump; everything else is
+            // gameplay state and goes to the drain exactly as before.
+            default -> inboundDatagrams.add(payload);
+        }
+        noteValidatedSourceLocked(source);
+    }
+
+    /**
+     * Address bookkeeping for a token-valid datagram (host only). A source that is already the send
+     * target needs nothing; anything else is unproven and becomes the challenge candidate, which is
+     * what stops a replayed-token packet from a hostile source redirecting the stream.
+     */
+    private void noteValidatedSourceLocked(SocketAddress source) {
+        if (role != CoopConnectionRole.HOST || source == null) {
+            return;
+        }
+        if (source.equals(validatedUdpAddress) || source.equals(candidateUdpAddress)) {
+            return;
+        }
+        if (candidateUdpAddress != null) {
+            // One outstanding challenge at a time: an attacker able to spray sources must not be able
+            // to make us mint nonces per packet.
+            return;
+        }
+        candidateUdpAddress = source;
+        candidateNonce = newNonceLocked();
+        candidateFirstSeenAtMillis = clockMillis.getAsLong();
+        candidateLastProbeAtMillis = 0L;
+    }
+
+    /** Sends (or resends) the outstanding challenge, and forgets a candidate that never answers. */
+    private void maybeChallengeCandidateLocked() {
+        if (candidateUdpAddress == null || udpChannel == null || expectedSessionToken == null) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (now - candidateFirstSeenAtMillis >= PATH_CANDIDATE_TIMEOUT_MILLIS) {
+            // Once per connection: a packet flood from rotating ports would otherwise get to write a
+            // log line every 5 s for as long as it keeps going.
+            if (!candidateTimeoutLogged) {
+                candidateTimeoutLogged = true;
+                CoopLog.info(CoopNetService.class, "Coop UDP candidate " + candidateUdpAddress
+                        + " never echoed its path challenge; keeping "
+                        + (validatedUdpAddress == null ? "<no target>" : validatedUdpAddress.toString()));
+            }
+            forgetCandidateLocked();
+            return;
+        }
+        if (candidateLastProbeAtMillis != 0L && now - candidateLastProbeAtMillis < PATH_PROBE_RESEND_MILLIS) {
+            return;
+        }
+        candidateLastProbeAtMillis = now;
+        probesSent++;
+        sendDatagramToLocked(candidateUdpAddress, CoopMessages.datagram(expectedSessionToken,
+                localDatagramSenderId, CoopMessages.Type.PATH_PROBE, 0L, 0L,
+                PATH_CHALLENGE_PREFIX + candidateNonce));
+    }
+
+    /**
+     * Answers a challenge, or completes one. The echo is only believed from the address that was
+     * challenged: a nonce that comes back from somewhere else proves an on-path observer, not a peer.
+     */
+    private void handlePathProbeLocked(SocketAddress source, String payload) {
+        String body = lastSectionBodyOrEmpty(payload);
+        if (body.startsWith(PATH_CHALLENGE_PREFIX)) {
+            // Answer immediately over the normal outbound path (guest: to its configured host; host:
+            // to its validated target, or dropped when it has none).
+            outboundDatagrams.add(CoopMessages.datagram(expectedSessionToken, localDatagramSenderId,
+                    CoopMessages.Type.PATH_PROBE, 0L, 0L,
+                    PATH_ECHO_PREFIX + body.substring(PATH_CHALLENGE_PREFIX.length())));
+            return;
+        }
+        if (!body.startsWith(PATH_ECHO_PREFIX)) {
+            return;
+        }
+        probeEchoesReceived++;
+        String nonce = body.substring(PATH_ECHO_PREFIX.length());
+        if (candidateUdpAddress == null || candidateNonce == null
+                || !candidateNonce.equals(nonce) || !candidateUdpAddress.equals(source)) {
+            return;
+        }
+        validatedUdpAddress = candidateUdpAddress;
+        pathValidations++;
+        candidateTimeoutLogged = false;
+        forgetCandidateLocked();
+        // Rare by construction (session start, NAT rebind, reconnect), so this logs every time: when a
+        // WAN session goes quiet, "which address are we streaming to" is the first question.
+        CoopLog.info(CoopNetService.class, "Coop UDP return address validated " + validatedUdpAddress);
+    }
+
+    /** Body of the last section, or "" — transport datagrams carry exactly one section. */
+    private static String lastSectionBodyOrEmpty(String payload) {
+        try {
+            java.util.List<CoopMessages.DatagramSection> sections =
+                    CoopMessages.parseDatagram(payload).sections();
+            return sections.isEmpty() ? "" : sections.get(sections.size() - 1).body();
+        } catch (RuntimeException ex) {
+            return "";
+        }
+    }
+
+    private String newNonceLocked() {
+        StringBuilder nonce = new StringBuilder(PATH_NONCE_HEX_CHARS);
+        byte[] bytes = new byte[PATH_NONCE_HEX_CHARS / 2];
+        nonceSource.nextBytes(bytes);
+        for (byte b : bytes) {
+            nonce.append(Character.forDigit((b >>> 4) & 0x0f, 16));
+            nonce.append(Character.forDigit(b & 0x0f, 16));
+        }
+        return nonce.toString();
+    }
+
+    private void forgetCandidateLocked() {
+        candidateUdpAddress = null;
+        candidateNonce = null;
+        candidateFirstSeenAtMillis = 0L;
+        candidateLastProbeAtMillis = 0L;
+    }
+
+    /** Queues a keepalive when the outbound stream has gone quiet; see {@link #KEEPALIVE_IDLE_MILLIS}. */
+    private void maybeQueueKeepaliveLocked() {
+        if (udpChannel == null || validatedUdpAddress == null || expectedSessionToken == null) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (now - lastDatagramSentAtMillis < KEEPALIVE_IDLE_MILLIS) {
+            return;
+        }
+        keepalivesSent++;
+        outboundDatagrams.add(CoopMessages.datagram(expectedSessionToken, localDatagramSenderId,
+                CoopMessages.Type.UDP_PROBE, 0L, 0L, ""));
+    }
+
+    /**
+     * True for the socket errors an ICMP rejection produces. The JDK documents
+     * {@code PortUnreachableException} for <em>connected</em> datagram sockets only and does not
+     * guarantee it even there; on Windows the same condition surfaces as a plain
+     * {@code SocketException} (JDK-4676710). Both are link weather, never a reason to close a channel.
+     */
+    static boolean isTransientLinkException(Throwable ex) {
+        return ex instanceof java.net.PortUnreachableException || ex instanceof java.net.SocketException;
+    }
+
+    private void noteTransientLinkEventLocked(String operation, Exception ex) {
+        icmpTransients++;
+        long now = clockMillis.getAsLong();
+        if (lastIcmpWarnAtMillis == 0L || now - lastIcmpWarnAtMillis >= ICMP_WARN_INTERVAL_MILLIS) {
+            lastIcmpWarnAtMillis = now;
+            CoopLog.warn(CoopNetService.class, "Coop UDP transient link error on " + operation
+                    + " (" + icmpTransients + " so far); channel kept open", ex);
+        }
+    }
+
+    /**
+     * True when the datagram may be accepted from this source. Address only: the peer's UDP port
+     * legitimately differs from its TCP port and can change mid-session on a NAT rebind, so what
+     * proves the port is the session token plus the challenge-echo, not a first-datagram lock.
      */
     private boolean isPinnedPeerLocked(SocketAddress source) {
         if (pinnedPeerAddress == null) {
@@ -316,11 +671,7 @@ public class CoopNetService {
         if (!(source instanceof InetSocketAddress inet) || inet.getAddress() == null) {
             return false;
         }
-        if (!pinnedPeerAddress.equals(inet.getAddress())) {
-            return false;
-        }
-        // Address matches. If we already know the peer's UDP port for this connection, require it.
-        return udpRemoteAddress == null || udpRemoteAddress.equals(source);
+        return pinnedPeerAddress.equals(inet.getAddress());
     }
 
     private static InetAddress peerAddressOf(SocketChannel channel) {
@@ -339,10 +690,10 @@ public class CoopNetService {
             outboundDatagrams.clear();
             return;
         }
-        SocketAddress remote = udpRemoteAddress;
+        SocketAddress remote = validatedUdpAddress;
         if (remote == null) {
-            // No peer address known yet (host before first guest datagram). Drop; the next 10 Hz
-            // snapshot supersedes anything queued, so there is no value in buffering stale state.
+            // No validated peer address yet (host before the challenge-echo completes). Drop; the next
+            // 10 Hz snapshot supersedes anything queued, so there is no value in buffering stale state.
             outboundDatagrams.clear();
             return;
         }
@@ -351,6 +702,7 @@ public class CoopNetService {
         while ((payload = outboundDatagrams.poll()) != null) {
             byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
             if (bytes.length > MAX_DATAGRAM_BYTES) {
+                oversizedDatagrams++;
                 CoopLog.warn(CoopNetService.class,
                         "Coop UDP dropping oversized datagram (" + bytes.length + " bytes)");
                 continue;
@@ -360,13 +712,36 @@ public class CoopNetService {
             // reach the socket, at the exact byte length the wire sees. Disabled, this is one static
             // boolean read.
             CoopWiretap.noteSend(payload, bytes.length);
-            try {
-                channel.send(ByteBuffer.wrap(bytes), remote);
-            } catch (Exception ex) {
-                if (!datagramSendFailureLogged) {
-                    CoopLog.warn(CoopNetService.class, "Coop UDP send failed; dropping datagram", ex);
-                    datagramSendFailureLogged = true;
-                }
+            sendDatagramBytesLocked(remote, bytes);
+        }
+    }
+
+    /** Sends one datagram to an explicit address — the challenge path, which cannot use the queue. */
+    private void sendDatagramToLocked(SocketAddress remote, String payload) {
+        if (udpChannel == null || remote == null) {
+            return;
+        }
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        CoopWiretap.noteSend(payload, bytes.length);
+        sendDatagramBytesLocked(remote, bytes);
+    }
+
+    private void sendDatagramBytesLocked(SocketAddress remote, byte[] bytes) {
+        DatagramChannel channel = udpChannel;
+        if (channel == null) {
+            return;
+        }
+        try {
+            channel.send(ByteBuffer.wrap(bytes), remote);
+            lastDatagramSentAtMillis = clockMillis.getAsLong();
+        } catch (Exception ex) {
+            if (isTransientLinkException(ex)) {
+                noteTransientLinkEventLocked("send", ex);
+                return;
+            }
+            if (!datagramSendFailureLogged) {
+                CoopLog.warn(CoopNetService.class, "Coop UDP send failed; dropping datagram", ex);
+                datagramSendFailureLogged = true;
             }
         }
     }
@@ -484,11 +859,14 @@ public class CoopNetService {
         discardingOversizedFrame = false;
         pinnedPeerAddress = peerAddressOf(channel);
         foreignDatagramWarned = false;
+        candidateTimeoutLogged = false;
+        forgetCandidateLocked();
         if (role == CoopConnectionRole.HOST) {
-            // Relearn the guest's UDP port for this connection. The host does not run shutdownLocked
-            // when a guest merely reconnects, so without this the previous guest's port would stay
-            // locked and the new guest's datagrams would be rejected for the rest of the session.
-            udpRemoteAddress = null;
+            // Re-validate the guest's UDP address for this connection. The host does not run
+            // shutdownLocked when a guest merely reconnects, so without this the previous connection's
+            // address would stay the send target — and a reconnecting guest behind NAT almost always
+            // comes back on a different port. The guest's target is configured, so it keeps its own.
+            validatedUdpAddress = null;
         }
         refreshConnectedLocked();
         CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role
@@ -635,8 +1013,18 @@ public class CoopNetService {
         connected = false;
         pendingConnectChannel = null;
         udpChannel = null;
-        udpRemoteAddress = null;
+        validatedUdpAddress = null;
+        forgetCandidateLocked();
+        expectedSessionToken = null;
+        localSenderId = null;
+        localDatagramSenderId = "";
+        lastDatagramSentAtMillis = 0L;
+        lastInboundDatagramAtMillis = 0L;
         datagramSendFailureLogged = false;
+        noTokenWarned = false;
+        tokenMismatchWarned = false;
+        malformedDatagramWarned = false;
+        candidateTimeoutLogged = false;
         inboundDatagrams.clear();
         outboundDatagrams.clear();
         // TCP queues too: a session restarted inside the same game process would otherwise replay

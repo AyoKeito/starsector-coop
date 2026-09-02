@@ -1538,10 +1538,78 @@ class CoopNetPumpTest {
         }
     }
 
+    // ---- Phase 20.1: the transport's session token follows the session -------------------------
+
+    /**
+     * The transport drops every datagram until it knows this session's token, so the handshake accept
+     * — the instant the session id exists — is the only correct moment to hand it over.
+     */
+    @Test
+    void hostHandshakeAcceptGivesTheTransportTheSessionToken() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        CoopHandshakeManifest manifest = emptyManifest("0.98a-RC8", "commit-a");
+        service.inbound.add(CoopMessages.handshakeManifest(2L, 9000L, manifest, false));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 10000L, () -> manifest, () -> false,
+                () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
+                () -> "fingerprint-host");
+
+        pump.advance(0f);
+
+        assertEquals(List.of(CoopMessages.wireToken("session-a")), service.expectedTokens);
+    }
+
+    @Test
+    void guestHandshakeAcceptGivesTheTransportTheSameSessionToken() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        service.inbound.add(CoopMessages.handshakeResultAccept(3L, 11000L, "session-a"));
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 12000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false);
+
+        pump.advance(0f);
+
+        // Both ends derive the token from the same session id, so the datagram filter matches.
+        assertEquals(List.of(CoopMessages.wireToken("session-a")), service.expectedTokens);
+    }
+
+    /**
+     * The session id dies with the connection. Leaving its token armed would let a reconnecting peer's
+     * stale in-flight datagrams apply to the next session.
+     */
+    @Test
+    void peerDisconnectClearsTheTransportSessionToken() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a", "session-b"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals(1, service.expectedTokens.size());
+        assertNull(service.expectedTokens.get(0), "the token must be cleared, not left armed");
+    }
+
     private static final class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
         private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
         private final List<CoopMessages.Message> sent = new ArrayList<>();
+        /** Every setExpectedSessionToken call, nulls included — the clear is as load-bearing as the set. */
+        private final List<String> expectedTokens = new ArrayList<>();
         private boolean connected = true;
 
         private RecordingNetService(CoopConnectionRole role) {
@@ -1566,6 +1634,11 @@ class CoopNetPumpTest {
         @Override
         public CoopMessages.Message pollInbound() {
             return inbound.poll();
+        }
+
+        @Override
+        public void setExpectedSessionToken(String token) {
+            expectedTokens.add(token);
         }
 
         @Override

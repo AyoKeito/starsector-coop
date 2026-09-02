@@ -254,7 +254,9 @@ public final class CoopNpcFleetReplicator {
         if (motions.isEmpty()) {
             return;
         }
-        service.sendDatagram(datagramRedundancy.compose(sessionState.sessionId(),
+        service.sendDatagram(datagramRedundancy.compose(
+                CoopMessages.wireToken(sessionState.sessionId()),
+                CoopMessages.wireToken(sessionState.localPlayerId()),
                 CoopMessages.Type.NPC_FLEET_MOTION, streamClock.nextEpoch(),
                 streamClock.gameTimeMillis(), CoopNpcFleetMotion.encodeBatch(motions)));
     }

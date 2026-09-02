@@ -693,6 +693,7 @@ public class CoopNetPump implements EveryFrameScript {
             if (config.role() == CoopConnectionRole.HOST) {
                 service.startHost(config.port());
                 sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
+                service.setLocalSenderId(sessionState.localPlayerId());
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
@@ -700,6 +701,7 @@ public class CoopNetPump implements EveryFrameScript {
                         + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
             } else if (config.role() == CoopConnectionRole.GUEST) {
                 sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
+                service.setLocalSenderId(sessionState.localPlayerId());
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
@@ -734,6 +736,7 @@ public class CoopNetPump implements EveryFrameScript {
                 int port = parsePort(memory.get(HOST_PORT_FLAG), HOST_PORT_FLAG);
                 service.startHost(port);
                 sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
+                service.setLocalSenderId(sessionState.localPlayerId());
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
@@ -748,6 +751,7 @@ public class CoopNetPump implements EveryFrameScript {
                     throw new IllegalArgumentException(CONNECT_HOST_FLAG + " is blank");
                 }
                 sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
+                service.setLocalSenderId(sessionState.localPlayerId());
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
@@ -841,6 +845,9 @@ public class CoopNetPump implements EveryFrameScript {
             // guest". Assignment, not OR: a drop during handshake really is not a lost session.
             peerDroppedAfterLiveSession = isGameplaySessionActive();
             boolean changed = sessionState.onChannelDisconnected();
+            // The session id died with the connection: keep accepting datagrams stamped with its token
+            // and a reconnecting peer's stale in-flight traffic would apply to the next session.
+            service.setExpectedSessionToken(null);
             lobbyHelloSent = false;
             handshakeManifestSent = false;
             seedLockRequestSent = false;
@@ -1046,6 +1053,9 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         String sessionId = sessionState.hostAcceptHandshake();
+        // The transport drops every datagram until it knows what this session's token looks like, so
+        // it has to learn it at the same instant the session id exists — not a frame later.
+        service.setExpectedSessionToken(CoopMessages.wireToken(sessionId));
         CoopMessages.Message accept = CoopMessages.handshakeResultAccept(
                 service.nextSeq(),
                 clockMillis.getAsLong(),
@@ -1172,6 +1182,7 @@ public class CoopNetPump implements EveryFrameScript {
         if (accepted) {
             String sessionId = CoopMessages.requiredPayloadString(message, "sessionId");
             sessionState.guestAcceptHandshake(sessionId);
+            service.setExpectedSessionToken(CoopMessages.wireToken(sessionId));
             CoopLog.info(CoopNetPump.class, "Coop handshake accepted sessionId=" + sessionId);
             return;
         }
@@ -1742,7 +1753,9 @@ public class CoopNetPump implements EveryFrameScript {
                 return;
             }
             String datagram = datagramRedundancy.compose(
-                    sessionState.sessionId(), CoopMessages.Type.FLEET_SNAPSHOT,
+                    CoopMessages.wireToken(sessionState.sessionId()),
+                    CoopMessages.wireToken(sessionState.localPlayerId()),
+                    CoopMessages.Type.FLEET_SNAPSHOT,
                     streamClock.nextEpoch(), streamClock.gameTimeMillis(), snapshot.encode());
             service.sendDatagram(datagram);
         } catch (RuntimeException | LinkageError ex) {
@@ -1947,10 +1960,10 @@ public class CoopNetPump implements EveryFrameScript {
                 // but then discarded is exactly what a desync investigation wants to see. Dormant
                 // unless -Dcoop.debug.wiretap=true / $coopWiretap.
                 wiretap.recordReceive(raw, datagram);
-                if (!sessionMatches(datagram.sessionId())) {
+                if (!sessionMatches(datagram.token())) {
                     continue;
                 }
-                // Sections at or below the per-type epoch watermark are dropped here: a reordered
+                // Sections at or below the (senderId, type) epoch watermark are dropped here: a reordered
                 // datagram applies nothing, a redundant section that already arrived applies nothing,
                 // and a redundant section covering a lost packet applies normally (oldest first).
                 for (CoopMessages.DatagramSection section : datagramWatermark.accept(datagram)) {
@@ -2216,9 +2229,14 @@ public class CoopNetPump implements EveryFrameScript {
         return hash.length() <= 8 ? hash : hash.substring(0, 8);
     }
 
-    private boolean sessionMatches(String datagramSessionId) {
+    /**
+     * Belt-and-braces: {@link CoopNetService} already drops datagrams whose token is not this
+     * session's, so nothing that reaches here should fail this. It stays because the pump's own view
+     * of the session id is what the apply paths trust, and the two must never disagree silently.
+     */
+    private boolean sessionMatches(String datagramToken) {
         String sessionId = sessionState.sessionId();
-        return sessionId != null && sessionId.equals(datagramSessionId);
+        return sessionId != null && CoopMessages.wireToken(sessionId).equals(datagramToken);
     }
 
     private String localPlayerFactionId() {

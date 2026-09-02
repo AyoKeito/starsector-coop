@@ -9,11 +9,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopDatagramWatermarkTest {
 
+    private static final String SENDER_A = "aaaaaaaaaaaaaaaa";
+    private static final String SENDER_B = "bbbbbbbbbbbbbbbb";
+
     private final CoopDatagramWatermark watermark = new CoopDatagramWatermark();
 
-    private static CoopMessages.Datagram datagram(String sessionId, CoopMessages.Type type,
+    private static CoopMessages.Datagram datagram(String token, CoopMessages.Type type,
                                                   CoopMessages.DatagramSection... sections) {
-        return new CoopMessages.Datagram(sessionId, type, List.of(sections));
+        return datagram(token, SENDER_A, type, sections);
+    }
+
+    private static CoopMessages.Datagram datagram(String token, String senderId, CoopMessages.Type type,
+                                                  CoopMessages.DatagramSection... sections) {
+        return new CoopMessages.Datagram(token, senderId, type, List.of(sections));
     }
 
     private static CoopMessages.DatagramSection section(long epoch, String body) {
@@ -66,14 +74,50 @@ class CoopDatagramWatermarkTest {
         assertEquals(1, fresh.size());
     }
 
+    /**
+     * Phase 20.1: epochs come from each sender's own stream clock and are not comparable across
+     * senders. Keyed by type alone, the peer that started streaming first would park the watermark
+     * above a second peer's epochs and swallow that peer's whole stream.
+     */
     @Test
-    void newSessionIdResetsWatermarks() {
-        watermark.accept(datagram("s1", CoopMessages.Type.NPC_FLEET_MOTION, section(50, "old")));
-        // A new session's peer restarts its epochs; its first datagram must not be swallowed.
+    void sendersTrackIndependentWatermarks() {
+        watermark.accept(datagram("s", SENDER_A, CoopMessages.Type.FLEET_SNAPSHOT, section(5, "a5")));
+
         List<CoopMessages.DatagramSection> fresh = watermark.accept(
-                datagram("s2", CoopMessages.Type.NPC_FLEET_MOTION, section(1, "new")));
-        assertEquals(1, fresh.size());
-        assertEquals("new", fresh.get(0).body());
+                datagram("s", SENDER_B, CoopMessages.Type.FLEET_SNAPSHOT, section(3, "b3")));
+
+        assertEquals(1, fresh.size(), "sender A's epoch must not censor sender B's stream");
+        assertEquals("b3", fresh.get(0).body());
+    }
+
+    @Test
+    void oneSendersReorderDoesNotDisturbAnother() {
+        watermark.accept(datagram("s", SENDER_A, CoopMessages.Type.FLEET_SNAPSHOT, section(4, "a4")));
+        watermark.accept(datagram("s", SENDER_B, CoopMessages.Type.FLEET_SNAPSHOT, section(9, "b9")));
+
+        assertTrue(watermark.accept(
+                        datagram("s", SENDER_A, CoopMessages.Type.FLEET_SNAPSHOT, section(3, "a3"))).isEmpty(),
+                "sender A's own reorder is still stale");
+        assertEquals(1, watermark.accept(
+                        datagram("s", SENDER_A, CoopMessages.Type.FLEET_SNAPSHOT, section(5, "a5"))).size(),
+                "sender A's next tick must still pass under sender B's higher epoch");
+    }
+
+    @Test
+    void newTokenResetsWatermarksForEverySender() {
+        watermark.accept(datagram("s1", SENDER_A, CoopMessages.Type.NPC_FLEET_MOTION, section(50, "old-a")));
+        watermark.accept(datagram("s1", SENDER_B, CoopMessages.Type.NPC_FLEET_MOTION, section(50, "old-b")));
+
+        // A new session's peers restart their epochs; neither first datagram may be swallowed.
+        List<CoopMessages.DatagramSection> freshA = watermark.accept(
+                datagram("s2", SENDER_A, CoopMessages.Type.NPC_FLEET_MOTION, section(1, "new-a")));
+        List<CoopMessages.DatagramSection> freshB = watermark.accept(
+                datagram("s2", SENDER_B, CoopMessages.Type.NPC_FLEET_MOTION, section(1, "new-b")));
+
+        assertEquals(1, freshA.size());
+        assertEquals("new-a", freshA.get(0).body());
+        assertEquals(1, freshB.size());
+        assertEquals("new-b", freshB.get(0).body());
     }
 
     @Test

@@ -3,6 +3,8 @@ package coop.net;
 import coop.handshake.CoopHandshakeManifest;
 import coop.session.CoopPlayerInfo;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -64,15 +66,67 @@ public final class CoopMessages {
         RESPAWN_PLAYER,
         PING,
         PONG,
+        /** Datagram-only: idle-path UDP keepalive so NAT bindings and link liveness survive quiet stretches. */
+        UDP_PROBE,
+        /** Datagram-only: QUIC-style path challenge/echo that proves a new UDP source before it is streamed to. */
+        PATH_PROBE,
         DISCONNECT
     }
 
-    public record Message(Type type, String sessionId, long seq, long sentAtMillis, String payloadJson) {
+    /**
+     * TCP control message. {@code senderId} (Phase 20.5) is the full player id of the originator and
+     * is nullable: the ~50 factories deliberately do not take it, because stamping it at the factory
+     * would mean threading the local id through every call site. {@link CoopNetService#send} stamps it
+     * on the way out instead, so one seam owns it. Nothing routes on it yet — it exists now because
+     * the wire format is the expensive thing to change once two installs must agree on it.
+     */
+    public record Message(Type type, String sessionId, long seq, long sentAtMillis, String payloadJson,
+                          String senderId) {
         public Message {
             Objects.requireNonNull(type, "type");
             payloadJson = payloadJson == null ? "{}" : payloadJson;
         }
+
+        /** Unstamped message (every factory below); the sending service fills {@code senderId} in. */
+        public Message(Type type, String sessionId, long seq, long sentAtMillis, String payloadJson) {
+            this(type, sessionId, seq, sentAtMillis, payloadJson, null);
+        }
+
+        /** Copy stamped with {@code senderId}; returns {@code this} when it already carries one. */
+        public Message withSenderId(String senderId) {
+            if (this.senderId != null || senderId == null) {
+                return this;
+            }
+            return new Message(type, sessionId, seq, sentAtMillis, payloadJson, senderId);
+        }
     }
+
+    /**
+     * Short wire id: the first 16 hex characters (64 bits) of the SHA-256 of {@code fullId}.
+     *
+     * <p>Datagrams pay their envelope on every packet at 10 Hz, where a 36-character UUID is ~9% of a
+     * 1,200-byte MTU budget for a field that only ever has to answer "is this ours?". 64 bits keeps
+     * blind spoofing infeasible for that drop-foreign-traffic role, and the address-hijack case is
+     * covered by the {@code PATH_PROBE} challenge-echo rather than by this token's width. The full
+     * UUID still travels on TCP, where one control message per second costs nothing.
+     */
+    public static String wireToken(String fullId) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest((fullId == null ? "" : fullId).getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(WIRE_TOKEN_CHARS);
+            for (int i = 0; out.length() < WIRE_TOKEN_CHARS; i++) {
+                out.append(Character.forDigit((hash[i] >>> 4) & 0x0f, 16));
+                out.append(Character.forDigit(hash[i] & 0x0f, 16));
+            }
+            return out.toString();
+        } catch (Exception ex) {
+            throw new IllegalStateException("Unable to derive coop wire token", ex);
+        }
+    }
+
+    /** Characters of hex in a {@link #wireToken(String)}; 16 hex = 64 bits. */
+    public static final int WIRE_TOKEN_CHARS = 16;
 
     public static Message hello(String sessionId, long seq, long sentAtMillis, CoopConnectionRole role) {
         Objects.requireNonNull(role, "role");
@@ -678,75 +732,155 @@ public final class CoopMessages {
      * envelope is fields joined by a unit-separator that never appears in those encodings. Datagrams
      * are framed one-per-packet by UDP itself.
      *
-     * <p><b>Phase 29 M1 wire prerequisite (2026-08-24; the Phase 20.1 epoch guard pulled forward):</b>
-     * the envelope carries one or more <em>sections</em>, oldest first, each stamped with the sender's
-     * monotonic {@code epoch} and stream time ({@link CoopStreamClock}). The current send plus the
-     * previous one ride in the same packet ({@link CoopDatagramRedundancy}), so a single lost datagram
-     * costs nothing — its sections arrive again in the next one. The receiver drops sections at or
-     * below its per-type epoch watermark ({@link CoopDatagramWatermark}), which is also what makes a
-     * reordered datagram inert instead of a stale-position apply. Wire shape: {@code sessionId},
-     * {@code TYPE}, then per section {@code epoch}, {@code sentGameTimeMillis}, {@code body}, all
-     * unit-separator joined — token count {@code 2 + 3n}.
+     * <p><b>Wire shape (Phase 20.1/20.5):</b> {@code token}, {@code senderId}, {@code TYPE}, then per
+     * section {@code epoch}, {@code sentGameTimeMillis}, {@code chunk}, {@code body} — all
+     * unit-separator joined, token count {@code 3 + 4n}.
+     *
+     * <ul>
+     *   <li>{@code token} is {@link #wireToken(String)} of the session id, not the UUID: this field
+     *       rides every packet at 10 Hz and only has to answer "is this ours?".</li>
+     *   <li>{@code senderId} is {@link #wireToken(String)} of the sending player id. It exists so the
+     *       receiver's watermark can be keyed per sender — with one guest that is invisible, with
+     *       three it is the difference between a working stream and one guest's epochs silently
+     *       censoring another's.</li>
+     *   <li>Sections carry the sender's monotonic {@code epoch} and stream time
+     *       ({@link CoopStreamClock}), oldest first. The current send plus the previous one ride in
+     *       the same packet ({@link CoopDatagramRedundancy}), so a single lost datagram costs nothing.
+     *       The receiver drops sections at or below its {@code (senderId, type)} epoch watermark
+     *       ({@link CoopDatagramWatermark}), which is also what makes a reordered datagram inert
+     *       instead of a stale-position apply.</li>
+     *   <li>{@code chunk} is 0 everywhere today. It is on the wire now because Phase 20 M4 splits an
+     *       oversized batch into self-contained chunk datagrams sharing one epoch, and adding a field
+     *       to a shipped envelope is the expensive kind of change.</li>
+     * </ul>
      */
-    public record Datagram(String sessionId, Type type, List<DatagramSection> sections) {
+    public record Datagram(String token, String senderId, Type type, List<DatagramSection> sections) {
         public Datagram {
             type = Objects.requireNonNull(type, "type");
-            sessionId = sessionId == null ? "" : sessionId;
+            token = token == null ? "" : token;
+            senderId = senderId == null ? "" : senderId;
             sections = sections == null ? List.of() : List.copyOf(sections);
         }
     }
 
-    /** One stamped body within a {@link Datagram}; {@code sentGameTimeMillis} is sender stream time. */
-    public record DatagramSection(long epoch, long sentGameTimeMillis, String body) {
+    /**
+     * One stamped body within a {@link Datagram}; {@code sentGameTimeMillis} is sender stream time and
+     * {@code chunk} is the 0-based index of this piece within its epoch (0 until Phase 20 M4 chunks).
+     */
+    public record DatagramSection(long epoch, long sentGameTimeMillis, int chunk, String body) {
         public DatagramSection {
             body = body == null ? "" : body;
+        }
+
+        /** Unchunked section — everything today. */
+        public DatagramSection(long epoch, long sentGameTimeMillis, String body) {
+            this(epoch, sentGameTimeMillis, 0, body);
+        }
+    }
+
+    /**
+     * Envelope prefix only: what the transport needs to decide whether a datagram is ours, before any
+     * body is parsed and before anything can be learned from the packet. Kept separate from
+     * {@link #parseDatagram} because {@link CoopNetService} runs this on every inbound packet
+     * including hostile ones, and parsing N section bodies to answer "wrong session" is work an
+     * attacker would get to choose the size of.
+     */
+    public record DatagramHeader(String token, String senderId, Type type) {
+        public DatagramHeader {
+            Objects.requireNonNull(type, "type");
+            token = token == null ? "" : token;
+            senderId = senderId == null ? "" : senderId;
         }
     }
 
     private static final char DATAGRAM_SEPARATOR = '\u001f';
+    /** Envelope fields before the first section: token, senderId, type. */
+    private static final int DATAGRAM_HEADER_TOKENS = 3;
+    /** Fields per section: epoch, sentGameTimeMillis, chunk, body. */
+    private static final int DATAGRAM_SECTION_TOKENS = 4;
 
-    public static String datagram(String sessionId, Type type, List<DatagramSection> sections) {
+    public static String datagram(String token, String senderId, Type type,
+                                  List<DatagramSection> sections) {
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(sections, "sections");
         if (sections.isEmpty()) {
             throw new IllegalArgumentException("Datagram needs at least one section");
         }
-        StringBuilder out = new StringBuilder(64 + sections.size() * 32);
-        out.append(sessionId == null ? "" : sessionId).append(DATAGRAM_SEPARATOR).append(type.name());
+        StringBuilder out = new StringBuilder(48 + sections.size() * 32);
+        out.append(token == null ? "" : token).append(DATAGRAM_SEPARATOR)
+                .append(senderId == null ? "" : senderId).append(DATAGRAM_SEPARATOR)
+                .append(type.name());
         for (DatagramSection section : sections) {
             out.append(DATAGRAM_SEPARATOR).append(section.epoch())
                     .append(DATAGRAM_SEPARATOR).append(section.sentGameTimeMillis())
+                    .append(DATAGRAM_SEPARATOR).append(section.chunk())
                     .append(DATAGRAM_SEPARATOR).append(section.body());
         }
         return out.toString();
     }
 
-    /** Single-section convenience (transport tests and call sites without redundancy). */
-    public static String datagram(String sessionId, Type type, long epoch, long sentGameTimeMillis,
-                                  String body) {
-        return datagram(sessionId, type, List.of(new DatagramSection(epoch, sentGameTimeMillis, body)));
+    /** Single-section convenience for chunk 0 (every call site today). */
+    public static String datagram(String token, String senderId, Type type, long epoch,
+                                  long sentGameTimeMillis, String body) {
+        return datagram(token, senderId, type, epoch, sentGameTimeMillis, 0, body);
+    }
+
+    /** Single-section convenience with an explicit chunk index. */
+    public static String datagram(String token, String senderId, Type type, long epoch,
+                                  long sentGameTimeMillis, int chunk, String body) {
+        return datagram(token, senderId, type,
+                List.of(new DatagramSection(epoch, sentGameTimeMillis, chunk, body)));
     }
 
     public static Datagram parseDatagram(String raw) {
         Objects.requireNonNull(raw, "raw");
         String[] tokens = splitDatagram(raw);
-        if (tokens.length < 5 || (tokens.length - 2) % 3 != 0) {
+        if (tokens.length < DATAGRAM_HEADER_TOKENS + DATAGRAM_SECTION_TOKENS
+                || (tokens.length - DATAGRAM_HEADER_TOKENS) % DATAGRAM_SECTION_TOKENS != 0) {
             throw new IllegalArgumentException("Malformed coop datagram envelope");
         }
-        String sessionId = tokens[0];
-        Type type = Type.valueOf(tokens[1]);
-        int sectionCount = (tokens.length - 2) / 3;
+        String token = tokens[0];
+        String senderId = tokens[1];
+        Type type = Type.valueOf(tokens[2]);
+        int sectionCount = (tokens.length - DATAGRAM_HEADER_TOKENS) / DATAGRAM_SECTION_TOKENS;
         List<DatagramSection> sections = new ArrayList<>(sectionCount);
         for (int i = 0; i < sectionCount; i++) {
-            int base = 2 + i * 3;
+            int base = DATAGRAM_HEADER_TOKENS + i * DATAGRAM_SECTION_TOKENS;
             try {
                 sections.add(new DatagramSection(Long.parseLong(tokens[base]),
-                        Long.parseLong(tokens[base + 1]), tokens[base + 2]));
+                        Long.parseLong(tokens[base + 1]), Integer.parseInt(tokens[base + 2]),
+                        tokens[base + 3]));
             } catch (NumberFormatException ex) {
                 throw new IllegalArgumentException("Malformed coop datagram section stamp", ex);
             }
         }
-        return new Datagram(sessionId, type, sections);
+        return new Datagram(token, senderId, type, sections);
+    }
+
+    /**
+     * Reads the envelope prefix and nothing else. Throws {@link IllegalArgumentException} — and only
+     * that — for anything malformed, so the transport's inbound filter has exactly one failure mode
+     * to classify and can never be knocked over by a crafted packet.
+     */
+    public static DatagramHeader parseDatagramHeader(String raw) {
+        if (raw == null) {
+            throw new IllegalArgumentException("Missing coop datagram");
+        }
+        int first = raw.indexOf(DATAGRAM_SEPARATOR);
+        int second = first < 0 ? -1 : raw.indexOf(DATAGRAM_SEPARATOR, first + 1);
+        int third = second < 0 ? -1 : raw.indexOf(DATAGRAM_SEPARATOR, second + 1);
+        if (third < 0) {
+            // No third separator means no section follows, which is not a datagram this transport
+            // emits — reject it here rather than let a header-only packet through the filter.
+            throw new IllegalArgumentException("Malformed coop datagram envelope");
+        }
+        String typeName = raw.substring(second + 1, third);
+        try {
+            return new DatagramHeader(raw.substring(0, first), raw.substring(first + 1, second),
+                    Type.valueOf(typeName));
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalArgumentException("Unknown coop datagram type: " + typeName, ex);
+        }
     }
 
     /**
@@ -777,7 +911,9 @@ public final class CoopMessages {
         json.append(',');
         json.append("\"seq\":").append(message.seq()).append(',');
         json.append("\"sentAtMillis\":").append(message.sentAtMillis()).append(',');
-        json.append("\"payloadJson\":\"").append(escapeJson(message.payloadJson())).append("\"");
+        json.append("\"payloadJson\":\"").append(escapeJson(message.payloadJson())).append("\",");
+        json.append("\"senderId\":");
+        appendNullableString(json, message.senderId());
         json.append('}');
         return json.toString();
     }
@@ -789,7 +925,10 @@ public final class CoopMessages {
         long seq = requiredLong(fields, "seq");
         long sentAtMillis = requiredLong(fields, "sentAtMillis");
         String payloadJson = requiredString(fields, "payloadJson");
-        return new Message(type, sessionId, seq, sentAtMillis, payloadJson);
+        // Tolerant: a message from a factory that never stamps a sender, or from before the
+        // field existed, decodes to null rather than failing the whole frame.
+        String senderId = nullableString(fields, "senderId");
+        return new Message(type, sessionId, seq, sentAtMillis, payloadJson, senderId);
     }
 
     public static Map<String, Object> decodePayload(Message message) {
