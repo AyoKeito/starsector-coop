@@ -463,3 +463,35 @@ Three findings:
 
 The machine has no global IPv6 (`IPv6Connectivity : NoTraffic`), so tier 1 was verified on loopback
 only. A real two-household IPv6 session is still outstanding.
+
+### A session across the real Internet
+
+Run 2026-09-02, build `3d3f41b`. The two clients ran on the same PC, but only one of them reached the
+host through the household LAN. The guest's JVM was launched as `jre\bin\coopguest-java.exe` (the
+guest launch script's `-ProxiedJvm` switch), and a per-application proxy on the machine routes that
+executable name through an AmneziaWG tunnel to a server in another network. Its packets left through
+the tunnel, came back in from the public Internet to the router's WAN side, and hit the UPnP mapping
+the host had opened. The host saw the guest from the tunnel's exit address, not from `192.168.1.x`.
+
+What the logs showed:
+
+- Host doctor block: `port mapping UPnP IGD via 192.168.1.1 "MikroTik Router (Router OS)"`, tier 3,
+  `share with guest 91.77.x.x:7777`.
+- Wrong password first: `LOBBY_CHALLENGE`, then `LOBBY_REJECT` "password rejected" and a drop, three
+  times; then `refusing connections from <tunnel exit> for 30000 ms after 3 failed lobby password
+  proofs`. A fourth failure doubled it to 60 s. Connections inside the cooldown were closed with no
+  reply. The guest log said `Coop lobby rejected: password rejected`.
+- Right password: `LOBBY_ACCEPT`, handshake, then `Coop UDP return address validated /<tunnel
+  exit>:39195`. Fleet state streamed over UDP through the tunnel; the TCP fallback never engaged.
+- Ten minutes of play: no fallback, degraded, link-death or grace transitions on either side, no coop
+  WARN. Host-side p95 RTT in the handoff-margin lines ran 52 to 181 ms across 17 samples, eleven of
+  them at 53 ms or 181 ms; the tunnel added most of that. Wiretap maxima 289 B (`FLEET_SNAPSHOT`) and
+  883 B (`NPC_FLEET_MOTION`). Clocks were within 0.5 game-seconds at the end.
+
+Two guest-side defects came out of the wrong-password half, filed in the plan as Phase 20 findings
+F4 and F5: the guest never backs off or shows the reason after a password reject (it reconnects every
+500 ms through the host's whole cooldown), and the reconnect right after a reject sends no hello, so
+it sits on the host's slot until the 15 s handshake deadline drops it. Neither weakens the host side,
+which rejected and throttled as designed. One practical consequence for testers: relaunching a guest
+while the old process is still knocking extends the cooldown, so the corrected guest looks unable to
+connect until it expires.
