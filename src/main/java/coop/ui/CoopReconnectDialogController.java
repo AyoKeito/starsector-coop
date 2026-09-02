@@ -1,0 +1,91 @@
+package coop.ui;
+
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.SectorAPI;
+import coop.util.CoopLog;
+
+/**
+ * Owns the one awkward part of showing a coop dialog: {@code showInteractionDialog} is exclusive, so
+ * it returns {@code false} whenever another dialog already has the slot, and there is no callback for
+ * "the slot is free now".
+ *
+ * <p>The 20.6 integration rule therefore says: retry every frame until it takes, and never force-close
+ * whatever is in the way. That matters most in exactly the situation this dialog exists for — the link
+ * can perfectly well die while the player is mid-conversation at a market, and stealing that dialog
+ * would abort a trade the player was in the middle of. So the reconnect dialog waits its turn; the
+ * feed banner posted alongside it carries the message until it gets one.
+ *
+ * <p>Engine-free when there is no engine: with no sector or no campaign UI every method is a no-op,
+ * which is what lets the coordinator's unit tests run with no game at all.
+ */
+public final class CoopReconnectDialogController {
+
+    private CoopReconnectDialogPlugin pending;
+    private boolean shown;
+    private boolean openFailureLogged;
+
+    /**
+     * Asks for this dialog to be on screen. Idempotent per plugin instance: calling it again while the
+     * same one is already up does nothing, and calling it with a new one replaces what we are trying
+     * to show.
+     */
+    public void request(CoopReconnectDialogPlugin plugin) {
+        if (plugin == null || plugin == pending) {
+            return;
+        }
+        close();
+        pending = plugin;
+        shown = false;
+        openFailureLogged = false;
+    }
+
+    /** Frame tick: one {@code showInteractionDialog} attempt while a dialog is wanted but not up. */
+    public void tick() {
+        if (pending == null || shown) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            CampaignUIAPI ui = sector.getCampaignUI();
+            if (ui == null) {
+                return;
+            }
+            // Null interaction target: this dialog is about the session, not about anything in the
+            // sector, and there is no entity it would make sense to point at.
+            shown = ui.showInteractionDialog(pending, null);
+        } catch (Throwable ex) {
+            // Once. A UI that throws here will throw every frame, and the caller already posted a feed
+            // banner carrying the same message.
+            if (!openFailureLogged) {
+                openFailureLogged = true;
+                CoopLog.warn(CoopReconnectDialogController.class,
+                        "Coop could not open the reconnect dialog; falling back to the feed banner", ex);
+            }
+            pending = null;
+        }
+    }
+
+    /** True once the engine has actually put the requested dialog on screen. */
+    public boolean isShown() {
+        return shown;
+    }
+
+    /** True while a dialog is wanted, whether or not it has managed to open yet. */
+    public boolean isRequested() {
+        return pending != null;
+    }
+
+    /** Dismisses whatever is up and stops trying. Idempotent. */
+    public void close() {
+        CoopReconnectDialogPlugin open = pending;
+        pending = null;
+        shown = false;
+        if (open != null) {
+            open.close();
+        }
+    }
+}

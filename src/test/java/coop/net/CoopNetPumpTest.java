@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopNetPumpTest {
@@ -883,7 +884,8 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
-        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = new CoopNetPump(service, session, now::get,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
                 () -> "fingerprint-host",
@@ -891,8 +893,11 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         // The in-game failure: guest quit, host detected the dead channel, but the guest slot was
-        // never freed, so the rejoin's LOBBY_HELLO got "Lobby already has a guest" forever.
+        // never freed, so the rejoin's LOBBY_HELLO got "Lobby already has a guest" forever. Since
+        // Phase 20.2 the slot is held for the grace window first; this is the post-expiry behaviour.
         service.connected = false;
+        pump.advance(0f);
+        now.set(1000L + 61_000L);
         pump.advance(0f);
 
         assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
@@ -903,6 +908,7 @@ class CoopNetPumpTest {
 
         service.connected = true;
         service.inbound.add(CoopMessages.lobbyHello(1L, 2000L, new CoopPlayerInfo("guest-b", "Guest B")));
+        pump.advance(0f);
         pump.advance(0f);
 
         assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
@@ -920,7 +926,8 @@ class CoopNetPumpTest {
         session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
         session.guestAcceptHandshake("session-a");
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
-        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = new CoopNetPump(service, session, now::get,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
                 () -> "fingerprint-host",
@@ -930,8 +937,11 @@ class CoopNetPumpTest {
 
         // Network blip: the service auto-reconnects TCP, but pre-fix the pump never resent the
         // hello (lobbyHelloSent stayed true) and the session state stayed post-lock, deadlocking
-        // both sides.
+        // both sides. Since Phase 20.2 the guest first spends the grace window asking for a resume;
+        // this is what it does once that window has expired.
         service.connected = false;
+        pump.advance(0f);
+        now.set(1000L + 61_000L);
         pump.advance(0f);
 
         assertEquals(CoopLobbyState.GUEST_CONNECTING, session.connectionState());
@@ -1394,6 +1404,12 @@ class CoopNetPumpTest {
                 "the next connection's transport must not be decided by the dead one's silence");
         assertEquals(100L, pump.stateStreamIntervalMillis());
         assertNull(pump.peerLinkStatus());
+
+        // Phase 20.2 holds the session open for the grace window, so the link readout only goes away
+        // once the window closes and the session really ends.
+        now.set(12_000L + 61_000L);
+        pump.advance(0f);
+
         assertNull(pump.hudState(false).transport(), "no session, no link readout");
     }
 
@@ -1677,8 +1693,17 @@ class CoopNetPumpTest {
         service.connected = false;
         pump.advance(0f);
 
-        // Same lobby state a never-connected host sits in (HOST_WAITING); only the disconnect edge
-        // knows a live session was lost here.
+        // Phase 20.2: the drop opens a grace window rather than ending the session, and the HUD says
+        // so with the same wording the 12b hold used.
+        assertEquals(CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING, pump.hudState(true).status());
+        assertEquals("reconnect", pump.hudState(true).pauseHolder(),
+                "the session, not a player, is what is holding the clock");
+
+        // Past the grace, the pre-20.2 teardown runs and the lobby rewinds to HOST_WAITING; only the
+        // disconnect edge knows a live session was lost here.
+        now.set(1000L + 61_000L);
+        pump.advance(0f);
+
         assertEquals(CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING, pump.hudState(true).status());
         assertNull(pump.hudState(true).pauseHolder(), "no session, so nobody owns the shared pause");
     }
@@ -1705,6 +1730,509 @@ class CoopNetPumpTest {
         CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
 
         assertEquals(CoopHudState.STATUS_REJECTED, pump.hudState(false).status());
+    }
+
+    // ---- Phase 20.2: in-session reconnect grace ---------------------------------------------------
+
+    @Test
+    void aLiveSessionDropOpensTheGraceWindowInsteadOfTearingTheSessionDown() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+
+        // The whole point: the session record survives the socket.
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+        assertEquals("session-a", session.sessionId());
+        assertEquals("guest-player", session.remotePlayerId());
+        assertTrue(session.handshakeValidated());
+        assertEquals(Long.valueOf(123456789L), session.seedLong());
+        assertEquals(CoopLobbyState.HOST_CONNECTED, session.connectionState());
+        // ...but no datagram stamped with its token is accepted while the window is open.
+        assertNull(service.expectedTokens.get(service.expectedTokens.size() - 1));
+        assertTrue(pump.pauseCoordinatorForBridge().reconnectHold());
+        assertTrue(pump.pauseCoordinatorForBridge().effectivePaused());
+    }
+
+    @Test
+    void aDropBeforeTheSessionIsLiveKeepsThePreGraceTeardown() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(),
+                "no handshake and no seed lock, so there is no session to hold");
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+        assertNull(session.sessionId());
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+    }
+
+    @Test
+    void aSessionThatNeverDropsNeverTouchesTheGraceMachinery() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+
+        for (int frame = 0; frame < 200; frame++) {
+            now.addAndGet(100L);
+            pump.advance(0f);
+        }
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, pump.hudState(false).status());
+        assertEquals(0, countOf(service, CoopMessages.Type.SESSION_RESUME_REQUEST));
+        assertEquals(0, countOf(service, CoopMessages.Type.SESSION_RESUME_ACCEPT));
+    }
+
+    @Test
+    void aMatchingResumeRequestIsAcceptedRestoresTheTokenAndForcesARebroadcast() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 5_000L, 3L, 1000L, ""));
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, timeLock);
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+        service.sent.clear();
+
+        service.connected = true;
+        now.addAndGet(4_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(), "guest-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(1, countOf(service, CoopMessages.Type.SESSION_RESUME_ACCEPT));
+        assertEquals(0, countOf(service, CoopMessages.Type.SESSION_RESUME_REJECT));
+        // The token is back, so the guest's datagrams are accepted again on the same session.
+        assertEquals(CoopMessages.wireToken("session-a"),
+                service.expectedTokens.get(service.expectedTokens.size() - 1));
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, pump.hudState(false).status());
+        // The forced rebroadcast pulls the 5 Hz clock stream forward rather than making the
+        // returning guest wait out the cadence with a frozen clock.
+        assertTrue(countOf(service, CoopMessages.Type.TIME_SNAPSHOT) >= 1,
+                "a resume must re-seed the guest's clock immediately");
+    }
+
+    @Test
+    void aStrangerIsRejectedAndTheHostKeepsWaitingForTheRealPartner() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.sent.clear();
+
+        service.connected = true;
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-b", 9L, 2000L, "guest-player"));
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 10L, 2000L, "someone-else"));
+        service.inbound.add(CoopMessages.lobbyHello(11L, 2000L, new CoopPlayerInfo("guest-z", "Stranger")));
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(),
+                "a stranger must not be able to end the wait early");
+        assertEquals(2, countOf(service, CoopMessages.Type.SESSION_RESUME_REJECT));
+        assertEquals(0, countOf(service, CoopMessages.Type.SESSION_RESUME_ACCEPT));
+        assertEquals(1, countOf(service, CoopMessages.Type.LOBBY_REJECT));
+        assertTrue(onlyOf(service, CoopMessages.Type.LOBBY_REJECT).payloadJson()
+                .contains(CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE));
+        assertEquals("guest-player", session.remotePlayerId(), "the slot still belongs to the partner");
+    }
+
+    @Test
+    void campaignTrafficFromAnUnprovenPeerIsIgnoredForTheWholeGraceWindow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.sent.clear();
+
+        // The session record is still live, so without the whitelist every campaign handler would
+        // run for whoever happens to be on the far end of this socket.
+        service.connected = true;
+        service.inbound.add(CoopMessages.worldDelta("session-a", 5L, 2000L,
+                "entity-1", "CONSUME", true, "", "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(0, countOf(service, CoopMessages.Type.WORLD_DELTA),
+                "an unproven peer's campaign traffic must not reach the replicator");
+
+        // After a matching resume the same message is ordinary session traffic again.
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 6L, 2000L, "guest-player"));
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.worldDelta("session-a", 7L, 2000L,
+                "entity-1", "CONSUME", true, "", "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(1, countOf(service, CoopMessages.Type.WORLD_DELTA));
+    }
+
+    @Test
+    void graceExpiryOnTheHostRunsTheOrdinaryTeardownAndReleasesTheHold() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+
+        now.set(1000L + 60_000L);
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+        assertNull(session.sessionId());
+        assertNull(session.remotePlayerId());
+        assertFalse(session.handshakeValidated());
+        assertNull(session.seedLong());
+    }
+
+    @Test
+    void theEndSessionOptionClosesTheWindowImmediately() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+
+        // Exactly what the dialog's one option runs.
+        pump.reconnectCoordinatorForTest().end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+    }
+
+    @Test
+    void theGuestAsksToResumeInsteadOfStartingAFreshLobbyRound() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.sent.clear();
+
+        service.connected = true;
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(0, countOf(service, CoopMessages.Type.LOBBY_HELLO),
+                "the whole point is not re-running the lobby for a blip");
+        CoopMessages.Message request = onlyOf(service, CoopMessages.Type.SESSION_RESUME_REQUEST);
+        assertEquals("session-a", CoopMessages.parseResumeSessionId(request));
+        assertEquals("guest-player", CoopMessages.parseResumePlayerId(request));
+        assertEquals(CoopHudState.STATUS_RECONNECTING, pump.hudState(false).status());
+        assertEquals("reconnect", pump.hudState(false).pauseHolder());
+    }
+
+    @Test
+    void theGuestResumesOnAcceptAndRestoresItsDatagramToken() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+
+        service.connected = true;
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 3L, 2000L));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(CoopMessages.wireToken("session-a"),
+                service.expectedTokens.get(service.expectedTokens.size() - 1));
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, pump.hudState(false).status());
+        assertEquals("session-a", pump.sessionStateForBridge().sessionId());
+    }
+
+    @Test
+    void theGuestEndsTheSessionWhenTheHostRejectsTheResume() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        CoopSessionState session = pump.sessionStateForBridge();
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+
+        service.connected = true;
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeReject("session-a", 3L, 2000L,
+                "session id does not match the held session"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, session.connectionState());
+        assertNull(session.sessionId());
+        // Back to ordinary lobby behaviour on the next frame.
+        pump.advance(0f);
+        assertEquals(1, countOf(service, CoopMessages.Type.LOBBY_HELLO));
+    }
+
+    @Test
+    void anAcceptNamingADifferentSessionIsRefusedRatherThanAdopted() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        CoopSessionState session = pump.sessionStateForBridge();
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.connected = true;
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-zzz", 3L, 2000L));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertNull(session.sessionId());
+    }
+
+    // ---- Phase 20.2: link death -------------------------------------------------------------------
+
+    @Test
+    void fifteenSecondsOfTcpSilenceDropsTheConnectionDeliberately() {
+        DroppingNetService service = new DroppingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        for (long t = 2_000L; t <= 17_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertEquals(1, service.drops.size(), "one deliberate drop, not one per frame");
+        assertTrue(service.drops.get(0).contains("tcpSilence="), service.drops.get(0));
+        assertTrue(service.drops.get(0).contains("peerInCombat=false"), service.drops.get(0));
+    }
+
+    @Test
+    void aPeerInCombatIsNeverDroppedForGoingQuiet() {
+        DroppingNetService service = new DroppingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        // The partner's last word before it went quiet: it is in a battle, so its campaign pump is
+        // stopped. That is the state the exemption reads.
+        service.inbound.add(CoopMessages.battleBegin("session-a", 7L, 1000L, "battle-1",
+                "guest-a", "Corvus", "a pirate armada", "", CoopMessages.BattleKind.PLAYER));
+        pump.advance(0f);
+
+        for (long t = 2_000L; t <= 120_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertEquals(List.of(), service.drops, "a battle stops the peer's pump, not the link");
+    }
+
+    @Test
+    void aCoordinatedSaveCheckpointExemptsTheSilenceItCauses() {
+        DroppingNetService service = new DroppingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.advance(0f);
+
+        // The host says it is saving, then both processes go quiet while the saves are written.
+        service.inbound.add(CoopMessages.saveCheckpoint("session-a", 4L, 1000L, 1L, "host save"));
+        pump.advance(0f);
+        for (long t = 2_000L; t <= 50_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertEquals(List.of(), service.drops);
+
+        // Past the exempt window the same silence is a verdict again.
+        for (long t = 51_000L; t <= 70_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+        assertEquals(1, service.drops.size());
+    }
+
+    @Test
+    void aLocalStallDoesNotCountAsThePeerGoingSilent() {
+        DroppingNetService service = new DroppingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        // This process fought its own battle for 40 s: no frames ran, and the silence it comes back
+        // to is its own doing.
+        now.set(41_000L);
+        pump.advance(0f);
+        for (long t = 42_000L; t <= 55_000L; t += 1_000L) {
+            now.set(t);
+            pump.advance(0f);
+        }
+
+        assertEquals(List.of(), service.drops);
+    }
+
+    // ---- Phase 20.3: port mapper wiring -----------------------------------------------------------
+
+    @Test
+    void aHostStartCreatesTicksAndTearsDownThePortMapper() {
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "27015");
+        try {
+            StartupNetService service = new StartupNetService();
+            AtomicLong now = new AtomicLong(1_000_000L);
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), now::get);
+            // Offline seam: the whole negotiation runs without a packet reaching the LAN.
+            pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, now::get));
+
+            pump.advance(0f);
+
+            assertEquals(27015, service.hostPort);
+            CoopPortMapper mapper = pump.portMapperForTest();
+            assertNotNull(mapper, "a host start must create the mapper");
+            assertEquals(27015, mapper.port());
+
+            for (int frame = 0; frame < 500 && !mapper.result().finished(); frame++) {
+                now.addAndGet(100L);
+                pump.advance(0f);
+            }
+
+            assertTrue(mapper.result().finished(), "the pump's frame tick drives it to a verdict");
+            assertSame(mapper, pump.portMapperForTest(), "the mapper is created once, not per frame");
+
+            pump.shutdownPortMapper();
+            assertNull(pump.portMapperForTest());
+        } finally {
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
+    @Test
+    void aGuestStartNeverMapsAnything() {
+        String savedHost = System.getProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
+        String savedPort = System.getProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, "127.0.0.1");
+        System.setProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, "27015");
+        try {
+            StartupNetService service = new StartupNetService();
+            AtomicLong now = new AtomicLong(1_000_000L);
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), now::get);
+            pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, now::get));
+
+            pump.advance(0f);
+
+            // Star topology: only the host needs to be reachable.
+            assertNull(pump.portMapperForTest());
+            assertEquals(CoopConnectionRole.GUEST, service.role());
+        } finally {
+            restoreProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, savedHost);
+            restoreProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, savedPort);
+        }
+    }
+
+    private static void restoreProperty(String key, String saved) {
+        if (saved == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, saved);
+        }
+    }
+
+    /** A transport that records deliberate drops instead of owning a socket. */
+    private static final class DroppingNetService extends RecordingNetService {
+        private final List<String> drops = new ArrayList<>();
+
+        private DroppingNetService(CoopConnectionRole role) {
+            super(role);
+        }
+
+        @Override
+        public boolean dropActiveConnection(String reason) {
+            drops.add(reason == null ? "" : reason);
+            connected = false;
+            return true;
+        }
+    }
+
+    /** Minimal transport for the startup paths: records what they asked for, opens nothing. */
+    private static final class StartupNetService extends CoopNetService {
+        private CoopConnectionRole role = CoopConnectionRole.NONE;
+        private int hostPort;
+
+        @Override
+        public CoopConnectionRole role() {
+            return role;
+        }
+
+        @Override
+        public void startHost(int port) {
+            hostPort = port;
+            role = CoopConnectionRole.HOST;
+        }
+
+        @Override
+        public void connect(String host, int port) {
+            role = CoopConnectionRole.GUEST;
+        }
+
+        @Override
+        public boolean isConnected() {
+            return false;
+        }
+
+        @Override
+        public void flushOutbound() {
+        }
+
+        @Override
+        public CoopMessages.Message pollInbound() {
+            return null;
+        }
+
+        @Override
+        public String pollDatagram() {
+            return null;
+        }
+
+        @Override
+        public void send(CoopMessages.Message message) {
+        }
+
+        @Override
+        public void setExpectedSessionToken(String token) {
+        }
+
+        @Override
+        public void setLocalSenderId(String playerId) {
+        }
     }
 
     private static CoopNetPump activeHostPump(RecordingNetService service, java.util.function.LongSupplier clock) {
@@ -1873,9 +2401,9 @@ class CoopNetPumpTest {
         assertNull(service.expectedTokens.get(0), "the token must be cleared, not left armed");
     }
 
-    private static final class RecordingNetService extends CoopNetService {
+    private static class RecordingNetService extends CoopNetService {
         private final CoopConnectionRole role;
-        private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
+        final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
         private final List<CoopMessages.Message> sent = new ArrayList<>();
         /** Every setExpectedSessionToken call, nulls included — the clear is as load-bearing as the set. */
         private final List<String> expectedTokens = new ArrayList<>();
@@ -1884,9 +2412,9 @@ class CoopNetPumpTest {
         private final Queue<String> inboundDatagrams = new ArrayDeque<>();
         private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
                 0L, 0L, 0L, "");
-        private boolean connected = true;
+        boolean connected = true;
 
-        private RecordingNetService(CoopConnectionRole role) {
+        RecordingNetService(CoopConnectionRole role) {
             this.role = role;
         }
 

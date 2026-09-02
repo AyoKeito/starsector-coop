@@ -79,8 +79,39 @@ public final class CoopConnectionDoctor {
         return report.toString();
     }
 
-    /** Guest-side block, written once the connection attempt has settled. */
+    /**
+     * Guest-side block, written once the connection attempt has settled. Address-and-verdict shape
+     * only; use {@link #guestReport(String, int, boolean, boolean, CoopLinkQuality.Snapshot,
+     * CoopDatagramStats)} when the link measurements and transport counters are available, which on
+     * the pump's path they always are.
+     */
     public static String guestReport(String host, int port, boolean tcpUp, boolean udpPathUp, long rttMillis) {
+        return guestReport(host, port, tcpUp, udpPathUp, rttMillis < 0 ? null : (int) rttMillis,
+                null, 0, null);
+    }
+
+    /**
+     * Guest-side block with everything the pump knows: the link snapshot (RTT, p95, loss, silence) and
+     * the transport's own counters (validated send target, path validations, probes, drops,
+     * keepalives, ICMP transients).
+     *
+     * <p>Those counters are the half that answers "why". "UDP blocked" plus "0 probes echoed, 12
+     * datagrams dropped for token mismatch" is a diagnosis; "UDP blocked" on its own is a symptom. The
+     * validated send target in particular is the one line that distinguishes a path that never
+     * validated from one that validated and then went quiet.
+     */
+    public static String guestReport(String host, int port, boolean tcpUp, boolean udpPathUp,
+                                     CoopLinkQuality.Snapshot link, CoopDatagramStats stats) {
+        return guestReport(host, port, tcpUp, udpPathUp,
+                link == null ? null : link.rttMillis(),
+                link == null ? null : link.p95RttMillis(),
+                link == null ? 0 : link.lossPercent(),
+                stats);
+    }
+
+    private static String guestReport(String host, int port, boolean tcpUp, boolean udpPathUp,
+                                      Integer rttMillis, Integer p95Millis, int lossPercent,
+                                      CoopDatagramStats stats) {
         Objects.requireNonNull(host, "host");
 
         StringBuilder report = new StringBuilder(HEADER);
@@ -91,7 +122,22 @@ public final class CoopConnectionDoctor {
                 : udpPathUp
                         ? "up - fleet state streams over UDP"
                         : "blocked - fleet state falls back to TCP; movement will be less smooth");
-        line(report, "RTT", rttMillis < 0 ? "not measured yet" : rttMillis + " ms");
+        line(report, "RTT", rttMillis == null ? "not measured yet" : rttMillis + " ms"
+                + (p95Millis == null ? "" : ", p95 " + p95Millis + " ms")
+                + ", loss " + lossPercent + "%");
+        if (stats != null) {
+            line(report, "UDP send target", (stats.validatedRemote().isEmpty() ? "none" : stats.validatedRemote())
+                    + " (validations " + stats.pathValidations()
+                    + ", probes sent " + stats.probesSent()
+                    + ", echoes " + stats.probeEchoesReceived() + ")");
+            line(report, "dropped inbound", "token mismatch " + stats.droppedTokenMismatch()
+                    + ", foreign source " + stats.droppedForeignSource()
+                    + ", malformed " + stats.droppedMalformed()
+                    + ", no token " + stats.droppedNoToken());
+            line(report, "keepalives", "sent " + stats.keepalivesSent()
+                    + ", received " + stats.keepalivesReceived()
+                    + "; ICMP transients " + stats.icmpTransients());
+        }
         line(report, "next step", guestNextStep(host, port, tcpUp, udpPathUp));
         return report.toString();
     }

@@ -75,6 +75,18 @@ public class CoopNetService {
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
     private static final String EXTRA_CONNECTION_REJECT_REASON = "Host already has an active connection";
     /**
+     * A held connection that has delivered no inbound bytes for this long is presumed half-open, and a
+     * new inbound connection replaces it rather than being rejected (Phase 20.2).
+     *
+     * <p>The failure this closes: after a NAT drop the host's socket is not closed, it is
+     * <em>stranded</em> — the OS keeps retransmitting for one to two minutes before it reports the
+     * peer gone. For that whole window {@code activeChannel} is non-null, so the guest's reconnect,
+     * which is already knocking every 500 ms, gets "Host already has an active connection" and the
+     * grace window expires waiting for a guest that was there the entire time. Ten seconds is past
+     * anything the 3 s ping cadence produces on a live link and well inside the 60 s grace default.
+     */
+    static final long HALF_OPEN_REPLACE_MILLIS = 10_000L;
+    /**
      * Idle gap before a {@code UDP_PROBE} goes out. 5 s, not the 10 s first specified: measured NAT UDP
      * timeouts are mostly ≥ 60 s, but a 34-gateway study found one device at 10 s, so 10 s sat on the
      * tail rather than under it.
@@ -169,6 +181,8 @@ public class CoopNetService {
     private String localDatagramSenderId = "";
     private long lastDatagramSentAtMillis;
     private long lastInboundDatagramAtMillis;
+    /** Wall clock of the last inbound TCP byte on {@code activeChannel}; see {@link #HALF_OPEN_REPLACE_MILLIS}. */
+    private long lastInboundFrameAtMillis;
     private long lastIcmpWarnAtMillis;
     private long droppedNoToken;
     private long droppedTokenMismatch;
@@ -468,6 +482,33 @@ public class CoopNetService {
             }
             pollNetworkLocked();
             return inboundDatagrams.poll();
+        }
+    }
+
+    /**
+     * Closes the active TCP channel on purpose, keeping the role, the listening socket and (on the
+     * guest) the retry configuration. Phase 20.2's link-death verdict calls this so the ordinary
+     * disconnect edge fires <em>now</em> instead of whenever the OS finishes retransmitting into a
+     * black hole — the guest's 500 ms retry then starts immediately, and the host opens its grace
+     * window while the world is still worth resuming.
+     *
+     * <p>Deliberately routed through the same close path a peer-initiated drop takes, so nothing
+     * downstream can tell the two apart and no second teardown shape has to be maintained.
+     *
+     * @param reason logged; the verdict's numbers, so a log reader can tell a deliberate drop from a
+     *               socket the peer closed
+     * @return true when a channel was actually closed
+     */
+    public boolean dropActiveConnection(String reason) {
+        synchronized (lifecycleLock) {
+            SocketChannel channel = activeChannel;
+            if (channel == null) {
+                return false;
+            }
+            CoopLog.info(CoopNetService.class, "Coop TCP dropping the active connection as " + role
+                    + ": " + (reason == null || reason.isEmpty() ? "no reason given" : reason));
+            closeActiveChannelLocked(channel);
+            return true;
         }
     }
 
@@ -862,8 +903,17 @@ public class CoopNetService {
         }
 
         if (activeChannel != null) {
-            rejectExtraConnectionLocked(accepted);
-            return;
+            long silence = clockMillis.getAsLong() - lastInboundFrameAtMillis;
+            if (silence < HALF_OPEN_REPLACE_MILLIS) {
+                rejectExtraConnectionLocked(accepted);
+                return;
+            }
+            // The held channel is presumed half-open (see HALF_OPEN_REPLACE_MILLIS): close it so the
+            // new connection can attach, rather than making a reconnecting guest wait out the OS
+            // retransmit timeout. A live peer cannot land here — it pings every 3 s.
+            CoopLog.info(CoopNetService.class, "Coop TCP replacing a presumed half-open connection"
+                    + " (no inbound bytes for " + silence + " ms) with the newly accepted one");
+            closeActiveChannelLocked(activeChannel);
         }
 
         if (!attachChannelLocked(accepted)) {
@@ -962,6 +1012,9 @@ public class CoopNetService {
         activeChannel = channel;
         inboundFrameLength = 0;
         discardingOversizedFrame = false;
+        // A fresh channel starts its silence clock now, so a connection accepted seconds after the
+        // previous one died is not itself immediately eligible for half-open replacement.
+        lastInboundFrameAtMillis = clockMillis.getAsLong();
         pinnedPeerAddress = peerAddressOf(channel);
         foreignDatagramWarned = false;
         candidateTimeoutLogged = false;
@@ -987,6 +1040,9 @@ public class CoopNetService {
 
         readBuffer.clear();
         int read = channel.read(readBuffer);
+        if (read > 0) {
+            lastInboundFrameAtMillis = clockMillis.getAsLong();
+        }
         while (read > 0) {
             readBuffer.flip();
             while (readBuffer.hasRemaining()) {
@@ -1125,6 +1181,7 @@ public class CoopNetService {
         localDatagramSenderId = "";
         lastDatagramSentAtMillis = 0L;
         lastInboundDatagramAtMillis = 0L;
+        lastInboundFrameAtMillis = 0L;
         datagramSendFailureLogged = false;
         noTokenWarned = false;
         tokenMismatchWarned = false;

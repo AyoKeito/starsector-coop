@@ -251,4 +251,18 @@ class CoopHudStateTest {
         assertEquals(" · session active · paused by host · guest 4h ahead",
                 line.substring(state.roleBadge().length()));
     }
+
+    @Test
+    void theReconnectHolderReadsTheSameOnBothClients() {
+        // Nobody "owns" this pause, so unlike host/guest it is not rewritten to "you" on either side.
+        assertEquals("reconnect",
+                CoopHudState.displayHolder(CoopHudState.HOLDER_RECONNECT, CoopConnectionRole.HOST));
+        assertEquals("reconnect",
+                CoopHudState.displayHolder(CoopHudState.HOLDER_RECONNECT, CoopConnectionRole.GUEST));
+
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING, true, "reconnect", null);
+        assertEquals("HOST · guest disconnected, holding · paused by reconnect",
+                CoopHudState.formatLine(state, DOT));
+    }
 }

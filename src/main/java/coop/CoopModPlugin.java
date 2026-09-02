@@ -22,6 +22,13 @@ import coop.util.CoopLog;
 
 public class CoopModPlugin extends BaseModPlugin {
     private CoopNetService netService;
+    /**
+     * The previous game's pump, kept only so its router mapping can be released on the next load.
+     * {@code onGameLoad} is the sole teardown hook the engine offers a mod — there is no quit or exit
+     * callback — so a process that never loads another game leaves the mapping to expire on its own
+     * one-hour lease. That is why the lease is short.
+     */
+    private CoopNetPump netPump;
 
     @Override
     public void onApplicationLoad() throws Exception {
@@ -46,6 +53,12 @@ public class CoopModPlugin extends BaseModPlugin {
             CoopSaveCheckpoint.notifySessionEnding();
             netService.shutdown();
         }
+        if (netPump != null) {
+            // Before the new pump replaces it: releasing the router mapping for a port we are about
+            // to re-open would undo the new session's own mapping (Phase 20.3).
+            netPump.shutdownPortMapper();
+            netPump = null;
+        }
         // The held guest snapshot belongs to the session that just ended; the copy already written
         // into the previous save is untouched, which is the point of it.
         CoopGuestSnapshotStore.clear();
@@ -62,6 +75,7 @@ public class CoopModPlugin extends BaseModPlugin {
         // always-on observer that releases the drive when the pump stops ticking it.
         CoopSystemDriveFrameHook.install(Global.getSector());
         CoopNetPump pump = CoopNetPumpInstaller.install(Global.getSector(), netService);
+        netPump = pump;
         // Phase 20.6 milestone 0: the always-on link status line. Cosmetic and self-disabling, so it
         // goes in right after the pump it reads from and before anything that could fail on its own.
         CoopLinkHud.install(Global.getSector(), pump);

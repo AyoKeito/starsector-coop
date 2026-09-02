@@ -45,6 +45,7 @@ public final class CoopSharedPauseCoordinator {
     private boolean guestKeyPauseIntent;     // guest manual pause — host MAY override
     private boolean guestScreenPauseIntent;  // guest screen-open pause — host may NOT override
     private boolean eitherInCombat;
+    private boolean reconnectHold;
     private long appliedGuestSeq = Long.MIN_VALUE;
 
     // ---- Guest local outgoing state ----
@@ -134,9 +135,24 @@ public final class CoopSharedPauseCoordinator {
         return eitherInCombat;
     }
 
+    /**
+     * Phase 20.2: the host holds the world for the whole reconnect grace window. Unlike every other
+     * intent this one is not a player's choice — it is the session refusing to advance past a partner
+     * who is not there to see it — so no pause key clears it and it outranks the rest in the HUD's
+     * holder wording. Cleared when the window closes, whichever way it closes.
+     */
+    public synchronized void setReconnectHold(boolean held) {
+        reconnectHold = held;
+    }
+
+    public synchronized boolean reconnectHold() {
+        return reconnectHold;
+    }
+
     /** The host-authoritative effective pause: the OR of all intents. */
     public synchronized boolean effectivePaused() {
-        return hostPauseIntent || guestKeyPauseIntent || guestScreenPauseIntent || eitherInCombat;
+        return hostPauseIntent || guestKeyPauseIntent || guestScreenPauseIntent || eitherInCombat
+                || reconnectHold;
     }
 
     /* ===================== Guest side ===================== */
@@ -198,6 +214,7 @@ public final class CoopSharedPauseCoordinator {
         guestKeyPauseIntent = false;
         guestScreenPauseIntent = false;
         eitherInCombat = false;
+        reconnectHold = false;
         appliedGuestSeq = Long.MIN_VALUE;
         guestScreenLevel = false;
         pendingGuestKeyPress = false;

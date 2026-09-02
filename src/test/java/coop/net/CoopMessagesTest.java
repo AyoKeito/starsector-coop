@@ -388,4 +388,50 @@ class CoopMessagesTest {
         assertEquals(CoopMessages.Type.FLEET_SNAPSHOT,
                 CoopMessages.parseDatagramHeader(decoded).type());
     }
+
+    // ---- Phase 20.2 session resume ----------------------------------------------------------------
+
+    @Test
+    void aResumeRequestCarriesTheSessionInBothTheEnvelopeAndThePayload() {
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.sessionResumeRequest("session-a", 5L, 9000L, "guest-player")));
+
+        assertEquals(CoopMessages.Type.SESSION_RESUME_REQUEST, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals(5L, decoded.seq());
+        assertEquals(9000L, decoded.sentAtMillis());
+        // The payload copy is what the host's grace check compares, deliberately independent of the
+        // envelope so the check cannot start passing by accident if envelope handling changes.
+        assertEquals("session-a", CoopMessages.parseResumeSessionId(decoded));
+        assertEquals("guest-player", CoopMessages.parseResumePlayerId(decoded));
+    }
+
+    @Test
+    void aResumeRequestRefusesToBeBuiltWithoutBothIdentities() {
+        assertThrows(RuntimeException.class,
+                () -> CoopMessages.sessionResumeRequest(null, 1L, 0L, "guest-player"));
+        assertThrows(RuntimeException.class,
+                () -> CoopMessages.sessionResumeRequest("session-a", 1L, 0L, " "));
+    }
+
+    @Test
+    void aResumeAcceptNamesTheSessionItIsHandingBack() {
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.sessionResumeAccept("session-a", 6L, 9100L)));
+
+        assertEquals(CoopMessages.Type.SESSION_RESUME_ACCEPT, decoded.type());
+        assertEquals("session-a", CoopMessages.parseResumeSessionId(decoded));
+    }
+
+    @Test
+    void aResumeRejectCarriesItsReasonAndToleratesHavingNoSession() {
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.sessionResumeReject(null, 7L, 9200L, "session id does not match")));
+
+        assertEquals(CoopMessages.Type.SESSION_RESUME_REJECT, decoded.type());
+        assertNull(decoded.sessionId(), "a host may be rejecting a session it never heard of");
+        assertEquals("session id does not match", CoopMessages.parseResumeRejectReason(decoded));
+        assertEquals("", CoopMessages.parseResumeRejectReason(CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.sessionResumeReject("session-a", 8L, 9300L, null)))));
+    }
 }

@@ -13,11 +13,12 @@ import java.util.Set;
  * loss, how long each transport has been silent, and — derived from those — whether the UDP path is
  * being eaten and the state stream has to fall back onto TCP.
  *
- * <p><b>Measures and reports; never declares death.</b> The campaign pump does not run while its
- * process is in combat or writing a coordinated autosave, so a peer can legitimately go silent for
- * minutes. Nothing here times a peer out — the only disconnect trigger remains the TCP socket
- * closing. The reconnect coordinator (M3) is where silence becomes a verdict, because that is where
- * the battle/save exemptions live.
+ * <p><b>Death is a verdict with exemptions, never a bare timeout</b> (M3). The campaign pump does not
+ * run while its process is in combat or writing a coordinated autosave, so a peer can legitimately go
+ * silent for minutes, and so can <em>this</em> process — which makes our own measured silence say
+ * nothing about the peer. {@link #evaluateLinkDeath} is therefore the only place silence becomes a
+ * verdict, and it refuses to give one while any of the three exemptions holds. Everything else here
+ * measures and reports.
  *
  * <p><b>Why the loss estimate is shaped like this.</b> The state streams are ack-free, so there is no
  * sequence-number acknowledgement to count. What there is: every datagram carries the sender's
@@ -71,6 +72,30 @@ public final class CoopLinkQuality {
     /** Degraded and recovered both need this much continuous evidence before they are announced. */
     static final long DEGRADED_SUSTAIN_MILLIS = 10_000L;
 
+    /**
+     * TCP silence at or past this is the raw death threshold. Both sides ping every 3 s and answer
+     * with a PONG, so a live link is never quiet for five ping intervals; a half-open socket after a
+     * NAT drop is quiet forever, and the OS will not tell us for another minute or two.
+     */
+    public static final long DEAD_TCP_SILENCE_MILLIS = 15_000L;
+    /**
+     * Exemption: a coordinated save checkpoint this recently. Writing a save stops the peer's pump for
+     * as long as the save takes, and a big late-game sector save is comfortably past the raw threshold.
+     */
+    public static final long DEATH_SAVE_EXEMPT_MILLIS = 60_000L;
+    /**
+     * Exemption trigger: a gap this large between two consecutive local frames means <em>we</em> were
+     * not pumping — our own combat, our own save, an OS stall. Our silence measurement then describes
+     * this process, not the link.
+     */
+    public static final long LOCAL_STALL_FRAME_GAP_MILLIS = 5_000L;
+
+    private boolean frameSeen;
+    private long lastFrameAtMillis;
+    private long lastFrameGapMillis;
+    private boolean localStallSeen;
+    private long localStallEndedAtMillis;
+
     /** Transport token on the wire and in the HUD: the state stream is on UDP. */
     public static final String TRANSPORT_UDP = "UDP";
     /** Transport token on the wire and in the HUD: the state stream is wrapped in TCP. */
@@ -120,11 +145,53 @@ public final class CoopLinkQuality {
         degraded = false;
         degradedSinceMillis = 0L;
         healthySinceMillis = nowMillis;
+        // Frame bookkeeping deliberately survives: it describes THIS process, not the connection.
+        // A session edge does not un-stall a game that just spent forty seconds in a battle, and
+        // clearing it here would throw away the very gap the next verdict has to account for.
+    }
+
+    /**
+     * Resume edge (20.2): the link is back on the same session, so the silence timers and the loss
+     * window — which describe the connection that just died — restart from now. The RTT history is
+     * deliberately kept: it is the same two machines on the same path, and throwing away a minute and
+     * a half of samples would leave the HUD blank for the first several pings after every blip.
+     */
+    public void resetSilence(long nowMillis) {
+        lossBySender.clear();
+        lastInboundTcpMillis = nowMillis;
+        lastUdpInboundMillis = nowMillis;
+        resetAtMillis = nowMillis;
+        fallbackClearSinceMillis = 0L;
+        outstandingPings.clear();
     }
 
     /** Wall clock of the most recent {@link #reset(long)}; the session-start stamp. */
     public long resetAtMillis() {
         return resetAtMillis;
+    }
+
+    /**
+     * One campaign frame went by. The gap to the previous frame is the whole local-stall exemption:
+     * a frame gap past {@link #LOCAL_STALL_FRAME_GAP_MILLIS} means this process was not running its
+     * pump, so whatever silence we then measure is ours, not the peer's.
+     */
+    public void noteFrame(long nowMillis) {
+        // A boolean rather than a zero sentinel: an injected test clock legitimately starts at 0, and
+        // "no frame yet" and "the first frame was at 0" are different states.
+        if (frameSeen && nowMillis > lastFrameAtMillis) {
+            lastFrameGapMillis = nowMillis - lastFrameAtMillis;
+            if (lastFrameGapMillis >= LOCAL_STALL_FRAME_GAP_MILLIS) {
+                localStallSeen = true;
+                localStallEndedAtMillis = nowMillis;
+            }
+        }
+        frameSeen = true;
+        lastFrameAtMillis = nowMillis;
+    }
+
+    /** The gap between the two most recent frames; 0 before a second frame has been seen. */
+    public long lastFrameGapMillis() {
+        return lastFrameGapMillis;
     }
 
     // ---- samples ---------------------------------------------------------------------------------
@@ -361,47 +428,77 @@ public final class CoopLinkQuality {
         return degraded;
     }
 
-    // ---- diagnostics -----------------------------------------------------------------------------
+    // ---- link death ------------------------------------------------------------------------------
 
     /**
-     * The one-shot INFO block the guest logs once it knows whether its UDP path works. A guest whose
-     * router eats UDP used to see nothing but a frozen partner mirror; this turns that into a line a
-     * player can paste into a bug report.
+     * One evaluation of the death rule, with every exemption it considered spelled out so the INFO log
+     * can say what it decided <em>on</em> rather than just what it decided.
      *
-     * <p>Formatting lives here rather than at the call site so it is testable, and so the connection
-     * doctor being built on another branch has one formatter to merge with rather than two call sites
-     * to chase.
+     * @param dead                 whether the link should be declared dead and the socket dropped
+     * @param tcpSilenceMillis     how long since any inbound TCP message
+     * @param udpSilenceMillis     how long since any inbound UDP datagram; context only
+     * @param peerInCombat         exemption (a): the peer is fighting a battle, so its pump is stopped
+     * @param recentSaveCheckpoint exemption (b): a coordinated save happened inside the exempt window
+     * @param localStalled         exemption (c): this process itself was not pumping recently
      */
-    public static String guestDoctorBlock(Snapshot link, CoopDatagramStats stats, boolean udpObserved) {
-        StringBuilder out = new StringBuilder(320);
-        out.append("Coop connection doctor (guest):");
-        out.append("\n  TCP control channel: ok (silent for ")
-                .append(link == null ? 0L : link.tcpSilenceMillis()).append(" ms)");
-        out.append("\n  UDP state path: ").append(udpObserved ? "ok" : "BLOCKED (no inbound datagram)");
-        Integer rtt = link == null ? null : link.rttMillis();
-        Integer p95 = link == null ? null : link.p95RttMillis();
-        out.append("\n  RTT: ").append(rtt == null ? "unknown" : rtt + " ms")
-                .append(", p95 ").append(p95 == null ? "unknown" : p95 + " ms")
-                .append(", loss ").append(link == null ? 0 : link.lossPercent()).append('%');
-        if (stats != null) {
-            out.append("\n  Validated send target: ")
-                    .append(stats.validatedRemote().isEmpty() ? "none" : stats.validatedRemote())
-                    .append(" (path validations ").append(stats.pathValidations())
-                    .append(", probes sent ").append(stats.probesSent())
-                    .append(", echoes ").append(stats.probeEchoesReceived()).append(')');
-            out.append("\n  Dropped inbound: token mismatch ").append(stats.droppedTokenMismatch())
-                    .append(", foreign source ").append(stats.droppedForeignSource())
-                    .append(", malformed ").append(stats.droppedMalformed())
-                    .append(", no token ").append(stats.droppedNoToken());
-            out.append("\n  Keepalives: sent ").append(stats.keepalivesSent())
-                    .append(", received ").append(stats.keepalivesReceived())
-                    .append("; ICMP transients ").append(stats.icmpTransients());
+    public record DeathVerdict(boolean dead,
+                               long tcpSilenceMillis,
+                               long udpSilenceMillis,
+                               boolean peerInCombat,
+                               boolean recentSaveCheckpoint,
+                               boolean localStalled) {
+
+        /** Whether any exemption was what stopped the verdict; false when the silence was simply short. */
+        public boolean exempted() {
+            return peerInCombat || recentSaveCheckpoint || localStalled;
         }
-        if (!udpObserved) {
-            out.append("\n  Likely cause: a NAT or firewall on the path is dropping UDP."
-                    + " The state stream falls back to TCP automatically; expect coarser mirror motion.");
+
+        /** The log line's body: the numbers, then every exemption and whether it fired. */
+        public String describe() {
+            return "tcpSilence=" + tcpSilenceMillis + " ms udpSilence=" + udpSilenceMillis
+                    + " ms threshold=" + DEAD_TCP_SILENCE_MILLIS
+                    + " ms; exemptions peerInCombat=" + peerInCombat
+                    + " recentSaveCheckpoint=" + recentSaveCheckpoint
+                    + " localStalled=" + localStalled;
         }
-        return out.toString();
+    }
+
+    /**
+     * Should the TCP link be declared dead? Dead means the socket is closed deliberately so the
+     * ordinary disconnect edge fires now instead of whenever the OS gives up retransmitting (one to
+     * two minutes on a half-open socket after a NAT drop), which on the guest hands straight over to
+     * the 500 ms reconnect retry and on the host opens the 20.2 grace window.
+     *
+     * <p>The raw condition is {@link #DEAD_TCP_SILENCE_MILLIS} of inbound TCP silence. It is then
+     * vetoed by three exemptions, each of which describes a way the silence can be legitimate:
+     * <ol>
+     *   <li><b>The peer is in combat.</b> Its campaign pump is not running, so it is not sending
+     *       anything, and this can last as long as a battle does.</li>
+     *   <li><b>A coordinated save checkpoint inside {@link #DEATH_SAVE_EXEMPT_MILLIS}.</b> Both
+     *       processes stop to write a save around a checkpoint, and a late-game sector save is well
+     *       past the raw threshold.</li>
+     *   <li><b>We were not pumping.</b> A local frame gap past
+     *       {@link #LOCAL_STALL_FRAME_GAP_MILLIS} means this process just came back from its own
+     *       combat or save; the accumulated silence is an artefact of our own stall, not evidence
+     *       about the peer. The exemption is held for a further {@link #DEAD_TCP_SILENCE_MILLIS}
+     *       after the stall ends, which is exactly how long it takes to re-earn the verdict on
+     *       evidence gathered while we were actually running.</li>
+     * </ol>
+     *
+     * @param peerInCombat              the remote player's battle state (see the pump's battle bridge)
+     * @param lastSaveCheckpointMillis  wall clock of the last SAVE_CHECKPOINT sent or received, or 0
+     */
+    public DeathVerdict evaluateLinkDeath(long nowMillis, boolean peerInCombat,
+                                          long lastSaveCheckpointMillis) {
+        long tcpSilence = tcpSilenceMillis(nowMillis);
+        long udpSilence = udpSilenceMillis(nowMillis);
+        boolean recentSave = lastSaveCheckpointMillis > 0L
+                && nowMillis - lastSaveCheckpointMillis <= DEATH_SAVE_EXEMPT_MILLIS;
+        boolean localStalled = localStallSeen
+                && nowMillis - localStallEndedAtMillis < DEAD_TCP_SILENCE_MILLIS;
+        boolean dead = tcpSilence >= DEAD_TCP_SILENCE_MILLIS
+                && !peerInCombat && !recentSave && !localStalled;
+        return new DeathVerdict(dead, tcpSilence, udpSilence, peerInCombat, recentSave, localStalled);
     }
 
     /** Per-sender sliding window of received datagram epochs; see the class doc for the estimator. */

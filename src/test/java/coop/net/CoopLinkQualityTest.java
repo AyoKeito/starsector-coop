@@ -340,40 +340,103 @@ class CoopLinkQualityTest {
         assertTrue(link.evaluateDegraded(11_000L));
     }
 
-    // ---- doctor ---------------------------------------------------------------------------------
+    // ---- link death (Phase 20.2) ------------------------------------------------------------------
 
     @Test
-    void theGuestDoctorBlockNamesTheBlockedPathAndItsLikelyCause() {
+    void silenceUnderTheThresholdIsNeverDeath() {
         CoopLinkQuality link = armed(0L);
-        link.notePingSent(1L, 0L);
-        link.notePongReceived(1L, 80L);
-        CoopDatagramStats stats = new CoopDatagramStats(0L, 2L, 3L, 0L, 4L, 0L, 0L, 5L, 0L, 1L, 0L,
-                0L, "");
+        link.noteInboundTcp(0L);
 
-        String block = CoopLinkQuality.guestDoctorBlock(link.snapshot(15_000L), stats, false);
+        CoopLinkQuality.DeathVerdict verdict = link.evaluateLinkDeath(14_999L, false, 0L);
 
-        assertTrue(block.startsWith("Coop connection doctor (guest):"), block);
-        assertTrue(block.contains("UDP state path: BLOCKED"), block);
-        assertTrue(block.contains("RTT: 80 ms"), block);
-        assertTrue(block.contains("token mismatch 2"), block);
-        assertTrue(block.contains("foreign source 3"), block);
-        assertTrue(block.contains("Validated send target: none"), block);
-        assertTrue(block.contains("Likely cause"), block);
+        assertFalse(verdict.dead());
+        assertFalse(verdict.exempted());
+        assertEquals(14_999L, verdict.tcpSilenceMillis());
     }
 
     @Test
-    void theGuestDoctorBlockReportsAWorkingPathWithoutTheCauseHint() {
+    void fifteenSecondsOfTcpSilenceWithNoExemptionIsDeath() {
         CoopLinkQuality link = armed(0L);
-        link.noteUdpInbound(1_000L);
-        CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 1L, 1L, 1L, 2L, 2L, 0L, 0L,
-                1_000L, "/203.0.113.9:7890");
+        link.noteInboundTcp(0L);
 
-        String block = CoopLinkQuality.guestDoctorBlock(link.snapshot(2_000L), stats, true);
+        CoopLinkQuality.DeathVerdict verdict = link.evaluateLinkDeath(15_000L, false, 0L);
 
-        assertTrue(block.contains("UDP state path: ok"), block);
-        assertTrue(block.contains("/203.0.113.9:7890"), block);
-        assertFalse(block.contains("Likely cause"), block);
-        assertNotNull(link.snapshot(2_000L));
+        assertTrue(verdict.dead());
+        assertFalse(verdict.exempted());
+        assertTrue(verdict.describe().contains("tcpSilence=15000"), verdict.describe());
+    }
+
+    @Test
+    void aPeerInCombatIsExemptFromDeathNoMatterHowLongItIsQuiet() {
+        CoopLinkQuality link = armed(0L);
+        link.noteInboundTcp(0L);
+
+        CoopLinkQuality.DeathVerdict verdict = link.evaluateLinkDeath(600_000L, true, 0L);
+
+        assertFalse(verdict.dead());
+        assertTrue(verdict.peerInCombat());
+        assertTrue(verdict.exempted());
+    }
+
+    @Test
+    void aRecentSaveCheckpointIsExemptAndTheExemptionAgesOut() {
+        CoopLinkQuality link = armed(0L);
+        link.noteInboundTcp(0L);
+
+        // Checkpoint at 1 s, evaluated at 40 s: inside the 60 s exempt window.
+        assertFalse(link.evaluateLinkDeath(40_000L, false, 1_000L).dead());
+        assertTrue(link.evaluateLinkDeath(40_000L, false, 1_000L).recentSaveCheckpoint());
+        // Same checkpoint, evaluated at 62 s: the save cannot explain this much silence any more.
+        assertTrue(link.evaluateLinkDeath(62_000L, false, 1_000L).dead());
+        // A zero stamp means "no checkpoint has ever happened", not "one happened at the epoch".
+        assertTrue(link.evaluateLinkDeath(40_000L, false, 0L).dead());
+    }
+
+    @Test
+    void aLocalFrameGapExemptsUntilAFullSilenceWindowHasBeenReEarned() {
+        CoopLinkQuality link = armed(0L);
+        link.noteInboundTcp(0L);
+        link.noteFrame(0L);
+        // The local process stalls for 30 s (its own combat or save) and comes back at 30 s.
+        link.noteFrame(30_000L);
+
+        assertEquals(30_000L, link.lastFrameGapMillis());
+        // The accumulated silence is ours, not the peer's: no verdict yet.
+        assertFalse(link.evaluateLinkDeath(30_000L, false, 0L).dead());
+        assertTrue(link.evaluateLinkDeath(30_000L, false, 0L).localStalled());
+        assertFalse(link.evaluateLinkDeath(44_000L, false, 0L).dead());
+        // A full silence window after the stall ended, the evidence is ours again.
+        assertTrue(link.evaluateLinkDeath(45_000L, false, 0L).dead());
+    }
+
+    @Test
+    void anOrdinaryFrameGapIsNotALocalStall() {
+        CoopLinkQuality link = armed(0L);
+        link.noteInboundTcp(0L);
+        for (long frame = 0L; frame <= 20_000L; frame += 16L) {
+            link.noteFrame(frame);
+        }
+
+        CoopLinkQuality.DeathVerdict verdict = link.evaluateLinkDeath(20_000L, false, 0L);
+
+        assertFalse(verdict.localStalled());
+        assertTrue(verdict.dead());
+    }
+
+    @Test
+    void resumingResetsTheSilenceTimersButKeepsTheRttHistory() {
+        CoopLinkQuality link = armed(0L);
+        link.notePingSent(1L, 0L);
+        link.notePongReceived(1L, 90L);
+        link.noteInboundTcp(0L);
+        assertTrue(link.evaluateLinkDeath(20_000L, false, 0L).dead());
+
+        link.resetSilence(20_000L);
+
+        assertEquals(90, link.rttMillis(), "the same two machines on the same path");
+        assertEquals(0L, link.lastFrameGapMillis(), "no frames were noted in this test");
+        assertEquals(0L, link.tcpSilenceMillis(20_000L));
+        assertFalse(link.evaluateLinkDeath(20_000L, false, 0L).dead());
     }
 
     @Test

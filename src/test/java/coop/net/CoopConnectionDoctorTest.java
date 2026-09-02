@@ -137,6 +137,57 @@ class CoopConnectionDoctorTest {
         assertTrue(report.contains("The host port is not reachable"), report);
     }
 
+    // ---- guest block with the transport counters (moved from CoopLinkQualityTest, Phase 20.3) -----
+
+    @Test
+    void theGuestBlockNamesTheBlockedPathItsCauseAndTheDropCounters() {
+        CoopLinkQuality link = new CoopLinkQuality();
+        link.reset(0L);
+        link.notePingSent(1L, 0L);
+        link.notePongReceived(1L, 80L);
+        CoopDatagramStats stats = new CoopDatagramStats(0L, 2L, 3L, 0L, 4L, 0L, 0L, 5L, 0L, 1L, 0L,
+                0L, "");
+
+        String report = CoopConnectionDoctor.guestReport("203.0.113.7", 27015, true, false,
+                link.snapshot(15_000L), stats);
+
+        assertTrue(report.startsWith("Coop connection doctor:\n"), report);
+        assertTrue(report.contains("UDP path          blocked"), report);
+        assertTrue(report.contains("RTT               80 ms, p95 80 ms, loss 0%"), report);
+        assertTrue(report.contains("token mismatch 2"), report);
+        assertTrue(report.contains("foreign source 3"), report);
+        assertTrue(report.contains("UDP send target   none"), report);
+        assertTrue(report.contains("keepalives        sent 5"), report);
+        assertTrue(report.contains("drops UDP"), report);
+    }
+
+    @Test
+    void theGuestBlockReportsAWorkingPathWithItsValidatedTarget() {
+        CoopLinkQuality link = new CoopLinkQuality();
+        link.reset(0L);
+        link.noteUdpInbound(1_000L);
+        CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 1L, 1L, 1L, 2L, 2L, 0L, 0L,
+                1_000L, "/203.0.113.9:7890");
+
+        String report = CoopConnectionDoctor.guestReport("203.0.113.7", 27015, true, true,
+                link.snapshot(2_000L), stats);
+
+        assertTrue(report.contains("UDP path          up"), report);
+        assertTrue(report.contains("/203.0.113.9:7890"), report);
+        assertTrue(report.contains("validations 1"), report);
+        assertFalse(report.contains("drops UDP"), report);
+        assertTrue(report.contains("next step         none - the link is healthy."), report);
+    }
+
+    @Test
+    void theGuestBlockWithNoStatsOmitsTheCounterLinesEntirely() {
+        String report = CoopConnectionDoctor.guestReport("203.0.113.7", 27015, true, true, null, null);
+
+        assertTrue(report.contains("RTT               not measured yet"), report);
+        assertFalse(report.contains("UDP send target"), report);
+        assertFalse(report.contains("dropped inbound"), report);
+    }
+
     @Test
     void enumeratingThisMachineNeverThrowsAndNeverReportsLoopback() {
         CoopConnectionDoctor.LocalAddresses addresses = CoopConnectionDoctor.enumerateLocalAddresses();

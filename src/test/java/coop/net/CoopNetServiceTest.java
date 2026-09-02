@@ -10,6 +10,7 @@ import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -123,6 +124,112 @@ class CoopNetServiceTest {
             guest.shutdown();
             host.shutdown();
         }
+    }
+
+    // ---- Phase 20.2: half-open replacement and deliberate drops ----------------------------------
+
+    @Test
+    void anExtraConnectionIsStillRejectedWhileTheHeldOneIsFresh() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        CoopNetService guest = new CoopNetService();
+        CoopNetService extraGuest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "first guest connected");
+
+            // One millisecond short of the half-open threshold: still an ordinary extra connection.
+            clock.addAndGet(CoopNetService.HALF_OPEN_REPLACE_MILLIS - 1L);
+            extraGuest.connect("127.0.0.1", port);
+            CoopMessages.Message reject =
+                    waitForMessageWhilePollingHost(host, extraGuest, "extra guest lobby reject");
+
+            assertEquals(CoopMessages.Type.LOBBY_REJECT, reject.type());
+            assertTrue(bothConnected(host, guest), "the held connection is untouched");
+        } finally {
+            extraGuest.shutdown();
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The stranded-socket case: after a NAT drop the host's channel is not closed, it is half-open,
+     * and the OS will not say so for another minute or two. Without the replacement rule the guest's
+     * reconnect knocks every 500 ms for that whole window and is turned away every time.
+     */
+    @Test
+    void aHalfOpenConnectionIsReplacedByTheReconnectingGuest() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        CoopNetService stranded = new CoopNetService();
+        CoopNetService returning = new CoopNetService();
+        try {
+            host.startHost(port);
+            stranded.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, stranded), "first guest connected");
+
+            // No inbound bytes for the whole threshold: the held channel is presumed dead.
+            clock.addAndGet(CoopNetService.HALF_OPEN_REPLACE_MILLIS);
+            returning.connect("127.0.0.1", port);
+            returning.send(CoopMessages.ping(null, returning.nextSeq(), 1000L));
+
+            AtomicReference<CoopMessages.Message> adopted = new AtomicReference<>();
+            waitUntil(() -> {
+                host.flushOutbound();
+                returning.flushOutbound();
+                adopted.set(host.pollInbound());
+                return adopted.get() != null;
+            }, "host adopted the reconnecting guest");
+
+            assertEquals(CoopMessages.Type.PING, adopted.get().type());
+            assertNull(returning.pollInbound(), "the reconnecting guest must not be lobby-rejected");
+            waitUntil(() -> {
+                stranded.flushOutbound();
+                return !stranded.isConnected();
+            }, "the replaced connection was closed");
+        } finally {
+            returning.shutdown();
+            stranded.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
+    void droppingTheActiveConnectionTakesTheOrdinaryDisconnectPathAndTheGuestRetries() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            assertTrue(host.dropActiveConnection("link death: tcpSilence=15000 ms"));
+            assertFalse(host.isConnected(), "the drop is synchronous on the side that ran it");
+            assertFalse(host.dropActiveConnection("again"), "there is nothing left to drop");
+
+            // The host is still listening and the guest still retries every 500 ms, which is the whole
+            // point of closing rather than shutting down.
+            waitUntil(() -> {
+                host.flushOutbound();
+                guest.flushOutbound();
+                return bothConnected(host, guest);
+            }, "the guest reconnected on its own retry");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    @Test
+    void droppingWithNoActiveConnectionIsANoOp() {
+        CoopNetService service = new CoopNetService();
+
+        assertFalse(service.dropActiveConnection("nothing to drop"));
     }
 
     // ---- poll consolidation (perf audit #10) -----------------------------------------------------

@@ -69,6 +69,12 @@ public record CoopHudState(String roleBadge,
     public static final String HOLDER_GUEST_SCREEN = "guest screen";
     /** Raw holder token: either player is in combat. */
     public static final String HOLDER_COMBAT = "combat";
+    /**
+     * Raw holder token: the Phase 20.2 grace window is holding the world while a dropped partner is
+     * given a chance to come back. Reads the same on both clients — neither player is holding this
+     * one, the session is.
+     */
+    public static final String HOLDER_RECONNECT = "reconnect";
 
     /** Transport wording: the state stream is on UDP, which is the normal case. */
     public static final String TRANSPORT_UDP = "udp";

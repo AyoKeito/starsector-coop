@@ -73,6 +73,16 @@ public final class CoopMessages {
          * receiver runs the identical parse/token/watermark/apply path either wire delivered it.
          */
         STATE_DATAGRAM,
+        /**
+         * Phase 20.2: guest &rarr; host on a reconnected socket, asking to pick the held session back
+         * up instead of starting a new lobby round. Carries the session id and the guest's player id;
+         * both must match what the host is holding.
+         */
+        SESSION_RESUME_REQUEST,
+        /** Phase 20.2: host &rarr; guest, the session is yours again — a full rebroadcast follows. */
+        SESSION_RESUME_ACCEPT,
+        /** Phase 20.2: host &rarr; guest, that request does not match the held session (with reason). */
+        SESSION_RESUME_REJECT,
         /** Datagram-only: idle-path UDP keepalive so NAT bindings and link liveness survive quiet stretches. */
         UDP_PROBE,
         /** Datagram-only: QUIC-style path challenge/echo that proves a new UDP source before it is streamed to. */
@@ -221,6 +231,71 @@ public final class CoopMessages {
     /** The composed datagram carried by a {@link Type#STATE_DATAGRAM} message. */
     public static String parseStateDatagram(Message message) {
         return requiredPayloadString(message, "datagram");
+    }
+
+    // ---- Phase 20.2: in-session reconnect grace ---------------------------------------------------
+
+    /**
+     * Guest &rarr; host on a freshly reconnected socket: "I am still {@code playerId} and I still hold
+     * session {@code sessionId}; give it back." Sent <em>instead of</em> {@code LOBBY_HELLO} while the
+     * guest's reconnect coordinator is running, which is what keeps the seed lock and the whole
+     * lobby/handshake round from being re-run for a two-second blip.
+     *
+     * <p>The session id travels in the envelope <em>and</em> the payload. The envelope field is what
+     * every other message uses and what {@code sessionMatches} reads; the payload copy is what the
+     * host's grace check compares, and keeping it explicit means the check cannot silently start
+     * passing if the envelope handling ever changes.
+     */
+    public static Message sessionResumeRequest(String sessionId, long seq, long sentAtMillis,
+                                               String playerId) {
+        String session = requireText(sessionId, "sessionId");
+        return new Message(Type.SESSION_RESUME_REQUEST, session, seq, sentAtMillis,
+                "{\"sessionId\":\"" + escapeJson(session) + "\","
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
+    }
+
+    /** Host &rarr; guest: the resume was accepted; the full session-start rebroadcast follows it. */
+    public static Message sessionResumeAccept(String sessionId, long seq, long sentAtMillis) {
+        String session = requireText(sessionId, "sessionId");
+        return new Message(Type.SESSION_RESUME_ACCEPT, session, seq, sentAtMillis,
+                "{\"sessionId\":\"" + escapeJson(session) + "\"}");
+    }
+
+    /**
+     * Host &rarr; guest: that request does not match the held session. Deliberately not fatal to the
+     * <em>host's</em> grace window — a stranger must not be able to end the wait early — but the guest
+     * that receives one gives up and runs its ordinary teardown.
+     *
+     * <p>The session id is nullable here: a reject may be answering a request for a session the host
+     * has never heard of, and there is no envelope session to quote back.
+     */
+    public static Message sessionResumeReject(String sessionId, long seq, long sentAtMillis,
+                                              String reason) {
+        return new Message(Type.SESSION_RESUME_REJECT, trimToNullable(sessionId), seq, sentAtMillis,
+                "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    private static String trimToNullable(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    /** The {@code sessionId} payload field of a {@code SESSION_RESUME_REQUEST}/{@code _ACCEPT}. */
+    public static String parseResumeSessionId(Message message) {
+        return requiredPayloadString(message, "sessionId");
+    }
+
+    /** The {@code playerId} payload field of a {@code SESSION_RESUME_REQUEST}. */
+    public static String parseResumePlayerId(Message message) {
+        return requiredPayloadString(message, "playerId");
+    }
+
+    /** The reject text, or "" when the sender did not supply one. */
+    public static String parseResumeRejectReason(Message message) {
+        return optionalPayloadString(message, "reason", "");
     }
 
     public static Message lobbyHello(long seq, long sentAtMillis, CoopPlayerInfo playerInfo) {

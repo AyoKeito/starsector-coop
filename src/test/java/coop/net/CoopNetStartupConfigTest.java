@@ -164,4 +164,52 @@ class CoopNetStartupConfigTest {
 
         assertTrue(failure.getMessage().contains("coop.portMapping"), failure.getMessage());
     }
+
+    // ---- Phase 20.2 reconnect grace ---------------------------------------------------------------
+
+    @Test
+    void theReconnectGraceDefaultsToSixtySeconds() {
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(new Properties());
+
+        assertEquals(60, config.reconnectGraceSeconds());
+        assertEquals(60_000L, config.reconnectGraceMillis());
+        assertFalse(config.isPresent(), "an empty property set still configures no role");
+    }
+
+    @Test
+    void parsesAnExplicitReconnectGrace() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.hostPort", "7777");
+        properties.setProperty("coop.reconnectGraceSeconds", " 120 ");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertEquals(120, config.reconnectGraceSeconds());
+        assertEquals(120_000L, config.reconnectGraceMillis());
+    }
+
+    @Test
+    void zeroDisablesTheGraceAndIsReadableWithoutARole() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.reconnectGraceSeconds", "0");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
+
+        assertFalse(config.isPresent());
+        assertEquals(0, config.reconnectGraceSeconds());
+        assertEquals(0L, config.reconnectGraceMillis());
+    }
+
+    @Test
+    void rejectsANonNumericOrOutOfRangeReconnectGrace() {
+        for (String value : new String[]{"soon", "-1", "3601"}) {
+            Properties properties = new Properties();
+            properties.setProperty("coop.reconnectGraceSeconds", value);
+
+            IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                    () -> CoopNetStartupConfig.from(properties), "expected a rejection for " + value);
+
+            assertTrue(failure.getMessage().contains("coop.reconnectGraceSeconds"), failure.getMessage());
+        }
+    }
 }

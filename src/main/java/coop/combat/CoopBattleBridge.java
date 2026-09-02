@@ -410,6 +410,20 @@ public final class CoopBattleBridge {
         return localBattleActive || remoteBattleActive;
     }
 
+    /**
+     * True while the <em>remote</em> player is in a battle, as last reported by
+     * {@code BATTLE_BEGIN}/{@code BATTLE_END}. This is the truth source for "the peer's campaign pump
+     * is legitimately stopped", which is exemption (a) of the Phase 20.2 link-death rule — the shared
+     * combat pause intent is host-only and so cannot answer the same question on the guest.
+     *
+     * <p>Deliberately sticky across a dead link: the last thing a peer says before it goes quiet for a
+     * battle is {@code BATTLE_BEGIN}, and that is exactly the state that must survive the silence it
+     * explains.
+     */
+    public boolean isRemoteBattleActive() {
+        return remoteBattleActive;
+    }
+
     // ---- inbound -------------------------------------------------------------------------------
 
     /** Dispatches one Phase 14 message. The caller has already checked the session is active. */

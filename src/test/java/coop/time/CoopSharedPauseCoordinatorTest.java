@@ -184,4 +184,37 @@ class CoopSharedPauseCoordinatorTest {
         assertEquals("true", CoopMessages.requiredPayloadString(decoded, "paused"));
         assertEquals(11L, CoopMessages.requiredPayloadLong(decoded, "intentSeq"));
     }
+
+    // ---- Phase 20.2 reconnect hold ----------------------------------------------------------------
+
+    @Test
+    void theReconnectHoldPausesTheWorldAndNoPauseKeyClearsIt() {
+        CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
+        coordinator.setReconnectHold(true);
+
+        assertTrue(coordinator.reconnectHold());
+        assertTrue(coordinator.effectivePaused());
+
+        // The host tapping pause resolves against the observed (paused) clock and clears its own
+        // intent -- but the hold is not a player's choice and survives.
+        coordinator.setObservedPaused(true);
+        coordinator.onHostPauseKey();
+
+        assertFalse(coordinator.hostPauseIntent());
+        assertTrue(coordinator.effectivePaused(), "only the grace window closing releases the hold");
+
+        coordinator.setReconnectHold(false);
+        assertFalse(coordinator.effectivePaused());
+    }
+
+    @Test
+    void aSessionResetClearsTheReconnectHoldWithEverythingElse() {
+        CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
+        coordinator.setReconnectHold(true);
+
+        coordinator.reset();
+
+        assertFalse(coordinator.reconnectHold());
+        assertFalse(coordinator.effectivePaused());
+    }
 }

@@ -16,12 +16,25 @@ public final class CoopNetStartupConfig {
      * gain from the attempt.
      */
     public static final String PORT_MAPPING_PROPERTY = "coop.portMapping";
+    /**
+     * Phase 20.2: how long a dropped socket keeps its session alive before the session really ends,
+     * in seconds. Default {@link #DEFAULT_RECONNECT_GRACE_SECONDS}. {@code 0} disables the grace
+     * entirely and restores the pre-20.2 "every drop ends the session" behaviour, which is worth
+     * keeping reachable for anyone debugging a teardown path.
+     */
+    public static final String RECONNECT_GRACE_PROPERTY = "coop.reconnectGraceSeconds";
+
+    /** Long enough for a NAT rebind or a Wi-Fi roam, short enough not to strand a player. */
+    public static final int DEFAULT_RECONNECT_GRACE_SECONDS = 60;
+    /** Upper bound; past this the "held" world is indistinguishable from a hung game. */
+    public static final int MAX_RECONNECT_GRACE_SECONDS = 3600;
 
     private static final String PORT_MAPPING_AUTO = "auto";
     private static final String PORT_MAPPING_OFF = "off";
 
     private static final CoopNetStartupConfig EMPTY =
-            new CoopNetStartupConfig(false, CoopConnectionRole.NONE, "", 0, "", true);
+            new CoopNetStartupConfig(false, CoopConnectionRole.NONE, "", 0, "", true,
+                    DEFAULT_RECONNECT_GRACE_SECONDS);
 
     private final boolean present;
     private final CoopConnectionRole role;
@@ -29,15 +42,18 @@ public final class CoopNetStartupConfig {
     private final int port;
     private final String newGameSeed;
     private final boolean portMappingEnabled;
+    private final int reconnectGraceSeconds;
 
     private CoopNetStartupConfig(boolean present, CoopConnectionRole role, String host, int port,
-                                 String newGameSeed, boolean portMappingEnabled) {
+                                 String newGameSeed, boolean portMappingEnabled,
+                                 int reconnectGraceSeconds) {
         this.present = present;
         this.role = Objects.requireNonNull(role, "role");
         this.host = Objects.requireNonNull(host, "host");
         this.port = port;
         this.newGameSeed = Objects.requireNonNull(newGameSeed, "newGameSeed");
         this.portMappingEnabled = portMappingEnabled;
+        this.reconnectGraceSeconds = reconnectGraceSeconds;
     }
 
     public static CoopNetStartupConfig fromSystemProperties() {
@@ -56,6 +72,7 @@ public final class CoopNetStartupConfig {
         String connectPort = trimToNull(properties.getProperty(CONNECT_PORT_PROPERTY));
         String newGameSeed = trimToEmpty(properties.getProperty(NEW_GAME_SEED_PROPERTY));
         boolean portMappingEnabled = parsePortMapping(properties.getProperty(PORT_MAPPING_PROPERTY));
+        int reconnectGrace = parseReconnectGrace(properties.getProperty(RECONNECT_GRACE_PROPERTY));
 
         boolean hostConfigured = hostPort != null;
         boolean guestConfigured = connectHost != null || connectPort != null;
@@ -64,13 +81,15 @@ public final class CoopNetStartupConfig {
         }
         if (hostConfigured) {
             return new CoopNetStartupConfig(true, CoopConnectionRole.HOST, "",
-                    parsePort(hostPort, HOST_PORT_PROPERTY), newGameSeed, portMappingEnabled);
+                    parsePort(hostPort, HOST_PORT_PROPERTY), newGameSeed, portMappingEnabled, reconnectGrace);
         }
         if (!guestConfigured) {
-            if (newGameSeed.isEmpty() && portMappingEnabled) {
+            if (newGameSeed.isEmpty() && portMappingEnabled
+                    && reconnectGrace == DEFAULT_RECONNECT_GRACE_SECONDS) {
                 return EMPTY;
             }
-            return new CoopNetStartupConfig(false, CoopConnectionRole.NONE, "", 0, newGameSeed, portMappingEnabled);
+            return new CoopNetStartupConfig(false, CoopConnectionRole.NONE, "", 0, newGameSeed,
+                    portMappingEnabled, reconnectGrace);
         }
         if (connectHost == null) {
             throw new IllegalArgumentException(CONNECT_HOST_PROPERTY + " is required when connecting as guest");
@@ -79,7 +98,7 @@ public final class CoopNetStartupConfig {
             throw new IllegalArgumentException(CONNECT_PORT_PROPERTY + " is required when connecting as guest");
         }
         return new CoopNetStartupConfig(true, CoopConnectionRole.GUEST, connectHost,
-                parsePort(connectPort, CONNECT_PORT_PROPERTY), newGameSeed, portMappingEnabled);
+                parsePort(connectPort, CONNECT_PORT_PROPERTY), newGameSeed, portMappingEnabled, reconnectGrace);
     }
 
     public boolean isPresent() {
@@ -110,6 +129,20 @@ public final class CoopNetStartupConfig {
         return portMappingEnabled;
     }
 
+    /**
+     * Phase 20.2 grace window in seconds; see {@link #RECONNECT_GRACE_PROPERTY}. Read by both roles —
+     * each side runs its own timer, and they are configured independently on purpose: a guest that
+     * gives up earlier than the host simply stops trying, which the host's own expiry then cleans up.
+     */
+    public int reconnectGraceSeconds() {
+        return reconnectGraceSeconds;
+    }
+
+    /** The same value in milliseconds, which is what {@link CoopReconnectCoordinator} takes. */
+    public long reconnectGraceMillis() {
+        return reconnectGraceSeconds * 1000L;
+    }
+
     private static String trimToNull(String value) {
         if (value == null) {
             return null;
@@ -136,6 +169,24 @@ public final class CoopNetStartupConfig {
         }
         throw new IllegalArgumentException(
                 PORT_MAPPING_PROPERTY + " must be \"" + PORT_MAPPING_AUTO + "\" or \"" + PORT_MAPPING_OFF + "\"");
+    }
+
+    private static int parseReconnectGrace(String value) {
+        String trimmed = trimToNull(value);
+        if (trimmed == null) {
+            return DEFAULT_RECONNECT_GRACE_SECONDS;
+        }
+        int seconds;
+        try {
+            seconds = Integer.parseInt(trimmed);
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException(RECONNECT_GRACE_PROPERTY + " must be an integer", ex);
+        }
+        if (seconds < 0 || seconds > MAX_RECONNECT_GRACE_SECONDS) {
+            throw new IllegalArgumentException(RECONNECT_GRACE_PROPERTY + " must be in range 0.."
+                    + MAX_RECONNECT_GRACE_SECONDS);
+        }
+        return seconds;
     }
 
     private static int parsePort(String value, String propertyName) {

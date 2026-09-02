@@ -84,6 +84,9 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_FALLBACK_RECOVERED = "fallbackRecovered";
     private static final String FEED_DEGRADED = "degraded";
     private static final String FEED_DEGRADED_RECOVERED = "degradedRecovered";
+    private static final String FEED_RECONNECT_WAIT = "reconnectWait";
+    private static final String FEED_RECONNECT_RESUMED = "reconnectResumed";
+    private static final String FEED_RECONNECT_ENDED = "reconnectEnded";
     private static final java.awt.Color FEED_WARN_COLOR = new java.awt.Color(255, 220, 120);
     private static final java.awt.Color FEED_BAD_COLOR = new java.awt.Color(255, 170, 90);
     private static final java.awt.Color FEED_GOOD_COLOR = new java.awt.Color(150, 230, 150);
@@ -154,6 +157,8 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_REPLICATOR_EXPEDITIONS = "replicator.expeditionWarnings";
     private static final String SECTION_PING = "net.sendPing";
     private static final String SECTION_LINK_SUPERVISION = "net.linkSupervision";
+    private static final String SECTION_RECONNECT = "net.reconnectGrace";
+    private static final String SECTION_PORT_MAPPER = "net.portMapper";
     private static final String SECTION_FLUSH_OUTBOUND_POST = "net.flushOutbound.post";
     /**
      * Per-message-type section keys, precomputed so the inbound drain never concatenates a string:
@@ -234,6 +239,22 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean guestDoctorLogged;
     /** Per-kind next-allowed stamp for the campaign feed notices (see {@link #postFeed}). */
     private final java.util.Map<String, Long> feedNextAtMillis = new java.util.HashMap<>();
+
+    // ---- Phase 20.2 reconnect grace / 20.3 port mapper ------------------------------------------
+    private final CoopReconnectCoordinator reconnect;
+    private final coop.ui.CoopReconnectDialogController reconnectDialogs =
+            new coop.ui.CoopReconnectDialogController();
+    /** Wall clock of the last SAVE_CHECKPOINT sent or received; exemption (b) of the death rule. */
+    private long lastSaveCheckpointAtMillis;
+    /** Log-once flag for traffic dropped while an unproven peer is on the line during a grace window. */
+    private boolean graceTrafficDropWarned;
+    /** Host: the router mapping negotiated for this session's port, or null when not hosting. */
+    private CoopPortMapper portMapper;
+    private boolean portMapperReportLogged;
+    private java.util.function.IntFunction<CoopPortMapper> portMapperFactory;
+    /** Guest: what it dialled, so the connection-doctor block can name it. */
+    private String guestConnectHost = "";
+    private int guestConnectPort;
     /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
      * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
@@ -452,6 +473,10 @@ public class CoopNetPump implements EveryFrameScript {
         CoopSaveCheckpoint.setActive(this.saveCheckpoint);
         // Same static-seam deal as the profiler: the transport's send hook has no handle on the pump.
         this.wiretap = CoopWiretap.installFresh(clockMillis);
+        // Phase 20.2. Built here (not lazily on the first drop) so the configured window is parsed and
+        // logged while a bad property is still a startup problem rather than a mid-session surprise.
+        this.reconnect = new CoopReconnectCoordinator(configuredReconnectGraceMillis(),
+                new ReconnectListener());
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextLinkStatusAtMillis = now + LINK_STATUS_INTERVAL_MILLIS;
@@ -459,6 +484,27 @@ public class CoopNetPump implements EveryFrameScript {
         this.linkQuality.reset(now);
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
         this.nextGuestSnapshotAtMillis = now;
+    }
+
+    /**
+     * The configured grace window, defaulting when the property is unusable. Bad networking
+     * properties already log once from {@code maybeStartFromSystemProperties}; a pump that refused to
+     * construct over one would take the whole mod down instead.
+     */
+    private static long configuredReconnectGraceMillis() {
+        try {
+            return CoopNetStartupConfig.fromSystemProperties().reconnectGraceMillis();
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Unusable "
+                    + CoopNetStartupConfig.RECONNECT_GRACE_PROPERTY + "; using the "
+                    + CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS + " s default", ex);
+            return CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS * 1000L;
+        }
+    }
+
+    /** Test-only read of the grace state machine. */
+    CoopReconnectCoordinator reconnectCoordinatorForTest() {
+        return reconnect;
     }
 
     // ---- Phase 30 agent-bridge accessors (dev tooling) -----------------------------------------
@@ -525,7 +571,10 @@ public class CoopNetPump implements EveryFrameScript {
         String status;
         if (role == CoopConnectionRole.HOST) {
             badge = CoopHudState.BADGE_HOST;
-            status = switch (lobby) {
+            // Phase 20.2 outranks the lobby state: during a grace window the session record is
+            // deliberately still HOST_CONNECTED, which would otherwise read as "session active".
+            status = reconnect.hostWaiting() ? CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING
+                    : switch (lobby) {
                 case HOST_CONNECTED -> active
                         ? CoopHudState.STATUS_SESSION_ACTIVE
                         : CoopHudState.STATUS_HANDSHAKING;
@@ -539,7 +588,8 @@ public class CoopNetPump implements EveryFrameScript {
             };
         } else if (role == CoopConnectionRole.GUEST) {
             badge = CoopHudState.BADGE_GUEST;
-            status = switch (lobby) {
+            status = reconnect.guestReconnecting() ? CoopHudState.STATUS_RECONNECTING
+                    : switch (lobby) {
                 case GUEST_CONNECTED -> active
                         ? CoopHudState.STATUS_SESSION_ACTIVE
                         : CoopHudState.STATUS_HANDSHAKING;
@@ -555,7 +605,11 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         String rawHolder = "";
-        if (active) {
+        if (active && pauseCoordinator.reconnectHold()) {
+            // Both roles, ahead of the host/guest split: during a grace window the holder is the
+            // session itself, and the guest has no host snapshot arriving to tell it so.
+            rawHolder = CoopHudState.HOLDER_RECONNECT;
+        } else if (active) {
             if (role == CoopConnectionRole.HOST) {
                 rawHolder = hostPauseHolder();
             } else if (role == CoopConnectionRole.GUEST) {
@@ -607,6 +661,11 @@ public class CoopNetPump implements EveryFrameScript {
      * {@code TIME_SNAPSHOT} that lets the guest label its HUD correctly. Empty string = nobody.
      */
     private String hostPauseHolder() {
+        // Phase 20.2 first: nobody chose this pause and no pause key clears it, so naming any player
+        // as the holder while the world is held for a reconnect would be a lie.
+        if (pauseCoordinator.reconnectHold()) {
+            return CoopHudState.HOLDER_RECONNECT;
+        }
         if (pauseCoordinator.hostPauseIntent()) {
             return CoopHudState.HOLDER_HOST;
         }
@@ -646,6 +705,9 @@ public class CoopNetPump implements EveryFrameScript {
         // Phase 29 M1: stream time advances by campaign dt, frozen while paused, before anything
         // this frame stamps an outbound datagram with it.
         streamClock.advance(amount, isSectorPausedForStream());
+        // Phase 20.2 exemption (c): the gap since the previous frame is how the link-death rule knows
+        // whether it was the peer that went quiet or this process that stopped running.
+        linkQuality.noteFrame(clockMillis.getAsLong());
         long t = profiler.start();
         maybeStartFromSystemProperties();
         t = profiler.split(SECTION_CFG_PROPERTIES, t);
@@ -658,8 +720,16 @@ public class CoopNetPump implements EveryFrameScript {
         // that lands on the same frame the session goes live must survive that reset.
         syncLinkSupervisionArming();
         t = profiler.split(SECTION_DETECT_DISCONNECT, t);
+        // Phase 20.2: the grace timer and the dialog's retry-to-open loop, right after the edge that
+        // opens the window and before anything downstream reads the session as live or dead.
+        tickReconnect();
+        t = profiler.split(SECTION_RECONNECT, t);
+        // Phase 20.3: the router mapping, cheap once it has finished.
+        tickPortMapper();
+        t = profiler.split(SECTION_PORT_MAPPER, t);
         syncGuestInputBlocker();
         t = profiler.split(SECTION_GUEST_INPUT_BLOCKER, t);
+        maybeSendSessionResumeRequest();
         maybeSendLobbyHello();
         t = profiler.split(SECTION_LOBBY_HELLO, t);
         drainInbound();
@@ -746,6 +816,96 @@ public class CoopNetPump implements EveryFrameScript {
         profiler.endFrame();
     }
 
+    // ---- Phase 20.3: port mapper + connection doctor ----------------------------------------------
+
+    /**
+     * Starts the router mapping for a host port, once per session. Nothing touches the network until
+     * the first {@link #tickPortMapper()}, so this is safe on the frame the host socket opens.
+     *
+     * <p><b>Both host start paths read the same JVM property.</b> {@code coop.portMapping} is a
+     * launch-time setting, not a per-campaign one: a host started from the sector-memory flags (the
+     * in-game control path) still reads {@code -Dcoop.portMapping} rather than looking for a memory
+     * flag of its own. There is no second place to configure it, and adding one would mean two answers
+     * to "will this host try UPnP".
+     */
+    private void startPortMapper(int port) {
+        if (portMapper != null) {
+            return;
+        }
+        boolean enabled = true;
+        try {
+            enabled = CoopNetStartupConfig.fromSystemProperties().portMappingEnabled();
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class,
+                    "Unusable coop port-mapping property; attempting automatic mapping anyway", ex);
+        }
+        try {
+            portMapper = portMapperFactory == null
+                    ? CoopPortMapper.start(port, enabled, clockMillis)
+                    : portMapperFactory.apply(port);
+            portMapperReportLogged = false;
+        } catch (RuntimeException | LinkageError ex) {
+            portMapper = null;
+            CoopLog.warn(CoopNetPump.class, "Coop port mapping could not start; the host is reachable"
+                    + " only through whatever the router already allows", ex);
+        }
+    }
+
+    /**
+     * One slice of the mapping negotiation per frame, then the connection-doctor block exactly once,
+     * when the mapper reports it has stopped trying. Cheap after that: {@code tick} on a finished
+     * mapper is a switch that falls through to "no work left", and the report flag short-circuits.
+     */
+    private void tickPortMapper() {
+        CoopPortMapper mapper = portMapper;
+        if (mapper == null) {
+            return;
+        }
+        try {
+            mapper.tick(clockMillis.getAsLong());
+            if (!portMapperReportLogged && mapper.result().finished()) {
+                portMapperReportLogged = true;
+                CoopLog.info(CoopNetPump.class,
+                        CoopConnectionDoctor.hostReport(mapper.port(), mapper.result()));
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // The mapper swallows its own failures, so reaching here means something structural.
+            // Drop it rather than log every frame; the host stays reachable by manual forwarding.
+            portMapper = null;
+            CoopLog.warn(CoopNetPump.class, "Coop port mapper failed; giving up on automatic mapping", ex);
+        }
+    }
+
+    /**
+     * Releases the router mapping. Called from {@code CoopModPlugin.onGameLoad}, which is the only
+     * teardown hook the engine gives a mod — there is no quit-to-menu or exit callback. A process that
+     * exits without reaching it leaves the mapping to expire on its own: the lease
+     * ({@link CoopPortMapper#LEASE_SECONDS}) is an hour, and both UPnP and NAT-PMP drop it then.
+     */
+    public void shutdownPortMapper() {
+        CoopPortMapper mapper = portMapper;
+        portMapper = null;
+        portMapperReportLogged = false;
+        if (mapper == null) {
+            return;
+        }
+        try {
+            mapper.shutdown();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop port mapper did not shut down cleanly", ex);
+        }
+    }
+
+    /** Test seam: production talks to the real router; tests pass {@code CoopPortMapper::startOffline}. */
+    void setPortMapperFactory(java.util.function.IntFunction<CoopPortMapper> factory) {
+        this.portMapperFactory = factory;
+    }
+
+    /** Test-only read of the mapper the host start paths created. */
+    CoopPortMapper portMapperForTest() {
+        return portMapper;
+    }
+
     private void maybeStartFromSystemProperties() {
         if (startupConfigChecked || service.role() != CoopConnectionRole.NONE) {
             return;
@@ -764,6 +924,7 @@ public class CoopNetPump implements EveryFrameScript {
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
+                startPortMapper(config.port());
                 CoopLog.info(CoopNetPump.class, "Coop host started from JVM property "
                         + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
             } else if (config.role() == CoopConnectionRole.GUEST) {
@@ -772,6 +933,8 @@ public class CoopNetPump implements EveryFrameScript {
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
+                guestConnectHost = config.host();
+                guestConnectPort = config.port();
                 service.connect(config.host(), config.port());
                 CoopLog.info(CoopNetPump.class, "Coop guest started from JVM properties "
                         + CoopNetStartupConfig.CONNECT_HOST_PROPERTY + "=" + config.host() + ", "
@@ -807,6 +970,9 @@ public class CoopNetPump implements EveryFrameScript {
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
+                // Same launch-time -Dcoop.portMapping property as the JVM-property path; see
+                // startPortMapper for why there is no memory-flag equivalent.
+                startPortMapper(port);
                 CoopLog.info(CoopNetPump.class, "Coop host control consumed memory flag " + HOST_PORT_FLAG + "=" + port);
                 return;
             }
@@ -822,6 +988,8 @@ public class CoopNetPump implements EveryFrameScript {
                 lobbyHelloSent = false;
                 handshakeManifestSent = false;
                 seedLockRequestSent = false;
+                guestConnectHost = host;
+                guestConnectPort = port;
                 service.connect(host, port);
                 CoopLog.info(CoopNetPump.class,
                         "Coop guest control consumed memory flags " + CONNECT_HOST_FLAG + "=" + host
@@ -906,31 +1074,304 @@ public class CoopNetPump implements EveryFrameScript {
     private void detectPeerDisconnect() {
         boolean connected = service.isConnected();
         if (channelWasConnected && !connected && service.role() != CoopConnectionRole.NONE) {
-            // Read BEFORE the rewind: afterwards the lobby is back at HOST_WAITING/GUEST_CONNECTING
-            // and nothing distinguishes "never had a partner" from "lost the one we had". The HUD
+            // Read BEFORE anything rewinds: once the lobby is back at HOST_WAITING/GUEST_CONNECTING
+            // nothing distinguishes "never had a partner" from "lost the one we had". The HUD
             // needs that distinction to say "guest disconnected, holding" rather than "waiting for
             // guest". Assignment, not OR: a drop during handshake really is not a lost session.
             peerDroppedAfterLiveSession = isGameplaySessionActive();
-            boolean changed = sessionState.onChannelDisconnected();
             // The session id died with the connection: keep accepting datagrams stamped with its token
-            // and a reconnecting peer's stale in-flight traffic would apply to the next session.
+            // and a reconnecting peer's stale in-flight traffic would apply to the next session. It
+            // stays cleared for the whole grace window and is re-set only on an accepted resume.
             service.setExpectedSessionToken(null);
             lobbyHelloSent = false;
             handshakeManifestSent = false;
             seedLockRequestSent = false;
-            latestTimeSnapshot = null;
             preSessionCampaignDropWarned = false;
             // The link measurements belonged to the dead connection; carrying them into the next one
             // would let a pre-drop RTT sample or UDP silence decide the new link's transport.
             linkSupervisionArmed = false;
             applyStateStreamFallback(false, "peer disconnected", false, clockMillis.getAsLong());
             resetLinkSupervision(clockMillis.getAsLong());
-            if (changed) {
-                CoopLog.warn(CoopNetPump.class, "Coop peer disconnected; session reset, awaiting reconnect as "
-                        + service.role());
+            // Phase 20.2: a live session gets a grace window instead of a teardown. Everything above
+            // is transport hygiene that applies either way; the session record itself survives only
+            // on the grace path.
+            if (!beginReconnectGrace()) {
+                endSessionAfterDrop();
             }
         }
         channelWasConnected = connected;
+        if (!connected) {
+            // Each new socket owes a fresh resume request; while there is no socket, none is pending.
+            reconnect.noteChannelDown();
+        }
+    }
+
+    // ---- Phase 20.2: in-session reconnect grace ---------------------------------------------------
+
+    /**
+     * Today's full session teardown, unchanged: the lobby rewinds so a reconnecting peer runs the
+     * whole lobby/handshake/seed-lock sequence on the new connection, and every session-scoped
+     * subsystem tears itself down on the same frame because {@link #isGameplaySessionActive()} goes
+     * false. Reached on a pre-session drop, on grace expiry, and whenever the grace is declined.
+     */
+    private void endSessionAfterDrop() {
+        boolean changed = sessionState.onChannelDisconnected();
+        latestTimeSnapshot = null;
+        if (changed) {
+            CoopLog.warn(CoopNetPump.class, "Coop peer disconnected; session reset, awaiting reconnect as "
+                    + service.role());
+        }
+    }
+
+    /**
+     * Opens the grace window if this drop deserves one, i.e. the session was live and the identity a
+     * resume has to be matched against still exists. A drop before the session went live keeps the
+     * pre-20.2 behaviour exactly: there is nothing to hold.
+     *
+     * @return true when a window opened and the session record must be kept
+     */
+    private boolean beginReconnectGrace() {
+        if (!peerDroppedAfterLiveSession || reconnect.graceMillis() <= 0L || reconnect.active()) {
+            return false;
+        }
+        String sessionId = sessionState.sessionId();
+        long now = clockMillis.getAsLong();
+        if (service.role() == CoopConnectionRole.HOST) {
+            reconnect.beginHostWait(sessionId, sessionState.remotePlayerId(), now);
+        } else if (service.role() == CoopConnectionRole.GUEST) {
+            // The guest matches on its OWN id: that is what the host remembers about the peer it lost.
+            reconnect.beginGuestReconnect(sessionId, sessionState.localPlayerId(), now);
+        }
+        return reconnect.active();
+    }
+
+    /** Frame tick for the grace window and the dialog's retry-until-it-opens loop. */
+    private void tickReconnect() {
+        if (reconnect.active() && service.role() == CoopConnectionRole.NONE) {
+            // The transport was torn down under us (game unload, explicit shutdown): there is no
+            // session left to hold and no teardown left to run.
+            reconnect.abandon();
+            releaseReconnectHold();
+            return;
+        }
+        reconnect.tick(clockMillis.getAsLong());
+        reconnectDialogs.tick();
+    }
+
+    /** Guest: one {@code SESSION_RESUME_REQUEST} per reconnected socket, in place of the lobby hello. */
+    private void maybeSendSessionResumeRequest() {
+        if (!reconnect.resumeRequestDue()
+                || service.role() != CoopConnectionRole.GUEST
+                || !service.isConnected()) {
+            return;
+        }
+        String sessionId = sessionState.sessionId();
+        String playerId = sessionState.localPlayerId();
+        if (sessionId == null || playerId == null) {
+            // Nothing to ask for: fall back to the ordinary lobby round.
+            reconnect.end("local session identity was lost");
+            return;
+        }
+        CoopMessages.Message request = CoopMessages.sessionResumeRequest(
+                sessionId, service.nextSeq(), clockMillis.getAsLong(), playerId);
+        service.send(request);
+        reconnect.markResumeRequestSent();
+        log("outbound", request);
+    }
+
+    /**
+     * Host: a returning guest is asking for its session back. A mismatch is rejected and the window
+     * keeps running — a stranger connecting mid-grace must not be able to end the wait early, which
+     * is exactly what would happen if a bad request were treated as "the peer is not coming back".
+     */
+    private void handleSessionResumeRequest(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        String requestSession = CoopMessages.parseResumeSessionId(message);
+        String requestPlayer = CoopMessages.parseResumePlayerId(message);
+        CoopReconnectCoordinator.ResumeDecision decision =
+                reconnect.evaluateResumeRequest(requestSession, requestPlayer);
+        if (!decision.accepted()) {
+            String reason = CoopReconnectCoordinator.rejectReason(decision);
+            CoopMessages.Message reject = CoopMessages.sessionResumeReject(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(), reason);
+            service.send(reject);
+            log("outbound", reject);
+            CoopLog.warn(CoopNetPump.class, "Coop rejected SESSION_RESUME_REQUEST (" + reason
+                    + "); the grace window keeps running");
+            return;
+        }
+        CoopMessages.Message accept = CoopMessages.sessionResumeAccept(
+                sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong());
+        service.send(accept);
+        log("outbound", accept);
+        // Only after the accept is queued: the resume re-sets the datagram token and forces the
+        // rebroadcast, and both belong strictly after the guest has been told it may keep the session.
+        reconnect.resume();
+    }
+
+    /** Guest: the host gave the session back. */
+    private void handleSessionResumeAccept(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !reconnect.guestReconnecting()) {
+            return;
+        }
+        String accepted = CoopMessages.parseResumeSessionId(message);
+        if (accepted == null || !accepted.equals(sessionState.sessionId())) {
+            CoopLog.warn(CoopNetPump.class, "Coop SESSION_RESUME_ACCEPT named session " + accepted
+                    + " but this guest holds " + sessionState.sessionId() + "; ending the session");
+            reconnect.end("resume accept named a different session");
+            return;
+        }
+        reconnect.resume();
+    }
+
+    /** Guest: the host will not take us back, so the session is over now rather than at expiry. */
+    private void handleSessionResumeReject(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !reconnect.guestReconnecting()) {
+            return;
+        }
+        String reason = CoopMessages.parseResumeRejectReason(message);
+        reconnect.end(CoopReconnectCoordinator.REASON_HOST_REJECTED
+                + (reason.isEmpty() ? "" : ": " + reason));
+    }
+
+    /**
+     * The only vocabulary an unproven peer may speak while a grace window is open: the resume
+     * exchange itself, a lobby hello (which gets the "session in reconnect grace" reject), and the
+     * heartbeat that keeps the half-open detector honest. Deliberately a whitelist — a new message
+     * type must be argued into this window rather than fall into it.
+     */
+    private static boolean allowedDuringReconnectGrace(CoopMessages.Type type) {
+        return type == CoopMessages.Type.SESSION_RESUME_REQUEST
+                || type == CoopMessages.Type.SESSION_RESUME_ACCEPT
+                || type == CoopMessages.Type.SESSION_RESUME_REJECT
+                || type == CoopMessages.Type.LOBBY_HELLO
+                || type == CoopMessages.Type.PING
+                || type == CoopMessages.Type.PONG;
+    }
+
+    /** Clears the shared hold and takes the dialog down; safe to call when neither is engaged. */
+    private void releaseReconnectHold() {
+        pauseCoordinator.setReconnectHold(false);
+        reconnectDialogs.close();
+    }
+
+    /**
+     * Guest-side hold. The guest's clock follows the host's {@code TIME_SNAPSHOT}, and there will be
+     * no more of those until the link is back — so the last one is re-stamped as paused and the
+     * every-frame re-apply that already exists becomes the hold. Reusing that path rather than adding
+     * a second {@code setPaused} caller is what keeps the guest's own interaction-dialog exemption
+     * (see {@link #maybeApplyTimeSnapshot()}) intact: with the reconnect dialog open, vanilla owns the
+     * clock and pauses it anyway, and this is the backstop for the frames before it manages to open.
+     */
+    private void holdGuestClockForReconnect() {
+        if (latestTimeSnapshot == null) {
+            return;
+        }
+        latestTimeSnapshot = new CoopTimeLock.TimeSnapshot(
+                true,
+                false,
+                latestTimeSnapshot.timestampMillis(),
+                latestTimeSnapshot.campaignDay(),
+                latestTimeSnapshot.sentAtMillis(),
+                CoopHudState.HOLDER_RECONNECT);
+    }
+
+    /**
+     * The forced full rebroadcast a resume owes the returning peer. It does not build a second
+     * broadcast path: the session-start rebroadcast <em>is</em> the streaming edges in
+     * {@link #syncNpcReplication()}, {@link #syncBaseReplication()}, {@link #syncBarGeneration()} and
+     * {@link #syncCampaignReplicator()}, all gated on {@code service.isConnected()}. They already went
+     * inactive on the drop, so the resume frame takes the active edge and everything — NPC set, base
+     * set, bar/mission pool, faction relations, player rep snapshot, colony state — is re-sent from
+     * scratch. Clearing the flags here makes that guarantee explicit rather than incidental, and the
+     * two cadenced streams that are not edge-driven are pulled forward by hand.
+     */
+    private void forceFullRebroadcast() {
+        npcReplicationStreaming = false;
+        baseReplicationStreaming = false;
+        barSuppressionArmed = false;
+        npcFleetReplicator.reset();
+        baseAuthority.reset();
+        datagramWatermark.reset();
+        datagramRedundancy.reset();
+        // The returning guest's clock is frozen until the first snapshot lands, so it does not wait
+        // out the 5 Hz cadence; the guest snapshot is cheap and re-establishes the save material.
+        nextTimeSnapshotAtMillis = 0L;
+        nextGuestSnapshotAtMillis = 0L;
+    }
+
+    /** The grace window's side effects; see {@link CoopReconnectCoordinator}. */
+    private final class ReconnectListener implements CoopReconnectCoordinator.Listener {
+
+        @Override
+        public void onGraceStarted(CoopReconnectCoordinator.State state, long graceMillis) {
+            long now = clockMillis.getAsLong();
+            long seconds = graceMillis / 1000L;
+            pauseCoordinator.setReconnectHold(true);
+            // One warning per window, not one per session: a second blip deserves its own line.
+            graceTrafficDropWarned = false;
+            if (state == CoopReconnectCoordinator.State.HOST_WAIT) {
+                CoopLog.warn(CoopNetPump.class, "Coop guest link died mid-session; holding the world"
+                        + " for " + seconds + " s awaiting a resume of session " + sessionState.sessionId());
+                postFeed(FEED_RECONNECT_WAIT, now, "Co-op: " + remoteDisplayName()
+                        + " disconnected - holding the game for " + seconds + "s.", FEED_WARN_COLOR);
+                reconnectDialogs.request(new coop.ui.CoopReconnectHostDialog(
+                        sessionState.remoteName(),
+                        () -> reconnect.remainingSeconds(clockMillis.getAsLong()),
+                        () -> reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER)));
+            } else {
+                holdGuestClockForReconnect();
+                CoopLog.warn(CoopNetPump.class, "Coop host link died mid-session; reconnecting for "
+                        + seconds + " s to resume session " + sessionState.sessionId());
+                postFeed(FEED_RECONNECT_WAIT, now, "Co-op: connection to the host lost -"
+                        + " reconnecting for " + seconds + "s.", FEED_WARN_COLOR);
+                reconnectDialogs.request(new coop.ui.CoopReconnectGuestDialog(
+                        sessionState.remoteName(),
+                        () -> reconnect.remainingSeconds(clockMillis.getAsLong()),
+                        () -> reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER)));
+            }
+        }
+
+        @Override
+        public void onResumed(CoopReconnectCoordinator.State previous) {
+            long now = clockMillis.getAsLong();
+            releaseReconnectHold();
+            // Same session, same token: the datagram watermark is session-scoped by that token, so
+            // epochs continue where they left off and M1's re-attach has already invalidated the
+            // validated UDP address for the challenge to re-earn.
+            String sessionId = sessionState.sessionId();
+            if (sessionId != null) {
+                service.setExpectedSessionToken(CoopMessages.wireToken(sessionId));
+            }
+            // Silence timers only: the RTT history is the same two machines on the same path.
+            linkQuality.resetSilence(now);
+            // Every clock sample spans a stalled link, so none of them says anything about drift.
+            clockReconciler.clearSamples();
+            if (previous == CoopReconnectCoordinator.State.HOST_WAIT) {
+                forceFullRebroadcast();
+            } else {
+                // Drop the synthesized hold snapshot; the host's next real one is the truth.
+                latestTimeSnapshot = null;
+                lastReconciledTimeSnapshot = null;
+            }
+            CoopLog.info(CoopNetPump.class, "Coop session " + sessionId + " resumed after a link drop as "
+                    + service.role() + "; forcing a full rebroadcast");
+            postFeed(FEED_RECONNECT_RESUMED, now, "Co-op: connection restored - session resumed.",
+                    FEED_GOOD_COLOR);
+        }
+
+        @Override
+        public void onEnded(CoopReconnectCoordinator.State previous, String reason) {
+            long now = clockMillis.getAsLong();
+            releaseReconnectHold();
+            service.setExpectedSessionToken(null);
+            endSessionAfterDrop();
+            CoopLog.warn(CoopNetPump.class, "Coop reconnect grace closed without a resume as "
+                    + service.role() + " (" + reason + "); the session is over");
+            postFeed(FEED_RECONNECT_ENDED, now, "Co-op: session ended - " + reason + ".", FEED_BAD_COLOR);
+        }
     }
 
     private void drainInbound() {
@@ -959,6 +1400,20 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void dispatchInbound(CoopMessages.Message message) {
+        // Phase 20.2. During a grace window the session record is deliberately still live, so
+        // isGameplaySessionActive() is true and every campaign handler below would happily run — for
+        // whoever happens to be on the far end of this socket, which has not yet proved it is the
+        // partner we are holding the session for. Until it does, only the messages that CAN prove it
+        // are dispatched. Pre-20.2 the teardown made this impossible by making the session inactive;
+        // keeping the session is what re-opens the question.
+        if (reconnect.active() && !allowedDuringReconnectGrace(message.type())) {
+            if (!graceTrafficDropWarned) {
+                graceTrafficDropWarned = true;
+                CoopLog.warn(CoopNetPump.class, "Coop ignoring type=" + message.type()
+                        + " from an unproven peer during the reconnect grace window");
+            }
+            return;
+        }
         switch (message.type()) {
             case LOBBY_HELLO -> handleLobbyHello(message);
             case LOBBY_ACCEPT -> handleLobbyAccept(message);
@@ -985,6 +1440,9 @@ public class CoopNetPump implements EveryFrameScript {
             case PING -> sendPong(message);
             case PONG -> handlePong(message);
             case LINK_STATUS -> handleLinkStatus(message);
+            case SESSION_RESUME_REQUEST -> handleSessionResumeRequest(message);
+            case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
+            case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
             case STATE_DATAGRAM -> {
                 // Same session gate the UDP path gets from its token check: pre-session state must
                 // never reach the mirrors, whichever wire carried it.
@@ -1011,6 +1469,11 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void maybeSendLobbyHello() {
+        // Phase 20.2: while the grace window is open the guest asks for its session back instead of
+        // starting a fresh lobby round; see maybeSendSessionResumeRequest.
+        if (reconnect.guestReconnecting()) {
+            return;
+        }
         if (lobbyHelloSent
                 || service.role() != CoopConnectionRole.GUEST
                 || !service.isConnected()
@@ -1053,6 +1516,19 @@ public class CoopNetPump implements EveryFrameScript {
 
     private void handleLobbyHello(CoopMessages.Message message) {
         if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+
+        // Phase 20.2: while a grace window is open the slot still belongs to the partner that lost
+        // it. Note this is also what a *returning* guest gets if it somehow sends a hello instead of
+        // a resume request — it should retry, not be adopted as a new guest on the held session.
+        if (reconnect.hostWaiting()) {
+            CoopMessages.Message reject = CoopMessages.lobbyReject(
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE);
+            service.send(reject);
+            log("outbound", reject);
             return;
         }
 
@@ -2003,6 +2479,9 @@ public class CoopNetPump implements EveryFrameScript {
             service.send(message);
             log("outbound", message);
             service.flushOutbound();
+            // Exemption (b) of the link-death rule: both processes stop to write a save around a
+            // checkpoint, and a late-game sector save runs well past the 15 s silence threshold.
+            lastSaveCheckpointAtMillis = clockMillis.getAsLong();
             return true;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to send SAVE_CHECKPOINT", ex);
@@ -2015,6 +2494,9 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         try {
+            // Same exemption stamp as the sender's: the guest is about to stop pumping to write its
+            // own coordinated autosave, and so, right now, is the host.
+            lastSaveCheckpointAtMillis = clockMillis.getAsLong();
             saveCheckpoint.onCheckpointReceived(
                     CoopMessages.requiredPayloadLong(message, "checkpointId"),
                     CoopMessages.requiredPayloadString(message, "reason"),
@@ -3113,6 +3595,7 @@ public class CoopNetPump implements EveryFrameScript {
             applyStateStreamFallback(fallback, linkQuality.fallbackReason(), true, now);
             tickDegradedNotice(now);
             maybeLogGuestDoctor(now, stats);
+            maybeDeclareLinkDead(now);
         }
 
         if (now >= nextLinkStatusAtMillis) {
@@ -3223,8 +3706,38 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         guestDoctorLogged = true;
+        CoopLog.info(CoopNetPump.class, CoopConnectionDoctor.guestReport(
+                guestConnectHost, guestConnectPort, service.isConnected(), udpObserved,
+                linkQuality.snapshot(now), stats));
+    }
+
+    /**
+     * Phase 20.2 link death. A half-open TCP socket after a NAT drop is not reported by the OS for one
+     * to two minutes; that is a minute of a session that looks alive, sends into a black hole, and (on
+     * the host) blocks the guest's reconnect with "Host already has an active connection". Declaring
+     * it dead ourselves and closing it turns that into the ordinary disconnect edge: the guest's
+     * 500 ms retry starts now, and the host opens its grace window while there is still a session
+     * worth resuming.
+     *
+     * <p>The exemptions live in {@link CoopLinkQuality#evaluateLinkDeath}; what this supplies is the
+     * evidence. The peer's combat state comes from the battle bridge rather than the shared combat
+     * pause intent, because that intent is computed host-side only and the guest needs the same
+     * answer. Runs on the 1 s supervision cadence, so the log line cannot repeat at frame rate.
+     */
+    private void maybeDeclareLinkDead(long now) {
+        if (!service.isConnected() || !isGameplaySessionActive() || reconnect.active()) {
+            return;
+        }
+        boolean peerInCombat = battleBridge.isRemoteBattleActive() || pauseCoordinator.eitherInCombat();
+        CoopLinkQuality.DeathVerdict verdict =
+                linkQuality.evaluateLinkDeath(now, peerInCombat, lastSaveCheckpointAtMillis);
+        if (!verdict.dead()) {
+            return;
+        }
         CoopLog.info(CoopNetPump.class,
-                CoopLinkQuality.guestDoctorBlock(linkQuality.snapshot(now), stats, udpObserved));
+                "Coop declaring the TCP link dead and closing it as " + service.role()
+                        + "; " + verdict.describe());
+        service.dropActiveConnection(verdict.describe());
     }
 
     private void sendLinkStatus(long now, CoopDatagramStats stats) {
