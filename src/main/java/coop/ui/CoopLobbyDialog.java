@@ -129,15 +129,36 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
         if (view == null) {
             return;
         }
-        rendered = view;
-        lastRenderAtMillis = clock.get();
-        if (!initial && !view.allReady()) {
+        if (!initial && confirmationIsStale(view)) {
             // The override's confirmation is about the roster it was pressed on; a roster that moved
             // out from under it must not leave a "Yes, start anyway" standing.
+            //
+            // Phase 21 red-team: the old test here was "!view.allReady()", which is true on every
+            // frame the override is even offered. Since the view also carries a live elapsed counter
+            // and live RTT text, some field changed on nearly every render and the confirmation the
+            // host had just pressed was wiped before it could be pressed again. What actually
+            // invalidates it is the roster moving or the gate opening on its own - nothing else.
             confirmingStartAnyway = false;
         }
         renderText(view);
-        renderOptions(view);
+        if (!renderOptions(view)) {
+            // A failed option render leaves the panel cleared and empty, which is the trapped-player
+            // bug. Not recording the view as rendered is what makes the next frame try again.
+            return;
+        }
+        rendered = view;
+        lastRenderAtMillis = clock.get();
+    }
+
+    /**
+     * Whether a standing "Yes, start anyway" is about a roster that no longer exists: the rows
+     * changed, or everybody readied and the override is not the way in any more.
+     */
+    private boolean confirmationIsStale(CoopLobbyView view) {
+        if (rendered == null) {
+            return true;
+        }
+        return !rendered.rows().equals(view.rows()) || (view.allReady() && !rendered.allReady());
     }
 
     private void renderText(CoopLobbyView view) {
@@ -174,11 +195,12 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
         }
     }
 
-    private void renderOptions(CoopLobbyView view) {
+    /** @return true when the option panel now holds a usable set of options */
+    private boolean renderOptions(CoopLobbyView view) {
         try {
             OptionPanelAPI options = dialog == null ? null : dialog.getOptionPanel();
             if (options == null) {
-                return;
+                return false;
             }
             options.clearOptions();
             if (confirmingStartAnyway) {
@@ -187,14 +209,14 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
                                 + " world that is already running.");
                 options.addOption(TEXT_START_ANYWAY_BACK, OPTION_START_ANYWAY_BACK,
                         "Keeps waiting.");
-                return;
+                return true;
             }
             boolean counting = view.countdownRemainingMillis() >= 0L;
             if (view.localRole() == CoopConnectionRole.HOST) {
                 if (counting) {
                     options.addOption(TEXT_CANCEL_COUNTDOWN, OPTION_CANCEL_COUNTDOWN,
                             "Stops the countdown; the campaign stays held.");
-                    return;
+                    return true;
                 }
                 options.addOption(view.startLabel(), OPTION_START,
                         view.allReady()
@@ -205,12 +227,12 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
                     options.addOption(TEXT_START_ANYWAY, OPTION_START_ANYWAY,
                             "Overrides the ready gate. Asks for confirmation first.");
                 }
-                return;
+                return true;
             }
             if (counting) {
                 options.addOption(TEXT_CANCEL_COUNTDOWN, OPTION_CANCEL_COUNTDOWN,
                         "Stops the countdown; the campaign stays held. Any player may cancel.");
-                return;
+                return true;
             }
             if (view.localReady()) {
                 options.addOption(TEXT_NOT_READY, OPTION_NOT_READY,
@@ -222,8 +244,10 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
                                 : "Available once your campaign has the host's world.");
                 options.setEnabled(OPTION_READY, view.canReady());
             }
+            return true;
         } catch (Throwable ex) {
             CoopLog.warn(getClass(), "Coop lobby could not render its options", ex);
+            return false;
         }
     }
 
@@ -255,10 +279,11 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
         // never left empty - a modal with no options is the trapped-player bug in its purest form.
         CoopLobbyView view = currentView();
         if (view != null) {
-            rendered = view;
-            lastRenderAtMillis = clock.get();
             renderText(view);
-            renderOptions(view);
+            if (renderOptions(view)) {
+                rendered = view;
+                lastRenderAtMillis = clock.get();
+            }
         }
     }
 

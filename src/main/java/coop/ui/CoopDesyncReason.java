@@ -709,7 +709,14 @@ public final class CoopDesyncReason {
         };
     }
 
-    /** The campaign-id reject glues launch advice onto the value with a semicolon; drop it. */
+    /**
+     * The campaign-id reject glues launch advice onto the value with a semicolon; drop it.
+     *
+     * <p>Cutting at the first {@code ;} is safe here specifically because a campaign id is a
+     * {@link java.util.UUID#toString()} — 32 hex digits and 4 dashes, nothing else the format could
+     * ever put a semicolon inside. A value that could legitimately contain one would need a real
+     * delimiter, not this.
+     */
     private static String cutAtAdvice(String value) {
         int semi = value.indexOf(';');
         return semi < 0 ? value.trim() : value.substring(0, semi).trim();

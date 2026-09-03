@@ -174,4 +174,44 @@ class CoopSessionStatsIntelTest {
         // throwable there takes the intel tab with it.
         intel.buttonPressConfirmed(CoopSessionStatsIntel.BUTTON_REFRESH, null);
     }
+
+    // ---- table column width ----------------------------------------------------------------------
+
+    @Test
+    void columnWidthKeepsTheSeventyFloorWhenThereIsRoom() {
+        // A normal-sized page, one player plus the team column: plenty of room, so the usual floor
+        // applies unclamped.
+        float labelWidth = 120f;
+        float width = 800f;
+        float result = CoopSessionStatsIntel.columnWidth(width, labelWidth, 2);
+
+        assertEquals(Math.max(70f, (width - labelWidth - 10f) / 2), result, 0.01f);
+        assertTrue(labelWidth + result * 2 <= width - 10f + 0.01f);
+    }
+
+    @Test
+    void columnWidthShrinksBelowTheFloorRatherThanOverflowTheNarrowPage() {
+        // A narrow page with several player columns: the 70f floor alone would push the table past
+        // the panel edge, so the table must give up the floor instead of overflowing.
+        float labelWidth = 120f;
+        float width = 400f;
+        int columnCount = 5;
+        float result = CoopSessionStatsIntel.columnWidth(width, labelWidth, columnCount);
+
+        assertTrue(result > 0f, "a degenerate width must not produce a zero or negative column");
+        assertTrue(labelWidth + result * columnCount <= width - 10f + 0.01f,
+                "the table must fit inside the available width: " + result);
+    }
+
+    @Test
+    void columnWidthNeverGoesNonPositiveOnAnExtremelyNarrowPage() {
+        float result = CoopSessionStatsIntel.columnWidth(50f, 120f, 4);
+
+        assertTrue(result >= 1f, result + "");
+    }
+
+    @Test
+    void columnWidthIsTheWholeWidthWithNoColumns() {
+        assertEquals(500f, CoopSessionStatsIntel.columnWidth(500f, 120f, 0));
+    }
 }

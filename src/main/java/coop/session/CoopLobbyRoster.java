@@ -100,7 +100,14 @@ public final class CoopLobbyRoster {
     private long countdownEndsAtMillis = NO_COUNTDOWN;
     private String lastResetReason = "";
 
-    /** Marks the moment the lobby opened; the elapsed counter and the AFK hint are measured from it. */
+    /**
+     * Marks the moment the lobby opened; the elapsed counter and the AFK hint are measured from it.
+     *
+     * <p>Re-based by {@link #admit(String, String, long)}: on the host this runs on the first frame of
+     * hosting, which can be minutes before anybody dials in, and "Waiting 4:12" for a lobby a guest
+     * reached eight seconds ago says nothing true. The clock the two readings want is the wait for
+     * the player who is actually being waited on.
+     */
     public void open(long nowMillis) {
         if (opened) {
             return;
@@ -154,6 +161,10 @@ public final class CoopLobbyRoster {
             }
         }
         rows.add(new Row(id, displayName(name), false, CoopJoinPhase.LINK_ESTABLISHED, nowMillis));
+        // The wait that "Waiting m:ss" and the two-minute AFK hint are about starts here, with the
+        // player who has to ready up, not with the host's first frame of hosting.
+        opened = true;
+        openedAtMillis = nowMillis;
         return true;
     }
 

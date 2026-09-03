@@ -27,6 +27,13 @@ public final class CoopDoctorMarker {
     /** The literal every marker line starts with, and the thing a player is told to search for. */
     public static final String PREFIX = "[COOP-DOCTOR]";
 
+    /**
+     * How much of {@code rawReason} rides on the marker line before it is cut off. A 30-mod handshake
+     * diff can be several kilobytes; the full text is already in the adjacent WARN this line sits next
+     * to, so the marker only needs enough of it to be recognisable in a search.
+     */
+    static final int MAX_REASON_CHARS = 300;
+
     private CoopDoctorMarker() {
     }
 
@@ -64,7 +71,7 @@ public final class CoopDoctorMarker {
         append(line, "source", value.source().name());
         appendQuoted(line, "local", orNone(localName));
         appendQuoted(line, "remote", orNone(remoteName));
-        appendQuoted(line, "reason", value.rawReason());
+        appendQuoted(line, "reason", truncateReason(value.rawReason()));
         switch (value.kind()) {
             case SEED -> appendSeed(line, value);
             case MODS -> appendMods(line, value);
@@ -141,8 +148,25 @@ public final class CoopDoctorMarker {
     }
 
     /**
+     * Cuts {@code rawReason} down to {@link #MAX_REASON_CHARS}, with a count of what was dropped. The
+     * full text already went out at WARN right next to this line, so nothing here is lost, only
+     * shortened to what a support helper needs to recognise and search for.
+     */
+    private static String truncateReason(String value) {
+        String text = value == null ? "" : value;
+        if (text.length() <= MAX_REASON_CHARS) {
+            return text;
+        }
+        int more = text.length() - MAX_REASON_CHARS;
+        return text.substring(0, MAX_REASON_CHARS) + " +" + more + " more chars";
+    }
+
+    /**
      * Makes any value safe to sit on one line inside quotes. Backslash first, or the escapes we add
-     * afterwards would be escaped again on a re-read.
+     * afterwards would be escaped again on a re-read. Every other C0 control character (form feed,
+     * backspace, a stray NUL from a mangled stack trace, and so on) is escaped too, as {@code \\uXXXX} -
+     * one of these left raw is exactly as capable of breaking a single-line paste as an unescaped
+     * newline, it is just rarer.
      */
     private static String escape(String value) {
         if (value == null) {
@@ -157,7 +181,13 @@ public final class CoopDoctorMarker {
                 case '\n' -> out.append("\\n");
                 case '\r' -> out.append("\\r");
                 case '\t' -> out.append("\\t");
-                default -> out.append(c);
+                default -> {
+                    if (Character.isISOControl(c)) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+                }
             }
         }
         return out.toString();

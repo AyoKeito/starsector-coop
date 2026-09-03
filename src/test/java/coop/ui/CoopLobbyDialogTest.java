@@ -237,6 +237,100 @@ class CoopLobbyDialogTest {
 
     // ---- proxies -------------------------------------------------------------------------------
 
+
+    /**
+     * Phase 21 red-team blocker 2. The confirmation used to be cleared by
+     * {@code if (!initial && !view.allReady())}, which is true on every frame the override is even
+     * offered - and since the view carries a live elapsed counter and live RTT text, "every frame the
+     * override is offered" meant "every render". The host pressed "Start anyway", the next re-render
+     * put the panel back, and the confirm pair was unreachable.
+     */
+    @Test
+    void theStartAnywayConfirmSurvivesTheElapsedCounterTicking() {
+        AtomicReference<CoopLobbyView> view = new AtomicReference<>(hostView(false, -1L, 12_000L));
+        AtomicLong overrides = new AtomicLong();
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopLobbyDialog plugin = new CoopLobbyDialog(view::get, now::get,
+                () -> { }, () -> { }, overrides::incrementAndGet, ready -> { });
+        RecordingDialog dialog = new RecordingDialog();
+        plugin.init(dialog.proxy());
+
+        plugin.optionSelected(CoopLobbyDialog.TEXT_START_ANYWAY,
+                dialog.options.dataFor(CoopLobbyDialog.TEXT_START_ANYWAY));
+        assertTrue(plugin.confirmingStartAnyway());
+
+        for (int frame = 1; frame <= 4; frame++) {
+            now.addAndGet(250L);
+            view.set(hostView(false, -1L, 12_000L + 250L * frame));
+            plugin.advance(0f);
+        }
+
+        assertEquals(List.of(CoopLobbyDialog.TEXT_START_ANYWAY_CONFIRM,
+                        CoopLobbyDialog.TEXT_START_ANYWAY_BACK), dialog.options.texts(),
+                "a ticking clock is not a reason to take the question back");
+
+        plugin.optionSelected(CoopLobbyDialog.TEXT_START_ANYWAY_CONFIRM,
+                dialog.options.dataFor(CoopLobbyDialog.TEXT_START_ANYWAY_CONFIRM));
+        assertEquals(1L, overrides.get());
+    }
+
+    /** The other half of blocker 2: what genuinely does invalidate the standing confirmation. */
+    @Test
+    void aRosterThatMovesUnderTheConfirmTakesItBack() {
+        AtomicReference<CoopLobbyView> view = new AtomicReference<>(hostView(false, -1L, 12_000L));
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopLobbyDialog plugin = new CoopLobbyDialog(view::get, now::get,
+                () -> { }, () -> { }, () -> { }, ready -> { });
+        RecordingDialog dialog = new RecordingDialog();
+        plugin.init(dialog.proxy());
+
+        plugin.optionSelected(CoopLobbyDialog.TEXT_START_ANYWAY,
+                dialog.options.dataFor(CoopLobbyDialog.TEXT_START_ANYWAY));
+        assertTrue(plugin.confirmingStartAnyway());
+
+        // The guest readied while the question was on screen: different rows, different question.
+        now.addAndGet(250L);
+        view.set(hostView(true, -1L, 12_250L));
+        plugin.advance(0f);
+
+        assertFalse(plugin.confirmingStartAnyway());
+        assertEquals(List.of("Start session"), dialog.options.texts());
+    }
+
+    /**
+     * Phase 21 red-team item 6: {@code clearOptions()} followed by a throwing {@code addOption} left
+     * an inescapable dialog with no options in it, and the view had already been marked rendered, so
+     * no later frame ever tried again.
+     */
+    @Test
+    void anOptionPanelThatThrowsIsRetriedRatherThanLeftEmpty() {
+        AtomicReference<CoopLobbyView> view = new AtomicReference<>(hostView(true, -1L, 12_000L));
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopLobbyDialog plugin = new CoopLobbyDialog(view::get, now::get,
+                () -> { }, () -> { }, () -> { }, ready -> { });
+        RecordingDialog dialog = new RecordingDialog();
+        dialog.options.throwOnAddOption = true;
+        plugin.init(dialog.proxy());
+
+        assertTrue(dialog.options.texts().isEmpty(), "the panel really is empty at this point");
+
+        dialog.options.throwOnAddOption = false;
+        now.addAndGet(CoopLobbyDialog.MIN_RENDER_INTERVAL_MILLIS);
+        plugin.advance(0f);
+
+        assertEquals(List.of("Start session"), dialog.options.texts(),
+                "the same unchanged view is re-rendered, because it was never recorded as rendered");
+    }
+
+    private static CoopLobbyView hostView(boolean allReady, long countdownRemaining, long elapsedMillis) {
+        return new CoopLobbyView(CoopConnectionRole.HOST,
+                List.of(new CoopLobbyView.Row("Alice", "Ready", true),
+                        new CoopLobbyView.Row("Bob", allReady ? "Ready" : "Not ready", false)),
+                List.of("Connection: direct"),
+                countdownRemaining, elapsedMillis, false, allReady,
+                allReady ? "Start session" : "Waiting for Bob...", false, false, false);
+    }
+
     private static final class RecordingDialog {
         private final RecordingTextPanel text = new RecordingTextPanel();
         private final RecordingOptionPanel options = new RecordingOptionPanel();
@@ -294,6 +388,8 @@ class CoopLobbyDialogTest {
     }
 
     static final class RecordingOptionPanel {
+        /** Models an engine option panel that clears and then refuses to take the new options. */
+        boolean throwOnAddOption;
         private final List<String> optionTexts = new ArrayList<>();
         private final List<Object> data = new ArrayList<>();
         final Map<Object, Boolean> enabledByData = new HashMap<>();
@@ -324,6 +420,9 @@ class CoopLobbyDialogTest {
                             yield null;
                         }
                         case "addOption" -> {
+                            if (throwOnAddOption) {
+                                throw new IllegalStateException("no options for you");
+                            }
                             optionTexts.add((String) args[0]);
                             data.add(args[1]);
                             enabledByData.put(args[1], Boolean.TRUE);

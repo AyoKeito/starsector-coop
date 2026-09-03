@@ -18,12 +18,16 @@ import java.util.Properties;
  * exactly the same values it did before, so the pump, the doctor and the launch scripts are
  * unchanged.
  *
- * <p>The parsing below is deliberately still the strict kind: a malformed port, grace window or
- * port-mapping mode is refused rather than quietly replaced, and it is refused identically whether
- * it came from a command line or from a file. That is why the reads use
- * {@link CoopOptionsStore#raw(String)} (the winning value, unvalidated) instead of the store's
- * clamping getters - two different answers for "the port is garbage" depending on which layer said
- * it would be worse than one loud one.
+ * <p><b>Strict where a human is watching, forgiving where nobody is.</b> A malformed port, grace
+ * window or port-mapping mode given as {@code -D} is still refused outright: whoever typed it is
+ * standing at a console, the exception lands in front of them, and guessing what they meant would
+ * be worse. The same garbage coming from {@code saves/common/coop_options.json} is <em>coerced</em>
+ * instead - clamped or replaced by {@link CoopOptionsRegistry}, with one WARN naming the key. The
+ * file is edited by hand hours before the session, and throwing out of here reaches the player as a
+ * host that silently never starts, with one line buried in the log and nothing on screen. So the
+ * layer that supplied the winning value decides which reader is used: {@code -D} keys go through
+ * {@link CoopOptionsStore#raw(String)} and the strict parsers below, file keys through the store's
+ * clamping getters.
  */
 public final class CoopNetStartupConfig {
     public static final String HOST_PORT_PROPERTY = "coop.hostPort";
@@ -74,6 +78,9 @@ public final class CoopNetStartupConfig {
     public static final int DEFAULT_RECONNECT_GRACE_SECONDS = 60;
     /** Upper bound; past this the "held" world is indistinguishable from a hung game. */
     public static final int MAX_RECONNECT_GRACE_SECONDS = 3600;
+
+    /** Latch behind {@link #warnAboutMaxGuestsOnce}. */
+    private static boolean maxGuestsWarned;
 
     private static final String PORT_MAPPING_AUTO = "auto";
     private static final String PORT_MAPPING_OFF = "off";
@@ -169,8 +176,16 @@ public final class CoopNetStartupConfig {
         String connectHost = roleValue(store, CONNECT_HOST_PROPERTY, roleFromProperties);
         String connectPort = roleValue(store, CONNECT_PORT_PROPERTY, roleFromProperties);
         String newGameSeed = trimToEmpty(store.raw(NEW_GAME_SEED_PROPERTY));
-        boolean portMappingEnabled = parsePortMapping(store.raw(PORT_MAPPING_PROPERTY));
-        int reconnectGrace = parseReconnectGrace(store.raw(RECONNECT_GRACE_PROPERTY));
+        // parsePortMapping/parseReconnectGrace throw. That is right for a command line and wrong for
+        // a hand-edited file, so the file layers go through the registry-coercing getters instead:
+        // store.string() canonicalises the enum (anything unrecognised becomes the default) and
+        // store.integer() clamps into 0..MAX_RECONNECT_GRACE_SECONDS, each with one WARN.
+        boolean portMappingEnabled = fromCommandLine(store, PORT_MAPPING_PROPERTY)
+                ? parsePortMapping(store.raw(PORT_MAPPING_PROPERTY))
+                : parsePortMapping(store.string(PORT_MAPPING_PROPERTY));
+        int reconnectGrace = fromCommandLine(store, RECONNECT_GRACE_PROPERTY)
+                ? parseReconnectGrace(store.raw(RECONNECT_GRACE_PROPERTY))
+                : store.integer(RECONNECT_GRACE_PROPERTY);
         String password = trimToEmpty(store.raw(PASSWORD_PROPERTY));
         int maxGuests = parseMaxGuests(store.raw(MAX_GUESTS_PROPERTY));
 
@@ -265,7 +280,19 @@ public final class CoopNetStartupConfig {
     }
 
     private static String roleValue(CoopOptionsStore store, String key, boolean propertiesOnly) {
-        return trimToNull(propertiesOnly ? store.property(key) : store.raw(key));
+        if (propertiesOnly) {
+            // A -D role key: keep the raw text so parsePort can refuse it out loud.
+            return trimToNull(store.property(key));
+        }
+        // From a file. store.string() turns a typo into "" (the registry default for all three role
+        // keys) after one WARN naming the key, which reads downstream as "not configured" - a game
+        // that starts solo and says why, instead of a host that never comes up.
+        return trimToNull(store.string(key));
+    }
+
+    /** Whether the winning layer for {@code key} is the {@code -D} command line. */
+    private static boolean fromCommandLine(CoopOptionsStore store, String key) {
+        return store.sourceOf(key) == CoopOptionsStore.Source.PROPERTY;
     }
 
     private static String trimToNull(String value) {
@@ -329,17 +356,30 @@ public final class CoopNetStartupConfig {
         try {
             requested = Integer.parseInt(trimmed);
         } catch (NumberFormatException ex) {
-            coop.util.CoopLog.warn(CoopNetStartupConfig.class, MAX_GUESTS_PROPERTY + "=" + trimmed
-                    + " is not an integer; using " + MAX_GUESTS_V1);
+            warnAboutMaxGuestsOnce(MAX_GUESTS_PROPERTY + "=" + trimmed + " is not an integer; using "
+                    + MAX_GUESTS_V1);
             return MAX_GUESTS_V1;
         }
         if (requested != MAX_GUESTS_V1) {
-            coop.util.CoopLog.warn(CoopNetStartupConfig.class, MAX_GUESTS_PROPERTY + "=" + requested
+            warnAboutMaxGuestsOnce(MAX_GUESTS_PROPERTY + "=" + requested
                     + " is not supported in v1 and has been clamped to " + MAX_GUESTS_V1
                     + ". The transport is N-ready; the gameplay arbitration for more than one guest"
                     + " is a later phase.");
         }
         return MAX_GUESTS_V1;
+    }
+
+    /**
+     * Once per process, not once per read. Every caller that wants any startup value at all runs
+     * {@link #from(CoopOptionsStore)}, and the pump, the doctor and the HUD each ask more than once
+     * per launch; without this latch a single unsupported {@code coop.maxGuests} papers the log.
+     */
+    private static synchronized void warnAboutMaxGuestsOnce(String message) {
+        if (maxGuestsWarned) {
+            return;
+        }
+        maxGuestsWarned = true;
+        coop.util.CoopLog.warn(CoopNetStartupConfig.class, message);
     }
 
     private static int parsePort(String value, String propertyName) {

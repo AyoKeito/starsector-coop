@@ -138,13 +138,16 @@ class CoopSessionStatsViewTest {
     }
 
     @Test
-    void theHeadlineSaysSoWhenNothingHasBeenLost() {
+    void theHeadlineHasNoLossRowAtAllWhenNothingHasBeenLost() {
+        // "No hulls lost this session." already lives in the ledger; the headline should not repeat it.
         CoopSessionStats stats = new CoopSessionStats();
         stats.notePlayer(HOST, "Ayo");
         stats.noteDaysElapsed(3f);
 
-        assertEquals("No hulls lost this session.",
-                CoopSessionStatsView.of(stats, Set.of()).headline().get(3));
+        List<String> headline = CoopSessionStatsView.of(stats, Set.of()).headline();
+
+        assertEquals(3, headline.size());
+        assertTrue(headline.stream().noneMatch(line -> line.contains("hull")), headline.toString());
     }
 
     // ---- record cards ----------------------------------------------------------------------------
@@ -240,10 +243,23 @@ class CoopSessionStatsViewTest {
     }
 
     @Test
+    void noHullsLostAppearsExactlyOnceOnTheWholePage() {
+        CoopSessionStats stats = new CoopSessionStats();
+        stats.notePlayer(HOST, "Ayo");
+        stats.noteDaysElapsed(3f);
+
+        long occurrences = CoopSessionStatsView.of(stats, Set.of()).allLines().stream()
+                .filter(line -> line.equals("No hulls lost this session."))
+                .count();
+
+        assertEquals(1, occurrences);
+    }
+
+    @Test
     void theFooterStatesAnAttributionRuleForEveryStatGroup() {
         List<String> footer = CoopSessionStatsView.of(rich(), Set.of()).footer();
 
-        assertEquals(12, footer.size());
+        assertEquals(13, footer.size());
         for (String subject : List.of("Battles:", "Fleets destroyed:", "Ships lost:", "Distance:",
                 "Systems visited:", "Salvage recovered:", "Net worth:", "Best single trade:",
                 "Markets traded with:", "Missions claimed:", "Colonies:",
@@ -253,6 +269,24 @@ class CoopSessionStatsViewTest {
         for (String line : footer) {
             assertTrue(line.endsWith("."), line);
         }
+    }
+
+    @Test
+    void theFooterStatesWhatIsActuallyMeasuredNotAnAspiration() {
+        List<String> footer = CoopSessionStatsView.of(rich(), Set.of()).footer();
+
+        assertTrue(footer.stream().anyMatch(line -> line.startsWith("Net worth:")
+                        && line.contains("liquid credits") && !line.contains("fleet value as")),
+                footer.toString());
+        assertTrue(footer.stream().anyMatch(line -> line.startsWith("Distance:")
+                        && line.contains("sampled once a second") && !line.contains("every frame")),
+                footer.toString());
+        assertTrue(footer.stream().anyMatch(line -> line.startsWith("Time flown together:")
+                        && line.contains("same star system") && !line.contains("sensors")),
+                footer.toString());
+        assertTrue(footer.stream().anyMatch(line -> line.contains("guest's is not measured")
+                        && line.contains("wire carries no price")),
+                footer.toString());
     }
 
     // ---- the rule that matters -------------------------------------------------------------------

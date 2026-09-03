@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -98,16 +99,38 @@ class CoopDialogControllerTest {
         assertSame(second, controller.pending());
     }
 
+    /**
+     * Phase 21 red-team item 3. The old behaviour was to drop the request on the first throw, which
+     * retired the dialog for the rest of the session - and the lobby's dialog is the one the world is
+     * held paused behind. The request survives; the backoff is what keeps the retry off the frame.
+     */
     @Test
-    void aUiThatThrowsIsLoggedOnceAndGivenUpOn() {
+    void aUiThatThrowsKeepsTheRequestAndRetriesOnABackoff() {
         RecordingUi ui = new RecordingUi();
         ui.explode = true;
         Global.setSector(sectorProxy(ui));
-        CoopDialogController controller = new CoopDialogController("lobby");
+        AtomicLong now = new AtomicLong(10_000L);
+        CoopDialogController controller = new CoopDialogController("lobby", now::get);
         controller.request(new FakeDialog());
         tickPastDeferral(controller);
 
-        assertFalse(controller.isRequested(), "a UI that throws once throws every frame");
+        assertTrue(controller.isRequested(), "a dialog the world is waiting on is never retired");
+        assertFalse(controller.isShown());
+        assertEquals(1, ui.attempts, "one attempt, then the backoff");
+
+        for (int frame = 0; frame < 100; frame++) {
+            controller.tick();
+        }
+        assertEquals(1, ui.attempts, "a hundred frames inside the backoff is still one attempt");
+
+        now.addAndGet(CoopDialogController.RETRY_BACKOFF_MILLIS);
+        controller.tick();
+        assertEquals(2, ui.attempts, "and it does try again once the backoff is up");
+
+        ui.explode = false;
+        now.addAndGet(CoopDialogController.RETRY_BACKOFF_MILLIS);
+        controller.tick();
+        assertTrue(controller.isShown(), "a UI that recovers gets the dialog it was owed");
     }
 
     @Test
@@ -173,10 +196,10 @@ class CoopDialogControllerTest {
                     new Class<?>[]{CampaignUIAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "showInteractionDialog" -> {
+                            attempts++;
                             if (explode) {
                                 throw new IllegalStateException("no dialog for you");
                             }
-                            attempts++;
                             if (accept) {
                                 shown.add((InteractionDialogPlugin) args[0]);
                             }

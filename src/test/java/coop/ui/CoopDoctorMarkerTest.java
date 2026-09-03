@@ -122,6 +122,47 @@ class CoopDoctorMarkerTest {
     }
 
     @Test
+    void aHugeModDiffIsTruncatedRatherThanPrintedInFull() {
+        // A 30-mod diff from the real classifier can run several kilobytes; the marker line only
+        // needs enough to be recognisable, and the full text already went out at WARN.
+        StringBuilder raw = new StringBuilder("handshakeManifest: ");
+        for (int i = 0; i < 2_000; i++) {
+            raw.append('x');
+        }
+        CoopDesyncReason reason = CoopDesyncReason.classify(raw.toString(), CoopDesyncReason.Source.HANDSHAKE);
+
+        String line = CoopDoctorMarker.format(reason, "s", CoopConnectionRole.HOST, "a", "b");
+
+        assertFalse(line.contains("x".repeat(301)), "the reason field must be cut short");
+        assertTrue(line.contains(" +" + (raw.length() - CoopDoctorMarker.MAX_REASON_CHARS)
+                + " more chars\""), line);
+    }
+
+    @Test
+    void aShortReasonIsNeverMarkedAsTruncated() {
+        CoopDesyncReason reason = CoopDesyncReason.classify("short reason", CoopDesyncReason.Source.OTHER);
+
+        String line = CoopDoctorMarker.format(reason, "s", CoopConnectionRole.HOST, "a", "b");
+
+        assertFalse(line.contains("more chars"), line);
+        assertTrue(line.contains(" reason=\"short reason\""), line);
+    }
+
+    @Test
+    void formFeedAndOtherControlCharactersAreEscapedNotLeftRaw() {
+        char formFeed = (char) 0x0C;
+        String raw = "handshakeManifest: page one" + formFeed + "page two end";
+        CoopDesyncReason reason = CoopDesyncReason.classify(raw, CoopDesyncReason.Source.HANDSHAKE);
+
+        String line = CoopDoctorMarker.format(reason, "s", CoopConnectionRole.GUEST, "a", "b");
+
+        assertEquals(-1, line.indexOf(formFeed), line);
+        char backslash = (char) 0x5C;
+        String expectedEscape = backslash + "u000c";
+        assertTrue(line.contains(expectedEscape), "form feed should be escaped: " + line);
+    }
+
+    @Test
     void logDoesNotThrowWithoutARunningGame() {
         CoopDesyncReason reason = CoopDesyncReason.classify("anything", CoopDesyncReason.Source.OTHER);
         CoopDoctorMarker.log(reason, "session-1", CoopConnectionRole.GUEST, "a", "b");

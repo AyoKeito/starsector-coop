@@ -3405,12 +3405,21 @@ public final class CoopCampaignReplicator
         return hyperspace != null && locationId.equals(hyperspace.getId()) ? hyperspace : null;
     }
 
+    /** Test seam: in play this is reached from the salvage watcher's per-frame removal diff. */
+    void reportLocalSalvageConsumeForTest(String entityId) {
+        reportLocalSalvageConsume(entityId);
+    }
+
     private void reportLocalSalvageConsume(String entityId) {
         CoopWorldDelta delta = new CoopWorldDelta(entityId, CoopWorldDelta.Kind.CONSUME, true, "",
                 session.localPlayerId());
         // Mark applied locally so we never re-report it and the host's rebroadcast echo is a no-op.
         if (worldLedger.apply(delta)) {
             reportWorldDelta(delta);
+            // Phase 21 red-team item 11. handleWorldDelta tallies the salvage that arrives over the
+            // wire, which is the *other* client's. This is the local one, and behind the same ledger:
+            // apply() returns true once per entity, so the echo that comes back cannot double-count.
+            tally(StatsSink::onSalvageConsumed);
             CoopLog.info(CoopCampaignReplicator.class, "Coop salvage CONSUME reported entity=" + entityId);
         }
     }

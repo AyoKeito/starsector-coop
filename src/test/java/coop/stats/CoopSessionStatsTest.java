@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopSessionStatsTest {
@@ -55,6 +56,20 @@ class CoopSessionStatsTest {
         stats.notePlayer("", "nobody");
 
         assertTrue(stats.playerIds().isEmpty());
+    }
+
+    @Test
+    void playerIdsIsACopyNotTheLiveColumnOrder() {
+        stats.notePlayer(HOST, "Ayo");
+
+        List<String> ids = stats.playerIds();
+        assertThrows(UnsupportedOperationException.class, () -> ids.add(GUEST));
+        assertThrows(UnsupportedOperationException.class, () -> ids.remove(HOST));
+
+        // Registering a new player afterwards must not retroactively change a list already handed out.
+        stats.notePlayer(GUEST, "Partner");
+        assertEquals(List.of(HOST), ids);
+        assertEquals(List.of(HOST, GUEST), stats.playerIds());
     }
 
     @Test

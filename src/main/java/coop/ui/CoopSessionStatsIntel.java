@@ -429,7 +429,7 @@ public class CoopSessionStatsIntel extends BaseIntelPlugin {
         List<String> headers = view.columnHeaders();
         float labelWidth = Math.max(120f, width * 0.30f);
         float columnWidth = headers.isEmpty() ? width
-                : Math.max(70f, (width - labelWidth - 10f) / headers.size());
+                : columnWidth(width, labelWidth, headers.size());
 
         for (CoopSessionStatsView.Section section : view.sections()) {
             info.addSectionHeading(section.title(), Alignment.MID, 12f);
@@ -442,19 +442,43 @@ public class CoopSessionStatsIntel extends BaseIntelPlugin {
             }
             info.beginTable(Misc.getBasePlayerColor(), Misc.getDarkPlayerColor(),
                     Misc.getBrightPlayerColor(), 20f, columns);
-            for (CoopSessionStatsView.Row row : section.rows()) {
-                // One colour for every cell in the row. No leader highlight, by decision.
-                Object[] data = new Object[(row.cells().size() + 1) * 2];
-                data[0] = text;
-                data[1] = row.label();
-                for (int i = 0; i < row.cells().size(); i++) {
-                    data[(i + 1) * 2] = text;
-                    data[(i + 1) * 2 + 1] = row.cells().get(i);
+            // beginTable/addTable must stay paired even when a row blows up midway - an unclosed table
+            // corrupts every widget the intel screen tries to lay out after this one, which is a worse
+            // failure than one section losing its remaining rows.
+            try {
+                for (CoopSessionStatsView.Row row : section.rows()) {
+                    // One colour for every cell in the row. No leader highlight, by decision.
+                    Object[] data = new Object[(row.cells().size() + 1) * 2];
+                    data[0] = text;
+                    data[1] = row.label();
+                    for (int i = 0; i < row.cells().size(); i++) {
+                        data[(i + 1) * 2] = text;
+                        data[(i + 1) * 2 + 1] = row.cells().get(i);
+                    }
+                    info.addRow(data);
                 }
-                info.addRow(data);
+            } catch (RuntimeException | LinkageError ex) {
+                logRenderFailureOnce(ex);
+            } finally {
+                info.addTable("", 0, 6f);
             }
-            info.addTable("", 0, 6f);
         }
+    }
+
+    /**
+     * How wide each stat column is, clamped so the table fits inside {@code width}.
+     *
+     * <p>A 70f-per-column floor reads fine at the intel screen's usual size, but on a narrow page with
+     * several player columns it can push the table past the panel edge - the failure item 5 exists to
+     * fix. When the floor would overflow, this gives up on it and hands back exactly what fits instead.
+     */
+    static float columnWidth(float width, float labelWidth, int columnCount) {
+        if (columnCount <= 0) {
+            return width;
+        }
+        float available = Math.max(0f, width - labelWidth - 10f);
+        float desired = Math.max(70f, available / columnCount);
+        return desired * columnCount <= available ? desired : Math.max(1f, available / columnCount);
     }
 
     private void renderLedger(TooltipMakerAPI info, CoopSessionStatsView view, Color gray) {

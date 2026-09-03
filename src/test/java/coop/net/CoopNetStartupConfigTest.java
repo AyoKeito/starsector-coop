@@ -422,12 +422,111 @@ class CoopNetStartupConfigTest {
         assertEquals(7777, config.port());
     }
 
+    /**
+     * Red-team item 1. The strict parsers are reachable from a file a player edits by hand, and a
+     * throw here surfaces as a host that logs one WARN and then never starts, with nothing on
+     * screen to explain it. A file value is coerced with a warning instead; only the command line
+     * is still refused outright (see the test below).
+     */
     @Test
-    void malformedFileValuesAreRefusedTheSameWayMalformedPropertiesAre() {
+    void aMalformedFileValueIsCoercedRatherThanStoppingTheLaunch() {
         CoopOptionsStore store = storeWithCommonOverride(new Properties(),
-                "coop.reconnectGraceSeconds", "eventually");
+                "coop.reconnectGraceSeconds", "eventually",
+                "coop.portMapping", "sometimes",
+                "coop.hostPort", "not-a-port");
 
-        assertThrows(IllegalArgumentException.class, () -> CoopNetStartupConfig.from(store));
+        CoopNetStartupConfig config =
+                assertDoesNotThrow(() -> CoopNetStartupConfig.from(store));
+
+        assertEquals(CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS,
+                config.reconnectGraceSeconds());
+        assertTrue(config.portMappingEnabled(), "an unreadable portMapping falls back to auto");
+        assertFalse(config.isPresent(), "an unreadable host port reads as \"not hosting\"");
+        assertEquals(CoopConnectionRole.NONE, config.role());
+    }
+
+    @Test
+    void outOfRangeFileValuesAreClampedRatherThanRefused() {
+        CoopOptionsStore store = storeWithCommonOverride(new Properties(),
+                "coop.reconnectGraceSeconds", "99999",
+                "coop.hostPort", "70000");
+
+        CoopNetStartupConfig config =
+                assertDoesNotThrow(() -> CoopNetStartupConfig.from(store));
+
+        assertEquals(CoopNetStartupConfig.MAX_RECONNECT_GRACE_SECONDS,
+                config.reconnectGraceSeconds());
+        assertEquals(CoopConnectionRole.HOST, config.role());
+        assertEquals(65535, config.port());
+    }
+
+    /**
+     * The other half of item 1: whoever typed a bad value on the command line is standing at a
+     * console, so it is still refused there. Same values as the file test above.
+     */
+    @Test
+    void aMalformedCommandLineValueIsStillRefusedOutright() {
+        for (String[] keyValue : new String[][]{
+                {"coop.reconnectGraceSeconds", "eventually"},
+                {"coop.portMapping", "sometimes"},
+                {"coop.hostPort", "not-a-port"}}) {
+            Properties properties = new Properties();
+            properties.setProperty(keyValue[0], keyValue[1]);
+
+            IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                    () -> CoopNetStartupConfig.from(properties),
+                    "expected a rejection for " + keyValue[0] + "=" + keyValue[1]);
+
+            assertTrue(failure.getMessage().contains(keyValue[0]), failure.getMessage());
+        }
+    }
+
+    /**
+     * Red-team item 3: {@code -Dcoop.password=} is how you run one session without the password your
+     * settings file sets. It used to be trimmed to null before the layer was chosen, so the file
+     * value came back and the gate stayed on.
+     */
+    @Test
+    void anExplicitlyEmptyPasswordPropertyClearsAFilePassword() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.password", "");
+
+        CoopOptionsStore store =
+                storeWithCommonOverride(properties, "coop.password", "from-the-file");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(store);
+
+        assertEquals("", config.password());
+        assertFalse(config.passwordRequired());
+    }
+
+    /** ...while an absent one still inherits the file password. */
+    @Test
+    void anAbsentPasswordPropertyStillInheritsTheFilePassword() {
+        CoopOptionsStore store =
+                storeWithCommonOverride(new Properties(), "coop.password", "from-the-file");
+
+        assertEquals("from-the-file", CoopNetStartupConfig.from(store).password());
+    }
+
+    /**
+     * The role rule is unchanged by item 3: an empty {@code -Dcoop.hostPort=} does not count as the
+     * command line naming a role key, so the file still decides the role.
+     */
+    @Test
+    void anEmptyRolePropertyDoesNotMakeTheCommandLineTheRoleAuthority() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.hostPort", "");
+
+        CoopOptionsStore store = storeWithCommonOverride(properties,
+                "coop.connectHost", "203.0.113.9",
+                "coop.connectPort", "7777");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(store);
+
+        assertEquals(CoopConnectionRole.GUEST, config.role());
+        assertEquals("203.0.113.9", config.host());
+        assertEquals(7777, config.port());
     }
 
     /** The seed is a one-shot {@code -D} gesture: a file must not be able to pin it. */

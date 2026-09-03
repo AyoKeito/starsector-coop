@@ -106,9 +106,14 @@ public class CoopSessionStats {
         }
     }
 
-    /** Player ids in fixed display order: host first, then join order. Never null. */
+    /**
+     * Player ids in fixed display order: host first, then join order. Never null.
+     *
+     * @return an unmodifiable copy; the live column order is internal, so nothing outside this class
+     * can insert or reorder a player without going through {@link #notePlayer}
+     */
     public List<String> playerIds() {
-        return playerOrder();
+        return List.copyOf(playerOrder());
     }
 
     /** The display name for {@code playerId}, falling back to the id when none was announced. */
@@ -359,8 +364,14 @@ public class CoopSessionStats {
     }
 
     /**
-     * Reads back what {@link #writeInto} stored, or null when the save has none — or has one written
-     * by a build whose class shape XStream could not map onto this one.
+     * Reads back what {@link #writeInto} stored, or null when the save simply has nothing under
+     * {@link #PERSISTENT_KEY}.
+     *
+     * <p>This is not a tolerant load: XStream deserialises the whole persistent-data map before this
+     * method ever runs, so a save written by a build whose class shape does not map onto this one
+     * throws during that deserialisation, not here. The real constraint this class has to honour
+     * across builds is upstream of this method — fields may be <em>added</em>, but never removed or
+     * renamed, or an older save's XML stops mapping onto this class entirely.
      */
     public static CoopSessionStats readFrom(Map<String, Object> persistentData) {
         if (persistentData == null) {

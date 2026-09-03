@@ -12,6 +12,7 @@ import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopTimeLock;
 import coop.ui.CoopHudState;
+import org.apache.log4j.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -505,7 +506,7 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
-        pump.advance(0f);
+        advancePastTheHeadlessLobbyValve(pump);
 
         // Phase 20 live QA (F2): coop releases what coop paused, with no key press from the host.
         // This assertion used to be reachable only because the test unpaused the sector by hand.
@@ -2699,8 +2700,25 @@ class CoopNetPumpTest {
 
         pump.advance(0f);
 
+        assertFalse(session.lobbyReleased(),
+                "one null-UI frame is a load frame, not a UI that is never coming");
+        assertTrue(sector.paused, "and the gate keeps holding while it waits to find out");
+
+        advancePastTheHeadlessLobbyValve(pump);
+
         assertTrue(session.lobbyReleased());
         assertFalse(sector.paused);
+    }
+
+    /**
+     * Phase 21 red-team item 5: the headless "no campaign UI" release now needs a whole second of
+     * consecutive null-UI frames, because a single one of those is what a load frame looks like. A
+     * test with no UI has to run the pump across that valve before its session is playable.
+     */
+    private static void advancePastTheHeadlessLobbyValve(CoopNetPump pump) {
+        for (int frame = 0; frame < 65; frame++) {
+            pump.advance(0f);
+        }
     }
 
     private static CoopMessages.Message lastOfType(RecordingNetService service, CoopMessages.Type type) {
@@ -2939,18 +2957,17 @@ class CoopNetPumpTest {
                 () -> "fingerprint-host",
                 () -> "coop-seed",
                 timeLock);
+        // The intent is applied after the headless valve, not before: while the lobby gate is still
+        // holding the world the shared-pause state is deliberately parked and reset every frame.
+        advancePastTheHeadlessLobbyValve(pump);
         pump.pauseCoordinatorForBridge().applyGuestKeyPauseIntent(true, 1L);
-
-        pump.advance(0f);
-        now.set(1200L);
+        now.set(5000L);
         pump.advance(0f);
 
-        CoopMessages.Message snapshot = service.sent.stream()
-                .filter(m -> m.type() == CoopMessages.Type.TIME_SNAPSHOT)
-                .findFirst()
-                .orElseThrow();
+        CoopMessages.Message snapshot = lastOfType(service, CoopMessages.Type.TIME_SNAPSHOT);
         assertEquals("guest", CoopMessages.requiredPayloadString(snapshot, "pausedBy"));
-        assertEquals(List.of("guest"), timeLock.capturedPauseHolders);
+        assertEquals("guest",
+                timeLock.capturedPauseHolders.get(timeLock.capturedPauseHolders.size() - 1));
     }
 
     @Test
@@ -3258,6 +3275,7 @@ class CoopNetPumpTest {
         pump.advance(0f);
         service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 3L, 2000L));
         pump.advance(0f);
+        advancePastTheHeadlessLobbyValve(pump);
 
         assertFalse(pump.reconnectCoordinatorForTest().active());
         assertEquals(CoopMessages.wireToken("session-a"),
@@ -3328,7 +3346,7 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
-        pump.advance(0f);
+        advancePastTheHeadlessLobbyValve(pump);
 
         assertTrue(sector.paused, "coop must only release the pause it applied itself");
         assertTrue(pump.pauseCoordinatorForBridge().hostPauseIntent(),
@@ -3354,7 +3372,7 @@ class CoopNetPumpTest {
         AtomicLong now = new AtomicLong(1000L);
         CoopNetPump pump = livePump(service, session, now::get);
 
-        pump.advance(0f);
+        advancePastTheHeadlessLobbyValve(pump);
         assertFalse(sector.paused, "a live session runs");
 
         service.connected = false;
@@ -3371,7 +3389,7 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
-        pump.advance(0f);
+        advancePastTheHeadlessLobbyValve(pump);
 
         assertFalse(sector.paused, "F2: the rejoined session must not stay paused waiting for a key press");
         assertFalse(pump.pauseCoordinatorForBridge().hostPauseIntent());
@@ -3430,7 +3448,7 @@ class CoopNetPumpTest {
         session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
         session.guestAcceptHandshake("session-a");
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
-        pump.advance(0f);
+        advancePastTheHeadlessLobbyValve(pump);
 
         // The guest's clock is the host snapshot's to drive (RecordingTimeLock does not touch the
         // sector), so what the release has to prove is that the pump stops re-asserting the hold.
@@ -3461,6 +3479,7 @@ class CoopNetPumpTest {
         assertFalse(pump.reconnectCoordinatorForTest().active());
         assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
         // Released: the resumed session's clock follows the host again, so nothing re-pauses locally.
+        advancePastTheHeadlessLobbyValve(pump);
         sector.paused = false;
         pump.advance(0f);
         assertFalse(sector.paused);
@@ -3949,14 +3968,20 @@ class CoopNetPumpTest {
     private static final class RecordingSector {
         private boolean paused;
         private final RecordingCampaignUi campaignUi;
+        private final RecordingFleet playerFleet;
 
         private RecordingSector(boolean paused) {
-            this(paused, null);
+            this(paused, null, null);
         }
 
         private RecordingSector(boolean paused, RecordingCampaignUi campaignUi) {
+            this(paused, campaignUi, null);
+        }
+
+        private RecordingSector(boolean paused, RecordingCampaignUi campaignUi, RecordingFleet playerFleet) {
             this.paused = paused;
             this.campaignUi = campaignUi;
+            this.playerFleet = playerFleet;
         }
 
         private SectorAPI proxy() {
@@ -3978,6 +4003,14 @@ class CoopNetPumpTest {
                             }
                             case "getCampaignUI" -> {
                                 return campaignUi == null ? null : campaignUi.proxy();
+                            }
+                            case "getPlayerFleet" -> {
+                                return playerFleet == null ? null : playerFleet.proxy();
+                            }
+                            // Phase 21 red-team item 13 re-registers the intel pages off the stats
+                            // tick; no manager is the headless answer and the pump has to take it.
+                            case "getIntelManager", "getClock" -> {
+                                return null;
                             }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
@@ -4001,6 +4034,8 @@ class CoopNetPumpTest {
         private final List<Object> shownDialogs = new ArrayList<>();
         /** False models another dialog holding the exclusive slot. */
         private boolean acceptInteractionDialogs = true;
+        /** True models a campaign UI that throws out of the show call on every frame. */
+        private boolean throwOnShowInteractionDialog;
 
         private RecordingCampaignUi(RecordingEntity target) {
             this.target = target;
@@ -4037,6 +4072,9 @@ class CoopNetPumpTest {
                             // test can assert WHICH coop dialog went up.
                             case "showInteractionDialog" -> {
                                 shownDialogs.add(args[0]);
+                                if (throwOnShowInteractionDialog) {
+                                    throw new IllegalStateException("no dialog for you");
+                                }
                                 return acceptInteractionDialogs;
                             }
                             case "addMessage" -> {
@@ -5240,6 +5278,321 @@ class CoopNetPumpTest {
         assertEquals(1, stats.shipLossLedger().size());
         assertEquals("ISS Bad Idea", stats.shipLossLedger().get(0).hullName());
         assertEquals(42.5f, stats.lastHullLossDay(), 0.01f);
+    }
+
+
+    // ---- Phase 21 red-team ------------------------------------------------------------------------
+
+    /**
+     * Blocker 1. A guest that drops two seconds into the three-second countdown used to leave the
+     * countdown running, so the host released alone: into a session with no guest, with the
+     * {@code LOBBY_STATUS(released)} dropped on the floor by the dead socket and no later one to
+     * replace it, and with the coop pause hold promoted to a host pause intent nothing could clear.
+     */
+    @Test
+    void aGuestDroppingMidCountdownCancelsItInsteadOfStartingTheHostAlone() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        service.inbound.add(CoopMessages.readyState("session-a", 5L, 1000L, "SNAPSHOT_APPLIED", true));
+        pump.advance(0f);
+        pump.lobbyStartForTest();
+        pump.advance(0f);
+        assertTrue(pump.lobbyRosterForTest().countdownActive());
+
+        // Two seconds into a three-second countdown.
+        now.set(3000L);
+        service.connected = false;
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+        assertFalse(pump.lobbyRosterForTest().countdownActive(),
+                "the drop is the countdown's answer");
+
+        // Well past the moment it would have fired.
+        now.set(1000L + coop.session.CoopLobbyRoster.COUNTDOWN_MILLIS + 5_000L);
+        pump.advance(0f);
+        assertFalse(session.lobbyReleased(), "the host must not start the session by itself");
+        assertTrue(sector.paused, "and the world stays held while the window runs");
+
+        // The guest comes back inside the window.
+        service.connected = true;
+        service.sent.clear();
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(), "guest-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(session.lobbyReleased(), "the lobby is still the lobby; nobody pressed Start");
+        assertFalse(pump.pauseCoordinatorForBridge().hostPauseIntent(),
+                "F2: the lobby hold is coop's, and it must never latch as the host player's pause");
+        assertNotNull(lastOfType(service, CoopMessages.Type.LOBBY_STATUS),
+                "the returning guest is sent the roster again");
+    }
+
+    /**
+     * Item 4. {@code READY_STATE} carries the phase and the ready flag together, so a guest that
+     * reaches SNAPSHOT_APPLIED and readies on the same frame leaves only the READY report behind. The
+     * roster refuses READY as a phase, so the row used to stay at SEED_LOCKED - and the ready report
+     * was then thrown away for arriving "too early" against the phase it was itself carrying.
+     */
+    @Test
+    void aReadyReportThatOutrunsThePhaseFloorStillReadiesTheRow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        Global.setSector(new RecordingSector(false, new RecordingCampaignUi(null)).proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        // Both reports in one drain; only the last one survives into the pending slot.
+        service.inbound.add(CoopMessages.readyState("session-a", 5L, 1000L, "SNAPSHOT_APPLIED", false));
+        service.inbound.add(CoopMessages.readyState("session-a", 6L, 1000L, "READY", true));
+        pump.advance(0f);
+
+        assertTrue(pump.lobbyRosterForTest().allReady(),
+                "the ready the guest sent is the ready the host gates on");
+        // READY reaches the row through setReady, which is the only writer allowed to put it there;
+        // the derived phase floor clamps to SNAPSHOT_APPLIED so it can never do it on the guest's
+        // behalf, and so the ready report is not refused for arriving with the phase it carries.
+        assertEquals(coop.session.CoopJoinPhase.READY,
+                pump.lobbyRosterForTest().row("guest-player").phase());
+    }
+
+    /**
+     * Item 7. A campaign UI that throws out of {@code showInteractionDialog} used to make the pump
+     * rebuild the dialog plugin and re-request it every frame, which reset the once-only WARN and
+     * turned a broken UI into a per-frame log flood.
+     */
+    @Test
+    void aUiThatWillNotOpenTheDesyncDialogIsAskedOncePerSecondAndLoggedOnce() {
+        CapturingAppender appender = new CapturingAppender();
+        Logger.getLogger(coop.ui.CoopDialogController.class).addAppender(appender);
+        try {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            CoopSessionState session = lobbyHostSession();
+            RecordingCampaignUi ui = new RecordingCampaignUi(null);
+            ui.throwOnShowInteractionDialog = true;
+            Global.setSector(new RecordingSector(false, ui).proxy());
+            CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+            service.inbound.add(CoopMessages.seedLockAck("session-a", 6L, 1000L, "fingerprint-guest"));
+            for (int frame = 0; frame < 100; frame++) {
+                pump.advance(0f);
+            }
+
+            assertTrue(pump.desyncDialogRequestedForTest(),
+                    "the reason is still owed to the player, so the request is kept");
+            List<Object> desyncAttempts = ui.shownDialogs.stream()
+                    .filter(shown -> shown instanceof coop.ui.CoopDesyncDialog)
+                    .toList();
+            assertEquals(1, desyncAttempts.size(),
+                    "a hundred frames inside the one-second backoff is one attempt");
+            assertEquals(1, new java.util.HashSet<>(desyncAttempts).size(),
+                    "and one plugin instance, never rebuilt per frame");
+            assertEquals(1, appender.messages().stream()
+                            .filter(line -> line.contains("could not open the desync dialog")).count(),
+                    "one WARN per request, not one per frame");
+        } finally {
+            Logger.getLogger(coop.ui.CoopDialogController.class).removeAppender(appender);
+        }
+    }
+
+    /**
+     * Item 8. A manifest the mod cannot capture used to reject the handshake with no marker, no
+     * dialog and no brake, leaving the guest dialling every five seconds against a local failure that
+     * retrying cannot fix.
+     */
+    @Test
+    void aManifestThatCannotBeCapturedIsADesyncAndNotASilentRetryLoop() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        Global.setSector(new RecordingSector(false, new RecordingCampaignUi(null)).proxy());
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L,
+                () -> {
+                    throw new IllegalStateException("mod list unreadable");
+                },
+                () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host",
+                () -> "coop-seed");
+
+        pump.advance(0f);
+
+        assertNotNull(pump.desyncReasonForTest(), "the player is told why the join stopped");
+        assertTrue(pump.desyncDialogRequestedForTest());
+        assertEquals(1, service.stopReconnectingReasons.size(), "no 5 s retry against a local failure");
+        assertTrue(session.rejectTerminal());
+    }
+
+    /**
+     * Item 10. {@code sendShipLost} is a guest-to-host message, and the only call site sat behind the
+     * stats tick's HOST gate - so a guest could lose a fleet and the losses page never heard of it.
+     */
+    @Test
+    void theGuestSettlesItsOwnHullLossesAndReportsThem() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        RecordingFleet fleet = new RecordingFleet();
+        fleet.add("member-1", "ISS Bad Idea");
+        fleet.add("member-2", "ISS Survivor");
+        Global.setSector(new RecordingSector(false, null, fleet).proxy());
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        advancePastTheHeadlessLobbyValve(pump);
+
+        pump.battleBegunForTest();
+        fleet.remove("member-1");
+        pump.battleConcludedForTest();
+        now.addAndGet(2_000L);
+        pump.advance(0f);
+
+        CoopMessages.Message lost = lastOfType(service, CoopMessages.Type.SHIP_LOST);
+        assertEquals("ISS Bad Idea", CoopMessages.parseShipLost(lost).hullName());
+        assertEquals("guest-player", CoopMessages.parseShipLost(lost).playerId());
+    }
+
+    /**
+     * Item 14. The pre-battle capture cleared the roster unconditionally, so a battle that began
+     * before the previous one had settled took the previous one's losses with it.
+     */
+    @Test
+    void aBattleThatBeginsBeforeTheLastOneSettlesKeepsTheFirstBattlesLosses() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingFleet fleet = new RecordingFleet();
+        fleet.add("member-1", "ISS Bad Idea");
+        fleet.add("member-2", "ISS Survivor");
+        Global.setSector(new RecordingSector(false, null, fleet).proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.battleBegunForTest();
+        fleet.remove("member-1");
+        pump.battleConcludedForTest();
+        // No frame in between: the next engagement starts before the diff has been taken.
+        pump.battleBegunForTest();
+
+        CoopSessionStats stats = pump.sessionStatsForTest();
+        assertEquals(1L, stats.player("host-player").shipsLost(),
+                "the first battle's losses are settled, not discarded");
+        assertEquals("ISS Bad Idea", stats.shipLossLedger().get(0).hullName());
+    }
+
+    /**
+     * Item 12. There is no net-worth API and no way to value the guest's fleet from the host, so the
+     * column is credits - and the guest's credits only ever reach the host inside GUEST_SNAPSHOT.
+     * Sampling only the host's fleet left the guest's column reading zero for the whole session.
+     */
+    @Test
+    void theGuestsNetWorthIsTakenFromTheSnapshotThatCarriesIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+        coop.save.CoopGuestSnapshot snapshot = new coop.save.CoopGuestSnapshot();
+        snapshot.setSessionId("session-a");
+        snapshot.setPlayerId("guest-player");
+        snapshot.setPlayerName("Guest");
+        snapshot.setCredits(4242d);
+
+        service.inbound.add(CoopMessages.guestSnapshot("session-a", 8L, 1000L, snapshot.encodeBody()));
+        pump.advance(0f);
+
+        assertEquals(4242L, pump.sessionStatsForTest().player("guest-player").netWorthCredits());
+    }
+
+    /** A player fleet whose membership a test can change between the two edges of a battle. */
+    private static final class RecordingFleet {
+        private final List<Object[]> members = new ArrayList<>();
+
+        private void add(String id, String shipName) {
+            members.add(new Object[]{id, shipName});
+        }
+
+        private void remove(String id) {
+            members.removeIf(member -> member[0].equals(id));
+        }
+
+        private com.fs.starfarer.api.campaign.CampaignFleetAPI proxy() {
+            return (com.fs.starfarer.api.campaign.CampaignFleetAPI) Proxy.newProxyInstance(
+                    com.fs.starfarer.api.campaign.CampaignFleetAPI.class.getClassLoader(),
+                    new Class<?>[]{com.fs.starfarer.api.campaign.CampaignFleetAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        return switch (method.getName()) {
+                            case "getFleetData" -> fleetDataProxy();
+                            case "getContainingLocation", "getLocation", "getCargo" -> null;
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        };
+                    });
+        }
+
+        private com.fs.starfarer.api.campaign.FleetDataAPI fleetDataProxy() {
+            return (com.fs.starfarer.api.campaign.FleetDataAPI) Proxy.newProxyInstance(
+                    com.fs.starfarer.api.campaign.FleetDataAPI.class.getClassLoader(),
+                    new Class<?>[]{com.fs.starfarer.api.campaign.FleetDataAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        if ("getMembersListCopy".equals(method.getName())) {
+                            List<com.fs.starfarer.api.fleet.FleetMemberAPI> copy = new ArrayList<>();
+                            for (Object[] member : members) {
+                                copy.add(memberProxy((String) member[0], (String) member[1]));
+                            }
+                            return copy;
+                        }
+                        throw new UnsupportedOperationException(method.getName());
+                    });
+        }
+
+        private static com.fs.starfarer.api.fleet.FleetMemberAPI memberProxy(String id, String shipName) {
+            return (com.fs.starfarer.api.fleet.FleetMemberAPI) Proxy.newProxyInstance(
+                    com.fs.starfarer.api.fleet.FleetMemberAPI.class.getClassLoader(),
+                    new Class<?>[]{com.fs.starfarer.api.fleet.FleetMemberAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        return switch (method.getName()) {
+                            case "getId" -> id;
+                            case "getShipName" -> shipName;
+                            // Null hull spec: describeHull already treats an undescribable member as
+                            // a hull with no class, which is all this test needs it to be.
+                            case "getHullSpec" -> null;
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        };
+                    });
+        }
+    }
+
+    private static final class CapturingAppender extends org.apache.log4j.AppenderSkeleton {
+        private final List<String> messages = new ArrayList<>();
+
+        private List<String> messages() {
+            return List.copyOf(messages);
+        }
+
+        @Override
+        protected void append(org.apache.log4j.spi.LoggingEvent event) {
+            messages.add(String.valueOf(event.getMessage()));
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public boolean requiresLayout() {
+            return false;
+        }
     }
 
     private static int countSent(RecordingNetService service, CoopMessages.Type type) {

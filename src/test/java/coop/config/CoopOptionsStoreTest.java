@@ -7,11 +7,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -114,14 +117,58 @@ class CoopOptionsStoreTest {
         assertTrue(store.hasProperty("coop.reconnectGraceSeconds"));
     }
 
+    /**
+     * Red-team item 3. {@code -Dcoop.password=} is the only way to run one session without the
+     * password the settings file sets, and before this the property was trimmed to null before the
+     * layer was chosen - so the file value came straight back and the gate stayed on.
+     */
     @Test
-    void aBlankPropertyIsTreatedAsAbsent() {
+    void anExplicitlyEmptyPropertyOverridesTheFileInsteadOfFallingThroughToIt() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of("coop.password", "hunter2"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props("coop.password", ""));
+
+        assertEquals("", store.raw("coop.password"));
+        assertEquals("", store.string("coop.password"));
+        assertEquals(Source.PROPERTY, store.sourceOf("coop.password"),
+                "an empty -D still means the property layer decided");
+    }
+
+    /** Whitespace is the same gesture as empty: the value was cleared, not left unsaid. */
+    @Test
+    void aWhitespaceOnlyPropertyClearsTheFileValueToo() {
         FakeSource source = new FakeSource();
         source.common = json(Map.of("coop.password", "hunter2"));
         CoopOptionsStore store = new CoopOptionsStore(source, props("coop.password", "   "));
 
+        assertEquals("", store.raw("coop.password"));
+    }
+
+    /**
+     * The other half of item 3: {@code property()} and {@code hasProperty()} keep trim-to-null, so
+     * an empty {@code -Dcoop.hostPort=} does not count as "the command line named a role key" in
+     * {@code CoopNetStartupConfig}.
+     */
+    @Test
+    void anEmptyPropertyStillDoesNotCountAsTheCommandLineNamingAKey() {
+        CoopOptionsStore store = new CoopOptionsStore(new FakeSource(),
+                props("coop.hostPort", "", "coop.connectHost", "   "));
+
+        assertFalse(store.hasProperty("coop.hostPort"));
+        assertNull(store.property("coop.hostPort"));
+        assertFalse(store.hasProperty("coop.connectHost"));
+        assertNull(store.property("coop.connectHost"));
+    }
+
+    /** An absent property still falls through to the file; only a present one decides. */
+    @Test
+    void anAbsentPropertyStillFallsThroughToTheFile() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of("coop.password", "hunter2"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
         assertEquals("hunter2", store.raw("coop.password"));
-        assertFalse(store.hasProperty("coop.password"));
+        assertEquals(Source.COMMON, store.sourceOf("coop.password"));
     }
 
     // ---- the -D-only set ----------------------------------------------------------------------
@@ -290,6 +337,45 @@ class CoopOptionsStoreTest {
     }
 
     // ---- production wiring ----------------------------------------------------------------------
+
+    /**
+     * Red-team item 4. The engine surfaces are memoised process-wide, and the latch used to be set
+     * before the read was attempted - so one question asked while {@code Global.getSettings()} was
+     * still null cached "there is no config file" for the whole run, and every setting in both files
+     * was ignored for the rest of the session.
+     */
+    @Test
+    void aReadBeforeTheEngineExistsDoesNotPoisonTheProcessWideCache() {
+        CoopOptionsStore.SettingsJsonSource source = CoopOptionsStore.SettingsJsonSource.INSTANCE;
+        source.invalidate();
+        try {
+            // Global.getSettings() is null in a unit test, which is exactly the situation of a class
+            // that asks a config question before the game has finished starting.
+            assertNull(source.shipped());
+            assertNull(source.common());
+
+            assertFalse(source.shippedCached(),
+                    "a read with no engine must leave the shipped layer unresolved");
+            assertFalse(source.commonCached(),
+                    "a read with no engine must leave the common layer unresolved");
+        } finally {
+            source.invalidate();
+        }
+    }
+
+    /**
+     * Red-team item 5: one store per property set, so the once-per-key warning memory survives
+     * between calls instead of every {@code CoopNetStartupConfig.from(Properties)} re-logging.
+     */
+    @Test
+    void aPropertySetGetsOneMemoisedStoreRatherThanANewOnePerCall() {
+        CoopOptionsStore.clearPropertyStoreCache();
+        Properties properties = new Properties();
+        properties.setProperty("coop.hudCorner", "sideways");
+
+        assertSame(CoopOptionsStore.forProperties(properties),
+                CoopOptionsStore.forProperties(properties));
+    }
 
     @Test
     void theSystemStoreIsASingletonAndSurvivesTheAbsenceOfAGame() {

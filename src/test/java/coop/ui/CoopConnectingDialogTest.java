@@ -123,6 +123,32 @@ class CoopConnectingDialogTest {
 
     // ---- proxies -------------------------------------------------------------------------------
 
+
+    /**
+     * Phase 21 red-team item 6. Same shape as the lobby's: a cleared panel plus a throwing
+     * {@code addOption} used to leave the guest with a connecting screen it could not cancel out of,
+     * permanently, because the view had already been recorded as rendered.
+     */
+    @Test
+    void anOptionPanelThatThrowsIsRetriedRatherThanLeavingNoCancel() {
+        CoopConnectingDialog.View view = new CoopConnectingDialog.View(
+                CoopJoinPhase.SEED_LOCKED, 4_000L, null, "");
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopConnectingDialog plugin = new CoopConnectingDialog(() -> view, now::get, () -> { });
+        RecordingDialog dialog = new RecordingDialog();
+        dialog.options.throwOnAddOption = true;
+
+        plugin.init(dialog.proxy());
+        assertTrue(dialog.options.texts().isEmpty());
+
+        dialog.options.throwOnAddOption = false;
+        now.addAndGet(CoopConnectingDialog.MIN_RENDER_INTERVAL_MILLIS);
+        plugin.advance(0f);
+
+        assertEquals(List.of(CoopConnectingDialog.TEXT_CANCEL), dialog.options.texts(),
+                "Cancel is the only way out of this screen; it has to come back");
+    }
+
     private static final class RecordingDialog {
         private final RecordingText text = new RecordingText();
         private final RecordingOptions options = new RecordingOptions();
@@ -180,6 +206,8 @@ class CoopConnectingDialogTest {
     }
 
     private static final class RecordingOptions {
+        /** Models an engine option panel that clears and then refuses to take the new options. */
+        private boolean throwOnAddOption;
         private final List<String> optionTexts = new ArrayList<>();
         private final List<Object> data = new ArrayList<>();
 
@@ -206,6 +234,9 @@ class CoopConnectingDialogTest {
                             yield null;
                         }
                         case "addOption" -> {
+                            if (throwOnAddOption) {
+                                throw new IllegalStateException("no options for you");
+                            }
                             optionTexts.add((String) args[0]);
                             data.add(args[1]);
                             yield null;

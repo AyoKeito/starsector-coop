@@ -174,10 +174,12 @@ final class CoopSessionStatsView {
             won += stats.player(playerId).battlesWon();
         }
         lines.add("Battles: " + fought + " fought, " + won + " won");
+        // "No hulls lost" already has a home in the ledger below; saying it twice on one page reads as
+        // a bug, not emphasis. The headline only earns a line here once there is a day count to show.
         Float sinceLoss = stats.daysSinceLastHullLoss();
-        lines.add(sinceLoss == null
-                ? "No hulls lost this session."
-                : "Days since the last hull loss: " + formatDays(sinceLoss));
+        if (sinceLoss != null) {
+            lines.add("Days since the last hull loss: " + formatDays(sinceLoss));
+        }
         return lines;
     }
 
@@ -397,15 +399,17 @@ final class CoopSessionStatsView {
                 "Battles: credited to the player whose fleet entered the engagement.",
                 "Fleets destroyed: team-wide, counted from the battle report of whoever fought it.",
                 "Ships lost: credited to the fleet the hull was serving in.",
-                "Distance: measured on the host from each fleet's own position, every frame.",
+                "Distance: measured on the host from each fleet's own position, sampled once a second.",
                 "Systems visited: credited to each player who entered; the team figure is the union.",
                 "Salvage recovered: team-wide, one count per entity the host saw consumed.",
-                "Net worth: the player's own credits and fleet value as last reported.",
+                "Net worth: the player's own liquid credits as last reported, not fleet value.",
                 "Best single trade: the largest transaction, bought or sold.",
+                "Best single trade: the guest's is not measured this release; the wire carries no price.",
                 "Markets traded with: credited to the player who opened the market screen.",
                 "Missions claimed: credited to the player whose claim the host accepted.",
                 "Colonies: founding is credited to the founder; held is what the shared faction owns.",
-                "Time flown together: team-wide, counted while both fleets share a system or sensors.");
+                "Time flown together: team-wide, counted only while both fleets are in the same star "
+                        + "system.");
     }
 
     // ---- formatting ------------------------------------------------------------------------------

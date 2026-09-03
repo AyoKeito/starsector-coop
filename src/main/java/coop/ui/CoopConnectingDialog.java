@@ -130,10 +130,14 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
         if (view == null) {
             return;
         }
+        renderText(view);
+        if (!renderOptions()) {
+            // The panel was cleared and then nothing went into it. Leaving the view unrecorded is
+            // what makes the next frame retry instead of settling on an empty, inescapable dialog.
+            return;
+        }
         rendered = view;
         lastRenderAtMillis = clock.get();
-        renderText(view);
-        renderOptions();
     }
 
     private void renderText(View view) {
@@ -198,18 +202,21 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
         };
     }
 
-    private void renderOptions() {
+    /** @return true when the option panel now holds a usable set of options */
+    private boolean renderOptions() {
         try {
             OptionPanelAPI options = dialog == null ? null : dialog.getOptionPanel();
             if (options == null) {
-                return;
+                return false;
             }
             options.clearOptions();
             options.addOption(TEXT_CANCEL, OPTION_CANCEL,
                     "Stops trying to join. Your campaign stays loaded and paused; the host sees an"
                             + " ordinary disconnect and nothing more.");
+            return true;
         } catch (Throwable ex) {
             CoopLog.warn(getClass(), "Coop connecting dialog could not render its options", ex);
+            return false;
         }
     }
 

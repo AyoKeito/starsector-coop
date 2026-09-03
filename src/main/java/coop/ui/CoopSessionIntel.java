@@ -158,7 +158,9 @@ public class CoopSessionIntel extends BaseIntelPlugin {
             // forceNoMessage: registration happens on every load and after every save, and a
             // "new intel" toast every time would be noise for an entry the player already knows about.
             manager.addIntel(intel, true);
-            CoopLog.info(CoopSessionIntel.class, "Coop session intel entry registered");
+            // No line for the ordinary case, for the same reason there is no toast: this runs twice
+            // per save. The sweep above logs when it actually found something, and that is the only
+            // registration event a log reader has any use for.
             return intel;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopSessionIntel.class, "Could not register the coop session intel entry", ex);

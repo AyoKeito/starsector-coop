@@ -333,16 +333,23 @@ public class CoopNetPump implements EveryFrameScript {
     // ---- Phase 20.2 reconnect grace / 20.3 port mapper ------------------------------------------
     private final CoopReconnectCoordinator reconnect;
     private final coop.ui.CoopDialogController reconnectDialogs =
-            new coop.ui.CoopDialogController("reconnect");
+            new coop.ui.CoopDialogController("reconnect", this::nowMillis);
 
     // ---- Phase 21 lobby --------------------------------------------------------------------------
     /** How often the host re-sends {@code LOBBY_STATUS} even when nothing changed. */
     private static final long LOBBY_STATUS_INTERVAL_MILLIS = 1_000L;
+    /**
+     * Consecutive frames with no campaign UI before the lobby gate gives up and releases itself.
+     * Sixty frames is about a second at the engine's frame rate, which is long enough that a load
+     * frame or a between-screens null read cannot trip it.
+     */
+    private static final int LOBBY_NO_UI_RELEASE_FRAMES = 60;
     /** Host-authoritative roster; on the guest, the mirror of the host's. */
     private final coop.session.CoopLobbyRoster lobbyRoster = new coop.session.CoopLobbyRoster();
-    private final coop.ui.CoopDialogController lobbyDialogs = new coop.ui.CoopDialogController("lobby");
+    private final coop.ui.CoopDialogController lobbyDialogs =
+            new coop.ui.CoopDialogController("lobby", this::nowMillis);
     private final coop.ui.CoopDialogController connectingDialogs =
-            new coop.ui.CoopDialogController("connecting");
+            new coop.ui.CoopDialogController("connecting", this::nowMillis);
     private coop.ui.CoopLobbyDialog lobbyDialog;
     private coop.ui.CoopConnectingDialog connectingDialog;
     /** Wall clock of the frame this client's lobby opened; the "released after n s" log reads it. */
@@ -380,7 +387,8 @@ public class CoopNetPump implements EveryFrameScript {
      * The one that outranks the lobby and the connecting screen and yields only to reconnect
      * (see {@link coop.ui.CoopDialogArbiter}).
      */
-    private final coop.ui.CoopDialogController desyncDialogs = new coop.ui.CoopDialogController("desync");
+    private final coop.ui.CoopDialogController desyncDialogs =
+            new coop.ui.CoopDialogController("desync", this::nowMillis);
     /**
      * The classified reason the dialog on screen is about, or null when none is up. Also what the HUD
      * reads to say the {@code COOP-*} code out loud, and what {@link #desyncOwnsReason} matches the
@@ -413,10 +421,12 @@ public class CoopNetPump implements EveryFrameScript {
     /** The peer's id, remembered across the disconnect that clears it; drives the "away" column. */
     private String lastRemotePlayerId = "";
     /** Fleet-member id to {@code name|hullClass}, captured when a coop battle starts. */
-    private final java.util.Map<String, String> preBattleRoster = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, Hull> preBattleRoster = new java.util.LinkedHashMap<>();
     /** True between a battle concluding and the first frame with no screen open to diff on. */
     private boolean shipLossDiffPending;
     private boolean lobbyNoUiReleaseLogged;
+    /** Consecutive lobby frames with no campaign UI to show the gate on; see {@link #tickLobby()}. */
+    private int lobbyNoUiFrames;
     /** Wall clock of the last SAVE_CHECKPOINT sent or received; exemption (b) of the death rule. */
     private long lastSaveCheckpointAtMillis;
     /** Log-once flag for traffic dropped while an unproven peer is on the line during a grace window. */
@@ -804,6 +814,14 @@ public class CoopNetPump implements EveryFrameScript {
         this.desyncOwnsFailure = owner == null ? reason -> false : owner;
     }
 
+    /**
+     * The pump's own wall clock, as an instance method so the dialog controllers can be handed it
+     * from their field initialisers (a lambda over the final field cannot be, it is not assigned yet).
+     */
+    private long nowMillis() {
+        return clockMillis.getAsLong();
+    }
+
     /** Test/bridge read: the lobby roster this client is rendering. */
     coop.session.CoopLobbyRoster lobbyRosterForTest() {
         return lobbyRoster;
@@ -1168,14 +1186,72 @@ public class CoopNetPump implements EveryFrameScript {
         if (remote != null && !remote.isEmpty()) {
             lastRemotePlayerId = remote;
         }
-        if (service.role() != CoopConnectionRole.HOST || !isSessionPlayable()) {
-            return;
-        }
         if (now >= nextStatsSampleAtMillis) {
             nextStatsSampleAtMillis = now + STATS_SAMPLE_INTERVAL_MILLIS;
-            sampleHostStats(stats, now);
+            // Ahead of the playable gate, because the failure this covers is a save, not a session:
+            // both intel entries are removed by beforeGameSave and re-added by afterGameSave, so a
+            // throw in between leaves the player with no coop pages at all until the next load. Two
+            // map lookups a second, and the registration itself only runs when one is missing.
+            reRegisterMissingIntelPages();
+            if (isSessionPlayable()) {
+                if (service.role() == CoopConnectionRole.HOST) {
+                    sampleHostStats(stats, now);
+                } else {
+                    // Phase 21 red-team item 10. The guest tallies nothing -- the host owns the
+                    // numbers -- but its own hulls still have to be *reported*, and sendShipLost is
+                    // only reachable from the settle. Behind the HOST gate it was unreachable, so a
+                    // guest could lose a fleet and the losses page would never hear about it.
+                    settleGuestShipLosses(stats);
+                }
+            }
         }
-        maybeSendSessionStats(now, false);
+        if (isSessionPlayable()) {
+            maybeSendSessionStats(now, false);
+        }
+    }
+
+    /** Guest half of the ship-loss diff; the host does this inside {@link #sampleHostStats}. */
+    private void settleGuestShipLosses(coop.stats.CoopSessionStats stats) {
+        try {
+            SectorAPI sector = sectorOrNull();
+            if (sector == null) {
+                return;
+            }
+            maybeSettleShipLosses(stats, sector, statsDay());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not settle the guest's hull losses", ex);
+        }
+    }
+
+    /**
+     * Re-adds either coop intel entry if it is not on the intel manager. A map lookup per entry per
+     * second; the registration itself only runs when something is actually missing.
+     */
+    private void reRegisterMissingIntelPages() {
+        try {
+            SectorAPI sector = sectorOrNull();
+            if (sector == null) {
+                return;
+            }
+            com.fs.starfarer.api.campaign.comm.IntelManagerAPI manager = sector.getIntelManager();
+            if (manager == null) {
+                return;
+            }
+            if (isIntelMissing(manager, coop.ui.CoopSessionIntel.class)) {
+                coop.ui.CoopSessionIntel.ensureRegistered(sector);
+            }
+            if (isIntelMissing(manager, coop.ui.CoopSessionStatsIntel.class)) {
+                coop.ui.CoopSessionStatsIntel.ensureRegistered(sector);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            // An intel manager that will not answer is not a reason to lose the frame.
+        }
+    }
+
+    private static boolean isIntelMissing(com.fs.starfarer.api.campaign.comm.IntelManagerAPI manager,
+                                          Class<?> type) {
+        java.util.List<com.fs.starfarer.api.campaign.comm.IntelInfoPlugin> found = manager.getIntel(type);
+        return found == null || found.isEmpty();
     }
 
     /**
@@ -1398,6 +1474,13 @@ public class CoopNetPump implements EveryFrameScript {
                     || sector.getPlayerFleet().getFleetData() == null) {
                 return;
             }
+            if (shipLossDiffPending) {
+                // A second battle beginning before the first one settled (a chained engagement, or a
+                // recovery screen that outlived the arming frame). Settling first is what keeps the
+                // first battle's losses; the old unconditional clear threw them away.
+                shipLossDiffPending = false;
+                settleShipLosses(sessionStats(), sector, statsDay());
+            }
             preBattleRoster.clear();
             for (com.fs.starfarer.api.fleet.FleetMemberAPI member
                     : sector.getPlayerFleet().getFleetData().getMembersListCopy()) {
@@ -1450,13 +1533,12 @@ public class CoopNetPump implements EveryFrameScript {
             com.fs.starfarer.api.campaign.LocationAPI location =
                     sector.getPlayerFleet().getContainingLocation();
             String systemName = location == null ? "" : location.getName();
-            for (java.util.Map.Entry<String, String> entry : preBattleRoster.entrySet()) {
+            for (java.util.Map.Entry<String, Hull> entry : preBattleRoster.entrySet()) {
                 if (survivors.contains(entry.getKey())) {
                     continue;
                 }
-                String[] hull = entry.getValue().split("\\|", 2);
-                String hullName = hull.length > 0 ? hull[0] : "";
-                String hullClass = hull.length > 1 ? hull[1] : "";
+                String hullName = entry.getValue().name();
+                String hullClass = entry.getValue().hullClass();
                 if (service.role() == CoopConnectionRole.HOST) {
                     // Dedup guarantee: the roster map is cleared below, so each captured member can
                     // be reported at most once per battle.
@@ -1488,7 +1570,20 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
-    private static String describeHull(com.fs.starfarer.api.fleet.FleetMemberAPI member) {
+    /**
+     * One captured hull, as two fields.
+     *
+     * <p>Two fields and not one {@code "name|class"} string: a player is perfectly entitled to name a
+     * ship {@code ISS Bar|Baz}, and the old join-then-split reported that as the hull class "Baz".
+     */
+    private record Hull(String name, String hullClass) {
+        private Hull {
+            name = name == null ? "" : name;
+            hullClass = hullClass == null ? "" : hullClass;
+        }
+    }
+
+    private static Hull describeHull(com.fs.starfarer.api.fleet.FleetMemberAPI member) {
         String name = "";
         String hullClass = "";
         try {
@@ -1500,7 +1595,7 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException | LinkageError ignored) {
             // A member the engine will not describe still counts as a hull; it just goes unnamed.
         }
-        return name + "|" + hullClass;
+        return new Hull(name, hullClass);
     }
 
     /**
@@ -1586,6 +1681,17 @@ public class CoopNetPump implements EveryFrameScript {
         onConnectingCancelled();
     }
 
+    // Test seams for the battle bridge's two edges. In play these arrive from
+    // CoopBattleBridge.BattleFleetListener; a unit test has no engine to fight a battle in.
+
+    void battleBegunForTest() {
+        onLocalBattleBegun(java.util.List.of());
+    }
+
+    void battleConcludedForTest() {
+        onBattleConcluded(java.util.List.of(), true);
+    }
+
     /**
      * Frame entry for the lobby. Runs after the inbound drain and before the pause hold, so a release
      * decided on this frame is applied by this frame's {@code syncHostSharedPause}.
@@ -1617,15 +1723,23 @@ public class CoopNetPump implements EveryFrameScript {
         // surface: without a campaign UI there is nothing to show, and holding a world paused with no
         // way to release it is strictly worse than falling back to the pre-lobby behaviour. In a
         // loaded campaign the UI is always there, so this never fires in play.
+        //
+        // Phase 21 red-team: a *single* null-UI frame used to be enough, and a null read is exactly
+        // what the engine hands back on a load frame, between screens, or on any frame the getter
+        // throws. Releasing the gate on one of those would start the session behind the players'
+        // backs. A whole second of them is a UI that is genuinely not coming.
         if (isGameplaySessionActive() && !campaignUiAvailable()) {
-            if (sessionState.releaseLobby() && !lobbyNoUiReleaseLogged) {
+            lobbyNoUiFrames++;
+            if (lobbyNoUiFrames >= LOBBY_NO_UI_RELEASE_FRAMES && sessionState.releaseLobby()
+                    && !lobbyNoUiReleaseLogged) {
                 lobbyNoUiReleaseLogged = true;
-                CoopLog.info(CoopNetPump.class, "Coop lobby released without opening: no campaign UI"
-                        + " to show it on");
+                CoopLog.warn(CoopNetPump.class, "Coop lobby released without opening: no campaign UI"
+                        + " to show it on for " + lobbyNoUiFrames + " consecutive frames");
             }
             closeLobbyUi();
             return;
         }
+        lobbyNoUiFrames = 0;
 
         if (role == CoopConnectionRole.HOST) {
             tickHostLobby(now);
@@ -1655,6 +1769,7 @@ public class CoopNetPump implements EveryFrameScript {
         lobbyStartAnyway = false;
         lastLobbyStatusKey = null;
         nextLobbyStatusAtMillis = 0L;
+        lobbyNoUiFrames = 0;
         guestReportedPhase = null;
         guestReportedReady = false;
         guestReadyStatePending = false;
@@ -1691,6 +1806,18 @@ public class CoopNetPump implements EveryFrameScript {
             applyDerivedGuestPhase(guestId, now);
             applyReportedGuestReady(guestId, now);
             if (reconnect.hostWaiting()) {
+                // Phase 21 red-team blocker 1. The countdown used to run straight through a drop, so
+                // a link that died two seconds into it released the host alone -- into a session with
+                // no guest, with the LOBBY_STATUS(released) dropped on the floor by the dead socket
+                // and no later one to replace it, and with the pause hold promoted to a host pause
+                // intent nobody could explain. The drop is the countdown's answer: cancel it.
+                if (lobbyRoster.cancelCountdown()) {
+                    CoopLog.info(CoopNetPump.class, "Coop lobby countdown cancelled: "
+                            + remoteDisplayName() + " dropped mid-countdown");
+                    postFeed(FEED_LOBBY_CANCELLED, now, "Co-op: countdown cancelled - "
+                            + remoteDisplayName() + " dropped.", FEED_WARN_COLOR);
+                }
+                lobbyStartAnyway = false;
                 lobbyRoster.markReconnecting(guestId, now);
             } else {
                 lobbyRoster.markReconnected(guestId, now);
@@ -1699,7 +1826,9 @@ public class CoopNetPump implements EveryFrameScript {
             dropDepartedGuestRows(now);
         }
 
-        if (lobbyRoster.countdownElapsed(now)) {
+        // Never while a grace window is open: the guest cannot be told about a release it is not
+        // connected to hear, and the whole point of the window is that it is coming back.
+        if (!reconnect.active() && lobbyRoster.countdownElapsed(now)) {
             releaseLobbyNow(now, lobbyStartAnyway);
             return;
         }
@@ -1724,8 +1853,16 @@ public class CoopNetPump implements EveryFrameScript {
             derived = coop.session.CoopJoinPhase.SEED_LOCKED;
         }
         coop.session.CoopJoinPhase target = coop.session.CoopJoinPhase.max(derived, guestReportedPhase);
+        if (target == coop.session.CoopJoinPhase.READY) {
+            // The roster refuses READY as a phase on purpose - readying is a player action carried by
+            // the row's ready flag, not by the protocol. Clamped rather than dropped: a guest whose
+            // SNAPSHOT_APPLIED and READY reports arrive in the same drain leaves only the READY one
+            // behind, and dropping it stranded the row at SEED_LOCKED with the ready report then
+            // refused for being too early (Phase 21 red-team, item 4).
+            target = coop.session.CoopJoinPhase.SNAPSHOT_APPLIED;
+        }
         coop.session.CoopLobbyRoster.Row row = lobbyRoster.row(guestId);
-        if (row == null || target == coop.session.CoopJoinPhase.READY || row.phase().atLeast(target)) {
+        if (row == null || row.phase().atLeast(target)) {
             return;
         }
         lobbyRoster.setPhase(guestId, target, now);
@@ -1747,11 +1884,12 @@ public class CoopNetPump implements EveryFrameScript {
         if (row == null) {
             return;
         }
-        guestReadyStatePending = false;
         if (!row.phase().atLeast(coop.session.CoopJoinPhase.SNAPSHOT_APPLIED)) {
-            // Nothing to be ready for yet; the phase floor already carries the progress.
+            // Nothing to be ready for yet. The flag stays pending: clearing it here consumed the only
+            // Ready the guest ever sends whenever the phase floor had not caught up on that frame.
             return;
         }
+        guestReadyStatePending = false;
         boolean changed = lobbyRoster.setReady(guestId, guestReportedReady, now);
         String name = remoteDisplayName();
         if (!guestReportedReady && lobbyRoster.cancelCountdown()) {
@@ -1868,7 +2006,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
         connectingDialogs.close();
         connectingDialog = null;
-        if (lobbyDialog == null) {
+        if (lobbyDialog == null || !lobbyDialogs.isRequested()) {
             lobbyDialog = new coop.ui.CoopLobbyDialog(this::lobbyView, clockMillis::getAsLong,
                     this::onLobbyStartPressed, this::onLobbyCancelCountdown,
                     this::onLobbyStartAnyway, this::onLobbyReadyToggled);
@@ -2031,7 +2169,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
         lobbyDialogs.close();
         lobbyDialog = null;
-        if (connectingDialog == null) {
+        if (connectingDialog == null || !connectingDialogs.isRequested()) {
             connectingDialog = new coop.ui.CoopConnectingDialog(
                     this::connectingView, clockMillis::getAsLong, this::onConnectingCancelled);
             connectingDialogs.request(connectingDialog);
@@ -2082,8 +2220,12 @@ public class CoopNetPump implements EveryFrameScript {
         coop.session.CoopJoinPhase phase = guestJoinPhase();
         boolean canReady = service.role() == CoopConnectionRole.GUEST
                 && phase != null && phase.atLeast(coop.session.CoopJoinPhase.SNAPSHOT_APPLIED);
+        // Quantised to whole seconds because the dialog's "did anything change?" guard is
+        // record equality: a raw millisecond counter differs on every frame, which turned the guard
+        // off entirely and rebuilt the option panel underneath the host's own confirm press.
+        long elapsedSeconds = (lobbyRoster.elapsedMillis(now) / 1000L) * 1000L;
         return new coop.ui.CoopLobbyView(service.role(), rows, lobbyVerdictLines(),
-                lobbyRoster.countdownRemainingMillis(now), lobbyRoster.elapsedMillis(now),
+                lobbyRoster.countdownRemainingMillis(now), elapsedSeconds,
                 lobbyRoster.afkHint(now), lobbyRoster.allReady(), lobbyRoster.startLabel(),
                 guestReadyRequested, canReady, sessionState.lobbyReleased());
     }
@@ -2698,7 +2840,7 @@ public class CoopNetPump implements EveryFrameScript {
      * {@code CoopSessionState.startHost/startGuest} at session start, which is the same moment.
      */
     String localPlayerName(CoopConnectionRole role) {
-        String configured = System.getProperty(PLAYER_NAME_PROPERTY);
+        String configured = configuredPlayerName();
         if (configured != null && !configured.trim().isEmpty()) {
             return configured.trim();
         }
@@ -2707,6 +2849,22 @@ public class CoopNetPump implements EveryFrameScript {
             return characterName.trim();
         }
         return role == CoopConnectionRole.HOST ? "Host" : "Guest";
+    }
+
+    /**
+     * The {@code coop.playerName} option, through the options store rather than
+     * {@code System.getProperty}: that is what lets it be set from the settings file as well as from
+     * a {@code -D}, on the same precedence every other coop option follows.
+     */
+    private static String configuredPlayerName() {
+        try {
+            return coop.config.CoopOptionsStore.system()
+                    .raw(coop.config.CoopOptionsRegistry.PLAYER_NAME);
+        } catch (RuntimeException | LinkageError ex) {
+            // No engine settings surface (a unit test, a very early frame). The -D layer is still the
+            // one that matters here, and it is readable without any of that.
+            return System.getProperty(PLAYER_NAME_PROPERTY);
+        }
     }
 
     /** Test seam: the production supplier reads the sector, which a unit test does not have. */
@@ -3146,6 +3304,11 @@ public class CoopNetPump implements EveryFrameScript {
         public void onGraceStarted(CoopReconnectCoordinator.State state, long graceMillis) {
             long now = clockMillis.getAsLong();
             long seconds = graceMillis / 1000L;
+            // RECONNECT is the top of the precedence order and the arbiter is only consulted by the
+            // lower-ranked requesters, so the lower-ranked dialogs are closed here rather than left
+            // to lose a race for the exclusive slot on some later frame.
+            closeLobbyUi();
+            desyncDialogs.close();
             pauseCoordinator.setReconnectHold(true);
             // Before the hold reaches the clock: from here the pause on screen is coop's, and it has
             // to still be coop's after an expiry hands the clock to the no-session hold (F2).
@@ -3395,8 +3558,18 @@ public class CoopNetPump implements EveryFrameScript {
             handshakeManifestSent = true;
             log("outbound", handshake);
         } catch (RuntimeException ex) {
-            sessionState.rejectHandshake("Failed to capture handshake manifest: " + ex.getMessage());
+            // The id first: rejectHandshake is what moves the session record, and the marker has to
+            // carry the id the two logs are lined up on.
+            String correlationId = desyncCorrelationId();
+            String reason = "Failed to capture handshake manifest: " + ex.getMessage();
+            // Terminal: retrying cannot make an unreadable mod list readable, and a guest that keeps
+            // dialling buries its own dialog under a fresh reject every five seconds.
+            sessionState.rejectHandshake(reason, true);
             CoopLog.warn(CoopNetPump.class, "Failed to capture coop handshake manifest", ex);
+            // Routed like every other handshake reject: marker, feed line, dialog, and terminal on
+            // the guest. Without it this was a silent 5 s retry loop against a local failure that
+            // retrying cannot fix.
+            noteDesync(reason, coop.ui.CoopDesyncReason.Source.HANDSHAKE, correlationId);
         }
     }
 
@@ -4292,7 +4465,20 @@ public class CoopNetPump implements EveryFrameScript {
                 // only a key press could clear. Anything the player actually asserted during the hold
                 // (a pre-hold pause, a vanilla auto-pause) is already in hostPauseIntent or is a
                 // pause the hold never claimed, so it survives either way.
-                pauseCoordinator.setHostPauseIntent(observed && !releasedCoopHold);
+                //
+                // coopHoldPaused is read as well as the release, because the release can be deferred:
+                // consumeCoopHoldRelease refuses while a reconnect window still owns the clock, and on
+                // that frame the pause on screen is just as much coop's as it is on the frame the hold
+                // ends (Phase 21 red-team blocker 1).
+                //
+                // By design, a pause the *host player* pressed while the lobby was up is dropped on
+                // the release frame. The pause key is consumed by CoopHostPauseInputListener and
+                // routed into a shared-pause path that does not run until the session is playable, so
+                // there is nothing left to seed from; the host presses it again on a live world. The
+                // alternative -- seeding true -- is the F2 latch, and a session stuck paused with no
+                // player able to say why is far worse than a lost keystroke.
+                pauseCoordinator.setHostPauseIntent(
+                        observed && !releasedCoopHold && !coopHoldPaused);
                 hostSharedPauseInitialized = true;
             } else if (observed != hostEffectivePauseApplied) {
                 // The clock changed without us setting it AND not via the pause key (that is consumed
@@ -4892,6 +5078,13 @@ public class CoopNetPump implements EveryFrameScript {
             CoopGuestSnapshot snapshot = CoopGuestSnapshot.decodeBody(
                     CoopMessages.requiredPayloadString(message, "body"));
             CoopGuestSnapshotStore.publish(snapshot);
+            // Phase 21 red-team item 12: the stats page's net-worth column is credits, and this is the
+            // only place the guest's credits ever reach the host. Sampled from the snapshot cadence
+            // rather than from the 1 Hz host sample, which has nothing to read them from.
+            String guestId = sessionState.remotePlayerId();
+            if (guestId != null && !guestId.isEmpty()) {
+                sessionStats().noteNetWorth(guestId, (long) snapshot.getCredits());
+            }
             if (CoopDebug.diagnosticsEnabled()) {
                 CoopLog.info(CoopNetPump.class,
                         "Coop guest snapshot received: " + snapshot.summary());

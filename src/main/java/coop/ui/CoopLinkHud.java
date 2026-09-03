@@ -5,6 +5,8 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.CampaignUIRenderingListener;
 import com.fs.starfarer.api.combat.ViewportAPI;
+import coop.config.CoopOptionsRegistry;
+import coop.config.CoopOptionsStore;
 import coop.net.CoopNetPump;
 import coop.net.CoopNetStartupConfig;
 import coop.util.CoopLog;
@@ -23,13 +25,19 @@ import java.awt.Color;
  * <p><b>Failure policy.</b> This is cosmetic; nothing it does may ever cost a frame. Every engine
  * touch runs under {@code catch (Throwable)}, and the first failure disables the instance for good
  * after exactly one log line — a HUD that stops drawing is a nuisance, a HUD that throws sixty times
- * a second in the render pass is a crash. {@code -Dcoop.hud.disable=true} skips installation
- * entirely.
+ * a second in the render pass is a crash. {@code coop.hud.disable=true}, on the command line or in
+ * {@code saves/common/coop_options.json}, skips installation entirely.
  */
 public final class CoopLinkHud implements CampaignUIRenderingListener {
 
-    /** Launch flag: when true the listener is never registered. */
-    public static final String DISABLE_PROPERTY = "coop.hud.disable";
+    /**
+     * Launch flag: when true the listener is never registered. Registered in
+     * {@link CoopOptionsRegistry#HUD_DISABLE} and therefore settable from
+     * {@code saves/common/coop_options.json} as well as {@code -D}, which is why it is read through
+     * {@link CoopOptionsStore} rather than off {@code System.getProperty} - a player who turns the
+     * HUD off in their settings file expects it to stay off.
+     */
+    public static final String DISABLE_PROPERTY = CoopOptionsRegistry.HUD_DISABLE;
 
     /** Gap from the left/right screen edge, in UI-coordinate pixels. Tune after a visual check. */
     static final float SIDE_MARGIN = 10f;
@@ -76,9 +84,9 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         if (sector == null || pump == null) {
             return;
         }
-        if (Boolean.parseBoolean(System.getProperty(DISABLE_PROPERTY))) {
+        if (disabledByOption()) {
             CoopLog.info(CoopLinkHud.class,
-                    "Coop link HUD disabled via -D" + DISABLE_PROPERTY + "=true");
+                    "Coop link HUD disabled via " + DISABLE_PROPERTY + "=true");
             return;
         }
         try {
@@ -87,6 +95,27 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
             sector.getListenerManager().addListener(new CoopLinkHud(pump, corner), true);
         } catch (Throwable ex) {
             CoopLog.warn(CoopLinkHud.class, "Coop link HUD could not be installed; continuing without it", ex);
+        }
+    }
+
+    /**
+     * The full option stack, not just {@code -D}: command line, then
+     * {@code saves/common/coop_options.json}, then the shipped defaults. A value that is neither
+     * true nor false is warned about once by the store and read as the default (false).
+     */
+    static boolean disabledByOption() {
+        return disabledByOption(CoopOptionsStore.system());
+    }
+
+    /** Same question against an explicit store, which is how the file layer is tested. */
+    static boolean disabledByOption(CoopOptionsStore store) {
+        try {
+            return store.bool(DISABLE_PROPERTY);
+        } catch (Exception | LinkageError ex) {
+            // Cosmetic feature, config-shaped failure: install the HUD rather than lose it.
+            CoopLog.warn(CoopLinkHud.class, "Could not read " + DISABLE_PROPERTY
+                    + "; installing the link HUD anyway", ex);
+            return false;
         }
     }
 
