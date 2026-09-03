@@ -208,6 +208,9 @@ Steps:
 
 1. Bump `version` in `mod_info.json` and in `build.gradle`. Same string.
 2. Update `CHANGELOG.md` and anything in `docs/player/` the release changes.
+   `LICENSE` (CC BY-NC 4.0 with the Fractal Softworks exception) ships in the release archive; any
+   code vendored since the last release needs its own notice next to it and a line in `LICENSE`'s
+   "does not cover" list.
 3. Commit. The commit hash is baked into the jar and compared at connect, so build after committing,
    not before.
 4. `scripts\build.ps1` (clean, test, build). Confirm `jars\coop.jar` and `jars\coop-forks.jar` both

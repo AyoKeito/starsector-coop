@@ -112,4 +112,8 @@ block from both sides.
 
 ## License
 
-To be announced. This release ships without a license file.
+CC BY-NC 4.0 for everyone except the game's developer. Use it, modify it, redistribute it and
+build on it with credit; do not sell it or ship it inside anything sold. Fractal Softworks is
+exempt from all of that: they may put any of this code into Starsector, sell the game with it, and
+owe no credit. The forked engine classes in `coop-forks.jar` stay Fractal Softworks' property. Full
+text in `LICENSE` at the repo root.
