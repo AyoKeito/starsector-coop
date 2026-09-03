@@ -1669,43 +1669,122 @@ class CoopNetPumpTest {
                 cadenceEvents, "newest first: one line per tier change, with its reason");
     }
 
+    /**
+     * Feeds {@code count} FLEET_SNAPSHOT datagrams whose arrivals alternate between the two gaps,
+     * starting at epoch {@code startEpoch} — epochs have to keep climbing across calls or the
+     * watermark drops the datagrams and the jitter estimator never sees them.
+     */
+    private static long feedAlternatingArrivals(RecordingNetService service, CoopNetPump pump,
+                                                AtomicLong now, long startAt, long startEpoch,
+                                                int count, long shortGap, long longGap) {
+        String token = CoopMessages.wireToken("session-a");
+        String sender = CoopMessages.wireToken("guest-player");
+        long at = startAt;
+        long epoch = startEpoch;
+        for (int i = 0; i < count; i++) {
+            at += (i % 2 == 0) ? shortGap : longGap;
+            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
+                    CoopMessages.Type.FLEET_SNAPSHOT, epoch++, at, "x"));
+            now.set(at);
+            pump.advance(0f);
+        }
+        return at;
+    }
+
     @Test
-    void aJitteryLinkWidensTheInterpolationDelayAndHoldsItForFiveSeconds() {
+    void theDelayIsTwoIntervalsPlusJitterWithNoRoundingUpToWholeIntervals() {
+        assertEquals(200L, CoopNetPump.interpolationDelayTargetMillis(100L, 0L),
+                "a clean default tier is exactly the M1 constant");
+        assertEquals(210L, CoopNetPump.interpolationDelayTargetMillis(100L, 10L),
+                "the sigma a loopback session has by construction costs ten ms, not a whole interval");
+        assertEquals(250L, CoopNetPump.interpolationDelayTargetMillis(100L, 50L));
+        assertEquals(400L, CoopNetPump.interpolationDelayTargetMillis(200L, 0L),
+                "a clean floor tier is two of the floor's intervals");
+        assertEquals(410L, CoopNetPump.interpolationDelayTargetMillis(200L, 10L));
+        assertEquals(150L, CoopNetPump.interpolationDelayTargetMillis(
+                        CoopCadenceTier.TOP.intervalMillis(), 0L),
+                "clamped up: below the timeline's minimum nothing buffers");
+        assertEquals(500L, CoopNetPump.interpolationDelayTargetMillis(200L, 250L),
+                "clamped down: past half a second the mirror is visibly behind");
+    }
+
+    @Test
+    void theFirstDelayOfASessionAppliesAtOnceAndSigmaNoiseDoesNotMoveItAgain() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         AtomicLong now = new AtomicLong(1_000L);
         CoopNetPump pump = livePump(service, activeHostSession(), now::get);
         pump.advance(0f);
         assertEquals(200L, pump.interpolationDelayMillis());
 
-        // FLEET_SNAPSHOT datagrams from the partner arriving 50/150 ms apart: one send interval of
-        // measured jitter, which the formula turns into a third interval of buffer.
-        String token = CoopMessages.wireToken("session-a");
-        String sender = CoopMessages.wireToken("guest-player");
-        long at = 1_000L;
-        long epoch = 1L;
-        for (int i = 0; i < 400; i++) {
-            at += (i % 2 == 0) ? 50L : 150L;
-            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
-                    CoopMessages.Type.FLEET_SNAPSHOT, epoch++, at, "x"));
-            now.set(at);
-            pump.advance(0f);
-        }
+        pump.applyInterpolationDelayTarget(1_000L, 210L);
+        assertEquals(210L, pump.interpolationDelayMillis(),
+                "the first measured value of a session applies immediately");
 
-        assertEquals(300L, pump.interpolationDelayMillis(),
-                "one interval plus a sigma of jitter rounds up to three intervals of buffer");
-        long changedAt = at;
+        // A sigma wandering between 8 and 11 ms is the estimator breathing, not a link that changed.
+        pump.applyInterpolationDelayTarget(20_000L, 208L);
+        assertEquals(210L, pump.interpolationDelayMillis());
+        pump.applyInterpolationDelayTarget(30_000L, 211L);
+        assertEquals(210L, pump.interpolationDelayMillis(), "no flap on either side of the applied value");
+    }
 
-        // The stream goes perfectly regular. The old value is held for five seconds before the
-        // estimator is allowed to narrow it again.
-        for (int i = 0; i < 20; i++) {
-            at += 100L;
-            service.inboundDatagrams.add(CoopMessages.datagram(token, sender,
-                    CoopMessages.Type.FLEET_SNAPSHOT, epoch++, at, "x"));
-            now.set(at);
-            pump.advance(0f);
-        }
-        assertTrue(at - changedAt < 5_000L);
-        assertEquals(300L, pump.interpolationDelayMillis(), "held for at least five seconds");
+    @Test
+    void aDelayChangeNeedsBothATwentyFiveMillisecondStepAndTheFiveSecondHold() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        pump.applyInterpolationDelayTarget(1_000L, 210L);
+
+        pump.applyInterpolationDelayTarget(4_000L, 236L);
+        assertEquals(210L, pump.interpolationDelayMillis(), "big enough, but inside the five-second hold");
+
+        pump.applyInterpolationDelayTarget(7_000L, 234L);
+        assertEquals(210L, pump.interpolationDelayMillis(), "hold over, but a 24 ms step is estimator noise");
+
+        pump.applyInterpolationDelayTarget(7_000L, 236L);
+        assertEquals(236L, pump.interpolationDelayMillis(), "26 ms past the hold is a link that changed");
+    }
+
+    @Test
+    void loopbackFrameJitterCostsMillisecondsNotAWholeInterval() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+
+        // Sends ride ~16 ms campaign frames, so even a clean loopback session's FLEET_SNAPSHOT
+        // arrivals wander about ten milliseconds either side of the 100 ms send interval. The first
+        // M2 build rounded that up to a third whole interval and put a clean session at 300 ms.
+        feedAlternatingArrivals(service, pump, now, 1_000L, 1L, 400, 90L, 110L);
+
+        assertEquals(209L, pump.interpolationDelayMillis(),
+                "a clean link stays within ten ms of the M1 200, not a whole interval above it");
+    }
+
+    @Test
+    void aJitteryLinkWidensTheInterpolationDelayAndACalmOneNarrowsItBack() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        pump.advance(0f);
+        assertEquals(200L, pump.interpolationDelayMillis());
+
+        // FLEET_SNAPSHOT datagrams from the partner arriving 50/150 ms apart: half a send interval
+        // of measured jitter, which the formula pays for in milliseconds of extra buffer.
+        long at = feedAlternatingArrivals(service, pump, now, 1_000L, 1L, 400, 50L, 150L);
+
+        // 44, not the 50 the estimator converges on: the first value of a session applies on the
+        // spot, part-way up the EMA's ramp, and the rest of the climb is inside one 25 ms step.
+        assertEquals(244L, pump.interpolationDelayMillis(),
+                "two intervals plus the measured sigma, no rounding up");
+
+        // The stream goes perfectly regular; the estimator decays and the buffer is given back, in
+        // steps no closer together than the hold.
+        feedAlternatingArrivals(service, pump, now, at, 401L, 200, 100L, 100L);
+
+        // Not all the way to 200: the last 18 ms is inside one step, and the deadband is the point.
+        assertEquals(218L, pump.interpolationDelayMillis(),
+                "a link that calmed down gets its buffer back to within one step of the clean value");
     }
 
     private static int countOf(RecordingNetService service, CoopMessages.Type type) {

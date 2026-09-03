@@ -73,6 +73,13 @@ public class CoopNetPump implements EveryFrameScript {
      * inside the first few seconds of it.
      */
     private static final long INTERP_DELAY_HOLD_MILLIS = 5_000L;
+    /**
+     * Smallest change in the interpolation delay worth applying: a quarter of the default tier's send
+     * interval. The delay is sized from an estimator whose own output moves a few milliseconds either
+     * way on a link that is doing nothing unusual, and every applied change moves the timeline's
+     * target; a step below this is estimator noise, not a link that changed.
+     */
+    private static final long INTERP_DELAY_STEP_MILLIS = 25L;
     /** How often each side reports what it is receiving. */
     private static final long LINK_STATUS_INTERVAL_MILLIS = 5_000L;
     /** How often the fallback/degraded rules are evaluated. Cheap; the rules are all time thresholds. */
@@ -4907,45 +4914,70 @@ public class CoopNetPump implements EveryFrameScript {
 
     /**
      * Phase 29 M2 adaptive interpolation delay, on the same 1 s tick and on both roles. Mirror's
-     * dynamic-adjustment formula: how many whole send intervals it takes to cover one interval plus a
-     * standard deviation of jitter, plus one, clamped to
-     * [{@link coop.fleet.CoopMotionTimeline#MIN_DELAY_SECONDS},
-     * {@link coop.fleet.CoopMotionTimeline#MAX_DELAY_SECONDS}].
+     * dynamic-adjustment form without its ceiling: two of the peer's send intervals — the Valve rule
+     * the M1 constant came from — plus one standard deviation of measured inter-arrival jitter,
+     * clamped to [{@link coop.fleet.CoopMotionTimeline#MIN_DELAY_SECONDS},
+     * {@link coop.fleet.CoopMotionTimeline#MAX_DELAY_SECONDS}]. Both terms are whole milliseconds
+     * already, so no rounding is involved.
      *
      * <p>The interval is the <em>peer's</em> announced tier, because the delay sizes a buffer of what
-     * the peer sends. On a clean link at the default tier the formula returns exactly the M1 constant
-     * of 200 ms; at the floor tier with no jitter, 400 ms.
+     * the peer sends. On a clean link at the default tier that is 200 ms plus whatever residual sigma
+     * the estimator is reading, and at the floor tier 400 ms plus the same.
+     *
+     * <p><b>Why there is no ceiling.</b> The first M2 build rounded the buffer up to whole send
+     * intervals. Sends happen on ~16 ms campaign frames, so even a loopback session measures 8-11 ms
+     * of sigma by construction, and rounding up turned that into a third whole interval: a clean
+     * session went 200 -> 300 ms within a second of starting, on both sides. Jitter is paid for in
+     * milliseconds now, not in intervals.
      *
      * <p>Two hysteresis rules keep the cursor from chasing the target it is measured against: a new
-     * value has to differ by at least a whole send interval, and any value is held
-     * {@link #INTERP_DELAY_HOLD_MILLIS}. The one exception is a target sitting on a clamp bound —
-     * at the floor tier the clamp compresses the reachable targets to 400 and 500 ms, less than one
-     * interval apart, and without the exception the delay would be pinned at 400 forever on exactly
-     * the jittery links the adaptation exists for.
+     * value has to differ from the applied one by at least {@link #INTERP_DELAY_STEP_MILLIS}, and any
+     * value is held {@link #INTERP_DELAY_HOLD_MILLIS}. The first value of a session is exempt from
+     * both, so a session settles on its measured buffer immediately instead of sitting on the initial
+     * constant until something moves a full step. With no ceiling there is no clamp-bound exception
+     * either: the targets are continuous in sigma, so a delay parked on the floor tier's 400 ms is
+     * one 25 ms step from moving, where whole-interval targets left it 100 ms — half an interval —
+     * from the nearest reachable neighbour and pinned there.
      */
     private void tickInterpolationDelay(long now) {
-        long interval = peerCadenceTier.intervalMillis();
-        long jitter = linkQuality.jitterStdDevMillis();
-        long steps = (long) Math.ceil((double) (interval + jitter) / interval) + 1L;
+        applyInterpolationDelayTarget(now, interpolationDelayTargetMillis(
+                peerCadenceTier.intervalMillis(), linkQuality.jitterStdDevMillis()));
+    }
+
+    /**
+     * The delay the peer's send {@code intervalMillis} and the measured {@code jitterMillis} ask for,
+     * clamped. Pure, and the test seam for the formula.
+     */
+    static long interpolationDelayTargetMillis(long intervalMillis, long jitterMillis) {
         long minDelay = Math.round(coop.fleet.CoopMotionTimeline.MIN_DELAY_SECONDS * 1000.0);
         long maxDelay = Math.round(coop.fleet.CoopMotionTimeline.MAX_DELAY_SECONDS * 1000.0);
-        long target = Math.max(minDelay, Math.min(maxDelay, steps * interval));
+        long target = 2L * intervalMillis + Math.max(0L, jitterMillis);
+        return Math.max(minDelay, Math.min(maxDelay, target));
+    }
+
+    /**
+     * The hysteresis half: adopts {@code target} when the step and the hold both allow it. Package
+     * private so the hysteresis can be driven with exact targets in tests.
+     */
+    void applyInterpolationDelayTarget(long now, long target) {
         if (target == interpolationDelayMillis) {
             return;
         }
-        boolean atClampBound = target == minDelay || target == maxDelay;
-        if (!atClampBound && Math.abs(target - interpolationDelayMillis) < interval) {
-            return;
-        }
-        if (interpolationDelayChangedAtMillis != 0L
-                && now - interpolationDelayChangedAtMillis < INTERP_DELAY_HOLD_MILLIS) {
-            return;
+        boolean firstOfSession = interpolationDelayChangedAtMillis == 0L;
+        if (!firstOfSession) {
+            if (Math.abs(target - interpolationDelayMillis) < INTERP_DELAY_STEP_MILLIS) {
+                return;
+            }
+            if (now - interpolationDelayChangedAtMillis < INTERP_DELAY_HOLD_MILLIS) {
+                return;
+            }
         }
         interpolationDelayMillis = target;
         interpolationDelayChangedAtMillis = now;
         motionTimeline.setDelaySeconds(target / 1000.0);
         CoopLog.info(CoopNetPump.class, "Coop interpolation delay -> " + target
-                + " ms (peer " + peerCadenceTier.hz() + " Hz, jitter sigma " + jitter + " ms)");
+                + " ms (peer " + peerCadenceTier.hz() + " Hz, jitter sigma "
+                + linkQuality.jitterStdDevMillis() + " ms)");
     }
 
     /** The interpolation delay currently in force, in milliseconds; test/bridge read. */

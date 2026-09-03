@@ -204,7 +204,7 @@ public final class CoopMessages {
      * As above, carrying the Phase 29 M2 {@code cadenceHz}: the {@link CoopCadenceTier} this side's
      * UDP state streams are currently sending at. The host's announcement is what the guest applies;
      * the guest echoes back what it applied, which is how each side learns the interval its
-     * <em>peer</em> is sending at and can size its interpolation delay in whole send intervals.
+     * <em>peer</em> is sending at and can size its interpolation delay against that interval.
      */
     public static Message linkStatus(String sessionId, long seq, long sentAtMillis,
                                      CoopLinkQuality.Snapshot link, String transport,

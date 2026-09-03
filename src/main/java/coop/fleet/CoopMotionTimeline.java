@@ -52,8 +52,8 @@ public final class CoopMotionTimeline {
      * the target back and the cursor runs at ×{@link #SLOWDOWN_TIMESCALE} until it has caught down.
      * A step smaller than the dead zone is simply absorbed into it and produces no correction at all,
      * which is the desirable outcome — the delay is a buffer target, not a position. The pump's own
-     * hysteresis keeps steps to whole send intervals and at least five seconds apart, so the cursor
-     * never chases a moving target.
+     * hysteresis keeps steps at least 25 ms and five seconds apart, so the cursor never chases a
+     * moving target.
      */
     public void setDelaySeconds(double seconds) {
         delaySeconds = Math.max(MIN_DELAY_SECONDS, Math.min(MAX_DELAY_SECONDS, seconds));
