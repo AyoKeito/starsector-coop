@@ -37,22 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here: Phases 21 and 28 built, red-teamed and smoke-verified (2026-09-03); license chosen; open: listing URL, then 19",
-  "here": "<b>Phase 20, connectivity hardening, is built, red-teamed, and QA-matrix passed (2026-09-02).</b> Nine feature commits took the transport from a LAN protocol to a WAN one: an N-ready datagram envelope with a 16-hex session token and a QUIC-style <code>PATH_PROBE</code> challenge-echo before any new source address is trusted (<code>4425e80</code>); a UPnP/NAT-PMP port mapper, CGNAT verdict and connection doctor (<code>e8649f6</code>); RTT/loss supervision, a symmetric UDP-blocked TCP fallback and bounded outbound queues (<code>1598734</code>); a 60 s in-session reconnect grace with a 15 s link-death rule that exempts combat, saves and stalls (<code>3197379</code>); the payload diet, which cut a 30-ship fleet tick from 9,282 B to 1,008 B and chunks <code>NPC_FLEET_MOTION</code> under 1,200 B (<code>6cfce04</code>); an optional <code>coop.password</code> nonce challenge, per-address abuse limits and the <code>CoopPeerLink</code> peer table (<code>64bef68</code>); and a latency audit that re-derived the <code>ENGAGE_GUEST</code> handoff in time-to-contact terms and closed the market-open race (<code>fe1ee25</code>). <b>Red-team pass:</b> three reviewers over <code>64bef68</code> raised 34 findings and all 34 were fixed (<code>04a8676</code> + <code>0d59163</code>, merged <code>d97094f</code>, 1,773 green). Two were live-reachable: a half-open socket replaced inside one poll produced no disconnect edge and locked the returning guest out for good, and a second drop inside an open grace window tore the session down and then accepted a resume against a null session id. <b>QA matrix (shaped loopback via clumsy, all six profiles PASS):</b> 30 min at 100 ms RTT / 2% loss / 5% reorder with no transitions and 0.04 game-days of drift; a 5% loss spike; a 30 s outage that resumed inside the grace with both dialogs on screen; a 95 s outage that expired at exactly 60 s and tore down cleanly; a full UDP block that flipped both sides into TCP fallback in ~10 s and recovered 5 s after the block lifted; and a 50%-reorder profile with no rubber-banding. The wiretap saw a 920 B maximum composed datagram and <b>zero over 1,200 B across roughly 35,000 samples</b>. Tier 3 is verified against real firmware (MikroTik hAP, RouterOS 7.23.3) after the router's UPnP internal interface was moved off the address-less bridge onto the VLAN that holds the LAN address. <b>Real-Internet smoke PASSED the same evening on <code>3d3f41b</code>:</b> host behind UPnP tier 3 on the MikroTik, guest tunnelled out through AmneziaWG via <code>-ProxiedJvm</code> so it arrived from another network; the UDP return address validated through the tunnel, fleet state stayed on UDP for the whole 10-minute baseline with zero transitions and zero coop WARN, host p95 RTT 52 to 181 ms, clocks within 0.5 game-seconds. The wrong-password run first: three rejects, then a 30 s refusal of the address. Two guest-side findings from that run (F4 no back-off and no on-screen reason after a password reject, F5 a silent reconnect that waited out the host's 15 s deadline) were fixed the same night in <code>080eaaf</code>: a password reject is terminal for the launch and the HUD says so, other rejects back off to 5 s, and every new connection opens a lobby round. The live re-check passed the same night: one reject, zero reconnects, reason on screen. Three UX findings from the grace-expiry profile were fixed the same day in <code>2e916b9</code> (a \"Wait 5 more minutes\" button, releasing the coop-owned pause hold when the session goes active, and holding the guest paused while it has no session); and the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back + hire click-throughs, feel pass). Phase 29 M2 followed and was certified on the six-profile matrix (2026-09-03). <b>2026-09-03: Phases 28 and 23 were pulled into V1</b> (user decision) while <span class=\"rp\" data-jump=\"21\">Phase 21</span> was in build. <b>Same day, Phase 21 was built</b> (lobby with ready-up and a cancellable countdown, guest connecting screen, three desync dialogs with a greppable <code>[COOP-DOCTOR]</code> line, a transient \"Coop Stats\" page; <code>5014011</code>), <b>Phase 28 in full</b> (options registry and file stack <code>6000241</code>, synced host policy plus the \"Coop Options\" page <code>85b07cf</code>), and <b>Phase 23's docs and scripts</b> (<code>8ee7bf6</code>). A three-reviewer red-team pass over 21 and 28 M1 raised 34 findings, all fixed in <code>ec8617c</code>; the suite went from 1,855 to 2,213 green. <b>The two-instance smoke for both phases passed the same day</b> (<code>c5c50cb</code>, 2,238 to 2,275 green) after seven fixes, each re-verified live on the rebuilt jar: a relaunched guest was refused for the whole reconnect window and now ends the host's wait with an authenticated lobby hello; the dropped guest's roster row outlived the wait and left a third row counting up from the drop; a guest's seed-lock reject never reached the wire, so the host opened a 60 s grace for a guest that never passed the seed lock and then named it COOP-SESSION instead of COOP-SEED; the lobby, connecting and reconnect dialogs rebuilt their text panel once a second and read as a flashing screen; a 19-digit <code>coop.newGameSeed</code> crashed vanilla in <code>CampaignState.createUI</code> on long overflow; the user options file is <code>coop_options.json.data</code>, not <code>coop_options.json</code>; and two desync pages gave the host advice written for the other side. Untouched by the fixes: ready-up with revoke and \"Start anyway\", the countdown release, the stats page agreeing on both sides, a host policy edit reaching the guest inside one snapshot, <code>coop.pauseOnGuestScreens=false</code> running the world under a guest's core tab, and COOP-SEED / COOP-MODS / COOP-SESSION each raised on the right failure. Open: the license choice and the public URLs <span class=\"rp\" data-jump=\"23\">23</span> ships (the desync dialog's support link points at a repository that is private today), then <span class=\"rp\" data-jump=\"19\">19</span>.",
+  "hereHead": "You are here: V1 code complete and smoke-verified; outstanding: the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
+  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span> needs the forum-thread URL for the listing text (the desync dialog's support link resolves now that the repository is public), and the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code> still has to be removed or dev-gated before a public build. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass) and the parked Phase 14 cosmetics listed under attention. Everything else in the V1 order is built and smoke-verified; the history is in the phase ledger and the git log.",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Phases 21 and 28 built, red-teamed and smoke-verified; license chosen (CC BY-NC 4.0, Fractal Softworks exempt); Phase 23 needs the listing URL; then 19",
-      "state": "21 + 28 smoke PASSED 2026-09-03",
-      "body": "<b>The Phase 21 + 28 two-instance smoke passed on 2026-09-03</b> (<code>c5c50cb</code>, 2,238 to 2,275 green) after seven fixes, all re-verified live on the rebuilt jar: relaunch rejoin (an authenticated lobby hello now ends the host's reconnect wait instead of being refused until the window expires), the ghost roster row the wait left behind, a seed-lock reject dropped before it reached the wire (the host opened a 60 s grace for a guest that never passed the seed lock, then raised COOP-SESSION for a COOP-SEED failure), a once-a-second full-panel flash on three dialogs, a 19-digit <code>coop.newGameSeed</code> that crashed vanilla on long overflow, the options file named <code>coop_options.json</code> where the engine writes <code>coop_options.json.data</code>, and two desync pages addressing the wrong player. Everything else passed as built, on both phases. <b>Open before <span class=\"rp\" data-jump=\"19\">19</span>:</b> the license choice (there is no <code>LICENSE</code> file) and the public URLs <span class=\"rp\" data-jump=\"23\">23</span> ships, the \"Open support thread\" link in the desync dialog among them, which resolves to a repository that is private today. <span class=\"rp\" data-jump=\"29\">Phase 29</span> M2, adaptive state-stream cadence, is <b>built</b> (2026-09-03, <code>5f01a98</code>, 1,851 green): the host moves each link between 10 Hz and a 5 Hz floor from p50 RTT, loss and queue backlog with a 30 s clean window before climbing back, the UDP-blocked fallback is now just the floor pin, and the mirror interpolation delay sizes itself from arrival jitter. It passed all six shaped-matrix profiles the same night (loss, RTT, UDP-block pin, flap guard, jitter; one calibration finding, the ceiling in the delay formula, fixed in <code>025c374</code>), so Phase 29 is done and the order moves to Phase 21. Before it, <span class=\"rp\" data-jump=\"20\">Phase 20</span> was <b>built, red-teamed and matrix-passed</b> (2026-09-02): nine feature commits, 34 red-team findings all fixed, and six shaped-loopback profiles PASS including a 30 s outage that resumed inside the grace window and a full UDP block that fell back to TCP in about 10 seconds. Its real-Internet smoke passed the same evening (host behind UPnP, guest tunnelled out through AmneziaWG, UDP validated through the tunnel, 10 min clean at 52 to 181 ms p95 RTT) and the live wrong-password run rejected three proofs and refused the address for 30 s; the two guest-side lobby findings from it (F4 password reject now terminal with an on-screen reason, F5 no silent reconnect) were fixed the same night in <code>080eaaf</code> (1,798 green) and live re-checked the same night on the tunnel path. Three UX findings from the grace-expiry profile were fixed the same day in <code>2e916b9</code>. That unblocks <span class=\"rp\" data-jump=\"29\">Phase 29</span> M2 (adaptive cadence), which needs 20's <code>CoopLinkQuality</code>/<code>LINK_STATUS</code> and is next in the order, followed by <span class=\"rp\" data-jump=\"21\">21</span> and then <span class=\"rp\" data-jump=\"19\">19</span>. Still open from before: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> 3-item manual residue."
-    },
-    {
-      "sev": "gap",
-      "sevLabel": "known gap",
-      "head": "Host starts unpaused before the guest connects",
-      "state": "closed by Phase 21 (2026-09-03), smoke-verified",
-      "body": "Closed 2026-09-03 by the Phase 21 lobby: the host loads into a lobby dialog with the world held paused by the coop-owned hold until every player is ready and the host presses Start (live smoke passed the same day). Original report: after loading into the campaign the host ran unpaused until the guest joined — the connect-time pause hold covers only the handshake window, not the load-to-connect gap. Owned by <span class=\"rp\" data-jump=\"21\">Phase 21</span> (pulled into V1 the same day, user decision): the lobby's force-pause-until-all-ready closes it. Interim etiquette: the host pauses manually after load until the guest is in."
+      "head": "Two items before Phase 19: the listing URL and the Ziggurat test start",
+      "state": "open",
+      "body": "<span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt, <code>a62886d</code>). Left: the forum-thread URL in <code>docs/player/LISTING.md</code>, and the COOP TEST Ziggurat new-game option in <code>data/campaign/rules.csv</code>, which must be removed or dev-gated before a public build. Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the final two-instance checklist, fixes limited to what it fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass)."
     },
     {
       "sev": "gap",
@@ -72,22 +65,8 @@
       "sev": "scope",
       "sevLabel": "before release",
       "head": "Ziggurat test start to remove at Phase 23 packaging",
-      "state": "deliberate, temporary",
+      "state": "open; blocks a public build",
       "body": "The COOP TEST Ziggurat start (option 6) must be removed or dev-gated before any public build (<span class=\"rp\" data-jump=\"23\">Phase 23</span>). The forced tutorial skip and forced Normal difficulty are <em>permanent</em> mod behavior, not dev conveniences: the tutorial rewrites Galatia and Easy's per-client sensor bonus would desync fleet views, and solo play with the mod enabled is unsupported by policy — solo players disable the mod (decided 2026-08-19)."
-    },
-    {
-      "sev": "scope",
-      "sevLabel": "scope",
-      "head": "Phase 24 rescoped INTO V1 (2026-06-10) — BUILT 2026-08-25, VERIFIED 2026-09-01",
-      "state": "built and smoke-verified",
-      "body": "Shared-faction colonies, industries, and raids are <b>V1 scope, built, and verified</b> — one shared player faction (separate per-player factions stay out), three milestone commits landed 2026-08-25 with the suite at 1108 green, and the two-instance live smoke passed on 2026-09-01. See <span class=\"rp\" data-jump=\"24\">P24</span>."
-    },
-    {
-      "sev": "note",
-      "sevLabel": "context",
-      "head": "The plan was enriched on 2026-06-10",
-      "state": "why some phases changed",
-      "body": "The 2026-06-10 enrichment added the authoritative <b>Phase Status Ledger</b>, the <b>hardening-first</b> build order, new sub-phases (6b / 7b / 7c / 12b / 12c), rescoped Phase 24 into V1, and added post-V1 phases 25–29. Since then, Phase 29 (2026-08-20) and Phase 21 (2026-08-24) were also pulled into V1. Phase 7’s fast-forward verdict is partly superseded by 7b. When the ledger and a phase’s checkboxes disagree, <b>the ledger wins</b>."
     }
   ],
   "phases": [
@@ -974,10 +953,31 @@
         "-Bridge launch switch"
       ],
       "residue": [],
-      "note": "Built, live-verified, AND polished 2026-08-25, same day as the spec (c51ee37/4ed9a77 build; live check + automated 7-item 12c smoke portion all PASS; 1f4aed2 fixed every run-surfaced nit and added status.pause stall diagnosis, markets verb, diffable visibility.view, ss_diff ignore, help-popup seeding � 959 mod + 31 MCP tests). Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Phase 23 dormancy checklist line added."
+      "note": "Built, live-verified, AND polished 2026-08-25, same day as the spec (c51ee37/4ed9a77 build; live check + automated 7-item 12c smoke portion all PASS; 1f4aed2 fixed every run-surfaced nit and added status.pause stall diagnosis, markets verb, diffable visibility.view, ss_diff ignore, help-popup seeding; 959 mod + 31 MCP tests). Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Phase 23 dormancy checklist line added."
     }
   ],
-  "buildOrderFallback": ["12b","12d","6b","13","14","15","16","17","18","29","12c","30","24","7b","7c","20","21","28","23","19"],
+  "buildOrderFallback": [
+    "12b",
+    "12d",
+    "6b",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "29",
+    "12c",
+    "30",
+    "24",
+    "7b",
+    "7c",
+    "20",
+    "21",
+    "28",
+    "23",
+    "19"
+  ],
   "acceptance": [
     "Mod loads cleanly with no coop stack trace in log",
     "Host/guest handshake succeeds on identical installs",
