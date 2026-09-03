@@ -437,15 +437,22 @@ public final class CoopColonySync {
             while (pendingEntries.hasNext()) {
                 Map.Entry<String, Integer> entry = pendingEntries.next();
                 String planetId = entry.getKey();
+                // emitFounded runs after the entry is gone, so the catch must not remove it twice:
+                // a second remove() on the same iterator position throws IllegalStateException out of
+                // drainPending, which would bury the real cause and skip every planet behind it.
+                boolean removed = false;
                 try {
                     MarketAPI market = resolveMarket(planetId, null);
                     if (market != null && isColonized(market)) {
                         pendingEntries.remove();
+                        removed = true;
                         emitFounded(planetId, market);
                         continue;
                     }
                 } catch (RuntimeException | LinkageError ex) {
-                    pendingEntries.remove();
+                    if (!removed) {
+                        pendingEntries.remove();
+                    }
                     CoopLog.warn(CoopColonySync.class,
                             "Failed to capture coop colonization of " + planetId, ex);
                     continue;

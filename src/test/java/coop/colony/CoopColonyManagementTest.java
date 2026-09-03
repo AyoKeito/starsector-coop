@@ -3,6 +3,8 @@ package coop.colony;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.SpecialItemData;
+import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.Industry;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue;
@@ -354,6 +356,54 @@ class CoopColonyManagementTest {
         assertFalse(market.industries.contains("heavyindustry"), "and is not un-done");
     }
 
+    /**
+     * A genuine finished upgrade renames the industry, so it is reported under the upgrade target and
+     * handled by the industry set difference. "Same id, report NONE, mirror UPGRADING" can therefore
+     * only be the colony screen's Cancel button - which refunded the acting player - and finishing it
+     * here would hand both engines a free Orbital Works nobody paid for.
+     */
+    @Test
+    void anUpgradeTheActingPlayerCancelledIsCancelledOnTheMirrorNotCompleted() {
+        FakeMarket market = colony();
+        market.addIndustry("heavyindustry");
+        market.industry("heavyindustry").upgradeTarget = "orbitalworks";
+        market.industry("heavyindustry").upgrading = true;
+
+        CoopColonyManagement.applyToMarket(market.proxy(), stateWithIndustries("host-player:1",
+                new CoopColonyManagement.IndustryState("population", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("spaceport", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("heavyindustry", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")));
+
+        assertEquals(1, market.industry("heavyindustry").cancelUpgradeCalls);
+        assertEquals(0, market.industry("heavyindustry").finishCalls,
+                "finishing it would build the upgrade target for free");
+        assertFalse(market.industry("heavyindustry").upgrading);
+        assertTrue(market.industries.contains("heavyindustry"), "and the industry stays as it was");
+        assertFalse(market.industries.contains("orbitalworks"));
+    }
+
+    /** The other NONE case is unchanged: a first-time build keeps its id, so finishing it is right. */
+    @Test
+    void aBuildTheReportSaysFinishedIsStillFinishedNotCancelled() {
+        FakeMarket market = colony();
+        market.addIndustry("mining");
+        market.industry("mining").building = true;
+
+        CoopColonyManagement.applyToMarket(market.proxy(), stateWithIndustries("host-player:1",
+                new CoopColonyManagement.IndustryState("population", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("spaceport", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", ""),
+                new CoopColonyManagement.IndustryState("mining", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")));
+
+        assertEquals(1, market.industry("mining").finishCalls);
+        assertEquals(0, market.industry("mining").cancelUpgradeCalls);
+    }
+
     /** Removal passes a null interaction mode: no credit refund, no core returned, no announcement. */
     @Test
     void removalIsSilentAndRefundsNothing() {
@@ -432,6 +482,31 @@ class CoopColonyManagementTest {
         Global.setSector(null);
 
         CoopColonyManagement.applyToEngine(emptyState("host-player:1"));
+    }
+
+    /**
+     * The abandonment race. The capture side only ever reports managed colonies, so an unmanaged
+     * market on the apply side means the report lost a race with a teardown - and the planet keeps the
+     * link to its planet-condition market, so {@code resolveMarket}'s fallback still finds it.
+     * Reconciling would hang industries, a construction queue and a free port on an uncolonized
+     * planet, and the poll skips unmanaged markets so nothing would ever converge it back.
+     */
+    @Test
+    void aReportForAMarketThatIsNoLongerAColonyHereIsDropped() {
+        FakeMarket market = colony();
+        market.playerOwned = false;
+        market.planetConditionMarketOnly = true;
+        Global.setSector(sectorWith(market));
+
+        CoopColonyManagement.applyToEngine(new CoopColonyManagement.State("host-player:1",
+                "market_planet_eos", "host-player", true, false, false, false,
+                List.of(new CoopColonyManagement.IndustryState("mining", "", false,
+                        CoopColonyManagement.BuildState.NONE, "", "", "")),
+                List.of(new CoopColonyManagement.QueueItem("heavyindustry", 200_000))));
+
+        assertFalse(market.freePort, "an uncolonized planet is not given a free port");
+        assertEquals(List.of("population", "spaceport"), List.copyOf(market.industries));
+        assertEquals(List.of(), queueIds(market));
     }
 
     // ---- Build state: vanilla's overridden predicates ------------------------------------------
@@ -723,6 +798,30 @@ class CoopColonyManagementTest {
                 false, false, false, false, List.of(industries), List.of());
     }
 
+    private static SectorAPI sectorWith(FakeMarket market) {
+        MarketAPI marketProxy = market.proxy();
+        EconomyAPI economy = (EconomyAPI) Proxy.newProxyInstance(
+                EconomyAPI.class.getClassLoader(),
+                new Class<?>[]{EconomyAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getMarket" -> market.id.equals(args[0]) ? marketProxy : null;
+                    case "toString" -> "Economy";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> defaultValue(method.getReturnType());
+                });
+        return (SectorAPI) Proxy.newProxyInstance(
+                SectorAPI.class.getClassLoader(),
+                new Class<?>[]{SectorAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getEconomy" -> economy;
+                    case "toString" -> "Sector";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> defaultValue(method.getReturnType());
+                });
+    }
+
     private static FakeMarket colony() {
         FakeMarket market = new FakeMarket("market_planet_eos");
         market.addIndustry("population");
@@ -767,6 +866,7 @@ class CoopColonyManagementTest {
         private int finishCalls;
         private int startBuildCalls;
         private int startUpgradeCalls;
+        private int cancelUpgradeCalls;
         private int setSpecialCalls;
         private Industry cached;
 
@@ -839,6 +939,14 @@ class CoopColonyManagementTest {
                             finishCalls++;
                             yield null;
                         }
+                        // BaseIndustry.cancelUpgrade (BaseIndustry.java:533-537) clears building and
+                        // upgradeId and leaves the industry itself exactly where it was.
+                        case "cancelUpgrade" -> {
+                            building = false;
+                            upgrading = false;
+                            cancelUpgradeCalls++;
+                            yield null;
+                        }
                         case "getSpecialItem" -> special;
                         case "setSpecialItem" -> {
                             special = (SpecialItemData) args[0];
@@ -858,6 +966,7 @@ class CoopColonyManagementTest {
     private static final class FakeMarket {
         private final String id;
         private boolean playerOwned = true;
+        private boolean planetConditionMarketOnly;
         private boolean freePort;
         private boolean immigrationClosed;
         private boolean immigrationIncentives;
@@ -898,7 +1007,7 @@ class CoopColonyManagementTest {
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getId" -> id;
                         case "isPlayerOwned" -> playerOwned;
-                        case "isPlanetConditionMarketOnly" -> false;
+                        case "isPlanetConditionMarketOnly" -> planetConditionMarketOnly;
                         case "isFreePort" -> freePort;
                         case "setFreePort" -> {
                             freePort = (Boolean) args[0];

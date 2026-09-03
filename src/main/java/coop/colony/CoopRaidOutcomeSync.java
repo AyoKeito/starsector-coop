@@ -335,15 +335,24 @@ public final class CoopRaidOutcomeSync {
      *
      * <p>{@code reportRaidToDisruptFinished} fires once <em>per disrupted industry</em>
      * ({@code MarketCMD.java:1903-1906}) while the other three fire once per act. Since a single
-     * outcome already carries every industry the act touched, repeat calls carrying the same
-     * {@code TempData} instance are collapsed — the alternative is N outcomes whose additive effects
-     * (unrest, defender increase) would stack N times on the mirror.
+     * outcome already carries every industry the act touched, consecutive disrupt calls carrying the
+     * same {@code TempData} instance are collapsed into one outcome.
+     *
+     * <p><b>The collapse is scoped to that one case on purpose.</b> Vanilla keeps a single
+     * {@code TempData} per market in memory under {@code $MarketCMD_temp} with a 0-day expiry
+     * ({@code MarketCMD.java:288-298}), and an interaction dialog holds the sector paused, so the
+     * instance survives for a whole <em>visit</em>, not just one act. Collapsing on identity alone
+     * therefore swallowed the second hostile act of a visit — raid a colony, then bombard it, and only
+     * the raid was ever replicated. Requiring both sides to be {@code RAID_DISRUPT} keeps the N-per-act
+     * suppression and lets a genuine second act through.
      */
     public static final class HostileActCapture implements ColonyPlayerHostileActListener {
         private final Sink sink;
         private long counter;
-        /** Identity of the act last captured; vanilla reuses one TempData for a whole act. */
+        /** Identity of the act last captured; vanilla reuses one TempData for a whole visit. */
         private Object lastActionData;
+        /** Which kind that last capture was, so only repeated disrupt calls collapse. */
+        private Kind lastKind;
 
         public HostileActCapture(Sink sink) {
             this.sink = Objects.requireNonNull(sink, "sink");
@@ -380,10 +389,12 @@ public final class CoopRaidOutcomeSync {
             if (market == null || !sink.shouldCaptureRaidOutcome()) {
                 return;
             }
-            if (actionData != null && actionData == lastActionData) {
+            if (kind == Kind.RAID_DISRUPT && lastKind == Kind.RAID_DISRUPT
+                    && actionData != null && actionData == lastActionData) {
                 return;
             }
             lastActionData = actionData;
+            lastKind = kind;
             try {
                 String actingPlayerId = sink.raidActingPlayerId();
                 String outcomeId = (actingPlayerId == null || actingPlayerId.isBlank()
@@ -399,6 +410,7 @@ public final class CoopRaidOutcomeSync {
         public void reset() {
             counter = 0;
             lastActionData = null;
+            lastKind = null;
         }
     }
 

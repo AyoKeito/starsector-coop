@@ -51,9 +51,15 @@ import java.util.Set;
  * neither side re-sends. "Known synced" is updated on send <em>and</em> on apply for exactly that
  * reason.
  *
- * <p><b>Concurrency is solved by construction, not by this class.</b> The Phase 10 interaction gate is
- * a global first-come lockout on dialogs, so the two players are never inside colony screens at the
- * same time. There is no merge, no conflict resolution and no locking here on purpose.
+ * <p><b>Concurrency is not solved here, and it is not fully solved by the interaction gate either.</b>
+ * The Phase 10 gate is a global first-come lockout on interaction <em>dialogs</em>, so it does keep the
+ * two players out of the same <em>docked</em> colony screen. It does not cover the colony screen
+ * reached from the command/intel UI, which docks nothing and claims no entity (see the paragraph
+ * above on why the poll exists) — both players can be in that screen on the same colony at once.
+ * There is still no merge, no conflict resolution and no locking here: two edits to one colony inside
+ * one {@link Poll} interval resolve as last-writer-wins on each engine, and the losing edit is dropped
+ * without a refund. Closing that hole needs either a gate on the OUTPOSTS core tab or a base-state
+ * hash on the wire, neither of which lives in this class.
  *
  * <p><b>Why the construction queue is the load-bearing field.</b> Vanilla's build button does not add
  * an industry — it appends to {@code market.getConstructionQueue()} and charges the player
@@ -647,6 +653,17 @@ public final class CoopColonyManagement {
                     + state.marketId() + ", which does not exist here; dropped");
             return;
         }
+        // The capture side only ever reports managed colonies, so an unmanaged market here means the
+        // report raced a teardown: an abandonment or a deciv has already flipped this back to the
+        // planet-condition market (which resolveMarket's planet fallback still finds, because the
+        // planet keeps the link). Reconciling it would add industries, a construction queue and a
+        // free_market condition to an uncolonized planet, and the poll — which skips unmanaged
+        // markets — would never converge it back.
+        if (!isManaged(market)) {
+            CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT names market "
+                    + state.marketId() + ", which is not a player colony here; dropped");
+            return;
+        }
         // The two engines run the same colony through the same vanilla code, so a queue entry popping
         // into a build lands on both within a frame or two and both polls report it. Reading the local
         // state once and comparing content is cheaper than the reconcile, and it keeps the no-op case
@@ -825,6 +842,11 @@ public final class CoopColonyManagement {
      *   <li><b>Report finished, mirror still building</b> &rarr; {@code finishBuildingOrUpgrading()}.
      *       This is the only forcing direction, and it is what makes the accepted build-progress drift
      *       self-heal.</li>
+     *   <li><b>Report finished, mirror still upgrading</b> &rarr; {@code cancelUpgrade()}, not finish.
+     *       An upgrade that actually completed renames the industry, so it is reported under the
+     *       upgrade target and never lands here; the only way the <em>same</em> id goes back to idle
+     *       is the colony screen's Cancel button, which refunds the acting player. Finishing it here
+     *       would hand both engines a free upgrade nobody paid for.</li>
      *   <li><b>Report building, mirror finished</b> &rarr; nothing. Restarting a finished build would
      *       unapply a working industry to re-run a timer, turning "the mirror is a few hours ahead"
      *       into a real regression.</li>
@@ -851,6 +873,15 @@ public final class CoopColonyManagement {
         BuildState live = liveBuildState(industry);
         switch (reported.buildState()) {
             case NONE -> {
+                // A finished upgrade never reaches this branch: it changes the industry's id, so the
+                // report arrives under the upgrade target and the industry set difference handles it.
+                // Same id, report NONE, mirror UPGRADING can therefore only be the acting player
+                // cancelling — BaseIndustry.cancelUpgrade (BaseIndustry.java:533-537) clears building
+                // and upgradeId and leaves the id alone — and the acting player was refunded for it.
+                if (live == BuildState.UPGRADING) {
+                    industry.cancelUpgrade();
+                    return true;
+                }
                 if (live != BuildState.NONE) {
                     industry.finishBuildingOrUpgrading();
                     return true;

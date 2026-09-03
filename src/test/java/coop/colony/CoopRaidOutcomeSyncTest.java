@@ -15,6 +15,7 @@ import com.fs.starfarer.api.impl.campaign.econ.RecentUnrest;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.population.PopulationComposition;
+import com.fs.starfarer.api.impl.campaign.rulecmd.salvage.MarketCMD;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -400,7 +401,99 @@ class CoopRaidOutcomeSyncTest {
                 "guest-player", 6, 0, "", false, false, false, List.of(), List.of())));
     }
 
+    // ---- Capture: the collapse guard -----------------------------------------------------------
+
+    /**
+     * Vanilla keeps <em>one</em> {@code TempData} per market for a whole visit — it lives in market
+     * memory under {@code $MarketCMD_temp} with a 0-day expiry ({@code MarketCMD.java:288-298}) and an
+     * open interaction dialog holds the sector paused, so nothing expires it. Collapsing on that
+     * identity alone therefore swallowed the second hostile act of a visit: raid a colony, then
+     * bombard it, and only the raid ever reached the peer.
+     */
+    @Test
+    void aBombardmentAfterARaidInTheSameVisitIsStillCaptured() {
+        FakeMarket market = new FakeMarket("market_agreus", 5);
+        RecordingSink sink = new RecordingSink();
+        CoopRaidOutcomeSync.HostileActCapture capture =
+                new CoopRaidOutcomeSync.HostileActCapture(sink);
+        MarketCMD.TempData visit = new MarketCMD.TempData();
+
+        capture.capture(CoopRaidOutcomeSync.Kind.RAID_VALUABLES, market.proxy(), visit, null);
+        capture.capture(CoopRaidOutcomeSync.Kind.BOMBARD_TACTICAL, market.proxy(), visit, null);
+
+        assertEquals(List.of(CoopRaidOutcomeSync.Kind.RAID_VALUABLES,
+                CoopRaidOutcomeSync.Kind.BOMBARD_TACTICAL), sink.kinds());
+    }
+
+    /**
+     * The one repeat vanilla really does make: {@code reportRaidToDisruptFinished} fires once per
+     * disrupted industry ({@code MarketCMD.java:1902-1906}) and a single outcome already carries them
+     * all, so those still collapse.
+     */
+    @Test
+    void repeatedDisruptCallsForOneRaidStillCollapseIntoOneOutcome() {
+        FakeMarket market = new FakeMarket("market_agreus", 5);
+        Industry first = market.addIndustry("heavyindustry").proxy();
+        Industry second = market.addIndustry("mining").proxy();
+        RecordingSink sink = new RecordingSink();
+        CoopRaidOutcomeSync.HostileActCapture capture =
+                new CoopRaidOutcomeSync.HostileActCapture(sink);
+        MarketCMD.TempData visit = new MarketCMD.TempData();
+
+        capture.capture(CoopRaidOutcomeSync.Kind.RAID_DISRUPT, market.proxy(), visit, first);
+        capture.capture(CoopRaidOutcomeSync.Kind.RAID_DISRUPT, market.proxy(), visit, second);
+
+        assertEquals(List.of(CoopRaidOutcomeSync.Kind.RAID_DISRUPT), sink.kinds());
+    }
+
+    /** Session teardown must not leave the guard pinned to the last act of the old session. */
+    @Test
+    void resetRearmsTheCollapseGuardAndRestartsTheIdCounter() {
+        FakeMarket market = new FakeMarket("market_agreus", 5);
+        Industry industry = market.addIndustry("heavyindustry").proxy();
+        RecordingSink sink = new RecordingSink();
+        CoopRaidOutcomeSync.HostileActCapture capture =
+                new CoopRaidOutcomeSync.HostileActCapture(sink);
+        MarketCMD.TempData visit = new MarketCMD.TempData();
+
+        capture.capture(CoopRaidOutcomeSync.Kind.RAID_DISRUPT, market.proxy(), visit, industry);
+        capture.reset();
+        capture.capture(CoopRaidOutcomeSync.Kind.RAID_DISRUPT, market.proxy(), visit, industry);
+
+        assertEquals(2, sink.captured.size());
+        assertEquals("guest-player:1", sink.captured.get(1).outcomeId());
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------
+
+    /** Collects what the capture listener hands the replicator. */
+    private static final class RecordingSink implements CoopRaidOutcomeSync.Sink {
+        private final List<CoopRaidOutcomeSync.Outcome> captured = new ArrayList<>();
+
+        @Override
+        public boolean shouldCaptureRaidOutcome() {
+            return true;
+        }
+
+        @Override
+        public String raidActingPlayerId() {
+            return "guest-player";
+        }
+
+        @Override
+        public void onRaidOutcomeCaptured(CoopRaidOutcomeSync.Outcome outcome) {
+            captured.add(outcome);
+        }
+
+        List<CoopRaidOutcomeSync.Kind> kinds() {
+            List<CoopRaidOutcomeSync.Kind> kinds = new ArrayList<>();
+            for (CoopRaidOutcomeSync.Outcome outcome : captured) {
+                kinds.add(outcome.kind());
+            }
+            return kinds;
+        }
+    }
+
 
     private static CoopRaidOutcomeSync.Outcome outcome() {
         return new CoopRaidOutcomeSync.Outcome("guest-player:1",

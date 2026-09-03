@@ -312,6 +312,35 @@ class CoopColonySyncTest {
         assertEquals(0, capture.pendingCount());
     }
 
+    /**
+     * The drain removes the pending entry <em>before</em> it reads the market and speaks, so a blow-up
+     * inside the emit must not remove it a second time: that throws {@code IllegalStateException} off
+     * the iterator, which escapes the drain, buries the real cause and strands every planet behind it
+     * for a frame.
+     */
+    @Test
+    void aColonizationThatBlowsUpWhileBeingEmittedDoesNotStrandTheRest() {
+        FakeSector sector = new FakeSector();
+        FakeMarket first = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        FakeMarket second = sector.addPlanetWithMarket("planet_ithaca", "market_planet_ithaca");
+        Global.setSector(sector.proxy());
+        RecordingSink sink = new RecordingSink();
+        sink.throwOnPlanet = "planet_eos";
+        CoopColonySync.ColonizationCapture capture = new CoopColonySync.ColonizationCapture(sink);
+
+        capture.reportPlayerColonizedPlanet(sector.planetProxy("planet_eos"));
+        capture.reportPlayerColonizedPlanet(sector.planetProxy("planet_ithaca"));
+        first.becomeColony();
+        second.becomeColony();
+
+        assertDoesNotThrow(capture::drainPending);
+
+        assertEquals(0, capture.pendingCount(), "both planets are done with in one pass");
+        assertEquals(List.of("planet_ithaca"),
+                sink.captured.stream().map(CoopColonySync.Event::planetId).toList(),
+                "the planet behind the thrower is still reported");
+    }
+
     @Test
     void abandonmentIsCapturedInlineAndCancelsAPendingColonization() {
         FakeSector sector = new FakeSector();
@@ -654,6 +683,8 @@ class CoopColonySyncTest {
     private static final class RecordingSink implements CoopColonySync.Sink {
         private final List<CoopColonySync.Event> captured = new ArrayList<>();
         private boolean capturing = true;
+        /** Test seam: stands in for any engine getter that blows up mid-emit. */
+        private String throwOnPlanet;
 
         @Override
         public boolean shouldCaptureColonyLifecycle() {
@@ -667,6 +698,9 @@ class CoopColonySyncTest {
 
         @Override
         public void onColonyLifecycleCaptured(CoopColonySync.Event event) {
+            if (event.planetId().equals(throwOnPlanet)) {
+                throw new IllegalArgumentException("engine blew up reading " + throwOnPlanet);
+            }
             captured.add(event);
         }
     }
