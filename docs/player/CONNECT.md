@@ -259,7 +259,7 @@ The word after the dash is the state. There are five:
 | `Syncing 2/5` | The join is working through its five steps. |
 | `Not ready` | The guest holds your world and has not pressed Ready. |
 | `Ready` | Pressed Ready. |
-| `Reconnecting 0:42` | That player dropped and the grace window is running. The row and its ready value are kept. |
+| `Reconnecting 0:42` | That player dropped and the grace window is running; the number is the time left in it. The row and its ready value are kept until the wait ends, either way. |
 
 A refused join replaces the state word with the refusal instead.
 
@@ -437,6 +437,17 @@ Both players get a countdown, the world is held paused on both sides, and each o
 end the session or wait another five minutes. If the guest gets back inside the window, the session
 carries on: the whole world state is rebroadcast so both sides restart from one picture, and nothing
 is rolled back.
+
+You do not have to sit the window out. If the game on the dropped side went down rather than just
+the connection, load the co-op save from that campaign and let it reconnect: a lobby hello arriving
+while the countdown is running ends the wait there and then, the roster's reconnecting row is
+dropped, and the pair goes through an ordinary lobby round on the new connection. The countdown on
+the other screen is a deadline, not a delay you have to serve.
+
+One consequence of that, worth knowing before you host on an open port: the returning game has a new
+player id, so the host cannot tell it apart from any other client dialling in. Whoever gets through
+the lobby password ends the wait, and on a host with no `coop.password` set, that is anyone who can
+reach the port.
 
 If the window expires, the session ends on both sides. That is not the end of the campaign. The
 guest's ordinary connect retry reconnects through the normal lobby handshake and, as long as both

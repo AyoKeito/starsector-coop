@@ -144,6 +144,10 @@ password stops strangers from joining an open port; it is a gate, not encryption
 One guest. The wire format can carry more and the setting exists, but any value other than 1 is
 clamped back to 1 with a warning, because the gameplay side of a third player is not built.
 
+The 60 second reconnect wait is not tied to the player who dropped. A restarted game arrives with a
+new player id, so whoever clears the lobby password first ends the wait, and with no `coop.password`
+set that is anyone who can reach the port while the countdown is on screen.
+
 If the host's game crashes rather than exits, the port mapping it asked the router for outlives it.
 Most routers expire it within the hour, and the mod deletes any stale mapping it finds at the next
 launch. A router that refuses timed leases keeps the port open until then.

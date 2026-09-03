@@ -54,8 +54,9 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   UPnP or NAT-PMP at startup and tells you in the log what happened.
 - Optional lobby password. It stops strangers from joining an open port; it does not encrypt the
   session.
-- A dropped link is held for 60 seconds with a countdown on both screens, and the session picks up
-  where it left off if the connection comes back.
+- A dropped link is held for 60 seconds with a countdown on both screens. The session picks up where
+  it left off when the connection returns, including when the other player had to restart the game
+  and reload their co-op save.
 - A lobby in front of every session. Both games load with the world paused, the guest's five join
   steps are on screen as they pass, and the clock starts when the host presses Start and a three
   second countdown runs out.
@@ -66,6 +67,23 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
 **Saving**
 
 - Co-ordinated saves on both machines. The guest rejoins by loading its co-op save.
+
+**Fixed before release**
+
+Found in the two-player test run on 2026-09-03 and fixed the same day.
+
+- A player who had to restart the game was refused for the whole 60 second wait. Reloading the co-op
+  save now ends the wait the moment it connects, and "wait longer" no longer pushes it further away.
+- The lobby kept the row of the player who had just come back, so it listed three players and
+  offered to start without the one sitting there ready.
+- The reconnect countdown counted up from the drop instead of down to the deadline.
+- A guest whose sector did not match was reported as a lost connection, and the host waited 60
+  seconds for a guest it had already refused. Both sides now say `COOP-SEED` straight away.
+- The lobby, connecting and reconnect screens rebuilt themselves once a second, which read on screen
+  as a flashing panel.
+- A seed longer than the game can store crashed it on the New Game screen. An unusable seed is now
+  ignored with a log line, and the launch scripts refuse it before writing it into `vmparams`.
+- Two of the refusal dialogs handed the host the instructions meant for the player at the other end.
 
 **Known limits.** Both players need identical Starsector versions and identical mod lists, and both
 have to edit one line in `vmparams` by hand. Traffic is plaintext. One guest. Both players
