@@ -142,11 +142,12 @@ launcher; that window still comes up and you still press Play in it. And it neve
    it reveals what it holds. The invite carries the password, so your partner never types it.
    Clearing the field is allowed and leaves the port open to anyone who finds it while a session is
    waiting.
-4. Press **Generate** next to **Seed**, or type your own. Both games generate the sector locally from
-   this string, and the check at connect compares what came out.
-5. Press **Look up** next to **Your address**. That is one HTTPS request to a service that replies
-   with the address your packets came from. If the two of you connect over a LAN or a VPN, type that
-   address over the answer instead.
+4. **Seed** is filled in for you when the launcher opens. Press **Generate** for a different one, or
+   type your own. Both games generate the sector locally from this string, and the check at connect
+   compares what came out. It only matters for a new campaign.
+5. **Your address** is looked up for you when the launcher opens with the field empty. That is one
+   HTTPS request to a service that replies with the address your packets came from; **Look up**
+   repeats it. If the two of you connect over a LAN or a VPN, type that address over the answer.
 6. **Sector size** and **Star age** are two drop-downs, defaulting to `normal` and `mixed`. Change
    them only if you want a different world; the invite carries whatever you pick, so your partner
    does not have to match them by hand.
@@ -510,10 +511,11 @@ for.
 ## 8. First session
 
 1. Both of you: `vmparams` edited, mod ticked, and every install-check row reading `OK`.
-2. Host: open `Coop Launcher.cmd`, press Host, set the port, press Generate, press Look up, press
+2. Host: open `Coop Launcher.cmd`, press Host, check the port, seed and address it filled in, press
    Check my connection and read the chips, press Copy next to Invite for your partner, send the line.
 3. Guest: open the launcher, press Guest, press Paste next to Invite from your host, press Test
-   connection. Four green chips and you are done checking.
+   connection. Four green chips and you are done checking. LAUNCH stays grey until the host address
+   is filled in, and the footer says what is missing.
 4. Both press LAUNCH, then Play in the vanilla launcher window when it appears.
 5. Both start New Game. The guest's Continue option names the host it will connect to, and the seed
    is already filled in from the invite.

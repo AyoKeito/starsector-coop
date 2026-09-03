@@ -171,6 +171,10 @@ public final class CoopLauncherApp {
 
     // footer + drawer
     private JButton launchButton;
+    private JLabel footerHint;
+    private boolean gameRunning;
+    /** The start-up address lookup runs once per launcher run, and only into an empty field. */
+    private boolean addressLookedUp;
     private JButton advancedToggle;
     private JButton logToggle;
     private JPanel drawer;
@@ -222,6 +226,11 @@ public final class CoopLauncherApp {
             adoptLayout(layout);
         }
         startUpdateCheck();
+        if (hostSegment.isSelected() && publicAddressField.getText().trim().isEmpty()
+                && System.getenv("COOP_LAUNCHER_PREVIEW") == null) {
+            addressLookedUp = true;
+            lookUpPublicAddress(null);
+        }
         applyPreview();
         frame.setVisible(true);
     }
@@ -476,6 +485,22 @@ public final class CoopLauncherApp {
             }
         };
         hostPortField.getDocument().addDocumentListener(preview);
+        hostPortField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                updateLaunchGate();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                updateLaunchGate();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                updateLaunchGate();
+            }
+        });
         hostPasswordField.getDocument().addDocumentListener(preview);
         hostSeedField.getDocument().addDocumentListener(preview);
         publicAddressField.getDocument().addDocumentListener(preview);
@@ -518,6 +543,24 @@ public final class CoopLauncherApp {
         guestPortField = CoopTheme.textField(String.valueOf(DEFAULT_PORT));
         guestPortField.setText(String.valueOf(DEFAULT_PORT));
         form.pair("Host address", guestHostField, "Port", guestPortField);
+        DocumentListener gate = new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                updateLaunchGate();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                updateLaunchGate();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                updateLaunchGate();
+            }
+        };
+        guestHostField.getDocument().addDocumentListener(gate);
+        guestPortField.getDocument().addDocumentListener(gate);
 
         guestPasswordField = CoopTheme.passwordField("none");
         guestPasswordField.setToolTipText("Has to match the host's exactly.");
@@ -696,7 +739,7 @@ public final class CoopLauncherApp {
 
         launchButton = CoopTheme.primary("LAUNCH");
         launchButton.addActionListener(event -> launch());
-        JLabel hint = CoopTheme.small("Closing this window does not close the game.");
+        footerHint = CoopTheme.small("Closing this window does not close the game.");
 
         advancedToggle = CoopTheme.ghost("Advanced");
         advancedToggle.addActionListener(event -> {
@@ -715,7 +758,7 @@ public final class CoopLauncherApp {
         footer.add(launchButton, c);
         c.gridx = 1;
         c.insets = new Insets(0, 14, 0, 0);
-        footer.add(hint, c);
+        footer.add(footerHint, c);
         c.gridx = 2;
         c.weightx = 1;
         c.fill = GridBagConstraints.HORIZONTAL;
@@ -876,10 +919,81 @@ public final class CoopLauncherApp {
         closeListener("the role changed");
         if (host) {
             maybeGenerateHostPassword();
+            maybeGenerateHostSeed();
             refreshInvitePreview();
         }
+        updateLaunchGate();
         sessionCard.revalidate();
         sessionCard.repaint();
+    }
+
+    /** A host always has a seed: a new campaign without one cannot be matched by the guest. */
+    private void maybeGenerateHostSeed() {
+        if (!hostSeedField.getText().trim().isEmpty()) {
+            return;
+        }
+        String seed = CoopSeeds.generate();
+        hostSeedField.setText(seed);
+        LOG.info("Generated a seed for the host: " + seed);
+        append("Generated seed " + seed + ". It only matters for a new campaign; the invite carries"
+                + " it.");
+    }
+
+    /**
+     * Enables LAUNCH only when the fields a launch needs are there, and says in the footer what is
+     * missing otherwise. Install problems and a running game also hold it.
+     */
+    private void updateLaunchGate() {
+        if (launchButton == null || footerHint == null) {
+            return;
+        }
+        String reason = launchBlockedReason();
+        launchButton.setEnabled(reason == null);
+        if (gameRunning) {
+            footerHint.setText("The game is running. Closing this window does not close it.");
+            footerHint.setForeground(CoopTheme.MUTED);
+        } else if (reason != null) {
+            footerHint.setText(reason);
+            footerHint.setForeground(CoopTheme.WARN);
+        } else {
+            footerHint.setText("Closing this window does not close the game.");
+            footerHint.setForeground(CoopTheme.MUTED);
+        }
+        launchButton.setToolTipText(reason);
+    }
+
+    private String launchBlockedReason() {
+        if (gameRunning) {
+            return "Starsector is already running from this launcher.";
+        }
+        if (layout == null) {
+            return "Point the launcher at your Starsector install first (Install, Folder).";
+        }
+        if (CoopInstallCheck.blocked(installRows)) {
+            return "Fix the install problems listed above, then press Refresh.";
+        }
+        if (hostSegment.isSelected()) {
+            if (!validPort(hostPortField.getText())) {
+                return "The port has to be a number between 1 and 65535.";
+            }
+            return null;
+        }
+        if (guestHostField.getText().trim().isEmpty()) {
+            return "Paste the invite from your host, or type the host address in.";
+        }
+        if (!validPort(guestPortField.getText())) {
+            return "The port has to be a number between 1 and 65535.";
+        }
+        return null;
+    }
+
+    private static boolean validPort(String text) {
+        try {
+            int port = Integer.parseInt(text == null ? "" : text.trim());
+            return port >= 1 && port <= 65535;
+        } catch (NumberFormatException ex) {
+            return false;
+        }
     }
 
     /**
@@ -1039,7 +1153,7 @@ public final class CoopLauncherApp {
         } else {
             installSummary.set("all " + all.size() + " checks passed", CoopTheme.OK);
         }
-        launchButton.setEnabled(fails == 0 && layout != null);
+        updateLaunchGate();
 
         rowsPanel.removeAll();
         int hidden = 0;
@@ -1606,12 +1720,14 @@ public final class CoopLauncherApp {
         append("Starsector started (pid " + pid + "). This window keeps showing the co-op lines from"
                 + " the game log.");
         launchButton.setText("RUNNING");
-        launchButton.setEnabled(false);
+        gameRunning = true;
+        updateLaunchGate();
         gameProcess.onExit().thenAccept(process -> SwingUtilities.invokeLater(() -> {
             LOG.info("starsector.exe exited with code " + process.exitValue());
             append("Starsector exited (code " + process.exitValue() + ").");
             launchButton.setText("LAUNCH");
-            launchButton.setEnabled(true);
+            gameRunning = false;
+            updateLaunchGate();
         }));
         setDrawerVisible(true);
         startLogTail();
