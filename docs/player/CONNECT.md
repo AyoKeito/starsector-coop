@@ -230,9 +230,105 @@ consequence for the guest: after fixing the password, wait out the cooldown. A c
 looks broken while the host is still refusing the address, and relaunching during the cooldown
 extends it.
 
-Other rejects read as plain sentences and are retried automatically every 5 seconds:
-`Lobby already has a guest`, `session in reconnect grace`, and the seed and install mismatches from
-`INSTALL.md` section 5.
+Other rejects read as plain sentences. `Lobby already has a guest` and `session in reconnect grace`
+are retried automatically every 5 seconds. The seed and install mismatches from `INSTALL.md`
+section 5 are not: they stop the guest's retry loop and open a dialog of their own, covered under
+"The three refusal dialogs" below.
+
+---
+
+## The lobby
+
+Loading the campaign does not start play. Both games open a dialog, the world is held paused behind
+it, and the clock starts only when the host presses Start and a three second countdown runs out.
+
+### What the host sees
+
+One line per player, host first then join order, your own line marked with `>`:
+
+```text
+> Ayo - Ready
+  Keito - Syncing 3/5
+```
+
+The word after the dash is the state. There are five:
+
+| Row reads | Means |
+|---|---|
+| `Connecting...` | The socket is up and nothing past that has happened. |
+| `Syncing 2/5` | The join is working through its five steps. |
+| `Not ready` | The guest holds your world and has not pressed Ready. |
+| `Ready` | Pressed Ready. |
+| `Reconnecting 0:42` | That player dropped and the grace window is running. The row and its ready value are kept. |
+
+A refused join replaces the state word with the refusal instead.
+
+Under the roster are three lines built from the same measurements the intel page uses,
+`Connection: ...`, `Endpoint: ...` and `Link: 42 ms over UDP`, then `Waiting 1:24.`, which ticks.
+
+The Start option names what it is waiting for. With nobody connected it reads
+`Waiting for a player to connect...` and cannot be selected. With a guest who has not readied it
+names them: `Waiting for Keito...`. It becomes `Start session`, and becomes selectable, only when
+every guest is ready.
+
+Pressing it arms a 3 second countdown: the text panel adds `Starting in 3...` and the option is
+replaced by `Cancel countdown`, which either player may press.
+
+Two minutes in with the guest still not ready, the dialog adds a line about the wait and a second
+option appears under Start: `Start anyway (guest not ready)`. It does not fire on the first press.
+The options become `Yes, start anyway` and `Back`, and confirming starts the session with a guest who
+will mirror an already running world.
+
+ESC does nothing here. The dialog has no escape option at all, deliberately: Start, the override and
+the game menu are the ways out.
+
+### What the guest sees
+
+First a connecting screen that lists all five steps at once, `>` on the current one and `done:` on
+the ones behind it:
+
+```text
+Joining the co-op session.
+  done: Connecting (1/5)
+  done: Checking versions (2/5)
+> Locking the sector (3/5)
+  Syncing the world (4/5)
+  Ready (5/5)
+Waiting 0:12.
+```
+
+Step 4 lands when the host's campaign clock arrives. That message is sent five times a second and is
+sent unconditionally, so it cannot fail to turn up on a link that works at all, which is why the
+ready gate hangs off it rather than off the world data. It is also the step that hands the guest over
+to the lobby.
+
+`Cancel` is live on this screen the whole time. It stops the retry loop and leaves your campaign
+loaded and paused; the host sees the ordinary disconnect it would have seen anyway. The feed line is
+`Co-op: joining cancelled. Your campaign stays paused.`
+
+Three failures are named on the screen rather than left spinning:
+
+- `This install and the host's do not match, so the session cannot start.` then
+  `Match the host's game version and mod list, then reconnect.`
+- `The host turned this connection down.` then `The host's own words are below. Nothing here retries
+  on its own.`, then the host's reason text.
+- `The host's port answered but the session never started.` after 30 seconds with no answer from the
+  lobby, then `Nothing arrived in 30 seconds. Check that the host is still on the lobby screen, then
+  try again.`
+
+Seed and install mismatches do not stop here. They take the screen over with a dialog of their own,
+covered two sections down.
+
+Past step 4 the guest gets the same roster the host is reading, with `Ready` where the host has
+Start. Taking it back is `Not ready`, allowed at any point before the session starts; taking it back
+also cancels a running countdown. While the countdown runs the guest sees `Cancel countdown` as well.
+
+### The pause
+
+From the moment a client takes a co-op role, the mod re-asserts the pause every frame until two
+things are true at once: the session is live, and the lobby has been released. Nothing you do in the
+lobby moves the clock. The one exception is a guest with an interaction dialog open, where vanilla
+already owns the clock and forcing a pause underneath it caused the frozen-dialog bug.
 
 ---
 
@@ -250,8 +346,9 @@ GUEST · session active · paused by host · guest 2h behind · 118 ms · loss 3
 ```
 
 - **Badge and status.** `HOST` or `GUEST`, then one of: no session, waiting for guest, connecting,
-  handshaking, session active, reconnecting, guest disconnected holding, or
-  `rejected: <reason>`.
+  handshaking, in lobby, session active, reconnecting, guest disconnected holding, or
+  `rejected: <reason>`. `in lobby` is the window between the handshake finishing and somebody
+  pressing Start; a refusal fills the reason in as `rejected: COOP-SEED, seed mismatch`.
 - **paused by ...** names whoever is holding the shared pause, worded from your side, so you read as
   "you" and the other player as "host" or "guest". "your screen" or "guest's screen" means a menu or
   dialog is open. "combat" means somebody is in a battle. "reconnect" means the grace window is
@@ -281,6 +378,20 @@ has no room for:
 - **History.** Round trip and loss as sparklines over the last samples, about five seconds apart,
   with min, median and max. This is the section that answers "has it been like this all evening".
 
+### The "Coop Stats" intel page
+
+The second entry under the same Coop tag. It opens on a team band (days elapsed, time flown together,
+battles fought and won, days since the last hull lost), then record cards: Longest haul, Best deal,
+Explorer, Veteran and Together, each hidden until it clears a floor so the page never congratulates
+you on 12 su travelled. Under those, a table with one column per player plus a Team column, split
+into Combat, Travel, Trade and Colonies, and a player who is away keeps their column with `(away)` on
+the header rather than going blank. Then the ship-loss ledger, newest first, and a closing line per
+stat saying how that stat is credited. Nothing on the page marks a winner. The host tallies it all
+and broadcasts every 30 seconds, so the guest's copy can be that far behind. Two numbers need
+reading carefully: "Together" counts only the seconds where both fleets are in the same star system,
+and the guest's "Best single trade" is always 0 in this release, because a guest transaction crosses
+the wire with no price attached. Guest trades still count towards "Markets traded with".
+
 ---
 
 ## When the link drops
@@ -301,6 +412,58 @@ If the window expires, the session ends on both sides. That is not the end of th
 guest's ordinary connect retry reconnects through the normal lobby handshake and, as long as both
 games are on the same campaign, becomes a new session with a full resync. You lose the convenience,
 not the save.
+
+---
+
+## The three refusal dialogs
+
+When a session is refused or ends with a reason, you get a dialog written for that reason, and a code
+you can search the log for. There are three codes.
+
+**`COOP-SEED` means the two of you are not in the same sector, or not in the same campaign.** The
+sector version opens with "Your sector and the host's sector are not the same." and gives each side
+the instruction that side can act on: the host is told to read its seed out, the guest is told to
+start a new campaign and type that seed into the seed field on the New Game screen. Below the remedy
+sit both seeds and the first 8 characters of each sector fingerprint, side by side, worded as "yours"
+and "the host's", so you can read them to each other and confirm you are looking at the same
+difference. The campaign version opens with "This save is not from the host's co-op campaign.",
+because co-op stamps a campaign with an id the first time a session runs in it, and points you at the
+co-op save from that campaign. `launch-guest.ps1 -AdoptCampaign` is named there as the way to take
+the host's world instead, at the cost of this save's progress. Neither version offers a "join anyway".
+
+**`COOP-MODS` means the two installs differ.** One line per differing mod, each with its own verdict
+and its own remedy, and the remedy points at whichever side is actually behind rather than always at
+you. Iron Mode on either side, a Starsector version difference and a co-op build difference each get
+a line above the mod list. The list is capped, with "... and N more" pointing at the log. A mod that
+matches on version but not on file contents is called out separately, in its own paragraph, because
+that is the case people refuse to believe: a partial download does it.
+
+**`COOP-SESSION` means the session itself could not be picked back up.** Six causes, each with its
+own body: the reconnect window closed, the partner is holding a different session, that place belongs
+to a different player id, the partner is mid-grace for somebody else, a player pressed the end
+option, or something that did not classify. The grace window is always printed as a number of
+seconds. An unrecognised reason lands here too and prints the raw text verbatim, so a session never
+ends in silence. Only one cause is marked retryable (the partner being mid-grace for someone else)
+and even that ships without a "Try again" button, on purpose: the guest's connect loop was never
+stopped for it, it is still dialling every few seconds, and the dialog closes itself the moment a
+fresh handshake goes through.
+
+After `COOP-SEED` and `COOP-MODS` the guest stops reconnecting. Both are deterministic, so retrying
+earns the identical refusal every 5 seconds and buries the dialog under a stack of new ones; fix the
+save or the mod list and relaunch. `COOP-SESSION` leaves the retry loop alone, because a fresh lobby
+round is the documented way back in after a grace expiry. The host is untouched by all three: it
+rewinds to waiting and keeps its lobby open for a corrected guest.
+
+Every one of these dialogs ends with the same line, naming the file and the exact string to search:
+
+```text
+Support code COOP-SEED. The full detail is in starsector.log - search it for: [COOP-DOCTOR] code=COOP-SEED
+```
+
+The options are "Open support thread", which opens the issue tracker behind the game and leaves the
+dialog standing, and "Close". ESC does not dismiss them. If you close one before reading it, the code
+is still in the campaign feed (`Co-op: seed mismatch (COOP-SEED) - see the dialog`), on the intel
+page's event log, and on the status line (`rejected: COOP-SEED, seed mismatch`).
 
 ---
 

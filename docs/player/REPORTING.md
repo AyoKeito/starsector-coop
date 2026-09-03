@@ -17,12 +17,25 @@ gone.
 
 Search the log for these and paste what you find, from both PCs.
 
-**`[COOP-DOCTOR]`** if the session ended with a dialog explaining why. One line, written at WARN,
-starting with that literal. It leads with the session id (the same on both sides) and then carries
-the classified cause, both players' names, and whatever detail fits the cause: the two seeds and
-fingerprints for a seed mismatch, the differing mods and versions for an install mismatch, the
-retry-ability and grace window for a dropped session. The dialog names the exact string to search
-for; a bare `[COOP-DOCTOR]` finds it too.
+**`[COOP-DOCTOR]`** if a dialog told you the session ended. One line, written at WARN, starting with
+that literal. Everything is on the one line by construction, newlines and quotes inside a value
+escaped, so it can be selected in a single drag:
+
+```text
+[COOP-DOCTOR] code=COOP-SEED sessionId=b1f0c7 role=GUEST source=SEED_LOCK local="Ayo" remote="Keito" reason="seedString: host=MN-11 guest=MN-42" campaignIdMismatch=false hostSeed=MN-11 guestSeed=MN-42 hostFingerprint=9c3a... guestFingerprint=71ee... hostCampaignId=... guestCampaignId=<none>
+```
+
+`code` is the second field, one of `COOP-SEED`, `COOP-MODS` or `COOP-SESSION`, and it is what the
+dialog tells you to search for: `[COOP-DOCTOR] code=` followed by that code. A bare `[COOP-DOCTOR]`
+finds the line too.
+
+`sessionId` is the third field and holds the identical value in both players' logs. That is what
+lines two pastes up without anyone having to say which log is which. `role`, `local` and `remote` are
+written from each machine's own side, so they differ between the two.
+
+What comes after `reason` depends on the code: seeds, fingerprints and campaign ids for `COOP-SEED`;
+`gameVersion`, `coopBuild`, `ironMode` and a semicolon-separated per-mod list for `COOP-MODS`;
+`cause`, `graceSeconds` and `retryable` for `COOP-SESSION`. A value nobody supplied prints `<none>`.
 
 **`Coop connection doctor:`** for anything about connecting. It is a block of about ten indented
 lines; paste the whole block, not just the `next step` line. The host's block and the guest's block

@@ -120,7 +120,8 @@ before ` -classpath `, each starting with `-D` and separated by spaces:
 ... -Xss4m -Dcoop.hostPort=7777 -Dcoop.newGameSeed=MN-1234567890123456789 -classpath ..\mods\coop\jars\coop-forks.jar;janino.jar;...
 ```
 
-**A later release moves most of these into a settings file.** This is what exists today.
+Most of them can also go in a settings file instead; section 7 covers it. A property on the command
+line always wins over the file.
 
 ### Host
 
@@ -169,7 +170,84 @@ campaign on the same seed is refused because the host's campaign is already in f
 The `coop.debug.*` properties are diagnostics for bug reports and development; `docs/REPORTING.md`
 covers the ones a player is ever asked for.
 
-## 7. First session
+## 7. Settings file
+
+The same `coop.*` names can live in a JSON file instead of on the `vmparams` line. Yours goes here,
+and you create it yourself:
+
+```text
+<Starsector>\saves\common\coop_options.json
+```
+
+Flat JSON, only the keys you want to change:
+
+```json
+{
+	"coop.hostPort": 7777,
+	"coop.password": "hullmod",
+	"coop.playerName": "Ayo",
+	"coop.hudCorner": "BL"
+}
+```
+
+Numbers, booleans and strings are all accepted for any key; the value is validated after it is read,
+not before. `saves\common` is a Starsector folder rather than a mod folder, which is the entire
+reason the file lives there: it survives updating or reinstalling the mod.
+
+The reference is the copy the mod ships with:
+
+```text
+<Starsector>\mods\coop\data\config\coop_options.json
+```
+
+That file lists every key with its type, its range, its default, when a change takes effect and which
+phase owns the behaviour, in a commented block each. Read it rather than a table here; it is the
+table. It is overwritten on every mod update, so your values do not go in it. Two things to watch for
+while reading it: a key marked INERT is wired to nothing in this build, and the keys in the `policy`
+tier are read per-client today and become the host's to decide in a later milestone.
+
+Precedence, highest first:
+
+1. `-Dcoop.<key>=<value>` on the launch command line
+2. `saves\common\coop_options.json`
+3. `mods\coop\data\config\coop_options.json`
+4. the default compiled into the mod
+
+Both files are read once at launch, so a change needs a relaunch. A bad value never stops the game:
+an integer outside its range is clamped to the nearest bound, anything else unusable falls back to
+the default, and either way one warning goes to the log. An unrecognised key is also logged and
+skipped.
+
+The keys most people actually set:
+
+| Key | Why you would set it |
+|---|---|
+| `coop.hostPort` | Makes this install the host. |
+| `coop.connectHost`, `coop.connectPort` | Make it the guest. Both together or neither. |
+| `coop.password` | Lobby password, same string on both. |
+| `coop.playerName` | The name your partner sees. |
+| `coop.portMapping` | `off` when you forwarded the port yourself, run a VPN, or the router answers UPnP badly. |
+| `coop.reconnectGraceSeconds` | How long a dropped link is held before the session ends. |
+| `coop.hudCorner`, `coop.hud.disable` | Where the status line sits, or whether it is drawn. |
+
+Some keys are `-D` only, forever, and a value for them in either file is skipped with a warning:
+`coop.newGameSeed`, `coop.sectorSize`, `coop.sectorAge`, `coop.adoptCampaignId`, and the debug
+hatches `coop.debug.*`, `coop.ff.disable`, `coop.clock.disable`, `coop.fullFidelityGuestSystem`. The
+first four are one-shot gestures for starting a campaign, where the friction is the point; the rest
+are not meant to read as ordinary settings.
+
+**The role keys carry one extra rule.** If any of `coop.hostPort`, `coop.connectHost` or
+`coop.connectPort` is given as `-D`, the role is decided by the `-D` layer alone and the file's role
+keys are ignored. Without that, a `coop.hostPort` sitting in your settings file would combine with a
+`-Dcoop.connectHost` on the command line into "Configure either host or guest coop startup
+properties, not both", and a machine set up to host could never be launched as a guest. Every other
+key keeps plain per-key precedence.
+
+Cadences, gate semantics, the seed and campaign checks, combat auto-pause, host authority itself: not
+options, and not going to become options. The shipped file names that list too, so you can tell a
+missing setting from a deliberate one.
+
+## 8. First session
 
 1. Both players finish the `vmparams` edit and tick the mod.
 2. The host sets `coop.hostPort` and `coop.newGameSeed`; the guest sets `coop.connectHost`,

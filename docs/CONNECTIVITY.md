@@ -248,6 +248,39 @@ launch scripts' `-ExtraJvmProps`. All of them are optional in the sense that the
 | `coop.debug.wiretap` | `false` | Logs sampled decoded payloads in both directions plus a per-message-type composed-size histogram every 60 s. Diagnostic only; it prints your session's game state into the log. |
 | `coop.debug.wiretapSample` | `10` | With the wiretap on, log one payload in every N. |
 
+Since Phase 28 milestone 1 these are also file-backed: `saves/common/coop_options.json` for user
+overrides, `mods/coop/data/config/coop_options.json` for the shipped defaults and the full annotated
+schema, `-D` on top of both. `CoopOptionsRegistry` is the typed schema and `CoopOptionsStore` the
+precedence stack; the `coop.debug.*` keys are `dOnly` and never read from either file. One rule the
+transport cares about: if any of `coop.hostPort`, `coop.connectHost` or `coop.connectPort` is set as
+a `-D` property, `CoopNetStartupConfig.from` resolves the role from the `-D` layer alone and ignores
+file-level role keys, so a hosting settings file does not make a `-Dcoop.connectHost` launch fail the
+"host and guest configured together" check. `docs/player/INSTALL.md` section 7 is the player-facing
+version.
+
+---
+
+## Lobby and desync codes
+
+Phase 21 put an in-campaign lobby in front of the session. `CoopSessionState.lobbyReleased()` gates
+`isSessionPlayable()`, which is what `maybeHoldPausedUntilSessionReady` and `syncSharedPause` read;
+every other caller keeps `isGameplaySessionActive()`, because the state streams are what carry the
+guest to the phase where it may ready at all. The guest's progress is the five-step
+`CoopJoinPhase`, and step 4 (`SNAPSHOT_APPLIED`) is "a `TIME_SNAPSHOT` arrived", chosen because it is
+the only unconditional periodic host-to-guest stream; a change-driven message there would wedge the
+gate. `CoopLobbyRoster` is the host-authoritative model, mirrored to the guest by `LOBBY_STATUS` and
+fed by the guest's `READY_STATE`. Dialog precedence lives in `CoopDialogArbiter`: reconnect, desync,
+lobby, connecting.
+
+Session-ending rejects are classified by `CoopDesyncReason` into three greppable codes.
+`COOP-SEED` covers seed, sector-fingerprint and campaign-id mismatches; `COOP-MODS` covers the
+handshake manifest diff, including game version, co-op build and Iron Mode; `COOP-SESSION` covers
+resume rejects and is also where an unmapped reason lands. Seed and mod rejects call
+`goTerminalOnGuestReject`, which stops the guest's connect loop (the host keeps its lobby open);
+resume rejects deliberately do not. Every dialog logs `CoopDoctorMarker.format` at WARN before it
+touches the UI, so the marker survives a dialog that never renders. That line is
+`[COOP-DOCTOR] code=<code> sessionId=<id> ...`, and `sessionId` is the field that matches two logs.
+
 ---
 
 ## Reading the connection doctor
