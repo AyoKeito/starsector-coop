@@ -85,8 +85,7 @@ public record CoopOptionsView(List<Section> sections) {
      */
     public static final Set<String> CONFIRM_REQUIRED = Set.of(
             CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS,
-            CoopOptionsRegistry.PASSWORD,
-            CoopOptionsRegistry.RECONNECT_GRACE_SECONDS);
+            CoopOptionsRegistry.PASSWORD);
 
     /**
      * Policy keys whose owning phase has not built, so the value is stored, synced and shown but
@@ -277,6 +276,12 @@ public record CoopOptionsView(List<Section> sections) {
     }
 
     private static Control control(CoopOptionsRegistry.Option option) {
+        if (LAUNCH_READ_POLICY_KEYS.contains(option.key())) {
+            // Read-only, and the row's own note says why. These sync and display, but the value in
+            // force on each install is that install's launch setting, so a working stepper here
+            // would spend a snapshot and a feed line on both clients to move a number nothing reads.
+            return Control.NONE;
+        }
         switch (option.type()) {
             case BOOL:
                 return Control.TOGGLE;
@@ -405,24 +410,79 @@ public record CoopOptionsView(List<Section> sections) {
                     + " to join. Set a new one in saves/common/coop_options.json or with"
                     + " -Dcoop.password=... before you host again.";
         }
-        if (CoopOptionsRegistry.RECONNECT_GRACE_SECONDS.equals(key)) {
-            return "Change how long a dropped connection is held?\n\nWhile the window is open the"
-                    + " world is frozen for whoever is still connected. Zero ends the session on the"
-                    + " first drop; a long window can leave one player staring at a paused game."
-                    + "\n\nEach install reads its own value when it launches.";
-        }
+        // coop.reconnectGraceSeconds used to have a prompt here. It no longer has a control (see
+        // LAUNCH_READ_POLICY_KEYS in control()), so there is nothing left to confirm.
         return "";
     }
 
-    /** The confirm text for the Reset button. */
-    public static String resetPrompt(boolean guest) {
-        return guest
-                ? "Reset your own preferences to the shipped defaults?\n\nThe session rules belong"
-                        + " to the host and are not touched."
-                : "Reset every coop option to the shipped defaults?\n\nThis campaign's session rules"
-                        + " and your local preferences both go back to what the mod ships with."
-                        + " Command-line settings are unaffected.";
+    /**
+     * The keys "Reset to defaults" drops from {@code saves/common/coop_options.json}.
+     *
+     * <p>{@link CoopOptionsRegistry.Tier#CLIENT} only. The launch tier - host port, join address,
+     * join port, router port mapping, password, display name - is deliberately left alone: it is how
+     * this install reaches its partner, it took typing into a file to set, and a player who presses
+     * a button labelled "reset to defaults" on a page of gameplay preferences is not asking to be
+     * disconnected the next time they launch. The policy tier is reset separately, on the campaign,
+     * and only by the client that owns it.
+     */
+    public static List<String> resetKeys() {
+        List<String> keys = new ArrayList<>();
+        for (CoopOptionsRegistry.Option option
+                : CoopOptionsRegistry.byTier(CoopOptionsRegistry.Tier.CLIENT)) {
+            if (!option.dOnly()) {
+                keys.add(option.key());
+            }
+        }
+        return List.copyOf(keys);
     }
+
+    /**
+     * The confirm text for the Reset button.
+     *
+     * <p>Names what moves and what does not, because the button's own label ("Reset to defaults")
+     * reads as "everything on this page" and that is not what it does.
+     */
+    public static String resetPrompt(boolean guest) {
+        String local = "Your preferences - " + labelList(resetKeys())
+                + " - go back to what the mod ships with. Your connection settings ("
+                + labelList(launchKeys()) + ") are not touched, and neither is anything set on the"
+                + " command line.";
+        return guest
+                ? "Reset your own preferences to the shipped defaults?\n\n" + local
+                        + "\n\nThe session rules belong to the host and are not touched."
+                : "Reset this campaign's session rules and your own preferences?\n\nEvery session"
+                        + " rule in the first section goes back to its shipped value for this"
+                        + " campaign.\n\n" + local;
+    }
+
+    private static List<String> launchKeys() {
+        List<String> keys = new ArrayList<>();
+        for (CoopOptionsRegistry.Option option
+                : CoopOptionsRegistry.byTier(CoopOptionsRegistry.Tier.LAUNCH)) {
+            if (!option.dOnly()) {
+                keys.add(option.key());
+            }
+        }
+        return keys;
+    }
+
+    private static String labelList(List<String> keys) {
+        StringBuilder text = new StringBuilder();
+        for (String key : keys) {
+            if (text.length() > 0) {
+                text.append(", ");
+            }
+            text.append(label(key).toLowerCase(java.util.Locale.ROOT));
+        }
+        return text.toString();
+    }
+
+    /**
+     * The feed line for a policy reset. One line for the whole sweep, and the same wording on both
+     * sides: a reset moves several keys at once, so naming them would be a paragraph, and the host
+     * reading "the host reset..." is clearer than a first-person line that does not say who.
+     */
+    public static final String RESET_LINE = "Co-op: the host reset the session rules.";
 
     /**
      * The feed line for a policy change, on both sides of the link.

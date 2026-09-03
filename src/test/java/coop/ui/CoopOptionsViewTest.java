@@ -256,23 +256,61 @@ class CoopOptionsViewTest {
     // ---- confirmation ----------------------------------------------------------------------------
 
     @Test
-    void exactlyThreeKeysAskForConfirmationAndEachNamesTheTradeOff() {
-        assertEquals(Set.of(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, CoopOptionsRegistry.PASSWORD,
-                CoopOptionsRegistry.RECONNECT_GRACE_SECONDS), CoopOptionsView.CONFIRM_REQUIRED);
+    void exactlyTwoKeysAskForConfirmationAndEachNamesTheTradeOff() {
+        assertEquals(Set.of(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, CoopOptionsRegistry.PASSWORD),
+                CoopOptionsView.CONFIRM_REQUIRED);
 
         assertTrue(CoopOptionsView.confirmPrompt(PAUSE, "true")
                 .contains("world moves while your partner reads"));
         assertTrue(CoopOptionsView.confirmPrompt(CoopOptionsRegistry.PASSWORD, "x")
                 .contains("Anyone who can reach your host port"));
-        assertTrue(CoopOptionsView.confirmPrompt(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS, "60")
-                .contains("frozen"));
         assertEquals("", CoopOptionsView.confirmPrompt(CoopOptionsRegistry.HUD_CORNER, "TR"));
     }
 
+    // ---- review item 6: the two launch-read policy keys are display-only -------------------------
+
     @Test
-    void theResetPromptTellsAGuestItsPartnersRulesAreSafe() {
-        assertTrue(CoopOptionsView.resetPrompt(true).contains("belong"));
-        assertTrue(CoopOptionsView.resetPrompt(false).contains("campaign's session rules"));
+    void theLaunchReadPolicyKeysHaveNoControlAndNoConfirm() {
+        CoopOptionsView view = CoopOptionsView.of(CoopConnectionRole.HOST, false, new FakeReader());
+
+        for (String key : CoopOptionsView.LAUNCH_READ_POLICY_KEYS) {
+            CoopOptionsView.Row row = row(view, key);
+            assertEquals(CoopOptionsView.Control.NONE, row.control(),
+                    key + " renders read-only: nothing reads the synced value");
+            assertFalse(row.editable(), key);
+            assertFalse(CoopOptionsView.CONFIRM_REQUIRED.contains(key),
+                    key + " has no control left to confirm");
+            assertTrue(row.note().contains("at launch"), key + ": " + row.note());
+        }
+    }
+
+    // ---- review item 4: what Reset actually touches -----------------------------------------------
+
+    @Test
+    void resetSweepsTheClientPreferencesAndLeavesTheConnectionSettingsAlone() {
+        Set<String> keys = new HashSet<>(CoopOptionsView.resetKeys());
+
+        assertEquals(Set.of(CoopOptionsRegistry.HUD_DISABLE, CoopOptionsRegistry.HUD_CORNER,
+                CoopOptionsRegistry.FEED_VERBOSITY, CoopOptionsRegistry.PARTNER_COLOR), keys);
+        for (CoopOptionsRegistry.Option option
+                : CoopOptionsRegistry.byTier(CoopOptionsRegistry.Tier.LAUNCH)) {
+            assertFalse(keys.contains(option.key()),
+                    option.key() + " is how this install reaches its partner and must survive a reset");
+        }
+    }
+
+    @Test
+    void theResetPromptNamesWhatMovesAndWhatDoesNot() {
+        String guest = CoopOptionsView.resetPrompt(true);
+        String host = CoopOptionsView.resetPrompt(false);
+
+        for (String prompt : new String[]{guest, host}) {
+            assertTrue(prompt.contains("link hud corner"), prompt);
+            assertTrue(prompt.contains("session password"), prompt);
+            assertTrue(prompt.contains("are not touched"), prompt);
+        }
+        assertTrue(guest.contains("session rules belong to the host"), guest);
+        assertTrue(host.contains("session rule in the first section"), host);
     }
 
     // ---- feed lines ------------------------------------------------------------------------------
@@ -283,6 +321,11 @@ class CoopOptionsViewTest {
                 CoopOptionsView.changeLine(PAUSE, "false", true));
         assertEquals("Co-op: the host set Pause while a guest reads a screen to off.",
                 CoopOptionsView.changeLine(PAUSE, "false", false));
+    }
+
+    @Test
+    void aResetGetsOneLineWithTheSameWordingOnBothSides() {
+        assertEquals("Co-op: the host reset the session rules.", CoopOptionsView.RESET_LINE);
     }
 
     @Test

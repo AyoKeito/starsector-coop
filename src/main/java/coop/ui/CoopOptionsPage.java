@@ -18,7 +18,9 @@ import coop.net.CoopConnectionRole;
 import coop.util.CoopLog;
 
 import java.awt.Color;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -66,6 +68,10 @@ public class CoopOptionsPage extends BaseIntelPlugin {
 
     /** Adds the entry if this campaign does not already have one. Idempotent. */
     public static CoopOptionsPage ensureRegistered(SectorAPI sector) {
+        // Re-armed here rather than never: this runs on every campaign load, and the "one warning
+        // per process" guard is meant to stop a broken render spamming the log within one session,
+        // not to hide a different failure two campaigns later.
+        renderFailureLogged = false;
         try {
             if (sector == null) {
                 return null;
@@ -294,7 +300,7 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     }
 
     /** The live policy and settings stack behind the view. */
-    private static final class LiveReader implements CoopOptionsView.Reader {
+    static final class LiveReader implements CoopOptionsView.Reader {
         private final CoopOptionsPolicy policy = CoopOptionsPolicy.active();
         private final CoopOptionsStore store = CoopOptionsStore.system();
 
@@ -325,10 +331,17 @@ public class CoopOptionsPage extends BaseIntelPlugin {
             }
         }
 
+        /**
+         * Deliberately {@code sourceOf(...) == PROPERTY} rather than {@code hasProperty(...)}.
+         * {@code hasProperty} trims a blank away, but the resolution stack does not: an explicitly
+         * empty {@code -Dcoop.hudCorner=} is the property layer deciding, and the file layers below
+         * it never get a look in. Asking the trimming question tagged that row {@code (default)} and
+         * drew a button on it, and pressing the button wrote a file value the next read discarded.
+         */
         @Override
         public boolean commandLine(String key) {
             try {
-                return store.hasProperty(key);
+                return store.sourceOf(key) == CoopOptionsStore.Source.PROPERTY;
             } catch (RuntimeException | LinkageError ex) {
                 return false;
             }
@@ -435,6 +448,16 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         }
     }
 
+    /**
+     * Wider than {@code BaseIntelPlugin}'s 550. These prompts are three paragraphs, not one line -
+     * the pauseOnGuestScreens one runs to about sixty words - and at 550 they wrap into a column
+     * tall enough to crowd the dialog.
+     */
+    @Override
+    public float getConfirmationPromptWidth(Object buttonId) {
+        return 650f;
+    }
+
     @Override
     public void createConfirmationPrompt(Object buttonId, TooltipMakerAPI prompt) {
         try {
@@ -527,15 +550,16 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     private void resetToDefaults() {
         CoopOptionsPolicy policy = CoopOptionsPolicy.active();
         if (policy != null) {
+            // Refuses on a guest by itself, which is the same rule the page's rows are drawn under.
             policy.resetToDefaults();
         }
-        CoopOptionsStore store = CoopOptionsStore.system();
-        for (CoopOptionsRegistry.Option option : CoopOptionsRegistry.fileBackedOptions()) {
-            if (option.tier() == CoopOptionsRegistry.Tier.POLICY) {
-                continue;
-            }
-            store.writeOverride(option.key(), null);
+        // Client-tier only: see CoopOptionsView#resetKeys. One write for the whole sweep, so an
+        // unwritable settings file produces one WARN instead of one per key.
+        Map<String, String> cleared = new LinkedHashMap<>();
+        for (String key : CoopOptionsView.resetKeys()) {
+            cleared.put(key, null);
         }
+        CoopOptionsStore.system().writeOverrides(cleared);
         CoopLog.info(CoopOptionsPage.class, "Coop options reset to the shipped defaults");
     }
 
@@ -549,11 +573,16 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         }
     }
 
-    private static void logRenderFailureOnce(Throwable ex) {
+    static void logRenderFailureOnce(Throwable ex) {
         if (renderFailureLogged) {
             return;
         }
         renderFailureLogged = true;
         CoopLog.warn(CoopOptionsPage.class, "Coop options intel page failed", ex);
+    }
+
+    /** Whether the once-per-process render warning has already fired. Tests only. */
+    static boolean renderFailureLogged() {
+        return renderFailureLogged;
     }
 }

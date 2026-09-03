@@ -63,6 +63,68 @@ class CoopOptionsStoreTest {
         }
     }
 
+    /**
+     * The one case that matters for writing: the user's file is on disk but will not parse. The real
+     * {@code SettingsJsonSource} swallows the exception and reports it through these two flags, so
+     * this fake does the same rather than throwing out of {@code common()}.
+     */
+    private static final class BrokenCommonSource implements CoopOptionsStore.JsonSource {
+        private JSONObject shipped;
+        private int writes;
+
+        @Override
+        public JSONObject shipped() {
+            return shipped;
+        }
+
+        @Override
+        public JSONObject common() {
+            return null;
+        }
+
+        @Override
+        public boolean commonReadFailed() {
+            return true;
+        }
+
+        @Override
+        public boolean commonFileExists() {
+            return true;
+        }
+
+        @Override
+        public boolean writeCommon(JSONObject json) {
+            writes++;
+            return true;
+        }
+    }
+
+    /** A source that throws out of every read, as an engine call that blows up would. */
+    private static final class ThrowingSource implements CoopOptionsStore.JsonSource {
+        private int writes;
+
+        @Override
+        public JSONObject shipped() {
+            throw new IllegalStateException("no shipped file here");
+        }
+
+        @Override
+        public JSONObject common() {
+            throw new IllegalStateException("saves/common is on fire");
+        }
+
+        @Override
+        public boolean commonFileExists() {
+            return true;
+        }
+
+        @Override
+        public boolean writeCommon(JSONObject json) {
+            writes++;
+            return true;
+        }
+    }
+
     private static JSONObject json(Map<String, Object> values) {
         try {
             JSONObject object = new JSONObject();
@@ -464,5 +526,93 @@ class CoopOptionsStoreTest {
 
         assertFalse(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "BL"));
         assertEquals("TR", store.string(CoopOptionsRegistry.HUD_CORNER));
+    }
+
+    // ---- review item 1: an unreadable user file is never rewritten -------------------------------
+
+    @Test
+    void anUnreadableUserFileIsRefusedRatherThanReplacedWithOneKey() {
+        BrokenCommonSource source = new BrokenCommonSource();
+        source.shipped = json(Map.of(CoopOptionsRegistry.HUD_CORNER, "TR"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertTrue(store.commonUnreadable());
+        assertFalse(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "BL"),
+                "a file that will not parse must be fixed by hand, not silently truncated");
+        assertEquals(0, source.writes,
+                "rewriting it would have thrown away every setting the file still holds");
+    }
+
+    @Test
+    void aReadThatThrowsIsTreatedAsUnreadableToo() {
+        ThrowingSource source = new ThrowingSource();
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertTrue(store.commonUnreadable());
+        assertFalse(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "BL"));
+        assertEquals(0, source.writes);
+    }
+
+    @Test
+    void anAbsentUserFileIsStillWritten() {
+        FakeSource source = new FakeSource();
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertFalse(store.commonUnreadable(),
+                "\"there is no file yet\" is not a failure - creating it is what the first edit does");
+        assertTrue(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "BL"));
+        assertEquals(1, source.writes);
+    }
+
+    // ---- review item 4: the batch form -----------------------------------------------------------
+
+    @Test
+    void writeOverridesRewritesTheFileOnceForTheWholeSweep() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of(
+                CoopOptionsRegistry.HUD_CORNER, "BL",
+                CoopOptionsRegistry.HUD_DISABLE, true,
+                "coop.somethingFromANewerBuild", "keep me"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        Map<String, String> cleared = new java.util.LinkedHashMap<>();
+        cleared.put(CoopOptionsRegistry.HUD_CORNER, null);
+        cleared.put(CoopOptionsRegistry.HUD_DISABLE, null);
+        assertTrue(store.writeOverrides(cleared));
+
+        assertEquals(1, source.writes, "one player action is one file rewrite");
+        assertEquals("TR", store.string(CoopOptionsRegistry.HUD_CORNER));
+        assertFalse(store.bool(CoopOptionsRegistry.HUD_DISABLE));
+        assertEquals("keep me", source.common.opt("coop.somethingFromANewerBuild"));
+    }
+
+    @Test
+    void writeOverridesRefusesTheKeysWriteOverrideRefusesAndKeepsTheRest() {
+        FakeSource source = new FakeSource();
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        Map<String, String> mixed = new java.util.LinkedHashMap<>();
+        mixed.put(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false");
+        mixed.put(CoopOptionsRegistry.NEW_GAME_SEED, "12345");
+        mixed.put(CoopOptionsRegistry.HUD_CORNER, "BL");
+        assertTrue(store.writeOverrides(mixed));
+
+        assertEquals(1, source.writes);
+        assertEquals("BL", source.common.opt(CoopOptionsRegistry.HUD_CORNER));
+        assertNull(source.common.opt(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+        assertNull(source.common.opt(CoopOptionsRegistry.NEW_GAME_SEED));
+    }
+
+    @Test
+    void writeOverridesRefusesTheWholeSweepWhenTheFileCannotBeRead() {
+        BrokenCommonSource source = new BrokenCommonSource();
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        Map<String, String> cleared = new java.util.LinkedHashMap<>();
+        cleared.put(CoopOptionsRegistry.HUD_CORNER, null);
+        cleared.put(CoopOptionsRegistry.HUD_DISABLE, null);
+
+        assertFalse(store.writeOverrides(cleared));
+        assertEquals(0, source.writes);
     }
 }

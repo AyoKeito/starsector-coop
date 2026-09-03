@@ -490,6 +490,12 @@ public class CoopNetPump implements EveryFrameScript {
     /** The policy version this client last posted a feed line for; -1 before the first read. */
     private int lastAnnouncedOptionsVersion = -1;
     /**
+     * Guest: the policy version this client has already acknowledged with {@code OPTIONS_APPLIED},
+     * or -1 when it has acknowledged nothing on this session. Reset on the session edge so a
+     * returning guest re-acknowledges rather than leaving the host pending forever.
+     */
+    private int lastSentOptionsAppliedVersion = -1;
+    /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
      * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
      * measured inside {@code applySet}, and two different clocks there would silently break it.
@@ -2021,18 +2027,84 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void tickOptionsPolicy() {
         if (!isPolicyAuthority()) {
+            // The guest half runs after syncSharedPause (see advanceFrame): that is where its
+            // boundary is crossed, and acknowledging from here would report it a frame late.
             return;
         }
         optionsPolicy.ensureSeeded(coop.config.CoopOptionsStore.system());
-        // The host's own NEXT_SCREEN_TOGGLE boundary. The host has no screen of its own that this
-        // key governs (its screens pause its own engine natively, and the shared clock follows the
-        // host); what it tracks here is whether the *guest* is currently holding the screen pause,
-        // so the page can honestly say "pending" for as long as the flip has not reached the guest.
-        if (!pauseCoordinator.guestScreenPauseIntent()) {
-            optionsPolicy.advanceBoundary(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS);
+        // The host's pending means "sent, not yet acknowledged", and the acknowledgement is the
+        // guest's OPTIONS_APPLIED (see handleOptionsApplied). With nobody to acknowledge - no guest
+        // connected, or the session not playable - there is no boundary to wait for and a pending
+        // change would hang on the page forever, so it promotes on the spot.
+        //
+        // This used to be an advanceBoundary gated on !guestScreenPauseIntent(), which read "the
+        // guest has nothing open". It is degenerate whenever the option is already off: the guest
+        // then holds no screen pause even while it sits in a core tab, so turning the option back ON
+        // promoted the host's applied value immediately while the guest - correctly - stayed
+        // pending, and the two disagreed about the rule in force.
+        if (!hasAcknowledgingGuest()) {
+            optionsPolicy.acknowledgeAllApplied();
         }
         announceLocalPolicyChange();
         maybeSendOptionsSnapshot();
+    }
+
+    /** True when there is a guest that owes this host an {@code OPTIONS_APPLIED}. */
+    private boolean hasAcknowledgingGuest() {
+        return service.role() == CoopConnectionRole.HOST && service.isConnected()
+                && isSessionPlayable();
+    }
+
+    /**
+     * Guest: tell the host once per version that every boundary has been crossed here.
+     *
+     * <p>Sent only when nothing is pending locally, which is the whole content of the message: the
+     * guest's own {@code advanceBoundary} calls (see {@link #syncGuestSharedPauseIntent()}) are what
+     * clear the pending state, and this is the report that they have.
+     */
+    private void maybeSendOptionsApplied() {
+        if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()
+                || !isGameplaySessionActive()) {
+            // A guest that drops re-acknowledges on the way back in; the host's own no-guest rule
+            // above has already promoted anything that was pending while it was gone.
+            lastSentOptionsAppliedVersion = -1;
+            return;
+        }
+        int version = optionsPolicy.version();
+        if (version <= 0 || version == lastSentOptionsAppliedVersion
+                || optionsPolicy.hasPendingChanges()) {
+            return;
+        }
+        String sessionId = sessionState.sessionId();
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return;
+        }
+        CoopMessages.Message message = CoopMessages.optionsApplied(sessionId, service.nextSeq(),
+                clockMillis.getAsLong(), version);
+        service.send(message);
+        log("outbound", message);
+        lastSentOptionsAppliedVersion = version;
+    }
+
+    /**
+     * Host: the guest has crossed its boundaries for {@code policyVersion}, so the host's pending
+     * values may promote.
+     *
+     * <p>An acknowledgement of an older version is ignored rather than applied: the host has changed
+     * something since, and that newer change is still owed its own boundary.
+     */
+    private void handleOptionsApplied(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        int version;
+        try {
+            version = CoopMessages.parseOptionsApplied(message).policyVersion();
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not read an OPTIONS_APPLIED", ex);
+            return;
+        }
+        optionsPolicy.acknowledgeApplied(version);
     }
 
     /**
@@ -2052,6 +2124,12 @@ public class CoopNetPump implements EveryFrameScript {
         }
         lastAnnouncedOptionsVersion = version;
         String key = optionsPolicy.lastChangedKey();
+        if (coop.config.CoopOptionsPolicy.RESET_MARKER.equals(key)) {
+            // A reset moves several keys at once and so names none of them. Without this the one
+            // player action on the page that changes the most produced the only silence.
+            postOptionsResetFeedLine(version);
+            return;
+        }
         if (key.isEmpty() || !coop.config.CoopOptionsPolicy.isPolicyKey(key)) {
             return;
         }
@@ -2110,6 +2188,15 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         String changed = snapshot.changedKey();
+        if (coop.config.CoopOptionsPolicy.RESET_MARKER.equals(changed)) {
+            // Gated on something having actually moved here, which is also what keeps the resume
+            // re-send quiet: it carries the same marker, but by then this client already holds the
+            // reset values and changedKeys() is empty.
+            if (!result.changedKeys().isEmpty()) {
+                postOptionsResetFeedLine(result.version());
+            }
+            return;
+        }
         if (changed.isEmpty() || !result.changedKeys().contains(changed)) {
             // An establish/resume broadcast, or a re-send of something we already hold: the values
             // are now right either way, and there is no event to narrate.
@@ -2128,6 +2215,15 @@ public class CoopNetPump implements EveryFrameScript {
     private void postOptionsFeedLine(String key, String value, boolean local) {
         postFeed(FEED_OPTIONS + ":" + key + "=" + value, clockMillis.getAsLong(),
                 coop.ui.CoopOptionsView.changeLine(key, value, local), FEED_WARN_COLOR);
+    }
+
+    /**
+     * The one line a whole-policy reset gets, identical on both sides. Keyed by version rather than
+     * by key/value so two resets in a row are two lines instead of one throttled away.
+     */
+    private void postOptionsResetFeedLine(int version) {
+        postFeed(FEED_OPTIONS + ":reset=" + version, clockMillis.getAsLong(),
+                coop.ui.CoopOptionsView.RESET_LINE, FEED_WARN_COLOR);
     }
 
     /** Host: the countdown ran out, so the session starts. */
@@ -2724,6 +2820,9 @@ public class CoopNetPump implements EveryFrameScript {
         tickBattleBridge();
         t = profiler.split(SECTION_BATTLE_BRIDGE, t);
         syncSharedPause();
+        // Phase 28 M2: immediately behind it, because syncGuestSharedPauseIntent is where the
+        // guest's apply boundary is crossed and the host is waiting to be told that it was.
+        maybeSendOptionsApplied();
         t = profiler.split(SECTION_SHARED_PAUSE, t);
         syncFastForwardLock();
         t = profiler.split(SECTION_TIME_FAST_FORWARD, t);
@@ -3457,6 +3556,8 @@ public class CoopNetPump implements EveryFrameScript {
         // the resume broadcast the plan asks for is exactly this one line - the periodic comparison
         // in maybeSendOptionsSnapshot does the rest.
         lastSentOptionsVersion = -1;
+        // ...and the returning guest owes the host a fresh acknowledgement of it.
+        lastSentOptionsAppliedVersion = -1;
         // The returning guest's clock is frozen until the first snapshot lands, so it does not wait
         // out the 5 Hz cadence; the guest snapshot is cheap and re-establishes the save material.
         nextTimeSnapshotAtMillis = 0L;
@@ -3656,6 +3757,7 @@ public class CoopNetPump implements EveryFrameScript {
             case SESSION_STATS -> handleSessionStats(message);
             case SHIP_LOST -> handleShipLost(message);
             case OPTIONS_SNAPSHOT -> handleOptionsSnapshot(message);
+            case OPTIONS_APPLIED -> handleOptionsApplied(message);
             case LOBBY_STATUS -> handleLobbyStatus(message);
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
@@ -4675,11 +4777,17 @@ public class CoopNetPump implements EveryFrameScript {
             CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
             boolean dialogOrMenu = ui != null && isBlockingDialogOrMenuOpen(ui);
             boolean coreTab = ui != null && isCoreTabOpen(ui);
-            if (!dialogOrMenu && !coreTab) {
-                // Phase 28 M2, the NEXT_SCREEN_TOGGLE boundary. Nothing is open, so a flip that
-                // arrived while a screen WAS open takes effect now - before the next open, and
-                // never underneath one. This is the whole of "a flip does not yank the pause out
-                // from under a screen the guest already has open".
+            if (!coreTab) {
+                // Phase 28 M2, the NEXT_SCREEN_TOGGLE boundary. No core tab is open, so a flip that
+                // arrived while one WAS open takes effect now - before the next open, and never
+                // underneath one. This is the whole of "a flip does not yank the pause out from
+                // under a screen the guest already has open".
+                //
+                // Core tabs only, not "nothing at all is open": the core tabs are the only thing
+                // this key governs. Waiting for an interaction dialog to close as well would park
+                // the boundary behind a docked-station conversation that can run for minutes, and
+                // that dialog pauses regardless of the option - so crossing the boundary underneath
+                // it changes nothing the player can see.
                 optionsPolicy.advanceBoundary(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS);
             }
             // The two hardwired intents are not negotiable: an interaction dialog pauses because the
@@ -4736,7 +4844,15 @@ public class CoopNetPump implements EveryFrameScript {
      * interaction dialog (Phase 12 market correctness) or the in-game menu.
      */
     private static boolean isBlockingDialogOrMenuOpen(CampaignUIAPI ui) {
-        return ui.isShowingDialog() || ui.isShowingMenu();
+        // Phase 28 review (decompiled CampaignState, 0.98a): opening a core tab from the button bar
+        // sets the same dialogType field that isShowingDialog() reads, so a core tab alone reports
+        // as "showing dialog". Subtract exactly that case, or coop.pauseOnGuestScreens=false could
+        // never stop the guest's screen pause. Keyed on getCurrentInteractionDialog(): a docked
+        // market dialog reports a core tab too, and that one must keep pausing (Phase 12 open-time
+        // snapshot model). isVanillaBlockingScreenOpen keeps the full union, so the input blocker's
+        // suspend logic is unaffected.
+        boolean coreTabOnly = ui.getCurrentCoreTab() != null && ui.getCurrentInteractionDialog() == null;
+        return (ui.isShowingDialog() && !coreTabOnly) || ui.isShowingMenu();
     }
 
     /**
@@ -6782,6 +6898,7 @@ public class CoopNetPump implements EveryFrameScript {
         // a campaign that keeps running solo must not still be living under a policy nobody is
         // broadcasting (and whose default is the safe, pre-Phase-28 behaviour).
         lastSentOptionsVersion = -1;
+        lastSentOptionsAppliedVersion = -1;
         if (!active && service.role() != CoopConnectionRole.HOST) {
             optionsPolicy.clearSyncedView();
             lastAnnouncedOptionsVersion = -1;

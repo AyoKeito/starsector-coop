@@ -697,6 +697,16 @@ class CoopMessagesTest {
     }
 
     @Test
+    void optionsAppliedRoundTripsThroughTheEnvelope() {
+        CoopMessages.Message message = CoopMessages.optionsApplied("session-a", 22L, 4300L, 7);
+        CoopMessages.OptionsApplied decoded = CoopMessages.parseOptionsApplied(
+                CoopMessages.decode(CoopMessages.encode(message)));
+
+        assertEquals(CoopMessages.Type.OPTIONS_APPLIED, message.type());
+        assertEquals(7, decoded.policyVersion());
+    }
+
+    @Test
     void optionsSnapshotCarriesAnEmptyChangedKeyForTheEstablishBroadcast() {
         CoopMessages.OptionsSnapshot decoded = CoopMessages.parseOptionsSnapshot(
                 CoopMessages.optionsSnapshot("session-a", 1L, 10L, Map.of(), 1, null));

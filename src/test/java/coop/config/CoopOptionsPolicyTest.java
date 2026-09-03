@@ -290,6 +290,66 @@ class CoopOptionsPolicyTest {
         }
     }
 
+    // ---- review item 5: a reset says so on the wire ----------------------------------------------
+
+    @Test
+    void aMultiKeyResetIsMarkedSoBothSidesCanNarrateIt() {
+        CoopOptionsPolicy policy = host();
+        policy.ensureSeeded(storeWith(Map.of()));
+        policy.set(PAUSE, "false");
+        policy.set(ALLOW_PAUSE, "false");
+
+        policy.resetToDefaults();
+
+        assertEquals(CoopOptionsPolicy.RESET_MARKER, policy.lastChangedKey(),
+                "\"\" already means \"establish broadcast, narrate nothing\"");
+        assertFalse(CoopOptionsPolicy.isPolicyKey(CoopOptionsPolicy.RESET_MARKER),
+                "the marker must not be mistakable for a key");
+    }
+
+    @Test
+    void aResetThatMovesOneKeyStillNamesThatKey() {
+        CoopOptionsPolicy policy = host();
+        policy.ensureSeeded(storeWith(Map.of()));
+        policy.set(PAUSE, "false");
+
+        policy.resetToDefaults();
+
+        assertEquals(PAUSE, policy.lastChangedKey());
+    }
+
+    // ---- review item 2: the host's pending clears on the guest's acknowledgement ------------------
+
+    @Test
+    void theHostsPendingClearsOnlyOnAnAcknowledgementOfTheCurrentVersion() {
+        CoopOptionsPolicy policy = host();
+        policy.ensureSeeded(storeWith(Map.of()));
+        policy.set(PAUSE, "false");
+        int version = policy.version();
+
+        assertTrue(policy.hasPendingChanges());
+        assertFalse(policy.acknowledgeApplied(version - 1),
+                "an ack for a version we have already moved past says nothing about this change");
+        assertTrue(policy.hasPendingChange(PAUSE));
+
+        assertTrue(policy.acknowledgeApplied(version));
+        assertFalse(policy.hasPendingChange(PAUSE));
+        assertFalse(policy.hasPendingChanges());
+        assertEquals("false", policy.applied(PAUSE));
+    }
+
+    @Test
+    void withNoGuestToWaitForEverythingPromotesAtOnce() {
+        CoopOptionsPolicy policy = host();
+        policy.ensureSeeded(storeWith(Map.of()));
+        policy.set(PAUSE, "false");
+
+        assertTrue(policy.acknowledgeAllApplied());
+
+        assertFalse(policy.hasPendingChanges());
+        assertFalse(policy.acknowledgeAllApplied(), "nothing left to promote");
+    }
+
     @Test
     void onlyPolicyKeysAreAccepted() {
         CoopOptionsPolicy policy = host();

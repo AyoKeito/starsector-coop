@@ -81,6 +81,16 @@ public final class CoopOptionsPolicy {
     /** The version a freshly seeded campaign starts at. Restarts at 1 per campaign, by design. */
     public static final int FIRST_VERSION = 1;
 
+    /**
+     * {@link #lastChangedKey()} for a {@link #resetToDefaults()} that moved more than one key, and so
+     * the {@code changedKey} the snapshot carries for it.
+     *
+     * <p>A sentinel rather than {@code ""} because empty already means "this send is an establish or
+     * resume broadcast, narrate nothing", and a reset must be narrated on both sides. Cannot collide
+     * with a registry key: every one of those starts with {@code coop.}.
+     */
+    public static final String RESET_MARKER = "*reset*";
+
     private static volatile CoopOptionsPolicy active;
 
     private final BooleanSupplier hostAuthority;
@@ -206,6 +216,16 @@ public final class CoopOptionsPolicy {
         return !Objects.equals(effective.get(key), applied.get(key));
     }
 
+    /** True when any key is waiting for its boundary. What the guest's acknowledgement gates on. */
+    public synchronized boolean hasPendingChanges() {
+        for (CoopOptionsRegistry.Option option : policyOptions()) {
+            if (!Objects.equals(effective.get(option.key()), applied.get(option.key()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Every policy key and its current value, in registration order; the snapshot body. */
     public synchronized Map<String, String> values() {
         return Collections.unmodifiableMap(new LinkedHashMap<>(effective));
@@ -243,6 +263,43 @@ public final class CoopOptionsPolicy {
         applied.put(key, pending);
         CoopLog.info(CoopOptionsPolicy.class, "Coop option " + key + " now in effect: " + pending);
         return true;
+    }
+
+    /**
+     * Host: the guest reports that its own boundaries have been crossed for {@code ackVersion}.
+     *
+     * <p>The host has no screen of its own that the pending keys govern, so it has no boundary to
+     * cross; what it is waiting for is the guest, and this is the guest saying so. An acknowledgement
+     * that is not for the version currently held is refused - the host has changed something since,
+     * and the newer change is still owed its own boundary.
+     *
+     * @return true when an applied value actually moved
+     */
+    public synchronized boolean acknowledgeApplied(int ackVersion) {
+        if (ackVersion != version) {
+            return false;
+        }
+        return promoteAll();
+    }
+
+    /**
+     * Host with no guest to wait for: promote everything now. A pending change with nobody on the
+     * other end would otherwise sit on the options page forever.
+     *
+     * @return true when an applied value actually moved
+     */
+    public synchronized boolean acknowledgeAllApplied() {
+        return promoteAll();
+    }
+
+    private boolean promoteAll() {
+        boolean moved = false;
+        for (CoopOptionsRegistry.Option option : policyOptions()) {
+            if (advanceBoundary(option.key())) {
+                moved = true;
+            }
+        }
+        return moved;
     }
 
     // ---- host writes -----------------------------------------------------------------------------
@@ -310,7 +367,7 @@ public final class CoopOptionsPolicy {
             return changed;
         }
         version = nextVersion(version);
-        lastChangedKey = changed.size() == 1 ? changed.get(0) : "";
+        lastChangedKey = changed.size() == 1 ? changed.get(0) : RESET_MARKER;
         persist();
         CoopLog.info(CoopOptionsPolicy.class, "Coop policy reset to defaults (v" + version + "): "
                 + String.join(", ", changed));

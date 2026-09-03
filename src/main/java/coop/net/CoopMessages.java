@@ -150,7 +150,26 @@ public final class CoopMessages {
          * ({@code CoopNetPump#allowedDuringReconnectGrace}): an unproven peer must not be able to
          * rewrite the rules of a session it has not yet proved it belongs to.
          */
-        OPTIONS_SNAPSHOT
+        OPTIONS_SNAPSHOT,
+        /**
+         * Phase 28 milestone 2: guest &rarr; host, "my applied policy has caught up to version N".
+         *
+         * <p>The acknowledgement half of the apply-boundary contract. A key whose boundary is not
+         * {@code IMMEDIATE} is <em>pending</em> on the host until the guest - the only client with a
+         * boundary to cross for it - says it has crossed it. Before this the host guessed, by
+         * looking at whether the guest was currently holding a screen pause, and the guess was
+         * degenerate in the direction that matters: with the option already off the guest holds no
+         * pause, so turning it back ON while the guest was reading a tab promoted the host's applied
+         * value on the spot while the guest correctly stayed pending.
+         *
+         * <p>Cheaper than an {@code appliedVersion} field on {@code LINK_STATUS}: one small message
+         * per policy change instead of a fifteenth field on a record with a dozen call sites and a
+         * compatibility constructor, and it acknowledges within a frame rather than within the 5 s
+         * {@code LINK_STATUS} tick.
+         *
+         * <p>Not on the reconnect-grace whitelist, for the same reason as {@code OPTIONS_SNAPSHOT}.
+         */
+        OPTIONS_APPLIED
     }
 
     /**
@@ -1087,6 +1106,27 @@ public final class CoopMessages {
                 .append(escapeJson(changedKey == null ? "" : changedKey)).append("\"}");
         return new Message(Type.OPTIONS_SNAPSHOT, requireText(sessionId, "sessionId"), seq,
                 sentAtMillis, json.toString());
+    }
+
+    /**
+     * Guest &rarr; host: "everything the host has sent me is now in force here, as of version N".
+     *
+     * <p>One field. The host only ever compares it against its own current version, so naming the
+     * keys would be data nobody reads.
+     */
+    public static Message optionsApplied(String sessionId, long seq, long sentAtMillis,
+                                         int policyVersion) {
+        return new Message(Type.OPTIONS_APPLIED, requireText(sessionId, "sessionId"), seq,
+                sentAtMillis, "{\"policyVersion\":" + policyVersion + "}");
+    }
+
+    /** Decoded {@link Type#OPTIONS_APPLIED}. */
+    public record OptionsApplied(int policyVersion) {
+    }
+
+    public static OptionsApplied parseOptionsApplied(Message message) {
+        return new OptionsApplied((int) Math.max(0L,
+                requiredPayloadLong(message, "policyVersion")));
     }
 
     public static OptionsSnapshot parseOptionsSnapshot(Message message) {

@@ -5816,4 +5816,156 @@ class CoopNetPumpTest {
                 "a campaign that keeps running solo is not still under the host's rules");
         assertEquals(0, pump.optionsPolicy().version());
     }
+
+    // ---- review item 2: the host's pending is "sent, not yet acknowledged" ------------------------
+
+    private static final String PAUSE_KEY = coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS;
+
+    @Test
+    void theGuestAcknowledgesOncePerVersionWhenItsBoundaryHasBeenCrossed() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+
+        // The guest is in a core tab when the flip arrives: the boundary has not come round.
+        ui.coreTab = CORE_TAB;
+        service.inbound.add(optionsSnapshotFor(PAUSE_KEY, "false", 2));
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(0, countOfType(service, CoopMessages.Type.OPTIONS_APPLIED),
+                "nothing to acknowledge while the change is still pending here");
+
+        // Closing the tab crosses it, and that is what the host is waiting to hear.
+        ui.coreTab = null;
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.OPTIONS_APPLIED));
+        assertEquals(2, CoopMessages.parseOptionsApplied(
+                lastOfType(service, CoopMessages.Type.OPTIONS_APPLIED)).policyVersion());
+
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.OPTIONS_APPLIED),
+                "once per version, not once per frame");
+    }
+
+    @Test
+    void theHostHoldsItsPendingUntilTheGuestAcknowledgesInEitherDirection() {
+        for (String from : new String[]{"true", "false"}) {
+            String to = "true".equals(from) ? "false" : "true";
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            Global.setSector(new RecordingSector(false).proxy());
+            CoopNetPump pump = livePump(service, activeHostSession(), new AtomicLong(1000L)::get);
+            pump.advance(0f);
+
+            // Establish the starting value and let it settle (the guest acknowledges v1/v2).
+            pump.optionsPolicy().set(PAUSE_KEY, from);
+            pump.advance(0f);
+            service.inbound.add(CoopMessages.optionsApplied("session-a", 50L, 1000L,
+                    pump.optionsPolicy().version()));
+            pump.advance(0f);
+            assertFalse(pump.optionsPolicy().hasPendingChanges(), from + " did not settle");
+
+            // The flip the guest has not answered yet. Nothing about the guest's own screen state
+            // may promote this: with the option off the guest holds no screen pause at all, and
+            // that used to be read as "the guest has nothing open, promote now".
+            pump.optionsPolicy().set(PAUSE_KEY, to);
+            pump.advance(0f);
+            pump.advance(0f);
+            assertTrue(pump.optionsPolicy().hasPendingChange(PAUSE_KEY),
+                    from + " -> " + to + " must stay pending until the guest says otherwise");
+            assertEquals(from, pump.optionsPolicy().applied(PAUSE_KEY));
+
+            service.inbound.add(CoopMessages.optionsApplied("session-a", 51L, 1000L,
+                    pump.optionsPolicy().version()));
+            pump.advance(0f);
+            assertFalse(pump.optionsPolicy().hasPendingChange(PAUSE_KEY), from + " -> " + to);
+            assertEquals(to, pump.optionsPolicy().applied(PAUSE_KEY));
+        }
+    }
+
+    @Test
+    void aHostWithNoGuestPromotesItsOwnChangeRatherThanHangingOnPending() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        service.connected = false;
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeHostSession(), new AtomicLong(1000L)::get);
+        pump.advance(0f);
+
+        pump.optionsPolicy().set(PAUSE_KEY, "false");
+        pump.advance(0f);
+
+        assertFalse(pump.optionsPolicy().hasPendingChange(PAUSE_KEY),
+                "with nobody to acknowledge, a pending change would sit on the page forever");
+        assertEquals("false", pump.optionsPolicy().applied(PAUSE_KEY));
+    }
+
+    // ---- review item 7: the guest's boundary is core tabs, not "anything at all" ------------------
+
+    @Test
+    void aLongInteractionDialogDoesNotHoldTheBoundaryOpen() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(entity);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+
+        service.inbound.add(optionsSnapshotFor(PAUSE_KEY, "false", 2));
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertFalse(pump.optionsPolicy().hasPendingChange(PAUSE_KEY),
+                "no core tab is open, so the boundary is crossed; the dialog is not what this key"
+                        + " governs and it pauses regardless");
+        assertEquals("true", CoopMessages.requiredPayloadString(lastPauseIntent(service), "paused"),
+                "the dialog's own pause is hardwired and survives the flip");
+    }
+
+    // ---- review item 5: a policy reset is narrated on both sides ----------------------------------
+
+    @Test
+    void aHostSideResetPostsOneFeedLine() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeHostSession(), new AtomicLong(1000L)::get);
+        pump.advance(0f);
+        pump.optionsPolicy().set(PAUSE_KEY, "false");
+        pump.optionsPolicy().set(coop.config.CoopOptionsRegistry.ALLOW_GUEST_PAUSE, "false");
+        pump.advance(0f);
+
+        pump.optionsPolicy().resetToDefaults();
+        pump.advance(0f);
+
+        assertEquals(1, feedLinesSaying(coop.ui.CoopOptionsView.RESET_LINE),
+                "the one action on the page that changes the most used to be the only silent one");
+    }
+
+    @Test
+    void aGuestNarratesTheHostsResetOnceAndStaysQuietOnTheResumeResend() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+        service.inbound.add(optionsSnapshotFor(PAUSE_KEY, "false", 2));
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.optionsSnapshot("session-a", 98L, 1000L,
+                java.util.Map.of(PAUSE_KEY, "true"), 3,
+                coop.config.CoopOptionsPolicy.RESET_MARKER));
+        pump.advance(0f);
+        assertEquals(1, feedLinesSaying(coop.ui.CoopOptionsView.RESET_LINE));
+
+        // The resume re-send carries the same marker but changes nothing here.
+        service.inbound.add(CoopMessages.optionsSnapshot("session-a", 99L, 1000L,
+                java.util.Map.of(PAUSE_KEY, "true"), 3,
+                coop.config.CoopOptionsPolicy.RESET_MARKER));
+        pump.advance(0f);
+        assertEquals(1, feedLinesSaying(coop.ui.CoopOptionsView.RESET_LINE),
+                "a re-send of values we already hold is not a new event");
+    }
+
+    private static long feedLinesSaying(String text) {
+        return coop.ui.CoopSessionIntelFeed.currentModel().events().stream()
+                .filter(e -> e.line().equals(text))
+                .count();
+    }
 }

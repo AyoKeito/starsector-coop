@@ -95,6 +95,29 @@ public final class CoopOptionsStore {
         JSONObject common();
 
         /**
+         * Whether the most recent {@link #common()} <em>failed</em>, as opposed to finding no file.
+         *
+         * <p>Both cases return {@code null} from {@link #common()}, and for reading that is the
+         * right answer either way - a file that will not parse contributes nothing, same as a file
+         * that is not there. For <em>writing</em> the two are opposites: rewriting an absent file
+         * creates it, while rewriting an unreadable one throws away every setting in it, including
+         * the ones this build cannot see. {@link CoopOptionsStore#writeOverrides} refuses in the
+         * second case, and this is how it tells them apart.
+         */
+        default boolean commonReadFailed() {
+            return false;
+        }
+
+        /**
+         * Whether {@code saves/common/coop_options.json} exists at all. Only consulted alongside
+         * {@link #commonReadFailed()}; a source that cannot answer says "no file" and a failed read
+         * over a file that is not there is then treated as harmless.
+         */
+        default boolean commonFileExists() {
+            return false;
+        }
+
+        /**
          * Replaces {@code saves/common/coop_options.json} with {@code json} and makes the new
          * content what {@link #common()} returns from here on.
          *
@@ -144,6 +167,12 @@ public final class CoopOptionsStore {
 
     private Map<String, String> commonLayer;
     private Map<String, String> shippedLayer;
+
+    /**
+     * Whether the last attempt to read the common layer failed, as opposed to finding no file. Only
+     * {@link #writeOverrides} cares: reads treat the two the same, writes must not.
+     */
+    private boolean commonFailed;
 
     /**
      * @param source         the two file layers
@@ -300,15 +329,59 @@ public final class CoopOptionsStore {
      * @return true when the file was written
      */
     public boolean writeOverride(String key, String value) {
-        CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
-        if (option.dOnly()) {
-            CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
-                    + " is a command-line-only setting and is not written to a file");
+        Map<String, String> single = new LinkedHashMap<>();
+        single.put(key, value);
+        return writeOverrides(single);
+    }
+
+    /**
+     * Phase 28 milestone 3: writes several user overrides in <em>one</em> file rewrite.
+     *
+     * <p>What "Reset to defaults" uses. Doing it one {@link #writeOverride} per key would rewrite
+     * the file once per key and, when the file is not writable, produce one WARN per key - a wall of
+     * identical lines for a single player action.
+     *
+     * <p>Same rules as the single-key form: a {@code null} value drops the override, unknown keys in
+     * the file are carried through untouched, and policy / {@code -D}-only keys are refused with
+     * their own WARN and simply left out of the write.
+     *
+     * @param values key to new value; a {@code null} value drops that key's override
+     * @return true when the file was written (or when there was nothing left to write)
+     */
+    public boolean writeOverrides(Map<String, String> values) {
+        if (values == null || values.isEmpty()) {
+            return true;
+        }
+        Map<String, String> accepted = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : values.entrySet()) {
+            String key = entry.getKey();
+            CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
+            if (option.dOnly()) {
+                CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
+                        + " is a command-line-only setting and is not written to a file");
+                continue;
+            }
+            if (option.tier() == CoopOptionsRegistry.Tier.POLICY) {
+                CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
+                        + " is host policy and belongs to the campaign, not to " + COMMON_FILE);
+                continue;
+            }
+            accepted.put(key, entry.getValue());
+        }
+        if (accepted.isEmpty()) {
             return false;
         }
-        if (option.tier() == CoopOptionsRegistry.Tier.POLICY) {
-            CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
-                    + " is host policy and belongs to the campaign, not to " + COMMON_FILE);
+        String label = describe(accepted.keySet());
+        // Refuse before composing anything. safeCommon() hands back null for "no file" and for
+        // "the file is there but will not parse" alike, and rewriting the file from that null would
+        // replace a settings file the player hand-edited (and broke) with whatever this one action
+        // set - silently deleting every other setting in it. A file that cannot be read is a file
+        // the player has to fix by hand.
+        if (commonUnreadable()) {
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+                    + " exists but could not be read, so it will not be rewritten - that would throw"
+                    + " away everything in it. Fix it by hand (it must be plain JSON, with no #"
+                    + " comments) or delete it. " + label + " not saved.");
             return false;
         }
         JSONObject json = new JSONObject();
@@ -322,7 +395,7 @@ public final class CoopOptionsStore {
                         continue;
                     }
                     String name = rawKey.toString();
-                    if (name.equals(key)) {
+                    if (accepted.containsKey(name)) {
                         continue;
                     }
                     Object existingValue = existing.opt(name);
@@ -331,12 +404,16 @@ public final class CoopOptionsStore {
                     }
                 }
             }
-            if (value != null) {
-                json.put(key, option.coerce(value).value());
+            for (Map.Entry<String, String> entry : accepted.entrySet()) {
+                if (entry.getValue() == null) {
+                    continue;
+                }
+                json.put(entry.getKey(),
+                        CoopOptionsRegistry.require(entry.getKey()).coerce(entry.getValue()).value());
             }
         } catch (Exception | LinkageError ex) {
             CoopLog.warn(CoopOptionsStore.class, "Coop options: could not compose "
-                    + COMMON_FILE + "; " + key + " was not saved", ex);
+                    + COMMON_FILE + "; " + label + " not saved", ex);
             return false;
         }
         boolean written;
@@ -344,24 +421,76 @@ public final class CoopOptionsStore {
             written = source.writeCommon(json);
         } catch (Exception | LinkageError ex) {
             CoopLog.warn(CoopOptionsStore.class, "Coop options: could not write saves/common/"
-                    + COMMON_FILE + "; " + key + " was not saved", ex);
+                    + COMMON_FILE + "; " + label + " not saved", ex);
             return false;
         }
         if (!written) {
             CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
-                    + " is not writable here; " + key + " was not saved");
+                    + " is not writable here; " + label + " not saved");
             return false;
         }
         // The layer is re-derived from what was just written, so the next read reflects the change
         // without waiting for a relaunch. The warning memory survives: a bad value elsewhere in the
         // file has already been reported and does not need reporting again per edit.
-        commonLayer = null;
+        //
+        // Every memoised store is dropped too, not just this one: forProperties() hands out stores
+        // that share this process's SettingsJsonSource, so a page that writes through system() would
+        // otherwise leave CoopNetStartupConfig's store answering out of a layer map built before the
+        // write.
+        dropCommonLayer();
+        invalidateMemoisedCommonLayers();
         return true;
+    }
+
+    /** "coop.hudCorner" for one key, "3 settings" for several; used in the failure WARNs. */
+    private static String describe(Set<String> keys) {
+        if (keys.size() == 1) {
+            return keys.iterator().next();
+        }
+        return keys.size() + " settings";
+    }
+
+    /**
+     * True when the user's file is present but could not be read or parsed - the one state in which
+     * rewriting it destroys data. "Absent" is deliberately <em>not</em> this: creating the file is
+     * exactly what the first override does.
+     */
+    public boolean commonUnreadable() {
+        // Resolve the layer first; commonFailed is only meaningful after a read has been attempted.
+        common();
+        return commonFailed && sourceSays(JsonSource::commonFileExists);
+    }
+
+    private boolean sourceSays(Function<JsonSource, Boolean> question) {
+        try {
+            return Boolean.TRUE.equals(question.apply(source));
+        } catch (Exception | LinkageError ex) {
+            return false;
+        }
+    }
+
+    private synchronized void dropCommonLayer() {
+        commonLayer = null;
+        commonFailed = false;
+    }
+
+    /** Drops the common layer of {@link #system()} and of every {@link #forProperties} store. */
+    private static void invalidateMemoisedCommonLayers() {
+        CoopOptionsStore local = system;
+        if (local != null) {
+            local.dropCommonLayer();
+        }
+        synchronized (BY_PROPERTIES) {
+            for (CoopOptionsStore store : BY_PROPERTIES.values()) {
+                store.dropCommonLayer();
+            }
+        }
     }
 
     /** Re-reads both file layers and clears the once-per-key warning memory. */
     public void reload() {
         commonLayer = null;
+        commonFailed = false;
         shippedLayer = null;
         warned.clear();
         source.invalidate();
@@ -406,8 +535,13 @@ public final class CoopOptionsStore {
 
     private JSONObject safeCommon() {
         try {
-            return source.common();
+            JSONObject json = source.common();
+            // The source swallows its own read failure (it has to: a broken file must not stop the
+            // game starting) and reports it through this flag instead.
+            commonFailed = sourceSays(JsonSource::commonReadFailed);
+            return json;
         } catch (Exception | LinkageError ex) {
+            commonFailed = true;
             warnOnce("layer:common", "could not read saves/common/" + COMMON_FILE + "; "
                     + COMMON_CONSEQUENCE + " (" + ex + ")");
             return null;
@@ -509,6 +643,8 @@ public final class CoopOptionsStore {
         private JSONObject shippedJson;
         private boolean commonRead;
         private JSONObject commonJson;
+        private boolean commonFailed;
+        private boolean commonExists;
 
         private SettingsJsonSource() {
         }
@@ -550,7 +686,8 @@ public final class CoopOptionsStore {
             }
             commonRead = true;
             try {
-                if (!settings.fileExistsInCommon(COMMON_FILE)) {
+                commonExists = settings.fileExistsInCommon(COMMON_FILE);
+                if (!commonExists) {
                     commonJson = null;
                 } else {
                     // putInWriteCache=false: this is a read-only consumer. Milestone 3 is what
@@ -559,10 +696,25 @@ public final class CoopOptionsStore {
                 }
             } catch (Exception | LinkageError ex) {
                 commonJson = null;
+                commonFailed = true;
+                // If fileExistsInCommon itself threw we do not know whether the file is there, and
+                // the safe assumption is that it is: it makes writeOverrides refuse, which is
+                // recoverable, where guessing "absent" would overwrite it.
+                commonExists = true;
                 CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
                         + " could not be read; " + COMMON_CONSEQUENCE, ex);
             }
             return commonJson;
+        }
+
+        @Override
+        public synchronized boolean commonReadFailed() {
+            return commonFailed;
+        }
+
+        @Override
+        public synchronized boolean commonFileExists() {
+            return commonExists;
         }
 
         /**
@@ -590,6 +742,8 @@ public final class CoopOptionsStore {
             }
             commonJson = json;
             commonRead = true;
+            commonFailed = false;
+            commonExists = true;
             return true;
         }
 
@@ -618,6 +772,8 @@ public final class CoopOptionsStore {
             shippedJson = null;
             commonRead = false;
             commonJson = null;
+            commonFailed = false;
+            commonExists = false;
         }
     }
 }
