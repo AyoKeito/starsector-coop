@@ -228,6 +228,7 @@ points the launcher at your Starsector folder when it could not work out where t
 | `no leftover -Dcoop.* in vmparams` | See below. |
 | `co-op enabled in mods\enabled_mods.json` | The mod is not ticked in the Starsector launcher. |
 | `mod_info.json version matches coop.jar` | Two builds got mixed in one folder. Delete `mods\coop` and unzip once. |
+| `Game version` | Your Starsector is not the one the mod was built for. Part of the mod is compiled against the game's own classes, so the mod refuses to start a session on any other version and says `COOP-GAME`. The version is read out of the `Starting Starsector <version> launcher` line the game writes at the top of `starsector-core\starsector.log`, so before the game has run once here the row reads `unknown until the game has run once`. Ticking **Allow game version mismatch** under Advanced drops it to a `WARN` and lets LAUNCH work. |
 | `settings file saves\common\coop_options.json.data` | The file exists and is not readable as plain JSON. The launcher refuses to overwrite it, because that would throw away every setting in it. |
 | `Update available: <version>` | Not a failure. One request to GitHub's releases API at start, compared against the version baked into your jar. It reads `Up to date: <version>` when you have the newest release, and `Update check: unavailable` with the reason when the request did not go through. |
 
@@ -247,7 +248,10 @@ needs: **Port mapping** (`auto`/`off`), **Link HUD corner** (`TR`/`TL`/`BR`/`BL`
 (seconds)**, **Agent bridge port (0 = off)**, **Wiretap sample (every Nth)**, **Interaction delay
 (ms)**, and a **Developer flags** group of checkboxes: **Diagnostics**, **Datagram wiretap**, **Frame
 profiler**, **Full-fidelity guest system** (on by default), **Disable shared fast-forward**, **Disable
-clock reconciler**, and **Start over inside the host's campaign (guest)**. Every field already shows
+clock reconciler**, **Allow game version mismatch**, and **Start over inside the host's campaign
+(guest)**. **Allow game version mismatch** runs the mod on a Starsector it was not built for, which
+is there so a tester can try a new release candidate before the forks are rebuilt for it; nothing on
+that version has been tested and nothing about it is supported. Every field already shows
 its real default rather than a placeholder, which is what the card's own hint says: `Defaults shown.
 Change only with a reason.` Leave the card closed unless you have one.
 

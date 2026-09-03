@@ -3,6 +3,7 @@ package coop.ui;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.OptionPanelAPI;
 import com.fs.starfarer.api.campaign.TextPanelAPI;
+import coop.handshake.CoopGameVersionCheck;
 import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.net.CoopConnectionRole;
@@ -50,6 +51,7 @@ class CoopDesyncDialogTest {
         assertTrue(dialogFor(seedReason()) instanceof CoopDesyncDialog.Seed);
         assertTrue(dialogFor(campaignIdReason()) instanceof CoopDesyncDialog.Seed);
         assertTrue(dialogFor(modsReason()) instanceof CoopDesyncDialog.Mods);
+        assertTrue(dialogFor(gameVersionReason()) instanceof CoopDesyncDialog.Game);
         assertTrue(dialogFor(graceReason()) instanceof CoopDesyncDialog.Session);
         assertTrue(dialogFor(unmappedReason()) instanceof CoopDesyncDialog.Unmapped);
         assertTrue(CoopDesyncDialog.forReason(null, null, null, null) instanceof CoopDesyncDialog.Unmapped,
@@ -64,6 +66,8 @@ class CoopDesyncDialogTest {
                 CoopDesyncDialog.feedLine(campaignIdReason()));
         assertEquals("Co-op: mod mismatch (COOP-MODS) - see the dialog",
                 CoopDesyncDialog.feedLine(modsReason()));
+        assertEquals("Co-op: game version mismatch (COOP-GAME) - see the dialog",
+                CoopDesyncDialog.feedLine(gameVersionReason()));
         assertEquals("Co-op: session not resumed (COOP-SESSION) - see the dialog",
                 CoopDesyncDialog.feedLine(graceReason()));
         assertEquals("Co-op: session ended (COOP-SESSION) - see the dialog",
@@ -271,6 +275,50 @@ class CoopDesyncDialogTest {
         assertEquals("Co-op session ended (no reason recorded)", panel.text.paragraphs.get(0));
     }
 
+    // ----------------------------------------------------- game version body
+
+    @Test
+    void theGameVersionDialogNamesBothVersionsTheRemedyAndTheTesterFlag() {
+        RecordingDialog panel = show(dialogFor(gameVersionReason()));
+        String body = String.join("\n", panel.text.paragraphs);
+
+        assertEquals("This Starsector version does not match the mod.", panel.text.paragraphs.get(0));
+        assertTrue(body.contains("0.98a-RC8"), body);
+        assertTrue(body.contains("0.99a-RC1"), body);
+        assertTrue(body.contains("Install Starsector 0.98a-RC8 on both PCs, or wait for a release of"
+                + " the mod built for 0.99a-RC1."), body);
+        assertTrue(body.contains("Allow game version mismatch"), body);
+        assertTrue(body.contains("Advanced"), "the flag is named where a tester can find it: " + body);
+        assertTrue(body.contains("Support code COOP-GAME"), body);
+    }
+
+    @Test
+    void theGameVersionDialogSaysNothingWasStartedAndNamesNoPartner() {
+        for (CoopConnectionRole role : List.of(CoopConnectionRole.HOST, CoopConnectionRole.GUEST,
+                CoopConnectionRole.NONE)) {
+            RecordingDialog panel = show(CoopDesyncDialog.forReason(gameVersionReason(), role,
+                    () -> { }, null));
+            String body = String.join("\n", panel.text.paragraphs);
+            assertTrue(body.contains("no port was opened and no connection was made"), body);
+            // Both machines read the same sentences: the check is local, so there is no side to
+            // blame and nothing that reads differently depending on who is looking.
+            assertFalse(body.contains("the host"), body);
+            assertFalse(body.contains("the guest"), body);
+        }
+    }
+
+    @Test
+    void anUnreadableVersionStillProducesASentenceRatherThanABlank() {
+        CoopDesyncReason reason = CoopDesyncReason.classify(
+                CoopGameVersionCheck.REASON_PREFIX + " mod= game=",
+                CoopDesyncReason.Source.OTHER);
+        RecordingDialog panel = show(dialogFor(reason));
+        String body = String.join("\n", panel.text.paragraphs);
+
+        assertEquals(CoopDesyncReason.Kind.GAME, reason.kind());
+        assertTrue(body.contains("an unknown version"), body);
+    }
+
     // ------------------------------------------------------------- behaviour
 
     @Test
@@ -415,10 +463,17 @@ class CoopDesyncDialogTest {
     // ----------------------------------------------------------------- setup
 
     private static List<CoopDesyncReason> allReasons() {
-        return List.of(seedReason(), campaignIdReason(), modsReason(), graceReason(),
+        return List.of(seedReason(), campaignIdReason(), modsReason(), gameVersionReason(),
+                graceReason(),
                 CoopDesyncReason.classify(CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE,
                         CoopDesyncReason.Source.SESSION_RESUME),
                 unmappedReason());
+    }
+
+    private static CoopDesyncReason gameVersionReason() {
+        return CoopDesyncReason.classify(
+                CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", false).rawReason(),
+                CoopDesyncReason.Source.OTHER);
     }
 
     private static CoopDesyncReason seedReason() {

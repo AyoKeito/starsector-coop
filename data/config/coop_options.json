@@ -29,8 +29,8 @@
 	# Not in this file, and never will be: coop.newGameSeed, coop.adoptCampaignId,
 	# coop.sectorSize, coop.sectorAge (one-shot new-game gestures - the friction is the point)
 	# and the debug hatches coop.debug.*, coop.ff.disable, coop.clock.disable,
-	# coop.fullFidelityGuestSystem. Those are -D only, forever, and a value for them here is
-	# ignored with a warning.
+	# coop.fullFidelityGuestSystem, coop.allowGameVersionMismatch. Those are -D only, forever, and
+	# a value for them here is ignored with a warning.
 	#
 	# Also deliberately absent - the correctness list. These are not preferences and asking for
 	# them as options is a design change, not a settings change: snapshot and stream cadences

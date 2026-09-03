@@ -101,6 +101,7 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
         return switch (value.kind()) {
             case SEED -> new Seed(value, role, onClose, onRetry);
             case MODS -> new Mods(value, role, onClose, onRetry);
+            case GAME -> new Game(value, role, onClose, onRetry);
             case SESSION -> new Session(value, role, onClose, onRetry);
             case UNMAPPED -> new Unmapped(value, role, onClose, onRetry);
         };
@@ -132,6 +133,7 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
         return switch (value.kind()) {
             case SEED -> value.campaignIdMismatch() ? "campaign mismatch" : "seed mismatch";
             case MODS -> "mod mismatch";
+            case GAME -> "game version mismatch";
             case SESSION -> "session not resumed";
             case UNMAPPED -> "session ended";
         };
@@ -492,6 +494,59 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
             boolean localIsHost = role == CoopConnectionRole.HOST;
             boolean ironIsHost = "host".equals(reason.ironModeSide());
             return ironIsHost == localIsHost ? "this campaign" : partner() + "'s campaign";
+        }
+    }
+
+    /**
+     * COOP-GAME: this install's Starsector is not the one the mod was built for.
+     *
+     * <p>The only dialog here with no partner in it. It is raised before a socket is opened, from a
+     * check that ran at application load, so there is no "you" and "the host" to phrase against and
+     * no side to assign blame to - both players are told the same thing, and the fix is the same
+     * sentence on both machines.
+     *
+     * <p>The remedy names the developer flag last and by its launcher label, not by its property
+     * name. A tester who wants it will find it; a player who does not know what it is will not be
+     * invited to type a {@code -D} into {@code vmparams} to make a refusal go away.
+     */
+    static final class Game extends CoopDesyncDialog {
+
+        Game(CoopDesyncReason reason, CoopConnectionRole role, Runnable onClose, Runnable onRetry) {
+            super(reason, role, onClose, onRetry);
+        }
+
+        @Override
+        String title() {
+            return "This Starsector version does not match the mod.";
+        }
+
+        @Override
+        List<String> bodyParagraphs() {
+            String mod = orUnknownVersion(reason.modGameVersion());
+            String game = orUnknownVersion(reason.installedGameVersion());
+            List<String> body = new ArrayList<>();
+            body.add("The co-op mod was built for Starsector " + mod + ". This game is "
+                    + game + ". Part of the mod is compiled against the game's own code, so a"
+                    + " different version does not just look wrong, it behaves in ways nothing here"
+                    + " has ever been tested against.");
+            body.add("Install Starsector " + mod + " on both PCs, or wait for a release of the mod"
+                    + " built for " + game + ".");
+            body.add("Testers can set the developer flag Allow game version mismatch in the"
+                    + " launcher's Advanced card. That runs co-op on this version anyway and is not"
+                    + " supported.");
+            body.add("Nothing was started: no port was opened and no connection was made. Your"
+                    + " campaign is unaffected and plays as single player.");
+            return body;
+        }
+
+        @Override
+        List<String> technicalParagraphs() {
+            return List.of("Mod built for " + orUnknownVersion(reason.modGameVersion())
+                    + ", game reports " + orUnknownVersion(reason.installedGameVersion()) + ".");
+        }
+
+        private static String orUnknownVersion(String value) {
+            return value == null || value.trim().isEmpty() ? "an unknown version" : value.trim();
         }
     }
 

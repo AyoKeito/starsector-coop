@@ -214,6 +214,8 @@ public class CoopNetPump implements EveryFrameScript {
     private final LongSupplier clockMillis;
     private long nextPingAtMillis;
     private boolean startupConfigChecked;
+    /** Phase 31: whether the game-version refusal has already produced its marker and dialog. */
+    private boolean gameVersionRefusalRaised;
     private boolean memoryConfigWarningLogged;
     private boolean lobbyHelloSent;
     private boolean handshakeManifestSent;
@@ -2885,6 +2887,9 @@ public class CoopNetPump implements EveryFrameScript {
         // whether it was the peer that went quiet or this process that stopped running.
         linkQuality.noteFrame(clockMillis.getAsLong());
         long t = profiler.start();
+        // Phase 31: before either start path, because this is the frame that would otherwise open a
+        // port or dial the host.
+        maybeRefuseForGameVersion();
         maybeStartFromSystemProperties();
         t = profiler.split(SECTION_CFG_PROPERTIES, t);
         maybeStartFromMemoryFlags();
@@ -3118,7 +3123,55 @@ public class CoopNetPump implements EveryFrameScript {
         return portMapper;
     }
 
+    /**
+     * The Phase 31 game-version refusal, or null when this install may start a session.
+     *
+     * <p>One choke point for all three ways a session begins - the lobby that opens on a game load,
+     * a new game started from the co-op New Game dialog, and a guest connect - because all three go
+     * through {@link #maybeStartFromSystemProperties()} or {@link #maybeStartFromMemoryFlags()}, and
+     * those two are the only places in the mod that call {@code startHost} or {@code connect}.
+     * Gating them means no port is opened and no connection is attempted, which is stronger than
+     * gating the lobby: {@code CoopSessionState.lobbyReleased} only decides when a session that is
+     * already connected starts playing.
+     */
+    private coop.handshake.CoopGameVersionCheck.Result gameVersionRefusal() {
+        coop.handshake.CoopGameVersionCheck.Result result;
+        try {
+            result = coop.handshake.CoopGameVersionCheck.remembered();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+        return result != null && result.refuses() ? result : null;
+    }
+
+    /**
+     * Says so, once, on the first campaign frame after a refused load: the doctor marker, the feed
+     * line and the dialog, exactly as a wire reject would.
+     *
+     * <p>Deliberately not raised from {@code onApplicationLoad}, where the check runs: there is no
+     * campaign UI at that point, and a dialog is the only surface a player actually reads. Waiting
+     * for the first frame costs nothing, because {@link #gameVersionRefusal()} has already stopped
+     * the two start paths below from doing anything.
+     */
+    private void maybeRefuseForGameVersion() {
+        if (gameVersionRefusalRaised) {
+            return;
+        }
+        coop.handshake.CoopGameVersionCheck.Result result = gameVersionRefusal();
+        if (result == null) {
+            return;
+        }
+        gameVersionRefusalRaised = true;
+        CoopLog.error(CoopNetPump.class, result.mismatchMessage()
+                + "; refusing to start a co-op session (no port opened, no connection attempted)");
+        raiseDesyncDialog(result.rawReason(), coop.ui.CoopDesyncReason.Source.OTHER,
+                desyncCorrelationId());
+    }
+
     private void maybeStartFromSystemProperties() {
+        if (gameVersionRefusal() != null) {
+            return;
+        }
         if (startupConfigChecked || service.role() != CoopConnectionRole.NONE) {
             return;
         }
@@ -3158,6 +3211,9 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void maybeStartFromMemoryFlags() {
+        if (gameVersionRefusal() != null) {
+            return;
+        }
         if (service.role() != CoopConnectionRole.NONE) {
             return;
         }

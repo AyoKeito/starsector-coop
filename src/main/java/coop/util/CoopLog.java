@@ -31,6 +31,10 @@ public final class CoopLog {
         getLogger(source).warn(message, throwable);
     }
 
+    public static void error(Class<?> source, String message) {
+        getLogger(source).error(message);
+    }
+
     public static void error(Class<?> source, String message, Throwable throwable) {
         getLogger(source).error(message, throwable);
     }

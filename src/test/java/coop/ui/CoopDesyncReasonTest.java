@@ -396,6 +396,45 @@ class CoopDesyncReasonTest {
                         CoopDesyncReason.Source.HANDSHAKE).kind());
     }
 
+    // ------------------------------------------------------------ COOP-GAME
+
+    @Test
+    void aLocalGameVersionMismatchIsItsOwnKindAndCode() {
+        CoopDesyncReason reason = CoopDesyncReason.classify(
+                coop.handshake.CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", false)
+                        .rawReason(),
+                CoopDesyncReason.Source.OTHER);
+
+        assertEquals(CoopDesyncReason.Kind.GAME, reason.kind());
+        assertEquals("COOP-GAME", reason.code());
+        assertEquals("0.98a-RC8", reason.modGameVersion());
+        assertEquals("0.99a-RC1", reason.installedGameVersion());
+        assertFalse(reason.retryable(), "a version mismatch cannot fix itself on a second attempt");
+    }
+
+    @Test
+    void theLocalCheckDoesNotCollideWithTheHandshakesTwoSidedGameVersionRow() {
+        // The handshake writes "gameVersion: host=.. guest=..", the local check writes
+        // "installedGameVersion: mod=.. game=..". Neither prefix may swallow the other.
+        CoopDesyncReason handshake = CoopDesyncReason.classify(
+                "gameVersion: host=0.98a-RC8 guest=0.99a-RC1", CoopDesyncReason.Source.HANDSHAKE);
+
+        assertEquals(CoopDesyncReason.Kind.MODS, handshake.kind());
+        assertEquals("0.98a-RC8", handshake.hostGameVersion());
+        assertEquals("", handshake.modGameVersion());
+    }
+
+    @Test
+    void aGameVersionLineWinsOverAnythingElseInTheSameText() {
+        // Belt and braces on the precedence rule: the local check runs before a socket exists, so
+        // nothing else in the string can be the actual cause.
+        String raw = coop.handshake.CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", false)
+                .rawReason() + "\nseedString: host=coop-1 guest=coop-2";
+
+        assertEquals(CoopDesyncReason.Kind.GAME,
+                CoopDesyncReason.classify(raw, CoopDesyncReason.Source.SEED_LOCK).kind());
+    }
+
     // ----------------------------------------------------------------- setup
 
     private static CoopDesyncReason classifyResume(String raw) {

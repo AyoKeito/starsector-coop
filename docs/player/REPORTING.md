@@ -39,7 +39,7 @@ newlines and quotes inside a value escaped, so it selects in a single drag:
 [COOP-DOCTOR] code=COOP-SEED sessionId=b1f0c7 role=GUEST source=SEED_LOCK local="Ayo" remote="Keito" reason="seedString: host=MN-11 guest=MN-42" campaignIdMismatch=false hostSeed=MN-11 guestSeed=MN-42 hostFingerprint=9c3a... guestFingerprint=71ee... hostCampaignId=... guestCampaignId=<none>
 ```
 
-`code` is the second field, one of `COOP-SEED`, `COOP-MODS` or `COOP-SESSION`, and it is what the
+`code` is the second field, one of `COOP-SEED`, `COOP-MODS`, `COOP-GAME` or `COOP-SESSION`, and it is what the
 dialog tells you to search for: `[COOP-DOCTOR] code=` followed by that code. A bare `[COOP-DOCTOR]`
 finds the line too.
 
@@ -49,7 +49,12 @@ written from each machine's own side, so they differ between the two.
 
 What comes after `reason` depends on the code: seeds, fingerprints and campaign ids for `COOP-SEED`;
 `gameVersion`, `coopBuild`, `ironMode` and a semicolon-separated per-mod list for `COOP-MODS`;
-`cause`, `graceSeconds` and `retryable` for `COOP-SESSION`. A value nobody supplied prints `<none>`.
+`modGameVersion` and `gameVersion` for `COOP-GAME`; `cause`, `graceSeconds` and `retryable` for
+`COOP-SESSION`. A value nobody supplied prints `<none>`.
+
+`COOP-GAME` is the only one of the four that is decided before anything connects: your Starsector is
+not the version the mod was built for, so no port was opened and no connection was attempted. Both
+players get it independently, and each log names that machine's own pair.
 
 ## When the launcher cannot run
 

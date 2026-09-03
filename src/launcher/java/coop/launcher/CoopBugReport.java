@@ -417,6 +417,11 @@ public final class CoopBugReport {
         line(text, "Mod version", modVersion == null ? "unknown (coop.jar has no manifest version)"
                 : modVersion + (modCommit == null ? "" : " (commit " + modCommit + ")"));
         line(text, "Launcher version", CoopInstallCheck.launcherVersion());
+        String builtFor = CoopInstallCheck.readModInfoGameVersion(layout.modInfo());
+        String gameVersion = CoopInstallCheck.readGameVersion(layout);
+        line(text, "Game version", (gameVersion == null
+                ? "unknown (no launcher line in the logs)" : gameVersion)
+                + (builtFor == null ? "" : ", mod built for " + builtFor));
         line(text, "Windows", System.getProperty("os.name", "unknown") + " "
                 + System.getProperty("os.version", "unknown"));
         line(text, "Java", System.getProperty("java.version", "unknown") + " "

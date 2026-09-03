@@ -64,6 +64,12 @@ public final class CoopDesyncReason {
         SEED("COOP-SEED"),
         /** Different install: mods, game version, coop build. */
         MODS("COOP-MODS"),
+        /**
+         * This install's Starsector is not the one the mod was built for. Local and pre-session:
+         * it is decided before anything is connected to, so it has no host/guest sides at all,
+         * which is why it is its own code rather than a row inside {@link #MODS}.
+         */
+        GAME("COOP-GAME"),
         /** The session itself could not be resumed or continued. */
         SESSION("COOP-SESSION"),
         /**
@@ -266,6 +272,10 @@ public final class CoopDesyncReason {
     private final String ironModeSide;
     private final boolean manifestUnreadable;
 
+    // GAME
+    private final String modGameVersion;
+    private final String installedGameVersion;
+
     // SESSION
     private final SessionCause sessionCause;
     private final int graceSeconds;
@@ -290,6 +300,8 @@ public final class CoopDesyncReason {
         this.guestCoopBuild = builder.guestCoopBuild;
         this.ironModeSide = builder.ironModeSide;
         this.manifestUnreadable = builder.manifestUnreadable;
+        this.modGameVersion = builder.modGameVersion;
+        this.installedGameVersion = builder.installedGameVersion;
         this.sessionCause = builder.sessionCause;
         this.graceSeconds = builder.graceSeconds;
         this.retryable = builder.retryable;
@@ -309,14 +321,19 @@ public final class CoopDesyncReason {
         builder.rawReason = raw.isEmpty() ? NO_REASON : raw;
 
         List<String> lines = splitLines(raw);
+        boolean gameShaped = parseGameVersion(builder, lines);
         boolean seedShaped = parseSeed(builder, lines);
         boolean modsShaped = parseMods(builder, lines);
         boolean sessionShaped = parseSession(builder, raw);
 
-        // Identity beats install beats session, matching the order the pump checks them in: a seed
-        // reject can only happen after the manifests already matched, so seed-shaped text is never
-        // ambiguous, while a session string can appear inside anything.
-        if (seedShaped) {
+        // Local install beats identity beats install-comparison beats session, matching the order
+        // the mod checks them in: the game-version check runs at application load, before anything
+        // is connected to, so nothing else can be the cause when its line is present. After that, a
+        // seed reject can only happen once the manifests already matched, so seed-shaped text is
+        // never ambiguous, while a session string can appear inside anything.
+        if (gameShaped) {
+            builder.kind = Kind.GAME;
+        } else if (seedShaped) {
             builder.kind = Kind.SEED;
         } else if (modsShaped) {
             builder.kind = Kind.MODS;
@@ -448,6 +465,16 @@ public final class CoopDesyncReason {
         return manifestUnreadable;
     }
 
+    /** {@link Kind#GAME}: the Starsector version the mod was built for. */
+    public String modGameVersion() {
+        return modGameVersion;
+    }
+
+    /** {@link Kind#GAME}: the Starsector version actually running here. */
+    public String installedGameVersion() {
+        return installedGameVersion;
+    }
+
     /** True when at least one mod matched on version but not on contents. */
     public boolean hasSameVersionDifferentContents() {
         return modRows.stream().anyMatch(row -> row.verdict() == ModVerdict.CONTENT_DIFFERS);
@@ -495,6 +522,34 @@ public final class CoopDesyncReason {
     }
 
     // ---------------------------------------------------------------- parsing
+
+    /**
+     * The one line {@code CoopGameVersionCheck.Result.rawReason()} writes:
+     * {@code installedGameVersion: mod=<a> game=<b>}.
+     *
+     * <p>Its own parser rather than a case in {@link #parseMods}, because it carries {@code mod=}
+     * and {@code game=} instead of {@code host=} and {@code guest=} - there is no other player in
+     * this failure, and reusing the two-sided parser would print one machine's version as if it
+     * belonged to the partner.
+     */
+    private static boolean parseGameVersion(Builder builder, List<String> lines) {
+        String prefix = coop.handshake.CoopGameVersionCheck.REASON_PREFIX;
+        boolean matched = false;
+        for (String line : lines) {
+            if (!line.startsWith(prefix)) {
+                continue;
+            }
+            String rest = line.substring(prefix.length()).trim();
+            int modAt = rest.indexOf("mod=");
+            int gameAt = rest.lastIndexOf(" game=");
+            if (modAt >= 0 && gameAt > modAt) {
+                builder.modGameVersion = rest.substring(modAt + "mod=".length(), gameAt).trim();
+                builder.installedGameVersion = rest.substring(gameAt + " game=".length()).trim();
+            }
+            matched = true;
+        }
+        return matched;
+    }
 
     private static boolean parseSeed(Builder builder, List<String> lines) {
         boolean matched = false;
@@ -802,6 +857,8 @@ public final class CoopDesyncReason {
         builder.guestCoopBuild = guestCoopBuild;
         builder.ironModeSide = ironModeSide;
         builder.manifestUnreadable = manifestUnreadable;
+        builder.modGameVersion = modGameVersion;
+        builder.installedGameVersion = installedGameVersion;
         builder.sessionCause = sessionCause;
         builder.graceSeconds = graceSeconds;
         builder.retryable = retryable;
@@ -828,6 +885,8 @@ public final class CoopDesyncReason {
         private String guestCoopBuild = "";
         private String ironModeSide = "";
         private boolean manifestUnreadable;
+        private String modGameVersion = "";
+        private String installedGameVersion = "";
         private SessionCause sessionCause;
         private int graceSeconds = -1;
         private boolean retryable;

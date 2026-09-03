@@ -75,6 +75,7 @@ public final class CoopDoctorMarker {
         switch (value.kind()) {
             case SEED -> appendSeed(line, value);
             case MODS -> appendMods(line, value);
+            case GAME -> appendGameVersion(line, value);
             case SESSION -> appendSession(line, value);
             case UNMAPPED -> append(line, "kind", "unmapped");
         }
@@ -127,6 +128,16 @@ public final class CoopDoctorMarker {
                     .append('>').append(orNone(row.guestVersion()));
         }
         appendQuoted(line, "mods", mods.length() == 0 ? "<none>" : mods.toString());
+    }
+
+    /**
+     * The two fields a helper needs for {@code COOP-GAME}, and no others: what the mod was built
+     * for and what the engine says it is. Both machines print their own pair, and the pair is the
+     * whole diagnosis.
+     */
+    private static void appendGameVersion(StringBuilder line, CoopDesyncReason reason) {
+        append(line, "modGameVersion", orNone(reason.modGameVersion()));
+        append(line, "gameVersion", orNone(reason.installedGameVersion()));
     }
 
     private static void appendSession(StringBuilder line, CoopDesyncReason reason) {

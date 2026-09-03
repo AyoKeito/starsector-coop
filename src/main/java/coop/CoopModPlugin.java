@@ -7,7 +7,9 @@ import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorOrphanSweeper;
+import coop.config.CoopOptionsRegistry;
 import coop.debug.CoopAgentBridge;
+import coop.handshake.CoopGameVersionCheck;
 import coop.fleet.CoopSystemDriveFrameHook;
 import coop.net.CoopNetPump;
 import coop.net.CoopNetPumpInstaller;
@@ -43,6 +45,7 @@ public class CoopModPlugin extends BaseModPlugin {
         super.onApplicationLoad();
         CoopLog.info(CoopModPlugin.class, "CoopModPlugin loaded");
         publishLauncherProperties();
+        checkGameVersion();
         String newGameSeed = CoopNetStartupConfig.newGameSeedFromSystemProperties();
         if (!newGameSeed.isEmpty()) {
             CoopLog.info(CoopModPlugin.class,
@@ -83,6 +86,73 @@ public class CoopModPlugin extends BaseModPlugin {
             System.setProperty(key, entry.getValue());
             CoopLog.info(CoopModPlugin.class, "Coop published the settings-file flag -D" + key
                     + "=" + entry.getValue() + " for readers that only see system properties");
+        }
+    }
+
+    /**
+     * Phase 31: is this the Starsector the mod was built for?
+     *
+     * <p>Runs right after {@link #publishLauncherProperties()} so a launcher-written
+     * {@code coop.allowGameVersionMismatch} is already a system property by the time it is read
+     * here. The verdict is remembered on {@link CoopGameVersionCheck} and enforced by the pump,
+     * which is where sockets are opened; nothing is refused at load time, because a player who
+     * cannot start a session still has a perfectly good single-player campaign to load.
+     *
+     * <p>Total. A settings API that will not answer, or a mod manager that does not know its own
+     * spec, leaves the verdict {@link CoopGameVersionCheck.Verdict#UNKNOWN} and lets the session
+     * run: refusing on the strength of a read that failed would be the mod breaking itself.
+     */
+    private static void checkGameVersion() {
+        String gameVersion = "";
+        String modGameVersion = "";
+        try {
+            gameVersion = Global.getSettings().getGameVersion();
+            com.fs.starfarer.api.ModSpecAPI spec =
+                    Global.getSettings().getModManager().getModSpec(COOP_MOD_ID);
+            modGameVersion = spec == null ? "" : spec.getGameVersion();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopModPlugin.class,
+                    "Coop could not read the game version to compare against the mod's", ex);
+        }
+        boolean allowed = allowGameVersionMismatch();
+        CoopGameVersionCheck.Result result =
+                CoopGameVersionCheck.check(modGameVersion, gameVersion, allowed);
+        CoopGameVersionCheck.remember(result);
+        switch (result.verdict()) {
+            case MATCH -> CoopLog.info(CoopModPlugin.class,
+                    "Coop game version check: mod built for " + result.modGameVersion()
+                            + ", game is " + result.gameVersion());
+            case UNKNOWN -> CoopLog.warn(CoopModPlugin.class,
+                    "Coop could not compare game versions (mod says \"" + result.modGameVersion()
+                            + "\", game says \"" + result.gameVersion()
+                            + "\"); co-op will run without the check");
+            case ALLOWED -> {
+                // The ERROR still goes out: the mismatch is a real fact about this install and the
+                // one thing a support thread needs, whether or not a tester chose to run anyway.
+                CoopLog.error(CoopModPlugin.class, result.mismatchMessage());
+                CoopLog.warn(CoopModPlugin.class, "Coop is running on a mismatched game version"
+                        + " because " + CoopOptionsRegistry.ALLOW_GAME_VERSION_MISMATCH
+                        + " is set. The forks are compiled against "
+                        + result.modGameVersion() + "; expect anything.");
+            }
+            case REFUSED -> CoopLog.error(CoopModPlugin.class, result.mismatchMessage());
+        }
+    }
+
+    /** The mod id, which is also the folder name the install check enforces. */
+    private static final String COOP_MOD_ID = "coop";
+
+    /**
+     * The developer escape hatch, read the way every other {@code dOnly} key is read: straight off
+     * the system properties, which {@link #publishLauncherProperties()} has already topped up from
+     * the settings file.
+     */
+    private static boolean allowGameVersionMismatch() {
+        try {
+            return Boolean.parseBoolean(
+                    System.getProperty(CoopOptionsRegistry.ALLOW_GAME_VERSION_MISMATCH));
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
         }
     }
 

@@ -84,6 +84,11 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   pair of jars, an unreadable settings file, and a leftover `-Dcoop.*` in `vmparams` that would
   silently outrank everything you set in the launcher. It reports and never edits `vmparams` or
   `enabled_mods.json`.
+- The mod checks the Starsector it is running on against the one it was built for, and refuses to
+  start a session on any other version with the code `COOP-GAME`. Parts of the mod are compiled
+  against the game's own classes, so this is the failure that produced the strangest bug reports.
+  The launcher shows it as a `Game version` row, read out of `starsector.log`, before you press
+  LAUNCH. Testers can turn the refusal off with **Allow game version mismatch** under Advanced.
 - Save a bug report: one zip on your Desktop with both game logs, the launcher log, your settings,
   your `vmparams`, your mod list, your newest save and a summary carrying the last `[COOP-DOCTOR]`
   line. The password is blanked out of everything in it. Both players press it; `REPORTING.md` says

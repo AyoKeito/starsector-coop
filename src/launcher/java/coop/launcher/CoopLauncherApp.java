@@ -161,6 +161,7 @@ public final class CoopLauncherApp {
     private JCheckBox fullFidelityBox;
     private JCheckBox ffDisableBox;
     private JCheckBox clockDisableBox;
+    private JCheckBox allowGameVersionMismatchBox;
     private JCheckBox adoptCampaignBox;
 
     // install card
@@ -675,10 +676,17 @@ public final class CoopLauncherApp {
         clockDisableBox = flag("Disable clock reconciler", "Turns off calendar drift correction,"
                 + " the behaviour before Phase 7c.");
         form.pair(null, ffDisableBox, null, clockDisableBox);
+        allowGameVersionMismatchBox = flag("Allow game version mismatch", "Lets the mod run on a"
+                + " Starsector version other than the one it was built for. For testing a new"
+                + " release candidate before the forks are updated. Unsupported.");
+        // The Game version install row reads this checkbox, so it has to be re-run when it changes:
+        // ticking it turns that row from a Launch-blocking FAIL into a WARN, and a row that only
+        // caught up on the next Refresh would leave the button dead with no visible reason.
+        allowGameVersionMismatchBox.addActionListener(event -> refreshInstallRows());
         adoptCampaignBox = flag("Start over inside the host's campaign (guest)", "Overrides the seed"
                 + " lock and adopts the host's in-flight campaign id. Discards this guest's co-op"
                 + " progress. Never remembered between launches.");
-        form.pair(null, adoptCampaignBox, null, new JLabel(""));
+        form.pair(null, allowGameVersionMismatchBox, null, adoptCampaignBox);
 
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
@@ -898,6 +906,7 @@ public final class CoopLauncherApp {
         setFlag(fullFidelityBox, CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM);
         setFlag(ffDisableBox, CoopLauncherConfig.FF_DISABLE);
         setFlag(clockDisableBox, CoopLauncherConfig.CLOCK_DISABLE);
+        setFlag(allowGameVersionMismatchBox, CoopLauncherConfig.ALLOW_GAME_VERSION_MISMATCH);
         // One-shot consent: never prefilled, so a previous launch's choice cannot repeat itself.
         adoptCampaignBox.setSelected(false);
         onRoleChanged();
@@ -1105,7 +1114,8 @@ public final class CoopLauncherApp {
             return;
         }
         config = CoopLauncherConfig.read(layout.coopOptions());
-        installRows = CoopInstallCheck.inspect(layout, config.readError());
+        installRows = CoopInstallCheck.inspect(layout, config.readError(),
+                allowGameVersionMismatchBox != null && allowGameVersionMismatchBox.isSelected());
         for (CoopInstallCheck.Row row : installRows) {
             LOG.info("Install check " + row);
         }
@@ -1678,12 +1688,15 @@ public final class CoopLauncherApp {
                 nonDefault(fullFidelityBox, CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM));
         owned.put(CoopLauncherConfig.FF_DISABLE, nonDefault(ffDisableBox, CoopLauncherConfig.FF_DISABLE));
         owned.put(CoopLauncherConfig.CLOCK_DISABLE, nonDefault(clockDisableBox, CoopLauncherConfig.CLOCK_DISABLE));
+        owned.put(CoopLauncherConfig.ALLOW_GAME_VERSION_MISMATCH,
+                nonDefault(allowGameVersionMismatchBox, CoopLauncherConfig.ALLOW_GAME_VERSION_MISMATCH));
         owned.put(CoopLauncherConfig.ADOPT_CAMPAIGN_ID, nonDefault(adoptCampaignBox, CoopLauncherConfig.ADOPT_CAMPAIGN_ID));
         List<String> flagsOn = new ArrayList<>();
         for (Map.Entry<String, String> entry : owned.entrySet()) {
             if (entry.getKey().startsWith("coop.debug.") || entry.getKey().equals(CoopLauncherConfig.FF_DISABLE)
                     || entry.getKey().equals(CoopLauncherConfig.CLOCK_DISABLE)
                     || entry.getKey().equals(CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM)
+                    || entry.getKey().equals(CoopLauncherConfig.ALLOW_GAME_VERSION_MISMATCH)
                     || entry.getKey().equals(CoopLauncherConfig.ADOPT_CAMPAIGN_ID)) {
                 if (!entry.getValue().isBlank()) {
                     flagsOn.add(entry.getKey() + "=" + entry.getValue());

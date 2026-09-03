@@ -163,6 +163,35 @@ class CoopDoctorMarkerTest {
     }
 
     @Test
+    void aGameVersionMarkerCarriesBothVersionsAndTheCodeTheDialogPointsAt() {
+        CoopDesyncReason reason = CoopDesyncReason.classify(
+                coop.handshake.CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", false)
+                        .rawReason(),
+                CoopDesyncReason.Source.OTHER);
+
+        String line = CoopDoctorMarker.format(reason, "session-9", CoopConnectionRole.NONE,
+                "Ayo", "");
+
+        assertFalse(line.contains("\n"));
+        assertTrue(line.startsWith("[COOP-DOCTOR] code=COOP-GAME "), line);
+        assertTrue(line.contains(" modGameVersion=0.98a-RC8 "), line);
+        assertTrue(line.endsWith(" gameVersion=0.99a-RC1"), line);
+        assertEquals(CoopDoctorMarker.searchString(reason), "[COOP-DOCTOR] code=COOP-GAME");
+    }
+
+    @Test
+    void aGameVersionMarkerPrintsNoneRatherThanAnEmptyFieldWhenAVersionIsUnknown() {
+        CoopDesyncReason reason = CoopDesyncReason.classify(
+                coop.handshake.CoopGameVersionCheck.REASON_PREFIX + " mod= game=",
+                CoopDesyncReason.Source.OTHER);
+
+        String line = CoopDoctorMarker.format(reason, "", CoopConnectionRole.NONE, "", "");
+
+        assertTrue(line.contains(" modGameVersion=<none> "), line);
+        assertTrue(line.contains(" gameVersion=<none>"), line);
+    }
+
+    @Test
     void logDoesNotThrowWithoutARunningGame() {
         CoopDesyncReason reason = CoopDesyncReason.classify("anything", CoopDesyncReason.Source.OTHER);
         CoopDoctorMarker.log(reason, "session-1", CoopConnectionRole.GUEST, "a", "b");

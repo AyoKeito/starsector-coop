@@ -3812,6 +3812,81 @@ class CoopNetPumpTest {
         }
     }
 
+    // ---- Phase 31: game-version refusal ----------------------------------------------------------
+
+    @Test
+    void aRefusedGameVersionOpensNoPortAndCreatesNoMapper() {
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "27015");
+        coop.handshake.CoopGameVersionCheck.remember(
+                coop.handshake.CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", false));
+        try {
+            StartupNetService service = new StartupNetService();
+            AtomicLong now = new AtomicLong(1_000_000L);
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), now::get);
+            pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, now::get));
+
+            for (int frame = 0; frame < 10; frame++) {
+                now.addAndGet(100L);
+                pump.advance(0f);
+            }
+
+            assertEquals(0, service.hostPort, "no port may be opened on a refused install");
+            assertEquals(CoopConnectionRole.NONE, service.role());
+            assertNull(pump.portMapperForTest(), "and nothing may be asked of the router either");
+        } finally {
+            coop.handshake.CoopGameVersionCheck.forget();
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
+    @Test
+    void aRefusedGameVersionNeverDialsTheHost() {
+        String savedHost = System.getProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
+        String savedPort = System.getProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, "127.0.0.1");
+        System.setProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, "27015");
+        coop.handshake.CoopGameVersionCheck.remember(
+                coop.handshake.CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", false));
+        try {
+            StartupNetService service = new StartupNetService();
+            AtomicLong now = new AtomicLong(1_000_000L);
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), now::get);
+            pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, now::get));
+
+            pump.advance(0f);
+
+            assertEquals(CoopConnectionRole.NONE, service.role());
+        } finally {
+            coop.handshake.CoopGameVersionCheck.forget();
+            restoreProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, savedHost);
+            restoreProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, savedPort);
+        }
+    }
+
+    @Test
+    void anAllowedGameVersionMismatchStartsTheHostAnyway() {
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "27015");
+        // The developer flag: still a mismatch, still logged as one, but not a refusal.
+        coop.handshake.CoopGameVersionCheck.remember(
+                coop.handshake.CoopGameVersionCheck.check("0.98a-RC8", "0.99a-RC1", true));
+        try {
+            StartupNetService service = new StartupNetService();
+            AtomicLong now = new AtomicLong(1_000_000L);
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), now::get);
+            pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, now::get));
+
+            pump.advance(0f);
+
+            assertEquals(27015, service.hostPort);
+            assertEquals(CoopConnectionRole.HOST, service.role());
+        } finally {
+            coop.handshake.CoopGameVersionCheck.forget();
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
     private static void restoreProperty(String key, String saved) {
         if (saved == null) {
             System.clearProperty(key);
