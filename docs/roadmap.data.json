@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here: V1 code complete and smoke-verified; outstanding: the coop launcher (Phase 31), the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
-  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is in build: a Swing window that writes <code>saves/common/coop_options.json.data</code>, reports install problems, runs the host doctor plus a guest test connection, and starts the game. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>; its install guide is rewritten around the launcher when Phase 31 lands. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
+  "hereHead": "You are here: V1 code complete; outstanding: the launcher smoke (deferred into Phase 19), the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
+  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is built (5cc5303: dark FlatLaf window, invite string with seed and world settings, install checks incl. the game version, host pre-flight and guest test connection, bug-report zip, update check, every -Dcoop flag in Advanced, COOP-GAME refusal). <b>Its two-instance smoke is deferred</b> (user, 2026-09-03) and runs as part of the Phase 19 checklist; until then the sandbox's acceptance of <code>System.setProperty</code> for the republished launcher flags is unverified in-game. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist plus the launcher smoke, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Before Phase 19: the launcher, the listing URL and the Ziggurat test start",
+      "head": "Before Phase 19: the launcher smoke (deferred), the listing URL and the Ziggurat test start",
       "state": "open",
-      "body": "<span class=\"rp\" data-jump=\"31\">Phase 31</span> (coop launcher) is the new V1 blocker, decided 2026-09-03: report-only install checks, invite string, host pre-flight, guest test connection, Windows only. <span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt, <code>a62886d</code>). Left there: the forum-thread URL in <code>docs/player/LISTING.md</code>, the COOP TEST Ziggurat new-game option in <code>data/campaign/rules.csv</code> (remove or dev-gate before a public build), and the install-guide rewrite once the launcher exists. Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the final two-instance checklist, fixes limited to what it fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass)."
+      "body": "<span class=\"rp\" data-jump=\"31\">Phase 31</span> (coop launcher) is built and pushed; its smoke is <b>deferred into Phase 19</b> by user decision 2026-09-03. Open there: confirm in a launcher-started game that the settings-file flags are republished (log line <code>Coop published the settings-file</code>), the invite round trip, the guest test connection against the host launcher, and the bug-report zip. <span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt). Left there: the forum-thread URL in <code>docs/player/LISTING.md</code> and the COOP TEST Ziggurat new-game option in <code>data/campaign/rules.csv</code> (remove or dev-gate before a public build). Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the final two-instance checklist, fixes limited to what it fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass)."
     },
     {
       "sev": "gap",
@@ -972,11 +972,12 @@
         "starsector.log status tail"
       ],
       "residue": [
+        "two-instance smoke deferred into Phase 19 (incl. in-game proof that System.setProperty passes the sandbox)",
         "Windows only; starsector.sh installs keep the manual path",
         "seed over the wire stays a Maybe",
         "no external reachability probe"
       ],
-      "note": "Created, decided AND built 2026-09-03 (2275 -> 2413 tests): launcher core, bug-report zip, update check, default password, package-release.ps1, Version Checker file, docs rewrite, README, issue forms. Two-instance launcher smoke pending."
+      "note": "Created, decided AND built 2026-09-03 (2275 -> 2445 tests, five commits b1372f7..5cc5303): launcher core, dark FlatLaf redesign, bug-report zip, update check, default password, every -Dcoop flag in Advanced, invite with world settings, launch gate, COOP-GAME game-version check, package-release.ps1, Version Checker file, docs rewrite, README, issue forms. Two-instance smoke DEFERRED into Phase 19 (user, 2026-09-03)."
     }
   ],
   "buildOrderFallback": [
