@@ -1,9 +1,30 @@
 package coop.net;
 
+import coop.config.CoopOptionsRegistry;
+import coop.config.CoopOptionsStore;
+
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
 
+/**
+ * Launch/connection settings.
+ *
+ * <p><b>Phase 28 milestone 1.</b> Every value here now resolves through {@link CoopOptionsStore}
+ * rather than straight off {@code System.getProperty}, which puts the full precedence stack behind
+ * it: {@code -Dcoop.*} beats {@code saves/common/coop_options.json} beats the shipped
+ * {@code data/config/coop_options.json} beats the {@link CoopOptionsRegistry} default. Every public
+ * method and constant kept its name and meaning, and a {@code -D}-configured launch resolves to
+ * exactly the same values it did before, so the pump, the doctor and the launch scripts are
+ * unchanged.
+ *
+ * <p>The parsing below is deliberately still the strict kind: a malformed port, grace window or
+ * port-mapping mode is refused rather than quietly replaced, and it is refused identically whether
+ * it came from a command line or from a file. That is why the reads use
+ * {@link CoopOptionsStore#raw(String)} (the winning value, unvalidated) instead of the store's
+ * clamping getters - two different answers for "the port is garbage" depending on which layer said
+ * it would be worse than one loud one.
+ */
 public final class CoopNetStartupConfig {
     public static final String HOST_PORT_PROPERTY = "coop.hostPort";
     public static final String CONNECT_HOST_PROPERTY = "coop.connectHost";
@@ -39,6 +60,12 @@ public final class CoopNetStartupConfig {
      * misbehaves in ways no test covers.
      */
     public static final String MAX_GUESTS_PROPERTY = "coop.maxGuests";
+    /**
+     * Phase 20.6 HUD corner placement: {@code TR} (default), {@code TL}, {@code BR} or {@code BL},
+     * case-insensitive. See {@link coop.ui.CoopHudCorner#parse(String)} for the fallback behaviour on
+     * an unrecognised value.
+     */
+    public static final String HUD_CORNER_PROPERTY = "coop.hudCorner";
 
     /** The only supported guest count in v1. */
     public static final int MAX_GUESTS_V1 = 1;
@@ -80,11 +107,12 @@ public final class CoopNetStartupConfig {
     }
 
     public static CoopNetStartupConfig fromSystemProperties() {
-        return from(System.getProperties());
+        return from(CoopOptionsStore.system());
     }
 
     public static String newGameSeedFromSystemProperties() {
-        return trimToEmpty(System.getProperty(NEW_GAME_SEED_PROPERTY));
+        // -D only, forever (a one-shot new-game gesture): the store never reads a file for it.
+        return trimToEmpty(CoopOptionsStore.system().raw(NEW_GAME_SEED_PROPERTY));
     }
 
     /**
@@ -94,25 +122,57 @@ public final class CoopNetStartupConfig {
      * not be able to turn a password-protected host into an open one.
      */
     public static String passwordFromSystemProperties() {
-        return trimToEmpty(System.getProperty(PASSWORD_PROPERTY));
+        return trimToEmpty(CoopOptionsStore.system().raw(PASSWORD_PROPERTY));
     }
 
     /** The clamped peer capacity on its own; see {@link #MAX_GUESTS_PROPERTY}. */
     public static int maxGuestsFromSystemProperties() {
-        return parseMaxGuests(System.getProperty(MAX_GUESTS_PROPERTY));
+        return parseMaxGuests(CoopOptionsStore.system().raw(MAX_GUESTS_PROPERTY));
     }
 
+    /**
+     * The HUD corner on its own; see {@link #HUD_CORNER_PROPERTY}. Read directly by
+     * {@link coop.ui.CoopLinkHud} at install time rather than folded into the role config above: the
+     * HUD is cosmetic and installed independently of whether host/guest role properties are present,
+     * malformed, or absent.
+     */
+    public static coop.ui.CoopHudCorner hudCornerFromSystemProperties() {
+        return coop.ui.CoopHudCorner.parse(CoopOptionsStore.system().raw(HUD_CORNER_PROPERTY));
+    }
+
+    /**
+     * Resolves from an explicit property set layered over the shipped/user files, the same stack
+     * {@link #fromSystemProperties()} uses. Unchanged for every existing caller and test: a value
+     * present in {@code properties} still wins outright.
+     */
     public static CoopNetStartupConfig from(Properties properties) {
         Objects.requireNonNull(properties, "properties");
+        return from(CoopOptionsStore.forProperties(properties));
+    }
 
-        String hostPort = trimToNull(properties.getProperty(HOST_PORT_PROPERTY));
-        String connectHost = trimToNull(properties.getProperty(CONNECT_HOST_PROPERTY));
-        String connectPort = trimToNull(properties.getProperty(CONNECT_PORT_PROPERTY));
-        String newGameSeed = trimToEmpty(properties.getProperty(NEW_GAME_SEED_PROPERTY));
-        boolean portMappingEnabled = parsePortMapping(properties.getProperty(PORT_MAPPING_PROPERTY));
-        int reconnectGrace = parseReconnectGrace(properties.getProperty(RECONNECT_GRACE_PROPERTY));
-        String password = trimToEmpty(properties.getProperty(PASSWORD_PROPERTY));
-        int maxGuests = parseMaxGuests(properties.getProperty(MAX_GUESTS_PROPERTY));
+    /**
+     * The real reader. The three role keys ({@code coop.hostPort}, {@code coop.connectHost},
+     * {@code coop.connectPort}) get one extra rule: if <em>any</em> of them is given as a {@code -D}
+     * property, the role is decided by the {@code -D} layer alone and file-level role keys are
+     * ignored. Without it, a player who put {@code coop.hostPort} in their settings file could never
+     * launch as a guest from the command line - the two layers would combine into the
+     * "host and guest configured together" refusal. Every other key keeps plain per-key precedence.
+     */
+    public static CoopNetStartupConfig from(CoopOptionsStore store) {
+        Objects.requireNonNull(store, "store");
+
+        boolean roleFromProperties = store.hasProperty(HOST_PORT_PROPERTY)
+                || store.hasProperty(CONNECT_HOST_PROPERTY)
+                || store.hasProperty(CONNECT_PORT_PROPERTY);
+
+        String hostPort = roleValue(store, HOST_PORT_PROPERTY, roleFromProperties);
+        String connectHost = roleValue(store, CONNECT_HOST_PROPERTY, roleFromProperties);
+        String connectPort = roleValue(store, CONNECT_PORT_PROPERTY, roleFromProperties);
+        String newGameSeed = trimToEmpty(store.raw(NEW_GAME_SEED_PROPERTY));
+        boolean portMappingEnabled = parsePortMapping(store.raw(PORT_MAPPING_PROPERTY));
+        int reconnectGrace = parseReconnectGrace(store.raw(RECONNECT_GRACE_PROPERTY));
+        String password = trimToEmpty(store.raw(PASSWORD_PROPERTY));
+        int maxGuests = parseMaxGuests(store.raw(MAX_GUESTS_PROPERTY));
 
         boolean hostConfigured = hostPort != null;
         boolean guestConfigured = connectHost != null || connectPort != null;
@@ -202,6 +262,10 @@ public final class CoopNetStartupConfig {
     /** Peer-table capacity, already clamped to {@link #MAX_GUESTS_V1}. */
     public int maxGuests() {
         return maxGuests;
+    }
+
+    private static String roleValue(CoopOptionsStore store, String key, boolean propertiesOnly) {
+        return trimToNull(propertiesOnly ? store.property(key) : store.raw(key));
     }
 
     private static String trimToNull(String value) {

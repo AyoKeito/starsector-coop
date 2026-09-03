@@ -1,0 +1,145 @@
+{
+	##############################################################################################
+	# Starsector Coop - shipped option defaults (Phase 28 milestone 1).
+	#
+	# THIS FILE IS OVERWRITTEN EVERY TIME YOU UPDATE THE MOD. Do not edit it to change a setting.
+	# Put your own values in                saves/common/coop_options.json
+	# (same flat "key": value shape, only the keys you actually want to change) - that folder
+	# survives mod updates. This file is the reference: it lists every option, its tier, its
+	# default and when a change takes effect.
+	#
+	# Precedence, highest first:
+	#   1. -Dcoop.<key>=<value> on the launch command line   (dev/debug override, always wins)
+	#   2. saves/common/coop_options.json                     (your settings)
+	#   3. this file                                          (shipped defaults)
+	#   4. the built-in default compiled into CoopOptionsRegistry
+	#
+	# Tiers:
+	#   launch  - per-client, read before a session exists. There is no in-game screen for these:
+	#             the title screen has no mod API, so a file or -D is the only pre-session surface.
+	#   policy  - host-authoritative gameplay rules. Milestone 1 reads them from this same stack;
+	#             milestone 2 stores them per campaign and syncs the host's value to the guest.
+	#   client  - local presentation only, never sent over the wire.
+	#
+	# INERT below means the schema ships now but the owning phase has not wired the key yet, so
+	# changing it does nothing in this build. It is listed so the file is a complete reference.
+	#
+	# Not in this file, and never will be: coop.newGameSeed, coop.adoptCampaignId,
+	# coop.sectorSize, coop.sectorAge (one-shot new-game gestures - the friction is the point)
+	# and the debug hatches coop.debug.*, coop.ff.disable, coop.clock.disable,
+	# coop.fullFidelityGuestSystem. Those are -D only, forever, and a value for them here is
+	# ignored with a warning.
+	#
+	# Also deliberately absent - the correctness list. These are not preferences and asking for
+	# them as options is a design change, not a settings change: snapshot and stream cadences
+	# (10 Hz fleet mirrors, 5 Hz time, 2-5 Hz battle status), fast-forward AND-over-intents
+	# semantics, combat auto-pause, interaction-gate and claim arbitration, seed lock and
+	# campaign-identity checks, the NPC suppressor, iron-mode refusal, host authority itself.
+	#
+	# Comments: '#' to end of line, exactly like the game's own data/config/settings.json.
+	##############################################################################################
+
+
+	##############################################################
+	# Tier: launch / connection (per-client, read before a session)
+	##############################################################
+
+	# Port this install listens on as HOST. Empty means "not hosting".
+	# Setting this together with coop.connectHost / coop.connectPort is refused, not guessed.
+	# integer 1..65535 | applies: next launch | Phase 2
+	"coop.hostPort":"",
+
+	# Host address to join as GUEST (IPv4, IPv6 or a name). Empty means "not joining".
+	# text | applies: next connect | Phase 2 / 20
+	"coop.connectHost":"",
+
+	# Host port to join as GUEST. Required whenever coop.connectHost is set.
+	# integer 1..65535 | applies: next connect | Phase 2 / 20
+	"coop.connectPort":"",
+
+	# auto asks the router to forward the host port over UPnP; off skips the attempt. Guests never
+	# map anything - in the star topology only the host needs to be reachable. Set off if your
+	# router answers UPnP badly, or if you already forwarded the port by hand or run a VPN LAN.
+	# auto|off | applies: next launch | Phase 20
+	"coop.portMapping":"auto",
+
+	# Lobby password; empty means none. A gatekeeper, not encryption: the protocol is plaintext and
+	# the proof is SHA-256(password + a fresh host nonce). What it buys is that a port scanner who
+	# finds the open port cannot join. Set the same value on both installs.
+	# text | applies: next connection attempt | Phase 20.4
+	"coop.password":"",
+
+	# The name your partner sees. Empty falls back to your own character's name.
+	# text | applies: next connection attempt | Phase 20.4
+	"coop.playerName":"",
+
+
+	##############################################################
+	# Tier: host policy (host-authoritative gameplay rules)
+	##############################################################
+
+	# Peer-table capacity. v1 supports exactly one guest: the transport is N-ready, the gameplay
+	# arbitration is not, so any other value is clamped back to 1 with a warning rather than
+	# producing a session that connects and then misbehaves. Phase 27 raises the bound.
+	# integer 1..1 | applies: next connection attempt | Phase 20.5 / 27
+	"coop.maxGuests":1,
+
+	# How long a dropped socket keeps the session alive before the session really ends. 0 restores
+	# the older "every drop ends the session" behaviour, which is worth having when debugging a
+	# teardown path. Each side runs its own timer and they are configured independently.
+	# integer 0..3600 | applies: next drop | Phase 20.2
+	"coop.reconnectGraceSeconds":60,
+
+	# Whether the guest may pause and unpause the shared world.
+	# Never gates the screen pause below - that would punish the guest silently.
+	# true|false | applies: immediately | Phase 25 | INERT until Phase 25 builds
+	"coop.allowGuestPause":true,
+
+	# true (default) is the shipped behaviour: the world stops while a guest browses the vanilla
+	# auto-pause screens - map, fleet, character, refit, cargo, intel. Set false and the world keeps
+	# running while your partner reads.
+	# This does NOT touch the two pauses that are correctness rather than comfort: an open
+	# interaction dialog (market trades are settled against the state at open time) and combat.
+	# true|false | applies: next screen open/close | Phase 28 | wired in milestone 2
+	"coop.pauseOnGuestScreens":true,
+
+	# Whether a guest may join a campaign that is already in progress.
+	# true|false | applies: next connection attempt | Phase 27 | INERT until Phase 27 builds
+	"coop.allowMidSessionJoin":true,
+
+	# How salvage from a jointly fought battle is divided. Phase 22 is what defines any value other
+	# than equal, so equal is the only accepted value today.
+	# equal | applies: next battle result | Phase 22 | INERT until Phase 22 builds
+	"coop.lootSplit":"equal",
+
+	# equal splits shared-faction colony income 50/50 with local upkeep staying with the owner;
+	# host-banks pays all of it to the host.
+	# equal|host-banks | applies: next month tick | Phase 24 | INERT until Phase 24 wires the key
+	"coop.incomeSplit":"equal",
+
+	# true makes a guest founding a colony ask the host first. false is the shipped trusted model.
+	# true|false | applies: next colonization | Phase 24 | INERT until Phase 24 wires the key
+	"coop.guestColonizationConsent":false,
+
+
+	##############################################################
+	# Tier: client preferences (local only, never synced)
+	##############################################################
+
+	# true skips installing the one-line coop link HUD entirely.
+	# true|false | applies: next launch | Phase 20.6
+	"coop.hud.disable":false,
+
+	# Which screen corner the link HUD anchors to.
+	# TR|TL|BR|BL | applies: next launch | Phase 20.6 / 21
+	"coop.hudCorner":"TR",
+
+	# How much of the coop event feed is shown.
+	# all|important|minimal | applies: immediately | Phase 20.6 | INERT until the feed reads it
+	"coop.feedVerbosity":"all",
+
+	# Colour used for your partner's presence marker. Empty is the built-in preset; Phase 8 defines
+	# the named vocabulary when it wires the key.
+	# text | applies: immediately | Phase 8 | INERT until Phase 8 wires the key
+	"coop.partnerColor":""
+}

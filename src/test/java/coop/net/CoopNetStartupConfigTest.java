@@ -1,9 +1,14 @@
 package coop.net;
 
+import coop.config.CoopOptionsStore;
+import coop.ui.CoopHudCorner;
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
 import java.util.Properties;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -278,5 +283,160 @@ class CoopNetStartupConfigTest {
 
         assertFalse(config.isPresent());
         assertEquals(1, config.maxGuests());
+    }
+
+    // ---- Phase 20.6 HUD corner ---------------------------------------------------------------------
+
+    @Test
+    void hudCornerPropertyNameIsCoopHudCorner() {
+        assertEquals("coop.hudCorner", CoopNetStartupConfig.HUD_CORNER_PROPERTY);
+    }
+
+    @Test
+    void hudCornerParsesAllFourValues() {
+        assertEquals(CoopHudCorner.TOP_RIGHT, CoopHudCorner.parse("TR"));
+        assertEquals(CoopHudCorner.TOP_LEFT, CoopHudCorner.parse("TL"));
+        assertEquals(CoopHudCorner.BOTTOM_RIGHT, CoopHudCorner.parse("BR"));
+        assertEquals(CoopHudCorner.BOTTOM_LEFT, CoopHudCorner.parse("BL"));
+    }
+
+    @Test
+    void hudCornerParsingIsCaseAndWhitespaceInsensitive() {
+        assertEquals(CoopHudCorner.BOTTOM_LEFT, CoopHudCorner.parse("  bl  "));
+        assertEquals(CoopHudCorner.TOP_LEFT, CoopHudCorner.parse("Tl"));
+    }
+
+    @Test
+    void hudCornerDefaultsToTopRight() {
+        assertEquals(CoopHudCorner.TOP_RIGHT, CoopHudCorner.DEFAULT);
+        assertEquals(CoopHudCorner.TOP_RIGHT, CoopHudCorner.parse(null));
+        assertEquals(CoopHudCorner.TOP_RIGHT, CoopHudCorner.parse(""));
+        assertEquals(CoopHudCorner.TOP_RIGHT, CoopHudCorner.parse("   "));
+    }
+
+    @Test
+    void anUnknownHudCornerFallsBackToTopRightWithoutThrowing() {
+        assertEquals(CoopHudCorner.TOP_RIGHT, assertDoesNotThrow(() -> CoopHudCorner.parse("NE")));
+        assertEquals(CoopHudCorner.TOP_RIGHT, assertDoesNotThrow(() -> CoopHudCorner.parse("top-right")));
+    }
+
+    @Test
+    void hudCornerFromSystemPropertiesReadsTheSystemProperty() {
+        String previous = System.getProperty(CoopNetStartupConfig.HUD_CORNER_PROPERTY);
+        try {
+            System.setProperty(CoopNetStartupConfig.HUD_CORNER_PROPERTY, "bl");
+            assertEquals(CoopHudCorner.BOTTOM_LEFT, CoopNetStartupConfig.hudCornerFromSystemProperties());
+
+            System.clearProperty(CoopNetStartupConfig.HUD_CORNER_PROPERTY);
+            assertEquals(CoopHudCorner.TOP_RIGHT, CoopNetStartupConfig.hudCornerFromSystemProperties());
+        } finally {
+            if (previous == null) {
+                System.clearProperty(CoopNetStartupConfig.HUD_CORNER_PROPERTY);
+            } else {
+                System.setProperty(CoopNetStartupConfig.HUD_CORNER_PROPERTY, previous);
+            }
+        }
+    }
+
+    // ---- Phase 28 milestone 1: the file stack underneath the properties ----------------------
+
+    /** A {@code saves/common/coop_options.json} standing in for the real one. */
+    private static CoopOptionsStore storeWithCommonOverride(Properties properties, String... keyValues) {
+        JSONObject common = new JSONObject();
+        try {
+            for (int i = 0; i + 1 < keyValues.length; i += 2) {
+                common.put(keyValues[i], keyValues[i + 1]);
+            }
+        } catch (JSONException ex) {
+            throw new IllegalStateException(ex);
+        }
+        CoopOptionsStore.JsonSource source = new CoopOptionsStore.JsonSource() {
+            @Override
+            public JSONObject shipped() {
+                return null;
+            }
+
+            @Override
+            public JSONObject common() {
+                return common;
+            }
+        };
+        return new CoopOptionsStore(source, properties::getProperty);
+    }
+
+    @Test
+    void readsValuesConfiguredOnlyInTheCommonOverrideFile() {
+        CoopOptionsStore store = storeWithCommonOverride(new Properties(),
+                "coop.hostPort", "7788",
+                "coop.portMapping", "off",
+                "coop.reconnectGraceSeconds", "120",
+                "coop.password", "from-the-file");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(store);
+
+        assertTrue(config.isPresent());
+        assertEquals(CoopConnectionRole.HOST, config.role());
+        assertEquals(7788, config.port());
+        assertFalse(config.portMappingEnabled());
+        assertEquals(120, config.reconnectGraceSeconds());
+        assertEquals("from-the-file", config.password());
+        assertTrue(config.passwordRequired());
+    }
+
+    @Test
+    void propertiesOverrideTheCommonOverrideFile() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.hostPort", "7777");
+        properties.setProperty("coop.reconnectGraceSeconds", "5");
+        properties.setProperty("coop.password", "from-the-command-line");
+
+        CoopOptionsStore store = storeWithCommonOverride(properties,
+                "coop.hostPort", "7788",
+                "coop.reconnectGraceSeconds", "120",
+                "coop.password", "from-the-file");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(store);
+
+        assertEquals(7777, config.port());
+        assertEquals(5, config.reconnectGraceSeconds());
+        assertEquals("from-the-command-line", config.password());
+    }
+
+    /**
+     * A player who keeps {@code coop.hostPort} in their settings file must still be able to join
+     * someone else's game from the command line, instead of hitting the "host and guest configured
+     * together" refusal caused by combining the two layers.
+     */
+    @Test
+    void aRoleGivenOnTheCommandLineIgnoresRoleKeysInTheFile() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.connectHost", "203.0.113.9");
+        properties.setProperty("coop.connectPort", "7777");
+
+        CoopOptionsStore store = storeWithCommonOverride(properties, "coop.hostPort", "7788");
+
+        CoopNetStartupConfig config = CoopNetStartupConfig.from(store);
+
+        assertEquals(CoopConnectionRole.GUEST, config.role());
+        assertEquals("203.0.113.9", config.host());
+        assertEquals(7777, config.port());
+    }
+
+    @Test
+    void malformedFileValuesAreRefusedTheSameWayMalformedPropertiesAre() {
+        CoopOptionsStore store = storeWithCommonOverride(new Properties(),
+                "coop.reconnectGraceSeconds", "eventually");
+
+        assertThrows(IllegalArgumentException.class, () -> CoopNetStartupConfig.from(store));
+    }
+
+    /** The seed is a one-shot {@code -D} gesture: a file must not be able to pin it. */
+    @Test
+    void theNewGameSeedIsNotReadableFromAFile() {
+        CoopOptionsStore store = storeWithCommonOverride(new Properties(),
+                "coop.hostPort", "7777",
+                "coop.newGameSeed", "12345");
+
+        assertEquals("", CoopNetStartupConfig.from(store).newGameSeed());
     }
 }
