@@ -24,9 +24,9 @@ import java.util.Objects;
  * <ul>
  *   <li>{@link Tier#LAUNCH} - per-client, read before any session exists. File stack plus {@code -D}
  *   only; the title screen has no API, so there is no pre-campaign UI, ever.</li>
- *   <li>{@link Tier#POLICY} - host-authoritative gameplay rules. Milestone 1 reads these through the
- *   same launch stack; milestone 2 adds per-campaign storage and the {@code OPTIONS_SNAPSHOT}
- *   broadcast, at which point the host's value is the one that counts.</li>
+ *   <li>{@link Tier#POLICY} - host-authoritative gameplay rules. A value in the launch stack only
+ *   <em>seeds</em> a new campaign; from then on {@link CoopOptionsPolicy} holds them in the
+ *   campaign's own save and broadcasts them to the guest.</li>
  *   <li>{@link Tier#CLIENT} - local presentation preferences, never synced.</li>
  * </ul>
  */
@@ -40,6 +40,35 @@ public final class CoopOptionsRegistry {
         LAUNCH,
         POLICY,
         CLIENT
+    }
+
+    /**
+     * When a changed value starts counting - the machine-readable half of {@code appliesAt}.
+     *
+     * <p>The rule the whole phase rests on: <b>nothing applies retroactively</b>. A consumer reads
+     * {@link CoopOptionsPolicy#applied(String)}, never the pending value, and calls
+     * {@link CoopOptionsPolicy#advanceBoundary(String)} at the moment named here - which is what
+     * stops a mid-screen {@code pauseOnGuestScreens} flip from yanking the pause out from under a
+     * screen the guest already has open.
+     *
+     * <p>{@link #IMMEDIATE} means there is no boundary to wait for: pending and applied are the same
+     * value, and the policy promotes it on the spot.
+     */
+    public enum ApplyBoundary {
+        /** Takes effect the moment it changes (presentation, and the Phase 25 pause strictness). */
+        IMMEDIATE,
+        /** The next time a vanilla core tab / dialog / menu opens or closes. */
+        NEXT_SCREEN_TOGGLE,
+        /** The next connection attempt - including "next launch", which is a connection attempt. */
+        NEXT_CONNECTION,
+        /** The next link drop, i.e. the next time a grace window opens. */
+        NEXT_DROP,
+        /** The next battle result to divide (Phase 22). */
+        NEXT_BATTLE_RESULT,
+        /** The next monthly income tick (Phase 24). */
+        NEXT_MONTH_TICK,
+        /** The next colony founding (Phase 24). */
+        NEXT_COLONIZATION
     }
 
     /** How a raw string is validated. */
@@ -83,14 +112,16 @@ public final class CoopOptionsRegistry {
      * @param max           inclusive upper bound for {@link Type#INT}
      * @param allowedValues canonical values for {@link Type#ENUM}, matched case-insensitively
      * @param owner         the phase that owns the behaviour behind the key
-     * @param appliesAt     the apply boundary; nothing in this registry applies retroactively
-     * @param description   one line for the shipped defaults file and the (milestone 3) options page
+     * @param appliesAt     the apply boundary in words, for the file and the page
+     * @param boundary      the same boundary the policy layer enforces; see {@link ApplyBoundary}
+     * @param description   one line for the shipped defaults file and the options page
      */
     public record Option(String key, Type type, Tier tier, String defaultValue, boolean allowsEmpty,
                          boolean dOnly, int min, int max, List<String> allowedValues,
-                         String owner, String appliesAt, String description) {
+                         String owner, String appliesAt, ApplyBoundary boundary, String description) {
 
         public Option {
+            Objects.requireNonNull(boundary, "boundary");
             Objects.requireNonNull(key, "key");
             Objects.requireNonNull(type, "type");
             Objects.requireNonNull(tier, "tier");
@@ -248,48 +279,48 @@ public final class CoopOptionsRegistry {
 
         // -- Tier 1: launch / connection -------------------------------------------------------
         options.add(intOption(HOST_PORT, Tier.LAUNCH, "", true, 1, 65535, "Phase 2",
-                "next launch",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
                 "TCP/UDP port this install listens on as HOST. Empty means \"not hosting\"."
                         + " Setting this and the connect keys together is refused, not guessed."));
         options.add(stringOption(CONNECT_HOST, Tier.LAUNCH, "", true, "Phase 2 / 20",
-                "next connect",
+                "next connect", ApplyBoundary.NEXT_CONNECTION,
                 "Host address to join as GUEST (IPv4, IPv6 or name). Empty means \"not joining\"."));
         options.add(intOption(CONNECT_PORT, Tier.LAUNCH, "", true, 1, 65535, "Phase 2 / 20",
-                "next connect",
+                "next connect", ApplyBoundary.NEXT_CONNECTION,
                 "Host port to join as GUEST. Required whenever coop.connectHost is set."));
         options.add(enumOption(PORT_MAPPING, Tier.LAUNCH, "auto", List.of("auto", "off"), "Phase 20",
-                "next launch",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
                 "auto asks the router to forward the host port over UPnP; off skips the attempt."
                         + " Guests never map anything - only the host needs to be reachable."));
         options.add(stringOption(PASSWORD, Tier.LAUNCH, "", true, "Phase 20.4",
-                "next connection attempt",
+                "next connection attempt", ApplyBoundary.NEXT_CONNECTION,
                 "Lobby password; empty means none. A gatekeeper, not encryption - the proof is"
                         + " SHA-256(password + host nonce) over a plaintext protocol, and what it"
                         + " buys is that a port scanner cannot join. Set it identically on both"
                         + " installs. Becomes a policy-tier value too once milestone 2 syncs"
                         + " policy."));
         options.add(stringOption(PLAYER_NAME, Tier.LAUNCH, "", true, "Phase 20.4",
-                "next connection attempt",
+                "next connection attempt", ApplyBoundary.NEXT_CONNECTION,
                 "Name shown to your partner. Empty falls back to the local character's own name."));
 
         // -- Tier 2: host gameplay policy ------------------------------------------------------
         options.add(intOption(MAX_GUESTS, Tier.POLICY, "1", false, 1, 1, "Phase 20.5 / 27",
-                "next connection attempt",
+                "next connection attempt", ApplyBoundary.NEXT_CONNECTION,
                 "Peer-table capacity. v1 supports exactly one guest: the transport is N-ready, the"
                         + " gameplay arbitration is not, so anything else is clamped with a warning."
                         + " Phase 27 raises the bound."));
         options.add(intOption(RECONNECT_GRACE_SECONDS, Tier.POLICY, "60", false, 0, 3600,
-                "Phase 20.2", "next drop",
+                "Phase 20.2", "next drop", ApplyBoundary.NEXT_DROP,
                 "How long a dropped socket keeps the session alive before it really ends. 0 restores"
                         + " the pre-20.2 \"every drop ends the session\" behaviour. Each side runs"
                         + " its own timer and they are configured independently on purpose."));
         options.add(boolOption(ALLOW_GUEST_PAUSE, Tier.POLICY, "true", "Phase 25",
-                "immediately",
+                "immediately", ApplyBoundary.IMMEDIATE,
                 "Whether the guest may pause and unpause the shared world. INERT until Phase 25"
                         + " builds. Never gates the screen pause below - that would punish the guest"
                         + " silently."));
         options.add(boolOption(PAUSE_ON_GUEST_SCREENS, Tier.POLICY, "true",
-                "Phase 28 (Phase 11 lever)", "next screen open/close",
+                "Phase 28 (Phase 11 lever)", "next screen open/close", ApplyBoundary.NEXT_SCREEN_TOGGLE,
                 "true is exact Phase 11 behaviour: the world stops while a guest browses the vanilla"
                         + " auto-pause screens (map/fleet/character/refit/cargo/intel). false lets"
                         + " the world keep running - your partner reads while time passes. Does NOT"
@@ -297,34 +328,37 @@ public final class CoopOptionsRegistry {
                         + " open-snapshot model trades against open-time state, so that pause is"
                         + " correctness) and combat auto-pause. Wired in milestone 2."));
         options.add(boolOption(ALLOW_MID_SESSION_JOIN, Tier.POLICY, "true", "Phase 27",
-                "next connection attempt",
+                "next connection attempt", ApplyBoundary.NEXT_CONNECTION,
                 "Whether a guest may join a campaign already in progress. INERT until Phase 27"
                         + " builds."));
         options.add(enumOption(LOOT_SPLIT, Tier.POLICY, "equal", List.of("equal"), "Phase 22",
-                "next battle result",
+                "next battle result", ApplyBoundary.NEXT_BATTLE_RESULT,
                 "How salvage from a jointly fought battle is divided. INERT until Phase 22 builds,"
                         + " which is also what defines any value other than equal."));
         options.add(enumOption(INCOME_SPLIT, Tier.POLICY, "equal", List.of("equal", "host-banks"),
-                "Phase 24", "next month tick",
+                "Phase 24", "next month tick", ApplyBoundary.NEXT_MONTH_TICK,
                 "equal splits shared-faction colony income 50/50 (local upkeep stays with the"
                         + " owner); host-banks pays it all to the host. INERT until Phase 24 wires"
                         + " the key."));
         options.add(boolOption(GUEST_COLONIZATION_CONSENT, Tier.POLICY, "false", "Phase 24",
-                "next colonization",
+                "next colonization", ApplyBoundary.NEXT_COLONIZATION,
                 "true makes a guest founding a colony ask the host first. Default false is the"
                         + " shipped trusted model. INERT until Phase 24 wires the key."));
 
         // -- Tier 3: per-client preferences ----------------------------------------------------
         options.add(boolOption(HUD_DISABLE, Tier.CLIENT, "false", "Phase 20.6",
-                "next launch",
-                "true skips installing the one-line link HUD entirely. Purely local."));
+                "immediately", ApplyBoundary.IMMEDIATE,
+                "true hides the one-line link HUD. Purely local, and live since Phase 28 milestone"
+                        + " 3: the HUD re-reads this on its own refresh tick, so a change from the"
+                        + " options page shows up without a relaunch."));
         options.add(enumOption(HUD_CORNER, Tier.CLIENT, "TR", List.of("TR", "TL", "BR", "BL"),
-                "Phase 20.6 / 21", "next launch",
-                "Which screen corner the link HUD anchors to. Purely local."));
+                "Phase 20.6 / 21", "immediately", ApplyBoundary.IMMEDIATE,
+                "Which screen corner the link HUD anchors to. Purely local, and live: re-read on"
+                        + " the HUD's refresh tick."));
         options.add(enumOption(FEED_VERBOSITY, Tier.CLIENT, "all",
-                List.of("all", "important", "minimal"), "Phase 20.6", "immediately",
+                List.of("all", "important", "minimal"), "Phase 20.6", "immediately", ApplyBoundary.IMMEDIATE,
                 "How much of the coop event feed is shown. INERT until the feed reads the key."));
-        options.add(stringOption(PARTNER_COLOR, Tier.CLIENT, "", true, "Phase 8", "immediately",
+        options.add(stringOption(PARTNER_COLOR, Tier.CLIENT, "", true, "Phase 8", "immediately", ApplyBoundary.IMMEDIATE,
                 "Colour used for your partner's presence marker. Empty is the built-in preset;"
                         + " Phase 8 defines the named vocabulary when it wires the key."));
 
@@ -336,46 +370,46 @@ public final class CoopOptionsRegistry {
         // like an ordinary preference. Their defaults below are documentation - the owning class
         // still reads its own property directly.
         options.add(dOnly(ADOPT_CAMPAIGN_ID, Type.BOOL, "false", "Phase 6b",
-                "next new game",
+                "next new game", ApplyBoundary.NEXT_CONNECTION,
                 "Overrides the seed lock and adopts an in-flight campaign id. One-shot explicit"
                         + " consent: it loses the other player's progress, so it must be typed."));
         options.add(dOnly(NEW_GAME_SEED, Type.STRING, "", "Phase 6",
-                "next new game",
+                "next new game", ApplyBoundary.NEXT_CONNECTION,
                 "Pins the sector seed so both installs generate the same sector. One-shot."));
         options.add(dOnly(SECTOR_SIZE, Type.STRING, "", "Phase 21",
-                "next new game",
+                "next new game", ApplyBoundary.NEXT_CONNECTION,
                 "small|normal - pins the new-game sector size on both installs. One-shot."));
         options.add(dOnly(SECTOR_AGE, Type.STRING, "", "Phase 21",
-                "next new game",
+                "next new game", ApplyBoundary.NEXT_CONNECTION,
                 "Star age (a StarAge constant, or mixed) pinned on both installs. One-shot."));
         options.add(dOnly(FULL_FIDELITY_GUEST_SYSTEM, Type.BOOL, "true", "Phase 29",
-                "next launch",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
                 "Kill switch for the full-fidelity guest-system driver. A fidelity lever, not a"
                         + " preference - see the correctness list."));
         options.add(dOnly(FF_DISABLE, Type.BOOL, "false", "Phase 7b",
-                "next launch",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
                 "Forces the shared fast-forward lock sticky-unavailable (pre-7b behaviour)."));
         options.add(dOnly(CLOCK_DISABLE, Type.BOOL, "false", "Phase 7c",
-                "next launch",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
                 "Disables the clock reconciler and restores uncorrected drift (pre-7c behaviour)."));
         options.add(dOnly(DEBUG_DIAGNOSTICS, Type.BOOL, "false", "Phase 8",
-                "immediately",
+                "immediately", ApplyBoundary.IMMEDIATE,
                 "Master switch for the dormant diagnostics (orbit dumps, dialog state, probes)."));
         options.add(dOnly(DEBUG_BRIDGE, Type.INT, "0", "Phase 30",
-                "next campaign load",
+                "next campaign load", ApplyBoundary.NEXT_CONNECTION,
                 "Port for the 127.0.0.1 agent bridge. Absent, 0 or unparsable means no socket"
                         + " ever."));
         options.add(dOnly(DEBUG_WIRETAP, Type.BOOL, "false", "Phase 20.1",
-                "immediately",
+                "immediately", ApplyBoundary.IMMEDIATE,
                 "Datagram wiretap: per-type size histograms against the 1200 B WAN budget."));
         options.add(dOnly(DEBUG_WIRETAP_SAMPLE, Type.INT, "10", "Phase 20.1",
-                "immediately",
+                "immediately", ApplyBoundary.IMMEDIATE,
                 "Wiretap sampling interval: log every Nth datagram per (direction, type)."));
         options.add(dOnly(DEBUG_FRAME_PROFILE, Type.BOOL, "false", "Phase 29",
-                "immediately",
+                "immediately", ApplyBoundary.IMMEDIATE,
                 "Per-frame pump profiler."));
         options.add(dOnly(DEBUG_INTERACTION_DELAY_MS, Type.INT, "0", "Phase 18",
-                "immediately",
+                "immediately", ApplyBoundary.IMMEDIATE,
                 "Makes the host hold every inbound INTERACTION_CLAIM this many ms, widening the"
                         + " claim race to something a human can hit. A test instrument."));
 
@@ -478,37 +512,37 @@ public final class CoopOptionsRegistry {
     // ---- entry helpers -----------------------------------------------------------------------
 
     private static Option boolOption(String key, Tier tier, String defaultValue, String owner,
-                                     String appliesAt, String description) {
+                                     String appliesAt, ApplyBoundary boundary, String description) {
         return new Option(key, Type.BOOL, tier, defaultValue, false, false, 0, 0, List.of(), owner,
-                appliesAt, description);
+                appliesAt, boundary, description);
     }
 
     private static Option intOption(String key, Tier tier, String defaultValue, boolean allowsEmpty,
                                     int min, int max, String owner, String appliesAt,
-                                    String description) {
+                                    ApplyBoundary boundary, String description) {
         return new Option(key, Type.INT, tier, defaultValue, allowsEmpty, false, min, max, List.of(),
-                owner, appliesAt, description);
+                owner, appliesAt, boundary, description);
     }
 
     private static Option stringOption(String key, Tier tier, String defaultValue,
                                        boolean allowsEmpty, String owner, String appliesAt,
-                                       String description) {
+                                       ApplyBoundary boundary, String description) {
         return new Option(key, Type.STRING, tier, defaultValue, allowsEmpty, false, 0, 0, List.of(),
-                owner, appliesAt, description);
+                owner, appliesAt, boundary, description);
     }
 
     private static Option enumOption(String key, Tier tier, String defaultValue,
                                      List<String> allowedValues, String owner, String appliesAt,
-                                     String description) {
+                                     ApplyBoundary boundary, String description) {
         return new Option(key, Type.ENUM, tier, defaultValue, false, false, 0, 0, allowedValues,
-                owner, appliesAt, description);
+                owner, appliesAt, boundary, description);
     }
 
     private static Option dOnly(String key, Type type, String defaultValue, String owner,
-                                String appliesAt, String description) {
+                                String appliesAt, ApplyBoundary boundary, String description) {
         boolean allowsEmpty = type == Type.STRING;
         int max = type == Type.INT ? Integer.MAX_VALUE : 0;
         return new Option(key, type, Tier.LAUNCH, defaultValue, allowsEmpty, true, 0, max,
-                List.of(), owner, appliesAt, description);
+                List.of(), owner, appliesAt, boundary, description);
     }
 }

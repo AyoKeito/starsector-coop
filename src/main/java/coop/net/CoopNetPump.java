@@ -110,6 +110,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_LOBBY_STARTED = "lobbyStarted";
     private static final String FEED_LOBBY_CANCELLED_JOIN = "lobbyCancelledJoin";
     private static final String FEED_DESYNC = "desync";
+    private static final String FEED_OPTIONS = "options";
     private static final java.awt.Color FEED_WARN_COLOR = new java.awt.Color(255, 220, 120);
     private static final java.awt.Color FEED_BAD_COLOR = new java.awt.Color(255, 170, 90);
     private static final java.awt.Color FEED_GOOD_COLOR = new java.awt.Color(150, 230, 150);
@@ -145,6 +146,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_SEED_LOCK_REQUEST = "seed.lockRequest";
     private static final String SECTION_HOLD_PAUSED = "session.holdPaused";
     private static final String SECTION_LOBBY = "session.lobby";
+    private static final String SECTION_OPTIONS_POLICY = "session.optionsPolicy";
     private static final String SECTION_BATTLE_BRIDGE = "battle.bridge";
     private static final String SECTION_SHARED_PAUSE = "time.sharedPause";
     private static final String SECTION_TIME_APPLY = "time.applySnapshot";
@@ -473,6 +475,21 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private final coop.ui.CoopSessionIntelFeed intelFeed = new coop.ui.CoopSessionIntelFeed();
     /**
+     * Phase 28 milestone 2: this campaign's host-authoritative policy. The lambda reads the role
+     * live rather than capturing it, because a pump is built before the role is decided (a host
+     * started from the sector-memory flags is {@code NONE} for its first frames).
+     */
+    private final coop.config.CoopOptionsPolicy optionsPolicy =
+            new coop.config.CoopOptionsPolicy(this::isPolicyAuthority);
+    /**
+     * The policy version the peer has been told about, or -1 when it has been told nothing on this
+     * session. Reset on both session edges and on a resume, which is what makes the establish and
+     * resume broadcasts fall out of the same one comparison instead of needing their own call sites.
+     */
+    private int lastSentOptionsVersion = -1;
+    /** The policy version this client last posted a feed line for; -1 before the first read. */
+    private int lastAnnouncedOptionsVersion = -1;
+    /**
      * Assigned in the constructor rather than inline so it shares the pump's injected clock: the
      * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
      * measured inside {@code applySet}, and two different clocks there would silently break it.
@@ -716,6 +733,9 @@ public class CoopNetPump implements EveryFrameScript {
         // static handle is how it reaches this pump's feed. Newest pump wins, exactly like the save
         // checkpoint above — a game load replaces the previous session's feed.
         coop.ui.CoopSessionIntelFeed.install(this.intelFeed);
+        // Phase 28: same static-handle argument. The options page is constructed by the intel screen
+        // and has no way to be handed this pump's policy, so the newest pump publishes it.
+        coop.config.CoopOptionsPolicy.install(this.optionsPolicy);
         long now = clockMillis.getAsLong();
         this.nextPingAtMillis = now + PING_INTERVAL_MILLIS;
         this.nextLinkStatusAtMillis = now + LINK_STATUS_INTERVAL_MILLIS;
@@ -1972,6 +1992,144 @@ public class CoopNetPump implements EveryFrameScript {
         lobbyRoster.clearResetReason();
     }
 
+    // ---- Phase 28 milestone 2: host policy options -------------------------------------------------
+
+    /** Test/page read: this campaign's policy, as this client sees it. */
+    public coop.config.CoopOptionsPolicy optionsPolicy() {
+        return optionsPolicy;
+    }
+
+    /**
+     * Who owns this campaign's policy: everyone except a guest.
+     *
+     * <p>Not "is the host", deliberately. A client that has not started hosting yet is
+     * {@link CoopConnectionRole#NONE} - which is precisely when a player sets the rules for the
+     * session they are about to open - and its campaign's rules are nobody else's. A guest is the
+     * one role whose policy comes off the wire, and it is the one role refused here.
+     */
+    private boolean isPolicyAuthority() {
+        return service.role() != CoopConnectionRole.GUEST;
+    }
+
+    /**
+     * One frame of the policy layer, host side only: seed the campaign if it has never been seeded,
+     * advance the boundary of the one key that has a consumer, announce a local change, and send the
+     * snapshot the guest is owed.
+     *
+     * <p>The guest half is not here - it is two lines in {@link #syncGuestSharedPauseIntent()} and
+     * the {@code OPTIONS_SNAPSHOT} handler - because there is nothing for a guest to decide.
+     */
+    private void tickOptionsPolicy() {
+        if (!isPolicyAuthority()) {
+            return;
+        }
+        optionsPolicy.ensureSeeded(coop.config.CoopOptionsStore.system());
+        // The host's own NEXT_SCREEN_TOGGLE boundary. The host has no screen of its own that this
+        // key governs (its screens pause its own engine natively, and the shared clock follows the
+        // host); what it tracks here is whether the *guest* is currently holding the screen pause,
+        // so the page can honestly say "pending" for as long as the flip has not reached the guest.
+        if (!pauseCoordinator.guestScreenPauseIntent()) {
+            optionsPolicy.advanceBoundary(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS);
+        }
+        announceLocalPolicyChange();
+        maybeSendOptionsSnapshot();
+    }
+
+    /**
+     * The host's own banner for a change it just made. Version-driven rather than called from the
+     * options page, so a change made from anywhere - the page today, a console command later -
+     * announces itself exactly once.
+     */
+    private void announceLocalPolicyChange() {
+        int version = optionsPolicy.version();
+        if (lastAnnouncedOptionsVersion < 0) {
+            // First read of this campaign's policy: seeding is not a change and gets no banner.
+            lastAnnouncedOptionsVersion = version;
+            return;
+        }
+        if (version <= lastAnnouncedOptionsVersion) {
+            return;
+        }
+        lastAnnouncedOptionsVersion = version;
+        String key = optionsPolicy.lastChangedKey();
+        if (key.isEmpty() || !coop.config.CoopOptionsPolicy.isPolicyKey(key)) {
+            return;
+        }
+        postOptionsFeedLine(key, optionsPolicy.effective(key), true);
+    }
+
+    /**
+     * Host: the whole policy, whenever the guest's copy could be behind ours.
+     *
+     * <p>One comparison covers all three cases the plan names - the send behind the lobby release,
+     * the re-send on a resume, and the send after a change - because each of them either bumps the
+     * version or resets {@link #lastSentOptionsVersion} to -1.
+     */
+    private void maybeSendOptionsSnapshot() {
+        if (service.role() != CoopConnectionRole.HOST || !service.isConnected()
+                || !isSessionPlayable()) {
+            return;
+        }
+        int version = optionsPolicy.version();
+        if (version == lastSentOptionsVersion) {
+            return;
+        }
+        String sessionId = sessionState.sessionId();
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return;
+        }
+        CoopMessages.Message message = CoopMessages.optionsSnapshot(sessionId, service.nextSeq(),
+                clockMillis.getAsLong(), optionsPolicy.values(), version,
+                optionsPolicy.lastChangedKey());
+        service.send(message);
+        log("outbound", message);
+        lastSentOptionsVersion = version;
+    }
+
+    /**
+     * Guest: adopt the host's policy wholesale.
+     *
+     * <p>Session-gated like every other campaign message: a snapshot that arrives before the
+     * lobby/handshake/seed-lock pipeline has run on this connection would be a stranger setting the
+     * rules of a campaign it has not joined.
+     */
+    private void handleOptionsSnapshot(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        CoopMessages.OptionsSnapshot snapshot;
+        try {
+            snapshot = CoopMessages.parseOptionsSnapshot(message);
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not read an OPTIONS_SNAPSHOT", ex);
+            return;
+        }
+        coop.config.CoopOptionsPolicy.SnapshotResult result = optionsPolicy.applySnapshot(
+                snapshot.values(), snapshot.policyVersion(), snapshot.changedKey());
+        if (result.stale()) {
+            return;
+        }
+        String changed = snapshot.changedKey();
+        if (changed.isEmpty() || !result.changedKeys().contains(changed)) {
+            // An establish/resume broadcast, or a re-send of something we already hold: the values
+            // are now right either way, and there is no event to narrate.
+            return;
+        }
+        postOptionsFeedLine(changed, optionsPolicy.effective(changed), false);
+    }
+
+    /**
+     * One banner and one intel-page event for a policy change.
+     *
+     * <p>Throttled per key <em>and value</em>: a player flipping a toggle back and forth gets both
+     * lines, while a peer that alternates a value at wire speed gets one line per direction per 30 s
+     * instead of a scrolling wall. Feed lines are the one part of this that a remote peer can drive.
+     */
+    private void postOptionsFeedLine(String key, String value, boolean local) {
+        postFeed(FEED_OPTIONS + ":" + key + "=" + value, clockMillis.getAsLong(),
+                coop.ui.CoopOptionsView.changeLine(key, value, local), FEED_WARN_COLOR);
+    }
+
     /** Host: the countdown ran out, so the session starts. */
     private void releaseLobbyNow(long now, boolean startAnyway) {
         long seconds = Math.max(0L, now - lobbyOpenedAtMillis) / 1000L;
@@ -2555,6 +2713,10 @@ public class CoopNetPump implements EveryFrameScript {
         // Phase 21: after the lobby, so the release that starts the session is already visible and
         // isSessionPlayable() is true on the very frame the first sample is taken.
         tickSessionStats(clockMillis.getAsLong());
+        // Phase 28 M2: after the drain (a snapshot that landed this frame is already applied) and
+        // before syncSharedPause, which is the one consumer that reads the policy this frame.
+        tickOptionsPolicy();
+        t = profiler.split(SECTION_OPTIONS_POLICY, t);
         maybeHoldPausedUntilSessionReady();
         t = profiler.split(SECTION_HOLD_PAUSED, t);
         // Phase 14 runs before syncSharedPause so a battle that began (or ended) this frame is already
@@ -3291,6 +3453,10 @@ public class CoopNetPump implements EveryFrameScript {
         // tick can be applied to anything.
         lastSentRosterHash = "";
         rosterCache.reset();
+        // Phase 28 M2: the returning peer may have missed a policy change while it was gone, and
+        // the resume broadcast the plan asks for is exactly this one line - the periodic comparison
+        // in maybeSendOptionsSnapshot does the rest.
+        lastSentOptionsVersion = -1;
         // The returning guest's clock is frozen until the first snapshot lands, so it does not wait
         // out the 5 Hz cadence; the guest snapshot is cheap and re-establishes the save material.
         nextTimeSnapshotAtMillis = 0L;
@@ -3489,6 +3655,7 @@ public class CoopNetPump implements EveryFrameScript {
             case READY_STATE -> handleReadyState(message);
             case SESSION_STATS -> handleSessionStats(message);
             case SHIP_LOST -> handleShipLost(message);
+            case OPTIONS_SNAPSHOT -> handleOptionsSnapshot(message);
             case LOBBY_STATUS -> handleLobbyStatus(message);
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
@@ -4505,7 +4672,22 @@ public class CoopNetPump implements EveryFrameScript {
         // Screen pause: a level forwarded only when it changes (open/close of a blocking screen).
         try {
             SectorAPI sector = Global.getSector();
-            boolean screenOpen = sector != null && isVanillaBlockingScreenOpen(sector);
+            CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
+            boolean dialogOrMenu = ui != null && isBlockingDialogOrMenuOpen(ui);
+            boolean coreTab = ui != null && isCoreTabOpen(ui);
+            if (!dialogOrMenu && !coreTab) {
+                // Phase 28 M2, the NEXT_SCREEN_TOGGLE boundary. Nothing is open, so a flip that
+                // arrived while a screen WAS open takes effect now - before the next open, and
+                // never underneath one. This is the whole of "a flip does not yank the pause out
+                // from under a screen the guest already has open".
+                optionsPolicy.advanceBoundary(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS);
+            }
+            // The two hardwired intents are not negotiable: an interaction dialog pauses because the
+            // Phase 12 market model trades against open-time state (correctness, not comfort), and
+            // the in-game menu pauses because the player has left the game. Only the core tabs -
+            // map/fleet/character/refit/cargo/intel, all local-only views - are behind the policy.
+            boolean screenOpen = dialogOrMenu || (coreTab && optionsPolicy.appliedBool(
+                    coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
             if (pauseCoordinator.updateGuestScreenLevel(screenOpen)) {
                 sendPauseIntent(CoopMessages.PauseSource.SCREEN, screenOpen);
             }
@@ -4531,17 +4713,38 @@ public class CoopNetPump implements EveryFrameScript {
         log("outbound", message);
     }
 
+    /**
+     * The full predicate: every vanilla screen that takes the keyboard away from the campaign.
+     *
+     * <p><b>Still the whole thing, deliberately.</b> Phase 28 split the shared-pause intent into two
+     * terms so {@code coop.pauseOnGuestScreens} can drop the core-tab half, but the guest input
+     * blocker's suspend logic ({@code syncGuestInputBlocker}) must keep using all of it: what it
+     * asks is "does a screen own the keyboard", which is true whatever the pause policy says. Wiring
+     * the option in here instead would trap the guest inside its own dialogs the moment the world
+     * was allowed to keep running - the exact failure the suspend logic exists to prevent.
+     */
     private static boolean isVanillaBlockingScreenOpen(SectorAPI sector) {
         CampaignUIAPI ui = sector.getCampaignUI();
         if (ui == null) {
             return false;
         }
-        // The core UI tabs (map/fleet/character/refit/cargo/intel) plus interaction dialogs and the
-        // in-game menu are the vanilla-blocking screens that should pause the shared world so the
-        // guest can read/plan without the host's world running on.
-        return ui.isShowingDialog()
-                || ui.isShowingMenu()
-                || ui.getCurrentCoreTab() != null;
+        return isBlockingDialogOrMenuOpen(ui) || isCoreTabOpen(ui);
+    }
+
+    /**
+     * The half of the predicate that pauses the shared world no matter what the policy says: an
+     * interaction dialog (Phase 12 market correctness) or the in-game menu.
+     */
+    private static boolean isBlockingDialogOrMenuOpen(CampaignUIAPI ui) {
+        return ui.isShowingDialog() || ui.isShowingMenu();
+    }
+
+    /**
+     * The half {@code coop.pauseOnGuestScreens} governs: the vanilla core tabs
+     * (map/fleet/character/refit/cargo/intel), all of them local-only views.
+     */
+    private static boolean isCoreTabOpen(CampaignUIAPI ui) {
+        return ui.getCurrentCoreTab() != null;
     }
 
     private void handlePauseIntent(CoopMessages.Message message) {
@@ -6574,6 +6777,15 @@ public class CoopNetPump implements EveryFrameScript {
         }
         long now = clockMillis.getAsLong();
         linkSupervisionArmed = active;
+        // Phase 28 M2: the peer on the other side of this edge has been told nothing, so the next
+        // frame owes it the whole policy. On the way out, a guest also forgets the host's rules -
+        // a campaign that keeps running solo must not still be living under a policy nobody is
+        // broadcasting (and whose default is the safe, pre-Phase-28 behaviour).
+        lastSentOptionsVersion = -1;
+        if (!active && service.role() != CoopConnectionRole.HOST) {
+            optionsPolicy.clearSyncedView();
+            lastAnnouncedOptionsVersion = -1;
+        }
         // Silent on both edges: a session starting or ending is not a connection event the player
         // needs a banner for.
         applyStateStreamFallback(false, active ? "session started" : "session ended", false, now);

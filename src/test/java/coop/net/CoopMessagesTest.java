@@ -675,4 +675,57 @@ class CoopMessagesTest {
     // (private members are class-private, not package-private). Not asserted here; verified by
     // reading CoopNetPump.java instead — SESSION_STATS and SHIP_LOST are absent from its
     // allowedDuringReconnectGrace switch.
+
+    // ---- Phase 28 milestone 2: OPTIONS_SNAPSHOT ---------------------------------------------------
+
+    @Test
+    void optionsSnapshotRoundTripsThroughTheEnvelope() {
+        java.util.Map<String, String> values = new java.util.LinkedHashMap<>();
+        values.put(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false");
+        values.put(coop.config.CoopOptionsRegistry.MAX_GUESTS, "1");
+        values.put(coop.config.CoopOptionsRegistry.INCOME_SPLIT, "host-banks");
+
+        CoopMessages.Message message = CoopMessages.optionsSnapshot("session-a", 21L, 4200L,
+                values, 6, coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS);
+        CoopMessages.OptionsSnapshot decoded = CoopMessages.parseOptionsSnapshot(
+                CoopMessages.decode(CoopMessages.encode(message)));
+
+        assertEquals(CoopMessages.Type.OPTIONS_SNAPSHOT, message.type());
+        assertEquals(values, decoded.values());
+        assertEquals(6, decoded.policyVersion());
+        assertEquals(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, decoded.changedKey());
+    }
+
+    @Test
+    void optionsSnapshotCarriesAnEmptyChangedKeyForTheEstablishBroadcast() {
+        CoopMessages.OptionsSnapshot decoded = CoopMessages.parseOptionsSnapshot(
+                CoopMessages.optionsSnapshot("session-a", 1L, 10L, Map.of(), 1, null));
+
+        assertEquals("", decoded.changedKey());
+        assertTrue(decoded.values().isEmpty());
+        assertEquals(1, decoded.policyVersion());
+    }
+
+    @Test
+    void optionsSnapshotIgnoresBookkeepingFieldsAsValues() {
+        CoopMessages.OptionsSnapshot decoded = CoopMessages.parseOptionsSnapshot(
+                CoopMessages.optionsSnapshot("session-a", 2L, 20L,
+                        Map.of(coop.config.CoopOptionsRegistry.LOOT_SPLIT, "equal"), 3, ""));
+
+        assertEquals(Map.of(coop.config.CoopOptionsRegistry.LOOT_SPLIT, "equal"), decoded.values());
+        assertFalse(decoded.values().containsKey("policyVersion"));
+        assertFalse(decoded.values().containsKey("changedKey"));
+    }
+
+    @Test
+    void optionsSnapshotSurvivesAValueWithQuotesInIt() {
+        CoopMessages.OptionsSnapshot decoded = CoopMessages.parseOptionsSnapshot(
+                CoopMessages.decode(CoopMessages.encode(CoopMessages.optionsSnapshot(
+                        "session-a", 3L, 30L,
+                        Map.of(coop.config.CoopOptionsRegistry.PARTNER_COLOR, "a \"quoted\" value"),
+                        2, coop.config.CoopOptionsRegistry.PARTNER_COLOR))));
+
+        assertEquals("a \"quoted\" value",
+                decoded.values().get(coop.config.CoopOptionsRegistry.PARTNER_COLOR));
+    }
 }

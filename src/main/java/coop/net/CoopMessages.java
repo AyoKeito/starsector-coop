@@ -137,7 +137,20 @@ public final class CoopMessages {
          * Guest &rarr; host: one hull the guest lost, feeding {@code CoopSessionStats#noteShipLost}
          * on the host, which is the tally owner.
          */
-        SHIP_LOST
+        SHIP_LOST,
+        /**
+         * Phase 28 milestone 2: host &rarr; guest, the whole host-authoritative policy for this
+         * campaign - every {@code CoopOptionsRegistry.Tier#POLICY} key, a monotonic
+         * {@code policyVersion}, and the {@code changedKey} that caused this send (empty for the
+         * establish/resume broadcasts). A full replacement, so a guest can never be left holding a
+         * key from an older session.
+         *
+         * <p>Sent when the lobby releases, again on every resume, and on every host change.
+         * Deliberately <b>not</b> on the reconnect-grace whitelist
+         * ({@code CoopNetPump#allowedDuringReconnectGrace}): an unproven peer must not be able to
+         * rewrite the rules of a session it has not yet proved it belongs to.
+         */
+        OPTIONS_SNAPSHOT
     }
 
     /**
@@ -1023,6 +1036,75 @@ public final class CoopMessages {
                     Boolean.parseBoolean(fields.get(3)), reconnecting, fields.get(5)));
         }
         return players;
+    }
+
+    // ---- Phase 28: host policy options -------------------------------------------------------------
+
+    /**
+     * Decoded {@link Type#OPTIONS_SNAPSHOT}.
+     *
+     * @param values        every policy key the host sent, in wire order. Values are raw strings;
+     *                      the registry validates them on the way in, so a key this build does not
+     *                      know about is simply ignored rather than being able to break the parse.
+     * @param policyVersion the host's monotonic counter for this campaign. A guest refuses a
+     *                      snapshot older than the one it holds, which is what stops a late
+     *                      duplicate after a resume from walking the policy backwards.
+     * @param changedKey    the single key whose change caused this send, or "" for the periodic
+     *                      establish/resume broadcasts
+     */
+    public record OptionsSnapshot(Map<String, String> values, int policyVersion, String changedKey) {
+        public OptionsSnapshot {
+            values = values == null ? Map.of() : Map.copyOf(values);
+            changedKey = changedKey == null ? "" : changedKey;
+        }
+    }
+
+    /**
+     * Host &rarr; guest: the whole policy, flat.
+     *
+     * <p>Flat because the envelope's parser is flat by design and because the payload <em>is</em> a
+     * key/value map - there is nothing here that wants a nested shape. The two bookkeeping fields
+     * cannot collide with an option: every registry key starts with {@code coop.}, and these two do
+     * not.
+     */
+    public static Message optionsSnapshot(String sessionId, long seq, long sentAtMillis,
+                                          Map<String, String> values, int policyVersion,
+                                          String changedKey) {
+        StringBuilder json = new StringBuilder(256);
+        json.append('{');
+        if (values != null) {
+            for (Map.Entry<String, String> entry : values.entrySet()) {
+                if (entry.getKey() == null) {
+                    continue;
+                }
+                json.append('"').append(escapeJson(entry.getKey())).append("\":\"")
+                        .append(escapeJson(entry.getValue() == null ? "" : entry.getValue()))
+                        .append("\",");
+            }
+        }
+        json.append("\"policyVersion\":").append(policyVersion).append(',');
+        json.append("\"changedKey\":\"")
+                .append(escapeJson(changedKey == null ? "" : changedKey)).append("\"}");
+        return new Message(Type.OPTIONS_SNAPSHOT, requireText(sessionId, "sessionId"), seq,
+                sentAtMillis, json.toString());
+    }
+
+    public static OptionsSnapshot parseOptionsSnapshot(Message message) {
+        Map<String, Object> payload = decodePayload(message);
+        Map<String, String> values = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : payload.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || !key.startsWith("coop.")) {
+                continue;
+            }
+            Object value = entry.getValue();
+            values.put(key, value == null ? "" : String.valueOf(value));
+        }
+        Object version = payload.get("policyVersion");
+        int policyVersion = version instanceof Long value ? (int) Math.max(0L, (long) value) : 0;
+        Object changed = payload.get("changedKey");
+        return new OptionsSnapshot(values, policyVersion,
+                changed instanceof String text ? text : "");
     }
 
     // ---- Session stats + ship-loss reporting -------------------------------------------------------

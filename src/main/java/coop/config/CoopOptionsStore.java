@@ -45,9 +45,10 @@ import java.util.function.Function;
  * question early would pin "there is no settings file" for the rest of the process. The property layer is read live, because
  * {@code System.setProperty} is how tests and the launch scripts arrange a run.
  *
- * <p><b>Policy tier.</b> Milestone 1 reads {@link CoopOptionsRegistry.Tier#POLICY} keys through this
- * same stack. Milestone 2 adds the per-campaign store and the {@code OPTIONS_SNAPSHOT} broadcast, at
- * which point this becomes the host's seed value rather than the effective one.
+ * <p><b>Policy tier.</b> {@link CoopOptionsRegistry.Tier#POLICY} keys read through this stack are the
+ * value a <em>new</em> campaign is seeded with, not the value in force: once a campaign exists,
+ * {@link CoopOptionsPolicy} owns those keys out of the campaign's own save and syncs them to the
+ * guest. {@link #writeOverride} refuses them for the same reason.
  */
 public final class CoopOptionsStore {
 
@@ -92,6 +93,19 @@ public final class CoopOptionsStore {
 
         /** The user's {@code saves/common/coop_options.json}, or {@code null} when absent. */
         JSONObject common();
+
+        /**
+         * Replaces {@code saves/common/coop_options.json} with {@code json} and makes the new
+         * content what {@link #common()} returns from here on.
+         *
+         * <p>Default: refuse. A source that cannot write says so rather than pretending, so the
+         * options page can tell the player the setting did not stick.
+         *
+         * @return true when the file was written
+         */
+        default boolean writeCommon(JSONObject json) {
+            return false;
+        }
 
         /** Drops any memoised read so the next call hits the engine again. */
         default void invalidate() {
@@ -265,6 +279,84 @@ public final class CoopOptionsStore {
             return Source.SHIPPED;
         }
         return Source.DEFAULT;
+    }
+
+    /**
+     * Phase 28 milestone 3: writes one user override into {@code saves/common/coop_options.json}.
+     *
+     * <p>The file is rewritten whole from the override map that is already loaded, with this key
+     * replaced (or removed, for a null {@code value}, which puts the key back to the shipped
+     * default). Keys this build does not know about are carried through untouched: a settings file
+     * written by a newer version of the mod must not be silently trimmed by an older one.
+     *
+     * <p><b>Not for policy or {@code -D}-only keys.</b> A policy value belongs to a campaign and is
+     * written by {@link CoopOptionsPolicy}; a {@code -D}-only key is deliberately not file-backed.
+     * Both are refused rather than written somewhere they would be ignored.
+     *
+     * <p>Failure is one WARN and {@code false} - never an exception, and the checked type the engine
+     * declares is caught as {@code Exception} so this class never names it (see the class javadoc).
+     *
+     * @param value the new value, or {@code null} to drop the override entirely
+     * @return true when the file was written
+     */
+    public boolean writeOverride(String key, String value) {
+        CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
+        if (option.dOnly()) {
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
+                    + " is a command-line-only setting and is not written to a file");
+            return false;
+        }
+        if (option.tier() == CoopOptionsRegistry.Tier.POLICY) {
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
+                    + " is host policy and belongs to the campaign, not to " + COMMON_FILE);
+            return false;
+        }
+        JSONObject json = new JSONObject();
+        try {
+            JSONObject existing = safeCommon();
+            if (existing != null) {
+                Iterator<?> keys = existing.keys();
+                while (keys.hasNext()) {
+                    Object rawKey = keys.next();
+                    if (rawKey == null) {
+                        continue;
+                    }
+                    String name = rawKey.toString();
+                    if (name.equals(key)) {
+                        continue;
+                    }
+                    Object existingValue = existing.opt(name);
+                    if (existingValue != null && !JSONObject.NULL.equals(existingValue)) {
+                        json.put(name, existingValue);
+                    }
+                }
+            }
+            if (value != null) {
+                json.put(key, option.coerce(value).value());
+            }
+        } catch (Exception | LinkageError ex) {
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: could not compose "
+                    + COMMON_FILE + "; " + key + " was not saved", ex);
+            return false;
+        }
+        boolean written;
+        try {
+            written = source.writeCommon(json);
+        } catch (Exception | LinkageError ex) {
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: could not write saves/common/"
+                    + COMMON_FILE + "; " + key + " was not saved", ex);
+            return false;
+        }
+        if (!written) {
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+                    + " is not writable here; " + key + " was not saved");
+            return false;
+        }
+        // The layer is re-derived from what was just written, so the next read reflects the change
+        // without waiting for a relaunch. The warning memory survives: a bad value elsewhere in the
+        // file has already been reported and does not need reporting again per edit.
+        commonLayer = null;
+        return true;
     }
 
     /** Re-reads both file layers and clears the once-per-key warning memory. */
@@ -471,6 +563,34 @@ public final class CoopOptionsStore {
                         + " could not be read; " + COMMON_CONSEQUENCE, ex);
             }
             return commonJson;
+        }
+
+        /**
+         * Writes the file and adopts the written content as the memoised read, so the next
+         * {@link #common()} returns what is on disk without a re-read.
+         *
+         * <p>{@code onlyIfChanged=true}: the engine skips the write when the content is identical,
+         * which turns a page that re-saves the same value into no disk traffic at all.
+         */
+        @Override
+        public synchronized boolean writeCommon(JSONObject json) {
+            if (json == null) {
+                return false;
+            }
+            SettingsAPI settings = settings();
+            if (settings == null) {
+                return false;
+            }
+            try {
+                settings.writeJSONToCommon(COMMON_FILE, json, true);
+            } catch (Exception | LinkageError ex) {
+                CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+                        + " could not be written; the setting holds for this session only", ex);
+                return false;
+            }
+            commonJson = json;
+            commonRead = true;
+            return true;
         }
 
         /** {@code null} until the engine exists; never throws. */

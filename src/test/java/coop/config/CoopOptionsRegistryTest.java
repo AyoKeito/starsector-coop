@@ -35,7 +35,28 @@ class CoopOptionsRegistryTest {
             assertNotNull(option.defaultValue(), option.key() + " has a null default");
             assertFalse(option.owner().isBlank(), option.key() + " has no owning phase");
             assertFalse(option.appliesAt().isBlank(), option.key() + " has no apply boundary");
+            assertNotNull(option.boundary(), option.key() + " has no machine-readable boundary");
             assertFalse(option.description().isBlank(), option.key() + " has no description");
+        }
+    }
+
+    /**
+     * Phase 28 milestone 2: the words and the enum must agree, because the page prints one and the
+     * policy enforces the other. Only the two spellings that carry behaviour are pinned - the rest
+     * of the vocabulary ("next launch", "next new game") is prose the enum deliberately folds into
+     * {@link CoopOptionsRegistry.ApplyBoundary#NEXT_CONNECTION}.
+     */
+    @Test
+    void theBoundaryEnumAgreesWithTheWordsForTheKeysThatHaveConsumers() {
+        assertEquals(CoopOptionsRegistry.ApplyBoundary.NEXT_SCREEN_TOGGLE,
+                CoopOptionsRegistry.require(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS).boundary());
+        assertEquals(CoopOptionsRegistry.ApplyBoundary.NEXT_DROP,
+                CoopOptionsRegistry.require(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS).boundary());
+        for (Option option : CoopOptionsRegistry.options()) {
+            if ("immediately".equals(option.appliesAt())) {
+                assertEquals(CoopOptionsRegistry.ApplyBoundary.IMMEDIATE, option.boundary(),
+                        option.key() + " says immediately but does not declare IMMEDIATE");
+            }
         }
     }
 
@@ -190,7 +211,8 @@ class CoopOptionsRegistryTest {
     @Test
     void anEnumOptionMustDeclareItsValues() {
         assertThrows(IllegalArgumentException.class, () -> new Option("coop.x", Type.ENUM,
-                Tier.CLIENT, "a", false, false, 0, 0, List.of(), "test", "immediately", "doc"));
+                Tier.CLIENT, "a", false, false, 0, 0, List.of(), "test", "immediately",
+                CoopOptionsRegistry.ApplyBoundary.IMMEDIATE, "doc"));
     }
 
     @Test

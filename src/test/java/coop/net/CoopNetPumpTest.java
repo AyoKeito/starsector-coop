@@ -528,9 +528,10 @@ class CoopNetPumpTest {
 
         pump.advance(0f);
 
-        assertEquals(1, service.sent.size());
-        CoopMessages.Message accept = service.sent.get(0);
-        assertEquals(CoopMessages.Type.INTERACTION_ACCEPT, accept.type());
+        // Phase 28 M2: a live host session also owes the guest one OPTIONS_SNAPSHOT on its first
+        // frame, so this counts the interaction traffic by type rather than counting everything.
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT));
+        CoopMessages.Message accept = lastOfType(service, CoopMessages.Type.INTERACTION_ACCEPT);
         assertEquals("market-1", CoopMessages.requiredPayloadString(accept, "entityId"));
         assertEquals("host-player", CoopMessages.requiredPayloadString(accept, "playerId"));
         assertEquals("Jangala", CoopMessages.requiredPayloadString(accept, "entityName"));
@@ -539,8 +540,8 @@ class CoopNetPumpTest {
         ui.target = null;
         pump.advance(0f);
 
-        assertEquals(2, service.sent.size());
-        CoopMessages.Message release = service.sent.get(1);
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_RELEASE));
+        CoopMessages.Message release = lastOfType(service, CoopMessages.Type.INTERACTION_RELEASE);
         assertEquals(CoopMessages.Type.INTERACTION_RELEASE, release.type());
         assertEquals("market-1", CoopMessages.requiredPayloadString(release, "entityId"));
         assertEquals("host-player", CoopMessages.requiredPayloadString(release, "playerId"));
@@ -3969,6 +3970,8 @@ class CoopNetPumpTest {
         private boolean paused;
         private final RecordingCampaignUi campaignUi;
         private final RecordingFleet playerFleet;
+        /** Phase 28: where the campaign's option policy is stored, beside coop.campaignId. */
+        private final java.util.Map<String, Object> persistentData = new java.util.LinkedHashMap<>();
 
         private RecordingSector(boolean paused) {
             this(paused, null, null);
@@ -4012,6 +4015,9 @@ class CoopNetPumpTest {
                             case "getIntelManager", "getClock" -> {
                                 return null;
                             }
+                            case "getPersistentData" -> {
+                                return persistentData;
+                            }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
                     });
@@ -4021,6 +4027,8 @@ class CoopNetPumpTest {
     private static final class RecordingCampaignUi {
         private RecordingEntity target;
         private boolean showingMenu;
+        /** Phase 28: a vanilla core tab (map/fleet/cargo/...) being open, or null for none. */
+        private Object coreTab;
         private int disallowInteractionCount;
         private int dismissCount;
         /**
@@ -4061,7 +4069,7 @@ class CoopNetPumpTest {
                                 return showingMenu;
                             }
                             case "getCurrentCoreTab" -> {
-                                return null;
+                                return coreTab;
                             }
                             case "setDisallowPlayerInteractionsForOneFrame" -> {
                                 disallowInteractionCount++;
@@ -5603,5 +5611,209 @@ class CoopNetPumpTest {
             }
         }
         return found;
+    }
+
+    // ---- Phase 28 milestone 2: host policy options -----------------------------------------------
+
+    /** The core tab the fake UI reports as open; any non-null value is "a core tab is up". */
+    private static final Object CORE_TAB = com.fs.starfarer.api.campaign.CoreUITabId.MAP;
+
+    private static CoopMessages.Message lastPauseIntent(RecordingNetService service) {
+        return lastOfType(service, CoopMessages.Type.PAUSE_INTENT);
+    }
+
+    private static CoopMessages.Message optionsSnapshotFor(String key, String value, int version) {
+        return CoopMessages.optionsSnapshot("session-a", 99L, 1000L,
+                java.util.Map.of(key, value), version, key);
+    }
+
+    @Test
+    void theHostBroadcastsThePolicyOnceTheSessionIsPlayable() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeHostSession(), new AtomicLong(1000L)::get);
+
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.OPTIONS_SNAPSHOT),
+                "one snapshot behind the release, and not one per frame after it");
+        CoopMessages.OptionsSnapshot snapshot = CoopMessages.parseOptionsSnapshot(
+                lastOfType(service, CoopMessages.Type.OPTIONS_SNAPSHOT));
+        assertEquals(coop.config.CoopOptionsPolicy.FIRST_VERSION, snapshot.policyVersion());
+        assertEquals("true",
+                snapshot.values().get(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+        assertEquals("", snapshot.changedKey(), "seeding a campaign is not a change to narrate");
+    }
+
+    @Test
+    void theHostSeedsThisCampaignsPolicyIntoItsPersistentData() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, activeHostSession(), new AtomicLong(1000L)::get);
+
+        pump.advance(0f);
+
+        assertEquals("true", sector.persistentData.get(
+                coop.config.CoopOptionsPolicy.PERSIST_PREFIX
+                        + coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+        assertEquals("1", sector.persistentData.get(
+                coop.config.CoopOptionsPolicy.PERSIST_VERSION_KEY));
+    }
+
+    @Test
+    void aHostChangeSendsANewSnapshotNamingTheChangedKey() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeHostSession(), new AtomicLong(1000L)::get);
+        pump.advance(0f);
+
+        assertTrue(pump.optionsPolicy().set(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false"));
+        pump.advance(0f);
+
+        assertEquals(2, countOfType(service, CoopMessages.Type.OPTIONS_SNAPSHOT));
+        CoopMessages.OptionsSnapshot snapshot = CoopMessages.parseOptionsSnapshot(
+                lastOfType(service, CoopMessages.Type.OPTIONS_SNAPSHOT));
+        assertEquals(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, snapshot.changedKey());
+        assertEquals("false",
+                snapshot.values().get(coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+        assertEquals(coop.config.CoopOptionsPolicy.FIRST_VERSION + 1, snapshot.policyVersion());
+    }
+
+    @Test
+    void theGuestAdoptsTheHostPolicyAndRefusesAStaleOne() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+        service.inbound.add(optionsSnapshotFor(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false", 4));
+
+        pump.advance(0f);
+
+        assertEquals("false", pump.optionsPolicy().effective(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+        assertEquals(4, pump.optionsPolicy().version());
+
+        service.inbound.add(optionsSnapshotFor(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "true", 3));
+        pump.advance(0f);
+
+        assertEquals("false", pump.optionsPolicy().effective(
+                        coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS),
+                "a stale snapshot after a resume must not walk the policy backwards");
+        assertEquals(4, pump.optionsPolicy().version());
+    }
+
+    @Test
+    void aGuestNeverSendsAnOptionsSnapshot() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.OPTIONS_SNAPSHOT));
+    }
+
+    // ---- Phase 28 milestone 2: coop.pauseOnGuestScreens -------------------------------------------
+
+    @Test
+    void byDefaultAGuestsCoreTabStillPausesTheSharedWorld() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+        pump.advance(0f);
+        assertEquals(0, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+
+        ui.coreTab = CORE_TAB;
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+        assertEquals("true", CoopMessages.requiredPayloadString(lastPauseIntent(service), "paused"));
+        assertEquals("SCREEN", CoopMessages.requiredPayloadString(lastPauseIntent(service), "source"));
+    }
+
+    @Test
+    void aPolicyFlipNeverYanksThePauseOutFromUnderAnOpenScreen() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+
+        // The guest opens a core tab under the default policy: the shared world stops.
+        ui.coreTab = CORE_TAB;
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+        assertEquals("true", CoopMessages.requiredPayloadString(lastPauseIntent(service), "paused"));
+
+        // The host turns the option off while that tab is still open.
+        service.inbound.add(optionsSnapshotFor(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false", 2));
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.PAUSE_INTENT),
+                "the pause the guest is already holding must survive the flip");
+        assertTrue(pump.optionsPolicy().hasPendingChange(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+
+        // Closing the tab is the boundary: the pause lifts and the new value takes effect.
+        ui.coreTab = null;
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+        assertEquals("false", CoopMessages.requiredPayloadString(lastPauseIntent(service), "paused"));
+        assertFalse(pump.optionsPolicy().hasPendingChange(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+
+        // And the next open does not pause at all.
+        ui.coreTab = CORE_TAB;
+        pump.advance(0f);
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.PAUSE_INTENT),
+                "with the option off a core tab is a local view, not a reason to stop the world");
+    }
+
+    @Test
+    void interactionDialogsStillPauseWhateverThePolicySays() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), new AtomicLong(1000L)::get);
+        service.inbound.add(optionsSnapshotFor(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false", 2));
+        pump.advance(0f);
+        assertEquals(0, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+
+        // The in-game menu is the other hardwired intent; neither is behind the option.
+        ui.showingMenu = true;
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+        assertEquals("true", CoopMessages.requiredPayloadString(lastPauseIntent(service), "paused"));
+    }
+
+    @Test
+    void aGuestGoesBackToTheSafeDefaultWhenTheSessionEnds() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, new AtomicLong(1000L)::get);
+        service.inbound.add(optionsSnapshotFor(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false", 2));
+        pump.advance(0f);
+        assertEquals("false", pump.optionsPolicy().effective(
+                coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
+
+        session.reset();
+        pump.advance(0f);
+
+        assertEquals("true", pump.optionsPolicy().effective(
+                        coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS),
+                "a campaign that keeps running solo is not still under the host's rules");
+        assertEquals(0, pump.optionsPolicy().version());
     }
 }

@@ -26,6 +26,8 @@ class CoopOptionsStoreTest {
         private JSONObject common;
         private int shippedReads;
         private int commonReads;
+        private int writes;
+        private boolean writable = true;
         private RuntimeException failure;
 
         @Override
@@ -44,6 +46,16 @@ class CoopOptionsStoreTest {
                 throw failure;
             }
             return common;
+        }
+
+        @Override
+        public boolean writeCommon(JSONObject json) {
+            if (!writable) {
+                return false;
+            }
+            writes++;
+            common = json;
+            return true;
         }
 
         @Override
@@ -385,5 +397,72 @@ class CoopOptionsStoreTest {
         // Global.getSettings() is null outside a running game; the store must degrade, not throw.
         assertEquals("auto", store.raw("coop.portMapping"));
         assertEquals("1", store.raw("coop.maxGuests"));
+    }
+
+    // ---- Phase 28 milestone 3: writing the user's own overrides ----------------------------------
+
+    @Test
+    void writeOverrideRoundTripsThroughTheCommonLayer() {
+        FakeSource source = new FakeSource();
+        source.shipped = json(Map.of(CoopOptionsRegistry.HUD_CORNER, "TR"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertEquals("TR", store.string(CoopOptionsRegistry.HUD_CORNER));
+        assertTrue(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "BL"));
+
+        assertEquals(1, source.writes);
+        assertEquals("BL", store.string(CoopOptionsRegistry.HUD_CORNER),
+                "the store must read its own write back without a relaunch");
+        assertEquals(Source.COMMON, store.sourceOf(CoopOptionsRegistry.HUD_CORNER));
+    }
+
+    @Test
+    void writeOverrideValidatesTheValueAndKeepsUnknownKeys() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of("coop.somethingFromANewerBuild", "keep me"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertTrue(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "bl"));
+
+        assertEquals("BL", source.common.opt(CoopOptionsRegistry.HUD_CORNER),
+                "the value is canonicalised on the way in");
+        assertEquals("keep me", source.common.opt("coop.somethingFromANewerBuild"),
+                "an older build must not trim a newer build's settings out of the file");
+    }
+
+    @Test
+    void writeOverrideWithNullDropsTheOverride() {
+        FakeSource source = new FakeSource();
+        source.shipped = json(Map.of(CoopOptionsRegistry.HUD_DISABLE, false));
+        source.common = json(Map.of(CoopOptionsRegistry.HUD_DISABLE, true));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertTrue(store.bool(CoopOptionsRegistry.HUD_DISABLE));
+        assertTrue(store.writeOverride(CoopOptionsRegistry.HUD_DISABLE, null));
+
+        assertFalse(store.bool(CoopOptionsRegistry.HUD_DISABLE));
+        assertEquals(Source.SHIPPED, store.sourceOf(CoopOptionsRegistry.HUD_DISABLE));
+    }
+
+    @Test
+    void writeOverrideRefusesPolicyAndCommandLineOnlyKeys() {
+        FakeSource source = new FakeSource();
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertFalse(store.writeOverride(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "false"),
+                "policy belongs to the campaign, not to saves/common");
+        assertFalse(store.writeOverride(CoopOptionsRegistry.NEW_GAME_SEED, "12345"),
+                "a -D-only key must never become a standing file setting");
+        assertEquals(0, source.writes);
+    }
+
+    @Test
+    void aFailedWriteIsReportedRatherThanPretendedAway() {
+        FakeSource source = new FakeSource();
+        source.writable = false;
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertFalse(store.writeOverride(CoopOptionsRegistry.HUD_CORNER, "BL"));
+        assertEquals("TR", store.string(CoopOptionsRegistry.HUD_CORNER));
     }
 }

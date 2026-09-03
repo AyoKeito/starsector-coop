@@ -23,6 +23,8 @@ import coop.stats.CoopSessionStats;
 import coop.stats.CoopSessionStatsStore;
 import coop.ui.CoopLinkHud;
 import coop.ui.CoopSessionIntel;
+import coop.config.CoopOptionsPolicy;
+import coop.ui.CoopOptionsPage;
 import coop.ui.CoopSessionStatsIntel;
 import coop.util.CoopLog;
 
@@ -94,6 +96,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // Phase 21: the "Coop Stats" page, on the same transient lifecycle. The counters themselves
         // live in the save under CoopSessionStats.PERSISTENT_KEY; only the page is recreated.
         CoopSessionStatsIntel.ensureRegistered(Global.getSector());
+        // Phase 28 milestone 3: the "Coop Options" page, same transient lifecycle again. The values
+        // it edits live in the campaign's persistent data (policy) and in saves/common (local
+        // preferences); the page itself is pure UI and holds nothing.
+        CoopOptionsPage.ensureRegistered(Global.getSector());
         // Phase 30 dev tooling, dormant unless -Dcoop.debug.bridge=<port> is set: no socket, no log
         // line and no script when it is absent. Installed here rather than inside the pump because it
         // has to answer before and without a coop session, and always as a TRANSIENT script — it owns
@@ -122,6 +128,9 @@ public class CoopModPlugin extends BaseModPlugin {
         // all - over a save that has no coop session in it at all. The new pump installs its own
         // feed; this is the window between the two.
         CoopSessionIntelFeed.uninstall();
+        // Phase 28: same window, same argument. The policy belongs to the campaign the outgoing pump
+        // was playing, and the options page must not edit it into the next one.
+        CoopOptionsPolicy.uninstall();
         // Phase 21, same argument for the stats page: its source is a lambda closed over the outgoing
         // pump's tally, and leaving it installed would render the previous game's counters over a
         // save that has no coop session in it.
@@ -173,6 +182,7 @@ public class CoopModPlugin extends BaseModPlugin {
         CoopSessionStatsStore.writeIntoCurrentSector();
         CoopSessionIntel.remove(Global.getSector());
         CoopSessionStatsIntel.remove(Global.getSector());
+        CoopOptionsPage.remove(Global.getSector());
         // Red-team B4: both roles announce the stall a save is about to cause, flushed inline, so
         // the partner's link-death rule does not read a guest's manual save as a dead link. Last,
         // because the two calls above are what make the save correct and this one is courtesy.
@@ -192,6 +202,7 @@ public class CoopModPlugin extends BaseModPlugin {
         // here the player is back in the campaign and expects the intel screen intact.
         CoopSessionIntel.ensureRegistered(Global.getSector());
         CoopSessionStatsIntel.ensureRegistered(Global.getSector());
+        CoopOptionsPage.ensureRegistered(Global.getSector());
         CoopSaveCheckpoint.notifyLocalGameSaved(CoopSaveCheckpoint.REASON_HOST_SAVE);
     }
 }

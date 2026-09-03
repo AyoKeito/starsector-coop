@@ -17,8 +17,10 @@
 	# Tiers:
 	#   launch  - per-client, read before a session exists. There is no in-game screen for these:
 	#             the title screen has no mod API, so a file or -D is the only pre-session surface.
-	#   policy  - host-authoritative gameplay rules. Milestone 1 reads them from this same stack;
-	#             milestone 2 stores them per campaign and syncs the host's value to the guest.
+	#   policy  - host-authoritative gameplay rules. A value here SEEDS a brand-new campaign only:
+	#             once a campaign exists its rules live in its own save, and the host edits them on
+	#             the in-game "Coop Options" intel page, which also syncs them to the guest. So
+	#             editing a policy line below does not change a campaign already in progress.
 	#   client  - local presentation only, never sent over the wire.
 	#
 	# INERT below means the schema ships now but the owning phase has not wired the key yet, so
@@ -82,6 +84,9 @@
 
 	##############################################################
 	# Tier: host policy (host-authoritative gameplay rules)
+	#
+	# These seed a NEW campaign. After that the campaign's own save holds them and the host changes
+	# them on the "Coop Options" intel page; the guest sees them there read-only.
 	##############################################################
 
 	# Peer-table capacity. v1 supports exactly one guest: the transport is N-ready, the gameplay
@@ -132,12 +137,12 @@
 	# Tier: client preferences (local only, never synced)
 	##############################################################
 
-	# true skips installing the one-line coop link HUD entirely.
-	# true|false | applies: next launch | Phase 20.6
+	# true hides the one-line coop link HUD.
+	# true|false | applies: immediately | Phase 20.6 / 28
 	"coop.hud.disable":false,
 
 	# Which screen corner the link HUD anchors to.
-	# TR|TL|BR|BL | applies: next launch | Phase 20.6 / 21
+	# TR|TL|BR|BL | applies: immediately | Phase 20.6 / 21 / 28
 	"coop.hudCorner":"TR",
 
 	# How much of the coop event feed is shown.

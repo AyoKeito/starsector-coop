@@ -25,13 +25,14 @@ import java.awt.Color;
  * <p><b>Failure policy.</b> This is cosmetic; nothing it does may ever cost a frame. Every engine
  * touch runs under {@code catch (Throwable)}, and the first failure disables the instance for good
  * after exactly one log line — a HUD that stops drawing is a nuisance, a HUD that throws sixty times
- * a second in the render pass is a crash. {@code coop.hud.disable=true}, on the command line or in
- * {@code saves/common/coop_options.json}, skips installation entirely.
+ * a second in the render pass is a crash. {@code coop.hud.disable=true}, on the command line, in
+ * {@code saves/common/coop_options.json} or on the options page, hides the line; the corner and that
+ * flag are both re-read on the refresh tick, so a change from the page applies without a relaunch.
  */
 public final class CoopLinkHud implements CampaignUIRenderingListener {
 
     /**
-     * Launch flag: when true the listener is never registered. Registered in
+     * Client preference: when true the line is not drawn. Registered in
      * {@link CoopOptionsRegistry#HUD_DISABLE} and therefore settable from
      * {@code saves/common/coop_options.json} as well as {@code -D}, which is why it is read through
      * {@link CoopOptionsStore} rather than off {@code System.getProperty} - a player who turns the
@@ -56,7 +57,16 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     private static final Color PAUSED_COLOR = new Color(255, 215, 120);
 
     private final CoopNetPump pump;
-    private final CoopHudCorner corner;
+    /**
+     * Phase 28 milestone 3: no longer fixed at install. {@code coop.hudCorner} and
+     * {@code coop.hud.disable} both apply IMMEDIATE, so both are re-read on the 100 ms refresh tick
+     * below - a change made on the options page moves the line without a relaunch. Re-reading is a
+     * map lookup against the store's cached layers, which is why it can afford to be on a tick at
+     * all; it is deliberately not on the render path, which runs at 60 Hz.
+     */
+    private CoopHudCorner corner;
+    /** Re-read with the corner: true hides the line without unregistering the listener. */
+    private boolean hiddenByOption;
 
     private CoopBitmapFont font;
     private String separator = CoopHudState.SEPARATOR_PIPE;
@@ -85,9 +95,11 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
             return;
         }
         if (disabledByOption()) {
+            // Registered anyway, and drawing nothing: since Phase 28 milestone 3 this option is
+            // IMMEDIATE, and a listener that was never installed could not be turned back on from
+            // the options page without a game load.
             CoopLog.info(CoopLinkHud.class,
-                    "Coop link HUD disabled via " + DISABLE_PROPERTY + "=true");
-            return;
+                    "Coop link HUD hidden via " + DISABLE_PROPERTY + "=true");
         }
         try {
             CoopHudCorner corner = CoopNetStartupConfig.hudCornerFromSystemProperties();
@@ -156,7 +168,7 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         }
 
         refreshIfDue(sector);
-        if (cachedLine.isEmpty()) {
+        if (hiddenByOption || cachedLine.isEmpty()) {
             return;
         }
 
@@ -211,10 +223,28 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
             return;
         }
         nextRefreshAtMillis = now + REFRESH_INTERVAL_MILLIS;
+        refreshOptions();
         CoopHudState state = pump.hudState(sector.isPaused());
         cachedBadge = state.roleBadge();
         cachedPaused = state.paused();
         cachedLine = CoopHudState.formatLine(state, separator);
+    }
+
+    /**
+     * Re-reads the two IMMEDIATE client options. Wrapped rather than trusted: a settings read that
+     * throws must cost the line's position, not the line.
+     *
+     * <p>{@link #hiddenByOption} hides rather than uninstalls, because an install-time removal is
+     * the one thing that could not be undone without a game load - and a player who turns the HUD
+     * back on expects it back now.
+     */
+    private void refreshOptions() {
+        try {
+            corner = CoopNetStartupConfig.hudCornerFromSystemProperties();
+        } catch (Throwable ex) {
+            corner = CoopHudCorner.DEFAULT;
+        }
+        hiddenByOption = disabledByOption();
     }
 
     private Color badgeColor() {
