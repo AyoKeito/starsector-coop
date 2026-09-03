@@ -120,8 +120,8 @@ before ` -classpath `, each starting with `-D` and separated by spaces:
 ... -Xss4m -Dcoop.hostPort=7777 -Dcoop.newGameSeed=MN-1234567890123456789 -classpath ..\mods\coop\jars\coop-forks.jar;janino.jar;...
 ```
 
-Most of them can also go in a settings file instead; section 7 covers it. A property on the command
-line always wins over the file.
+Most of them can also go in a settings file, or be changed on a page inside the game; section 7
+covers both. A property on the command line always wins over either.
 
 ### Host
 
@@ -170,10 +170,88 @@ campaign on the same seed is refused because the host's campaign is already in f
 The `coop.debug.*` properties are diagnostics for bug reports and development; `docs/REPORTING.md`
 covers the ones a player is ever asked for.
 
-## 7. Settings file
+## 7. Changing settings
+
+Two places hold the same `coop.*` values, and the in-game one is the one to reach for.
+
+### The "Coop Options" page
+
+Open the intel screen, pick the **Coop** tag in the filter list, and open **Coop Options**. It sits
+under the same tag as the session and stats pages and it is there from the first frame of a campaign
+running under the mod, session or no session.
+
+Three groups on it:
+
+- **Session rules (host).** The rules this campaign is played under. They live in the campaign's own
+  save and the host sends them to the guest, so both of you read the same value. The host presses the
+  buttons; the guest reads each value with `(host setting)` after it and no button next to it.
+- **Your preferences.** Local to your install and never sent to your partner: whether the link HUD is
+  drawn, which corner it sits in.
+- **Connection (read at launch).** Host port, join address and port, router port mapping, password,
+  display name. Nothing reads these once a session has started, so the buttons work only while no
+  session is running; during a session each row says `takes effect at next launch` instead.
+
+Changes in the last two groups are written to `saves\common\coop_options.json` for you, and the page
+creates that file if you do not have one. A session rule goes into the campaign's save instead, and
+your partner is told in their event feed: `Co-op: the host set <name> to <value>.`
+
+The intel screen draws buttons, not text fields, so the vocabulary is short: `Turn on` / `Turn off`
+for a yes-or-no setting, `Change to <value>` to walk an enum, `Less` / `More` in 15 second steps for
+the reconnect window, and `Clear` for the password. An address, a name or a new password still has to
+be typed into the settings file, and those rows print
+`text setting - edit saves/common/coop_options.json` with no button. `Reset to defaults` at the
+bottom puts everything back to the shipped values; pressed by a guest it resets only that guest's own
+preferences.
+
+Three changes stop and ask first, with a dialog that names what you lose rather than asking whether
+you are sure: turning off the pause while a guest reads a screen, clearing the password, and moving
+the reconnect grace.
+
+### Reading a row
+
+Every value carries a tag saying where it came from:
+
+| Tag | Means |
+|---|---|
+| `(host setting)` | You are the guest, and this is one of the host's session rules. The missing button is the design, not a fault. |
+| `(this campaign)` | A session rule this campaign has stored in its save. |
+| `(command line)` | Set as `-Dcoop.<key>=` in `vmparams`. That layer outranks everything, so the row is read-only: a button that changed a value the next read would overwrite would be lying to you. |
+| `(your settings)` | It comes from your `saves\common\coop_options.json`. |
+| `(default)` | Nothing has set it and you are reading the value the mod ships with. |
+
+A session rule that cannot take effect the instant it changes shows `pending - applies <when>` under
+it until the moment arrives: `next screen open/close`, `next connection attempt`, `next drop`, `next
+battle result`, `next month tick`, `next colonization`. Nothing here applies backwards. The one that
+comes up in play is the guest-screen pause: flip it while your partner has the map open and it waits
+for them to close it, rather than pulling the pause out from under them.
+
+### Rows that do nothing yet
+
+Seven rows are on the page with the setting stored and the behaviour not built. They carry the note
+`no effect in this build - <phase> wires it`, and pressing the button changes the stored value and
+nothing else. Five of them are session rules:
+
+| Row | Note it prints |
+|---|---|
+| Guest may pause the world | `no effect in this build - Phase 25 wires it` |
+| Allow joining a session in progress | `no effect in this build - Phase 27 wires it` |
+| Battle loot split | `no effect in this build - Phase 22 wires it` |
+| Colony income split | `no effect in this build - Phase 24 wires it` |
+| Guest asks before colonizing | `no effect in this build - Phase 24 wires it` |
+
+The other two are preferences: **Event feed detail** (`Phase 20.6 wires it`) and **Partner marker
+colour** (`Phase 8 wires it`).
+
+Two further session rules work, but not the way the rest of the group does. **Maximum guests** and
+**Reconnect grace** both print
+`each install reads its own value at launch; shown here so both players can see it`, because both are
+read before any campaign exists. They are on the page so the two of you can compare them. Maximum
+guests has no buttons at all: 1 is both its bounds in this build.
+
+### The settings file
 
 The same `coop.*` names can live in a JSON file instead of on the `vmparams` line. Yours goes here,
-and you create it yourself:
+and the options page creates it the first time you change something, or you write it yourself:
 
 ```text
 <Starsector>\saves\common\coop_options.json
@@ -203,8 +281,10 @@ The reference is the copy the mod ships with:
 That file lists every key with its type, its range, its default, when a change takes effect and which
 phase owns the behaviour, in a commented block each. Read it rather than a table here; it is the
 table. It is overwritten on every mod update, so your values do not go in it. Two things to watch for
-while reading it: a key marked INERT is wired to nothing in this build, and the keys in the `policy`
-tier are read per-client today and become the host's to decide in a later milestone.
+while reading it: a key marked INERT is wired to nothing in this build, and a value in the `policy`
+tier only seeds a campaign that has never been started. Once a campaign exists its rules live in its
+own save and the host changes them on the options page, so editing a `policy` line in either file
+does nothing to a campaign already in progress.
 
 Precedence, highest first:
 
@@ -213,7 +293,10 @@ Precedence, highest first:
 3. `mods\coop\data\config\coop_options.json`
 4. the default compiled into the mod
 
-Both files are read once at launch, so a change needs a relaunch. A bad value never stops the game:
+Both files are read once at launch, so anything you type into them by hand needs a relaunch. A change
+made on the options page skips that: the page rewrites your file and the mod re-reads the key on the
+spot, though a connection setting is still only picked up when a session starts. A bad value never
+stops the game:
 an integer outside its range is clamped to the nearest bound, anything else unusable falls back to
 the default, and either way one warning goes to the log. An unrecognised key is also logged and
 skipped.

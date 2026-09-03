@@ -47,6 +47,10 @@ who is pausing, round trip, packet loss and which transport your fleet positions
 side, and a log of everything that has gone wrong this session. A "Coop Stats" page tallies the
 campaign.
 
+**Settings.** A "Coop Options" page in the same intel screen: the host sets the session's rules and
+they sync to the guest, each player sets their own preferences, and the page writes them to your
+settings file for you.
+
 **Saving.** Coordinated saves on both machines. The guest rejoins by loading its co-op save.
 
 ## What does not work, and what differs

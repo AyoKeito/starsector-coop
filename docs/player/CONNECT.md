@@ -394,6 +394,36 @@ the wire with no price attached. Guest trades still count towards "Markets trade
 
 ---
 
+## Pause while a guest reads a screen
+
+Out of the box the clock stops whenever either player opens one of the vanilla auto-pause screens,
+which is what "paused by guest's screen" on the status line is reporting. The host can turn that off
+for the guest's screens: intel screen, **Coop** tag, **Coop Options**, under **Session rules (host)**,
+the row `Pause while a guest reads a screen`. Only the host has the button. The guest reads the same
+row with `(host setting)` after it, and gets `Co-op: the host set Pause while a guest reads a screen
+to off.` in its feed when it changes.
+
+Off, the world keeps running while the guest sits in the map, fleet, character, refit, cargo or intel
+tab: fleets move, fuel burns, the month ticks. Four things still stop time whatever this is set to:
+an interaction dialog (a market is traded against the stock it had when it opened, so that pause is
+correctness rather than comfort), the in-game menu, combat, and the pause key.
+
+Turning it off asks first:
+
+> Turn off the pause while a guest reads a screen?
+>
+> The world moves while your partner reads: their map, cargo and refit screens will no longer stop
+> time for either of you. Interaction dialogs and combat still pause.
+>
+> The change takes effect the next time a screen opens or closes, never underneath one that is
+> already open.
+
+The last line is literal. Flip the setting while the guest has the map open and the row reads
+`pending - applies next screen open/close` until they close it; the pause they are already holding is
+not taken out from under them. Turning it back on waits the same way.
+
+---
+
 ## When the link drops
 
 Nothing is lost the moment a connection dies.

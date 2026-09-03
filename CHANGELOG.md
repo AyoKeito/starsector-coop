@@ -14,6 +14,15 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   trip, packet loss and which transport your fleet positions are travelling over.
 - A "Coop Session" page in the intel screen with link history, what your partner measures, and a log
   of everything that has gone wrong this session.
+- A "Coop Stats" page tallying the campaign: battles, travel, trade, colonies and every ship lost,
+  per player and as a team.
+- A "Coop Options" page. The host sets the session's rules there and they travel with the campaign's
+  save and sync to the guest; each player sets their own preferences separately.
+- Every setting also lives in a file: `saves\common\coop_options.json` for yours, which the options
+  page writes for you, and a shipped `data\config\coop_options.json` listing every key, its default
+  and when a change takes effect.
+- The host can let the world keep running while the guest reads its map, cargo or refit screen.
+  Interaction dialogs, the menu and combat still pause both games.
 
 **The world**
 
@@ -46,6 +55,11 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   session.
 - A dropped link is held for 60 seconds with a countdown on both screens, and the session picks up
   where it left off if the connection comes back.
+- A lobby in front of every session. Both games load with the world paused, the guest's five join
+  steps are on screen as they pass, and the clock starts when the host presses Start and a three
+  second countdown runs out.
+- A refused or ended session gets a dialog naming the cause and what to do about it, with a code
+  (`COOP-SEED`, `COOP-MODS`, `COOP-SESSION`) that also lands in both logs.
 - A "connection doctor" block in the log answers "why can't we connect" in one screen, on both sides.
 
 **Saving**

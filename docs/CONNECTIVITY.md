@@ -258,6 +258,22 @@ file-level role keys, so a hosting settings file does not make a `-Dcoop.connect
 "host and guest configured together" check. `docs/player/INSTALL.md` section 7 is the player-facing
 version.
 
+Milestone 2 lifts the `policy` tier out of that stack. Policy values live in
+`sector.getPersistentData()` under `coop.options.<key>` as plain strings, so no class of ours reaches
+XStream; they are seeded once from the host's install stack on the first host frame with a sector and
+host-owned from then on, which is why editing `coop_options.json` cannot rewrite a campaign already
+in progress. `CoopOptionsPolicy` holds them. The host sends the whole map as `OPTIONS_SNAPSHOT`
+whenever its version bumps (a change, the lobby release, a resume) and the guest's copy is
+snapshot-only and read-only, never file-fed. Consumers read `applied(key)` and never `effective(key)`:
+the applied value catches up only when the consumer calls `advanceBoundary(key)` at the key's
+`ApplyBoundary` (`IMMEDIATE`, `NEXT_SCREEN_TOGGLE`, `NEXT_CONNECTION`, `NEXT_DROP`,
+`NEXT_BATTLE_RESULT`, `NEXT_MONTH_TICK`, `NEXT_COLONIZATION`), which is what stops a
+`coop.pauseOnGuestScreens` flip from yanking the pause out from under a screen the guest already has
+open. One consumer exists today, in `CoopNetPump.syncGuestSharedPauseIntent`; `coop.maxGuests` and
+`coop.reconnectGraceSeconds` stay launch-read in `CoopNetStartupConfig`; the other five policy keys
+are inert until phases 22, 24, 25 and 27. Milestone 3 is the `Coop Options` intel page,
+`CoopOptionsPage` rendering a model built by `CoopOptionsView`.
+
 ---
 
 ## Lobby and desync codes
