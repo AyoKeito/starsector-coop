@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string] $TestRoot = 'K:\Starsector-coop-test',
+    # Where setup-two-client-test.ps1 put the profiles. Defaults to a sibling of the Starsector
+    # install this mod folder sits in; see scripts\coop-paths.ps1.
+    [string] $TestRoot,
     [string] $HostAddress = '127.0.0.1',
     [int] $Port = 7777,
     [string] $SeedString = 'MN-1234567890123456789',
@@ -20,6 +22,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'coop-paths.ps1')
 
 function Set-CoopVmParams {
     param(
@@ -75,10 +79,12 @@ if ($Port -lt 1 -or $Port -gt 65535) {
 # Agent bridge port for the guest instance; tools/starsector-mcp maps 'guest' to this.
 $BridgePort = 7802
 
-$profileRoot = Join-Path ([System.IO.Path]::GetFullPath($TestRoot)) 'guest'
+$testRootFull = Resolve-CoopTestRoot $TestRoot
+$profileRoot = Join-Path $testRootFull 'guest'
 $exe = Join-Path $profileRoot 'starsector.exe'
 if (-not (Test-Path -LiteralPath $exe)) {
-    throw "Missing guest test client at $exe. Run setup-two-client-test.ps1 first."
+    throw ("Missing guest test client at $exe. Run setup-two-client-test.ps1 first," +
+        " or point this script at an existing profile pair with -TestRoot '<path>'.")
 }
 
 $jvmProperties = @(

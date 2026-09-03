@@ -1,0 +1,149 @@
+# What is and is not shared
+
+Two Starsector installs, each running its own copy of the game engine, kept in agreement by messages
+over the network. The host's engine is the authority. Everything below follows from that, and none
+of it is a bug report; these are the places where two co-op campaigns differ from one solo campaign.
+
+---
+
+## Battles
+
+**You fight your own battles.** Whoever gets engaged runs the fight on their own PC and pilots it as
+normal. Your partner's fleet on your screen is a mirror, not a participant, and it cannot be pulled
+into your battle.
+
+**Your partner is paused and gets a banner**, one when your battle starts and one when it ends. There
+is no in-game view of the fight. A live-updating status panel was built and then removed: it flickered
+on every redraw, and in practice people watch over Discord screen-share, where a full-screen dialog on
+the watching client is in the way.
+
+**Both players piloting in one battle is not in this release.** It is the largest single item on the
+list of things that could come later.
+
+## Saves
+
+The host's save is the campaign. It carries the world, the colonies, the markets, and a record of what
+the guest owned as of the last time the guest reported in.
+
+The guest's save is co-op material only. It is not a solo campaign you can load later: the scripts
+that generate the world are not in it, so opening it without a host is unsupported.
+
+Both saves need the mod. Once a campaign has been played in co-op it cannot be loaded without the mod
+enabled.
+
+**Rejoining is by loading the co-op autosave, not by starting a New Game.** The mod writes a
+coordinated autosave carrying the campaign's id. A fresh campaign on the same seed is refused, because
+the host's campaign is already in flight and a brand new one is not it. There is an override for the
+case where the guest's save is genuinely gone, and it costs the guest everything they had.
+
+## Playing alone
+
+Turn the mod off for solo campaigns. With it enabled the game is under co-op rules whether or not a
+session exists, and three of those are visible immediately:
+
+- Difficulty is forced to Normal and the difficulty question is never asked.
+- The tutorial is skipped. The vanilla tutorial rewrites Galatia system state, which would pull two
+  seed-locked campaigns apart.
+- The career list has a sixth entry, "COOP TEST", that starts you in a Ziggurat with a million
+  credits. It exists so a test session has something worth fighting over.
+
+## Fast-forward
+
+Fast-forward works and both clocks move together, but the mod switches Starsector to toggle mode for
+the duration of a session, so Shift is a tap rather than a hold. Your own preference is restored when
+the session ends. Two edges to know about: leaving the campaign mid-session (exit to menu, load another
+save) leaves toggle mode on until the next session ends or you restart the game, and opening the
+vanilla settings menu during a session and clicking apply writes the forced value into your settings
+file. Neither breaks anything; both explain a "my Shift became a toggle" surprise.
+
+---
+
+## Shared, per-player, and neither
+
+**Shared.** The world and everything in it: NPC fleets, markets and their stock, colonies and their
+industries, survey levels, explored ruins, salvaged wrecks, faction reputation, and the campaign
+clock.
+
+**Per-player.** Your fleet, your cargo, your credits, your officers, your skills. Salvage loot is
+per-player by design: the world remembers that a wreck was taken, and each of you rolls your own
+contents from it. Same rule for survey data.
+
+**Neither, in this release.** Contacts, the missions contacts offer, and person bounties are local to
+each player. The guest gets no person bounties at all; the script that generates them is one of the
+ones held back so it does not spawn a second copy of the host's world.
+
+## Divergences you will actually run into
+
+**Colonies.** Both of you govern the same colonies under one faction. Two things do not line up. A
+construction bar can read differently on the two screens until the industry finishes, at which point
+the lagging side is forced to completion; the drift never grows past the gap between the two starts.
+And a colony's commodity shortage markers can disagree, because each engine solves supply for the
+whole sector on its own schedule. The host's reading is the one to trust.
+
+Also on the guest: the vanilla hostile-activity meter runs its own simulation and predicts nothing
+real, because the fleets it would spawn are suppressed. The co-op expedition warning, the one with a
+countdown, is the entry that matches the fleets actually coming.
+
+**Bar offers.** The same offers appear for both of you, from the same people, for the same
+commodities, at different tonnage and different pay. The wire carries the offer's seed and each game
+sizes the numbers against the local fleet and the local market. Both of you completing the same job is
+the point; both being quoted the same fee is not.
+
+Two smaller effects on the same screen. An offer the host has already taken keeps showing on the
+guest until the next pool update drops it, so an accept can come back "already taken". And a pirate or
+Pather base rumour is generated locally on each side, which can shuffle the whole list into a
+different order, so the two bars occasionally show different picks out of the same pool.
+
+**Surveying.** A system can be remote-surveyed once by each of you, where a solo campaign allows one
+sweep. The survey data commodity goes to whoever ran the survey; the other player gets the survey
+level without the cargo. A survey contract completes and pays when the target reads fully surveyed,
+without asking who did it, so a contract the guest is holding pays out when the host surveys the
+planet. And either player entering a system marks its planets as seen on both maps.
+
+**Weather and hyperspace.** Hyperspace storm cells and star flares are rolled independently on each
+PC. A storm only hits the fleet standing in it and both fleets are owner-authoritative, so this costs
+nothing but a different sky. Slipstreams are the same story with a visible artifact: the two of you
+see different slipstream maps, so your partner's fleet can appear to cross empty hyperspace
+impossibly fast.
+
+**The abyss.** The guest can fly into it. The deep content there (rogue stellar objects, lights,
+Threat encounters) exists on the host's engine only, so those are host experiences.
+
+**Sensor ghosts** do not appear for the guest at all. Several ghost types spawn real fleets or touch
+story state, and an independent roll on the guest would be a real divergence rather than a visual one,
+so they are held back entirely.
+
+**Markets neither of you has visited recently** can drift apart, because Starsector rerolls shop stock
+on save when the last roll is over 30 days old, and the two of you save at different moments. Docking
+converges them. Right after a guest opens a market, mercenary captains and their levels can differ for
+the second or two before the host's snapshot lands. A damaged multi-module ship in a listing arrives
+on the other side with clean modules.
+
+**Two abilities behave slightly differently for the guest.** An interdiction pulse the guest fires is
+resolved on the host at slightly the wrong radius and strength, because one of the stats behind it is
+not mirrored; the reputation cost is also charged when you start the charge-up rather than when the
+pulse lands. And a distress call the guest makes brings the responding fleet in near the host, though
+it does route to the right system.
+
+## Clocks
+
+The two campaign clocks are not identical to the second. Starsector advances its calendar in whole
+seconds per frame, so two machines drift apart structurally even at the same speed. The guest corrects
+itself continuously and the status line shows the gap once it reaches an hour of game time.
+
+Running both games on one PC has its own version of this: Starsector caps its per-frame step, so a
+minimised or background window runs its clock slow and looks from the other side like the other client
+running fast. Keep both windows restored and visible.
+
+## Networking
+
+Traffic is plaintext. Message payloads are readable by anyone on the path between you. The lobby
+password stops strangers from joining an open port; it is a gate, not encryption. A VPN (see
+`CONNECT.md`, tier 0) is the only thing that encrypts the session.
+
+One guest. The wire format can carry more and the setting exists, but any value other than 1 is
+clamped back to 1 with a warning, because the gameplay side of a third player is not built.
+
+If the host's game crashes rather than exits, the port mapping it asked the router for outlives it.
+Most routers expire it within the hour, and the mod deletes any stale mapping it finds at the next
+launch. A router that refuses timed leases keeps the port open until then.

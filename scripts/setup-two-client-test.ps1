@@ -1,34 +1,20 @@
 [CmdletBinding()]
 param(
+    # The Starsector install to clone. Defaults to the install this mod folder lives in.
     [string] $BaseInstallRoot,
-    [string] $TestRoot = 'K:\Starsector-coop-test',
+    # Where the host and guest profiles go. Defaults to a sibling of the install named
+    # <install leaf>-coop-test; see scripts\coop-paths.ps1.
+    [string] $TestRoot,
     [switch] $WhatIfOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptDir = Split-Path -Parent $PSCommandPath
+. (Join-Path $PSScriptRoot 'coop-paths.ps1')
+
 if ([string]::IsNullOrWhiteSpace($BaseInstallRoot)) {
-    $BaseInstallRoot = Join-Path $scriptDir '..\..\..'
-}
-
-function Resolve-FullPath {
-    param([Parameter(Mandatory = $true)][string] $Path)
-    return [System.IO.Path]::GetFullPath($Path)
-}
-
-function Assert-StarsectorRoot {
-    param([Parameter(Mandatory = $true)][string] $Path)
-    if (-not (Test-Path -LiteralPath (Join-Path $Path 'starsector.exe'))) {
-        throw "Missing starsector.exe under $Path"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Path 'vmparams'))) {
-        throw "Missing vmparams under $Path"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Path 'starsector-core'))) {
-        throw "Missing starsector-core under $Path"
-    }
+    $BaseInstallRoot = Get-CoopInstallRoot
 }
 
 function Invoke-RobocopyChecked {
@@ -60,12 +46,18 @@ function Invoke-RobocopyChecked {
     }
 }
 
-$baseRoot = Resolve-FullPath $BaseInstallRoot
-$testRootFull = Resolve-FullPath $TestRoot
+$baseRoot = Resolve-CoopFullPath $BaseInstallRoot
+Assert-CoopStarsectorRoot $baseRoot
+
+# Derived from the install being cloned, not from the mod's own install: -BaseInstallRoot may point
+# somewhere else entirely, and the profiles belong next to what they are copies of.
+$testRootFull = if ([string]::IsNullOrWhiteSpace($TestRoot)) {
+    Get-CoopDefaultTestRoot -InstallRoot $baseRoot
+} else {
+    Resolve-CoopFullPath $TestRoot
+}
 $baseComparable = $baseRoot.TrimEnd('\')
 $testComparable = $testRootFull.TrimEnd('\')
-
-Assert-StarsectorRoot $baseRoot
 
 if ($testComparable.Equals($baseComparable, [System.StringComparison]::OrdinalIgnoreCase) -or
     $testComparable.StartsWith($baseComparable + '\', [System.StringComparison]::OrdinalIgnoreCase)) {

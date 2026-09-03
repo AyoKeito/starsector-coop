@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string] $TestRoot = 'K:\Starsector-coop-test',
+    # Where setup-two-client-test.ps1 put the profiles. Defaults to a sibling of the Starsector
+    # install this mod folder sits in; see scripts\coop-paths.ps1.
+    [string] $TestRoot,
     [int] $Tail = 120,
     [string] $Pattern = 'coop|Coop'
 )
@@ -8,7 +10,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$testRootFull = [System.IO.Path]::GetFullPath($TestRoot)
+. (Join-Path $PSScriptRoot 'coop-paths.ps1')
+
+$testRootFull = Resolve-CoopTestRoot $TestRoot
 
 foreach ($profile in @('host', 'guest')) {
     $logPath = Join-Path $testRootFull "$profile\starsector-core\starsector.log"

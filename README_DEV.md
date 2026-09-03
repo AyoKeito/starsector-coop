@@ -188,3 +188,45 @@ Seventeen verbs: `status`, `fleets`, `market`, `markets`, `barpool`, `survey`, `
 The agent side is `tools/starsector-mcp`, a Node stdio MCP server that wraps both ports into `ss_status`, `ss_dump`, `ss_diff`, `ss_act` and `ss_advance_days`. All state comparison lives there; the bridge only serializes. `ss_diff` excludes `role`, `engineId` and `lines` by default (per-instance by nature, and the diff drowns in them otherwise); its `ignore` argument replaces that list. Setup, the `.mcp.json` registration block, the port env overrides and a worked example per tool are in `tools/starsector-mcp/README.md`. It is not part of the mod jar and ships no runtime dependency into the game.
 
 Four things are deliberately not bridge verbs: market buy/sell, officer hire, bar-offer accept, and market open/close. Each of those is on the smoke checklist because a UI listener drives it (`PlayerMarketTransaction`, the dialog close-diff that produces a hire claim, snapshot-on-open). A bridge verb would call the engine method underneath the listener, which passes whether or not the listener is still wired up, so it would green-light exactly the breakage the check exists to catch. Those four stay manual, alongside the claim race and the motion and stealth feel passes.
+
+## Release Checklist
+
+**The handshake compares two version strings, and they live in two files.** `CoopHandshakeManifest`
+captures `coopBuildVersion` from `coop.build.CoopBuildInfo.VERSION`, which `generateCoopBuildInfo`
+writes from `build.gradle`'s `version` property; separately, the engine's `ModSpecAPI.getVersion()`
+supplies the `version` field of the `coop` entry in `enabledMods`, and that one comes from
+`mod_info.json`, alongside a SHA-256 of the whole `mod_info.json` text taken through
+`SettingsAPI.loadText`. `CoopHandshakeDiff.compare` checks all three, and any single difference
+rejects the session. So a release bump is two edits that have to agree: `mod_info.json`'s `version`
+and `build.gradle`'s `version`. `coopGitCommit` is compared too and comes from
+`git rev-parse --short=12 HEAD`, which has a consequence worth stating plainly: two people who each
+build the mod from their own checkout will be refused even at an identical version, and an uncommitted
+build reports `dev-uncommitted`. A release is one built artifact that both players install, not a
+version number both players reproduce.
+
+Steps:
+
+1. Bump `version` in `mod_info.json` and in `build.gradle`. Same string.
+2. Update `CHANGELOG.md` and anything in `docs/player/` the release changes.
+3. Commit. The commit hash is baked into the jar and compared at connect, so build after committing,
+   not before.
+4. `scripts\build.ps1` (clean, test, build). Confirm `jars\coop.jar` and `jars\coop-forks.jar` both
+   have the new timestamp; `build` depends on `forksJar`, so a `jar`-only run is not a release build.
+5. `scripts\deploy-to-test-clients.ps1`, then a two-client session: handshake accepted, both status
+   lines read `session active`, and the host log's connection-doctor block names a tier.
+6. Package exactly what `deploy-to-test-clients.ps1` copies: `mod_info.json`, `jars\`, `data\`. Not
+   `build\`, not `src\`, not `forks\`, not `tmp_ff_analysis`. The archive must unpack to a folder
+   named `coop`, because the handshake compares the mod path as `mods/<folder name>`.
+7. Check `jar -tf jars\coop.jar` has no `coop/rng/` or `coop/presence/` entries and
+   `jar -tf jars\coop-forks.jar` does. Those two packages belong to the system classloader only; a
+   duplicate in `coop.jar` breaks the forks silently.
+
+**Phase 30 dormancy holds in the release build; confirm it, do not strip it.** With
+`-Dcoop.debug.bridge` absent the agent bridge opens no socket and writes no log line.
+`CoopAgentBridge.configuredPort()` returns 0 and `createIfEnabled()` returns null, so no instance is
+built at all, and `install(null)` returns before it touches the sector. The same is true for `0`, a
+negative number, blank, garbage and out-of-range values. Both facts are pinned by
+`src/test/java/coop/debug/CoopAgentBridgeTest.java`
+(`withoutThePropertyNothingIsBuiltAndNothingBinds`, which also binds the port itself afterwards to
+prove nothing took it, and `zeroAndGarbageAndOutOfRangeValuesAreAllDormant`). Both run in
+`scripts\build.ps1`, so a green build is the confirmation.

@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string] $TestRoot = 'K:\Starsector-coop-test',
+    # Where setup-two-client-test.ps1 put the profiles. Defaults to a sibling of the Starsector
+    # install this mod folder sits in; see scripts\coop-paths.ps1.
+    [string] $TestRoot,
     [switch] $SkipBuild,
     [switch] $WhatIfOnly
 )
@@ -8,14 +10,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptDir = Split-Path -Parent $PSCommandPath
-$modRoot = Split-Path -Parent $scriptDir
-$testRootFull = [System.IO.Path]::GetFullPath($TestRoot)
+. (Join-Path $PSScriptRoot 'coop-paths.ps1')
+
+$scriptDir = $PSScriptRoot
+$modRoot = Get-CoopModRoot
+$testRootFull = Resolve-CoopTestRoot $TestRoot
 
 function Assert-ProfileRoot {
     param([Parameter(Mandatory = $true)][string] $Path)
     if (-not (Test-Path -LiteralPath (Join-Path $Path 'starsector.exe'))) {
-        throw "Missing test Starsector profile at $Path. Run setup-two-client-test.ps1 first."
+        throw ("Missing test Starsector profile at $Path. Run setup-two-client-test.ps1 first," +
+            " or point this script at an existing profile pair with -TestRoot '<path>'.")
     }
 }
 

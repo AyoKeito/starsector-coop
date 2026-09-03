@@ -235,12 +235,12 @@ plan to host regularly.
 ## Configuration
 
 Everything the networking layer reads is a JVM property, set in `vmparams` or passed through the
-launch scripts' `-ExtraJvmProps`. All of them are optional; the defaults are what a LAN session uses.
+launch scripts' `-ExtraJvmProps`. All of them are optional in the sense that the game starts without them; with neither the host nor the guest properties set the mod takes no role.
 
 | Property | Default | What it does |
 |---|---|---|
-| `coop.hostPort` | `7777` | The TCP and UDP port the host listens on. Both protocols use the same number. |
-| `coop.connectHost` / `coop.connectPort` | none / `7777` | Guest side: where to connect. `connectHost` takes a hostname, an IPv4 address, or an IPv6 address. |
+| `coop.hostPort` | none (no host role) | The TCP and UDP port the host listens on. Both protocols use the same number. Setting it is what makes this client the host; the launch scripts pass `7777`. |
+| `coop.connectHost` / `coop.connectPort` | none (no guest role) | Guest side: where to connect. Both are required together; `connectHost` alone is a startup error. `connectHost` takes a hostname, an IPv4 address, or an IPv6 address; the launch scripts pass port `7777`. |
 | `coop.password` | empty (no password) | Turns on the lobby password gate. Both sides must set the same string. The host answers the first hello with a random nonce and the guest proves it knows the password by returning `SHA-256(password + nonce)`; a wrong proof gets `LOBBY_REJECT` and feeds a per-address cooldown. **This is gatekeeping, not encryption.** The protocol is plaintext, so anyone who can capture your traffic can read a session; the password stops strangers from joining an open port, and nothing more. |
 | `coop.maxGuests` | `1` | Peer-table capacity. The wire format is N-ready, but v1 clamps this to 1 whatever you set. Multi-guest play is Phase 27. |
 | `coop.reconnectGraceSeconds` | `60` | How long a live session survives a dropped link before it is torn down. During the window both players get a countdown dialog with an "End session" option and a "Wait 5 more minutes" option, and the world is held paused. |
