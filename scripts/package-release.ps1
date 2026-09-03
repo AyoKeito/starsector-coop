@@ -230,6 +230,8 @@ $jarsDir = Join-Path $modRoot 'jars'
 $coopJar = Join-Path $jarsDir 'coop.jar'
 $forksJar = Join-Path $jarsDir 'coop-forks.jar'
 $launcherJar = Join-Path $jarsDir 'coop-launcher.jar'
+$flatlafJar = Join-Path $jarsDir 'flatlaf.jar'
+$flatlafLicense = Join-Path $jarsDir 'FLATLAF-LICENSE.txt'
 
 foreach ($required in @($coopJar, $forksJar)) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -238,6 +240,9 @@ foreach ($required in @($coopJar, $forksJar)) {
     }
 }
 
+# jarsToShip only ever holds jars this build stamps with a Coop-Git-Commit manifest attribute --
+# it feeds the manifest commit check below. flatlaf.jar is a third-party jar with its own
+# manifest, so it and its license text are tracked separately and staged without that check.
 $jarsToShip = New-Object System.Collections.Generic.List[string]
 $jarsToShip.Add($coopJar)
 $jarsToShip.Add($forksJar)
@@ -248,6 +253,20 @@ else {
     Write-Warning ("jars\coop-launcher.jar is missing, so the archive ships without the desktop" +
         " launcher's jar. Build with a current build.gradle to include it.")
 }
+
+$thirdPartyFilesToShip = New-Object System.Collections.Generic.List[string]
+if (Test-Path -LiteralPath $flatlafJar) {
+    $thirdPartyFilesToShip.Add($flatlafJar)
+}
+else {
+    Write-Warning ("jars\flatlaf.jar is missing, so the archive ships without the launcher's" +
+        " FlatLaf look-and-feel. Build with a current build.gradle (copyLauncherLibs) to include" +
+        " it.")
+}
+if (-not (Test-Path -LiteralPath $flatlafLicense)) {
+    throw "Missing $flatlafLicense - FlatLaf's license text is committed and has to ship with jars\flatlaf.jar."
+}
+$thirdPartyFilesToShip.Add($flatlafLicense)
 
 if ($SkipCommitCheck) {
     Write-Warning ("################################################################")
@@ -319,11 +338,14 @@ try {
         }
     }
 
-    # jars\: only the three the mod ships, never whatever else the folder accumulated.
+    # jars\: only the files the mod ships, never whatever else the folder accumulated.
     $stagedJars = Join-Path $stagedMod 'jars'
     New-Item -ItemType Directory -Path $stagedJars -Force | Out-Null
     foreach ($jar in $jarsToShip) {
         Copy-Item -LiteralPath $jar -Destination $stagedJars -Force
+    }
+    foreach ($thirdPartyFile in $thirdPartyFilesToShip) {
+        Copy-Item -LiteralPath $thirdPartyFile -Destination $stagedJars -Force
     }
 
     # data\: the whole tree, as deploy-to-test-clients.ps1 copies it.

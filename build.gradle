@@ -65,6 +65,17 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.3'
 }
 
+// FlatLaf (Apache-2.0) for the desktop launcher's UI. Resolved into its own configuration rather
+// than launcherImplementation because sourceSets.launcher.compileClasspath below is a plain
+// FileCollection assignment, not the auto-wired one Gradle would build from launcherImplementation.
+configurations {
+    flatlaf
+}
+
+dependencies {
+    flatlaf 'com.formdev:flatlaf:3.6'
+}
+
 tasks.register('generateCoopBuildInfo') {
     inputs.property('version', project.version.toString())
     inputs.property('gitCommit', coopGitCommit)
@@ -119,7 +130,7 @@ sourceSets {
 sourceSets.launcher.compileClasspath = sourceSets.main.output + files(
     "${starsectorCore}/json.jar",
     "${starsectorCore}/log4j-1.2.9.jar"
-)
+) + configurations.flatlaf
 sourceSets.launcher.runtimeClasspath = sourceSets.launcher.output + sourceSets.launcher.compileClasspath
 
 dependencies {
@@ -127,6 +138,9 @@ dependencies {
     // classes have to be visible there. json.jar and log4j are already on the test classpath.
     testImplementation sourceSets.launcher.output
 }
+// Gradle 8 rejects a Configuration passed as a dependency notation (`testImplementation
+// configurations.flatlaf`), so pull flatlaf onto the test classpath by extension instead.
+configurations.testImplementation.extendsFrom(configurations.flatlaf)
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
@@ -187,12 +201,23 @@ tasks.register('forksJar', Jar) {
     }
 }
 
+tasks.register('copyLauncherLibs', Copy) {
+    // FlatLaf is a launcher runtime dependency, not shaded into coop-launcher.jar: "Coop
+    // Launcher.cmd" puts it on the classpath as jars/flatlaf.jar instead. Renamed off its version
+    // number so the .cmd's -cp list never has to change on a FlatLaf bump. Does not touch
+    // jars/FLATLAF-LICENSE.txt, which is a committed file this task never writes to.
+    from(configurations.flatlaf)
+    into file('jars')
+    rename { 'flatlaf.jar' }
+}
+
 tasks.register('launcherJar', Jar) {
+    dependsOn 'copyLauncherLibs'
     archiveFileName = 'coop-launcher.jar'
     destinationDirectory = file('jars')
-    // Only the launcher's own classes. coop.jar, json.jar and log4j-1.2.9.jar are put on the
-    // classpath by "Coop Launcher.cmd" instead of being shaded in, so there is exactly one copy of
-    // every coop class on disk and the launcher can never run against a stale embedded one.
+    // Only the launcher's own classes. coop.jar, json.jar, log4j-1.2.9.jar and flatlaf.jar are put
+    // on the classpath by "Coop Launcher.cmd" instead of being shaded in, so there is exactly one
+    // copy of every coop class on disk and the launcher can never run against a stale embedded one.
     from sourceSets.launcher.output
     manifest {
         attributes(

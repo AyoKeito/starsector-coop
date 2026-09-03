@@ -6,7 +6,7 @@ on both machines.
 
 ## The bug report
 
-Press **Save a bug report** in the launcher, on both PCs, and attach both files. It writes
+Press **Log**, then **Save a bug report**, in the launcher, on both PCs, and attach both files. It writes
 `coop-report-host-<date>-<time>.zip` or `coop-report-guest-<date>-<time>.zip` to your Desktop and
 opens the folder it landed in.
 

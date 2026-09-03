@@ -21,8 +21,8 @@ edges and report them.
 2. Open `<Starsector>\vmparams` in a text editor and paste `..\mods\coop\jars\coop-forks.jar;`
    right after `-classpath `. This is the one manual step; the launcher checks it for you.
 3. Tick the mod in the Starsector launcher once.
-4. Double-click `<Starsector>\mods\coop\Coop Launcher.cmd`. Pick Host or Guest, fill in the fields,
-   press Launch. The host copies an invite line; the guest pastes it.
+4. Double-click `<Starsector>\mods\coop\Coop Launcher.cmd`. Press Host or Guest at the top right,
+   fill in the fields, press LAUNCH. The host copies an invite line; the guest pastes it.
 
 The full guide is `docs/player/INSTALL.md`.
 
@@ -36,7 +36,7 @@ The full guide is `docs/player/INSTALL.md`.
 
 ## Reporting a problem
 
-Both players press **Save a bug report** in the launcher and attach the zip it writes to the desktop.
+Both players press **Log**, then **Save a bug report**, in the launcher and attach the zip it writes to the desktop.
 Open an issue with the template; it asks for the `[COOP-DOCTOR]` line that any session-ending dialog
 prints.
 

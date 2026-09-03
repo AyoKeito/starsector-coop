@@ -90,8 +90,11 @@ execution-policy prompt.
 | Source set | `src/launcher/java`, package `coop.launcher` |
 | Tests | `src/test/java/coop/launcher`, in the main test source set |
 | Jar | `jars/coop-launcher.jar`, from `launcherJar`; `build` depends on it |
-| Runtime classpath | `jars/coop-launcher.jar`, `jars/coop.jar`, `starsector-core/json.jar`, `starsector-core/log4j-1.2.9.jar` |
+| Runtime classpath | `jars/coop-launcher.jar`, `jars/flatlaf.jar`, `jars/coop.jar`, `starsector-core/json.jar`, `starsector-core/log4j-1.2.9.jar` |
 | Log | `mods/coop/coop-launcher.log`, next to the `.cmd` |
+
+FlatLaf (Apache-2.0) is fetched by Gradle into `jars/flatlaf.jar` via `copyLauncherLibs` and sits on
+the `.cmd`'s classpath alongside `coop-launcher.jar`.
 
 **`starfarer.api.jar` is not on that classpath, on purpose.** The launcher reuses `CoopPortMapper`,
 `CoopConnectionDoctor` and `CoopOptionsRegistry` out of `coop.jar`, and none of them link to the game

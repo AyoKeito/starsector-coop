@@ -66,8 +66,8 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
 
 **Starting the game**
 
-- `Coop Launcher.cmd` in the mod folder: a window with the settings in it, so nobody has to learn a
-  `-D` property to play. It runs on the JRE that ships with the game, writes
+- `Coop Launcher.cmd` in the mod folder: a dark-themed window with the settings in it, so nobody has
+  to learn a `-D` property to play. It runs on the JRE that ships with the game, writes
   `saves\common\coop_options.json.data`, and starts the game; the vanilla launcher still comes up and
   you still press Play there. Windows only in this release.
 - An invite line, `coop://host:port/?seed=...&pw=...`. The host presses Copy invite, the guest presses

@@ -24,33 +24,36 @@ Find out whether the two of you can reach each other before either game is loade
 in `Coop Launcher.cmd`, and the order matters: the host goes first and stays open.
 
 **The host presses Check my connection.** It runs the same UPnP and NAT-PMP request the game runs at
-startup, then the same connection doctor, and prints the doctor's block into the status pane rather
-than into a log file you have to go find. Read it the way "Reading the log" below reads it: the tier
-line says which of the four routes you are on, and the `next step` line says what to do when the
-answer is bad. It takes a few seconds, and the router mapping is released afterwards so the game can
-make its own at launch. The launcher then holds the port open, and says so, until you press Launch.
+startup, then the same connection doctor, and shows the result as chips (mapped or not, the external
+address, a carrier-grade NAT warning when it applies), with a sentence under them saying what to do
+next, rather than sending you to a log file to go find. The log drawer opens on its own with the full
+block; read it the way "Reading the log" below reads it: the tier line says which of the four routes
+you are on, and the `next step` line says what to do when the answer is bad. It takes a few seconds,
+and the router mapping is released afterwards so the game can make its own at launch. Once it is
+holding the port for the guest's test a `listening on <port>` chip appears, and the launcher keeps
+the port open, and says so, until you press LAUNCH.
 
-**The guest presses Test connection** while that is up, with the invite already pasted in. Four rows
-come back:
+**The guest presses Test connection** while that is up, with the invite already pasted in. Four
+chips come back, green when good, red when failed, grey when not measured:
 
-| Row | Reading it |
+| Chip | Reading it |
 |---|---|
-| TCP reachable | The port is open from where you are sitting. A failure here is the host's port forward, the host's firewall, or a wrong address, and everything below it is moot. |
-| launcher answered | What accepted the connection was the host's co-op launcher, and it prints the mod version it is running. |
-| UDP echoed | Fleet movement will go over UDP. Without it the session still runs over TCP, which costs latency; a router that forwards TCP but not UDP is the usual cause. |
-| round trip | Milliseconds, measured over that TCP connection. |
+| TCP | The port is open from where you are sitting. A failure here is the host's port forward, the host's firewall, or a wrong address, and everything below it is moot. |
+| launcher \<version\> | What accepted the connection was the host's co-op launcher, and it prints the mod version it is running. |
+| UDP | Fleet movement will go over UDP. Without it the session still runs over TCP, which costs latency; a router that forwards TCP but not UDP is the usual cause. |
+| \<n\> ms | Milliseconds, measured over that TCP connection. |
 
 TCP green and no launcher answer means something else is listening on that port. Nearly always that
 is the host's game already running instead of the host's launcher, in which case there is nothing to
-test: press Launch and join.
+test: press LAUNCH and join.
 
 The test connects once and does not retry. The game counts connection attempts per address, five to
 a window, and a prober that hammered the port would spend the guest's budget before the real session
 started.
 
 The tiers below are written as `-D` properties on the `vmparams` line. In the launcher they are the
-Port field on the host, the Host address and Port fields on the guest, and Port mapping under
-Advanced settings.
+Port field on the host, the Host address and Port fields on the guest, and Port mapping in the
+Advanced card, hidden behind the footer's Advanced button until you open it.
 
 ## Tier 0: a VPN pseudo-LAN
 

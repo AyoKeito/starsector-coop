@@ -105,13 +105,13 @@ front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in Starsector
 The rest is `Coop Launcher.cmd`, in the mod folder. It runs on the JRE that ships with the game, so
 there is nothing to install. It checks the install and names what is wrong with it, writes your
 settings into `saves\common\coop_options.json.data`, and starts the game. The host picks a port,
-presses Generate for a seed and presses Copy invite; the guest presses Paste invite and has the
-address, port, password and seed in one go. Windows only in this release; on any other OS the
+presses Generate for a seed and presses Copy next to the invite line; the guest presses Paste and has
+the address, port, password and seed in one go. Windows only in this release; on any other OS the
 settings file and the `-D` properties still work by hand.
 
 ## Reporting a problem
 
-Both of you press **Save a bug report** in the launcher, and attach both zips. That packs the logs
+Both of you press **Log**, then **Save a bug report**, in the launcher, and attach both zips. That packs the logs
 before the next launch overwrites them, together with your settings, your newest save and a summary;
 the password is blanked out of everything in it. One side's zip tells half the story, because a
 refusal is one machine rejecting the other.

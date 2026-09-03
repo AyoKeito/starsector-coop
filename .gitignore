@@ -4,6 +4,7 @@
 /jars/coop.jar
 /jars/coop-forks.jar
 /jars/coop-launcher.jar
+/jars/flatlaf.jar
 
 # Written by the desktop launcher every run, next to the mod it belongs to.
 /coop-launcher.log

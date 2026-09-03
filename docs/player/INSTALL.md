@@ -125,7 +125,7 @@ appears once.
 
 The launcher works out where the game is from its own location, so leave `Coop Launcher.cmd` in
 `<Starsector>\mods\coop`; a shortcut to it is fine, a copy on the desktop is not. If it guesses
-wrong anyway, **Choose install folder** in the install-check panel sets it straight.
+wrong anyway, **Folder** in the Install card sets it straight.
 
 What the launcher does: it writes your settings into `saves\common\coop_options.json.data`, tells you
 about anything wrong with the install, and starts `starsector.exe`. It does not replace the vanilla
@@ -134,18 +134,21 @@ launcher; that window still comes up and you still press Play in it. And it neve
 
 ### The host's fields
 
-1. Pick **Host** under **Your role**. That is what makes this install the host.
+1. Press **Host**, the button at the top right of the window. That is what makes this install the
+   host.
 2. Leave **Port** at 7777 unless something else on your PC wants it. It is the TCP and UDP port your
    partner connects to.
-3. **Password** fills itself in with a generated one when you leave it empty. The invite carries it,
-   so your partner never types it. Clearing the field is allowed and leaves the port open to anyone
-   who finds it while a session is waiting.
+3. **Password** fills itself in with a generated one when you leave it empty. The eye button next to
+   it reveals what it holds. The invite carries the password, so your partner never types it.
+   Clearing the field is allowed and leaves the port open to anyone who finds it while a session is
+   waiting.
 4. Press **Generate** next to **Seed**, or type your own. Both games generate the sector locally from
    this string, and the check at connect compares what came out.
-5. Press **Look up** under **Your public address**. That is one HTTPS request to a service that
-   replies with the address your packets came from. If the two of you connect over a LAN or a VPN,
-   type that address over the answer instead.
-6. Press **Copy invite**. Send your partner the one line it puts on your clipboard.
+5. Press **Look up** next to **Your address**. That is one HTTPS request to a service that replies
+   with the address your packets came from. If the two of you connect over a LAN or a VPN, type that
+   address over the answer instead.
+6. Press **Copy** next to **Invite for your partner**, which updates on its own as you fill in the
+   fields above. Send your partner the one line it puts on your clipboard.
 
 The invite looks like this, and it carries the password in clear text, so send it the way you would
 send a password:
@@ -156,10 +159,11 @@ coop://203.0.113.9:7777/?seed=MN-1234567890123456789&pw=hullmod
 
 ### The guest's fields
 
-Pick **Guest**, put the host's line on your clipboard, press **Paste invite**. Address, port,
-password and seed fill in together; an invite that will not parse says which part of it failed
-rather than clearing the fields. **Seed** is read-only here on purpose: it comes from the invite,
-and it is used only when you start a new campaign. Rejoining by loading a co-op save ignores it.
+Press **Guest** at the top right, put the host's line on your clipboard, and press **Paste** next to
+**Invite from your host**. Typing or pasting the line into that field fills in the rest by itself:
+address, port, password and seed. An invite that will not parse says which part of it failed rather
+than clearing the fields. **Seed** is read-only here on purpose: it comes from the invite, and it is
+used only when you start a new campaign. Rejoining by loading a co-op save ignores it.
 
 You can also type **Host address** and **Port** in by hand and have the host tell you the password.
 The seed still has to match, which is what the invite is for.
@@ -169,33 +173,38 @@ The seed still has to match, which is what the invite is for.
 Do this once, before the first session, in this order.
 
 The host presses **Check my connection**. It runs the same UPnP and NAT-PMP port mapping the game
-runs at startup, then the same connection doctor, and prints the doctor's block into the status pane:
-which tier you are on, what the router said, and what to do when the answer is bad. It takes a few
-seconds. The router mapping is released afterwards so the game makes its own at launch. From then on,
-for as long as the host's launcher stays open, it holds the port and answers the guest's test.
+runs at startup, then the same connection doctor, and shows the result as chips: whether it mapped
+the port, the external address and port, and a carrier-grade NAT warning when that is what it found.
+A sentence under the chips says what to do next, and the log drawer opens on its own with the full
+doctor block: which tier you are on, what the router said, and what to do when the answer is bad. It
+takes a few seconds. The router mapping is released afterwards so the game makes its own at launch,
+and once the launcher is holding the port for the guest's test a `listening on <port>` chip appears.
+From then on, for as long as the host's launcher stays open, it holds the port and answers the
+guest's test.
 
-The guest then presses **Test connection** and reads four rows:
+The guest then presses **Test connection** and reads four chips, green when good, red when failed,
+grey when not measured:
 
-| Row | What a good result means |
+| Chip | What a good result means |
 |---|---|
-| TCP reachable | The port is open and something accepted the connection. |
-| launcher answered | That something is the host's co-op launcher, and it prints the mod version it is running. |
-| UDP echoed | Fleet positions will travel over UDP. Without it the session still runs, over TCP, with more latency. |
-| round trip | The measured time in milliseconds. |
+| TCP | The port is open and something accepted the connection. |
+| launcher \<version\> | That something is the host's co-op launcher, and it prints the mod version it is running. |
+| UDP | Fleet positions will travel over UDP. Without it the session still runs, over TCP, with more latency. |
+| \<n\> ms | The measured round trip time. |
 
 If TCP connects and no launcher answers, the test says so: something is listening on that port and it
 is not the co-op launcher. The usual cause is that the host's game is already running instead of the
-host's launcher, and then there is nothing to test. Press Launch.
+host's launcher, and then there is nothing to test. Press LAUNCH.
 
 The test connects once and never retries. The game counts connection attempts per address, and a
 probe that hammered the port would spend the guest's budget before the real session started.
 
 ### The install check
 
-The panel at the bottom lists what the launcher found, one row each, badged `OK`, `WARN` or `FAIL`.
-**Refresh** re-runs them after you fix something, **Open INSTALL.md** opens this file, and **Choose
-install folder** points the launcher at your Starsector folder when it could not work out where the
-game is.
+The Install card shows a summary chip (`all N checks passed`, `1 warning`, `2 problems`) and lists
+only the rows that are not `OK`, badged `OK`, `WARN` or `FAIL`; **Show all checks (N passed)** reveals
+the rest. **Refresh** re-runs them after you fix something, **Guide** opens this file, and **Folder**
+points the launcher at your Starsector folder when it could not work out where the game is.
 
 | Row | Fails when |
 |---|---|
@@ -218,23 +227,27 @@ launcher: an old port, an old address, a seed from a campaign you finished. The 
 entries to delete. They get left behind by the developer launch scripts, so a normal install will not
 have any.
 
-Every row that says `FAIL` is a reason the session will not work, and Launch refuses while one is
+Every row that says `FAIL` is a reason the session will not work, and LAUNCH refuses while one is
 outstanding. A `WARN` row is a reason it will work differently than you meant.
 
-### Advanced settings, and Launch
+### Advanced, and LAUNCH
 
-**Advanced settings** folds open five more: port mapping, reconnect grace, link HUD corner, sector
-size and star age. Each has a `(shipped default)` entry in its list, so you can always put one back
-without knowing what the default was. Leave the fold shut unless you have a reason to open it.
+The **Advanced** button in the footer folds open a card with five more fields: port mapping, link HUD
+corner, sector size, star age and reconnect grace. Each drop-down has a `shipped default` entry, so
+you can always put one back without knowing what the default was; the reconnect grace field has a
+`shipped default` checkbox instead. Leave the card closed unless you have a reason to open it.
 
-**Launch** writes the settings file, closes the launcher's listener so the game can bind the port,
-and starts `starsector.exe`. The window stays open afterwards and tails `starsector.log` in the
-**Status** pane: the connection doctor block, the `[COOP-DOCTOR]` lines, and every co-op warning.
-Closing the window does not close the game.
+**LAUNCH** writes the settings file, closes the launcher's listener so the game can bind the port,
+and starts `starsector.exe`; the button then reads `RUNNING` for as long as the game is up. The
+window stays open afterwards, the log drawer opens on its own, and it tails `starsector.log`: the
+connection doctor block, the `[COOP-DOCTOR]` lines, and every co-op warning. Closing the window does
+not close the game.
 
-Three buttons sit on that pane. **Open log folder** opens `starsector-core`. **Clear** empties the
-pane. **Save a bug report** packs a zip on your Desktop with the logs, your settings, your save and
-a summary; `REPORTING.md` covers what goes in it and what to do with it.
+The **Log** button in the footer opens and closes that same drawer at any time. Inside it,
+**Save a bug report** packs a zip on your Desktop with the logs, your settings, your save and a
+summary, and the **Include my newest save** checkbox next to it leaves the save out when unticked;
+`REPORTING.md` covers what goes in the zip and what to do with it. **Open log folder** opens
+`starsector-core`, and **Clear** empties the pane.
 
 ## 7. Changing settings without the launcher
 
@@ -320,7 +333,7 @@ guests has no buttons at all: 1 is both its bounds in this build.
 ### The settings file
 
 The same `coop.*` names live in a JSON file. Yours is here. The launcher rewrites it every time you
-press Launch, the options page creates it the first time you change a setting there, and you can
+press LAUNCH, the options page creates it the first time you change a setting there, and you can
 write it yourself:
 
 ```text
@@ -461,11 +474,11 @@ the ones a player is ever asked for.
 ## 8. First session
 
 1. Both of you: `vmparams` edited, mod ticked, and every install-check row reading `OK`.
-2. Host: open `Coop Launcher.cmd`, pick Host, set the port, press Generate, press Look up, press
-   Check my connection and read the doctor block, press Copy invite, send the line.
-3. Guest: open the launcher, pick Guest, press Paste invite, press Test connection. Four green rows
-   and you are done checking.
-4. Both press Launch, then Play in the vanilla launcher window when it appears.
+2. Host: open `Coop Launcher.cmd`, press Host, set the port, press Generate, press Look up, press
+   Check my connection and read the chips, press Copy next to Invite for your partner, send the line.
+3. Guest: open the launcher, press Guest, press Paste next to Invite from your host, press Test
+   connection. Four green chips and you are done checking.
+4. Both press LAUNCH, then Play in the vanilla launcher window when it appears.
 5. Both start New Game. The guest's Continue option names the host it will connect to, and the seed
    is already filled in from the invite.
 6. Both games load paused into the lobby, with the guest's join steps listed as they pass. The host

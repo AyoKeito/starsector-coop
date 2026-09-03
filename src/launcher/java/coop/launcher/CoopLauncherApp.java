@@ -4,6 +4,7 @@ import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Desktop;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
@@ -39,18 +40,24 @@ import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
-import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.JToggleButton;
+import javax.swing.ScrollPaneConstants;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
-import javax.swing.UIManager;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 
 import org.apache.log4j.Logger;
 
 import coop.config.CoopOptionsRegistry;
+import coop.launcher.CoopTheme.Card;
+import coop.launcher.CoopTheme.Chip;
+import coop.launcher.CoopTheme.Dot;
+import coop.launcher.CoopTheme.Form;
 import coop.net.CoopConnectionDoctor;
 import coop.net.CoopPortMapper;
 
@@ -66,6 +73,10 @@ import coop.net.CoopPortMapper;
  * <p>Engine-free by construction: this source set is compiled without {@code starfarer.api.jar} on
  * the classpath. The mod classes it does reuse ({@link CoopPortMapper},
  * {@link CoopConnectionDoctor}, {@link CoopOptionsRegistry}) do not link to the game API.
+ *
+ * <p>Layout (redesigned 2026-09-03): a header with the role switch, three cards (Session,
+ * Connection, Install), an Advanced card hidden by default, a footer with the one primary button,
+ * and a log drawer that opens when something worth reading lands in it.
  */
 public final class CoopLauncherApp {
 
@@ -74,7 +85,7 @@ public final class CoopLauncherApp {
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     /** Shown in every "shipped default" combo slot; selecting it removes the key from the file. */
-    private static final String DEFAULT_ENTRY = "(shipped default)";
+    private static final String DEFAULT_ENTRY = "shipped default";
 
     /**
      * Star ages, spelled out because {@code StarAge} lives in {@code starfarer.api.jar} and the
@@ -103,27 +114,38 @@ public final class CoopLauncherApp {
 
     private JFrame frame;
 
-    private JRadioButton hostRole;
-    private JRadioButton guestRole;
+    // header
+    private JToggleButton hostSegment;
+    private JToggleButton guestSegment;
+    private Chip updateChip;
 
+    // session card
+    private Card sessionCard;
+    private JLabel sessionHint;
+    private JPanel sessionBody;
+    private JPanel hostForm;
+    private JPanel guestForm;
     private JTextField hostPortField;
     private JPasswordField hostPasswordField;
     private JTextField hostSeedField;
     private JTextField publicAddressField;
+    private JTextField invitePreviewField;
     private JButton copyInviteButton;
-    private JButton checkConnectionButton;
 
+    private JTextField guestInviteField;
+    private JTextArea guestInviteNote;
     private JTextField guestHostField;
     private JTextField guestPortField;
     private JPasswordField guestPasswordField;
     private JTextField guestSeedField;
-    private JButton testConnectionButton;
 
-    private JPanel hostPanel;
-    private JPanel guestPanel;
+    // connection card
+    private JButton connectionButton;
+    private JPanel chipRow;
+    private JTextArea connectionNote;
 
-    private JButton advancedToggle;
-    private JPanel advancedPanel;
+    // advanced card
+    private Card advancedCard;
     private JComboBox<String> portMappingBox;
     private JSpinner reconnectGraceSpinner;
     private JCheckBox reconnectGraceDefault;
@@ -131,10 +153,18 @@ public final class CoopLauncherApp {
     private JComboBox<String> sectorSizeBox;
     private JComboBox<String> sectorAgeBox;
 
+    // install card
+    private Chip installSummary;
     private JPanel rowsPanel;
-    private JTextArea statusArea;
-    private JButton launchButton;
+    private JButton showAllButton;
+    private boolean showAllRows;
 
+    // footer + drawer
+    private JButton launchButton;
+    private JButton advancedToggle;
+    private JButton logToggle;
+    private JPanel drawer;
+    private JTextArea statusArea;
     private JCheckBox includeSaveBox;
     private JButton bugReportButton;
 
@@ -145,11 +175,13 @@ public final class CoopLauncherApp {
     /**
      * Set once the player empties the host password field themselves. From then on nothing refills
      * it: a host who deliberately wants an open session should not have to fight the launcher about
-     * it every time they touch a radio button.
+     * it every time they touch the role switch.
      */
     private boolean hostPasswordCleared;
     /** True while the code, not the player, is writing the host password field. */
     private boolean writingHostPassword;
+    /** True while the code, not the player, is writing the guest invite field. */
+    private boolean writingGuestInvite;
 
     private CoopLauncherProbe.HostListener listener;
     private CoopLogTail logTail;
@@ -167,29 +199,70 @@ public final class CoopLauncherApp {
     }
 
     private void start(CoopInstallLayout discovered) {
-        try {
-            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (Exception ex) {
-            LOG.warn("Could not set the system look and feel; using the default", ex);
-        }
+        CoopTheme.install();
         this.layout = discovered;
         this.launcherVersion = CoopInstallCheck.launcherVersion();
         buildFrame();
         if (layout == null) {
             append("This folder does not look like a Starsector install, so the launcher could not"
-                    + " work out where the game is. Use \"Choose install folder\" to point at it.");
+                    + " work out where the game is. Use \"Folder\" in the Install card to point at it.");
+            setDrawerVisible(true);
             chooseInstallFolder();
         } else {
             adoptLayout(layout);
         }
         startUpdateCheck();
+        applyPreview();
         frame.setVisible(true);
+    }
+
+    /**
+     * Dev only: {@code COOP_LAUNCHER_PREVIEW=host|guest} stages the window for a screenshot (role
+     * selected, sample connection chips, log drawer open). Nothing is written and no socket opens.
+     */
+    private void applyPreview() {
+        String preview = System.getenv("COOP_LAUNCHER_PREVIEW");
+        if (preview == null || preview.isBlank()) {
+            return;
+        }
+        LOG.info("Preview mode " + preview);
+        boolean guest = preview.trim().equalsIgnoreCase("guest");
+        boolean install = preview.trim().equalsIgnoreCase("install");
+        hostSegment.setSelected(!guest);
+        guestSegment.setSelected(guest);
+        onRoleChanged();
+        if (guest) {
+            writingGuestInvite = true;
+            guestInviteField.setText("coop://203.0.113.9:7777/?seed=MN-8402913377120455081&pw=k7mxq2rp4d");
+            writingGuestInvite = false;
+            applyInviteText(guestInviteField.getText(), false);
+            setChips(List.of(new Chip("TCP", CoopTheme.OK), new Chip("launcher 0.1.0", CoopTheme.OK),
+                    new Chip("UDP", CoopTheme.OK), new Chip("3 ms", CoopTheme.OK)));
+            note("The host's launcher answered on TCP and UDP. Press Launch when your host does.");
+        } else {
+            hostSeedField.setText("MN-8402913377120455081");
+            publicAddressField.setText("203.0.113.9");
+            setChips(List.of(new Chip("UPnP mapped", CoopTheme.OK), new Chip("203.0.113.9:7777", CoopTheme.OK),
+                    new Chip("listening on 7777", CoopTheme.OK)));
+            note("Your router opened 203.0.113.9:7777. Copy the invite and ask your partner to press"
+                    + " Test connection. The full doctor block is in the log.");
+        }
+        if (install) {
+            advancedCard.setVisible(true);
+            showAllRows = true;
+            renderRows();
+            Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+            frame.setSize(new Dimension(700, screen.height - 80));
+            frame.setLocationRelativeTo(null);
+            return;
+        }
+        setDrawerVisible(true);
     }
 
     // ---- window ---------------------------------------------------------------------------------
 
     private void buildFrame() {
-        frame = new JFrame("Starsector Coop Launcher " + launcherVersion);
+        frame = new JFrame("Starsector Coop");
         frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         frame.addWindowListener(new WindowAdapter() {
             @Override
@@ -198,259 +271,442 @@ public final class CoopLauncherApp {
             }
         });
 
-        JPanel root = new JPanel(new BorderLayout(8, 8));
-        root.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JPanel root = new JPanel(new BorderLayout());
+        root.setBackground(CoopTheme.BG);
+        root.add(buildHeader(), BorderLayout.NORTH);
 
-        JPanel top = new JPanel();
-        top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
-        top.add(buildRolePanel());
-        top.add(Box.createVerticalStrut(6));
-        hostPanel = buildHostPanel();
-        guestPanel = buildGuestPanel();
-        top.add(hostPanel);
-        top.add(guestPanel);
-        top.add(Box.createVerticalStrut(6));
-        top.add(buildAdvancedSection());
-        top.add(Box.createVerticalStrut(6));
-        top.add(buildInstallSection());
+        JPanel cards = new JPanel();
+        cards.setOpaque(false);
+        cards.setLayout(new BoxLayout(cards, BoxLayout.Y_AXIS));
+        cards.setBorder(BorderFactory.createEmptyBorder(4, 20, 8, 20));
+        sessionCard = buildSessionCard();
+        Card connectionCard = buildConnectionCard();
+        advancedCard = buildAdvancedCard();
+        Card installCard = buildInstallCard();
+        for (Card card : List.of(sessionCard, connectionCard, advancedCard, installCard)) {
+            card.setAlignmentX(Component.LEFT_ALIGNMENT);
+            card.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+            cards.add(card);
+            cards.add(CoopTheme.vgap(14));
+        }
+        advancedCard.setVisible(false);
 
-        root.add(top, BorderLayout.NORTH);
-        root.add(buildStatusSection(), BorderLayout.CENTER);
-        root.add(buildBottomBar(), BorderLayout.SOUTH);
+        CoopTheme.ScrollColumn cardsHolder = new CoopTheme.ScrollColumn();
+        cardsHolder.add(cards, BorderLayout.NORTH);
+        JScrollPane scroll = new JScrollPane(cardsHolder,
+                ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.setBorder(BorderFactory.createEmptyBorder());
+        scroll.getViewport().setOpaque(false);
+        scroll.setOpaque(false);
+        scroll.getVerticalScrollBar().setUnitIncrement(24);
+        root.add(scroll, BorderLayout.CENTER);
+
+        JPanel south = new JPanel(new BorderLayout());
+        south.setOpaque(false);
+        south.add(buildFooter(), BorderLayout.NORTH);
+        drawer = buildDrawer();
+        drawer.setVisible(false);
+        south.add(drawer, BorderLayout.CENTER);
+        root.add(south, BorderLayout.SOUTH);
 
         frame.setContentPane(root);
-        frame.setMinimumSize(new Dimension(720, 700));
-        frame.pack();
+        frame.setMinimumSize(new Dimension(640, 600));
+        Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+        frame.setSize(new Dimension(700, Math.max(600, Math.min(860, screen.height - 80))));
         frame.setLocationRelativeTo(null);
     }
 
-    private JPanel buildRolePanel() {
-        JPanel panel = titled("Your role");
-        panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
-        hostRole = new JRadioButton("Host");
-        guestRole = new JRadioButton("Guest");
+    private JComponent buildHeader() {
+        JPanel header = new JPanel(new GridBagLayout());
+        header.setOpaque(false);
+        header.setBorder(BorderFactory.createEmptyBorder(18, 24, 14, 24));
+
+        JLabel title = new JLabel("Starsector Coop");
+        title.setFont(title.getFont().deriveFont(Font.BOLD, (float) title.getFont().getSize() + 9f));
+        title.setForeground(CoopTheme.TEXT);
+        JLabel version = CoopTheme.small("launcher " + launcherVersion);
+        updateChip = new Chip("", CoopTheme.WARN);
+        updateChip.setVisible(false);
+        updateChip.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+        updateChip.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent event) {
+                if (!updateUrl.isEmpty()) {
+                    LOG.info("Opening the release page " + updateUrl);
+                    openUrl(updateUrl);
+                }
+            }
+        });
+
+        hostSegment = CoopTheme.segment("Host");
+        guestSegment = CoopTheme.segment("Guest");
         ButtonGroup group = new ButtonGroup();
-        group.add(hostRole);
-        group.add(guestRole);
-        hostRole.addActionListener(event -> onRoleChanged());
-        guestRole.addActionListener(event -> onRoleChanged());
-        panel.add(hostRole);
-        panel.add(Box.createHorizontalStrut(12));
-        panel.add(guestRole);
-        panel.add(Box.createHorizontalStrut(16));
-        panel.add(new JLabel("The host runs the world. The guest joins it."));
-        panel.add(Box.createHorizontalGlue());
-        return panel;
+        group.add(hostSegment);
+        group.add(guestSegment);
+        hostSegment.addActionListener(event -> onRoleChanged());
+        guestSegment.addActionListener(event -> onRoleChanged());
+        JPanel segments = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        segments.setOpaque(false);
+        segments.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
+        JPanel pill = new JPanel(new FlowLayout(FlowLayout.CENTER, 2, 2));
+        pill.setBackground(CoopTheme.CARD);
+        pill.setBorder(BorderFactory.createLineBorder(CoopTheme.CARD_BORDER, 1, true));
+        pill.add(hostSegment);
+        pill.add(guestSegment);
+        segments.add(pill);
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.anchor = GridBagConstraints.WEST;
+        header.add(title, c);
+        c.gridx = 1;
+        c.insets = new Insets(6, 10, 0, 0);
+        header.add(version, c);
+        c.gridx = 2;
+        c.insets = new Insets(2, 12, 0, 0);
+        header.add(updateChip, c);
+        c.gridx = 3;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(0, 0, 0, 0);
+        header.add(Box.createHorizontalGlue(), c);
+        c.gridx = 4;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        c.anchor = GridBagConstraints.EAST;
+        header.add(segments, c);
+        return header;
     }
 
-    private JPanel buildHostPanel() {
-        JPanel panel = titled("Host");
-        GridBagLayout grid = new GridBagLayout();
-        panel.setLayout(grid);
-        int row = 0;
+    private Card buildSessionCard() {
+        Card card = new Card("Session");
+        sessionHint = CoopTheme.muted("");
+        card.trailing.add(sessionHint);
 
-        hostPortField = new JTextField(String.valueOf(DEFAULT_PORT), 8);
-        addRow(panel, row++, "Port", hostPortField, null,
-                "The TCP and UDP port your partner connects to.");
+        sessionBody = new JPanel(new BorderLayout());
+        sessionBody.setOpaque(false);
+        hostForm = buildHostForm();
+        guestForm = buildGuestForm();
+        sessionBody.add(hostForm, BorderLayout.CENTER);
 
-        hostPasswordField = new JPasswordField(18);
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        card.body.add(sessionBody, c);
+        return card;
+    }
+
+    private JPanel buildHostForm() {
+        JPanel panel = new JPanel();
+        panel.setOpaque(false);
+        Form form = new Form(panel);
+
+        hostPortField = CoopTheme.textField(String.valueOf(DEFAULT_PORT));
+        hostPortField.setText(String.valueOf(DEFAULT_PORT));
+        hostPortField.setToolTipText("The TCP and UDP port your partner connects to.");
+
+        hostPasswordField = CoopTheme.passwordField("no password");
+        hostPasswordField.setToolTipText("Generated for you. Clear it for an open session. The invite"
+                + " carries it.");
         hostPasswordField.getDocument().addDocumentListener(new PasswordWatcher());
-        addRow(panel, row++, "Password", hostPasswordField, null,
-                "Optional. Generated for you; both of you have to type the same one."
-                        + " The invite carries it.");
+        form.pair("Port", hostPortField, "Password", hostPasswordField);
 
-        hostSeedField = new JTextField(24);
-        JButton generate = new JButton("Generate");
+        hostSeedField = CoopTheme.textField("press Generate");
+        hostSeedField.setToolTipText("Both games generate the same sector from this. New campaigns"
+                + " only.");
+        JButton generate = CoopTheme.inline("Generate");
         generate.addActionListener(event -> {
             String seed = CoopSeeds.generate();
             hostSeedField.setText(seed);
             LOG.info("Generated a new seed: " + seed);
             append("New seed " + seed + ". Copy the invite so your partner gets the same one.");
         });
-        addRow(panel, row++, "Seed", hostSeedField, generate,
-                "Both games have to generate the same sector.");
+        CoopTheme.trailing(hostSeedField, generate);
 
-        publicAddressField = new JTextField(24);
-        JButton lookUp = new JButton("Look up");
+        publicAddressField = CoopTheme.textField("press Look up, or type a LAN or VPN address");
+        publicAddressField.setToolTipText("What your partner connects to. Overwrite it with a LAN or"
+                + " VPN address if that is how you reach each other.");
+        JButton lookUp = CoopTheme.inline("Look up");
         lookUp.addActionListener(event -> lookUpPublicAddress(null));
-        addRow(panel, row++, "Your public address", publicAddressField, lookUp,
-                "Overwrite this with a LAN or VPN address if that is how you connect.");
+        CoopTheme.trailing(publicAddressField, lookUp);
+        form.pair("Seed", hostSeedField, "Your address", publicAddressField);
 
-        JPanel buttons = new JPanel();
-        buttons.setLayout(new BoxLayout(buttons, BoxLayout.X_AXIS));
-        copyInviteButton = new JButton("Copy invite");
+        invitePreviewField = CoopTheme.textField("fill in the address and seed above");
+        invitePreviewField.setEditable(false);
+        invitePreviewField.setForeground(CoopTheme.ACCENT);
+        copyInviteButton = CoopTheme.inline("Copy");
         copyInviteButton.addActionListener(event -> copyInvite());
-        checkConnectionButton = new JButton("Check my connection");
-        checkConnectionButton.addActionListener(event -> checkMyConnection());
-        buttons.add(copyInviteButton);
-        buttons.add(Box.createHorizontalStrut(8));
-        buttons.add(checkConnectionButton);
-        buttons.add(Box.createHorizontalGlue());
+        CoopTheme.trailing(invitePreviewField, copyInviteButton);
+        form.full("Invite for your partner", invitePreviewField);
 
-        GridBagConstraints c = new GridBagConstraints();
-        c.gridx = 0;
-        c.gridy = row;
-        c.gridwidth = 4;
-        c.anchor = GridBagConstraints.WEST;
-        c.insets = new Insets(6, 4, 2, 4);
-        panel.add(buttons, c);
+        DocumentListener preview = new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                refreshInvitePreview();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                refreshInvitePreview();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                refreshInvitePreview();
+            }
+        };
+        hostPortField.getDocument().addDocumentListener(preview);
+        hostPasswordField.getDocument().addDocumentListener(preview);
+        hostSeedField.getDocument().addDocumentListener(preview);
+        publicAddressField.getDocument().addDocumentListener(preview);
         return panel;
     }
 
-    private JPanel buildGuestPanel() {
-        JPanel panel = titled("Guest");
-        panel.setLayout(new GridBagLayout());
-        int row = 0;
+    private JPanel buildGuestForm() {
+        JPanel panel = new JPanel();
+        panel.setOpaque(false);
+        Form form = new Form(panel);
 
-        JButton paste = new JButton("Paste invite");
+        guestInviteField = CoopTheme.textField("paste the coop:// line your host sent you");
+        JButton paste = CoopTheme.inline("Paste");
         paste.addActionListener(event -> pasteInvite());
+        CoopTheme.trailing(guestInviteField, paste);
+        guestInviteField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                onGuestInviteTyped();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                onGuestInviteTyped();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                onGuestInviteTyped();
+            }
+        });
+        form.full("Invite from your host", guestInviteField);
+        guestInviteNote = CoopTheme.paragraph("Fills the fields below. You can also type them in.");
+        guestInviteNote.setBorder(BorderFactory.createEmptyBorder(0, 2, 10, 0));
+        form.raw(guestInviteNote);
+
+        guestHostField = CoopTheme.textField("name, IPv4 or IPv6");
+        guestPortField = CoopTheme.textField(String.valueOf(DEFAULT_PORT));
+        guestPortField.setText(String.valueOf(DEFAULT_PORT));
+        form.pair("Host address", guestHostField, "Port", guestPortField);
+
+        guestPasswordField = CoopTheme.passwordField("none");
+        guestPasswordField.setToolTipText("Has to match the host's exactly.");
+        guestSeedField = CoopTheme.textField("from the invite");
+        guestSeedField.setEditable(false);
+        guestSeedField.setToolTipText("Only used when you start a new campaign.");
+        form.pair("Password", guestPasswordField, "Seed", guestSeedField);
+        return panel;
+    }
+
+    private Card buildConnectionCard() {
+        Card card = new Card("Connection");
+        JPanel row = new JPanel(new GridBagLayout());
+        row.setOpaque(false);
+
+        connectionButton = CoopTheme.secondary("Check my connection");
+        connectionButton.addActionListener(event -> {
+            if (hostSegment.isSelected()) {
+                checkMyConnection();
+            } else {
+                testConnection();
+            }
+        });
+        chipRow = new JPanel(new CoopTheme.WrapLayout(6, 4));
+        chipRow.setOpaque(false);
+
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
-        c.gridy = row++;
-        c.gridwidth = 4;
+        c.gridy = 0;
         c.anchor = GridBagConstraints.WEST;
-        c.insets = new Insets(2, 4, 6, 4);
-        JPanel pasteRow = new JPanel();
-        pasteRow.setLayout(new BoxLayout(pasteRow, BoxLayout.X_AXIS));
-        pasteRow.add(paste);
-        pasteRow.add(Box.createHorizontalStrut(10));
-        pasteRow.add(new JLabel("Fills every field below from the one line your host sent you."));
-        pasteRow.add(Box.createHorizontalGlue());
-        panel.add(pasteRow, c);
+        row.add(connectionButton, c);
+        c.gridx = 1;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(0, 12, 0, 0);
+        row.add(chipRow, c);
 
-        guestHostField = new JTextField(24);
-        addRow(panel, row++, "Host address", guestHostField, null,
-                "A name, an IPv4 address, or an IPv6 address.");
-
-        guestPortField = new JTextField(String.valueOf(DEFAULT_PORT), 8);
-        addRow(panel, row++, "Port", guestPortField, null, "");
-
-        guestPasswordField = new JPasswordField(18);
-        addRow(panel, row++, "Password", guestPasswordField, null,
-                "Has to match the host's exactly.");
-
-        guestSeedField = new JTextField(24);
-        guestSeedField.setEditable(false);
-        addRow(panel, row++, "Seed", guestSeedField, null,
-                "From the invite. Only used when you start a new campaign.");
-
-        JPanel buttons = new JPanel();
-        buttons.setLayout(new BoxLayout(buttons, BoxLayout.X_AXIS));
-        testConnectionButton = new JButton("Test connection");
-        testConnectionButton.addActionListener(event -> testConnection());
-        buttons.add(testConnectionButton);
-        buttons.add(Box.createHorizontalStrut(10));
-        buttons.add(new JLabel("Ask your host to open their launcher first."));
-        buttons.add(Box.createHorizontalGlue());
+        connectionNote = CoopTheme.paragraph("");
+        connectionNote.setBorder(BorderFactory.createEmptyBorder(10, 2, 0, 0));
+        connectionNote.setVisible(false);
 
         c = new GridBagConstraints();
         c.gridx = 0;
-        c.gridy = row;
-        c.gridwidth = 4;
+        c.gridy = 0;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
         c.anchor = GridBagConstraints.WEST;
-        c.insets = new Insets(6, 4, 2, 4);
-        panel.add(buttons, c);
-        return panel;
+        card.body.add(row, c);
+        c.gridy = 1;
+        card.body.add(connectionNote, c);
+        return card;
     }
 
-    private JPanel buildAdvancedSection() {
-        JPanel wrapper = new JPanel(new BorderLayout());
-        advancedToggle = new JButton("Advanced settings");
-        advancedToggle.addActionListener(event -> {
-            boolean show = !advancedPanel.isVisible();
-            advancedPanel.setVisible(show);
-            LOG.info("Advanced settings " + (show ? "shown" : "hidden"));
-            frame.pack();
-        });
-        JPanel togglePanel = new JPanel();
-        togglePanel.setLayout(new BoxLayout(togglePanel, BoxLayout.X_AXIS));
-        togglePanel.add(advancedToggle);
-        togglePanel.add(Box.createHorizontalStrut(10));
-        togglePanel.add(new JLabel("Everything here has a working default. Leave it alone unless you"
-                + " have a reason."));
-        togglePanel.add(Box.createHorizontalGlue());
-
-        advancedPanel = titled("Advanced settings");
-        advancedPanel.setLayout(new GridBagLayout());
-        int row = 0;
+    private Card buildAdvancedCard() {
+        Card card = new Card("Advanced");
+        card.trailing.add(CoopTheme.muted("Everything here has a working default."));
+        JPanel panel = new JPanel();
+        panel.setOpaque(false);
+        Form form = new Form(panel);
 
         portMappingBox = combo(CoopOptionsRegistry.require(CoopOptionsRegistry.PORT_MAPPING)
                 .allowedValues());
-        addRow(advancedPanel, row++, "Port mapping", portMappingBox, null,
-                "auto asks your router to forward the port over UPnP. Host only.");
+        portMappingBox.setToolTipText("auto asks your router to forward the port over UPnP. Host"
+                + " only.");
+        hudCornerBox = combo(CoopOptionsRegistry.require(CoopOptionsRegistry.HUD_CORNER)
+                .allowedValues());
+        hudCornerBox.setToolTipText("Where the one-line link status sits on screen. Local only.");
+        form.pair("Port mapping", portMappingBox, "Link HUD corner", hudCornerBox);
+
+        sectorSizeBox = combo(SECTOR_SIZES);
+        sectorSizeBox.setToolTipText("New campaigns only. Both of you need the same value.");
+        sectorAgeBox = combo(STAR_AGES);
+        sectorAgeBox.setToolTipText("New campaigns only. Both of you need the same value.");
+        form.pair("Sector size", sectorSizeBox, "Star age", sectorAgeBox);
 
         reconnectGraceSpinner = new JSpinner(new SpinnerNumberModel(60, 0,
                 CoopOptionsRegistry.require(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS).max(), 5));
-        reconnectGraceDefault = new JCheckBox("use the shipped default", true);
+        reconnectGraceDefault = new JCheckBox("shipped default", true);
+        reconnectGraceDefault.setOpaque(false);
         reconnectGraceDefault.addActionListener(event ->
                 reconnectGraceSpinner.setEnabled(!reconnectGraceDefault.isSelected()));
         reconnectGraceSpinner.setEnabled(false);
-        addRow(advancedPanel, row++, "Reconnect grace (seconds)", reconnectGraceSpinner,
-                reconnectGraceDefault, "How long a dropped link keeps the session alive.");
+        reconnectGraceSpinner.setToolTipText("How long a dropped link keeps the session alive.");
+        JPanel grace = new JPanel(new GridBagLayout());
+        grace.setOpaque(false);
+        GridBagConstraints g = new GridBagConstraints();
+        g.gridx = 0;
+        g.gridy = 0;
+        g.weightx = 1;
+        g.fill = GridBagConstraints.HORIZONTAL;
+        grace.add(reconnectGraceSpinner, g);
+        g.gridx = 1;
+        g.weightx = 0;
+        g.fill = GridBagConstraints.NONE;
+        g.insets = new Insets(0, 10, 0, 0);
+        grace.add(reconnectGraceDefault, g);
+        form.full("Reconnect grace (seconds)", grace);
 
-        hudCornerBox = combo(CoopOptionsRegistry.require(CoopOptionsRegistry.HUD_CORNER)
-                .allowedValues());
-        addRow(advancedPanel, row++, "Link HUD corner", hudCornerBox, null,
-                "Where the one-line link status sits on screen. Local only.");
-
-        sectorSizeBox = combo(SECTOR_SIZES);
-        addRow(advancedPanel, row++, "Sector size", sectorSizeBox, null,
-                "New campaigns only. Both of you need the same value.");
-
-        sectorAgeBox = combo(STAR_AGES);
-        addRow(advancedPanel, row++, "Star age", sectorAgeBox, null,
-                "New campaigns only. Both of you need the same value.");
-
-        advancedPanel.setVisible(false);
-
-        wrapper.add(togglePanel, BorderLayout.NORTH);
-        wrapper.add(advancedPanel, BorderLayout.CENTER);
-        return wrapper;
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        card.body.add(panel, c);
+        return card;
     }
 
-    private JPanel buildInstallSection() {
-        JPanel panel = titled("Install check");
-        panel.setLayout(new BorderLayout(4, 4));
-
-        JPanel buttons = new JPanel();
-        buttons.setLayout(new BoxLayout(buttons, BoxLayout.X_AXIS));
-        JButton refresh = new JButton("Refresh");
+    private Card buildInstallCard() {
+        Card card = new Card("Install");
+        installSummary = new Chip("checking", CoopTheme.INFO);
+        card.trailing.add(installSummary);
+        JButton refresh = CoopTheme.ghost("Refresh");
         refresh.addActionListener(event -> {
             LOG.info("Install check refreshed by the player");
             refreshInstallRows();
         });
-        JButton openInstallDoc = new JButton("Open INSTALL.md");
-        openInstallDoc.addActionListener(event -> openInstallDoc());
-        JButton chooseFolder = new JButton("Choose install folder");
-        chooseFolder.addActionListener(event -> chooseInstallFolder());
-        buttons.add(refresh);
-        buttons.add(Box.createHorizontalStrut(8));
-        buttons.add(openInstallDoc);
-        buttons.add(Box.createHorizontalStrut(8));
-        buttons.add(chooseFolder);
-        buttons.add(Box.createHorizontalGlue());
+        JButton folder = CoopTheme.ghost("Folder");
+        folder.setToolTipText("Point the launcher at a different Starsector install.");
+        folder.addActionListener(event -> chooseInstallFolder());
+        JButton guide = CoopTheme.ghost("Guide");
+        guide.setToolTipText("Open the install guide (INSTALL.md).");
+        guide.addActionListener(event -> openInstallDoc());
+        card.trailing.add(refresh);
+        card.trailing.add(folder);
+        card.trailing.add(guide);
 
         rowsPanel = new JPanel();
+        rowsPanel.setOpaque(false);
         rowsPanel.setLayout(new BoxLayout(rowsPanel, BoxLayout.Y_AXIS));
 
-        panel.add(buttons, BorderLayout.NORTH);
-        panel.add(rowsPanel, BorderLayout.CENTER);
-        return panel;
+        showAllButton = CoopTheme.ghost("Show all checks");
+        showAllButton.addActionListener(event -> {
+            showAllRows = !showAllRows;
+            renderRows();
+        });
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.anchor = GridBagConstraints.WEST;
+        card.body.add(rowsPanel, c);
+        c.gridy = 1;
+        c.fill = GridBagConstraints.NONE;
+        c.insets = new Insets(4, 0, 0, 0);
+        card.body.add(showAllButton, c);
+        return card;
     }
 
-    private JComponent buildStatusSection() {
-        JPanel panel = titled("Status");
-        panel.setLayout(new BorderLayout(4, 4));
-        statusArea = new JTextArea(14, 80);
-        statusArea.setEditable(false);
-        statusArea.setLineWrap(false);
-        statusArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        JScrollPane scroll = new JScrollPane(statusArea);
-        scroll.setPreferredSize(new Dimension(700, 240));
+    private JComponent buildFooter() {
+        JPanel footer = new JPanel(new GridBagLayout());
+        footer.setOpaque(false);
+        footer.setBorder(BorderFactory.createEmptyBorder(6, 20, 14, 20));
 
-        JPanel buttons = new JPanel();
-        buttons.setLayout(new BoxLayout(buttons, BoxLayout.X_AXIS));
-        JButton openLogFolder = new JButton("Open log folder");
+        launchButton = CoopTheme.primary("LAUNCH");
+        launchButton.addActionListener(event -> launch());
+        JLabel hint = CoopTheme.small("Closing this window does not close the game.");
+
+        advancedToggle = CoopTheme.ghost("Advanced");
+        advancedToggle.addActionListener(event -> {
+            boolean show = !advancedCard.isVisible();
+            advancedCard.setVisible(show);
+            LOG.info("Advanced settings " + (show ? "shown" : "hidden"));
+            advancedCard.getParent().revalidate();
+        });
+        logToggle = CoopTheme.ghost("Log");
+        logToggle.addActionListener(event -> setDrawerVisible(!drawer.isVisible()));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.anchor = GridBagConstraints.WEST;
+        footer.add(launchButton, c);
+        c.gridx = 1;
+        c.insets = new Insets(0, 14, 0, 0);
+        footer.add(hint, c);
+        c.gridx = 2;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(0, 0, 0, 0);
+        footer.add(Box.createHorizontalGlue(), c);
+        c.gridx = 3;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        c.anchor = GridBagConstraints.EAST;
+        footer.add(advancedToggle, c);
+        c.gridx = 4;
+        c.insets = new Insets(0, 4, 0, 0);
+        footer.add(logToggle, c);
+        return footer;
+    }
+
+    private JPanel buildDrawer() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(CoopTheme.FIELD);
+        panel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, CoopTheme.CARD_BORDER));
+
+        JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        toolbar.setOpaque(false);
+        toolbar.setBorder(BorderFactory.createEmptyBorder(2, 14, 0, 14));
+        bugReportButton = CoopTheme.secondary("Save a bug report");
+        bugReportButton.addActionListener(event -> saveBugReport());
+        includeSaveBox = new JCheckBox("Include my newest save", true);
+        includeSaveBox.setOpaque(false);
+        includeSaveBox.setForeground(CoopTheme.MUTED);
+        JButton openLogFolder = CoopTheme.ghost("Open log folder");
         openLogFolder.addActionListener(event -> {
             if (layout == null) {
                 append("There is no install to open a log folder for yet.");
@@ -459,35 +715,38 @@ public final class CoopLauncherApp {
             LOG.info("Opening the log folder " + layout.starsectorCore());
             openPath(layout.starsectorCore());
         });
-        bugReportButton = new JButton("Save a bug report");
-        bugReportButton.addActionListener(event -> saveBugReport());
-        includeSaveBox = new JCheckBox("Include my newest save", true);
-        JButton clear = new JButton("Clear");
+        JButton clear = CoopTheme.ghost("Clear");
         clear.addActionListener(event -> statusArea.setText(""));
-        buttons.add(openLogFolder);
-        buttons.add(Box.createHorizontalStrut(8));
-        buttons.add(bugReportButton);
-        buttons.add(Box.createHorizontalStrut(4));
-        buttons.add(includeSaveBox);
-        buttons.add(Box.createHorizontalStrut(8));
-        buttons.add(clear);
-        buttons.add(Box.createHorizontalGlue());
+        toolbar.add(bugReportButton);
+        toolbar.add(includeSaveBox);
+        toolbar.add(CoopTheme.hgap(8));
+        toolbar.add(openLogFolder);
+        toolbar.add(clear);
 
+        statusArea = new JTextArea(9, 60);
+        statusArea.setEditable(false);
+        statusArea.setLineWrap(true);
+        statusArea.setWrapStyleWord(true);
+        statusArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        statusArea.setForeground(CoopTheme.TEXT);
+        statusArea.setBackground(CoopTheme.FIELD);
+        statusArea.setBorder(BorderFactory.createEmptyBorder(6, 14, 10, 14));
+        JScrollPane scroll = new JScrollPane(statusArea);
+        scroll.setBorder(BorderFactory.createEmptyBorder());
+        scroll.setPreferredSize(new Dimension(600, 190));
+
+        panel.add(toolbar, BorderLayout.NORTH);
         panel.add(scroll, BorderLayout.CENTER);
-        panel.add(buttons, BorderLayout.SOUTH);
         return panel;
     }
 
-    private JComponent buildBottomBar() {
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
-        launchButton = new JButton("Launch");
-        launchButton.addActionListener(event -> launch());
-        panel.add(Box.createHorizontalGlue());
-        panel.add(new JLabel("Closing this window does not close the game."));
-        panel.add(Box.createHorizontalStrut(12));
-        panel.add(launchButton);
-        return panel;
+    private void setDrawerVisible(boolean visible) {
+        if (drawer.isVisible() == visible) {
+            return;
+        }
+        drawer.setVisible(visible);
+        logToggle.setForeground(visible ? CoopTheme.ACCENT : CoopTheme.MUTED);
+        drawer.getParent().revalidate();
     }
 
     // ---- state ----------------------------------------------------------------------------------
@@ -514,8 +773,8 @@ public final class CoopLauncherApp {
         String connectPort = config.value(CoopLauncherConfig.CONNECT_PORT).trim();
 
         boolean host = !hostPort.isEmpty() || connectHost.isEmpty();
-        hostRole.setSelected(host);
-        guestRole.setSelected(!host);
+        hostSegment.setSelected(host);
+        guestSegment.setSelected(!host);
 
         hostPortField.setText(hostPort.isEmpty() ? String.valueOf(DEFAULT_PORT) : hostPort);
         guestHostField.setText(connectHost);
@@ -558,14 +817,25 @@ public final class CoopLauncherApp {
     }
 
     private void onRoleChanged() {
-        boolean host = hostRole.isSelected();
-        hostPanel.setVisible(host);
-        guestPanel.setVisible(!host);
+        boolean host = hostSegment.isSelected();
+        sessionBody.removeAll();
+        sessionBody.add(host ? hostForm : guestForm, BorderLayout.CENTER);
+        sessionHint.setText(host ? "You run the world. Your partner joins it."
+                : "You join your partner's world.");
+        connectionButton.setText(host ? "Check my connection" : "Test connection");
+        connectionButton.setToolTipText(host
+                ? "Asks your router to open the port the way the game will, then waits for your"
+                        + " partner's test."
+                : "Reaches the host's launcher. Ask your host to open theirs and press Check first.");
+        setChips(List.of());
+        note("");
         closeListener("the role changed");
         if (host) {
             maybeGenerateHostPassword();
+            refreshInvitePreview();
         }
-        frame.pack();
+        sessionCard.revalidate();
+        sessionCard.repaint();
     }
 
     /**
@@ -585,25 +855,25 @@ public final class CoopLauncherApp {
         // The value never reaches the log. The whole point of it is that only the two players see it.
         LOG.info("Generated a host password of " + CoopPasswords.LENGTH + " characters;"
                 + " the value is not logged");
-        append("Generated a password for you. Copy invite sends it to your partner. Clear the field"
-                + " if you would rather have no password.");
+        append("Generated a password for you. The invite carries it. Clear the field if you would"
+                + " rather have no password.");
     }
 
     /** Notices the player emptying the host password field, so nothing refills it afterwards. */
-    private final class PasswordWatcher implements javax.swing.event.DocumentListener {
+    private final class PasswordWatcher implements DocumentListener {
 
         @Override
-        public void insertUpdate(javax.swing.event.DocumentEvent event) {
+        public void insertUpdate(DocumentEvent event) {
             check();
         }
 
         @Override
-        public void removeUpdate(javax.swing.event.DocumentEvent event) {
+        public void removeUpdate(DocumentEvent event) {
             check();
         }
 
         @Override
-        public void changedUpdate(javax.swing.event.DocumentEvent event) {
+        public void changedUpdate(DocumentEvent event) {
             check();
         }
 
@@ -615,6 +885,59 @@ public final class CoopLauncherApp {
                 hostPasswordCleared = true;
                 LOG.info("The player emptied the host password field; it stays empty for this run");
             }
+        }
+    }
+
+    /** Keeps the read-only invite line in step with the host fields. */
+    private void refreshInvitePreview() {
+        if (invitePreviewField == null) {
+            return;
+        }
+        String invite = buildInvite(false);
+        invitePreviewField.setText(invite == null ? "" : invite);
+        copyInviteButton.setEnabled(invite != null);
+    }
+
+    /**
+     * The invite for the current host fields, or {@code null} when a field is missing or wrong.
+     * With {@code loud} the reason is shown; the live preview stays quiet.
+     */
+    private String buildInvite(boolean loud) {
+        String address = publicAddressField.getText().trim();
+        String portText = hostPortField.getText().trim();
+        String seed = hostSeedField.getText().trim();
+        if (address.isEmpty() || portText.isEmpty()) {
+            return null;
+        }
+        int port;
+        try {
+            port = Integer.parseInt(portText);
+        } catch (NumberFormatException ex) {
+            if (loud) {
+                fail("The port has to be a number between 1 and 65535, not \"" + portText + "\".");
+            }
+            return null;
+        }
+        if (port < 1 || port > 65535) {
+            if (loud) {
+                fail("The port has to be between 1 and 65535.");
+            }
+            return null;
+        }
+        String seedProblem = CoopSeeds.validate(seed);
+        if (seedProblem != null) {
+            if (loud) {
+                fail("That seed is not usable: " + seedProblem + ". Press Generate for a fresh one.");
+            }
+            return null;
+        }
+        try {
+            return CoopInvite.format(address, port, seed, password(hostPasswordField));
+        } catch (IllegalArgumentException ex) {
+            if (loud) {
+                fail("Could not build an invite: " + ex.getMessage());
+            }
+            return null;
         }
     }
 
@@ -645,62 +968,123 @@ public final class CoopLauncherApp {
         }
     }
 
-    /** Redraws the install panel from {@link #installRows} plus the update row, if one has landed. */
+    /** Redraws the install card from {@link #installRows} plus the update row, if one has landed. */
     private void renderRows() {
-        rowsPanel.removeAll();
-        for (CoopInstallCheck.Row row : installRows) {
-            rowsPanel.add(renderRow(row, null));
-        }
+        List<CoopInstallCheck.Row> all = new ArrayList<>(installRows);
         if (updateRow != null) {
-            JButton openRelease = null;
-            if (!updateUrl.isEmpty()) {
-                openRelease = new JButton("Open release page");
-                String target = updateUrl;
-                openRelease.addActionListener(event -> {
-                    LOG.info("Opening the release page " + target);
-                    openUrl(target);
+            all.add(updateRow);
+        }
+        int fails = 0;
+        int warns = 0;
+        for (CoopInstallCheck.Row row : all) {
+            if (row.status() == CoopInstallCheck.Status.FAIL) {
+                fails++;
+            } else if (row.status() == CoopInstallCheck.Status.WARN) {
+                warns++;
+            }
+        }
+        if (fails > 0) {
+            installSummary.set(fails + (fails == 1 ? " problem" : " problems")
+                    + (warns > 0 ? ", " + warns + (warns == 1 ? " warning" : " warnings") : ""),
+                    CoopTheme.FAIL);
+        } else if (warns > 0) {
+            installSummary.set(warns + (warns == 1 ? " warning" : " warnings"), CoopTheme.WARN);
+        } else if (all.isEmpty()) {
+            installSummary.set("no install", CoopTheme.INFO);
+        } else {
+            installSummary.set("all " + all.size() + " checks passed", CoopTheme.OK);
+        }
+        launchButton.setEnabled(fails == 0 && layout != null);
+
+        rowsPanel.removeAll();
+        int hidden = 0;
+        for (CoopInstallCheck.Row row : all) {
+            boolean interesting = row.status() != CoopInstallCheck.Status.OK;
+            if (!interesting && !showAllRows) {
+                hidden++;
+                continue;
+            }
+            JButton trailing = null;
+            if (row == updateRow && !updateUrl.isEmpty()) {
+                trailing = CoopTheme.inline("Open release page");
+                trailing.addActionListener(event -> {
+                    LOG.info("Opening the release page " + updateUrl);
+                    openUrl(updateUrl);
                 });
             }
-            rowsPanel.add(renderRow(updateRow, openRelease));
+            rowsPanel.add(renderRow(row, trailing));
         }
+        showAllButton.setText(showAllRows ? "Hide passed checks"
+                : "Show all checks (" + hidden + " passed)");
+        showAllButton.setVisible(hidden > 0 || showAllRows);
         rowsPanel.revalidate();
         rowsPanel.repaint();
-        frame.pack();
     }
 
     private JComponent renderRow(CoopInstallCheck.Row row, JComponent trailing) {
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
-        JLabel badge = new JLabel(switch (row.status()) {
-            case OK -> "OK  ";
-            case INFO -> "INFO";
-            case WARN -> "WARN";
-            case FAIL -> "FAIL";
-        });
-        badge.setFont(new Font(Font.MONOSPACED, Font.BOLD, 12));
-        badge.setForeground(switch (row.status()) {
-            case OK -> new java.awt.Color(0x1B, 0x6B, 0x2A);
-            case INFO -> new java.awt.Color(0x55, 0x55, 0x55);
-            case WARN -> new java.awt.Color(0x8A, 0x5A, 0x00);
-            case FAIL -> new java.awt.Color(0xA3, 0x1D, 0x1D);
-        });
-        panel.add(badge);
-        panel.add(Box.createHorizontalStrut(8));
-        StringBuilder text = new StringBuilder("<html><b>").append(escape(row.label()))
-                .append("</b>: ").append(escape(row.detail()));
-        if (!row.fix().isEmpty()) {
-            text.append("<br><i>").append(escape(row.fix())).append("</i>");
-        }
-        text.append("</html>");
-        JLabel label = new JLabel(text.toString());
-        panel.add(label);
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.anchor = GridBagConstraints.NORTHWEST;
+        c.insets = new Insets(5, 2, 0, 10);
+        panel.add(new Dot(CoopTheme.statusColor(row.status())), c);
+
+        JLabel label = new JLabel(row.label());
+        label.setForeground(CoopTheme.TEXT);
+        c.gridx = 1;
+        c.insets = new Insets(0, 0, 0, 8);
+        panel.add(label, c);
+
+        JLabel detail = CoopTheme.muted(row.detail());
+        c.gridx = 2;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(0, 0, 0, 0);
+        panel.add(detail, c);
+
         if (trailing != null) {
-            panel.add(Box.createHorizontalStrut(8));
-            panel.add(trailing);
+            c.gridx = 3;
+            c.weightx = 0;
+            c.fill = GridBagConstraints.NONE;
+            c.insets = new Insets(0, 8, 0, 0);
+            panel.add(trailing, c);
         }
-        panel.add(Box.createHorizontalGlue());
+        if (!row.fix().isEmpty()) {
+            JLabel fix = new JLabel("<html><body style='width: 460px'>" + escape(row.fix())
+                    + "</body></html>");
+            fix.setForeground(CoopTheme.MUTED);
+            fix.setFont(fix.getFont().deriveFont(Font.ITALIC, (float) fix.getFont().getSize() - 1f));
+            c = new GridBagConstraints();
+            c.gridx = 1;
+            c.gridy = 1;
+            c.gridwidth = 3;
+            c.weightx = 1;
+            c.fill = GridBagConstraints.HORIZONTAL;
+            c.anchor = GridBagConstraints.WEST;
+            c.insets = new Insets(2, 0, 0, 0);
+            panel.add(fix, c);
+        }
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, panel.getPreferredSize().height));
         return panel;
+    }
+
+    private void setChips(List<Chip> chips) {
+        chipRow.removeAll();
+        for (Chip chip : chips) {
+            chipRow.add(chip);
+        }
+        chipRow.revalidate();
+        chipRow.repaint();
+    }
+
+    private void note(String text) {
+        connectionNote.setText(text);
+        connectionNote.setVisible(!text.isEmpty());
+        connectionNote.getParent().revalidate();
     }
 
     // ---- actions --------------------------------------------------------------------------------
@@ -719,40 +1103,60 @@ public final class CoopLauncherApp {
     private void finishCopyInvite() {
         String address = publicAddressField.getText().trim();
         if (address.isEmpty()) {
-            append("No address to put in the invite. Type one in and press Copy invite again.");
+            fail("No address to put in the invite. Press Look up, or type one in, then Copy again.");
             return;
         }
-        Integer port = parsePort(hostPortField.getText(), "port");
-        if (port == null) {
-            return;
-        }
-        String seed = hostSeedField.getText().trim();
-        String seedProblem = CoopSeeds.validate(seed);
-        if (seedProblem != null) {
-            fail("That seed is not usable: " + seedProblem + ". Press Generate for a fresh one.");
-            return;
-        }
-        String invite;
-        try {
-            invite = CoopInvite.format(address, port, seed, password(hostPasswordField));
-        } catch (IllegalArgumentException ex) {
-            fail("Could not build an invite: " + ex.getMessage());
+        String invite = buildInvite(true);
+        if (invite == null) {
             return;
         }
         setClipboard(invite);
-        LOG.info("Invite copied for " + address + ":" + port + " seed=" + seed
-                + " password=" + (password(hostPasswordField).isEmpty() ? "none" : "set"));
+        LOG.info("Invite copied for " + address + ":" + hostPortField.getText().trim() + " seed="
+                + hostSeedField.getText().trim() + " password="
+                + (password(hostPasswordField).isEmpty() ? "none" : "set"));
         append("Invite copied to the clipboard. Send your partner this line:");
         append("  " + invite);
+        note("Invite copied. Send it to your partner, then press Check my connection.");
     }
 
     private void pasteInvite() {
         LOG.info("Paste invite pressed");
-        String text = readClipboard();
+        String text = readClipboard().trim();
+        if (text.isEmpty()) {
+            fail("The clipboard is empty. Copy the invite line your host sent you first.");
+            return;
+        }
+        writingGuestInvite = true;
+        try {
+            guestInviteField.setText(text);
+        } finally {
+            writingGuestInvite = false;
+        }
+        applyInviteText(text, true);
+    }
+
+    private void onGuestInviteTyped() {
+        if (writingGuestInvite) {
+            return;
+        }
+        String text = guestInviteField.getText().trim();
+        if (text.isEmpty()) {
+            guestInviteNote.setForeground(CoopTheme.MUTED);
+            guestInviteNote.setText("Fills the fields below. You can also type them in.");
+            return;
+        }
+        applyInviteText(text, false);
+    }
+
+    private void applyInviteText(String text, boolean loud) {
         CoopInvite.Parsed parsed = CoopInvite.parse(text);
         if (!parsed.ok()) {
-            LOG.warn("Invite could not be parsed: " + parsed.error());
-            fail("That is not a usable invite: " + parsed.error());
+            guestInviteNote.setForeground(CoopTheme.FAIL);
+            guestInviteNote.setText("Not a usable invite: " + parsed.error());
+            if (loud) {
+                LOG.warn("Invite could not be parsed: " + parsed.error());
+                fail("That is not a usable invite: " + parsed.error());
+            }
             return;
         }
         CoopInvite invite = parsed.invite();
@@ -760,15 +1164,19 @@ public final class CoopLauncherApp {
         guestPortField.setText(String.valueOf(invite.port()));
         guestPasswordField.setText(invite.password());
         guestSeedField.setText(invite.seed());
-        LOG.info("Invite accepted: " + invite);
-        append("Invite read. Host " + invite.host() + ":" + invite.port()
+        String summary = "Invite read. Host " + invite.host() + ":" + invite.port()
                 + (invite.seed().isEmpty() ? ", no seed" : ", seed " + invite.seed())
-                + (invite.password().isEmpty() ? ", no password" : ", password set") + ".");
+                + (invite.password().isEmpty() ? ", no password" : ", password set") + ".";
+        guestInviteNote.setForeground(CoopTheme.OK);
+        guestInviteNote.setText(summary);
+        LOG.info("Invite accepted: " + invite);
+        append(summary);
     }
 
     private void lookUpPublicAddress(Runnable then) {
         LOG.info("Public address lookup started");
         append("Looking up your public address.");
+        note("Looking up your public address.");
         background.submit(() -> {
             CoopPublicAddress.Lookup result = CoopPublicAddress.lookup();
             SwingUtilities.invokeLater(() -> {
@@ -777,9 +1185,12 @@ public final class CoopLauncherApp {
                     LOG.info("Public address lookup returned " + result.address());
                     append("Your public address is " + result.address()
                             + ". Overwrite it if you connect over a LAN or a VPN.");
+                    note("Your public address is " + result.address() + ". Overwrite it for a LAN"
+                            + " or VPN session.");
                 } else {
                     LOG.warn("Public address lookup failed: " + result.error());
                     append(result.error());
+                    note(result.error());
                 }
                 if (then != null) {
                     then.run();
@@ -794,9 +1205,12 @@ public final class CoopLauncherApp {
             return;
         }
         LOG.info("Check my connection pressed for port " + port);
-        checkConnectionButton.setEnabled(false);
+        connectionButton.setEnabled(false);
         closeListener("a new connection check started");
         append("Checking port " + port + ". This takes a few seconds.");
+        Chip working = new Chip("asking the router", CoopTheme.INFO);
+        setChips(List.of(working));
+        note("Asking your router to open port " + port + ", the way the game does at startup.");
 
         boolean mappingEnabled = !"off".equalsIgnoreCase(selected(portMappingBox, "auto"));
         CoopPortMapper mapper = CoopPortMapper.start(port, mappingEnabled, System::currentTimeMillis);
@@ -828,6 +1242,7 @@ public final class CoopLauncherApp {
             if (result.mapped() && !result.cgnat() && publicAddressField.getText().trim().isEmpty()) {
                 publicAddressField.setText(result.externalAddress());
             }
+            showHostChips(port, result, false);
             // shutdown() drives its own bounded release loop (up to 1.2 s of busy waiting against
             // the injected clock), so it has to leave the event dispatch thread. The mapper is not
             // being ticked any more at this point, so handing it over is a clean transfer.
@@ -835,36 +1250,81 @@ public final class CoopLauncherApp {
                 mapper.shutdown();
                 SwingUtilities.invokeLater(() -> {
                     append("Released the router mapping so the game can make its own at startup.");
-                    openListener(port);
-                    checkConnectionButton.setEnabled(true);
+                    boolean listening = openListener(port);
+                    showHostChips(port, result, listening);
+                    connectionButton.setEnabled(true);
                 });
             });
         });
         checkTimer.start();
     }
 
-    private void openListener(int port) {
+    private void showHostChips(int port, CoopPortMapper.Result result, boolean listening) {
+        List<Chip> chips = new ArrayList<>();
+        if (result.mapped()) {
+            chips.add(new Chip(tierName(result.tier()) + " mapped", CoopTheme.OK));
+            chips.add(new Chip(result.externalEndpoint(), result.cgnat() ? CoopTheme.WARN
+                    : CoopTheme.OK));
+            if (result.cgnat()) {
+                chips.add(new Chip("carrier-grade NAT", CoopTheme.WARN));
+            }
+        } else if (result.tier() == CoopPortMapper.Tier.NONE && result.failureText().isEmpty()) {
+            chips.add(new Chip("mapping off", CoopTheme.INFO));
+        } else {
+            chips.add(new Chip("no mapping", CoopTheme.WARN));
+        }
+        if (listening) {
+            chips.add(new Chip("listening on " + port, CoopTheme.OK));
+        }
+        setChips(chips);
+        if (result.mapped() && !result.cgnat()) {
+            note("Your router opened " + result.externalEndpoint() + ". Copy the invite and ask your"
+                    + " partner to press Test connection. The full doctor block is in the log.");
+        } else if (result.cgnat()) {
+            note("Your router answered, but its outside address is not public (carrier-grade NAT)."
+                    + " A VPN or IPv6 is the way through. Details in the log.");
+        } else if (!result.failureText().isEmpty()) {
+            note(result.failureText() + " Forward port " + port + " on your router by hand, or use a"
+                    + " VPN. Details in the log.");
+        } else {
+            note("Port mapping is off. Forward port " + port + " by hand, or use a VPN or LAN"
+                    + " address.");
+        }
+        setDrawerVisible(true);
+    }
+
+    private boolean openListener(int port) {
         try {
             listener = CoopLauncherProbe.HostListener.open(port, launcherVersion);
             LOG.info("Launcher listener open on port " + listener.port());
             append("Waiting for the guest's test on port " + listener.port()
                     + ". This stops when you press Launch.");
+            return true;
         } catch (Exception ex) {
             LOG.warn("Could not hold port " + port + " for the guest's test", ex);
             append("Port " + port + " is already in use, so the guest cannot test against this"
                     + " launcher. Is the game already running?");
+            note("Port " + port + " is already in use, so your partner cannot test against this"
+                    + " launcher. Is the game already running?");
+            return false;
         }
     }
 
     private void testConnection() {
         String host = guestHostField.getText().trim();
+        if (host.isEmpty()) {
+            fail("Paste the invite, or type the host's address in.");
+            return;
+        }
         Integer port = parsePort(guestPortField.getText(), "port");
         if (port == null) {
             return;
         }
         LOG.info("Test connection pressed for " + host + ":" + port);
-        testConnectionButton.setEnabled(false);
+        connectionButton.setEnabled(false);
         append("Testing " + host + ":" + port + ".");
+        setChips(List.of(new Chip("reaching " + host + ":" + port, CoopTheme.INFO)));
+        note("");
         background.submit(() -> {
             CoopLauncherProbe.Result result = CoopLauncherProbe.GuestProber.probe(host, port);
             SwingUtilities.invokeLater(() -> {
@@ -881,7 +1341,20 @@ public final class CoopLauncherApp {
                 append("  round trip          " + (result.rttMillis() < 0 ? "not measured"
                         : result.rttMillis() + " ms"));
                 append(result.message());
-                testConnectionButton.setEnabled(true);
+                List<Chip> chips = new ArrayList<>();
+                chips.add(new Chip("TCP", result.tcpReachable() ? CoopTheme.OK : CoopTheme.FAIL));
+                chips.add(new Chip(result.launcherAnswered()
+                        ? "launcher " + result.launcherVersion() : "launcher",
+                        result.launcherAnswered() ? CoopTheme.OK
+                                : result.tcpReachable() ? CoopTheme.WARN : CoopTheme.FAIL));
+                chips.add(new Chip("UDP", result.udpEchoed() ? CoopTheme.OK
+                        : result.launcherAnswered() ? CoopTheme.FAIL : CoopTheme.INFO));
+                chips.add(new Chip(result.rttMillis() < 0 ? "no round trip"
+                        : result.rttMillis() + " ms", result.rttMillis() < 0 ? CoopTheme.INFO
+                        : CoopTheme.OK));
+                setChips(chips);
+                note(result.message());
+                connectionButton.setEnabled(true);
             });
         });
     }
@@ -892,7 +1365,7 @@ public final class CoopLauncherApp {
             return;
         }
         boolean includeSave = includeSaveBox.isSelected();
-        String role = hostRole.isSelected() ? "host" : "guest";
+        String role = hostSegment.isSelected() ? "host" : "guest";
         LOG.info("Save a bug report pressed; role=" + role + " includeSave=" + includeSave);
         bugReportButton.setEnabled(false);
         append("Packing a bug report. A large game log takes a few seconds.");
@@ -939,11 +1412,15 @@ public final class CoopLauncherApp {
             CoopUpdateCheck.Outcome outcome = CoopUpdateCheck.check(version);
             SwingUtilities.invokeLater(() -> {
                 updateRow = CoopUpdateCheck.row(outcome);
-                updateUrl = outcome.kind() == CoopUpdateCheck.Kind.UPDATE_AVAILABLE
-                        ? outcome.url() : "";
+                boolean available = outcome.kind() == CoopUpdateCheck.Kind.UPDATE_AVAILABLE;
+                updateUrl = available ? outcome.url() : "";
                 LOG.info("Update check " + updateRow);
                 renderRows();
-                if (outcome.kind() == CoopUpdateCheck.Kind.UPDATE_AVAILABLE) {
+                updateChip.set("update " + outcome.version() + " available", CoopTheme.WARN);
+                updateChip.setToolTipText("Both players must install the same release. Click to open"
+                        + " the release page.");
+                updateChip.setVisible(available);
+                if (available) {
                     append("Version " + outcome.version() + " is out. Both of you have to be on the"
                             + " same release: " + outcome.url());
                 }
@@ -974,7 +1451,7 @@ public final class CoopLauncherApp {
             return;
         }
 
-        boolean host = hostRole.isSelected();
+        boolean host = hostSegment.isSelected();
         Map<String, String> owned = new LinkedHashMap<>();
         if (host) {
             Integer port = parsePort(hostPortField.getText(), "port");
@@ -1042,10 +1519,15 @@ public final class CoopLauncherApp {
         LOG.info("Started starsector.exe pid " + pid);
         append("Starsector started (pid " + pid + "). This window keeps showing the co-op lines from"
                 + " the game log.");
+        launchButton.setText("RUNNING");
+        launchButton.setEnabled(false);
         gameProcess.onExit().thenAccept(process -> SwingUtilities.invokeLater(() -> {
             LOG.info("starsector.exe exited with code " + process.exitValue());
             append("Starsector exited (code " + process.exitValue() + ").");
+            launchButton.setText("LAUNCH");
+            launchButton.setEnabled(true);
         }));
+        setDrawerVisible(true);
         startLogTail();
     }
 
@@ -1090,6 +1572,7 @@ public final class CoopLauncherApp {
         if (!doc.isFile()) {
             append("INSTALL.md is not in this copy of the mod. It is in the download, at"
                     + " docs/player/INSTALL.md.");
+            setDrawerVisible(true);
             return;
         }
         openPath(doc);
@@ -1123,6 +1606,9 @@ public final class CoopLauncherApp {
     }
 
     private void append(String line) {
+        if (statusArea == null) {
+            return;
+        }
         String stamped = LocalTime.now().format(CLOCK) + "  " + line;
         statusArea.append(stamped + "\n");
         statusArea.setCaretPosition(statusArea.getDocument().getLength());
@@ -1130,8 +1616,7 @@ public final class CoopLauncherApp {
 
     private void fail(String message) {
         append(message.replace("\n\n", " ").replace("\n", " "));
-        JOptionPane.showMessageDialog(frame, message, "Starsector Coop Launcher",
-                JOptionPane.WARNING_MESSAGE);
+        JOptionPane.showMessageDialog(frame, message, "Starsector Coop", JOptionPane.WARNING_MESSAGE);
     }
 
     private Integer parsePort(String text, String what) {
@@ -1157,6 +1642,15 @@ public final class CoopLauncherApp {
 
     private static String yesNo(boolean value) {
         return value ? "yes" : "no";
+    }
+
+    private static String tierName(CoopPortMapper.Tier tier) {
+        return switch (tier) {
+            case UPNP -> "UPnP";
+            case NAT_PMP -> "NAT-PMP";
+            case PCP -> "PCP";
+            case NONE -> "no";
+        };
     }
 
     private JComboBox<String> combo(List<String> allowed) {
@@ -1188,40 +1682,6 @@ public final class CoopLauncherApp {
         Object value = box.getSelectedItem();
         String text = value == null ? "" : String.valueOf(value);
         return DEFAULT_ENTRY.equals(text) ? fallback : text;
-    }
-
-    private void addRow(JPanel panel, int row, String label, JComponent field, JComponent extra,
-                        String note) {
-        GridBagConstraints c = new GridBagConstraints();
-        c.insets = new Insets(2, 4, 2, 4);
-        c.anchor = GridBagConstraints.WEST;
-        c.gridy = row;
-
-        c.gridx = 0;
-        panel.add(new JLabel(label), c);
-
-        c.gridx = 1;
-        c.fill = GridBagConstraints.HORIZONTAL;
-        panel.add(field, c);
-        c.fill = GridBagConstraints.NONE;
-
-        c.gridx = 2;
-        if (extra != null) {
-            panel.add(extra, c);
-        } else {
-            panel.add(Box.createHorizontalStrut(0), c);
-        }
-
-        c.gridx = 3;
-        c.weightx = 1.0;
-        panel.add(new JLabel(note == null ? "" : note), c);
-    }
-
-    private static JPanel titled(String title) {
-        JPanel panel = new JPanel();
-        panel.setBorder(BorderFactory.createTitledBorder(title));
-        panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        return panel;
     }
 
     private void setClipboard(String text) {

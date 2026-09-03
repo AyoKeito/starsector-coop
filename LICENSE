@@ -27,8 +27,9 @@ What this license does not cover
   mod under the game's modding terms. The modifications themselves are
   offered to Fractal Softworks under the exception above.
 - Third-party code vendored into the Mod keeps its own license and notice,
-  stated in the file or directory that contains it. This release contains
-  none.
+  stated in the file or directory that contains it.
+- jars/flatlaf.jar is FlatLaf by FormDev Software GmbH, Apache License 2.0,
+  redistributed unmodified; see https://github.com/JFormDesigner/FlatLaf.
 - tools/starsector-mcp depends on npm packages under their own licenses,
   listed in its package-lock.json.
 
