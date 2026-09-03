@@ -16,6 +16,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Only the engine-free half of the plugin is covered here: tags, wording, lifecycle flags and the
  * hidden-vs-feed rule. The rendering path needs a live {@code TooltipMakerAPI} and is checked by eye
  * in the smoke pass.
+ *
+ * <p>The Phase 21 sweep in {@code ensureRegistered} (discard every existing instance, add one fresh
+ * one) is not exercised here: it needs a fake {@code IntelManagerAPI} plus a {@code SectorAPI} to
+ * hand it to {@code ensureRegistered}/{@code remove}, and no such stub exists yet for either type in
+ * this test file or in {@code CoopSessionStatsIntelTest}. Only the null-safety paths are covered
+ * below; the sweep itself needs the manual smoke pass.
  */
 class CoopSessionIntelTest {
 
@@ -27,10 +33,16 @@ class CoopSessionIntelTest {
     }
 
     @Test
-    void isPermanentAndNeverSweptAway() {
+    void lifecycleFlagsStopTheManagerSweepSoTheModControlsRemovalItself() {
         assertFalse(intel.isEnded());
         assertFalse(intel.isEnding());
         assertFalse(intel.shouldRemoveIntel());
+    }
+
+    @Test
+    void registrationAndRemovalTolerateANullSector() {
+        assertNull(CoopSessionIntel.ensureRegistered(null));
+        assertFalse(CoopSessionIntel.remove(null));
     }
 
     @Test

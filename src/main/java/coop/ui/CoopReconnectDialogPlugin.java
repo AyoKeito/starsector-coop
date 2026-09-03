@@ -32,7 +32,8 @@ import java.util.function.IntSupplier;
  * render must never be able to take down the frame that is trying to save the session. The reconnect
  * coordinator behind it works with no dialog at all, and the feed banner is the fallback.
  */
-public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlugin {
+public abstract class CoopReconnectDialogPlugin
+        implements InteractionDialogPlugin, CoopDismissableDialog {
 
     /** The options' ids; object identities, so nothing else can collide with them. */
     private static final Object OPTION_END = new Object();
@@ -164,7 +165,8 @@ public abstract class CoopReconnectDialogPlugin implements InteractionDialogPlug
     }
 
     /** Closes the dialog if it is still up; idempotent and safe to call from the pump. */
-    void close() {
+    @Override
+    public void close() {
         InteractionDialogAPI open = dialog;
         dialog = null;
         if (open == null) {

@@ -12,11 +12,12 @@ import com.fs.starfarer.api.util.Misc;
 import coop.util.CoopLog;
 
 import java.awt.Color;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Phase 20.6: the "Coop Session" intel entry - a permanent page in the intel screen showing who is
+ * Phase 20.6 / Phase 21: the "Coop Session" intel entry - a page in the intel screen showing who is
  * connected, what the link is doing, how it has behaved over the last few minutes, and (on the host)
  * whether this machine is reachable at all.
  *
@@ -27,24 +28,39 @@ import java.util.Set;
  * API-sanctioned page surface in the campaign ({@code IntelInfoPlugin.hasLargeDescription()} +
  * {@code createLargeDescription(CustomPanelAPI, w, h)}, verified against the 0.98a API sources).
  *
- * <p><b>No persisted state, on purpose.</b> This object lands in the save through XStream like every
- * other intel plugin, and XStream runs neither constructors nor field initialisers on load. The
- * safest possible save shape is therefore no instance fields at all: everything on the page is read
- * live from {@link CoopSessionIntelFeed}, and an entry restored from a save written by a different
- * build has nothing to migrate. That is the same lesson Phase 24's {@code importantApplied} flag
- * came out of, taken one step further - there is no flag to migrate because there is no flag.
+ * <p><b>Transient, not persisted (Phase 21).</b> This class used to be registered once and left in
+ * the save forever, on the theory that {@link #isHidden()} would cover solo play. It doesn't cover
+ * everything a save can do to it: XStream runs neither constructors nor field initialisers on load,
+ * so a saved instance is whatever bytecode the build that wrote the save happened to have, and a
+ * later build's {@code render} method can be handed an object that never ran its own constructor.
+ * The actual fix is to never let an instance reach the save at all. {@link CoopModPlugin} removes the
+ * entry in {@code beforeGameSave} and re-adds a brand-new one in {@code afterGameSave} and in
+ * {@code onGameLoad}. A save written under this policy carries zero instances of this class, so there
+ * is nothing to go stale. The class name itself cannot change - XStream still has to resolve
+ * instances left by saves from before this phase landed - which is why {@link #ensureRegistered}
+ * additionally sweeps and discards every existing instance before adding its one fresh one: an old
+ * save's instance is not "the" entry to reuse, it's exactly the stale object this phase exists to
+ * get rid of.
  *
- * <p><b>Permanent, and that is the whole lifecycle.</b> {@link #isEnded()} and {@link #isEnding()}
- * are false forever and {@link #shouldRemoveIntel()} refuses removal, so the intel manager's sweep
- * never takes it. What changes instead is {@link #isHidden()}: with no coop role active the entry
- * vanishes from the screen, which is how a save loaded solo shows no coop clutter without the entry
- * having to be deleted and recreated.
+ * <p><b>No instance fields, kept anyway.</b> Everything on the page is read live from
+ * {@link CoopSessionIntelFeed}. That was originally the plan's defence against a saved instance
+ * having nothing to migrate; it is no longer load-bearing since a saved instance should not exist at
+ * all, but it costs nothing to keep and it is one less thing to reconsider if the remove/re-add hooks
+ * are ever skipped by a bug.
+ *
+ * <p><b>Lifecycle flags stay false, for a different reason now.</b> {@link #isEnded()},
+ * {@link #isEnding()}, and {@link #shouldRemoveIntel()} all still return values that tell the intel
+ * manager's own sweep to leave the entry alone - but the entry's lifecycle is no longer "the manager
+ * never removes it", it's "the mod removes and re-adds it explicitly, twice per save, and the manager
+ * sweep is not one of the two places that happens." Letting the manager's own end/ending logic remove
+ * the entry mid-session would race the mod's own remove/re-add calls for no benefit.
  *
  * <p><b>Rendering cannot crash the intel screen.</b> Every engine-facing method here is wrapped. A
  * throwable inside the page degrades to a single "unavailable" line and one log warning per session,
  * because an exception out of {@code createLargeDescription} takes the whole intel tab with it.
  *
- * <h2>Wiring the coordinator must add (this worker was not allowed to touch {@code CoopNetPump})</h2>
+ * <h2>Wiring the coordinator must add (this worker was not allowed to touch {@code CoopNetPump} or
+ * {@code CoopModPlugin})</h2>
  * <pre>{@code
  * // --- CoopNetPump: field, next to the other UI-facing state ---
  * private final CoopSessionIntelFeed intelFeed = new CoopSessionIntelFeed();
@@ -53,6 +69,12 @@ import java.util.Set;
  * CoopSessionIntelFeed.install(intelFeed);
  *
  * // --- CoopModPlugin.onGameLoad, after the pump is installed ---
+ * CoopSessionIntel.ensureRegistered(Global.getSector());
+ *
+ * // --- CoopModPlugin.beforeGameSave, before the engine writes the file ---
+ * CoopSessionIntel.remove(Global.getSector());
+ *
+ * // --- CoopModPlugin.afterGameSave, once the file is written ---
  * CoopSessionIntel.ensureRegistered(Global.getSector());
  *
  * // --- CoopNetPump, in the LINK_STATUS send path (once per interval, NOT per frame) ---
@@ -104,15 +126,18 @@ public class CoopSessionIntel extends BaseIntelPlugin {
     // ---- registration ----------------------------------------------------------------------------
 
     /**
-     * Adds the entry if this campaign does not already have one, and returns it either way.
-     * Idempotent across game loads: the entry persists in the save, so on a reload the manager
-     * already holds it and this call finds it rather than adding a second.
+     * Sweeps out every existing instance (see the class Javadoc: an existing instance is either
+     * left over from a save written before Phase 21, or a leftover from a remove/re-add pair that
+     * did not complete), adds exactly one fresh instance, and returns it.
+     *
+     * <p>Safe to call from both {@code onGameLoad} and {@code afterGameSave} without checking
+     * anything first - it always ends with exactly one entry registered, never zero, never two.
      *
      * <p>Registered with {@code addIntel(plugin, true)} rather than {@code queueIntel}, because
      * queueing is comm-relay gated and a diagnostics page must be readable from anywhere - including
      * from deep space with a dead link, which is exactly when a player wants it.
      *
-     * @return the live entry, or null when there is no sector or the manager refused
+     * @return the newly registered entry, or null when there is no sector or the manager refused
      */
     public static CoopSessionIntel ensureRegistered(SectorAPI sector) {
         try {
@@ -123,19 +148,48 @@ public class CoopSessionIntel extends BaseIntelPlugin {
             if (manager == null) {
                 return null;
             }
-            CoopSessionIntel existing = findExisting(manager);
-            if (existing != null) {
-                return existing;
+            int swept = removeAll(manager);
+            if (swept > 0) {
+                CoopLog.info(CoopSessionIntel.class,
+                        "Swept " + swept + " stale coop session intel entr" + (swept == 1 ? "y" : "ies")
+                                + " (left over from an older save or an incomplete remove/re-add)");
             }
             CoopSessionIntel intel = new CoopSessionIntel();
-            // forceNoMessage: registration happens on every load, and a "new intel" toast every load
-            // would be noise for an entry the player already knows about.
+            // forceNoMessage: registration happens on every load and after every save, and a
+            // "new intel" toast every time would be noise for an entry the player already knows about.
             manager.addIntel(intel, true);
             CoopLog.info(CoopSessionIntel.class, "Coop session intel entry registered");
             return intel;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopSessionIntel.class, "Could not register the coop session intel entry", ex);
             return null;
+        }
+    }
+
+    /**
+     * Drops the entry from the intel manager. Called from {@code CoopModPlugin.beforeGameSave} so
+     * no instance of this class reaches XStream; safe to call when there is nothing registered.
+     *
+     * @return true when an entry was actually removed
+     */
+    public static boolean remove(SectorAPI sector) {
+        try {
+            if (sector == null) {
+                return false;
+            }
+            IntelManagerAPI manager = sector.getIntelManager();
+            if (manager == null) {
+                return false;
+            }
+            CoopSessionIntel existing = findExisting(manager);
+            if (existing == null) {
+                return false;
+            }
+            manager.removeIntel(existing);
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSessionIntel.class, "Could not remove the coop session intel entry", ex);
+            return false;
         }
     }
 
@@ -152,9 +206,36 @@ public class CoopSessionIntel extends BaseIntelPlugin {
         return null;
     }
 
+    /**
+     * Removes every registered instance of this class, not just the first. Iterates a defensive
+     * copy of {@code manager.getIntel(...)} so removing entries mid-loop does not disturb the list
+     * being walked.
+     *
+     * @return how many instances were removed
+     */
+    private static int removeAll(IntelManagerAPI manager) {
+        List<IntelInfoPlugin> found = manager.getIntel(CoopSessionIntel.class);
+        if (found == null || found.isEmpty()) {
+            return 0;
+        }
+        List<IntelInfoPlugin> copy = new ArrayList<>(found);
+        int removed = 0;
+        for (IntelInfoPlugin plugin : copy) {
+            if (plugin instanceof CoopSessionIntel) {
+                manager.removeIntel(plugin);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     // ---- lifecycle -------------------------------------------------------------------------------
 
-    /** Permanent: nothing ends this entry, so the manager sweep never sees a reason to drop it. */
+    /**
+     * False, but not because the entry is permanent. The mod controls this entry's lifecycle
+     * explicitly through {@link #remove} and {@link #ensureRegistered}; letting the intel manager's
+     * own sweep remove it on top of that would race those calls for no benefit.
+     */
     @Override
     public boolean isEnded() {
         return false;
@@ -171,9 +252,11 @@ public class CoopSessionIntel extends BaseIntelPlugin {
     }
 
     /**
-     * Hidden unless a coop role is live. This is the solo-play answer: the mod's policy is that
-     * enabling it means coop rules, but a save can still be loaded with no session running, and a
-     * dead diagnostics page in the intel screen is clutter.
+     * Hidden unless a coop role is live. This is the second line of defence, not the first: after
+     * Phase 21 the entry should not be in a solo save at all, because it is removed before every save
+     * and only re-added on load. {@link #isHidden} exists for the case where an instance is present
+     * anyway - a save from a build before this phase, or a save taken while the remove hook failed to
+     * run - so a dead diagnostics page still does not show up as clutter in solo play.
      */
     @Override
     public boolean isHidden() {

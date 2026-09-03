@@ -100,6 +100,16 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_RECONNECT_RESUMED = "reconnectResumed";
     private static final String FEED_RECONNECT_ENDED = "reconnectEnded";
     private static final String FEED_RECONNECT_EXTENDED = "reconnectExtended";
+    private static final String FEED_LOBBY_JOINED = "lobbyJoined";
+    private static final String FEED_LOBBY_LEFT = "lobbyLeft";
+    private static final String FEED_LOBBY_READY = "lobbyReady";
+    private static final String FEED_LOBBY_UNREADY = "lobbyUnready";
+    private static final String FEED_LOBBY_RESET = "lobbyReset";
+    private static final String FEED_LOBBY_COUNTDOWN = "lobbyCountdown";
+    private static final String FEED_LOBBY_CANCELLED = "lobbyCancelled";
+    private static final String FEED_LOBBY_STARTED = "lobbyStarted";
+    private static final String FEED_LOBBY_CANCELLED_JOIN = "lobbyCancelledJoin";
+    private static final String FEED_DESYNC = "desync";
     private static final java.awt.Color FEED_WARN_COLOR = new java.awt.Color(255, 220, 120);
     private static final java.awt.Color FEED_BAD_COLOR = new java.awt.Color(255, 170, 90);
     private static final java.awt.Color FEED_GOOD_COLOR = new java.awt.Color(150, 230, 150);
@@ -134,6 +144,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_HANDSHAKE_MANIFEST = "handshake.manifest";
     private static final String SECTION_SEED_LOCK_REQUEST = "seed.lockRequest";
     private static final String SECTION_HOLD_PAUSED = "session.holdPaused";
+    private static final String SECTION_LOBBY = "session.lobby";
     private static final String SECTION_BATTLE_BRIDGE = "battle.bridge";
     private static final String SECTION_SHARED_PAUSE = "time.sharedPause";
     private static final String SECTION_TIME_APPLY = "time.applySnapshot";
@@ -321,8 +332,91 @@ public class CoopNetPump implements EveryFrameScript {
 
     // ---- Phase 20.2 reconnect grace / 20.3 port mapper ------------------------------------------
     private final CoopReconnectCoordinator reconnect;
-    private final coop.ui.CoopReconnectDialogController reconnectDialogs =
-            new coop.ui.CoopReconnectDialogController();
+    private final coop.ui.CoopDialogController reconnectDialogs =
+            new coop.ui.CoopDialogController("reconnect");
+
+    // ---- Phase 21 lobby --------------------------------------------------------------------------
+    /** How often the host re-sends {@code LOBBY_STATUS} even when nothing changed. */
+    private static final long LOBBY_STATUS_INTERVAL_MILLIS = 1_000L;
+    /** Host-authoritative roster; on the guest, the mirror of the host's. */
+    private final coop.session.CoopLobbyRoster lobbyRoster = new coop.session.CoopLobbyRoster();
+    private final coop.ui.CoopDialogController lobbyDialogs = new coop.ui.CoopDialogController("lobby");
+    private final coop.ui.CoopDialogController connectingDialogs =
+            new coop.ui.CoopDialogController("connecting");
+    private coop.ui.CoopLobbyDialog lobbyDialog;
+    private coop.ui.CoopConnectingDialog connectingDialog;
+    /** Wall clock of the frame this client's lobby opened; the "released after n s" log reads it. */
+    private long lobbyOpenedAtMillis;
+    private boolean lobbyOpenLogged;
+    /** True when the release that is running came from the host's confirm-guarded override. */
+    private boolean lobbyStartAnyway;
+    /** Host: coalescing key for {@code LOBBY_STATUS}; a frame that changes nothing sends nothing. */
+    private String lastLobbyStatusKey;
+    private long nextLobbyStatusAtMillis;
+    /** Host: the phase the guest last reported over {@code READY_STATE}. */
+    private coop.session.CoopJoinPhase guestReportedPhase;
+    /** Host: the ready value that came with it, and whether it still has to be applied. */
+    private boolean guestReportedReady;
+    private boolean guestReadyStatePending;
+    /** Guest: the local Ready toggle. Revocable at any time before release. */
+    private boolean guestReadyRequested;
+    /** Guest: change detection for {@code READY_STATE}; cleared on every disconnect edge. */
+    private coop.session.CoopJoinPhase lastSentJoinPhase;
+    private Boolean lastSentReady;
+    /** Guest: when the current connect attempt started, for the elapsed counter and the timeout. */
+    private long guestConnectStartedAtMillis;
+    /** Guest: the player pressed Cancel on the connecting dialog; no more join UI this connection. */
+    private boolean guestJoinCancelled;
+    /**
+     * Seam for the Phase 21 desync dialogs: when one of them owns the failure — seed lock, mod
+     * mismatch, resume reject — the connecting dialog steps aside instead of showing a second,
+     * weaker version of the same message. Defaults to the pump's own live predicate; a test may
+     * swap it out through {@link #setDesyncFailureOwner}.
+     */
+    private java.util.function.Predicate<String> desyncOwnsFailure = this::desyncOwnsReason;
+
+    // ---- Phase 21 desync dialogs ------------------------------------------------------------------
+    /**
+     * The one that outranks the lobby and the connecting screen and yields only to reconnect
+     * (see {@link coop.ui.CoopDialogArbiter}).
+     */
+    private final coop.ui.CoopDialogController desyncDialogs = new coop.ui.CoopDialogController("desync");
+    /**
+     * The classified reason the dialog on screen is about, or null when none is up. Also what the HUD
+     * reads to say the {@code COOP-*} code out loud, and what {@link #desyncOwnsReason} matches the
+     * connecting dialog's raw failure text against.
+     */
+    private coop.ui.CoopDesyncReason desyncReason;
+
+    // ---- Phase 21 session stats -------------------------------------------------------------------
+    /** Host broadcast cadence; the same 30 s the guest snapshot uses, for the same reason. */
+    private static final long STATS_BROADCAST_INTERVAL_MILLIS = 30_000L;
+    /** How often the host samples positions, systems and the day count. Once a second is free. */
+    private static final long STATS_SAMPLE_INTERVAL_MILLIS = 1_000L;
+    private static final long STATS_NET_WORTH_INTERVAL_MILLIS = 30_000L;
+    /** The live tally; loaded from the save on first use. See {@link #sessionStats()}. */
+    private coop.stats.CoopSessionStats sessionStats;
+    private long nextStatsSampleAtMillis;
+    private long nextStatsBroadcastAtMillis;
+    private long nextStatsNetWorthAtMillis;
+    /** Day count carried out of the save, so a reload does not freeze the monotonic gauge. */
+    private float statsDayOffset;
+    /** {@code getTimestamp()} at the first sample after a load; 0 means "not taken yet". */
+    private long statsBaseTimestamp;
+    /** Distance anchors: {x, y, valid}. Primitive arrays because there are exactly two of them. */
+    private final float[] hostTrack = new float[3];
+    private final float[] guestTrack = new float[3];
+    /** Last containing-location id per player, so a jump resets the anchor instead of counting. */
+    private final java.util.Map<String, String> lastLocationIds = new java.util.HashMap<>();
+    /** Campaign day the colonies-held gauge was last taken on; negative means never. */
+    private float lastColonyCountDay = -1f;
+    /** The peer's id, remembered across the disconnect that clears it; drives the "away" column. */
+    private String lastRemotePlayerId = "";
+    /** Fleet-member id to {@code name|hullClass}, captured when a coop battle starts. */
+    private final java.util.Map<String, String> preBattleRoster = new java.util.LinkedHashMap<>();
+    /** True between a battle concluding and the first frame with no screen open to diff on. */
+    private boolean shipLossDiffPending;
+    private boolean lobbyNoUiReleaseLogged;
     /** Wall clock of the last SAVE_CHECKPOINT sent or received; exemption (b) of the death rule. */
     private long lastSaveCheckpointAtMillis;
     /** Log-once flag for traffic dropped while an unproven peer is on the line during a grace window. */
@@ -569,6 +663,9 @@ public class CoopNetPump implements EveryFrameScript {
         // Phase 18: vanilla's market-close callback, forwarded so a rejected claim stops being
         // tracked once the screen it referred to is confirmed gone.
         this.campaignReplicator.setMarketCloseObserver(this::onLocalMarketClosed);
+        // Phase 21: the trade / mission / salvage / colony tallies. The replicator owns those
+        // handlers and their de-duplication ledgers; the pump owns the counters they feed.
+        this.campaignReplicator.setStatsSink(new StatsSink());
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis,
                 streamClock, this::sendStateDatagram);
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
@@ -616,6 +713,10 @@ public class CoopNetPump implements EveryFrameScript {
         this.linkQuality.reset(now);
         this.nextTimeSnapshotAtMillis = now + CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS;
         this.nextGuestSnapshotAtMillis = now;
+        // A full interval out, not zero: the one send that belongs at the start of a session is the
+        // forced one behind the lobby release (releaseLobbyNow), and letting the periodic timer also
+        // fire on the first frame would put two identical payloads on the wire back to back.
+        this.nextStatsBroadcastAtMillis = now + STATS_BROADCAST_INTERVAL_MILLIS;
     }
 
     /**
@@ -682,6 +783,1388 @@ public class CoopNetPump implements EveryFrameScript {
         return sector != null && isVanillaBlockingScreenOpen(sector);
     }
 
+    // ---- Phase 21: in-campaign lobby --------------------------------------------------------------
+
+    /**
+     * The predicate the campaign clock is gated on: a session that exists <em>and</em> that both
+     * players have agreed to start.
+     *
+     * <p>Used in exactly two places - the early return of {@link #maybeHoldPausedUntilSessionReady()}
+     * and the top of {@link #syncSharedPause()} - and nowhere else. Every other
+     * {@link #isGameplaySessionActive()} caller keeps the old predicate, because the state streams
+     * are what carry the guest from "seed locked" to "snapshot applied", and gating them behind the
+     * lobby would make the ready gate unreachable.
+     */
+    private boolean isSessionPlayable() {
+        return isGameplaySessionActive() && sessionState.lobbyReleased();
+    }
+
+    /** Test seam for the desync dialogs' hand-off; see {@link #desyncOwnsFailure}. */
+    void setDesyncFailureOwner(java.util.function.Predicate<String> owner) {
+        this.desyncOwnsFailure = owner == null ? reason -> false : owner;
+    }
+
+    /** Test/bridge read: the lobby roster this client is rendering. */
+    coop.session.CoopLobbyRoster lobbyRosterForTest() {
+        return lobbyRoster;
+    }
+
+    /** Test read: whether the lobby dialog is being asked for. */
+    boolean lobbyDialogRequestedForTest() {
+        return lobbyDialogs.isRequested();
+    }
+
+    /** Test read: whether the connecting dialog is being asked for. */
+    boolean connectingDialogRequestedForTest() {
+        return connectingDialogs.isRequested();
+    }
+
+    /** Test read: whether a desync dialog is being asked for. */
+    boolean desyncDialogRequestedForTest() {
+        return desyncDialogs.isRequested();
+    }
+
+    /** Test read: the classified reason behind the desync dialog, or null. */
+    coop.ui.CoopDesyncReason desyncReasonForTest() {
+        return desyncReason;
+    }
+
+    /** Test seam: the player pressed Close on the desync dialog. */
+    void desyncCloseForTest() {
+        onDesyncDialogClosed();
+    }
+
+    /** Test seam: the player pressed the reconnect dialog's give-up option. */
+    void endReconnectWaitForTest() {
+        reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER);
+    }
+
+    // ---- Phase 21 desync dialogs -------------------------------------------------------------------
+
+    /**
+     * The single funnel every loud failure goes through: classify, write the {@code [COOP-DOCTOR]}
+     * marker, post the feed line, and ask for the dialog.
+     *
+     * <p><b>Why one funnel and not a call at each of the eight reject sites.</b> The sites differ in
+     * exactly two things — the raw text and which {@link coop.ui.CoopDesyncReason.Source} it came
+     * from — and everything after that must be identical on both machines or the two marker lines
+     * cannot be matched up in a support thread. Eight copies of the same six calls is eight chances
+     * for one of them to drift.
+     *
+     * <p><b>{@code sessionIdAtReject} is a parameter, not a read.</b> Every reject site calls
+     * {@code sessionState.rejectHandshake} or ends the reconnect window, and both of those clear the
+     * canonical session — including the id. The correlation id has to be captured <em>before</em>
+     * that, so the caller passes it in. For a lobby-stage reject there is no session id yet (the
+     * handshake is what mints it), and the callers pass the provisional lobby id instead; it is
+     * host-minted and therefore also the same string on both machines, which is the only property
+     * the correlation actually needs.
+     *
+     * @param rawReason        the producer's exact text
+     * @param source           where it came from; decides the fallback kind and the phrasing
+     * @param sessionIdAtReject the session id captured before the state cleared it
+     */
+    /**
+     * The correlation id the marker line carries, read <em>before</em> the reject clears it.
+     *
+     * <p>{@code rejectHandshake} and every reconnect terminal end run
+     * {@code clearCanonicalSession()}, which drops the session id. Reading it afterwards yields
+     * {@code <none>} on both machines, which is exactly the field a support thread needs to match
+     * two pastes. Hence the read-first rule, and hence this being a separate method the reject sites
+     * call on their first line.
+     *
+     * <p>Lobby-stage rejects (a mod mismatch, a seed mismatch) happen before the handshake mints a
+     * session id at all. Those fall back to the provisional lobby id, which is host-minted and echoed
+     * to the guest in {@code LOBBY_ACCEPT} — so it is the same string on both machines, which is the
+     * only property the correlation actually needs.
+     */
+    private String desyncCorrelationId() {
+        String sessionId = sessionState.sessionId();
+        if (sessionId != null && !sessionId.trim().isEmpty()) {
+            return sessionId;
+        }
+        return sessionState.provisionalLobbyId();
+    }
+
+    /**
+     * What a reject site calls once it has finished doing its own work: stop a guest that would
+     * otherwise loop on a deterministic reject, then classify, log the marker, post the feed line and
+     * ask for the dialog.
+     *
+     * <p>Called <em>after</em> the site's wire reply and log line, not before. Everything in here is
+     * total — {@link coop.ui.CoopDoctorMarker#log} and {@link coop.ui.CoopFeed#post} both swallow —
+     * but the reject the peer is waiting for still belongs on the socket first.
+     */
+    private void noteDesync(String rawReason, coop.ui.CoopDesyncReason.Source source,
+                            String correlationId) {
+        if (source != coop.ui.CoopDesyncReason.Source.SESSION_RESUME) {
+            // Seed and mod rejects only: a resume reject leaves the guest's connect loop alone on
+            // purpose, because a fresh lobby round is the documented way back in after a grace expiry.
+            goTerminalOnGuestReject(rawReason);
+        }
+        raiseDesyncDialog(rawReason, source, correlationId);
+    }
+
+    /**
+     * Marker and feed line without the dialog, for the host's side of a resume reject.
+     *
+     * <p>The host turning a resume request away is not a session ending for the host: its grace window
+     * is still running and the real guest may still come back, and the reconnect dialog explaining
+     * that is already the right thing on its screen. What the host owes the support thread is the
+     * matching {@code [COOP-DOCTOR]} line, so the two logs can be lined up on the same id — and that
+     * is all this writes.
+     */
+    private void noteDesyncMarkerOnly(String rawReason, coop.ui.CoopDesyncReason.Source source,
+                                      String correlationId) {
+        coop.ui.CoopDesyncReason reason;
+        try {
+            reason = coop.ui.CoopDesyncReason.classify(rawReason, source)
+                    .withGraceSeconds((int) (reconnect.graceMillis() / 1000L));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not classify a desync reason: " + rawReason, ex);
+            return;
+        }
+        coop.ui.CoopDoctorMarker.log(reason, correlationId, service.role(),
+                sessionState.localName(), sessionState.remoteName());
+    }
+
+    private void raiseDesyncDialog(String rawReason, coop.ui.CoopDesyncReason.Source source,
+                                   String sessionIdAtReject) {
+        coop.ui.CoopDesyncReason reason;
+        try {
+            reason = coop.ui.CoopDesyncReason.classify(rawReason, source);
+            if (source == coop.ui.CoopDesyncReason.Source.SESSION_RESUME) {
+                // The coordinator's reason strings are bare phrases; the dialog is required to state
+                // the window as a number, and this is the only place that knows how long it was.
+                reason = reason.withGraceSeconds((int) (reconnect.graceMillis() / 1000L));
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not classify a desync reason: " + rawReason, ex);
+            return;
+        }
+        desyncReason = reason;
+        // The marker first, before anything that touches the UI: it is the artifact a support thread
+        // is built on, and it has to be in the log even on a frame where every dialog call throws.
+        coop.ui.CoopDoctorMarker.log(reason, sessionIdAtReject, service.role(),
+                sessionState.localName(), sessionState.remoteName());
+        // postFeed also records the line on the intel page's event log (see postFeed), so the page
+        // still names the code after the banner has scrolled away and the dialog has been dismissed.
+        postFeed(FEED_DESYNC, clockMillis.getAsLong(), coop.ui.CoopDesyncDialog.feedLine(reason),
+                FEED_WARN_COLOR);
+        requestDesyncDialog(reason);
+    }
+
+    /**
+     * Guest half of the no-auto-retry rule. The three deterministic rejects cannot become acceptable
+     * without a relaunch on one side or the other, so the retry loop is stopped and the reject is
+     * marked terminal — otherwise the guest reconnects every 5 s, earns the identical reject, and
+     * buries its own dialog under a stream of new ones. Exactly the brake the wrong-password path
+     * already applies (see {@link #handleLobbyReject}).
+     *
+     * <p>The host is deliberately untouched: it rewinds to {@code HOST_WAITING} on the drop and keeps
+     * its lobby open for a corrected guest, which is the pre-Phase-21 behaviour and the right one.
+     */
+    private void goTerminalOnGuestReject(String rawReason) {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        try {
+            service.stopReconnecting(rawReason);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not stop the connect loop after a reject", ex);
+        }
+    }
+
+    private void requestDesyncDialog(coop.ui.CoopDesyncReason reason) {
+        if (!coop.ui.CoopDialogArbiter.mayRequest(coop.ui.CoopDialogArbiter.DESYNC,
+                reconnectDialogs.isRequested() ? coop.ui.CoopDialogArbiter.RECONNECT : null)) {
+            // Only reconnect outranks this, and it is on screen exactly while the link might still
+            // come back. The reason is kept, so the next tick re-offers the dialog once it is gone.
+            return;
+        }
+        // The two lower-ranked screens are asking about a join that has already failed.
+        lobbyDialogs.close();
+        lobbyDialog = null;
+        connectingDialogs.close();
+        connectingDialog = null;
+        desyncDialogs.request(coop.ui.CoopDesyncDialog.forReason(reason, service.role(),
+                this::onDesyncDialogClosed, desyncRetryAction(reason)));
+    }
+
+    /**
+     * What "Try again" does. Always null today, and the reason is worth writing down rather than
+     * rediscovering.
+     *
+     * <p>{@link coop.ui.CoopDesyncReason#retryable()} is false for every seed and mod reason by
+     * construction, so the only candidate is a transient session cause —
+     * {@link coop.ui.CoopDesyncReason.SessionCause#HOST_IN_GRACE}, the host being mid-grace for
+     * somebody else. And that is exactly the case where nothing needs re-arming: this path never
+     * calls {@link #goTerminalOnGuestReject}, so the guest's TCP connect loop was never stopped, it
+     * is still dialling every few seconds, and {@link #tickDesyncDialog()} drops this dialog by
+     * itself the moment a fresh handshake validates. A button labelled "Try again" that starts
+     * nothing is worse than no button: it invites the player to press it and conclude the mod is
+     * broken when nothing visibly happens.
+     *
+     * <p>The one re-arm the transport does offer, {@code CoopNetService.connect}, is not usable here:
+     * it runs a full {@code shutdownLocked} first, which would tear down a link that may already be
+     * back up by the time the player reads the dialog.
+     */
+    private Runnable desyncRetryAction(coop.ui.CoopDesyncReason reason) {
+        return null;
+    }
+
+    /** Close: log it and drop the dialog. Nothing else — the session ended when the reject landed. */
+    private void onDesyncDialogClosed() {
+        if (desyncReason != null) {
+            CoopLog.info(CoopNetPump.class, "Coop desync dialog closed (" + desyncReason.code() + ")");
+        }
+        desyncReason = null;
+        desyncDialogs.close();
+    }
+
+    /**
+     * The HUD line for {@link CoopLobbyState#REJECTED}.
+     *
+     * <p>Two different rejects land in that state and only one of them used to be readable.
+     * {@code guestRejectLobby} stores {@link coop.session.CoopSessionState#rejectReason()}, which the
+     * HUD has always printed. {@code rejectHandshake} — every mod mismatch, every seed and campaign
+     * mismatch — stores its text in a different field, so the HUD fell back to a bare "connection
+     * rejected" for precisely the failures that need the most explaining.
+     *
+     * <p>So: the lobby reason when there is one, otherwise the desync code and its three-word cause,
+     * which is what the dialog and the feed banner beside it are both already saying. The player ends
+     * up with "rejected: COOP-SEED, seed mismatch" on the HUD after the dialog has been dismissed,
+     * which is enough to find the {@code [COOP-DOCTOR]} line in the log.
+     */
+    private String rejectedHudStatus() {
+        String lobbyReason = sessionState.rejectReason();
+        if (lobbyReason != null && !lobbyReason.trim().isEmpty()) {
+            return CoopHudState.rejectedStatus(lobbyReason);
+        }
+        coop.ui.CoopDesyncReason reason = desyncReason;
+        if (reason == null) {
+            String raw = sessionState.handshakeRejectReason();
+            if (raw == null || raw.trim().isEmpty()) {
+                return CoopHudState.rejectedStatus(null);
+            }
+            // No classified reason yet (the HUD can render on the same frame the reject lands, before
+            // the funnel has run): classify defensively rather than print the raw diff, which is a
+            // multi-line developer artifact and would run off the HUD line.
+            reason = coop.ui.CoopDesyncReason.classify(raw, coop.ui.CoopDesyncReason.Source.OTHER);
+        }
+        return CoopHudState.rejectedStatus(
+                reason.code() + ", " + coop.ui.CoopDesyncDialog.shortCause(reason));
+    }
+
+    /** True when a desync dialog already owns this exact failure text; see {@link #desyncOwnsFailure}. */
+    private boolean desyncOwnsReason(String rawReason) {
+        coop.ui.CoopDesyncReason current = desyncReason;
+        if (current == null || rawReason == null) {
+            return false;
+        }
+        return current.rawReason().equals(rawReason.trim());
+    }
+
+    /**
+     * Frame tick, run before {@link #tickLobby()} so the lower-ranked controllers see this one's
+     * request on the same frame. Outside {@code tickLobby} on purpose: that method returns early for
+     * a released lobby and for {@code role == NONE}, and both are states a desync dialog has to
+     * survive — a resume reject arrives precisely when the session is being torn down.
+     */
+    private void tickDesyncDialog() {
+        if (desyncReason != null && sessionState.handshakeValidated()) {
+            // A later handshake succeeded, so whatever this dialog is about has been superseded. Only
+            // reachable on the host, which stays in its lobby and can admit a corrected guest.
+            onDesyncDialogClosed();
+            return;
+        }
+        if (desyncReason != null && !desyncDialogs.isRequested()) {
+            // Held back by the reconnect dialog on an earlier frame; re-offer now that it is gone.
+            requestDesyncDialog(desyncReason);
+        }
+        desyncDialogs.tick();
+    }
+
+    // ---- Phase 21 session stats --------------------------------------------------------------------
+
+    /**
+     * The live tally, loaded from the save on first use.
+     *
+     * <p>Lazily rather than in the constructor: the pump is built during {@code onGameLoad}, and
+     * reading {@code getPersistentData()} there would race the engine's own restore on some paths.
+     * The first frame that asks is always after the sector is fully up.
+     *
+     * <p>Installing the intel page's source here rather than at construction is the same idea — the
+     * page renders from whatever this returns, and a page pointed at a tally that was about to be
+     * replaced by the saved one would show zeroes for a frame.
+     */
+    private coop.stats.CoopSessionStats sessionStats() {
+        if (sessionStats == null) {
+            coop.stats.CoopSessionStats loaded = coop.stats.CoopSessionStatsStore.readFromCurrentSector();
+            sessionStats = loaded == null ? new coop.stats.CoopSessionStats() : loaded;
+            // Carry the saved day count forward: noteDaysElapsed is a monotonic gauge, so a reload
+            // that restarted the base timestamp would otherwise freeze the counter at its old value
+            // for however long the session had already run.
+            statsDayOffset = sessionStats.daysElapsed();
+            statsBaseTimestamp = 0L;
+            coop.stats.CoopSessionStatsStore.publish(sessionStats);
+            coop.ui.CoopSessionStatsIntel.setSource(() -> sessionStats, this::awayPlayerIds);
+        }
+        return sessionStats;
+    }
+
+    /**
+     * Whose column renders as "away": the peer, while it is disconnected or inside a reconnect grace
+     * window. Read from a remembered id because {@code sessionState.remotePlayerId()} is cleared by
+     * the very disconnect that makes the peer away, so reading it live would always answer "nobody".
+     */
+    private java.util.Set<String> awayPlayerIds() {
+        String remote = lastRemotePlayerId;
+        if (remote == null || remote.isEmpty()) {
+            return java.util.Set.of();
+        }
+        boolean present = service.isConnected() && !reconnect.active();
+        return present ? java.util.Set.of() : java.util.Set.of(remote);
+    }
+
+    /**
+     * Campaign days since this tally started, on the one scale everything in {@link
+     * coop.stats.CoopSessionStats} shares (the days-elapsed gauge and every ship-loss entry's day).
+     *
+     * <p>Built from a base {@code getTimestamp()} plus the offset carried out of the save rather than
+     * from an absolute campaign day, because there is no absolute-day API that survives a cycle
+     * rollover without hand-rolling the calendar arithmetic.
+     */
+    private float statsDay() {
+        try {
+            SectorAPI sector = sectorOrNull();
+            if (sector == null || sector.getClock() == null) {
+                return statsDayOffset;
+            }
+            if (statsBaseTimestamp == 0L) {
+                statsBaseTimestamp = sector.getClock().getTimestamp();
+                return statsDayOffset;
+            }
+            return statsDayOffset + Math.max(0f, sector.getClock().getElapsedDaysSince(statsBaseTimestamp));
+        } catch (RuntimeException | LinkageError ex) {
+            return statsDayOffset;
+        }
+    }
+
+    /**
+     * Frame entry for the tally. Both roles run it — the guest needs the intel page's source
+     * installed and its own received copy stored — but only the host samples and broadcasts.
+     */
+    private void tickSessionStats(long now) {
+        if (service.role() == CoopConnectionRole.NONE && sessionStats == null) {
+            // Solo, or a campaign that has not started coop yet. The stats page hides itself while no
+            // source is installed, and that is the whole solo-load answer -- creating the tally here
+            // would put an empty "Coop Stats" entry in the intel screen of a campaign that has never
+            // had a session. Once a role exists the tally stays for the life of the pump, so an ended
+            // session keeps its counters and its page.
+            return;
+        }
+        coop.stats.CoopSessionStats stats = sessionStats();
+        String remote = sessionState.remotePlayerId();
+        if (remote != null && !remote.isEmpty()) {
+            lastRemotePlayerId = remote;
+        }
+        if (service.role() != CoopConnectionRole.HOST || !isSessionPlayable()) {
+            return;
+        }
+        if (now >= nextStatsSampleAtMillis) {
+            nextStatsSampleAtMillis = now + STATS_SAMPLE_INTERVAL_MILLIS;
+            sampleHostStats(stats, now);
+        }
+        maybeSendSessionStats(now, false);
+    }
+
+    /**
+     * The once-per-second host sample: the gauges and the two per-frame-shaped counters (distance,
+     * systems, time flown together) that would cost a frame's work to measure at 60 Hz and cost
+     * nothing at 1 Hz. Every engine call is wrapped; a sample that fails is skipped, not retried.
+     */
+    private void sampleHostStats(coop.stats.CoopSessionStats stats, long now) {
+        try {
+            // The roster. notePlayer is add-or-rename, so calling it every second is idempotent by
+            // construction, and doing it here rather than at session start is what makes the columns
+            // survive a reload with no separate restore step.
+            String hostId = sessionState.localPlayerId();
+            if (hostId != null && !hostId.isEmpty()) {
+                stats.notePlayer(hostId, sessionState.localName());
+            }
+            String guestId = sessionState.remotePlayerId();
+            if (guestId != null && !guestId.isEmpty()) {
+                stats.notePlayer(guestId, sessionState.remoteName());
+            }
+
+            stats.noteDaysElapsed(statsDay());
+
+            SectorAPI sector = sectorOrNull();
+            if (sector == null) {
+                return;
+            }
+            com.fs.starfarer.api.campaign.CampaignFleetAPI hostFleet = sector.getPlayerFleet();
+            com.fs.starfarer.api.campaign.CampaignFleetAPI guestMirror =
+                    coop.fleet.CoopGuestMirrorHandle.current();
+
+            String hostLocation = sampleFleet(stats, hostId, hostFleet, hostTrack);
+            String guestLocation = sampleFleet(stats, guestId, guestMirror, guestTrack);
+
+            // "Together" = the same containing location, for v1. The spec allows "or within mutual
+            // sensor range"; same-location is the half that needs no per-frame range maths and no
+            // agreement about whose sensor strength counts, and in a game where a system is the unit
+            // of shared activity it is also the half a player would recognise. Mutual-sensor-range is
+            // recorded as the refinement, not built.
+            if (hostLocation != null && hostLocation.equals(guestLocation)) {
+                stats.noteTogether(STATS_SAMPLE_INTERVAL_MILLIS / 1000f);
+            }
+
+            if (now >= nextStatsNetWorthAtMillis) {
+                nextStatsNetWorthAtMillis = now + STATS_NET_WORTH_INTERVAL_MILLIS;
+                sampleHostNetWorth(stats, hostId, sector);
+            }
+
+            float day = statsDay();
+            if (lastColonyCountDay < 0f || day - lastColonyCountDay >= 1f) {
+                lastColonyCountDay = day;
+                stats.noteColoniesHeld(countPlayerFactionMarkets(sector));
+            }
+
+            maybeSettleShipLosses(stats, sector, day);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop session stats sample failed", ex);
+        }
+    }
+
+    /**
+     * Distance and systems-visited for one fleet. Returns the fleet's containing-location id, or null
+     * when there is no fleet to sample.
+     *
+     * <p>The distance anchor is reset (not differenced) whenever the containing location changes: a
+     * jump into hyperspace moves a fleet thousands of units in one frame in a different coordinate
+     * space, and counting that as travel would make the number meaningless.
+     */
+    private String sampleFleet(coop.stats.CoopSessionStats stats, String playerId,
+                               com.fs.starfarer.api.campaign.CampaignFleetAPI fleet,
+                               float[] anchor) {
+        if (fleet == null || playerId == null || playerId.isEmpty()) {
+            return null;
+        }
+        com.fs.starfarer.api.campaign.LocationAPI location = fleet.getContainingLocation();
+        String locationId = location == null ? null : location.getId();
+        if (locationId != null && !locationId.isEmpty()) {
+            stats.noteSystemVisited(playerId, locationId);
+        }
+        org.lwjgl.util.vector.Vector2f position = fleet.getLocation();
+        if (position == null) {
+            return locationId;
+        }
+        boolean sameLocation = locationId != null && locationId.equals(lastLocationIds.get(playerId));
+        if (sameLocation && anchor[2] != 0f) {
+            float dx = position.x - anchor[0];
+            float dy = position.y - anchor[1];
+            stats.noteDistance(playerId, (float) Math.sqrt(dx * dx + dy * dy));
+        }
+        anchor[0] = position.x;
+        anchor[1] = position.y;
+        anchor[2] = 1f;
+        lastLocationIds.put(playerId, locationId == null ? "" : locationId);
+        return locationId;
+    }
+
+    /**
+     * Net worth, as liquid credits, for both players.
+     *
+     * <p>There is no net-worth API in 0.98a, and the two obvious extensions — summing
+     * {@code FleetMemberAPI.getBaseValue()} and cargo base values — are only available for the host's
+     * own fleet: the guest half arrives as {@code GUEST_SNAPSHOT}, which carries credits and hull ids
+     * but no valuations. Measuring the two columns differently would be worse than measuring both
+     * narrowly, so both are credits and the page's footer says so.
+     */
+    private void sampleHostNetWorth(coop.stats.CoopSessionStats stats, String hostId, SectorAPI sector) {
+        if (hostId == null || hostId.isEmpty()) {
+            return;
+        }
+        try {
+            if (sector.getPlayerFleet() != null && sector.getPlayerFleet().getCargo() != null
+                    && sector.getPlayerFleet().getCargo().getCredits() != null) {
+                stats.noteNetWorth(hostId,
+                        (long) sector.getPlayerFleet().getCargo().getCredits().get());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not read the host's credits for the stats page", ex);
+        }
+    }
+
+    /** How many markets the shared player faction holds right now; the colonies-held gauge. */
+    private int countPlayerFactionMarkets(SectorAPI sector) {
+        try {
+            if (sector.getEconomy() == null) {
+                return 0;
+            }
+            int held = 0;
+            for (com.fs.starfarer.api.campaign.econ.MarketAPI market : sector.getEconomy().getMarketsCopy()) {
+                if (market != null && market.isPlayerOwned()) {
+                    held++;
+                }
+            }
+            return held;
+        } catch (RuntimeException | LinkageError ex) {
+            return (int) sessionStats().coloniesHeldTeam();
+        }
+    }
+
+    /**
+     * Host broadcast of the whole tally on the {@code GUEST_SNAPSHOT} cadence, plus one immediately
+     * after the lobby releases so the page is populated from the first minute of play rather than
+     * from the first 30-second boundary.
+     *
+     * @param force true for the post-release send, which ignores the interval
+     */
+    private void maybeSendSessionStats(long now, boolean force) {
+        if (service.role() != CoopConnectionRole.HOST || !service.isConnected()
+                || !isGameplaySessionActive() || sessionState.sessionId() == null) {
+            return;
+        }
+        if (!force && now < nextStatsBroadcastAtMillis) {
+            return;
+        }
+        nextStatsBroadcastAtMillis = now + STATS_BROADCAST_INTERVAL_MILLIS;
+        try {
+            CoopMessages.Message message = CoopMessages.sessionStats(sessionState.sessionId(),
+                    service.nextSeq(), now,
+                    coop.stats.CoopSessionStatsCodec.encodePayload(sessionStats()));
+            service.send(message);
+            log("outbound", message);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not send SESSION_STATS", ex);
+        }
+    }
+
+    /**
+     * Guest: replace the local copy with the host's. Wholesale, not merged — the host is the only
+     * tallier, so anything the guest holds is a strictly older copy of the same thing.
+     */
+    private void handleSessionStats(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST) {
+            return;
+        }
+        try {
+            coop.stats.CoopSessionStats received =
+                    coop.stats.CoopSessionStatsCodec.decodePayload(message.payloadJson());
+            sessionStats = received;
+            statsDayOffset = received.daysElapsed();
+            statsBaseTimestamp = 0L;
+            coop.stats.CoopSessionStatsStore.publish(received);
+            coop.ui.CoopSessionStatsIntel.setSource(() -> sessionStats, this::awayPlayerIds);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply SESSION_STATS", ex);
+        }
+    }
+
+    /** Host: one hull the guest reported losing. */
+    private void handleShipLost(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        try {
+            CoopMessages.ShipLost loss = CoopMessages.parseShipLost(message);
+            // Dedup guarantee: the guest sends exactly one SHIP_LOST per hull it detected missing,
+            // from a roster diff it then clears (see settleShipLosses). There is no rebroadcast and
+            // no echo path, so the host counts what arrives.
+            sessionStats().noteShipLost(loss.playerId(), loss.hullName(), loss.hullClass(),
+                    loss.systemName(), loss.day(), loss.cause());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply SHIP_LOST", ex);
+        }
+    }
+
+    // ---- Phase 21 ship-loss detection --------------------------------------------------------------
+
+    /**
+     * Roster snapshot taken when a coop battle starts, so the hulls that are gone when it settles can
+     * be named.
+     *
+     * <p><b>Why a battle-scoped diff and not a continuous one.</b> A fleet loses members for half a
+     * dozen reasons that are not losses — sold, stored, mothballed, scuttled, transferred — and a
+     * continuous watcher would have to tell them apart. Between "a battle began" and "the battle
+     * settled" there is only one reason a hull can vanish, and the bridge already tells both roles
+     * when those two moments are ({@code CoopBattleBridge.BattleFleetListener}).
+     */
+    private void captureRosterBeforeBattle() {
+        try {
+            SectorAPI sector = sectorOrNull();
+            if (sector == null || sector.getPlayerFleet() == null
+                    || sector.getPlayerFleet().getFleetData() == null) {
+                return;
+            }
+            preBattleRoster.clear();
+            for (com.fs.starfarer.api.fleet.FleetMemberAPI member
+                    : sector.getPlayerFleet().getFleetData().getMembersListCopy()) {
+                if (member == null || member.getId() == null) {
+                    continue;
+                }
+                preBattleRoster.put(member.getId(), describeHull(member));
+            }
+            shipLossDiffPending = false;
+        } catch (RuntimeException | LinkageError ex) {
+            preBattleRoster.clear();
+        }
+    }
+
+    /** Arms the diff; the settle itself waits for a frame with no screen open (see below). */
+    private void armShipLossDiff() {
+        shipLossDiffPending = !preBattleRoster.isEmpty();
+    }
+
+    /**
+     * Takes the diff, but only on a frame where no blocking screen is open.
+     *
+     * <p>Post-battle salvage <em>recovers</em> hulls, and the recovery screen is the player deciding
+     * which ones. Diffing while it is up would report every recoverable hull as lost and then never
+     * take it back. Waiting for the screen to close costs a second of latency on a cosmetic counter
+     * and removes the whole class of false positives.
+     */
+    private void maybeSettleShipLosses(coop.stats.CoopSessionStats stats, SectorAPI sector, float day) {
+        if (!shipLossDiffPending || isVanillaBlockingScreenOpen(sector)) {
+            return;
+        }
+        shipLossDiffPending = false;
+        settleShipLosses(stats, sector, day);
+    }
+
+    private void settleShipLosses(coop.stats.CoopSessionStats stats, SectorAPI sector, float day) {
+        try {
+            if (preBattleRoster.isEmpty() || sector.getPlayerFleet() == null
+                    || sector.getPlayerFleet().getFleetData() == null) {
+                return;
+            }
+            java.util.Set<String> survivors = new java.util.HashSet<>();
+            for (com.fs.starfarer.api.fleet.FleetMemberAPI member
+                    : sector.getPlayerFleet().getFleetData().getMembersListCopy()) {
+                if (member != null && member.getId() != null) {
+                    survivors.add(member.getId());
+                }
+            }
+            String playerId = sessionState.localPlayerId();
+            com.fs.starfarer.api.campaign.LocationAPI location =
+                    sector.getPlayerFleet().getContainingLocation();
+            String systemName = location == null ? "" : location.getName();
+            for (java.util.Map.Entry<String, String> entry : preBattleRoster.entrySet()) {
+                if (survivors.contains(entry.getKey())) {
+                    continue;
+                }
+                String[] hull = entry.getValue().split("\\|", 2);
+                String hullName = hull.length > 0 ? hull[0] : "";
+                String hullClass = hull.length > 1 ? hull[1] : "";
+                if (service.role() == CoopConnectionRole.HOST) {
+                    // Dedup guarantee: the roster map is cleared below, so each captured member can
+                    // be reported at most once per battle.
+                    stats.noteShipLost(playerId, hullName, hullClass, systemName, day, "battle");
+                } else {
+                    sendShipLost(playerId, hullName, hullClass, systemName, day);
+                }
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not settle the post-battle hull losses", ex);
+        } finally {
+            preBattleRoster.clear();
+        }
+    }
+
+    private void sendShipLost(String playerId, String hullName, String hullClass, String systemName,
+                              float day) {
+        if (!service.isConnected() || sessionState.sessionId() == null) {
+            return;
+        }
+        try {
+            CoopMessages.Message message = CoopMessages.shipLost(sessionState.sessionId(),
+                    service.nextSeq(), clockMillis.getAsLong(), playerId, hullName, hullClass,
+                    systemName, day, "battle");
+            service.send(message);
+            log("outbound", message);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not send SHIP_LOST", ex);
+        }
+    }
+
+    private static String describeHull(com.fs.starfarer.api.fleet.FleetMemberAPI member) {
+        String name = "";
+        String hullClass = "";
+        try {
+            name = member.getShipName() == null ? "" : member.getShipName();
+            if (member.getHullSpec() != null) {
+                hullClass = member.getHullSpec().getHullName() == null
+                        ? "" : member.getHullSpec().getHullName();
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            // A member the engine will not describe still counts as a hull; it just goes unnamed.
+        }
+        return name + "|" + hullClass;
+    }
+
+    /**
+     * Host: one finished battle, from either engine.
+     *
+     * <p>Dedup guarantee: called only when {@code battleResultReconciler.apply} returned true, and
+     * that method is the mod's battle-id ledger — a repeat of the same {@code battleId} (a resend, a
+     * host applying its own result twice) returns false and never reaches here.
+     */
+    private void noteBattleForStats(CoopBattleResult result) {
+        try {
+            String outcome = result.outcome() == null
+                    ? "" : result.outcome().toUpperCase(java.util.Locale.ROOT);
+            boolean won = outcome.contains("WIN") || outcome.contains("VICTOR");
+            sessionStats().noteBattle(result.engagingPlayerId(), won);
+            sessionStats().noteFleetsDestroyed(result.destroyedFleetIds().size());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not tally a battle result", ex);
+        }
+    }
+
+    /** The replicator's tally hooks; see {@link coop.campaign.CoopCampaignReplicator.StatsSink}. */
+    private final class StatsSink implements coop.campaign.CoopCampaignReplicator.StatsSink {
+
+        @Override
+        public void onTrade(String playerId, String marketId, long netCredits) {
+            hostTally(stats -> stats.noteTrade(playerId, marketId, netCredits));
+        }
+
+        @Override
+        public void onMissionClaimed(String playerId) {
+            hostTally(stats -> stats.noteMissionClaimed(playerId));
+        }
+
+        @Override
+        public void onSalvageConsumed() {
+            hostTally(coop.stats.CoopSessionStats::noteSalvage);
+        }
+
+        @Override
+        public void onColonyFounded(String playerId) {
+            hostTally(stats -> stats.noteColonyFounded(playerId));
+        }
+    }
+
+    /** Runs a tally on the host only, wrapped: a cosmetic counter must never fail a frame. */
+    private void hostTally(java.util.function.Consumer<coop.stats.CoopSessionStats> tally) {
+        if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        try {
+            tally.accept(sessionStats());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop session stats tally failed", ex);
+        }
+    }
+
+    /** Test read: the live tally. */
+    coop.stats.CoopSessionStats sessionStatsForTest() {
+        return sessionStats();
+    }
+
+    // Test seams for the lobby's option callbacks. In play these are Runnables the dialog holds;
+    // a unit test has no engine to press an option on, so it presses them here instead.
+
+    void lobbyStartForTest() {
+        onLobbyStartPressed();
+    }
+
+    void lobbyStartAnywayForTest() {
+        onLobbyStartAnyway();
+    }
+
+    void lobbyCancelCountdownForTest() {
+        onLobbyCancelCountdown();
+    }
+
+    void lobbyReadyToggleForTest(boolean ready) {
+        onLobbyReadyToggled(ready);
+    }
+
+    void connectingCancelForTest() {
+        onConnectingCancelled();
+    }
+
+    /**
+     * Frame entry for the lobby. Runs after the inbound drain and before the pause hold, so a release
+     * decided on this frame is applied by this frame's {@code syncHostSharedPause}.
+     */
+    private void tickLobby() {
+        CoopConnectionRole role = service.role();
+        long now = clockMillis.getAsLong();
+        if (role == CoopConnectionRole.NONE) {
+            closeLobbyUi();
+            resetLobbyState();
+            return;
+        }
+        if (sessionState.lobbyReleased()) {
+            // Playing. Nothing to render, and the roster is dropped so a later handshake starts clean.
+            if (lobbyOpenLogged || lobbyRoster.size() > 0) {
+                closeLobbyUi();
+                resetLobbyState();
+            }
+            return;
+        }
+        if (!lobbyOpenLogged) {
+            lobbyOpenLogged = true;
+            lobbyOpenedAtMillis = now;
+            lobbyRoster.open(now);
+            CoopLog.info(CoopNetPump.class, "Coop lobby opened as " + role);
+        }
+
+        // Safety valve, evaluated before anything else can hold the clock for a lobby that has no
+        // surface: without a campaign UI there is nothing to show, and holding a world paused with no
+        // way to release it is strictly worse than falling back to the pre-lobby behaviour. In a
+        // loaded campaign the UI is always there, so this never fires in play.
+        if (isGameplaySessionActive() && !campaignUiAvailable()) {
+            if (sessionState.releaseLobby() && !lobbyNoUiReleaseLogged) {
+                lobbyNoUiReleaseLogged = true;
+                CoopLog.info(CoopNetPump.class, "Coop lobby released without opening: no campaign UI"
+                        + " to show it on");
+            }
+            closeLobbyUi();
+            return;
+        }
+
+        if (role == CoopConnectionRole.HOST) {
+            tickHostLobby(now);
+        } else {
+            tickGuestLobby(now);
+        }
+
+        // Precedence: reconnect > desync (future) > lobby > connecting. A controller never requests
+        // while a higher-ranked one is on screen, so two coop dialogs can never fight for the slot.
+        lobbyDialogs.tick();
+        connectingDialogs.tick();
+    }
+
+    /** True when there is a campaign UI to put a dialog on. */
+    private static boolean campaignUiAvailable() {
+        try {
+            SectorAPI sector = Global.getSector();
+            return sector != null && sector.getCampaignUI() != null;
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    private void resetLobbyState() {
+        lobbyRoster.clear();
+        lobbyOpenLogged = false;
+        lobbyStartAnyway = false;
+        lastLobbyStatusKey = null;
+        nextLobbyStatusAtMillis = 0L;
+        guestReportedPhase = null;
+        guestReportedReady = false;
+        guestReadyStatePending = false;
+        guestReadyRequested = false;
+        lastSentJoinPhase = null;
+        lastSentReady = null;
+        guestConnectStartedAtMillis = 0L;
+        guestJoinCancelled = false;
+    }
+
+    private void closeLobbyUi() {
+        lobbyDialogs.close();
+        connectingDialogs.close();
+        lobbyDialog = null;
+        connectingDialog = null;
+    }
+
+    // ---- host side ---------------------------------------------------------------------------------
+
+    private void tickHostLobby(long now) {
+        String hostId = sessionState.localPlayerId();
+        if (hostId == null) {
+            return;
+        }
+        lobbyRoster.setHost(hostId, sessionState.localName(), now);
+
+        String guestId = sessionState.remotePlayerId();
+        if (guestId != null) {
+            boolean fresh = lobbyRoster.row(guestId) == null;
+            if (lobbyRoster.admit(guestId, sessionState.remoteName(), now) && fresh) {
+                postFeed(FEED_LOBBY_JOINED, now,
+                        "Co-op: " + remoteDisplayName() + " joined the lobby.", FEED_GOOD_COLOR);
+            }
+            applyDerivedGuestPhase(guestId, now);
+            applyReportedGuestReady(guestId, now);
+            if (reconnect.hostWaiting()) {
+                lobbyRoster.markReconnecting(guestId, now);
+            } else {
+                lobbyRoster.markReconnected(guestId, now);
+            }
+        } else {
+            dropDepartedGuestRows(now);
+        }
+
+        if (lobbyRoster.countdownElapsed(now)) {
+            releaseLobbyNow(now, lobbyStartAnyway);
+            return;
+        }
+
+        maybeSendLobbyStatus(now, false);
+        requestLobbyDialog();
+    }
+
+    /**
+     * The phase the host can work out on its own (link, handshake, seed lock), merged with whatever
+     * the guest reported. A guest on an older build that never sends {@code READY_STATE} still shows
+     * real progress up to {@link coop.session.CoopJoinPhase#SEED_LOCKED} this way.
+     *
+     * <p>Only ever moves forward: a derived floor must never demote a row that has already readied.
+     */
+    private void applyDerivedGuestPhase(String guestId, long now) {
+        coop.session.CoopJoinPhase derived = coop.session.CoopJoinPhase.LINK_ESTABLISHED;
+        if (sessionState.handshakeValidated()) {
+            derived = coop.session.CoopJoinPhase.VERSIONS_MATCHED;
+        }
+        if (sessionState.seedLong() != null) {
+            derived = coop.session.CoopJoinPhase.SEED_LOCKED;
+        }
+        coop.session.CoopJoinPhase target = coop.session.CoopJoinPhase.max(derived, guestReportedPhase);
+        coop.session.CoopLobbyRoster.Row row = lobbyRoster.row(guestId);
+        if (row == null || target == coop.session.CoopJoinPhase.READY || row.phase().atLeast(target)) {
+            return;
+        }
+        lobbyRoster.setPhase(guestId, target, now);
+    }
+
+    /**
+     * Applies the ready value the guest last reported, once there is a row to apply it to.
+     *
+     * <p>Deferred rather than applied on arrival because the inbound drain runs before the roster is
+     * built: a {@code READY_STATE} that lands on the same frame the guest is admitted would otherwise
+     * be written into a row that does not exist yet and silently lost. Applied exactly once per
+     * report, so a stale "not ready" cannot cancel a countdown the host armed afterwards.
+     */
+    private void applyReportedGuestReady(String guestId, long now) {
+        if (!guestReadyStatePending) {
+            return;
+        }
+        coop.session.CoopLobbyRoster.Row row = lobbyRoster.row(guestId);
+        if (row == null) {
+            return;
+        }
+        guestReadyStatePending = false;
+        if (!row.phase().atLeast(coop.session.CoopJoinPhase.SNAPSHOT_APPLIED)) {
+            // Nothing to be ready for yet; the phase floor already carries the progress.
+            return;
+        }
+        boolean changed = lobbyRoster.setReady(guestId, guestReportedReady, now);
+        String name = remoteDisplayName();
+        if (!guestReportedReady && lobbyRoster.cancelCountdown()) {
+            lobbyStartAnyway = false;
+            CoopLog.info(CoopNetPump.class, "Coop lobby countdown cancelled by " + name);
+            postFeed(FEED_LOBBY_CANCELLED, now, "Co-op: countdown cancelled by " + name + ".",
+                    FEED_WARN_COLOR);
+        }
+        if (!changed) {
+            return;
+        }
+        if (guestReportedReady) {
+            postFeed(FEED_LOBBY_READY, now, "Co-op: " + name + " is ready.", FEED_GOOD_COLOR);
+        } else {
+            postFeed(FEED_LOBBY_UNREADY, now, "Co-op: " + name + " is no longer ready.",
+                    FEED_WARN_COLOR);
+        }
+    }
+
+    /**
+     * The guest is gone from the session record. A join that never reached
+     * {@link coop.session.CoopJoinPhase#SNAPSHOT_APPLIED} leaves no partial state and no stuck row;
+     * anything later has already had its chance at the reconnect grace by the time we get here.
+     */
+    private void dropDepartedGuestRows(long now) {
+        for (coop.session.CoopLobbyRoster.Row row : lobbyRoster.rows()) {
+            if (row.host()) {
+                continue;
+            }
+            boolean partial = !row.phase().atLeast(coop.session.CoopJoinPhase.SNAPSHOT_APPLIED);
+            String name = row.name();
+            if (lobbyRoster.dropPartial(row.playerId()) || lobbyRoster.remove(row.playerId())) {
+                lobbyRoster.cancelCountdown();
+                postFeed(FEED_LOBBY_LEFT, now, "Co-op: " + name
+                        + (partial ? " dropped during the handshake." : " left the lobby."),
+                        FEED_WARN_COLOR);
+            }
+        }
+    }
+
+    /** Host: the roster on the wire, in the fixed order the lobby renders it. */
+    private java.util.List<CoopMessages.LobbyPlayer> lobbyWirePlayers(long now) {
+        java.util.List<CoopMessages.LobbyPlayer> players = new java.util.ArrayList<>();
+        for (coop.session.CoopLobbyRoster.Row row : lobbyRoster.rows()) {
+            long reconnecting = row.reconnectingSinceMillis() == null
+                    ? -1L
+                    : Math.max(0L, now - row.reconnectingSinceMillis());
+            players.add(new CoopMessages.LobbyPlayer(row.playerId(), row.name(), row.phase().name(),
+                    row.ready(), reconnecting, row.reason()));
+        }
+        return players;
+    }
+
+    /**
+     * Host: broadcasts the roster on every change and at least once a second while the lobby is open.
+     * The countdown's remaining milliseconds are deliberately left out of the coalescing key - they
+     * change every frame, and including them would turn a three-second countdown into a per-frame
+     * broadcast for no extra information.
+     */
+    private void maybeSendLobbyStatus(long now, boolean released) {
+        if (!isGameplaySessionActive() || !service.isConnected()
+                || sessionState.remotePlayerId() == null || sessionState.sessionId() == null) {
+            return;
+        }
+        java.util.List<CoopMessages.LobbyPlayer> players = lobbyWirePlayers(now);
+        String resetReason = lobbyRoster.lastResetReason();
+        String key = CoopMessages.encodeLobbyPlayers(players) + "|" + lobbyRoster.countdownActive()
+                + "|" + released + "|" + resetReason;
+        if (!released && key.equals(lastLobbyStatusKey) && now < nextLobbyStatusAtMillis) {
+            return;
+        }
+        lastLobbyStatusKey = key;
+        nextLobbyStatusAtMillis = now + LOBBY_STATUS_INTERVAL_MILLIS;
+        CoopMessages.Message message = CoopMessages.lobbyStatus(
+                sessionState.sessionId(), service.nextSeq(), now, players,
+                lobbyRoster.countdownRemainingMillis(now), released, resetReason,
+                lobbyRoster.elapsedMillis(now));
+        service.send(message);
+        log("outbound", message);
+        lobbyRoster.clearResetReason();
+    }
+
+    /** Host: the countdown ran out, so the session starts. */
+    private void releaseLobbyNow(long now, boolean startAnyway) {
+        long seconds = Math.max(0L, now - lobbyOpenedAtMillis) / 1000L;
+        lobbyRoster.cancelCountdown();
+        sessionState.releaseLobby();
+        CoopLog.info(CoopNetPump.class, "Coop lobby released (start anyway=" + startAnyway
+                + ") after " + seconds + " s");
+        postFeed(FEED_LOBBY_STARTED, now, startAnyway
+                        ? "Co-op: session started without every player ready."
+                        : "Co-op: session started.",
+                FEED_GOOD_COLOR);
+        // Told to the guest before the roster is dropped; the release flag is what closes its lobby.
+        maybeSendLobbyStatus(now, true);
+        // Phase 21: one stats broadcast right behind the release, so the page is populated from the
+        // first minute rather than from the first 30-second boundary after it.
+        maybeSendSessionStats(now, true);
+        closeLobbyUi();
+        resetLobbyState();
+    }
+
+    private void requestLobbyDialog() {
+        if (!coop.ui.CoopDialogArbiter.mayRequest(coop.ui.CoopDialogArbiter.LOBBY,
+                reconnectDialogs.isRequested() ? coop.ui.CoopDialogArbiter.RECONNECT : null,
+                desyncDialogs.isRequested() ? coop.ui.CoopDialogArbiter.DESYNC : null)) {
+            // Precedence lives in CoopDialogArbiter: reconnect and desync both outrank the lobby. The
+            // host case is the one this exists for — a rejected guest leaves the host in its lobby, so
+            // without this the lobby would immediately take the slot back off the desync dialog that
+            // is the only thing telling the host why the guest never arrived.
+            lobbyDialogs.close();
+            lobbyDialog = null;
+            return;
+        }
+        connectingDialogs.close();
+        connectingDialog = null;
+        if (lobbyDialog == null) {
+            lobbyDialog = new coop.ui.CoopLobbyDialog(this::lobbyView, clockMillis::getAsLong,
+                    this::onLobbyStartPressed, this::onLobbyCancelCountdown,
+                    this::onLobbyStartAnyway, this::onLobbyReadyToggled);
+            lobbyDialogs.request(lobbyDialog);
+        }
+    }
+
+    // ---- lobby option callbacks ---------------------------------------------------------------------
+
+    private void onLobbyStartPressed() {
+        long now = clockMillis.getAsLong();
+        if (!lobbyRoster.allReady() || !lobbyRoster.startCountdown(now)) {
+            return;
+        }
+        lobbyStartAnyway = false;
+        CoopLog.info(CoopNetPump.class, "Coop lobby countdown started by " + sessionState.localName());
+        postFeed(FEED_LOBBY_COUNTDOWN, now, "Co-op: starting in "
+                + (coop.session.CoopLobbyRoster.COUNTDOWN_MILLIS / 1000L) + "s.", FEED_GOOD_COLOR);
+    }
+
+    private void onLobbyStartAnyway() {
+        long now = clockMillis.getAsLong();
+        if (!lobbyRoster.startCountdown(now)) {
+            return;
+        }
+        lobbyStartAnyway = true;
+        CoopLog.info(CoopNetPump.class, "Coop lobby countdown started by " + sessionState.localName()
+                + " (start anyway)");
+        postFeed(FEED_LOBBY_COUNTDOWN, now, "Co-op: starting without every player ready.",
+                FEED_WARN_COLOR);
+    }
+
+    private void onLobbyCancelCountdown() {
+        long now = clockMillis.getAsLong();
+        if (service.role() == CoopConnectionRole.GUEST) {
+            // The guest cancels by taking its ready back; the host treats that as both.
+            guestReadyRequested = false;
+            lobbyRoster.cancelCountdown();
+            return;
+        }
+        if (!lobbyRoster.cancelCountdown()) {
+            return;
+        }
+        lobbyStartAnyway = false;
+        CoopLog.info(CoopNetPump.class, "Coop lobby countdown cancelled by " + sessionState.localName());
+        postFeed(FEED_LOBBY_CANCELLED, now, "Co-op: countdown cancelled.", FEED_WARN_COLOR);
+    }
+
+    private void onLobbyReadyToggled(Boolean ready) {
+        guestReadyRequested = Boolean.TRUE.equals(ready);
+        if (!guestReadyRequested) {
+            lobbyRoster.cancelCountdown();
+        }
+    }
+
+    // ---- guest side --------------------------------------------------------------------------------
+
+    private void tickGuestLobby(long now) {
+        if (!service.isConnected()) {
+            guestConnectStartedAtMillis = 0L;
+            lastSentJoinPhase = null;
+            lastSentReady = null;
+            closeLobbyUi();
+            return;
+        }
+        if (guestConnectStartedAtMillis == 0L) {
+            guestConnectStartedAtMillis = now;
+        }
+        coop.session.CoopJoinPhase phase = guestJoinPhase();
+        maybeSendReadyState(now, phase);
+
+        if (guestJoinCancelled) {
+            closeLobbyUi();
+            return;
+        }
+        coop.ui.CoopConnectingDialog.Failure failure = guestJoinFailure(now);
+        if (failure == null && phase != null
+                && phase.atLeast(coop.session.CoopJoinPhase.SNAPSHOT_APPLIED)) {
+            requestLobbyDialog();
+            return;
+        }
+        requestConnectingDialog(failure);
+    }
+
+    /**
+     * How far this guest has got. {@code SNAPSHOT_APPLIED} is "the host's world clock has arrived":
+     * see {@link coop.session.CoopJoinPhase} for why that message and not {@code BASE_SET}.
+     */
+    private coop.session.CoopJoinPhase guestJoinPhase() {
+        if (sessionState.connectionState() != CoopLobbyState.GUEST_CONNECTED) {
+            return null;
+        }
+        coop.session.CoopJoinPhase phase = coop.session.CoopJoinPhase.LINK_ESTABLISHED;
+        if (sessionState.handshakeValidated()) {
+            phase = coop.session.CoopJoinPhase.VERSIONS_MATCHED;
+        }
+        if (sessionState.seedLong() != null) {
+            phase = coop.session.CoopJoinPhase.SEED_LOCKED;
+        }
+        if (latestTimeSnapshot != null) {
+            phase = coop.session.CoopJoinPhase.SNAPSHOT_APPLIED;
+        }
+        if (guestReadyRequested && phase == coop.session.CoopJoinPhase.SNAPSHOT_APPLIED) {
+            phase = coop.session.CoopJoinPhase.READY;
+        }
+        return phase;
+    }
+
+    /** Guest: one {@code READY_STATE} per phase/ready change, and one on every reconnect. */
+    private void maybeSendReadyState(long now, coop.session.CoopJoinPhase phase) {
+        if (phase == null || sessionState.sessionId() == null) {
+            return;
+        }
+        boolean ready = phase == coop.session.CoopJoinPhase.READY;
+        if (phase == lastSentJoinPhase && lastSentReady != null && lastSentReady == ready) {
+            return;
+        }
+        lastSentJoinPhase = phase;
+        lastSentReady = ready;
+        CoopMessages.Message message = CoopMessages.readyState(
+                sessionState.sessionId(), service.nextSeq(), now, phase.name(), ready);
+        service.send(message);
+        log("outbound", message);
+    }
+
+    /** The named cause of a failed join, or null while it is still running. */
+    private coop.ui.CoopConnectingDialog.Failure guestJoinFailure(long now) {
+        String handshakeReason = sessionState.handshakeRejectReason();
+        if (handshakeReason != null) {
+            return desyncOwnsFailure.test(handshakeReason)
+                    ? null
+                    : coop.ui.CoopConnectingDialog.Failure.VERSION_MISMATCH;
+        }
+        String rejectReason = sessionState.rejectReason();
+        if (rejectReason != null) {
+            return desyncOwnsFailure.test(rejectReason)
+                    ? null
+                    : coop.ui.CoopConnectingDialog.Failure.HOST_REFUSED;
+        }
+        if (sessionState.connectionState() != CoopLobbyState.GUEST_CONNECTED
+                && guestConnectStartedAtMillis > 0L
+                && now - guestConnectStartedAtMillis >= coop.ui.CoopConnectingDialog.CONNECT_TIMEOUT_MILLIS) {
+            return coop.ui.CoopConnectingDialog.Failure.TIMED_OUT;
+        }
+        return null;
+    }
+
+    private void requestConnectingDialog(coop.ui.CoopConnectingDialog.Failure failure) {
+        // The lobby is not consulted here: the caller has already decided which of the two belongs on
+        // screen (they are mutually exclusive join states), so this side of the precedence is only
+        // about the reconnect dialog, which outranks both.
+        boolean blocked = reconnect.active() || !coop.ui.CoopDialogArbiter.mayRequest(
+                coop.ui.CoopDialogArbiter.CONNECTING,
+                reconnectDialogs.isRequested() ? coop.ui.CoopDialogArbiter.RECONNECT : null,
+                desyncDialogs.isRequested() ? coop.ui.CoopDialogArbiter.DESYNC : null);
+        if (blocked) {
+            connectingDialogs.close();
+            connectingDialog = null;
+            return;
+        }
+        lobbyDialogs.close();
+        lobbyDialog = null;
+        if (connectingDialog == null) {
+            connectingDialog = new coop.ui.CoopConnectingDialog(
+                    this::connectingView, clockMillis::getAsLong, this::onConnectingCancelled);
+            connectingDialogs.request(connectingDialog);
+        }
+    }
+
+    private coop.ui.CoopConnectingDialog.View connectingView() {
+        long now = clockMillis.getAsLong();
+        coop.ui.CoopConnectingDialog.Failure failure = guestJoinFailure(now);
+        String detail = "";
+        if (failure == coop.ui.CoopConnectingDialog.Failure.VERSION_MISMATCH) {
+            detail = String.valueOf(sessionState.handshakeRejectReason());
+        } else if (failure == coop.ui.CoopConnectingDialog.Failure.HOST_REFUSED) {
+            detail = String.valueOf(sessionState.rejectReason());
+        }
+        long elapsed = guestConnectStartedAtMillis == 0L ? 0L : Math.max(0L, now - guestConnectStartedAtMillis);
+        return new coop.ui.CoopConnectingDialog.View(guestJoinPhase(), elapsed, failure, detail);
+    }
+
+    /**
+     * Guest: Cancel on the connecting dialog. Stops the retry loop and leaves the guest sitting on a
+     * paused campaign; the host sees the ordinary disconnect it would have seen anyway, and nothing
+     * about the cancel reaches further than that.
+     */
+    private void onConnectingCancelled() {
+        guestJoinCancelled = true;
+        long now = clockMillis.getAsLong();
+        try {
+            service.stopReconnecting("join cancelled by the player");
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not stop the connect loop after a cancel", ex);
+        }
+        CoopLog.info(CoopNetPump.class, "Coop join cancelled by the player");
+        postFeed(FEED_LOBBY_CANCELLED_JOIN, now,
+                "Co-op: joining cancelled. Your campaign stays paused.", FEED_WARN_COLOR);
+    }
+
+    // ---- shared view --------------------------------------------------------------------------------
+
+    private coop.ui.CoopLobbyView lobbyView() {
+        long now = clockMillis.getAsLong();
+        String localId = sessionState.localPlayerId();
+        java.util.List<coop.ui.CoopLobbyView.Row> rows = new java.util.ArrayList<>();
+        for (coop.session.CoopLobbyRoster.Row row : lobbyRoster.rows()) {
+            rows.add(new coop.ui.CoopLobbyView.Row(row.name(), lobbyRoster.stateWord(row, now),
+                    row.playerId().equals(localId)));
+        }
+        coop.session.CoopJoinPhase phase = guestJoinPhase();
+        boolean canReady = service.role() == CoopConnectionRole.GUEST
+                && phase != null && phase.atLeast(coop.session.CoopJoinPhase.SNAPSHOT_APPLIED);
+        return new coop.ui.CoopLobbyView(service.role(), rows, lobbyVerdictLines(),
+                lobbyRoster.countdownRemainingMillis(now), lobbyRoster.elapsedMillis(now),
+                lobbyRoster.afkHint(now), lobbyRoster.allReady(), lobbyRoster.startLabel(),
+                guestReadyRequested, canReady, sessionState.lobbyReleased());
+    }
+
+    /** The Phase 20 connection-doctor verdict as dialog text rather than log lines. */
+    private java.util.List<String> lobbyVerdictLines() {
+        java.util.List<String> lines = new java.util.ArrayList<>();
+        coop.ui.CoopSessionIntelModel model = coop.ui.CoopSessionIntelFeed.currentModel();
+        coop.ui.CoopSessionIntelModel.Reachability reach = model.reachability();
+        if (reach != null && !reach.tierText().isEmpty()) {
+            lines.add("Connection: " + reach.tierText());
+        }
+        if (reach != null && !reach.externalEndpoint().isEmpty()) {
+            lines.add("Endpoint: " + reach.externalEndpoint());
+        }
+        coop.ui.CoopSessionIntelModel.LinkSample link = model.localLink();
+        if (link != null) {
+            lines.add("Link: " + coop.ui.CoopSessionIntelModel.formatRtt(link.rttMillis())
+                    + " over " + coop.ui.CoopSessionIntelModel.describeTransport(link.transport()));
+        }
+        return lines;
+    }
+
+    // ---- inbound ------------------------------------------------------------------------------------
+
+    /** Host: the guest's own view of its progress and its ready toggle. */
+    private void handleReadyState(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        String guestId = sessionState.remotePlayerId();
+        if (guestId == null) {
+            return;
+        }
+        CoopMessages.ReadyState state = CoopMessages.parseReadyState(message);
+        coop.session.CoopJoinPhase phase = coop.session.CoopJoinPhase.parse(
+                state.phase(), coop.session.CoopJoinPhase.LINK_ESTABLISHED);
+        guestReportedPhase = phase;
+        guestReportedReady = state.ready();
+        guestReadyStatePending = true;
+        CoopLog.info(CoopNetPump.class, "Coop lobby ready-state " + remoteDisplayName()
+                + " ready=" + state.ready() + " phase=" + phase);
+    }
+
+    /** Guest: the host's authoritative roster. Full replacement; the host owns this list. */
+    private void handleLobbyStatus(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
+            return;
+        }
+        CoopMessages.LobbyStatus status = CoopMessages.parseLobbyStatus(message);
+        long now = clockMillis.getAsLong();
+        java.util.List<coop.session.CoopLobbyRoster.Row> rows = new java.util.ArrayList<>();
+        boolean first = true;
+        for (CoopMessages.LobbyPlayer player : status.players()) {
+            rows.add(coop.session.CoopLobbyRoster.mirroredRow(player.playerId(), player.name(), first,
+                    coop.session.CoopJoinPhase.parse(player.phase(),
+                            coop.session.CoopJoinPhase.LINK_ESTABLISHED),
+                    player.ready(),
+                    player.reconnectingMillis() < 0L ? null : now - player.reconnectingMillis(),
+                    player.reason(), now));
+            first = false;
+        }
+        lobbyRoster.replaceAll(rows, now);
+        lobbyRoster.applyCountdownRemaining(status.countdownRemainingMillis(), now);
+        if (!status.resetReason().isEmpty()) {
+            guestReadyRequested = false;
+            postFeed(FEED_LOBBY_RESET, now, "Co-op: ready reset - " + status.resetReason() + ".",
+                    FEED_WARN_COLOR);
+        }
+        if (status.released()) {
+            if (sessionState.releaseLobby()) {
+                long seconds = Math.max(0L, now - lobbyOpenedAtMillis) / 1000L;
+                CoopLog.info(CoopNetPump.class,
+                        "Coop lobby released (start anyway=false) after " + seconds + " s");
+                postFeed(FEED_LOBBY_STARTED, now, "Co-op: session started.", FEED_GOOD_COLOR);
+            }
+            closeLobbyUi();
+            resetLobbyState();
+        }
+    }
+
     // ---- Phase 20.6 link HUD accessor ------------------------------------------------------------
 
     /**
@@ -708,9 +2191,11 @@ public class CoopNetPump implements EveryFrameScript {
             status = reconnect.hostWaiting() ? CoopHudState.STATUS_GUEST_DISCONNECTED_HOLDING
                     : switch (lobby) {
                 case HOST_CONNECTED -> active
-                        ? CoopHudState.STATUS_SESSION_ACTIVE
+                        ? (sessionState.lobbyReleased()
+                                ? CoopHudState.STATUS_SESSION_ACTIVE
+                                : CoopHudState.STATUS_IN_LOBBY)
                         : CoopHudState.STATUS_HANDSHAKING;
-                case REJECTED -> CoopHudState.rejectedStatus(sessionState.rejectReason());
+                case REJECTED -> rejectedHudStatus();
                 case NONE -> CoopHudState.STATUS_NO_SESSION;
                 // HOST_WAITING covers both "never had a guest" and the 12b post-drop rewind; the
                 // pump's disconnect edge is the only thing that can tell them apart.
@@ -723,9 +2208,11 @@ public class CoopNetPump implements EveryFrameScript {
             status = reconnect.guestReconnecting() ? CoopHudState.STATUS_RECONNECTING
                     : switch (lobby) {
                 case GUEST_CONNECTED -> active
-                        ? CoopHudState.STATUS_SESSION_ACTIVE
+                        ? (sessionState.lobbyReleased()
+                                ? CoopHudState.STATUS_SESSION_ACTIVE
+                                : CoopHudState.STATUS_IN_LOBBY)
                         : CoopHudState.STATUS_HANDSHAKING;
-                case REJECTED -> CoopHudState.rejectedStatus(sessionState.rejectReason());
+                case REJECTED -> rejectedHudStatus();
                 case NONE -> CoopHudState.STATUS_NO_SESSION;
                 default -> peerDroppedAfterLiveSession
                         ? CoopHudState.STATUS_RECONNECTING
@@ -915,6 +2402,17 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_HANDSHAKE_MANIFEST, t);
         maybeSendSeedLockRequest();
         t = profiler.split(SECTION_SEED_LOCK_REQUEST, t);
+        // Phase 21: before tickLobby so the lower-ranked lobby and connecting controllers see this
+        // one's request on the same frame rather than one frame late.
+        tickDesyncDialog();
+        // Phase 21: after the inbound drain (so a LOBBY_STATUS or READY_STATE that landed this
+        // frame is already in the roster) and before the hold, so the frame that releases the lobby
+        // is the frame that unpauses.
+        tickLobby();
+        t = profiler.split(SECTION_LOBBY, t);
+        // Phase 21: after the lobby, so the release that starts the session is already visible and
+        // isSessionPlayable() is true on the very frame the first sample is taken.
+        tickSessionStats(clockMillis.getAsLong());
         maybeHoldPausedUntilSessionReady();
         t = profiler.split(SECTION_HOLD_PAUSED, t);
         // Phase 14 runs before syncSharedPause so a battle that began (or ended) this frame is already
@@ -1481,6 +2979,8 @@ public class CoopNetPump implements EveryFrameScript {
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop rejected SESSION_RESUME_REQUEST: this side holds"
                     + " no session id, so there is nothing to give back");
+            noteDesyncMarkerOnly("no session to resume",
+                    coop.ui.CoopDesyncReason.Source.SESSION_RESUME, desyncCorrelationId());
             return;
         }
         if (!checkResumePassword(message)) {
@@ -1498,6 +2998,10 @@ public class CoopNetPump implements EveryFrameScript {
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop rejected SESSION_RESUME_REQUEST (" + reason
                     + "); the grace window keeps running");
+            // Marker only: the guest that just got this will raise the dialog on its own side, and
+            // this host's window is still open for the peer it is actually waiting for.
+            noteDesyncMarkerOnly(reason, coop.ui.CoopDesyncReason.Source.SESSION_RESUME,
+                    desyncCorrelationId());
             return;
         }
         CoopMessages.Message accept = CoopMessages.sessionResumeAccept(
@@ -1712,6 +3216,9 @@ public class CoopNetPump implements EveryFrameScript {
         @Override
         public void onEnded(CoopReconnectCoordinator.State previous, String reason) {
             long now = clockMillis.getAsLong();
+            // Before endSessionAfterDrop, which runs onChannelDisconnected and with it the clear that
+            // takes the session id away.
+            String correlationId = desyncCorrelationId();
             releaseReconnectHold();
             service.setExpectedSessionToken(null);
             // Red-team B7: the flag that told the HUD "we lost a partner, we are holding" is only
@@ -1723,6 +3230,13 @@ public class CoopNetPump implements EveryFrameScript {
             CoopLog.warn(CoopNetPump.class, "Coop reconnect grace closed without a resume as "
                     + service.role() + " (" + reason + "); the session is over");
             postFeed(FEED_RECONNECT_ENDED, now, "Co-op: session ended - " + reason + ".", FEED_BAD_COLOR);
+            // Phase 21: the two terminal ends a player did not choose get a dialog. "Ended by player"
+            // does not — that one is somebody pressing the reconnect dialog's own give-up option, and
+            // answering a button press with a second modal explaining what the button did is the
+            // shape of an inescapable dialog loop, not an explanation.
+            if (!CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER.equals(reason)) {
+                noteDesync(reason, coop.ui.CoopDesyncReason.Source.SESSION_RESUME, correlationId);
+            }
         }
     }
 
@@ -1809,6 +3323,10 @@ public class CoopNetPump implements EveryFrameScript {
                     handleSessionResumeRequest(message);
                 }
             }
+            case READY_STATE -> handleReadyState(message);
+            case SESSION_STATS -> handleSessionStats(message);
+            case SHIP_LOST -> handleShipLost(message);
+            case LOBBY_STATUS -> handleLobbyStatus(message);
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
             case STATE_DATAGRAM -> {
@@ -2028,6 +3546,10 @@ public class CoopNetPump implements EveryFrameScript {
         log("outbound", reject);
         service.flushOutbound();
         service.dropActiveConnection(LOBBY_REJECT_PASSWORD);
+        // Marker only, and deliberately after the drop: whoever failed the proof is not necessarily
+        // the partner, and the host's grace window is still running for the one that is.
+        noteDesyncMarkerOnly(LOBBY_REJECT_PASSWORD, coop.ui.CoopDesyncReason.Source.SESSION_RESUME,
+                desyncCorrelationId());
         return false;
     }
 
@@ -2209,6 +3731,12 @@ public class CoopNetPump implements EveryFrameScript {
 
         String diff = handshakeDiffFor(message);
         if (!diff.isEmpty()) {
+            // Read the correlation id first: rejectHandshake clears the canonical session. There is no
+            // session id at this point anyway (hostAcceptHandshake below is what mints it), so this is
+            // the provisional lobby id, which the guest holds under the same value.
+            String correlationId = desyncCorrelationId();
+            // Not terminal on the host: the host stays in its lobby and a guest that fixes its mod
+            // list must be able to come back without the host relaunching.
             sessionState.rejectHandshake(diff);
             CoopMessages.Message reject = CoopMessages.handshakeResultReject(
                     service.nextSeq(),
@@ -2217,6 +3745,7 @@ public class CoopNetPump implements EveryFrameScript {
             service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop handshake rejected:\n" + diff);
+            noteDesync(diff, coop.ui.CoopDesyncReason.Source.HANDSHAKE, correlationId);
             return;
         }
 
@@ -2271,8 +3800,11 @@ public class CoopNetPump implements EveryFrameScript {
                             + " campaignId=" + campaignId.id()
                             + " minted=" + campaignId.minted());
         } catch (RuntimeException ex) {
-            sessionState.rejectHandshake("seedLock: " + ex.getMessage());
+            String reason = "seedLock: " + ex.getMessage();
+            String correlationId = desyncCorrelationId();
+            sessionState.rejectHandshake(reason);
             CoopLog.warn(CoopNetPump.class, "Failed to create coop seed lock request", ex);
+            noteDesync(reason, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
         }
     }
 
@@ -2356,8 +3888,12 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         String diff = CoopMessages.requiredPayloadString(message, "diff");
-        sessionState.rejectHandshake(diff);
+        String correlationId = desyncCorrelationId();
+        // Terminal on the guest: a mod list is fixed by relaunching, so retrying every 5 s can only
+        // earn the identical reject and bury the dialog that explains it.
+        sessionState.rejectHandshake(diff, true);
         CoopLog.warn(CoopNetPump.class, "Coop handshake rejected:\n" + diff);
+        noteDesync(diff, coop.ui.CoopDesyncReason.Source.HANDSHAKE, correlationId);
     }
 
     private void handleSeedLockRequest(CoopMessages.Message message) {
@@ -2390,7 +3926,12 @@ public class CoopNetPump implements EveryFrameScript {
 
         String seedMismatch = CoopSeedSync.seedStringMismatch(seedString, guestSeedString);
         if (!seedMismatch.isEmpty()) {
-            sessionState.rejectHandshake(seedMismatch);
+            // The correlation id first, and it is the session id here: the handshake has already
+            // validated by the time a seed lock runs, so both machines hold the same minted id.
+            String correlationId = desyncCorrelationId();
+            // Terminal: a different seed is fixed by rolling a new campaign or loading the
+            // coordinated save, never by reconnecting.
+            sessionState.rejectHandshake(seedMismatch, true);
             CoopMessages.Message reject = CoopMessages.seedLockReject(
                     message.sessionId(),
                     service.nextSeq(),
@@ -2399,12 +3940,14 @@ public class CoopNetPump implements EveryFrameScript {
             service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + seedMismatch);
+            noteDesync(seedMismatch, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
             return;
         }
 
         String mismatch = CoopSeedSync.fingerprintMismatch(hostFingerprint, guestFingerprint);
         if (!mismatch.isEmpty()) {
-            sessionState.rejectHandshake(mismatch);
+            String correlationId = desyncCorrelationId();
+            sessionState.rejectHandshake(mismatch, true);
             CoopMessages.Message reject = CoopMessages.seedLockReject(
                     message.sessionId(),
                     service.nextSeq(),
@@ -2414,6 +3957,7 @@ public class CoopNetPump implements EveryFrameScript {
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + mismatch);
             dumpCanonicalFingerprint("guest fingerprint comparison failed");
+            noteDesync(mismatch, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
             return;
         }
 
@@ -2497,7 +4041,10 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private boolean rejectCampaignId(CoopMessages.Message message, String reason) {
-        sessionState.rejectHandshake(reason);
+        String correlationId = desyncCorrelationId();
+        // Terminal, and the reason text already names the two remedies (a fresh campaign from the
+        // host's seed, or -DcoopAdoptCampaignId); both need a relaunch, so retrying cannot help.
+        sessionState.rejectHandshake(reason, true);
         CoopMessages.Message reject = CoopMessages.seedLockReject(
                 message.sessionId(),
                 service.nextSeq(),
@@ -2506,6 +4053,7 @@ public class CoopNetPump implements EveryFrameScript {
         service.sendTo(message.senderId(), reject);
         log("outbound", reject);
         CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
+        noteDesync(reason, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
         return false;
     }
 
@@ -2517,6 +4065,10 @@ public class CoopNetPump implements EveryFrameScript {
         String guestFingerprint = CoopMessages.requiredPayloadString(message, "sectorFingerprint");
         String mismatch = CoopSeedSync.fingerprintMismatch(sessionState.sectorFingerprint(), guestFingerprint);
         if (!mismatch.isEmpty()) {
+            String correlationId = desyncCorrelationId();
+            // Host side, so not terminal: the host rewinds to HOST_WAITING and keeps its lobby open.
+            // The dialog still shows, because otherwise the host learns nothing about why the guest
+            // it was waiting for disappeared.
             sessionState.rejectHandshake(mismatch);
             CoopMessages.Message reject = CoopMessages.seedLockReject(
                     message.sessionId(),
@@ -2527,6 +4079,7 @@ public class CoopNetPump implements EveryFrameScript {
             log("outbound", reject);
             CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected after guest ACK: " + mismatch);
             dumpCanonicalFingerprint("host rejecting after guest ack");
+            noteDesync(mismatch, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
             return;
         }
 
@@ -2536,12 +4089,16 @@ public class CoopNetPump implements EveryFrameScript {
 
     private void handleSeedLockReject(CoopMessages.Message message) {
         String reason = CoopMessages.requiredPayloadString(message, "reason");
-        sessionState.rejectHandshake(reason);
+        String correlationId = desyncCorrelationId();
+        // Reached by both roles (the guest rejects the host's request, the host rejects the guest's
+        // ack), and terminal only on the guest — same asymmetry as every other seed site.
+        sessionState.rejectHandshake(reason, service.role() == CoopConnectionRole.GUEST);
         CoopLog.warn(CoopNetPump.class, "Coop seed lock rejected: " + reason);
         // Both sides dump on a fingerprint reject so the two logs can be diffed entry-for-entry.
         if (reason.contains("sectorFingerprint")) {
             dumpCanonicalFingerprint("received seed-lock reject");
         }
+        noteDesync(reason, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
     }
 
     private void handleTimeSnapshot(CoopMessages.Message message) {
@@ -2593,7 +4150,12 @@ public class CoopNetPump implements EveryFrameScript {
         // we prevent the gap instead of closing it. Once the session is active the hold is released
         // and the host's normal pause/unpause mirrors to the guest.
         CoopConnectionRole role = service.role();
-        if (role == CoopConnectionRole.NONE || isGameplaySessionActive()) {
+        // Phase 21: isSessionPlayable(), not isGameplaySessionActive(). The lobby sits between "the
+        // session exists" and "the players agreed to start it", and the hold is what keeps the world
+        // still for it. Everything else - state streams, BASE_SET, fleet mirrors, TIME_SNAPSHOT -
+        // keeps its old predicate on purpose: that traffic is how the guest reaches the phase where
+        // it is allowed to press Ready at all.
+        if (role == CoopConnectionRole.NONE || isSessionPlayable()) {
             return;
         }
         try {
@@ -2688,7 +4250,12 @@ public class CoopNetPump implements EveryFrameScript {
      * </ul>
      */
     private void syncSharedPause() {
-        if (!isGameplaySessionActive()) {
+        // Phase 21 gate: while the lobby is open the shared-pause machinery stays parked. The clock
+        // is held by the owned hold above, and running the intent exchange here would let the guest's
+        // own lobby dialog (a blocking screen) publish a PAUSE_INTENT for a world nobody is playing
+        // yet. resetSharedPauseState() is safe to reach every lobby frame: it early-returns as soon
+        // as there is nothing to clear, and it sends nothing in any case.
+        if (!isSessionPlayable()) {
             resetSharedPauseState();
             return;
         }
@@ -2822,6 +4389,13 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void resetSharedPauseState() {
+        if (pauseCoordinator.reconnectHold()) {
+            // Phase 21 made this reachable with a hold standing: a peer that drops while the lobby is
+            // still open opens a grace window AND parks the shared-pause machinery on the same frame.
+            // The grace hold is the session's, not this frame's, and clearing it here would drop the
+            // world's only pause in the middle of a reconnect.
+            return;
+        }
         if (!hostSharedPauseInitialized
                 && !pauseCoordinator.guestKeyPauseIntent()
                 && !pauseCoordinator.guestScreenPauseIntent()
@@ -4469,7 +6043,11 @@ public class CoopNetPump implements EveryFrameScript {
                     CoopMessages.requiredPayloadString(message, "outcome"),
                     (int) CoopMessages.requiredPayloadLong(message, "engagingFleetSize"),
                     CoopMessages.requiredPayloadString(message, "body"));
-            battleResultReconciler.apply(result);
+            // Dedup guarantee: apply() is the battle-id ledger and returns false for a repeat, so a
+            // resent BATTLE_RESULT cannot double-count the guest's battle.
+            if (battleResultReconciler.apply(result)) {
+                noteBattleForStats(result);
+            }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply BATTLE_RESULT", ex);
         }
@@ -4483,7 +6061,10 @@ public class CoopNetPump implements EveryFrameScript {
     private void onLocalBattleResult(CoopBattleResult result) {
         try {
             if (service.role() == CoopConnectionRole.HOST) {
-                battleResultReconciler.apply(result);
+                // Dedup guarantee: apply() is the battle-id ledger and returns false for a repeat.
+                if (battleResultReconciler.apply(result)) {
+                    noteBattleForStats(result);
+                }
                 return;
             }
             long now = clockMillis.getAsLong();
@@ -4509,6 +6090,9 @@ public class CoopNetPump implements EveryFrameScript {
      * it fights the real fleets and vanilla keeps them correct.
      */
     private void onLocalBattleBegun(List<String> coopFleetIds) {
+        // Phase 21, both roles: the pre-battle roster is the only unambiguous point to read the
+        // fleet from, and the host fights its own battles here too.
+        captureRosterBeforeBattle();
         if (service.role() == CoopConnectionRole.HOST) {
             return;
         }
@@ -4535,6 +6119,9 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void onBattleConcluded(List<String> coopFleetIds, boolean localBattle) {
         long now = clockMillis.getAsLong();
+        // Phase 21: arm the hull-loss diff. It settles on a later frame, once the recovery screen is
+        // gone -- see maybeSettleShipLosses.
+        armShipLossDiff();
         boolean host = service.role() == CoopConnectionRole.HOST;
         if (!host && !localBattle) {
             return;

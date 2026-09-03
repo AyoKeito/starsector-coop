@@ -298,6 +298,19 @@ class CoopHudStateTest {
     }
 
     @Test
+    void theLobbyStatusReadsAsItsOwnStateRatherThanAsALiveSession() {
+        // Phase 21: the session exists and the link is measured, but nobody has started it yet. That
+        // is a different thing from "session active" and the HUD has to say so - it is the only
+        // on-screen explanation for why the campaign clock is not moving.
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_IN_LOBBY, true, "you", null, 18, 0,
+                CoopHudState.TRANSPORT_UDP);
+
+        assertEquals("HOST · in lobby · paused by you · 18 ms · loss 0% · udp",
+                CoopHudState.formatLine(state, DOT));
+    }
+
+    @Test
     void theEightFieldConstructorLeavesTheCadenceAbsent() {
         CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
                 CoopHudState.STATUS_SESSION_ACTIVE, false, null, null,

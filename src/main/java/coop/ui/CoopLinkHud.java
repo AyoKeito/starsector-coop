@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.CampaignUIRenderingListener;
 import com.fs.starfarer.api.combat.ViewportAPI;
 import coop.net.CoopNetPump;
+import coop.net.CoopNetStartupConfig;
 import coop.util.CoopLog;
 
 import java.awt.Color;
@@ -16,7 +17,8 @@ import java.awt.Color;
  * campaign clock has drifted from the host's.
  *
  * <p>Drawn in the {@code aboveUIBelowTooltips} pass so it sits over the campaign map but never over
- * a tooltip, right-aligned under the vanilla fps/version overlay in the top-right corner.
+ * a tooltip. Anchored by default under the vanilla fps/version overlay in the top-right corner;
+ * {@code -Dcoop.hudCorner=TL|TR|BL|BR} moves it to any corner (see {@link CoopHudCorner}).
  *
  * <p><b>Failure policy.</b> This is cosmetic; nothing it does may ever cost a frame. Every engine
  * touch runs under {@code catch (Throwable)}, and the first failure disables the instance for good
@@ -29,10 +31,12 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     /** Launch flag: when true the listener is never registered. */
     public static final String DISABLE_PROPERTY = "coop.hud.disable";
 
-    /** Gap from the right screen edge, in UI-coordinate pixels. Tune after a visual check. */
-    static final float RIGHT_MARGIN = 10f;
+    /** Gap from the left/right screen edge, in UI-coordinate pixels. Tune after a visual check. */
+    static final float SIDE_MARGIN = 10f;
     /** Drop from the top screen edge to the line's top, clearing the vanilla fps/version overlay. */
     static final float TOP_OFFSET = 60f;
+    /** Gap from the bottom screen edge to the line's bottom, clearing the vanilla bottom bar. */
+    static final float BOTTOM_OFFSET = 60f;
 
     /** The vanilla UI font. */
     static final String FONT_PATH = "graphics/fonts/insignia15LTaa.fnt";
@@ -44,6 +48,7 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     private static final Color PAUSED_COLOR = new Color(255, 215, 120);
 
     private final CoopNetPump pump;
+    private final CoopHudCorner corner;
 
     private CoopBitmapFont font;
     private String separator = CoopHudState.SEPARATOR_PIPE;
@@ -57,8 +62,9 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     private String cachedLine = "";
     private boolean cachedPaused;
 
-    private CoopLinkHud(CoopNetPump pump) {
+    private CoopLinkHud(CoopNetPump pump, CoopHudCorner corner) {
         this.pump = pump;
+        this.corner = corner == null ? CoopHudCorner.DEFAULT : corner;
     }
 
     /**
@@ -76,8 +82,9 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
             return;
         }
         try {
+            CoopHudCorner corner = CoopNetStartupConfig.hudCornerFromSystemProperties();
             sector.getListenerManager().removeListenerOfClass(CoopLinkHud.class);
-            sector.getListenerManager().addListener(new CoopLinkHud(pump), true);
+            sector.getListenerManager().addListener(new CoopLinkHud(pump, corner), true);
         } catch (Throwable ex) {
             CoopLog.warn(CoopLinkHud.class, "Coop link HUD could not be installed; continuing without it", ex);
         }
@@ -128,14 +135,45 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         float screenHeight = Global.getSettings().getScreenHeight();
         float badgeWidth = font.width(cachedBadge);
         float totalWidth = font.width(cachedLine);
-        float x = screenWidth - RIGHT_MARGIN - totalWidth;
-        float y = screenHeight - TOP_OFFSET;
+        HudAnchor anchor = anchor(corner, screenWidth, screenHeight, totalWidth, font.lineHeight());
+        float x = anchor.x();
+        float y = anchor.y();
 
         // Two draws so the badge keeps the player colour while the rest carries the pause state.
         // formatLine always leads with the badge, so this split is exact.
         String remainder = cachedLine.substring(Math.min(cachedBadge.length(), cachedLine.length()));
         font.draw(cachedBadge, x, y, badgeColor());
         font.draw(remainder, x + badgeWidth, y, cachedPaused ? PAUSED_COLOR : TEXT_COLOR);
+    }
+
+    /**
+     * The line's top-left in UI coordinates (origin bottom-left, y up — see
+     * {@link CoopBitmapFont#draw}), for the requested corner.
+     *
+     * <p>Pure and GL-free so the four placements are unit-testable without a live renderer.
+     * {@code textHeight} is the font's line height, not this particular line's rendered height (the
+     * bitmap font has no per-string height, only a per-font one) — it is only used to lift the line
+     * clear of the bottom offset for the two bottom corners; the top corners anchor from the line's
+     * top and never need it.
+     *
+     * @param corner      which corner to anchor to
+     * @param screenWidth  UI-coordinate screen width
+     * @param screenHeight UI-coordinate screen height
+     * @param textWidth    the rendered line's width, from {@link CoopBitmapFont#width}
+     * @param textHeight   the font's line height, from {@link CoopBitmapFont#lineHeight()}
+     */
+    static HudAnchor anchor(CoopHudCorner corner, float screenWidth, float screenHeight,
+                             float textWidth, float textHeight) {
+        CoopHudCorner effective = corner == null ? CoopHudCorner.DEFAULT : corner;
+        boolean left = effective == CoopHudCorner.TOP_LEFT || effective == CoopHudCorner.BOTTOM_LEFT;
+        boolean top = effective == CoopHudCorner.TOP_LEFT || effective == CoopHudCorner.TOP_RIGHT;
+        float x = left ? SIDE_MARGIN : screenWidth - SIDE_MARGIN - textWidth;
+        float y = top ? screenHeight - TOP_OFFSET : BOTTOM_OFFSET + textHeight;
+        return new HudAnchor(x, y);
+    }
+
+    /** The line's top-left anchor point, in UI coordinates; see {@link #anchor}. */
+    record HudAnchor(float x, float y) {
     }
 
     private void refreshIfDue(SectorAPI sector) {

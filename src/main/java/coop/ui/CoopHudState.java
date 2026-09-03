@@ -69,6 +69,11 @@ public record CoopHudState(String roleBadge,
     public static final String STATUS_CONNECTING = "connecting";
     public static final String STATUS_HANDSHAKING = "handshaking";
     public static final String STATUS_SESSION_ACTIVE = "session active";
+    /**
+     * Phase 21: the session exists and is fully handshaken, but the players have not started it yet.
+     * The clock is held by the coop pause hold for exactly as long as this reads.
+     */
+    public static final String STATUS_IN_LOBBY = "in lobby";
     public static final String STATUS_REJECTED = "connection rejected";
     /** Prefix of the reason-carrying form; see {@link #rejectedStatus}. */
     public static final String STATUS_REJECTED_PREFIX = "rejected: ";

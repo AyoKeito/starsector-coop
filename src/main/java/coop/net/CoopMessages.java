@@ -113,7 +113,31 @@ public final class CoopMessages {
          * rejected is otherwise never retried — the sender only re-sends on a hash change — leaving
          * the receiving mirror stuck on a tick whose roster never arrives.
          */
-        FLEET_ROSTER_REQUEST
+        FLEET_ROSTER_REQUEST,
+        /**
+         * Phase 21 lobby: guest &rarr; host, "this is the join phase I have reached and whether I am
+         * ready". Sent on every local phase/ready change and re-sent on a reconnect, so the host's
+         * roster never depends on a message it might have missed.
+         */
+        READY_STATE,
+        /**
+         * Phase 21 lobby: host &rarr; guest, the whole roster plus the countdown and the released
+         * flag. The host is authoritative; this is a full replacement, sent on every roster change
+         * and at least once a second so the lobby never shows a static frame.
+         */
+        LOBBY_STATUS,
+        /**
+         * Host &rarr; guest, cosmetic: the host's {@code CoopSessionStats} tally, encoded whole by
+         * {@link coop.stats.CoopSessionStatsCodec#encodePayload}. Not on the reconnect-grace
+         * whitelist ({@code CoopNetPump#allowedDuringReconnectGrace}) — a cosmetic tally must not be
+         * a channel an unproven peer can speak on.
+         */
+        SESSION_STATS,
+        /**
+         * Guest &rarr; host: one hull the guest lost, feeding {@code CoopSessionStats#noteShipLost}
+         * on the host, which is the tally owner.
+         */
+        SHIP_LOST
     }
 
     /**
@@ -856,6 +880,220 @@ public final class CoopMessages {
     public static Message baseSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
         return new Message(Type.BASE_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    // ---- Phase 21: lobby / ready-up ---------------------------------------------------------------
+    //
+    // Both types ride the reliable TCP control plane and are deliberately NOT on the reconnect-grace
+    // whitelist: during a grace window the lobby is closed (the reconnect dialog owns that surface),
+    // and a peer that has not yet proved it is the partner we are holding the session for has no
+    // business writing into the roster. Nothing in the lobby needs them to pass that window.
+
+    /**
+     * Phase 21: the guest's own view of its join progress.
+     *
+     * @param phase the {@code CoopJoinPhase} name; a name this build does not know decodes to the
+     *              caller's fallback rather than failing the frame
+     * @param ready whether the guest has pressed Ready (revocable at any time before release)
+     */
+    public static Message readyState(String sessionId, long seq, long sentAtMillis,
+                                     String phase, boolean ready) {
+        return new Message(Type.READY_STATE, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"phase\":\"" + escapeJson(phase == null ? "" : phase) + "\""
+                        + ",\"ready\":\"" + ready + "\"}");
+    }
+
+    /** Decoded {@link Type#READY_STATE}. */
+    public record ReadyState(String phase, boolean ready) {
+        public ReadyState {
+            phase = phase == null ? "" : phase;
+        }
+    }
+
+    public static ReadyState parseReadyState(Message message) {
+        Map<String, Object> payload = decodePayload(message);
+        return new ReadyState(requiredString(payload, "phase"),
+                Boolean.parseBoolean(requiredString(payload, "ready")));
+    }
+
+    /** One roster row on the wire. {@code reconnectingMillis} is -1 when the player is connected. */
+    public record LobbyPlayer(String playerId,
+                              String name,
+                              String phase,
+                              boolean ready,
+                              long reconnectingMillis,
+                              String reason) {
+        public LobbyPlayer {
+            playerId = requireText(playerId, "playerId");
+            name = name == null ? "" : name;
+            phase = phase == null ? "" : phase;
+            reason = reason == null ? "" : reason;
+        }
+    }
+
+    /**
+     * Decoded {@link Type#LOBBY_STATUS}.
+     *
+     * @param countdownRemainingMillis milliseconds left on the start countdown, -1 when none. Sent as
+     *                                 a <em>remaining</em> value rather than an absolute deadline
+     *                                 precisely because the two wall clocks differ; the guest rebases
+     *                                 it onto its own clock on arrival.
+     * @param elapsedMillis            how long the lobby has been open, so the guest can tick a
+     *                                 counter and "slow" stays distinguishable from "dead"
+     */
+    public record LobbyStatus(List<LobbyPlayer> players,
+                              long countdownRemainingMillis,
+                              boolean released,
+                              String resetReason,
+                              long elapsedMillis) {
+        public LobbyStatus {
+            players = players == null ? List.of() : List.copyOf(players);
+            resetReason = resetReason == null ? "" : resetReason;
+        }
+    }
+
+    /**
+     * Phase 21: the host's authoritative roster. The player list is a delimited blob inside one
+     * string field, because the envelope's JSON parser is flat and has no arrays - the same encoding
+     * choice every list-bearing coop payload makes.
+     */
+    public static Message lobbyStatus(String sessionId, long seq, long sentAtMillis,
+                                      List<LobbyPlayer> players, long countdownRemainingMillis,
+                                      boolean released, String resetReason, long elapsedMillis) {
+        return new Message(Type.LOBBY_STATUS, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"players\":\"" + escapeJson(encodeLobbyPlayers(players)) + "\""
+                        + ",\"countdownRemainingMillis\":" + countdownRemainingMillis
+                        + ",\"released\":\"" + released + "\""
+                        + ",\"resetReason\":\"" + escapeJson(resetReason == null ? "" : resetReason) + "\""
+                        + ",\"elapsedMillis\":" + elapsedMillis + "}");
+    }
+
+    public static LobbyStatus parseLobbyStatus(Message message) {
+        Map<String, Object> payload = decodePayload(message);
+        Object countdown = payload.get("countdownRemainingMillis");
+        Object elapsed = payload.get("elapsedMillis");
+        return new LobbyStatus(
+                decodeLobbyPlayers(requiredString(payload, "players")),
+                countdown instanceof Long value ? value : -1L,
+                Boolean.parseBoolean(requiredString(payload, "released")),
+                requiredString(payload, "resetReason"),
+                elapsed instanceof Long value ? value : 0L);
+    }
+
+    static String encodeLobbyPlayers(List<LobbyPlayer> players) {
+        if (players == null || players.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        for (LobbyPlayer player : players) {
+            if (out.length() > 0) {
+                out.append('\n');
+            }
+            out.append(coop.campaign.CoopDelimited.field(player.playerId())).append('|')
+                    .append(coop.campaign.CoopDelimited.field(player.name())).append('|')
+                    .append(coop.campaign.CoopDelimited.field(player.phase())).append('|')
+                    .append(player.ready()).append('|')
+                    .append(player.reconnectingMillis()).append('|')
+                    .append(coop.campaign.CoopDelimited.field(player.reason()));
+        }
+        return out.toString();
+    }
+
+    static List<LobbyPlayer> decodeLobbyPlayers(String encoded) {
+        List<LobbyPlayer> players = new ArrayList<>();
+        if (encoded == null || encoded.isEmpty()) {
+            return players;
+        }
+        for (String line : encoded.split("\n", -1)) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            List<String> fields = coop.campaign.CoopDelimited.split(line);
+            if (fields.size() < 6 || fields.get(0).isEmpty()) {
+                // One malformed row must not cost the whole roster; the rest still renders.
+                continue;
+            }
+            long reconnecting;
+            try {
+                reconnecting = Long.parseLong(fields.get(4));
+            } catch (NumberFormatException ex) {
+                reconnecting = -1L;
+            }
+            players.add(new LobbyPlayer(fields.get(0), fields.get(1), fields.get(2),
+                    Boolean.parseBoolean(fields.get(3)), reconnecting, fields.get(5)));
+        }
+        return players;
+    }
+
+    // ---- Session stats + ship-loss reporting -------------------------------------------------------
+
+    /**
+     * Host &rarr; guest: the whole {@code CoopSessionStats} tally, low rate, cosmetic. {@code
+     * payloadJson} must be exactly what {@link coop.stats.CoopSessionStatsCodec#encodePayload}
+     * produced and is carried <b>verbatim, not re-wrapped or re-escaped</b> — the codec owns the
+     * payload's shape (it is already the complete flat JSON object this message's payload is), and
+     * running it through another layer of {@code escapeJson} is the classic double-escaping bug: the
+     * codec's own {@code body} field would come back with every backslash doubled.
+     *
+     * <p>A null or blank payload becomes {@code "{}"} instead of throwing: a stats message is
+     * cosmetic (session-end tallies, not gameplay state), and it must never be able to fail a send or
+     * kill a session over a formatting slip.
+     *
+     * <p>Deliberately <b>not</b> on the reconnect-grace whitelist
+     * ({@code CoopNetPump#allowedDuringReconnectGrace}): during a grace window the peer on the other
+     * end has not yet proved it is the partner the session is held for, and a cosmetic tally is not
+     * worth opening a channel an unproven peer can speak on.
+     */
+    public static Message sessionStats(String sessionId, long seq, long sentAtMillis, String payloadJson) {
+        String session = requireText(sessionId, "sessionId");
+        String payload = payloadJson == null || payloadJson.isBlank() ? "{}" : payloadJson;
+        return new Message(Type.SESSION_STATS, session, seq, sentAtMillis, payload);
+    }
+
+    /**
+     * Guest &rarr; host: one hull the guest lost, so the host's {@code CoopSessionStats} — the tally
+     * owner — can fold it in via {@code noteShipLost}. One message per hull lost; the guest reports
+     * rather than tallies because the host is the single source of truth for the shared session
+     * stats, the same rule {@code GUEST_REP_DELTA} follows for reputation.
+     */
+    public static Message shipLost(String sessionId, long seq, long sentAtMillis, String playerId,
+                                   String hullName, String hullClass, String systemName, float day,
+                                   String cause) {
+        return new Message(Type.SHIP_LOST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"playerId\":\"" + escapeJson(playerId == null ? "" : playerId) + "\","
+                        + "\"hullName\":\"" + escapeJson(hullName == null ? "" : hullName) + "\","
+                        + "\"hullClass\":\"" + escapeJson(hullClass == null ? "" : hullClass) + "\","
+                        + "\"systemName\":\"" + escapeJson(systemName == null ? "" : systemName) + "\","
+                        + "\"day\":\"" + day + "\","
+                        + "\"cause\":\"" + escapeJson(cause == null ? "" : cause) + "\"}");
+    }
+
+    /** Decoded {@link Type#SHIP_LOST}; a malformed {@code day} falls back to 0f rather than throwing. */
+    public record ShipLost(String playerId, String hullName, String hullClass, String systemName,
+                           float day, String cause) {
+        public ShipLost {
+            playerId = playerId == null ? "" : playerId;
+            hullName = hullName == null ? "" : hullName;
+            hullClass = hullClass == null ? "" : hullClass;
+            systemName = systemName == null ? "" : systemName;
+            cause = cause == null ? "" : cause;
+        }
+    }
+
+    public static ShipLost parseShipLost(Message message) {
+        float day;
+        try {
+            day = requiredPayloadFloat(message, "day");
+        } catch (RuntimeException ex) {
+            day = 0f;
+        }
+        return new ShipLost(
+                optionalPayloadString(message, "playerId", ""),
+                optionalPayloadString(message, "hullName", ""),
+                optionalPayloadString(message, "hullClass", ""),
+                optionalPayloadString(message, "systemName", ""),
+                day,
+                optionalPayloadString(message, "cause", ""));
     }
 
     // ---- Phase 14/15: solo own-fleet combat + spectator bridge + result reconciliation -----------

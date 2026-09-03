@@ -23,6 +23,13 @@ import java.util.Queue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
+import coop.combat.CoopBattleResult;
+import coop.stats.CoopSessionStats;
+import coop.stats.CoopSessionStatsCodec;
+import coop.stats.CoopSessionStatsStore;
+import coop.ui.CoopDesyncReason;
+import coop.ui.CoopDoctorMarker;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -2391,6 +2398,322 @@ class CoopNetPumpTest {
                 .filter(m -> m.type() == CoopMessages.Type.STATE_DATAGRAM).count());
     }
 
+    // ---- Phase 21: the lobby gate ----------------------------------------------------------------
+
+    private static CoopSessionState lobbyHostSession() {
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        session.hostAcceptHandshake();
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        // Deliberately NOT released: this is a session sitting in its lobby.
+        return session;
+    }
+
+    @Test
+    void theHoldStaysWhileTheSessionIsActiveButTheLobbyIsNotReleased() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+
+        assertTrue(sector.paused, "the lobby holds the world; that is the whole point of the gate");
+        assertFalse(session.lobbyReleased());
+        assertEquals(CoopHudState.STATUS_IN_LOBBY, pump.hudState(true).status());
+        assertTrue(pump.lobbyDialogRequestedForTest());
+    }
+
+    @Test
+    void theHostStartsTheSessionAfterTheCountdownAndTheReleaseFrameUnpauses() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        // The guest reports itself ready.
+        service.inbound.add(CoopMessages.readyState("session-a", 5L, 1000L, "SNAPSHOT_APPLIED", true));
+        pump.advance(0f);
+        assertTrue(pump.lobbyRosterForTest().allReady());
+        assertTrue(sector.paused);
+
+        pump.lobbyStartForTest();
+        now.set(2000L);
+        pump.advance(0f);
+        assertTrue(pump.lobbyRosterForTest().countdownActive());
+        assertTrue(sector.paused, "the countdown is a telegraph, not the release");
+
+        now.set(1000L + coop.session.CoopLobbyRoster.COUNTDOWN_MILLIS);
+        pump.advance(0f);
+
+        assertTrue(session.lobbyReleased());
+        assertFalse(sector.paused, "the frame that releases the lobby is the frame that unpauses");
+        assertFalse(pump.pauseCoordinatorForBridge().hostPauseIntent(),
+                "the lobby hold is coop's, never the host player's pause");
+        assertEquals(CoopHudState.STATUS_SESSION_ACTIVE, pump.hudState(false).status());
+        CoopMessages.Message released = lastOfType(service, CoopMessages.Type.LOBBY_STATUS);
+        assertTrue(CoopMessages.parseLobbyStatus(released).released(),
+                "the guest learns about the start from the roster it is already reading");
+    }
+
+    @Test
+    void aGuestThatTakesItsReadyBackCancelsTheCountdown() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        service.inbound.add(CoopMessages.readyState("session-a", 5L, 1000L, "SNAPSHOT_APPLIED", true));
+        pump.advance(0f);
+        pump.lobbyStartForTest();
+        assertTrue(pump.lobbyRosterForTest().countdownActive());
+
+        service.inbound.add(CoopMessages.readyState("session-a", 6L, 1100L, "SNAPSHOT_APPLIED", false));
+        now.set(1100L);
+        pump.advance(0f);
+
+        assertFalse(pump.lobbyRosterForTest().countdownActive(),
+                "un-readying is also a cancel; the two are one press on the guest's side");
+        assertFalse(pump.lobbyRosterForTest().allReady());
+
+        now.set(1000L + coop.session.CoopLobbyRoster.COUNTDOWN_MILLIS + 1000L);
+        pump.advance(0f);
+        assertFalse(session.lobbyReleased(), "a cancelled countdown must never start the session");
+        assertTrue(sector.paused);
+    }
+
+    @Test
+    void startAnywayReleasesWithAGuestThatNeverReadied() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        pump.advance(0f);
+        assertFalse(pump.lobbyRosterForTest().allReady());
+
+        pump.lobbyStartAnywayForTest();
+        now.set(1000L + coop.session.CoopLobbyRoster.COUNTDOWN_MILLIS);
+        pump.advance(0f);
+
+        assertTrue(session.lobbyReleased());
+        assertFalse(sector.paused);
+    }
+
+    @Test
+    void theHostBroadcastsTheRosterOnChangeAndAtLeastOnceASecond() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.LOBBY_STATUS));
+
+        // A quiet second changes nothing and sends nothing.
+        for (int i = 0; i < 30; i++) {
+            now.addAndGet(16L);
+            pump.advance(0f);
+        }
+        assertEquals(1, countOfType(service, CoopMessages.Type.LOBBY_STATUS),
+                "an unchanged roster inside the interval costs no traffic");
+
+        // Past the interval, one keepalive frame: never a static screen for more than a second.
+        now.addAndGet(1_000L);
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.LOBBY_STATUS));
+
+        // And a change goes out immediately rather than waiting for the timer.
+        service.inbound.add(CoopMessages.readyState("session-a", 5L, now.get(), "SNAPSHOT_APPLIED", true));
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertEquals(3, countOfType(service, CoopMessages.Type.LOBBY_STATUS));
+        CoopMessages.LobbyStatus status = CoopMessages.parseLobbyStatus(
+                lastOfType(service, CoopMessages.Type.LOBBY_STATUS));
+        assertEquals(2, status.players().size());
+        assertEquals("Host", status.players().get(0).name(), "host first, then join order");
+        assertTrue(status.players().get(1).ready());
+    }
+
+    @Test
+    void theGuestSendsOneReadyStatePerChangeAndMirrorsTheHostsRoster() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(true, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.READY_STATE));
+        assertEquals("SEED_LOCKED",
+                CoopMessages.parseReadyState(lastOfType(service, CoopMessages.Type.READY_STATE)).phase());
+        assertTrue(pump.connectingDialogRequestedForTest(),
+                "before the world arrives the guest is still on the connecting screen");
+
+        // The host's world clock lands: that is SNAPSHOT_APPLIED, and the lobby replaces it.
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 9L, true, false, 222333444L, 17L,
+                now.get(), ""));
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.READY_STATE));
+        assertEquals("SNAPSHOT_APPLIED",
+                CoopMessages.parseReadyState(lastOfType(service, CoopMessages.Type.READY_STATE)).phase());
+        assertTrue(pump.lobbyDialogRequestedForTest());
+        assertFalse(pump.connectingDialogRequestedForTest());
+
+        // Nothing changed, so nothing is re-sent.
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.READY_STATE));
+
+        pump.lobbyReadyToggleForTest(true);
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertEquals(3, countOfType(service, CoopMessages.Type.READY_STATE));
+        assertTrue(CoopMessages.parseReadyState(
+                lastOfType(service, CoopMessages.Type.READY_STATE)).ready());
+
+        // The host's roster arrives and is taken wholesale.
+        service.inbound.add(CoopMessages.lobbyStatus("session-a", 20L, now.get(), List.of(
+                        new CoopMessages.LobbyPlayer("host-player", "Host", "READY", true, -1L, ""),
+                        new CoopMessages.LobbyPlayer("guest-player", "Guest", "READY", true, -1L, "")),
+                2_000L, false, "", 30_000L));
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertEquals(2, pump.lobbyRosterForTest().size());
+        assertTrue(pump.lobbyRosterForTest().countdownActive());
+        assertFalse(session.lobbyReleased());
+
+        // And the released flag is what closes the guest's lobby.
+        service.inbound.add(CoopMessages.lobbyStatus("session-a", 21L, now.get(), List.of(
+                        new CoopMessages.LobbyPlayer("host-player", "Host", "READY", true, -1L, ""),
+                        new CoopMessages.LobbyPlayer("guest-player", "Guest", "READY", true, -1L, "")),
+                -1L, true, "", 33_000L));
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertTrue(session.lobbyReleased());
+        assertFalse(pump.lobbyDialogRequestedForTest());
+    }
+
+    @Test
+    void aGuestThatCancelsTheJoinStopsTheRetryLoopAndDisturbsNothingElse() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingSector sector = new RecordingSector(false, ui);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+        assertTrue(pump.connectingDialogRequestedForTest());
+
+        pump.connectingCancelForTest();
+        pump.advance(0f);
+
+        assertEquals(1, service.stopReconnectingReasons.size());
+        assertFalse(pump.connectingDialogRequestedForTest(), "a cancelled join leaves no screen up");
+        assertTrue(sector.paused, "and leaves the guest sitting on a held campaign");
+    }
+
+    @Test
+    void aGuestWithNoLobbyAcceptInsideThirtySecondsIsToldItTimedOut() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        pump.advance(0f);
+        now.addAndGet(coop.ui.CoopConnectingDialog.CONNECT_TIMEOUT_MILLIS);
+        pump.advance(0f);
+
+        assertTrue(pump.connectingDialogRequestedForTest(),
+                "the screen stays up and names the cause rather than spinning forever");
+    }
+
+    @Test
+    void aGuestThatDropsMidHandshakeLeavesNoRowOnTheHost() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        // Mid-handshake means exactly that: accepted into the lobby, versions not yet compared, so
+        // the drop gets no reconnect grace and there is nothing to hold a row for. (The host records
+        // its seed lock when it SENDS the request, not on the guest's ack, so anything past
+        // hostAcceptHandshake is already a live session and gets a grace window instead.)
+        CoopSessionState session = new CoopSessionState(
+                new SequencedIds("lobby-a", "host-player", "session-a"));
+        session.startHost("Host");
+        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        pump.advance(0f);
+        assertEquals(2, pump.lobbyRosterForTest().size());
+        assertEquals(coop.session.CoopJoinPhase.LINK_ESTABLISHED,
+                pump.lobbyRosterForTest().row("guest-player").phase());
+
+        service.connected = false;
+        now.addAndGet(16L);
+        pump.advance(0f);
+
+        assertEquals(1, pump.lobbyRosterForTest().size(), "only the host is left");
+        assertNull(pump.lobbyRosterForTest().row("guest-player"));
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+    }
+
+    @Test
+    void aLobbyGateWithNoCampaignUiToShowItOnReleasesItselfRatherThanHangingTheWorld() {
+        // Holding a world paused for a lobby that has no surface would be a hang with no way out.
+        // In a loaded campaign the UI is always there, so this only ever fires headless.
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingSector sector = new RecordingSector(false);
+        Global.setSector(sector.proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+
+        assertTrue(session.lobbyReleased());
+        assertFalse(sector.paused);
+    }
+
+    private static CoopMessages.Message lastOfType(RecordingNetService service, CoopMessages.Type type) {
+        CoopMessages.Message found = null;
+        for (CoopMessages.Message message : service.sent) {
+            if (message.type() == type) {
+                found = message;
+            }
+        }
+        assertNotNull(found, "no " + type + " was sent");
+        return found;
+    }
+
     private static CoopNetPump livePump(RecordingNetService service, CoopSessionState session,
                                         java.util.function.LongSupplier clock) {
         return new CoopNetPump(service, session, clock::getAsLong,
@@ -2696,7 +3019,11 @@ class CoopNetPumpTest {
         session.rejectHandshake("mod list mismatch");
         CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
 
-        assertEquals(CoopHudState.STATUS_REJECTED, pump.hudState(false).status());
+        // Phase 21: a handshake reject stores its reason in handshakeRejectReason, not rejectReason,
+        // so the HUD used to fall back to a bare "connection rejected" for exactly the failures that
+        // need explaining. It now names the support code the dialog and the feed banner also carry.
+        assertEquals(CoopHudState.STATUS_REJECTED_PREFIX + "COOP-MODS, mod mismatch",
+                pump.hudState(false).status());
     }
 
     // ---- Phase 20.2: in-session reconnect grace ---------------------------------------------------
@@ -3367,6 +3694,8 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-a", "Guest A"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        // Phase 21: a session already in play, so the lobby gate is open.
+        session.releaseLobby();
         return new CoopNetPump(service, session, clock,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(123456789L, "coop-seed", "fingerprint-host"),
@@ -3668,6 +3997,10 @@ class CoopNetPumpTest {
          */
         private boolean dismissClosesDialog = true;
         private final List<String> messages = new ArrayList<>();
+        /** Phase 21: every plugin handed to {@code showInteractionDialog}. */
+        private final List<Object> shownDialogs = new ArrayList<>();
+        /** False models another dialog holding the exclusive slot. */
+        private boolean acceptInteractionDialogs = true;
 
         private RecordingCampaignUi(RecordingEntity target) {
             this.target = target;
@@ -3698,6 +4031,13 @@ class CoopNetPumpTest {
                             case "setDisallowPlayerInteractionsForOneFrame" -> {
                                 disallowInteractionCount++;
                                 return null;
+                            }
+                            // Phase 21: the coop dialog controllers open through this. Returning
+                            // true models the engine taking the dialog; the plugin is recorded so a
+                            // test can assert WHICH coop dialog went up.
+                            case "showInteractionDialog" -> {
+                                shownDialogs.add(args[0]);
+                                return acceptInteractionDialogs;
                             }
                             case "addMessage" -> {
                                 messages.add((String) args[0]);
@@ -3862,6 +4202,10 @@ class CoopNetPumpTest {
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        // Phase 21: "active" now also means the players started the session. These helpers stand for
+        // a session already in play, so they open the lobby gate; the lobby's own tests are the ones
+        // that leave it shut.
+        session.releaseLobby();
         return session;
     }
 
@@ -4027,6 +4371,8 @@ class CoopNetPumpTest {
         session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
         session.guestAcceptHandshake("session-a");
         session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        // Phase 21: see activeHostSession().
+        session.releaseLobby();
         return session;
     }
 
@@ -4624,5 +4970,285 @@ class CoopNetPumpTest {
         public void setInteractionBlocked(boolean blocked, String entityName) {
             interactionBlocks.add(new InteractionBlock(blocked, entityName));
         }
+    }
+    // ---- Phase 21: desync dialogs ------------------------------------------------------------------
+
+    /** The seed-lock request a host sends; the guest's fingerprint is what decides the outcome. */
+    private static CoopMessages.Message hostSeedLockRequest() {
+        return CoopMessages.seedLockRequest("session-a", 4L, 14000L, 123456789L, "coop-seed",
+                "fingerprint-host", "campaign-a", true);
+    }
+
+    @Test
+    void aGuestSeedRejectRaisesTheDesyncDialogAndStopsTheRetryLoop() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        service.inbound.add(hostSeedLockRequest());
+        CoopNetPump pump = pumpForGuestSeedLock(service, session,
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-a"),
+                false, false, "fingerprint-guest", () -> "");
+
+        pump.advance(0f);
+
+        assertTrue(pump.desyncDialogRequestedForTest(), "the guest is shown why its sector differs");
+        assertNotNull(pump.desyncReasonForTest());
+        assertEquals("COOP-SEED", pump.desyncReasonForTest().code());
+        // No auto-retry on a deterministic reject: the loop is stopped and the state is terminal, so
+        // the guest cannot reconnect every 5 s and bury its own dialog under fresh ones.
+        assertEquals(1, service.stopReconnectingReasons.size());
+        assertTrue(session.rejectTerminal());
+        assertFalse(session.guestRearmLobby(), "a terminal reject must not rearm on the next connect");
+        // The connecting dialog steps aside: showing "version mismatch / host refused / timed out"
+        // next to the dialog that names the actual sector difference is two weaker answers, not one
+        // good one.
+        assertFalse(pump.connectingDialogRequestedForTest());
+    }
+
+    @Test
+    void aHostSeedRejectShowsTheHostWhyAndTheLobbyYieldsUntilItIsClosed() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        pump.advance(0f);
+        assertTrue(pump.lobbyDialogRequestedForTest(), "the host sits in its lobby to begin with");
+
+        service.inbound.add(CoopMessages.seedLockAck("session-a", 6L, 1000L, "fingerprint-guest"));
+        pump.advance(0f);
+
+        assertTrue(pump.desyncDialogRequestedForTest());
+        assertEquals("COOP-SEED", pump.desyncReasonForTest().code());
+        // Arbiter precedence: the lobby must not take the slot back off the only thing telling the
+        // host why the guest never arrived.
+        assertFalse(pump.lobbyDialogRequestedForTest());
+        // The host is NOT terminal: it rewinds and keeps waiting for a corrected guest.
+        assertFalse(session.rejectTerminal());
+        assertTrue(service.stopReconnectingReasons.isEmpty(), "only a guest stops dialling");
+
+        pump.desyncCloseForTest();
+        pump.advance(0f);
+
+        assertFalse(pump.desyncDialogRequestedForTest());
+        assertTrue(pump.lobbyDialogRequestedForTest(), "the lobby comes back once the dialog is gone");
+    }
+
+    @Test
+    void bothSidesWriteTheSameDoctorMarkerCorrelationIdForOneSeedReject() {
+        // The whole point of the marker is that a support thread with two pastes can be matched up,
+        // which only works if the sessionId field is byte-identical on the two machines.
+        CoopDesyncReason hostSide = CoopDesyncReason.classify(
+                "sectorFingerprint: host=fingerprint-host guest=fingerprint-guest",
+                CoopDesyncReason.Source.SEED_LOCK);
+        CoopDesyncReason guestSide = CoopDesyncReason.classify(
+                "sectorFingerprint: host=fingerprint-host guest=fingerprint-guest",
+                CoopDesyncReason.Source.SEED_LOCK);
+
+        String hostLine = CoopDoctorMarker.format(hostSide, "session-a", CoopConnectionRole.HOST,
+                "Host", "Guest");
+        String guestLine = CoopDoctorMarker.format(guestSide, "session-a", CoopConnectionRole.GUEST,
+                "Guest", "Host");
+
+        assertTrue(hostLine.startsWith("[COOP-DOCTOR] code=COOP-SEED sessionId=session-a"), hostLine);
+        assertTrue(guestLine.startsWith("[COOP-DOCTOR] code=COOP-SEED sessionId=session-a"), guestLine);
+        assertFalse(hostLine.contains("\n"), "the marker has to be selectable in one drag");
+        assertFalse(guestLine.contains("\n"));
+    }
+
+    @Test
+    void theSessionIdIsCapturedBeforeTheRejectClearsIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        Global.setSector(new RecordingSector(false, new RecordingCampaignUi(null)).proxy());
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        service.inbound.add(CoopMessages.seedLockAck("session-a", 6L, 1000L, "fingerprint-guest"));
+        pump.advance(0f);
+
+        // rejectHandshake runs clearCanonicalSession, so reading the id after the reject would give
+        // <none> on both machines - the one value the correlation cannot afford to lose.
+        assertNull(session.sessionId());
+        assertTrue(pump.desyncDialogRequestedForTest());
+    }
+
+    @Test
+    void aGraceExpiryRaisesTheSessionDialogAndStatesTheWindowAsANumber() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+
+        now.addAndGet(CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS * 1000L + 1000L);
+        pump.advance(0f);
+
+        assertTrue(pump.desyncDialogRequestedForTest());
+        assertEquals("COOP-SESSION", pump.desyncReasonForTest().code());
+        assertEquals(CoopDesyncReason.SessionCause.GRACE_EXPIRED,
+                pump.desyncReasonForTest().sessionCause());
+        // The window length is a number the dialog is required to state and only the pump knows.
+        assertEquals(CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS,
+                pump.desyncReasonForTest().graceSeconds());
+    }
+
+    @Test
+    void aPlayerEndingTheWaitGetsNoSecondDialogExplainingTheirOwnButton() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+
+        pump.endReconnectWaitForTest();
+        pump.advance(0f);
+
+        assertFalse(pump.desyncDialogRequestedForTest(),
+                "answering a button press with a modal explaining what the button did is a loop");
+    }
+
+    // ---- Phase 21: session stats -------------------------------------------------------------------
+
+    @Test
+    void theHostTalliesAGuestBattleFromTheBattleResultItReceives() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+        // One warm-up frame: the session-start edge inside syncNpcReplication resets the reconciler's
+        // applied-battle ledger, and in play that edge is long past by the time a battle happens.
+        pump.advance(0f);
+
+        CoopBattleResult result = new CoopBattleResult("battle-1", "guest-player", "WIN", 5,
+                List.of("npc-1", "npc-2"), List.of());
+        service.inbound.add(CoopMessages.battleResult("session-a", 7L, 1000L, result.battleId(),
+                result.engagingPlayerId(), result.outcome(), result.engagingFleetSize(),
+                result.encodeBody()));
+        pump.advance(0f);
+
+        CoopSessionStats stats = pump.sessionStatsForTest();
+        assertEquals(1L, stats.player("guest-player").battlesFought());
+        assertEquals(1L, stats.player("guest-player").battlesWon());
+        assertEquals(2L, stats.fleetsDestroyedTeam());
+
+        // The reconciler's battle-id ledger is the dedup: a resend must not count twice.
+        service.inbound.add(CoopMessages.battleResult("session-a", 8L, 1000L, result.battleId(),
+                result.engagingPlayerId(), result.outcome(), result.engagingFleetSize(),
+                result.encodeBody()));
+        pump.advance(0f);
+        assertEquals(1L, stats.player("guest-player").battlesFought());
+        assertEquals(2L, stats.fleetsDestroyedTeam());
+    }
+
+    @Test
+    void aGuestMarketTransactionJoinsTheHostsMarketsTradedWithSet() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        service.inbound.add(CoopMessages.marketTxn("session-a", 9L, 1000L, "jangala", "COMMODITY",
+                "supplies", 10, 0f, "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(List.of("jangala"),
+                pump.sessionStatsForTest().player("guest-player").marketsTradedWith());
+        assertEquals(1, pump.sessionStatsForTest().marketsTradedWithUnionCount());
+    }
+
+    @Test
+    void theHostTalliesAMissionClaimItAcceptsAndNotTheOneItRejects() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        service.inbound.add(CoopMessages.missionClaimRequest("session-a", 10L, 1000L, "mission-1",
+                "guest-player"));
+        pump.advance(0f);
+        assertEquals(1L, pump.sessionStatsForTest().player("guest-player").missionsClaimed());
+
+        // First-come arbitration is the dedup: the second claim on the same mission is rejected, so
+        // nothing behind it counts.
+        service.inbound.add(CoopMessages.missionClaimRequest("session-a", 11L, 1000L, "mission-1",
+                "guest-player"));
+        pump.advance(0f);
+        assertEquals(1L, pump.sessionStatsForTest().player("guest-player").missionsClaimed());
+    }
+
+    @Test
+    void theGuestReplacesItsTallyWithTheHostsSessionStatsBroadcast() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        CoopSessionStats sent = new CoopSessionStats();
+        sent.notePlayer("host-player", "Host");
+        sent.notePlayer("guest-player", "Guest");
+        sent.noteBattle("host-player", true);
+        sent.noteFleetsDestroyed(3);
+        sent.noteTogether(120f);
+        service.inbound.add(CoopMessages.sessionStats("session-a", 12L, 1000L,
+                CoopSessionStatsCodec.encodePayload(sent)));
+
+        pump.advance(0f);
+
+        CoopSessionStats applied = pump.sessionStatsForTest();
+        assertEquals(List.of("host-player", "guest-player"), applied.playerIds());
+        assertEquals(1L, applied.player("host-player").battlesWon());
+        assertEquals(3L, applied.fleetsDestroyedTeam());
+        assertEquals(120f, applied.timeFlownTogetherSeconds(), 0.01f);
+        // The page reads whatever the pump holds, and the guest's save carries the same copy.
+        assertSame(applied, CoopSessionStatsStore.current());
+    }
+
+    @Test
+    void theHostBroadcastsTheStatsOnceAtReleaseAndThenOnTheThirtySecondCadence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = lobbyHostSession();
+        Global.setSector(new RecordingSector(false, new RecordingCampaignUi(null)).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        service.inbound.add(CoopMessages.readyState("session-a", 5L, 1000L, "SNAPSHOT_APPLIED", true));
+        pump.advance(0f);
+        pump.lobbyStartForTest();
+        now.addAndGet(coop.session.CoopLobbyRoster.COUNTDOWN_MILLIS + 100L);
+        pump.advance(0f);
+
+        assertTrue(session.lobbyReleased());
+        assertEquals(1, countSent(service, CoopMessages.Type.SESSION_STATS),
+                "one send behind the release, so the page is populated from the first minute");
+
+        // Nothing more until the interval is up.
+        now.addAndGet(29_000L);
+        pump.advance(0f);
+        assertEquals(1, countSent(service, CoopMessages.Type.SESSION_STATS));
+
+        now.addAndGet(2_000L);
+        pump.advance(0f);
+        assertEquals(2, countSent(service, CoopMessages.Type.SESSION_STATS));
+    }
+
+    @Test
+    void theHostRecordsAHullTheGuestReportsLosing() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        service.inbound.add(CoopMessages.shipLost("session-a", 13L, 1000L, "guest-player",
+                "ISS Bad Idea", "Wolf", "Corvus", 42.5f, "battle"));
+        pump.advance(0f);
+
+        CoopSessionStats stats = pump.sessionStatsForTest();
+        assertEquals(1L, stats.player("guest-player").shipsLost());
+        assertEquals(1, stats.shipLossLedger().size());
+        assertEquals("ISS Bad Idea", stats.shipLossLedger().get(0).hullName());
+        assertEquals(42.5f, stats.lastHullLossDay(), 0.01f);
+    }
+
+    private static int countSent(RecordingNetService service, CoopMessages.Type type) {
+        int found = 0;
+        for (CoopMessages.Message message : service.sent) {
+            if (message.type() == type) {
+                found++;
+            }
+        }
+        return found;
     }
 }

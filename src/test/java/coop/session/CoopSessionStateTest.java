@@ -216,6 +216,82 @@ class CoopSessionStateTest {
         assertEquals("fingerprint-a", state.sectorFingerprint());
     }
 
+    // ---- Phase 21: the lobby gate + the kept handshake reason -------------------------------------
+
+    @Test
+    void theLobbyGateStartsClosedAndOpensOnlyOnce() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        state.startHost("Host");
+
+        assertFalse(state.lobbyReleased(), "a fresh session has not been started by anybody yet");
+        assertTrue(state.releaseLobby());
+        assertTrue(state.lobbyReleased());
+        assertFalse(state.releaseLobby(), "releasing twice is a no-op");
+    }
+
+    @Test
+    void losingTheCanonicalSessionClosesTheLobbyGateAgain() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+        state.hostAcceptHandshake();
+        state.recordSeedLock(1L, "coop-seed", "fingerprint-a");
+        state.releaseLobby();
+
+        // The peer drops outside a grace window: the canonical session goes, and so does the gate.
+        assertTrue(state.onChannelDisconnected());
+
+        assertFalse(state.lobbyReleased(),
+                "a fresh handshake must run a fresh lobby, not drop a new partner into a live world");
+    }
+
+    @Test
+    void resetClosesTheLobbyGate() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        state.startHost("Host");
+        state.releaseLobby();
+
+        state.reset();
+
+        assertFalse(state.lobbyReleased());
+    }
+
+    @Test
+    void aRejectedHandshakeKeepsItsReason() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("guest-player"));
+        state.startGuest("Guest");
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+
+        state.rejectHandshake("mod list differs: nexerelin 0.11 vs 0.12");
+
+        assertEquals("mod list differs: nexerelin 0.11 vs 0.12", state.handshakeRejectReason());
+        assertEquals(CoopLobbyState.REJECTED, state.connectionState());
+    }
+
+    @Test
+    void aBlankHandshakeReasonIsStoredAsNull() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("guest-player"));
+        state.startGuest("Guest");
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+
+        state.rejectHandshake("   ");
+
+        assertNull(state.handshakeRejectReason());
+    }
+
+    @Test
+    void theHandshakeReasonIsClearedWhenTheGuestRearmsForAFreshRound() {
+        CoopSessionState state = new CoopSessionState(new SequencedIds("guest-player"));
+        state.startGuest("Guest");
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        state.rejectHandshake("versions differ");
+        state.guestRejectLobby("try again");
+
+        assertTrue(state.guestRearmLobby());
+
+        assertNull(state.handshakeRejectReason(), "a new round must not show the old round's reason");
+    }
+
     private static final class SequencedIds implements java.util.function.Supplier<String> {
         private final Queue<String> ids;
 

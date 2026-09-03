@@ -1,0 +1,260 @@
+package coop.ui;
+
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
+import com.fs.starfarer.api.campaign.OptionPanelAPI;
+import com.fs.starfarer.api.campaign.TextPanelAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.combat.EngagementResultAPI;
+import coop.session.CoopJoinPhase;
+import coop.util.CoopLog;
+
+import java.util.Map;
+import java.util.function.Supplier;
+
+/**
+ * What the guest looks at between "the socket connected" and "the world arrived": the same five named
+ * phases the host's roster shows, with the current one marked, an elapsed counter that ticks every
+ * second, and a Cancel that is always live.
+ *
+ * <p><b>Why the counter matters.</b> The lobby research rule is "never a static frame longer than ten
+ * seconds": a screen that does not move is indistinguishable from a hung one, and a join stall with
+ * no visible progress is the single most reported multiplayer support case in the corpus. The step
+ * counter plus the elapsed clock is the cheapest honest answer.
+ *
+ * <p><b>Why the failures are named individually.</b> Elden Ring Seamless Co-op's undifferentiated
+ * "no sessions found" is the cautionary tale; every distinguishable cause gets its own sentence and
+ * its own remedy. The three this dialog can name on its own are a version/mod mismatch, an explicit
+ * refusal from the host (with the host's own reason text), and a timeout with no {@code LOBBY_ACCEPT}
+ * inside {@link #CONNECT_TIMEOUT_MILLIS}.
+ *
+ * <p><b>Seam for the desync dialogs.</b> Seed-lock rejects, mod-mismatch diffs and resume rejects get
+ * their own dedicated dialogs (built separately). When one of those takes over, the pump closes this
+ * controller and this dialog simply steps aside rather than showing a second, weaker version of the
+ * same message.
+ */
+public final class CoopConnectingDialog implements InteractionDialogPlugin, CoopDismissableDialog {
+
+    /** No {@code LOBBY_ACCEPT} within this long is reported as a timeout rather than left spinning. */
+    public static final long CONNECT_TIMEOUT_MILLIS = 30_000L;
+
+    private static final Object OPTION_CANCEL = new Object();
+
+    static final String TEXT_CANCEL = "Cancel";
+
+    /** Cap on re-renders; the phase list changes rarely and the counter only once a second. */
+    static final long MIN_RENDER_INTERVAL_MILLIS = 250L;
+
+    /** The distinguishable ways a join can fail before the lobby is reached. */
+    public enum Failure {
+        /** The handshake compared the two installs and they differ. */
+        VERSION_MISMATCH,
+        /** The host answered {@code LOBBY_REJECT} — wrong password, slot taken, grace window. */
+        HOST_REFUSED,
+        /** Connected, but no {@code LOBBY_ACCEPT} inside {@link #CONNECT_TIMEOUT_MILLIS}. */
+        TIMED_OUT
+    }
+
+    /**
+     * One frame of the connecting screen.
+     *
+     * @param phase   how far the join has got; null before the host has accepted the lobby at all
+     * @param elapsedMillis time since the connect attempt started
+     * @param failure the named cause, or null while the join is still running
+     * @param detail  the host's own words for {@link Failure#HOST_REFUSED} / the handshake diff for a
+     *                mismatch; "" when there is nothing more to say
+     */
+    public record View(CoopJoinPhase phase, long elapsedMillis, Failure failure, String detail) {
+        public View {
+            detail = detail == null ? "" : detail;
+        }
+    }
+
+    private final Supplier<View> viewSupplier;
+    private final Supplier<Long> clock;
+    private final Runnable onCancel;
+
+    private InteractionDialogAPI dialog;
+    private View rendered;
+    private long lastRenderAtMillis = Long.MIN_VALUE;
+    private boolean renderFailed;
+
+    /**
+     * @param viewSupplier polled every frame; re-renders only when the value changes
+     * @param clock        wall clock in millis, for the render rate limit
+     * @param onCancel     stops the reconnect loop and leaves the guest sitting paused. Always live
+     *                     and always safe: a cancelled join must not disturb the host beyond the
+     *                     ordinary disconnect it would see anyway.
+     */
+    public CoopConnectingDialog(Supplier<View> viewSupplier, Supplier<Long> clock, Runnable onCancel) {
+        this.viewSupplier = viewSupplier == null ? () -> null : viewSupplier;
+        this.clock = clock == null ? () -> 0L : clock;
+        this.onCancel = onCancel == null ? () -> { } : onCancel;
+    }
+
+    @Override
+    public void init(InteractionDialogAPI dialog) {
+        this.dialog = dialog;
+        try {
+            dialog.hideVisualPanel();
+        } catch (Throwable ignored) {
+            // Cosmetic only.
+        }
+        // Never setOptionOnEscape: Cancel is the only exit, and it is explicit.
+        render(currentView());
+    }
+
+    @Override
+    public void advance(float amount) {
+        View view = currentView();
+        if (view == null || view.equals(rendered)) {
+            return;
+        }
+        long now = clock.get();
+        if (lastRenderAtMillis != Long.MIN_VALUE && now - lastRenderAtMillis < MIN_RENDER_INTERVAL_MILLIS) {
+            return;
+        }
+        render(view);
+    }
+
+    private View currentView() {
+        try {
+            return viewSupplier.get();
+        } catch (Throwable ex) {
+            CoopLog.warn(getClass(), "Coop connecting dialog could not read its view", ex);
+            return null;
+        }
+    }
+
+    private void render(View view) {
+        if (view == null) {
+            return;
+        }
+        rendered = view;
+        lastRenderAtMillis = clock.get();
+        renderText(view);
+        renderOptions();
+    }
+
+    private void renderText(View view) {
+        if (renderFailed) {
+            return;
+        }
+        try {
+            TextPanelAPI text = dialog == null ? null : dialog.getTextPanel();
+            if (text == null) {
+                return;
+            }
+            text.clear();
+            if (view.failure() != null) {
+                text.addPara(failureHeadline(view.failure()));
+                text.addPara(failureRemedy(view.failure()));
+                if (!view.detail().isEmpty()) {
+                    text.addPara(view.detail());
+                }
+                text.addPara("Waiting " + coop.session.CoopLobbyRoster.formatClock(view.elapsedMillis()) + ".");
+                return;
+            }
+            text.addPara("Joining the co-op session.");
+            for (CoopJoinPhase phase : CoopJoinPhase.values()) {
+                text.addPara(phaseLine(phase, view.phase()));
+            }
+            text.addPara("Waiting " + coop.session.CoopLobbyRoster.formatClock(view.elapsedMillis()) + ".");
+        } catch (Throwable ex) {
+            renderFailed = true;
+            CoopLog.warn(getClass(), "Coop connecting dialog could not render its text", ex);
+        }
+    }
+
+    /** The phase list line: done, current, or still ahead. */
+    static String phaseLine(CoopJoinPhase phase, CoopJoinPhase current) {
+        String counter = " (" + phase.stepIndex() + "/" + CoopJoinPhase.STEP_COUNT + ")";
+        if (current == null) {
+            return "  " + phase.displayWord() + counter;
+        }
+        if (current.atLeast(phase) && current != phase) {
+            return "  done: " + phase.displayWord() + counter;
+        }
+        if (current == phase) {
+            return "> " + phase.displayWord() + counter;
+        }
+        return "  " + phase.displayWord() + counter;
+    }
+
+    static String failureHeadline(Failure failure) {
+        return switch (failure) {
+            case VERSION_MISMATCH -> "This install and the host's do not match, so the session cannot start.";
+            case HOST_REFUSED -> "The host turned this connection down.";
+            case TIMED_OUT -> "The host's port answered but the session never started.";
+        };
+    }
+
+    static String failureRemedy(Failure failure) {
+        return switch (failure) {
+            case VERSION_MISMATCH -> "Match the host's game version and mod list, then reconnect.";
+            case HOST_REFUSED -> "The host's own words are below. Nothing here retries on its own.";
+            case TIMED_OUT -> "Nothing arrived in " + (CONNECT_TIMEOUT_MILLIS / 1000L)
+                    + " seconds. Check that the host is still on the lobby screen, then try again.";
+        };
+    }
+
+    private void renderOptions() {
+        try {
+            OptionPanelAPI options = dialog == null ? null : dialog.getOptionPanel();
+            if (options == null) {
+                return;
+            }
+            options.clearOptions();
+            options.addOption(TEXT_CANCEL, OPTION_CANCEL,
+                    "Stops trying to join. Your campaign stays loaded and paused; the host sees an"
+                            + " ordinary disconnect and nothing more.");
+        } catch (Throwable ex) {
+            CoopLog.warn(getClass(), "Coop connecting dialog could not render its options", ex);
+        }
+    }
+
+    @Override
+    public void optionSelected(String optionText, Object optionData) {
+        if (optionData != OPTION_CANCEL) {
+            return;
+        }
+        try {
+            onCancel.run();
+        } catch (Throwable ex) {
+            CoopLog.warn(getClass(), "Coop connecting dialog cancel action failed", ex);
+        }
+        close();
+    }
+
+    @Override
+    public void optionMousedOver(String optionText, Object optionData) {
+    }
+
+    @Override
+    public void backFromEngagement(EngagementResultAPI battleResult) {
+    }
+
+    @Override
+    public Object getContext() {
+        return null;
+    }
+
+    @Override
+    public Map<String, MemoryAPI> getMemoryMap() {
+        return Map.of();
+    }
+
+    @Override
+    public void close() {
+        InteractionDialogAPI open = dialog;
+        dialog = null;
+        if (open == null) {
+            return;
+        }
+        try {
+            open.dismiss();
+        } catch (Throwable ex) {
+            CoopLog.warn(getClass(), "Coop connecting dialog could not be dismissed", ex);
+        }
+    }
+}

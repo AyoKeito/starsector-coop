@@ -19,8 +19,11 @@ import coop.save.CoopGuestSnapshot;
 import coop.save.CoopGuestSnapshotStore;
 import coop.save.CoopSaveCheckpoint;
 import coop.seed.CoopSeedSync;
+import coop.stats.CoopSessionStats;
+import coop.stats.CoopSessionStatsStore;
 import coop.ui.CoopLinkHud;
 import coop.ui.CoopSessionIntel;
+import coop.ui.CoopSessionStatsIntel;
 import coop.util.CoopLog;
 
 public class CoopModPlugin extends BaseModPlugin {
@@ -63,6 +66,9 @@ public class CoopModPlugin extends BaseModPlugin {
         // The held guest snapshot belongs to the session that just ended; the copy already written
         // into the previous save is untouched, which is the point of it.
         CoopGuestSnapshotStore.clear();
+        // Same shape: the previous session's tally belongs to the game that just ended. The copy
+        // already written into that save is untouched; the new pump reads its own back.
+        CoopSessionStatsStore.clear();
         // Process-wide caches keyed to the game that just ended: the location id map (ids are only
         // unique within a campaign) and the handle on the previous session's mirror fleet.
         CoopLocations.invalidate();
@@ -81,9 +87,13 @@ public class CoopModPlugin extends BaseModPlugin {
         // goes in right after the pump it reads from and before anything that could fail on its own.
         CoopLinkHud.install(Global.getSector(), pump);
         // Phase 20.6: the "Coop Session" intel page. Registered after the pump because the pump's
-        // constructor installs the feed the page reads; the entry itself is permanent and hides
-        // itself when no coop role is active, so a solo save shows no coop clutter.
+        // constructor installs the feed the page reads. Transient since Phase 21: removed before
+        // every save and recreated here and after one, so no instance of it ever reaches XStream and
+        // a solo load of a coop save has nothing to hide.
         CoopSessionIntel.ensureRegistered(Global.getSector());
+        // Phase 21: the "Coop Stats" page, on the same transient lifecycle. The counters themselves
+        // live in the save under CoopSessionStats.PERSISTENT_KEY; only the page is recreated.
+        CoopSessionStatsIntel.ensureRegistered(Global.getSector());
         // Phase 30 dev tooling, dormant unless -Dcoop.debug.bridge=<port> is set: no socket, no log
         // line and no script when it is absent. Installed here rather than inside the pump because it
         // has to answer before and without a coop session, and always as a TRANSIENT script — it owns
@@ -112,6 +122,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // all - over a save that has no coop session in it at all. The new pump installs its own
         // feed; this is the window between the two.
         CoopSessionIntelFeed.uninstall();
+        // Phase 21, same argument for the stats page: its source is a lambda closed over the outgoing
+        // pump's tally, and leaving it installed would render the previous game's counters over a
+        // save that has no coop session in it.
+        CoopSessionStatsIntel.clearSource();
         // Same shape for the stall hook: with no pump there is nothing to route beforeGameSave to.
         CoopStallNotice.setActive(null);
     }
@@ -133,6 +147,12 @@ public class CoopModPlugin extends BaseModPlugin {
         x.alias("coopGuestSnapStack", CoopGuestSnapshot.CargoStack.class);
         x.alias("coopGuestSnapShip", CoopGuestSnapshot.Ship.class);
         x.alias("coopGuestSnapOfficer", CoopGuestSnapshot.Officer.class);
+        // Phase 21 session stats, same argument: the tally rides the save under
+        // CoopSessionStats.PERSISTENT_KEY, and a package rename without these aliases would make
+        // every save carrying one unreadable.
+        x.alias("coopStats", CoopSessionStats.class);
+        x.alias("coopStatsPlayer", CoopSessionStats.PlayerStats.class);
+        x.alias("coopStatsLoss", CoopSessionStats.ShipLoss.class);
     }
 
     /**
@@ -147,6 +167,12 @@ public class CoopModPlugin extends BaseModPlugin {
     public void beforeGameSave() {
         CoopFullFidelitySystemDriver.beginSave();
         CoopGuestSnapshotStore.writeIntoCurrentSector();
+        // Phase 21: the tally goes in, the two intel pages come out. Both pages are transient by
+        // design (see CoopSessionIntel) -- nothing of either class may reach XStream -- while the
+        // counters they render are plain data and are exactly what has to survive.
+        CoopSessionStatsStore.writeIntoCurrentSector();
+        CoopSessionIntel.remove(Global.getSector());
+        CoopSessionStatsIntel.remove(Global.getSector());
         // Red-team B4: both roles announce the stall a save is about to cause, flushed inline, so
         // the partner's link-death rule does not read a guest's manual save as a dead link. Last,
         // because the two calls above are what make the save correct and this one is courtesy.
@@ -162,6 +188,10 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void afterGameSave() {
         CoopFullFidelitySystemDriver.endSave();
+        // Phase 21: put the transient pages back, before anything else. The save is written; from
+        // here the player is back in the campaign and expects the intel screen intact.
+        CoopSessionIntel.ensureRegistered(Global.getSector());
+        CoopSessionStatsIntel.ensureRegistered(Global.getSector());
         CoopSaveCheckpoint.notifyLocalGameSaved(CoopSaveCheckpoint.REASON_HOST_SAVE);
     }
 }

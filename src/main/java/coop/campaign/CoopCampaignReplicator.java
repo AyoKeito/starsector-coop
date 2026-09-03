@@ -722,6 +722,48 @@ public final class CoopCampaignReplicator
         this.battleObserver = observer;
     }
 
+    /**
+     * Phase 21 session-stats tally hooks.
+     *
+     * <p>Four of the counters on the stats page are events this class already handles and already
+     * de-duplicates: a market transaction, a mission claim the host accepted, a consumed salvageable,
+     * a founded colony. The counters themselves live in the pump, so the replicator reports rather
+     * than tallies, and each call below sits at the point where that event has already passed its
+     * ledger. Null sink = no stats, which is what every existing test gets.
+     */
+    public interface StatsSink {
+        /** One market transaction; {@code netCredits} is signed (a purchase is negative). */
+        void onTrade(String playerId, String marketId, long netCredits);
+
+        /** One mission claim the host's arbiter accepted. */
+        void onMissionClaimed(String playerId);
+
+        /** One consumed salvageable, past the world-delta ledger. */
+        void onSalvageConsumed();
+
+        /** One colony founded, past the colony ledger. */
+        void onColonyFounded(String playerId);
+    }
+
+    private StatsSink statsSink;
+
+    public void setStatsSink(StatsSink sink) {
+        this.statsSink = sink;
+    }
+
+    /** Runs a stats hook when one is installed, swallowing whatever it throws. */
+    private void tally(java.util.function.Consumer<StatsSink> hook) {
+        StatsSink sink = statsSink;
+        if (sink == null) {
+            return;
+        }
+        try {
+            hook.accept(sink);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop session stats hook failed", ex);
+        }
+    }
+
     @Override
     public void onBattleOccurred(boolean playerWon) {
         if (battleObserver != null) {
@@ -1156,12 +1198,19 @@ public final class CoopCampaignReplicator
         }
         String missionId = CoopMessages.requiredPayloadString(message, "missionId");
         String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        // Read before arbitrating: arbitrate() re-accepts the SAME player's repeat claim (it is
+        // idempotent by design, so a resent request still gets an accept back), which means
+        // accepted() alone is not a dedup. An unheld mission is.
+        boolean freshClaim = missionBoard.claimHolder(missionId) == null;
         CoopMissionBoardSync.ClaimResult result = missionBoard.arbitrate(missionId, playerId);
         if (result.accepted()) {
             sendTo(message.senderId(), CoopMessages.missionClaimAccept(session.sessionId(),
                     service.nextSeq(), now(), missionId, playerId, result.hostSeq()));
             CoopLog.info(CoopCampaignReplicator.class, "Coop mission claim accepted missionId=" + missionId
                     + " playerId=" + playerId + " hostSeq=" + result.hostSeq());
+            if (freshClaim) {
+                tally(sink -> sink.onMissionClaimed(playerId));
+            }
         } else {
             sendTo(message.senderId(), CoopMessages.missionClaimReject(session.sessionId(),
                     service.nextSeq(), now(), missionId, result.rejectReason()));
@@ -1175,10 +1224,15 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return false;
         }
+        boolean freshClaim = missionBoard.claimHolder(missionId) == null;
         CoopMissionBoardSync.ClaimResult result = missionBoard.arbitrate(missionId, session.localPlayerId());
         if (result.accepted()) {
             send(CoopMessages.missionClaimAccept(session.sessionId(), service.nextSeq(), now(),
                     missionId, session.localPlayerId(), result.hostSeq()));
+            // Same unheld-mission dedup as the remote path above: one tally per missionId, ever.
+            if (freshClaim) {
+                tally(sink -> sink.onMissionClaimed(session.localPlayerId()));
+            }
         }
         return result.accepted();
     }
@@ -1227,6 +1281,14 @@ public final class CoopCampaignReplicator
         // the host applies it to its canonical market. Since both sides started identical at open and
         // apply the same delta, displayed quantities stay consistent without any live re-sync.
         if (!isGuest()) {
+            // Phase 21 stats, host only: this is the host's own trade, and it is the only place the
+            // credit value of one is available at all (the wire's MARKET_TXN carries per-item
+            // deltas, not prices). Dedup guarantee: vanilla fires onPlayerMarketTransaction exactly
+            // once per confirmed transaction, and the replay guard above has already excluded the
+            // re-drive of a remote one.
+            String hostMarketId = transaction.getMarket().getId();
+            long credits = (long) transaction.getCreditValue();
+            tally(sink -> sink.onTrade(session.localPlayerId(), hostMarketId, credits));
             return;
         }
         try {
@@ -1303,6 +1365,18 @@ public final class CoopCampaignReplicator
         String itemId = CoopMessages.requiredPayloadString(message, "itemId");
         int qty = (int) CoopMessages.requiredPayloadLong(message, "qty");
         String detail = CoopMessages.requiredPayloadString(message, "detail");
+        String actingPlayerId = CoopMessages.requiredPayloadString(message, "actingPlayerId");
+        // Phase 21 stats. Dedup guarantee: MARKET_TXN is guest -> host only and the host never
+        // rebroadcasts it, so every message that reaches here is one transaction line, once.
+        //
+        // Accepted v1 limitation, stated here so it is not read as a bug: the credit magnitude is
+        // qty * unitPrice, and unitPrice has always been sent as 0f (sendMarketTxn line 1338) because
+        // the sender diffs stack sizes and never sees a price. So a guest trade joins the
+        // markets-traded-with set -- which is what the page's "markets traded with" column counts --
+        // but contributes nothing to best-single-trade. Filling that in needs a price on the wire,
+        // which is a protocol change this phase is not allowed to make.
+        long netCredits = (long) (qty * CoopMessages.requiredPayloadFloat(message, "unitPrice"));
+        tally(sink -> sink.onTrade(actingPlayerId, marketId, netCredits));
         // Keep the in-memory model in step (used by tests / future assertions).
         marketSync.applyTransaction(new CoopMarketSync.Transaction(marketId, kind, itemId, qty,
                 CoopMessages.requiredPayloadFloat(message, "unitPrice"), detail));
@@ -1822,6 +1896,12 @@ public final class CoopCampaignReplicator
         if (!colonyLedger.apply(event)) {
             return;
         }
+        if (event.kind() == CoopColonySync.Kind.FOUNDED) {
+            // Phase 21 stats. Dedup guarantee: the colonyLedger.apply() above is the same gate that
+            // stops the host's rebroadcast echoing back into this method, so one founding counts once
+            // whichever client did it.
+            tally(sink -> sink.onColonyFounded(session.localPlayerId()));
+        }
         send(event.kind() == CoopColonySync.Kind.FOUNDED
                 ? CoopMessages.colonyFounded(session.sessionId(), service.nextSeq(), now(), event.encode())
                 : CoopMessages.colonyAbandoned(session.sessionId(), service.nextSeq(), now(), event.encode()));
@@ -1851,6 +1931,11 @@ public final class CoopCampaignReplicator
         CoopColonySync.Event event = CoopColonySync.decode(
                 CoopMessages.requiredPayloadString(message, "colony"));
         boolean firstApply = colonyLedger.apply(event);
+        if (firstApply && event.kind() == CoopColonySync.Kind.FOUNDED) {
+            // Phase 21 stats, same ledger and same guarantee as onColonyLifecycleCaptured: this is
+            // the peer's founding arriving once, credited to the peer.
+            tally(sink -> sink.onColonyFounded(event.actingPlayerId()));
+        }
         if (firstApply) {
             replayGuard.begin();
             try {
@@ -2221,6 +2306,12 @@ public final class CoopCampaignReplicator
                 CoopMessages.requiredPayloadString(message, "newStateJson"),
                 CoopMessages.requiredPayloadString(message, "actingPlayerId"));
         boolean firstApply = worldLedger.apply(delta);
+        if (firstApply && delta.consumed()) {
+            // Phase 21 stats. Dedup guarantee: worldLedger.apply() returns true exactly once per
+            // (entityId, kind) -- it is the ledger that kills the host's own rebroadcast echo below,
+            // so counting behind it cannot double-count a salvage either client reported.
+            tally(StatsSink::onSalvageConsumed);
+        }
         if (firstApply) {
             replayGuard.begin();
             try {

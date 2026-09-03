@@ -2,6 +2,8 @@ package coop.net;
 
 import coop.session.CoopPlayerInfo;
 import coop.handshake.CoopHandshakeManifest;
+import coop.stats.CoopSessionStats;
+import coop.stats.CoopSessionStatsCodec;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -540,4 +542,137 @@ class CoopMessagesTest {
         assertEquals("", CoopMessages.parseResumeRejectReason(CoopMessages.decode(CoopMessages.encode(
                 CoopMessages.sessionResumeReject("session-a", 8L, 9300L, null)))));
     }
+
+    // ---- Phase 21: lobby / ready-up ----------------------------------------------------------------
+
+    @Test
+    void aReadyStateRoundTripsItsPhaseAndFlag() {
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.readyState("session-a", 11L, 9400L, "SNAPSHOT_APPLIED", true)));
+
+        assertEquals(CoopMessages.Type.READY_STATE, decoded.type());
+        CoopMessages.ReadyState state = CoopMessages.parseReadyState(decoded);
+        assertEquals("SNAPSHOT_APPLIED", state.phase());
+        assertTrue(state.ready());
+
+        CoopMessages.ReadyState notReady = CoopMessages.parseReadyState(CoopMessages.decode(
+                CoopMessages.encode(CoopMessages.readyState("session-a", 12L, 9401L, "READY", false))));
+        assertFalse(notReady.ready());
+    }
+
+    @Test
+    void aLobbyStatusRoundTripsTheWholeRoster() {
+        List<CoopMessages.LobbyPlayer> players = List.of(
+                new CoopMessages.LobbyPlayer("host-1", "Alice", "READY", true, -1L, ""),
+                new CoopMessages.LobbyPlayer("guest-1", "Bob | the second", "SNAPSHOT_APPLIED", false,
+                        42_000L, "Mod mismatch"));
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.lobbyStatus("session-a", 13L, 9500L, players, 1_500L, false,
+                        "the host changed a setting", 61_000L)));
+
+        assertEquals(CoopMessages.Type.LOBBY_STATUS, decoded.type());
+        CoopMessages.LobbyStatus status = CoopMessages.parseLobbyStatus(decoded);
+        assertEquals(players, status.players(), "order is fixed: host first, then join order");
+        assertEquals(1_500L, status.countdownRemainingMillis());
+        assertFalse(status.released());
+        assertEquals("the host changed a setting", status.resetReason());
+        assertEquals(61_000L, status.elapsedMillis());
+    }
+
+    @Test
+    void aLobbyStatusWithNobodyInItAndNoCountdownDecodesCleanly() {
+        CoopMessages.LobbyStatus status = CoopMessages.parseLobbyStatus(CoopMessages.decode(
+                CoopMessages.encode(CoopMessages.lobbyStatus("session-a", 14L, 9600L, List.of(),
+                        -1L, true, null, 0L))));
+
+        assertEquals(List.of(), status.players());
+        assertEquals(-1L, status.countdownRemainingMillis());
+        assertTrue(status.released());
+        assertEquals("", status.resetReason());
+    }
+
+    @Test
+    void oneMalformedRosterRowDoesNotCostTheWholeRoster() {
+        // A newer peer with a shorter row, or a truncated line: the rest must still render.
+        List<CoopMessages.LobbyPlayer> decoded =
+                CoopMessages.decodeLobbyPlayers("host-1|Alice|READY|true|-1|\nbroken-row\n");
+
+        assertEquals(1, decoded.size());
+        assertEquals("host-1", decoded.get(0).playerId());
+    }
+
+    // ---- SESSION_STATS + SHIP_LOST -----------------------------------------------------------------
+
+    @Test
+    void sessionStatsCarriesTheCodecPayloadVerbatimWithNoDoubleEscaping() {
+        CoopSessionStats stats = new CoopSessionStats();
+        stats.notePlayer("host-1", "Alice");
+        stats.noteFleetsDestroyed(3);
+        stats.noteDaysElapsed(12.5f);
+        stats.noteShipLost("host-1", "Wolf \"Fang\" Mk.II", "FRIGATE", "Corvus\\Ward", 12.5f, "combat");
+        String payload = CoopSessionStatsCodec.encodePayload(stats);
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.sessionStats("session-a", 20L, 10_000L, payload)));
+
+        assertEquals(CoopMessages.Type.SESSION_STATS, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals(payload, decoded.payloadJson(), "the payload rides the wire byte for byte");
+
+        CoopSessionStats restored = CoopSessionStatsCodec.decodePayload(decoded.payloadJson());
+        assertEquals(3L, restored.fleetsDestroyedTeam());
+        assertEquals(12.5f, restored.daysElapsed());
+        assertEquals(1, restored.shipLossLedger().size());
+        CoopSessionStats.ShipLoss loss = restored.shipLossLedger().get(0);
+        assertEquals("host-1", loss.playerId());
+        assertEquals("Wolf \"Fang\" Mk.II", loss.hullName());
+        assertEquals("Corvus\\Ward", loss.systemName());
+        assertEquals("combat", loss.cause());
+    }
+
+    @Test
+    void sessionStatsWithANullOrBlankPayloadYieldsEmptyObjectInsteadOfThrowing() {
+        CoopMessages.Message fromNull = CoopMessages.sessionStats("session-a", 21L, 10_100L, null);
+        CoopMessages.Message fromBlank = CoopMessages.sessionStats("session-a", 22L, 10_200L, "   ");
+
+        assertEquals("{}", fromNull.payloadJson());
+        assertEquals("{}", fromBlank.payloadJson());
+    }
+
+    @Test
+    void shipLostRoundTripsHullNameWithQuoteAndBackslashAndEmptyCause() {
+        CoopMessages.Message message = CoopMessages.shipLost("session-a", 23L, 10_300L, "guest-1",
+                "Hyperion \"Reaper\" \\Prime", "CRUISER", "Askonia", 47.25f, "");
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(message));
+        assertEquals(CoopMessages.Type.SHIP_LOST, decoded.type());
+
+        CoopMessages.ShipLost shipLost = CoopMessages.parseShipLost(decoded);
+        assertEquals("guest-1", shipLost.playerId());
+        assertEquals("Hyperion \"Reaper\" \\Prime", shipLost.hullName());
+        assertEquals("CRUISER", shipLost.hullClass());
+        assertEquals("Askonia", shipLost.systemName());
+        assertEquals(47.25f, shipLost.day());
+        assertEquals("", shipLost.cause());
+    }
+
+    @Test
+    void shipLostWithAMalformedDayFallsBackToZeroInsteadOfThrowing() {
+        CoopMessages.Message malformed = new CoopMessages.Message(CoopMessages.Type.SHIP_LOST,
+                "session-a", 24L, 10_400L,
+                "{\"playerId\":\"guest-1\",\"hullName\":\"Wolf\",\"hullClass\":\"FRIGATE\","
+                        + "\"systemName\":\"Askonia\",\"day\":\"not-a-number\",\"cause\":\"combat\"}");
+
+        CoopMessages.ShipLost shipLost = CoopMessages.parseShipLost(malformed);
+
+        assertEquals(0f, shipLost.day());
+        assertEquals("guest-1", shipLost.playerId());
+    }
+
+    // Note (per task instructions): CoopNetPump.allowedDuringReconnectGrace is a private method, so
+    // it is not reachable from this test even though both classes share the coop.net package
+    // (private members are class-private, not package-private). Not asserted here; verified by
+    // reading CoopNetPump.java instead — SESSION_STATS and SHIP_LOST are absent from its
+    // allowedDuringReconnectGrace switch.
 }

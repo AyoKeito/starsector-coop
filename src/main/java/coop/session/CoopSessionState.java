@@ -25,6 +25,25 @@ public class CoopSessionState {
     private String rejectReason;
     /** True when that reject can never be retried in this launch (wrong lobby password). */
     private boolean rejectTerminal;
+    /**
+     * Phase 21 lobby gate. False means "a session exists but the players have not agreed to start
+     * it yet", which is what {@code CoopNetPump.isSessionPlayable()} holds the campaign clock on.
+     * Cleared by {@link #clearCanonicalSession()} and {@link #reset()}, so any loss of the canonical
+     * session closes the gate again and the next handshake reopens the lobby.
+     *
+     * <p>A reconnect-grace <em>resume</em> deliberately does not pass through either of those: the
+     * grace window never touches this record (see {@code CoopNetPump.handleSessionResumeAccept}), so
+     * a partner who drops and comes back inside the window lands straight back in the running
+     * session. The reconnect dialog is that surface; re-running the lobby there would be a second
+     * ready-up for a session both players already started.
+     */
+    private boolean lobbyReleased;
+    /**
+     * Why the last handshake was rejected (the {@code CoopHandshakeDiff} text, a seed mismatch, a
+     * campaign-id mismatch). Kept rather than discarded because the desync dialogs have nothing to
+     * show a player otherwise — before this field the reason reached a log line and was dropped.
+     */
+    private String handshakeRejectReason;
 
     public CoopSessionState() {
         this(() -> UUID.randomUUID().toString());
@@ -138,6 +157,7 @@ public class CoopSessionState {
         }
         connectionState = CoopLobbyState.GUEST_CONNECTING;
         rejectReason = null;
+        handshakeRejectReason = null;
         remotePlayerId = null;
         remoteName = null;
         provisionalLobbyId = null;
@@ -181,6 +201,7 @@ public class CoopSessionState {
                 || handshakeValidated || seedLong != null || connectionState != target;
         remotePlayerId = null;
         remoteName = null;
+        handshakeRejectReason = null;
         if (role == CoopConnectionRole.GUEST) {
             // Host-minted; the next lobby accept supplies a fresh one.
             provisionalLobbyId = null;
@@ -210,12 +231,66 @@ public class CoopSessionState {
         handshakeValidated = true;
     }
 
+    /**
+     * Records a rejected handshake and, since Phase 21, <em>keeps the reason</em>
+     * ({@link #handshakeRejectReason()}) so the desync dialogs can name the cause instead of showing
+     * a bare "co-op session ended".
+     */
     public synchronized void rejectHandshake(String reason) {
+        rejectHandshake(reason, false);
+    }
+
+    /**
+     * As {@link #rejectHandshake(String)}, but able to mark the reject <em>terminal</em> for this
+     * launch.
+     *
+     * <p>Phase 21 wiring wave. A mod mismatch and a seed/campaign mismatch are both deterministic:
+     * nothing either side can do without relaunching will change the answer, so a guest that keeps
+     * its retry loop running reconnects every 5 s, gets the identical reject, and buries its own
+     * dialog under a stream of fresh ones. Terminal is the same brake the wrong-password path
+     * already uses — {@link #guestRearmLobby()} refuses to rearm and {@link #onChannelDisconnected()}
+     * stops rewinding out of {@link CoopLobbyState#REJECTED}, so the state and the reason survive the
+     * drop the host sends right behind the reject and the HUD keeps saying why.
+     *
+     * <p>Only the guest ever passes true. On the host a terminal reject would freeze the lobby for
+     * the rest of the process, and the host's correct behaviour is the pre-Phase-21 one: rewind to
+     * {@link CoopLobbyState#HOST_WAITING} and keep waiting for a corrected guest.
+     *
+     * @param terminal true when this launch can never be accepted no matter how often it retries
+     */
+    public synchronized void rejectHandshake(String reason, boolean terminal) {
         if (role == CoopConnectionRole.NONE) {
             throw new IllegalStateException("No active lobby can reject a handshake");
         }
         connectionState = CoopLobbyState.REJECTED;
+        handshakeRejectReason = normalizeReason(reason);
+        if (terminal) {
+            rejectTerminal = true;
+        }
         clearCanonicalSession();
+    }
+
+    /** The last handshake reject's reason text, or null when no handshake was rejected. */
+    public synchronized String handshakeRejectReason() {
+        return handshakeRejectReason;
+    }
+
+    /**
+     * Opens the gate: the players agreed to start, so the campaign clock may run. Idempotent.
+     *
+     * @return true when this call is the one that opened it
+     */
+    public synchronized boolean releaseLobby() {
+        if (lobbyReleased) {
+            return false;
+        }
+        lobbyReleased = true;
+        return true;
+    }
+
+    /** Whether the lobby has been released and normal play may proceed. */
+    public synchronized boolean lobbyReleased() {
+        return lobbyReleased;
     }
 
     public synchronized void recordSeedLock(long acceptedSeedLong, String acceptedSeedString,
@@ -298,6 +373,8 @@ public class CoopSessionState {
         sectorFingerprint = null;
         rejectReason = null;
         rejectTerminal = false;
+        lobbyReleased = false;
+        handshakeRejectReason = null;
     }
 
     private static String normalizeReason(String value) {
@@ -314,6 +391,9 @@ public class CoopSessionState {
         seedLong = null;
         seedString = null;
         sectorFingerprint = null;
+        // Phase 21: the gate closes with the session it belonged to, so a fresh handshake always
+        // reopens the lobby rather than dropping a newly admitted partner into a running world.
+        lobbyReleased = false;
     }
 
     private String nextId(String fieldName) {
