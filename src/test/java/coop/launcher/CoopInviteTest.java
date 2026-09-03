@@ -47,6 +47,21 @@ class CoopInviteTest {
     }
 
     @Test
+    void sectorSizeAndStarAgeRideAlongAndAreLeftOutWhenBlank() {
+        String text = CoopInvite.format("203.0.113.9", 7777, "MN-1", "", "Small", "OLD");
+        assertEquals("coop://203.0.113.9:7777/?seed=MN-1&size=small&age=old", text);
+        CoopInvite.Parsed parsed = CoopInvite.parse(text);
+        assertTrue(parsed.ok(), parsed.error());
+        assertEquals("small", parsed.invite().sectorSize());
+        assertEquals("old", parsed.invite().sectorAge());
+
+        CoopInvite.Parsed bare = CoopInvite.parse(CoopInvite.format("h", 1, "MN-1", "x"));
+        assertTrue(bare.ok(), bare.error());
+        assertEquals("", bare.invite().sectorSize());
+        assertEquals("", bare.invite().sectorAge());
+    }
+
+    @Test
     void anEmptySeedIsLeftOutAndComesBackEmpty() {
         String text = CoopInvite.format("host.example", 7777, "", "pw");
 

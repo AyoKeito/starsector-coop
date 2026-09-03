@@ -69,10 +69,14 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
 - `Coop Launcher.cmd` in the mod folder: a dark-themed window with the settings in it, so nobody has
   to learn a `-D` property to play. It runs on the JRE that ships with the game, writes
   `saves\common\coop_options.json.data`, and starts the game; the vanilla launcher still comes up and
-  you still press Play there. Windows only in this release.
-- An invite line, `coop://host:port/?seed=...&pw=...`. The host presses Copy invite, the guest presses
-  Paste invite and has the address, the port, the password and the seed filled in at once. The
-  password is generated for the host rather than left empty.
+  you still press Play there. Windows only in this release. Its Advanced card, folded shut by default,
+  exposes the developer flags (diagnostics, datagram wiretap, frame profiler, the full-fidelity
+  guest-system and shared fast-forward and clock-reconciler switches, and the guest's one-shot
+  start-over-in-the-host's-campaign override) as checkboxes instead of `-D` properties.
+- An invite line, `coop://host:port/?seed=...&pw=...&size=...&age=...`. The host presses Copy invite,
+  the guest presses Paste invite and has the address, the port, the password, the seed, the sector
+  size and the star age filled in at once. The password is generated for the host rather than left
+  empty.
 - Check my connection on the host runs the port mapping and the connection doctor before the game is
   loaded and puts the result on screen. It then holds the port so the guest's Test connection can
   measure TCP, UDP and round trip against it.

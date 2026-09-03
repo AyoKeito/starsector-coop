@@ -147,26 +147,35 @@ launcher; that window still comes up and you still press Play in it. And it neve
 5. Press **Look up** next to **Your address**. That is one HTTPS request to a service that replies
    with the address your packets came from. If the two of you connect over a LAN or a VPN, type that
    address over the answer instead.
-6. Press **Copy** next to **Invite for your partner**, which updates on its own as you fill in the
+6. **Sector size** and **Star age** are two drop-downs, defaulting to `normal` and `mixed`. Change
+   them only if you want a different world; the invite carries whatever you pick, so your partner
+   does not have to match them by hand.
+7. Press **Copy** next to **Invite for your partner**, which updates on its own as you fill in the
    fields above. Send your partner the one line it puts on your clipboard.
 
 The invite looks like this, and it carries the password in clear text, so send it the way you would
 send a password:
 
 ```text
-coop://203.0.113.9:7777/?seed=MN-1234567890123456789&pw=hullmod
+coop://203.0.113.9:7777/?seed=MN-1234567890123456789&pw=hullmod&size=normal&age=mixed
 ```
 
 ### The guest's fields
 
 Press **Guest** at the top right, put the host's line on your clipboard, and press **Paste** next to
 **Invite from your host**. Typing or pasting the line into that field fills in the rest by itself:
-address, port, password and seed. An invite that will not parse says which part of it failed rather
-than clearing the fields. **Seed** is read-only here on purpose: it comes from the invite, and it is
-used only when you start a new campaign. Rejoining by loading a co-op save ignores it.
+address, port, password, seed, sector size and star age. An invite that will not parse says which
+part of it failed rather than clearing the fields. **Seed**, **Sector size** and **Star age** are
+read-only here on purpose: they come from the invite, and they are used only when you start a new
+campaign. Rejoining by loading a co-op save ignores all three. **Sector size** and **Star age** read
+`normal` and `mixed` when the invite does not carry them, the same defaults the host's drop-downs
+open on.
 
 You can also type **Host address** and **Port** in by hand and have the host tell you the password.
-The seed still has to match, which is what the invite is for.
+The seed still has to match, which is what the invite is for, and so do sector size and star age. The
+guest's fields for both are read-only, so if the host changed either away from `normal` and `mixed`
+and you are not pasting the invite, the only way to set them is by hand in the settings file, covered
+in section 7.
 
 ### Check my connection, and Test connection
 
@@ -232,10 +241,14 @@ outstanding. A `WARN` row is a reason it will work differently than you meant.
 
 ### Advanced, and LAUNCH
 
-The **Advanced** button in the footer folds open a card with five more fields: port mapping, link HUD
-corner, sector size, star age and reconnect grace. Each drop-down has a `shipped default` entry, so
-you can always put one back without knowing what the default was; the reconnect grace field has a
-`shipped default` checkbox instead. Leave the card closed unless you have a reason to open it.
+The **Advanced** button in the footer folds open a card holding the settings a normal session never
+needs: **Port mapping** (`auto`/`off`), **Link HUD corner** (`TR`/`TL`/`BR`/`BL`), **Reconnect grace
+(seconds)**, **Agent bridge port (0 = off)**, **Wiretap sample (every Nth)**, **Interaction delay
+(ms)**, and a **Developer flags** group of checkboxes: **Diagnostics**, **Datagram wiretap**, **Frame
+profiler**, **Full-fidelity guest system** (on by default), **Disable shared fast-forward**, **Disable
+clock reconciler**, and **Start over inside the host's campaign (guest)**. Every field already shows
+its real default rather than a placeholder, which is what the card's own hint says: `Defaults shown.
+Change only with a reason.` Leave the card closed unless you have one.
 
 **LAUNCH** writes the settings file, closes the launcher's listener so the game can bind the port,
 and starts `starsector.exe`; the button then reads `RUNNING` for as long as the game is up. The
@@ -406,9 +419,21 @@ value for them in `data\config\coop_options.json` is skipped with a warning. The
 gestures for starting a campaign rather than standing settings, and your file is the layer the
 launcher hands them over in.
 
-The rest are `-D` only, forever, and a value for them in either file is skipped with a warning:
-`coop.adoptCampaignId`, and the debug hatches `coop.debug.*`, `coop.ff.disable`, `coop.clock.disable`
-and `coop.fullFidelityGuestSystem`. Those are not meant to read as ordinary settings.
+`coop.adoptCampaignId` and the developer flags (`coop.debug.diagnostics`, `coop.debug.wiretap`,
+`coop.debug.wiretapSample`, `coop.debug.frameProfile`, `coop.debug.bridge`,
+`coop.debug.interactionDelayMs`, `coop.fullFidelityGuestSystem`, `coop.ff.disable` and
+`coop.clock.disable`) are the odd ones out: a value for them in `data\config\coop_options.json` is
+still skipped with a warning, but your own settings file is not off limits to them any more. The
+launcher's Advanced card sets every one of these, as the Developer flags checkboxes and the three
+spinner fields alongside Reconnect grace (Agent bridge port, Wiretap sample, Interaction delay), and
+writes the key into
+`saves\common\coop_options.json.data` only when you move it away from its default. At the next
+launch the mod reads any of these keys it finds there and republishes it as the matching `-D` system
+property, unless a real `-D` for that same key is already on the `vmparams` line, which still wins.
+Editing one of them into the file by hand works the same way; the launcher is just the usual path in.
+**Start over inside the host's campaign** is never remembered between launches: ticking it is
+one-shot consent for that single launch, and it discards the guest's co-op progress. That is the same
+escape the dev scripts call `-AdoptCampaign`; the checkbox is its player-facing form.
 
 **The role keys carry one extra rule.** If any of `coop.hostPort`, `coop.connectHost` or
 `coop.connectPort` is given as `-D`, the role is decided by the `-D` layer alone and the file's role
@@ -449,7 +474,9 @@ Host, guest, and a fresh campaign:
 Setting host and guest properties on the same install stops the game at startup with "Configure
 either host or guest coop startup properties, not both". Seed, size and age all feed the sector
 fingerprint the two games compare, so a difference in any of them is caught at connect rather than
-discovered hours later.
+discovered hours later. In the launcher, size and age are the two drop-downs on the host's Session
+card and the two read-only fields on the guest's, filled from the invite; this table is the
+`vmparams` form for launching without any of it.
 
 The rest:
 
@@ -464,12 +491,21 @@ The rest:
 | `coop.adoptCampaignId` | `false` | Guest only, and only for the case in the note below. |
 | `coop.maxGuests` | `1` | Peer capacity. Anything other than 1 is clamped back to 1 with a warning in the log. |
 
+The launcher's Advanced card sets `coop.portMapping` (Port mapping), `coop.hudCorner` (Link HUD
+corner), `coop.reconnectGraceSeconds` (Reconnect grace) and `coop.adoptCampaignId` (Start over inside
+the host's campaign) for players who use it, by the mechanism above. `coop.password` and
+`coop.playerName` are Session-card fields instead, and `coop.hud.disable` and `coop.maxGuests` have no
+launcher field at all. This table is the plain `vmparams` form for setting any of them without it.
+
 Rejoining after the guest quits: load the co-op autosave the mod wrote, not New Game. A fresh
 campaign on the same seed is refused because the host's campaign is already in flight.
-`-Dcoop.adoptCampaignId=true` forces it through at the cost of everything the guest had.
+`-Dcoop.adoptCampaignId=true`, or the Advanced card's **Start over inside the host's campaign**
+checkbox, forces it through at the cost of everything the guest had.
 
-The `coop.debug.*` properties are diagnostics for bug reports and development; `REPORTING.md` covers
-the ones a player is ever asked for.
+The `coop.debug.*` properties, `coop.fullFidelityGuestSystem`, `coop.ff.disable` and
+`coop.clock.disable` are diagnostics for bug reports and development; the launcher's Advanced card
+sets all of them, by the mechanism above, and `REPORTING.md` covers the ones a player is ever asked
+for.
 
 ## 8. First session
 

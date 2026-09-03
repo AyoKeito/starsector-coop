@@ -72,14 +72,13 @@ public final class CoopOptionsStore {
     public static final String MOD_ID = "coop";
 
     /**
-     * The three {@code dOnly} keys the Phase 31 launcher is allowed to hand over through
-     * {@link #COMMON_PATH}. See {@link #rawOneShot} for the reasoning; nothing else reads them from
-     * a file, and they still never appear in the shipped defaults or on the options page.
+     * Every {@code dOnly} key: the one-shot new-game gestures, the kill switches and the debug
+     * hatches. The Phase 31 launcher hands them over through {@link #COMMON_PATH}, and
+     * {@code CoopModPlugin.onApplicationLoad} republishes them as system properties for the readers
+     * that only look there. See {@link #rawOneShot} for why the file is read for them at all; they
+     * still never appear in the shipped defaults or on the options page.
      */
-    public static final Set<String> ONE_SHOT_KEYS = Set.of(
-            CoopOptionsRegistry.NEW_GAME_SEED,
-            CoopOptionsRegistry.SECTOR_SIZE,
-            CoopOptionsRegistry.SECTOR_AGE);
+    public static final Set<String> ONE_SHOT_KEYS = dOnlyKeys();
 
     /**
      * What a player loses when the user file cannot be read or parsed, said in full because the
@@ -292,7 +291,7 @@ public final class CoopOptionsStore {
     public String rawOneShot(String key) {
         CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
         if (!ONE_SHOT_KEYS.contains(key)) {
-            throw new IllegalArgumentException(key + " is not a one-shot new-game key; use raw(...)");
+            throw new IllegalArgumentException(key + " is not a -D-only key; use raw(...)");
         }
         String fromProperty = propertyReader.apply(key);
         if (fromProperty != null) {
@@ -300,6 +299,25 @@ public final class CoopOptionsStore {
         }
         String fromCommon = oneShotCommon().get(key);
         return fromCommon == null ? option.defaultValue() : fromCommon;
+    }
+
+    /**
+     * The {@code dOnly} keys present in the user file, in registry order, with their raw text. This
+     * is what the mod plugin republishes as system properties at application load, so the launcher
+     * can set a flag that only {@code System.getProperty} readers ever look at.
+     */
+    public Map<String, String> launcherOverrides() {
+        return oneShotCommon();
+    }
+
+    private static Set<String> dOnlyKeys() {
+        Set<String> keys = new java.util.LinkedHashSet<>();
+        for (CoopOptionsRegistry.Option option : CoopOptionsRegistry.options()) {
+            if (option.dOnly()) {
+                keys.add(option.key());
+            }
+        }
+        return Collections.unmodifiableSet(keys);
     }
 
     /** The validated value: enum values canonicalised, bad values replaced, one WARN per key. */

@@ -84,9 +84,6 @@ public final class CoopLauncherApp {
 
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss");
 
-    /** Shown in every "shipped default" combo slot; selecting it removes the key from the file. */
-    private static final String DEFAULT_ENTRY = "shipped default";
-
     /**
      * Star ages, spelled out because {@code StarAge} lives in {@code starfarer.api.jar} and the
      * launcher is compiled without it. The mod validates the value again
@@ -96,6 +93,8 @@ public final class CoopLauncherApp {
     private static final List<String> STAR_AGES = List.of("young", "average", "old", "mixed");
 
     private static final List<String> SECTOR_SIZES = List.of("small", "normal");
+    private static final String DEFAULT_SECTOR_SIZE = "normal";
+    private static final String DEFAULT_STAR_AGE = "mixed";
 
     private static final int DEFAULT_PORT = 7777;
     private static final long CHECK_TIMEOUT_MILLIS = 20_000L;
@@ -131,6 +130,8 @@ public final class CoopLauncherApp {
     private JTextField publicAddressField;
     private JTextField invitePreviewField;
     private JButton copyInviteButton;
+    private JComboBox<String> sectorSizeBox;
+    private JComboBox<String> sectorAgeBox;
 
     private JTextField guestInviteField;
     private JTextArea guestInviteNote;
@@ -138,6 +139,8 @@ public final class CoopLauncherApp {
     private JTextField guestPortField;
     private JPasswordField guestPasswordField;
     private JTextField guestSeedField;
+    private JTextField guestSectorSizeField;
+    private JTextField guestSectorAgeField;
 
     // connection card
     private JButton connectionButton;
@@ -148,10 +151,17 @@ public final class CoopLauncherApp {
     private Card advancedCard;
     private JComboBox<String> portMappingBox;
     private JSpinner reconnectGraceSpinner;
-    private JCheckBox reconnectGraceDefault;
     private JComboBox<String> hudCornerBox;
-    private JComboBox<String> sectorSizeBox;
-    private JComboBox<String> sectorAgeBox;
+    private JCheckBox diagnosticsBox;
+    private JCheckBox wiretapBox;
+    private JSpinner wiretapSampleSpinner;
+    private JCheckBox frameProfileBox;
+    private JSpinner bridgePortSpinner;
+    private JSpinner interactionDelaySpinner;
+    private JCheckBox fullFidelityBox;
+    private JCheckBox ffDisableBox;
+    private JCheckBox clockDisableBox;
+    private JCheckBox adoptCampaignBox;
 
     // install card
     private Chip installSummary;
@@ -233,7 +243,7 @@ public final class CoopLauncherApp {
         onRoleChanged();
         if (guest) {
             writingGuestInvite = true;
-            guestInviteField.setText("coop://203.0.113.9:7777/?seed=MN-8402913377120455081&pw=k7mxq2rp4d");
+            guestInviteField.setText("coop://203.0.113.9:7777/?seed=MN-8402913377120455081&pw=k7mxq2rp4d&size=normal&age=mixed");
             writingGuestInvite = false;
             applyInviteText(guestInviteField.getText(), false);
             setChips(List.of(new Chip("TCP", CoopTheme.OK), new Chip("launcher 0.1.0", CoopTheme.OK),
@@ -435,6 +445,12 @@ public final class CoopLauncherApp {
         CoopTheme.trailing(publicAddressField, lookUp);
         form.pair("Seed", hostSeedField, "Your address", publicAddressField);
 
+        sectorSizeBox = combo(SECTOR_SIZES, DEFAULT_SECTOR_SIZE);
+        sectorSizeBox.setToolTipText("New campaigns only. The invite carries it to your partner.");
+        sectorAgeBox = combo(STAR_AGES, DEFAULT_STAR_AGE);
+        sectorAgeBox.setToolTipText("New campaigns only. The invite carries it to your partner.");
+        form.pair("Sector size", sectorSizeBox, "Star age", sectorAgeBox);
+
         invitePreviewField = CoopTheme.textField("fill in the address and seed above");
         invitePreviewField.setEditable(false);
         invitePreviewField.setForeground(CoopTheme.ACCENT);
@@ -463,6 +479,8 @@ public final class CoopLauncherApp {
         hostPasswordField.getDocument().addDocumentListener(preview);
         hostSeedField.getDocument().addDocumentListener(preview);
         publicAddressField.getDocument().addDocumentListener(preview);
+        sectorSizeBox.addActionListener(event -> refreshInvitePreview());
+        sectorAgeBox.addActionListener(event -> refreshInvitePreview());
         return panel;
     }
 
@@ -507,6 +525,16 @@ public final class CoopLauncherApp {
         guestSeedField.setEditable(false);
         guestSeedField.setToolTipText("Only used when you start a new campaign.");
         form.pair("Password", guestPasswordField, "Seed", guestSeedField);
+
+        guestSectorSizeField = CoopTheme.textField("");
+        guestSectorSizeField.setEditable(false);
+        guestSectorSizeField.setText(DEFAULT_SECTOR_SIZE);
+        guestSectorSizeField.setToolTipText("From the invite. New campaigns only.");
+        guestSectorAgeField = CoopTheme.textField("");
+        guestSectorAgeField.setEditable(false);
+        guestSectorAgeField.setText(DEFAULT_STAR_AGE);
+        guestSectorAgeField.setToolTipText("From the invite. New campaigns only.");
+        form.pair("Sector size", guestSectorSizeField, "Star age", guestSectorAgeField);
         return panel;
     }
 
@@ -555,48 +583,59 @@ public final class CoopLauncherApp {
 
     private Card buildAdvancedCard() {
         Card card = new Card("Advanced");
-        card.trailing.add(CoopTheme.muted("Everything here has a working default."));
+        card.trailing.add(CoopTheme.muted("Defaults shown. Change only with a reason."));
         JPanel panel = new JPanel();
         panel.setOpaque(false);
         Form form = new Form(panel);
 
         portMappingBox = combo(CoopOptionsRegistry.require(CoopOptionsRegistry.PORT_MAPPING)
-                .allowedValues());
+                .allowedValues(), registryDefault(CoopOptionsRegistry.PORT_MAPPING));
         portMappingBox.setToolTipText("auto asks your router to forward the port over UPnP. Host"
                 + " only.");
         hudCornerBox = combo(CoopOptionsRegistry.require(CoopOptionsRegistry.HUD_CORNER)
-                .allowedValues());
+                .allowedValues(), registryDefault(CoopOptionsRegistry.HUD_CORNER));
         hudCornerBox.setToolTipText("Where the one-line link status sits on screen. Local only.");
         form.pair("Port mapping", portMappingBox, "Link HUD corner", hudCornerBox);
 
-        sectorSizeBox = combo(SECTOR_SIZES);
-        sectorSizeBox.setToolTipText("New campaigns only. Both of you need the same value.");
-        sectorAgeBox = combo(STAR_AGES);
-        sectorAgeBox.setToolTipText("New campaigns only. Both of you need the same value.");
-        form.pair("Sector size", sectorSizeBox, "Star age", sectorAgeBox);
+        reconnectGraceSpinner = spinner(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS, 5);
+        reconnectGraceSpinner.setToolTipText("How long a dropped link keeps the session alive."
+                + " Host decides.");
+        bridgePortSpinner = spinner(CoopOptionsRegistry.DEBUG_BRIDGE, 1);
+        bridgePortSpinner.setToolTipText("Port for the localhost agent bridge used by the dev"
+                + " tooling. 0 means no socket.");
+        form.pair("Reconnect grace (seconds)", reconnectGraceSpinner, "Agent bridge port (0 = off)",
+                bridgePortSpinner);
 
-        reconnectGraceSpinner = new JSpinner(new SpinnerNumberModel(60, 0,
-                CoopOptionsRegistry.require(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS).max(), 5));
-        reconnectGraceDefault = new JCheckBox("shipped default", true);
-        reconnectGraceDefault.setOpaque(false);
-        reconnectGraceDefault.addActionListener(event ->
-                reconnectGraceSpinner.setEnabled(!reconnectGraceDefault.isSelected()));
-        reconnectGraceSpinner.setEnabled(false);
-        reconnectGraceSpinner.setToolTipText("How long a dropped link keeps the session alive.");
-        JPanel grace = new JPanel(new GridBagLayout());
-        grace.setOpaque(false);
-        GridBagConstraints g = new GridBagConstraints();
-        g.gridx = 0;
-        g.gridy = 0;
-        g.weightx = 1;
-        g.fill = GridBagConstraints.HORIZONTAL;
-        grace.add(reconnectGraceSpinner, g);
-        g.gridx = 1;
-        g.weightx = 0;
-        g.fill = GridBagConstraints.NONE;
-        g.insets = new Insets(0, 10, 0, 0);
-        grace.add(reconnectGraceDefault, g);
-        form.full("Reconnect grace (seconds)", grace);
+        wiretapSampleSpinner = spinner(CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE, 1);
+        wiretapSampleSpinner.setToolTipText("Log every Nth datagram per type when the wiretap is"
+                + " on.");
+        interactionDelaySpinner = spinner(CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS, 100);
+        interactionDelaySpinner.setToolTipText("Test instrument: the host holds every interaction"
+                + " claim this many ms.");
+        form.pair("Wiretap sample (every Nth)", wiretapSampleSpinner,
+                "Interaction delay (ms)", interactionDelaySpinner);
+
+        JLabel flagsLabel = CoopTheme.fieldLabel("Developer flags");
+        flagsLabel.setBorder(BorderFactory.createEmptyBorder(6, 2, 6, 0));
+        form.raw(flagsLabel);
+
+        diagnosticsBox = flag("Diagnostics", "Master switch for the dormant diagnostics: orbit"
+                + " dumps, dialog state, probes. Verbose log.");
+        wiretapBox = flag("Datagram wiretap", "Per-type size histograms against the WAN budget.");
+        form.pair(null, diagnosticsBox, null, wiretapBox);
+        frameProfileBox = flag("Frame profiler", "Per-frame pump profiler in the log.");
+        fullFidelityBox = flag("Full-fidelity guest system", "Kill switch for the full-fidelity"
+                + " guest-system driver. On by default; off is a fidelity downgrade.");
+        form.pair(null, frameProfileBox, null, fullFidelityBox);
+        ffDisableBox = flag("Disable shared fast-forward", "Forces the shared fast-forward lock"
+                + " unavailable, the behaviour before Phase 7b.");
+        clockDisableBox = flag("Disable clock reconciler", "Turns off calendar drift correction,"
+                + " the behaviour before Phase 7c.");
+        form.pair(null, ffDisableBox, null, clockDisableBox);
+        adoptCampaignBox = flag("Start over inside the host's campaign (guest)", "Overrides the seed"
+                + " lock and adopts the host's in-flight campaign id. Discards this guest's co-op"
+                + " progress. Never remembered between launches.");
+        form.pair(null, adoptCampaignBox, null, new JLabel(""));
 
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
@@ -795,24 +834,29 @@ public final class CoopLauncherApp {
         hostSeedField.setText(seed);
         guestSeedField.setText(seed);
 
-        select(portMappingBox, config.value(CoopLauncherConfig.PORT_MAPPING));
-        select(hudCornerBox, config.value(CoopLauncherConfig.HUD_CORNER));
-        select(sectorSizeBox, config.value(CoopLauncherConfig.SECTOR_SIZE));
-        select(sectorAgeBox, config.value(CoopLauncherConfig.SECTOR_AGE));
+        select(portMappingBox, config.value(CoopLauncherConfig.PORT_MAPPING),
+                registryDefault(CoopOptionsRegistry.PORT_MAPPING));
+        select(hudCornerBox, config.value(CoopLauncherConfig.HUD_CORNER),
+                registryDefault(CoopOptionsRegistry.HUD_CORNER));
+        select(sectorSizeBox, config.value(CoopLauncherConfig.SECTOR_SIZE), DEFAULT_SECTOR_SIZE);
+        select(sectorAgeBox, config.value(CoopLauncherConfig.SECTOR_AGE), DEFAULT_STAR_AGE);
+        guestSectorSizeField.setText(orDefault(config.value(CoopLauncherConfig.SECTOR_SIZE),
+                DEFAULT_SECTOR_SIZE));
+        guestSectorAgeField.setText(orDefault(config.value(CoopLauncherConfig.SECTOR_AGE),
+                DEFAULT_STAR_AGE));
 
-        String grace = config.value(CoopLauncherConfig.RECONNECT_GRACE_SECONDS).trim();
-        boolean graceSet = !grace.isEmpty();
-        reconnectGraceDefault.setSelected(!graceSet);
-        reconnectGraceSpinner.setEnabled(graceSet);
-        if (graceSet) {
-            try {
-                reconnectGraceSpinner.setValue(Integer.parseInt(grace));
-            } catch (NumberFormatException ex) {
-                LOG.warn("Ignoring an unreadable reconnect grace in the settings file: " + grace);
-                reconnectGraceDefault.setSelected(true);
-                reconnectGraceSpinner.setEnabled(false);
-            }
-        }
+        setSpinner(reconnectGraceSpinner, CoopLauncherConfig.RECONNECT_GRACE_SECONDS);
+        setSpinner(bridgePortSpinner, CoopLauncherConfig.DEBUG_BRIDGE);
+        setSpinner(wiretapSampleSpinner, CoopLauncherConfig.DEBUG_WIRETAP_SAMPLE);
+        setSpinner(interactionDelaySpinner, CoopLauncherConfig.DEBUG_INTERACTION_DELAY_MS);
+        setFlag(diagnosticsBox, CoopLauncherConfig.DEBUG_DIAGNOSTICS);
+        setFlag(wiretapBox, CoopLauncherConfig.DEBUG_WIRETAP);
+        setFlag(frameProfileBox, CoopLauncherConfig.DEBUG_FRAME_PROFILE);
+        setFlag(fullFidelityBox, CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM);
+        setFlag(ffDisableBox, CoopLauncherConfig.FF_DISABLE);
+        setFlag(clockDisableBox, CoopLauncherConfig.CLOCK_DISABLE);
+        // One-shot consent: never prefilled, so a previous launch's choice cannot repeat itself.
+        adoptCampaignBox.setSelected(false);
         onRoleChanged();
     }
 
@@ -932,7 +976,8 @@ public final class CoopLauncherApp {
             return null;
         }
         try {
-            return CoopInvite.format(address, port, seed, password(hostPasswordField));
+            return CoopInvite.format(address, port, seed, password(hostPasswordField),
+                    selected(sectorSizeBox), selected(sectorAgeBox));
         } catch (IllegalArgumentException ex) {
             if (loud) {
                 fail("Could not build an invite: " + ex.getMessage());
@@ -1164,8 +1209,12 @@ public final class CoopLauncherApp {
         guestPortField.setText(String.valueOf(invite.port()));
         guestPasswordField.setText(invite.password());
         guestSeedField.setText(invite.seed());
+        guestSectorSizeField.setText(orDefault(invite.sectorSize(), DEFAULT_SECTOR_SIZE));
+        guestSectorAgeField.setText(orDefault(invite.sectorAge(), DEFAULT_STAR_AGE));
         String summary = "Invite read. Host " + invite.host() + ":" + invite.port()
                 + (invite.seed().isEmpty() ? ", no seed" : ", seed " + invite.seed())
+                + ", " + guestSectorSizeField.getText() + " sector, " + guestSectorAgeField.getText()
+                + " stars"
                 + (invite.password().isEmpty() ? ", no password" : ", password set") + ".";
         guestInviteNote.setForeground(CoopTheme.OK);
         guestInviteNote.setText(summary);
@@ -1212,7 +1261,7 @@ public final class CoopLauncherApp {
         setChips(List.of(working));
         note("Asking your router to open port " + port + ", the way the game does at startup.");
 
-        boolean mappingEnabled = !"off".equalsIgnoreCase(selected(portMappingBox, "auto"));
+        boolean mappingEnabled = !"off".equalsIgnoreCase(selected(portMappingBox));
         CoopPortMapper mapper = CoopPortMapper.start(port, mappingEnabled, System::currentTimeMillis);
         long started = System.currentTimeMillis();
         AtomicInteger ticks = new AtomicInteger();
@@ -1488,12 +1537,49 @@ public final class CoopLauncherApp {
             }
             owned.put(CoopLauncherConfig.NEW_GAME_SEED, seed);
         }
-        owned.put(CoopLauncherConfig.PORT_MAPPING, selected(portMappingBox, ""));
+        owned.put(CoopLauncherConfig.PORT_MAPPING, selected(portMappingBox));
         owned.put(CoopLauncherConfig.RECONNECT_GRACE_SECONDS,
-                reconnectGraceDefault.isSelected() ? "" : String.valueOf(reconnectGraceSpinner.getValue()));
-        owned.put(CoopLauncherConfig.HUD_CORNER, selected(hudCornerBox, ""));
-        owned.put(CoopLauncherConfig.SECTOR_SIZE, selected(sectorSizeBox, ""));
-        owned.put(CoopLauncherConfig.SECTOR_AGE, selected(sectorAgeBox, ""));
+                String.valueOf(reconnectGraceSpinner.getValue()));
+        owned.put(CoopLauncherConfig.HUD_CORNER, selected(hudCornerBox));
+        if (host) {
+            owned.put(CoopLauncherConfig.SECTOR_SIZE, selected(sectorSizeBox));
+            owned.put(CoopLauncherConfig.SECTOR_AGE, selected(sectorAgeBox));
+        } else {
+            owned.put(CoopLauncherConfig.SECTOR_SIZE,
+                    orDefault(guestSectorSizeField.getText(), DEFAULT_SECTOR_SIZE));
+            owned.put(CoopLauncherConfig.SECTOR_AGE,
+                    orDefault(guestSectorAgeField.getText(), DEFAULT_STAR_AGE));
+        }
+        // Flags are written only when they differ from the registry default, so the file stays
+        // readable and a default never masquerades as a deliberate choice.
+        owned.put(CoopLauncherConfig.DEBUG_BRIDGE, nonDefault(bridgePortSpinner, CoopLauncherConfig.DEBUG_BRIDGE));
+        owned.put(CoopLauncherConfig.DEBUG_WIRETAP_SAMPLE,
+                nonDefault(wiretapSampleSpinner, CoopLauncherConfig.DEBUG_WIRETAP_SAMPLE));
+        owned.put(CoopLauncherConfig.DEBUG_INTERACTION_DELAY_MS,
+                nonDefault(interactionDelaySpinner, CoopLauncherConfig.DEBUG_INTERACTION_DELAY_MS));
+        owned.put(CoopLauncherConfig.DEBUG_DIAGNOSTICS, nonDefault(diagnosticsBox, CoopLauncherConfig.DEBUG_DIAGNOSTICS));
+        owned.put(CoopLauncherConfig.DEBUG_WIRETAP, nonDefault(wiretapBox, CoopLauncherConfig.DEBUG_WIRETAP));
+        owned.put(CoopLauncherConfig.DEBUG_FRAME_PROFILE, nonDefault(frameProfileBox, CoopLauncherConfig.DEBUG_FRAME_PROFILE));
+        owned.put(CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM,
+                nonDefault(fullFidelityBox, CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM));
+        owned.put(CoopLauncherConfig.FF_DISABLE, nonDefault(ffDisableBox, CoopLauncherConfig.FF_DISABLE));
+        owned.put(CoopLauncherConfig.CLOCK_DISABLE, nonDefault(clockDisableBox, CoopLauncherConfig.CLOCK_DISABLE));
+        owned.put(CoopLauncherConfig.ADOPT_CAMPAIGN_ID, nonDefault(adoptCampaignBox, CoopLauncherConfig.ADOPT_CAMPAIGN_ID));
+        List<String> flagsOn = new ArrayList<>();
+        for (Map.Entry<String, String> entry : owned.entrySet()) {
+            if (entry.getKey().startsWith("coop.debug.") || entry.getKey().equals(CoopLauncherConfig.FF_DISABLE)
+                    || entry.getKey().equals(CoopLauncherConfig.CLOCK_DISABLE)
+                    || entry.getKey().equals(CoopLauncherConfig.FULL_FIDELITY_GUEST_SYSTEM)
+                    || entry.getKey().equals(CoopLauncherConfig.ADOPT_CAMPAIGN_ID)) {
+                if (!entry.getValue().isBlank()) {
+                    flagsOn.add(entry.getKey() + "=" + entry.getValue());
+                }
+            }
+        }
+        if (!flagsOn.isEmpty()) {
+            LOG.info("Developer flags for this launch: " + flagsOn);
+            append("Developer flags: " + String.join(" ", flagsOn));
+        }
 
         try {
             config.write(layout.coopOptions(), host, owned);
@@ -1653,35 +1739,97 @@ public final class CoopLauncherApp {
         };
     }
 
-    private JComboBox<String> combo(List<String> allowed) {
-        List<String> entries = new ArrayList<>();
-        entries.add(DEFAULT_ENTRY);
-        entries.addAll(allowed);
-        JComboBox<String> box = new JComboBox<>(entries.toArray(new String[0]));
-        box.setSelectedItem(DEFAULT_ENTRY);
+    private static JComboBox<String> combo(List<String> allowed, String defaultValue) {
+        JComboBox<String> box = new JComboBox<>(allowed.toArray(new String[0]));
+        select(box, defaultValue, defaultValue);
         return box;
     }
 
-    private static void select(JComboBox<String> box, String value) {
+    /** Selects {@code value} when it is one of the entries, else {@code fallback}. */
+    private static void select(JComboBox<String> box, String value, String fallback) {
         String trimmed = value == null ? "" : value.trim();
-        if (trimmed.isEmpty()) {
-            box.setSelectedItem(DEFAULT_ENTRY);
-            return;
-        }
         for (int i = 0; i < box.getItemCount(); i++) {
-            if (trimmed.equalsIgnoreCase(box.getItemAt(i))) {
+            if (!trimmed.isEmpty() && trimmed.equalsIgnoreCase(box.getItemAt(i))) {
                 box.setSelectedIndex(i);
                 return;
             }
         }
-        box.setSelectedItem(DEFAULT_ENTRY);
+        for (int i = 0; i < box.getItemCount(); i++) {
+            if (fallback.equalsIgnoreCase(box.getItemAt(i))) {
+                box.setSelectedIndex(i);
+                return;
+            }
+        }
+        if (box.getItemCount() > 0) {
+            box.setSelectedIndex(0);
+        }
     }
 
-    /** The chosen value, or {@code fallback} when the "shipped default" entry is selected. */
-    private static String selected(JComboBox<String> box, String fallback) {
+    private static String selected(JComboBox<String> box) {
         Object value = box.getSelectedItem();
-        String text = value == null ? "" : String.valueOf(value);
-        return DEFAULT_ENTRY.equals(text) ? fallback : text;
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static String registryDefault(String key) {
+        return CoopOptionsRegistry.require(key).defaultValue();
+    }
+
+    private static String orDefault(String value, String fallback) {
+        String trimmed = value == null ? "" : value.trim();
+        return trimmed.isEmpty() ? fallback : trimmed;
+    }
+
+    /** An integer spinner over a registry key's range, starting at its default. */
+    private static JSpinner spinner(String key, int step) {
+        CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
+        int min = option.min() == Integer.MIN_VALUE ? 0 : option.min();
+        int max = option.max() == Integer.MAX_VALUE ? 65535 : option.max();
+        int start = Integer.parseInt(option.defaultValue());
+        return new JSpinner(new SpinnerNumberModel(start, Math.min(min, start), Math.max(max, start), step));
+    }
+
+    private static JCheckBox flag(String text, String tooltip) {
+        JCheckBox box = new JCheckBox(text);
+        box.setOpaque(false);
+        box.setForeground(CoopTheme.TEXT);
+        box.setToolTipText(tooltip);
+        return box;
+    }
+
+    private void setSpinner(JSpinner spinner, String key) {
+        String value = config.value(key).trim();
+        if (value.isEmpty()) {
+            spinner.setValue(Integer.parseInt(registryDefault(key)));
+            return;
+        }
+        try {
+            SpinnerNumberModel model = (SpinnerNumberModel) spinner.getModel();
+            int parsed = Integer.parseInt(value);
+            int min = ((Number) model.getMinimum()).intValue();
+            int max = ((Number) model.getMaximum()).intValue();
+            spinner.setValue(Math.max(min, Math.min(max, parsed)));
+        } catch (NumberFormatException ex) {
+            LOG.warn("Ignoring an unreadable " + key + " in the settings file: " + value);
+            spinner.setValue(Integer.parseInt(registryDefault(key)));
+        }
+    }
+
+    private void setFlag(JCheckBox box, String key) {
+        String value = config.value(key).trim();
+        box.setSelected(value.isEmpty() ? Boolean.parseBoolean(registryDefault(key))
+                : Boolean.parseBoolean(value));
+    }
+
+    /** The spinner's value as text, or blank when it equals the registry default. */
+    private static String nonDefault(JSpinner spinner, String key) {
+        String value = String.valueOf(spinner.getValue());
+        return value.equals(registryDefault(key)) ? "" : value;
+    }
+
+    /** The checkbox as {@code true}/{@code false}, or blank when it equals the registry default. */
+    private static String nonDefault(JCheckBox box, String key) {
+        String value = String.valueOf(box.isSelected());
+        return value.equals(registryDefault(key)) ? "" : value;
     }
 
     private void setClipboard(String text) {

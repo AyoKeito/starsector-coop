@@ -49,6 +49,18 @@ public final class CoopLauncherConfig {
     public static final String SECTOR_SIZE = CoopOptionsRegistry.SECTOR_SIZE;
     public static final String SECTOR_AGE = CoopOptionsRegistry.SECTOR_AGE;
 
+    /** The -D-only flags the Advanced card exposes; the mod republishes them at application load. */
+    public static final String FULL_FIDELITY_GUEST_SYSTEM = CoopOptionsRegistry.FULL_FIDELITY_GUEST_SYSTEM;
+    public static final String FF_DISABLE = CoopOptionsRegistry.FF_DISABLE;
+    public static final String CLOCK_DISABLE = CoopOptionsRegistry.CLOCK_DISABLE;
+    public static final String DEBUG_DIAGNOSTICS = CoopOptionsRegistry.DEBUG_DIAGNOSTICS;
+    public static final String DEBUG_BRIDGE = CoopOptionsRegistry.DEBUG_BRIDGE;
+    public static final String DEBUG_WIRETAP = CoopOptionsRegistry.DEBUG_WIRETAP;
+    public static final String DEBUG_WIRETAP_SAMPLE = CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE;
+    public static final String DEBUG_FRAME_PROFILE = CoopOptionsRegistry.DEBUG_FRAME_PROFILE;
+    public static final String DEBUG_INTERACTION_DELAY_MS = CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS;
+    public static final String ADOPT_CAMPAIGN_ID = CoopOptionsRegistry.ADOPT_CAMPAIGN_ID;
+
     /**
      * The order launcher-owned keys are written in, so two runs over the same settings produce the
      * same file and a diff is readable.
@@ -63,7 +75,17 @@ public final class CoopLauncherConfig {
             RECONNECT_GRACE_SECONDS,
             HUD_CORNER,
             SECTOR_SIZE,
-            SECTOR_AGE);
+            SECTOR_AGE,
+            FULL_FIDELITY_GUEST_SYSTEM,
+            FF_DISABLE,
+            CLOCK_DISABLE,
+            DEBUG_DIAGNOSTICS,
+            DEBUG_BRIDGE,
+            DEBUG_WIRETAP,
+            DEBUG_WIRETAP_SAMPLE,
+            DEBUG_FRAME_PROFILE,
+            DEBUG_INTERACTION_DELAY_MS,
+            ADOPT_CAMPAIGN_ID);
 
     private final Map<String, Object> existing;
     private final boolean fileExisted;

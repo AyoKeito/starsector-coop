@@ -337,18 +337,34 @@ class CoopOptionsStoreTest {
     }
 
     @Test
+    void launcherOverridesListTheDOnlyKeysPresentInTheUserFileOnly() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of(
+                "coop.debug.bridge", "7801",
+                "coop.newGameSeed", "MN-42",
+                "coop.hostPort", "7777"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        Map<String, String> overrides = store.launcherOverrides();
+        assertEquals("7801", overrides.get("coop.debug.bridge"));
+        assertEquals("MN-42", overrides.get("coop.newGameSeed"));
+        assertEquals(2, overrides.size(), "an ordinary key is not a launcher override: " + overrides);
+    }
+
+    @Test
     void noOtherKeyMayBeReadThroughTheOneShotPath() {
         CoopOptionsStore store = new CoopOptionsStore(new FakeSource(), props());
 
-        assertThrows(IllegalArgumentException.class,
-                () -> store.rawOneShot("coop.adoptCampaignId"));
         assertThrows(IllegalArgumentException.class, () -> store.rawOneShot("coop.hostPort"));
-        assertThrows(IllegalArgumentException.class, () -> store.rawOneShot("coop.debug.bridge"));
+        assertThrows(IllegalArgumentException.class, () -> store.rawOneShot("coop.password"));
+        // Every -D-only key is readable this way since the launcher's Advanced card exposes them.
+        assertEquals("0", store.rawOneShot("coop.debug.bridge"));
+        assertEquals("false", store.rawOneShot("coop.adoptCampaignId"));
     }
 
     /**
-     * The launcher writes the one-shot keys into the user file on every launch, so the "entries this
-     * build does not use" warning must stop naming them. Every other -D-only key still counts.
+     * The launcher writes the -D-only keys into the user file, so the "entries this build does not
+     * use" warning must stop naming them. A key no build knows still counts.
      */
     @Test
     void aOneShotKeyInTheUserFileIsNotReportedAsAnUnknownEntry() {
@@ -360,13 +376,15 @@ class CoopOptionsStoreTest {
             source.common = json(Map.of(
                     "coop.newGameSeed", "MN-42",
                     "coop.adoptCampaignId", "true",
+                    "coop.noSuchKey", "1",
                     "coop.hudCorner", "BL"));
             CoopOptionsStore store = new CoopOptionsStore(source, props());
 
             store.raw("coop.hudCorner");
 
             String joined = String.join(" | ", appender.messages);
-            assertTrue(joined.contains("coop.adoptCampaignId"), joined);
+            assertTrue(joined.contains("coop.noSuchKey"), joined);
+            assertFalse(joined.contains("coop.adoptCampaignId"), joined);
             assertFalse(joined.contains("coop.newGameSeed"), joined);
         } finally {
             logger.removeAppender(appender);
@@ -393,9 +411,16 @@ class CoopOptionsStoreTest {
     }
 
     @Test
-    void theOneShotSetIsExactlyTheThreeNewGameKeys() {
-        assertEquals(Set.of("coop.newGameSeed", "coop.sectorSize", "coop.sectorAge"),
-                CoopOptionsStore.ONE_SHOT_KEYS);
+    void theOneShotSetIsExactlyTheRegistrysDOnlyKeys() {
+        Set<String> dOnly = new java.util.HashSet<>();
+        for (CoopOptionsRegistry.Option option : CoopOptionsRegistry.options()) {
+            if (option.dOnly()) {
+                dOnly.add(option.key());
+            }
+        }
+        assertEquals(dOnly, CoopOptionsStore.ONE_SHOT_KEYS);
+        assertTrue(CoopOptionsStore.ONE_SHOT_KEYS.contains("coop.newGameSeed"));
+        assertTrue(CoopOptionsStore.ONE_SHOT_KEYS.contains("coop.debug.bridge"));
     }
 
     // ---- validation ---------------------------------------------------------------------------

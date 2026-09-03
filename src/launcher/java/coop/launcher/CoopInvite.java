@@ -19,7 +19,8 @@ import java.util.Objects;
  * through {@link java.net.URI}: the failure messages have to name the part that broke, and a URI
  * parse failure names a character offset.
  */
-public record CoopInvite(String host, int port, String seed, String password) {
+public record CoopInvite(String host, int port, String seed, String password, String sectorSize,
+                         String sectorAge) {
 
     /** Scheme, lower case, including the separator. */
     public static final String SCHEME = "coop://";
@@ -28,6 +29,13 @@ public record CoopInvite(String host, int port, String seed, String password) {
         host = trim(host);
         seed = trim(seed);
         password = password == null ? "" : password;
+        sectorSize = trim(sectorSize).toLowerCase(Locale.ROOT);
+        sectorAge = trim(sectorAge).toLowerCase(Locale.ROOT);
+    }
+
+    /** An invite without world settings: the guest falls back to the launcher defaults. */
+    public CoopInvite(String host, int port, String seed, String password) {
+        this(host, port, seed, password, "", "");
     }
 
     /** A parse attempt: exactly one of {@link #invite()} and {@link #error()} is set. */
@@ -42,6 +50,14 @@ public record CoopInvite(String host, int port, String seed, String password) {
      * broken invite is a bug here, not something the guest should have to diagnose.
      */
     public static String format(String host, int port, String seed, String password) {
+        return format(host, port, seed, password, "", "");
+    }
+
+    /**
+     * Renders an invite that also pins the sector size and star age, each left out when blank.
+     */
+    public static String format(String host, int port, String seed, String password,
+                                String sectorSize, String sectorAge) {
         String cleanHost = trim(host);
         if (cleanHost.isEmpty()) {
             throw new IllegalArgumentException("an invite needs a host address");
@@ -63,6 +79,22 @@ public record CoopInvite(String host, int port, String seed, String password) {
                 text.append('&');
             }
             text.append("pw=").append(encode(cleanPassword));
+            first = false;
+        }
+        String cleanSize = trim(sectorSize).toLowerCase(Locale.ROOT);
+        if (!cleanSize.isEmpty()) {
+            if (!first) {
+                text.append('&');
+            }
+            text.append("size=").append(encode(cleanSize));
+            first = false;
+        }
+        String cleanAge = trim(sectorAge).toLowerCase(Locale.ROOT);
+        if (!cleanAge.isEmpty()) {
+            if (!first) {
+                text.append('&');
+            }
+            text.append("age=").append(encode(cleanAge));
         }
         // Trailing "?" with nothing after it is legal and round-trips, but it reads like a mistake
         // on a line someone pastes into a chat window.
@@ -74,7 +106,7 @@ public record CoopInvite(String host, int port, String seed, String password) {
 
     /** Convenience for a value already in hand. */
     public String format() {
-        return format(host, port, seed, password);
+        return format(host, port, seed, password, sectorSize, sectorAge);
     }
 
     /**
@@ -157,6 +189,8 @@ public record CoopInvite(String host, int port, String seed, String password) {
 
         String seed = "";
         String password = "";
+        String sectorSize = "";
+        String sectorAge = "";
         if (!query.isEmpty()) {
             for (String pair : query.split("&", -1)) {
                 if (pair.isEmpty()) {
@@ -175,6 +209,8 @@ public record CoopInvite(String host, int port, String seed, String password) {
                 switch (name.toLowerCase(Locale.ROOT)) {
                     case "seed" -> seed = decoded;
                     case "pw" -> password = decoded;
+                    case "size" -> sectorSize = decoded;
+                    case "age" -> sectorAge = decoded;
                     default -> {
                         return fail("the invite carries an unknown setting \"" + name + "\"");
                     }
@@ -185,7 +221,7 @@ public record CoopInvite(String host, int port, String seed, String password) {
         if (seedProblem != null) {
             return fail("the seed \"" + seed + "\" is not usable: " + seedProblem);
         }
-        return new Parsed(new CoopInvite(host, port, seed, password), null);
+        return new Parsed(new CoopInvite(host, port, seed, password, sectorSize, sectorAge), null);
     }
 
     private static Parsed fail(String reason) {

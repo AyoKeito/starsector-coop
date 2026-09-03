@@ -42,6 +42,7 @@ public class CoopModPlugin extends BaseModPlugin {
     public void onApplicationLoad() throws Exception {
         super.onApplicationLoad();
         CoopLog.info(CoopModPlugin.class, "CoopModPlugin loaded");
+        publishLauncherProperties();
         String newGameSeed = CoopNetStartupConfig.newGameSeedFromSystemProperties();
         if (!newGameSeed.isEmpty()) {
             CoopLog.info(CoopModPlugin.class,
@@ -49,6 +50,39 @@ public class CoopModPlugin extends BaseModPlugin {
                             + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
                             + "=" + newGameSeed);
             publishSeedForTheForks(newGameSeed);
+        }
+    }
+
+    /**
+     * Phase 31: every {@code -D}-only key the launcher wrote into the settings file becomes a real
+     * system property, unless the command line already carries one (a real {@code -D} stays the top
+     * of the stack). The debug hatches and kill switches ({@code coop.debug.*}, {@code coop.ff.disable},
+     * {@code coop.clock.disable}, {@code coop.fullFidelityGuestSystem}, {@code coop.adoptCampaignId})
+     * are read with {@code System.getProperty} by their owners and nothing else; this is the one
+     * place that lets a launcher-written value reach them. The seed goes through
+     * {@link #publishSeedForTheForks} instead, because it has to be validated first.
+     */
+    private static void publishLauncherProperties() {
+        java.util.Map<String, String> overrides;
+        try {
+            overrides = coop.config.CoopOptionsStore.system().launcherOverrides();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopModPlugin.class, "Coop could not read the launcher overrides", ex);
+            return;
+        }
+        for (java.util.Map.Entry<String, String> entry : overrides.entrySet()) {
+            String key = entry.getKey();
+            if (CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY.equals(key)) {
+                continue;
+            }
+            if (System.getProperty(key) != null) {
+                CoopLog.info(CoopModPlugin.class, "Coop keeps the command line's -D" + key
+                        + "; the settings file's value is ignored");
+                continue;
+            }
+            System.setProperty(key, entry.getValue());
+            CoopLog.info(CoopModPlugin.class, "Coop published the settings-file flag -D" + key
+                    + "=" + entry.getValue() + " for readers that only see system properties");
         }
     }
 

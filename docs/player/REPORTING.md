@@ -98,6 +98,11 @@ campaign's contents into the log:
 | `-Dcoop.debug.wiretap=true` | Sampled message payloads in both directions, plus a size histogram every 60 seconds. |
 | `-Dcoop.debug.wiretapSample=10` | With the wiretap on, log one message in every N. |
 
-These are the one thing the launcher cannot set for you: they go on the `vmparams` line as `-D`
-properties, and `INSTALL.md` section 7 shows where. Take them off the line when the run is over, or
-the launcher's install check will keep warning you about them.
+The launcher's Advanced card sets these too: **Diagnostics** and **Datagram wiretap** are checkboxes
+in its Developer flags group, and **Wiretap sample (every Nth)** is a spinner next to Reconnect grace
+in the same card. Ticking a box there writes the matching key into your settings file, and the mod
+turns it back into the property above at the next launch; `INSTALL.md` section 7 covers the
+mechanism, and shows where to set them as plain `-D` properties on the `vmparams` line instead, for a
+launch without the launcher. Turn them back off, in whichever place you turned them on, when the run
+is over. Left on in the settings file, the next session just runs with diagnostics on; left on as a
+`-D` on `vmparams`, the launcher's install check will keep warning you about it besides.
