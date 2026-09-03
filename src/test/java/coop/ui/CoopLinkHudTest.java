@@ -104,7 +104,7 @@ class CoopLinkHudTest {
 
     /**
      * The regression: the flag is registered and file-backed, but installation used to test it with
-     * {@code System.getProperty}, so turning the HUD off in {@code saves/common/coop_options.json}
+     * {@code System.getProperty}, so turning the HUD off in {@code saves/common/coop_options.json.data}
      * did nothing.
      */
     @Test

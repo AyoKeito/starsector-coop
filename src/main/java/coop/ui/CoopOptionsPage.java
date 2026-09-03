@@ -517,7 +517,7 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     /**
      * One press. A policy key goes through {@link CoopOptionsPolicy#set} - which writes the campaign's
      * persistent data and lets the pump broadcast the change - and everything else is written to the
-     * user's own {@code saves/common/coop_options.json}.
+     * user's own {@code saves/common/coop_options.json.data}.
      */
     private void apply(Press press) {
         CoopOptionsRegistry.Option option = CoopOptionsRegistry.option(press.key());

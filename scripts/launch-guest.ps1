@@ -75,6 +75,7 @@ if ([string]::IsNullOrWhiteSpace($HostAddress)) {
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Port must be in range 1..65535"
 }
+Assert-CoopSeedString $SeedString
 
 # Agent bridge port for the guest instance; tools/starsector-mcp maps 'guest' to this.
 $BridgePort = 7802

@@ -191,15 +191,15 @@ Three groups on it:
   display name. Nothing reads these once a session has started, so the buttons work only while no
   session is running; during a session each row says `takes effect at next launch` instead.
 
-Changes in the last two groups are written to `saves\common\coop_options.json` for you, and the page
-creates that file if you do not have one. A session rule goes into the campaign's save instead, and
-your partner is told in their event feed: `Co-op: the host set <name> to <value>.`
+Changes in the last two groups are written to `saves\common\coop_options.json.data` for you, and
+the page creates that file if you do not have one. A session rule goes into the campaign's save
+instead, and your partner is told in their event feed: `Co-op: the host set <name> to <value>.`
 
 The intel screen draws buttons, not text fields, so the vocabulary is short: `Turn on` / `Turn off`
 for a yes-or-no setting, `Change to <value>` to walk an enum, `Less` / `More` in 15 second steps for
 the reconnect window, and `Clear` for the password. An address, a name or a new password still has to
 be typed into the settings file, and those rows print
-`text setting - edit saves/common/coop_options.json` with no button. `Reset to defaults` at the
+`text setting - edit saves/common/coop_options.json.data` with no button. `Reset to defaults` at the
 bottom puts everything back to the shipped values; pressed by a guest it resets only that guest's own
 preferences.
 
@@ -216,7 +216,7 @@ Every value carries a tag saying where it came from:
 | `(host setting)` | You are the guest, and this is one of the host's session rules. The missing button is the design, not a fault. |
 | `(this campaign)` | A session rule this campaign has stored in its save. |
 | `(command line)` | Set as `-Dcoop.<key>=` in `vmparams`. That layer outranks everything, so the row is read-only: a button that changed a value the next read would overwrite would be lying to you. |
-| `(your settings)` | It comes from your `saves\common\coop_options.json`. |
+| `(your settings)` | It comes from your `saves\common\coop_options.json.data`. |
 | `(default)` | Nothing has set it and you are reading the value the mod ships with. |
 
 A session rule that cannot take effect the instant it changes shows `pending - applies <when>` under
@@ -251,11 +251,16 @@ guests has no buttons at all: 1 is both its bounds in this build.
 ### The settings file
 
 The same `coop.*` names can live in a JSON file instead of on the `vmparams` line. Yours goes here,
-and the options page creates it the first time you change something, or you write it yourself:
+and the options page creates it the first time you change a setting on the page, or you write it
+yourself:
 
 ```text
-<Starsector>\saves\common\coop_options.json
+<Starsector>\saves\common\coop_options.json.data
 ```
+
+The `.data` on the end comes from Starsector, not from the mod: the engine appends it to every file
+a mod writes into `saves\common`, so that is the name to look for and to type into your editor. What
+is inside is plain JSON whatever the extension says.
 
 Flat JSON, only the keys you want to change:
 
@@ -289,7 +294,7 @@ does nothing to a campaign already in progress.
 Precedence, highest first:
 
 1. `-Dcoop.<key>=<value>` on the launch command line
-2. `saves\common\coop_options.json`
+2. `saves\common\coop_options.json.data`
 3. `mods\coop\data\config\coop_options.json`
 4. the default compiled into the mod
 

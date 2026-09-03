@@ -65,6 +65,7 @@ function Set-CoopVmParams {
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Port must be in range 1..65535"
 }
+Assert-CoopSeedString $SeedString
 
 # Agent bridge port for the host instance; tools/starsector-mcp maps 'host' to this.
 $BridgePort = 7801

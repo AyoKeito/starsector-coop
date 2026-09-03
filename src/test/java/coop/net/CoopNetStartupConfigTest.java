@@ -2,15 +2,24 @@ package coop.net;
 
 import coop.config.CoopOptionsStore;
 import coop.ui.CoopHudCorner;
+import org.apache.log4j.AppenderSkeleton;
+import org.apache.log4j.Level;
+import org.apache.log4j.Logger;
+import org.apache.log4j.spi.LoggingEvent;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -72,13 +81,13 @@ class CoopNetStartupConfigTest {
     void parsesNewGameSeedAlongsideHostProperty() {
         Properties properties = new Properties();
         properties.setProperty("coop.hostPort", "7777");
-        properties.setProperty("coop.newGameSeed", "  MN-shared-test-seed  ");
+        properties.setProperty("coop.newGameSeed", "  MN-1234567890123456789  ");
 
         CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
 
         assertTrue(config.isPresent());
         assertEquals(CoopConnectionRole.HOST, config.role());
-        assertEquals("MN-shared-test-seed", config.newGameSeed());
+        assertEquals("MN-1234567890123456789", config.newGameSeed());
     }
 
     @Test
@@ -86,25 +95,25 @@ class CoopNetStartupConfigTest {
         Properties properties = new Properties();
         properties.setProperty("coop.connectHost", "127.0.0.1");
         properties.setProperty("coop.connectPort", "7777");
-        properties.setProperty("coop.newGameSeed", "MN-shared-test-seed");
+        properties.setProperty("coop.newGameSeed", "MN-1234567890123456789");
 
         CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
 
         assertTrue(config.isPresent());
         assertEquals(CoopConnectionRole.GUEST, config.role());
-        assertEquals("MN-shared-test-seed", config.newGameSeed());
+        assertEquals("MN-1234567890123456789", config.newGameSeed());
     }
 
     @Test
     void newGameSeedAloneIsExposedButNotARoleConfig() {
         Properties properties = new Properties();
-        properties.setProperty("coop.newGameSeed", "MN-shared-test-seed");
+        properties.setProperty("coop.newGameSeed", "MN-1234567890123456789");
 
         CoopNetStartupConfig config = CoopNetStartupConfig.from(properties);
 
         assertFalse(config.isPresent());
         assertEquals(CoopConnectionRole.NONE, config.role());
-        assertEquals("MN-shared-test-seed", config.newGameSeed());
+        assertEquals("MN-1234567890123456789", config.newGameSeed());
     }
 
     @Test
@@ -340,7 +349,7 @@ class CoopNetStartupConfigTest {
 
     // ---- Phase 28 milestone 1: the file stack underneath the properties ----------------------
 
-    /** A {@code saves/common/coop_options.json} standing in for the real one. */
+    /** A {@code saves/common/coop_options.json.data} standing in for the real one. */
     private static CoopOptionsStore storeWithCommonOverride(Properties properties, String... keyValues) {
         JSONObject common = new JSONObject();
         try {
@@ -537,5 +546,150 @@ class CoopNetStartupConfigTest {
                 "coop.newGameSeed", "12345");
 
         assertEquals("", CoopNetStartupConfig.from(store).newGameSeed());
+    }
+
+    // ---- new-game seed validation: "MN-" followed by digits that fit a long, no stricter --------
+    //
+    // Live crash: -Dcoop.newGameSeed=MN-9999999999999999999 (19 nines, past Long.MAX_VALUE) forced
+    // that string onto CharacterCreationData/sector.seedString and vanilla's own new-game code died
+    // in CampaignState.createUI with a bare NumberFormatException when the player pressed New Game.
+
+    @BeforeEach
+    void resetNewGameSeedWarnLatch() {
+        CoopNetStartupConfig.resetNewGameSeedWarnLatchForTests();
+    }
+
+    @Test
+    void validateNewGameSeedAcceptsAWellFormedSeed() {
+        assertNull(CoopNetStartupConfig.validateNewGameSeed("MN-1234567890123456789"));
+    }
+
+    @Test
+    void validateNewGameSeedAcceptsAnAbsentValue() {
+        assertNull(CoopNetStartupConfig.validateNewGameSeed(""));
+        assertNull(CoopNetStartupConfig.validateNewGameSeed(null));
+    }
+
+    @Test
+    void validateNewGameSeedRejectsDigitsThatOverflowALong() {
+        // Long.MAX_VALUE is 9223372036854775807 (19 digits); this is 19 nines.
+        assertNotNull(CoopNetStartupConfig.validateNewGameSeed("MN-9999999999999999999"));
+    }
+
+    @Test
+    void validateNewGameSeedRejectsAMissingPrefix() {
+        assertNotNull(CoopNetStartupConfig.validateNewGameSeed("1234567890123456789"));
+    }
+
+    @Test
+    void validateNewGameSeedRejectsEmptyDigits() {
+        assertNotNull(CoopNetStartupConfig.validateNewGameSeed("MN-"));
+    }
+
+    @Test
+    void validateNewGameSeedRejectsNonDigitCharacters() {
+        assertNotNull(CoopNetStartupConfig.validateNewGameSeed("MN-shared-test-seed"));
+        assertNotNull(CoopNetStartupConfig.validateNewGameSeed("MN-123abc"));
+    }
+
+    @Test
+    void aValidNewGameSeedPropertyPassesThroughUnchanged() {
+        Properties properties = new Properties();
+        properties.setProperty("coop.newGameSeed", "MN-1234567890123456789");
+
+        assertEquals("MN-1234567890123456789", CoopNetStartupConfig.from(properties).newGameSeed());
+    }
+
+    @Test
+    void aMalformedNewGameSeedPropertyIsIgnoredAndLeftToVanilla() {
+        for (String bad : new String[]{
+                "MN-9999999999999999999", // overflows a long
+                "1234567890123456789",    // missing the "MN-" prefix
+                "MN-",                    // no digits
+                "MN-shared-test-seed"     // non-digit characters
+        }) {
+            Properties properties = new Properties();
+            properties.setProperty("coop.newGameSeed", bad);
+
+            assertEquals("", CoopNetStartupConfig.from(properties).newGameSeed(),
+                    "expected " + bad + " to be ignored");
+        }
+    }
+
+    @Test
+    void aMalformedNewGameSeedSystemPropertyIsIgnoredAndLeftToVanilla() {
+        String previous = System.getProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY);
+        try {
+            System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, "MN-9999999999999999999");
+            assertEquals("", CoopNetStartupConfig.newGameSeedFromSystemProperties());
+        } finally {
+            if (previous == null) {
+                System.clearProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY);
+            } else {
+                System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, previous);
+            }
+        }
+    }
+
+    @Test
+    void theMalformedNewGameSeedWarnIsEmittedExactlyOnce() {
+        CapturingAppender appender = CapturingAppender.attach(CoopNetStartupConfig.class);
+        try {
+            Properties properties = new Properties();
+            properties.setProperty("coop.newGameSeed", "MN-9999999999999999999");
+
+            CoopNetStartupConfig.from(properties);
+            CoopNetStartupConfig.from(properties);
+            CoopNetStartupConfig.newGameSeedFromSystemProperties();
+
+            List<String> matching = appender.warnings().stream()
+                    .filter(message -> message.contains("Coop ignoring -Dcoop.newGameSeed="))
+                    .toList();
+            assertEquals(1, matching.size(), matching.toString());
+            assertTrue(matching.get(0).contains("MN-9999999999999999999"), matching.get(0));
+            assertTrue(matching.get(0).contains("the new-game seed field is left to vanilla"),
+                    matching.get(0));
+        } finally {
+            appender.detach();
+        }
+    }
+
+    /** Minimal log4j sink so the warn-once behaviour can be asserted on rather than assumed. */
+    private static final class CapturingAppender extends AppenderSkeleton {
+        private final List<String> warnings = new ArrayList<>();
+        private Logger attachedTo;
+
+        private static CapturingAppender attach(Class<?> source) {
+            CapturingAppender appender = new CapturingAppender();
+            appender.attachedTo = Logger.getLogger(source);
+            appender.attachedTo.addAppender(appender);
+            return appender;
+        }
+
+        private void detach() {
+            if (attachedTo != null) {
+                attachedTo.removeAppender(this);
+            }
+        }
+
+        private List<String> warnings() {
+            return warnings;
+        }
+
+        @Override
+        protected void append(LoggingEvent event) {
+            if (event.getLevel().isGreaterOrEqual(Level.WARN)) {
+                warnings.add(String.valueOf(event.getMessage()));
+            }
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public boolean requiresLayout() {
+            return false;
+        }
     }
 }

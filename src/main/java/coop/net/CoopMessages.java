@@ -948,7 +948,13 @@ public final class CoopMessages {
                 Boolean.parseBoolean(requiredString(payload, "ready")));
     }
 
-    /** One roster row on the wire. {@code reconnectingMillis} is -1 when the player is connected. */
+    /**
+     * One roster row on the wire.
+     *
+     * <p>{@code reconnectingMillis} is the reconnect grace <em>remaining</em> for this player, or -1
+     * when the player is connected. Remaining rather than elapsed-since-drop so the guest's row
+     * counts down to the same instant the host's does; see {@code CoopLobbyRoster.markReconnecting}.
+     */
     public record LobbyPlayer(String playerId,
                               String name,
                               String phase,

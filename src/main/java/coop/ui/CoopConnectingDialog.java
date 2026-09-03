@@ -17,6 +17,12 @@ import java.util.function.Supplier;
  * phases the host's roster shows, with the current one marked, an elapsed counter that ticks every
  * second, and a Cancel that is always live.
  *
+ * <p><b>The counter is a label, not a paragraph.</b> The view carries a raw millisecond counter, so
+ * it differs on every frame and the dialog used to clear and rebuild its text panel four times a
+ * second. Players reported exactly that as a flash on the reconnect dialog, which did far less. The
+ * phase list is now rebuilt only when a phase or a failure actually changes, and the elapsed line is
+ * a {@link CoopLiveDialogLine} label updated with {@code setText}.
+ *
  * <p><b>Why the counter matters.</b> The lobby research rule is "never a static frame longer than ten
  * seconds": a screen that does not move is indistinguishable from a hung one, and a join stall with
  * no visible progress is the single most reported multiplayer support case in the corpus. The step
@@ -75,9 +81,19 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
     private final Runnable onCancel;
 
     private InteractionDialogAPI dialog;
-    private View rendered;
+    /** The half of the view a rebuild is needed for; null until one has succeeded. */
+    private Key renderedKey;
+    /** The elapsed counter, as a label in the visual panel. */
+    private final CoopLiveDialogLine liveLine = new CoopLiveDialogLine();
     private long lastRenderAtMillis = Long.MIN_VALUE;
     private boolean renderFailed;
+
+    /** Everything in a {@link View} except the clock: what the phase list is drawn from. */
+    private record Key(CoopJoinPhase phase, Failure failure, String detail) {
+        static Key of(View view) {
+            return new Key(view.phase(), view.failure(), view.detail());
+        }
+    }
 
     /**
      * @param viewSupplier polled every frame; re-renders only when the value changes
@@ -95,19 +111,27 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
     @Override
     public void init(InteractionDialogAPI dialog) {
         this.dialog = dialog;
-        try {
-            dialog.hideVisualPanel();
-        } catch (Throwable ignored) {
-            // Cosmetic only.
-        }
         // Never setOptionOnEscape: Cancel is the only exit, and it is explicit.
-        render(currentView());
+        View view = currentView();
+        if (!liveLine.install(dialog, view == null ? "" : elapsedLine(view))) {
+            try {
+                dialog.hideVisualPanel();
+            } catch (Throwable ignored) {
+                // Cosmetic only.
+            }
+        }
+        render(view);
     }
 
     @Override
     public void advance(float amount) {
         View view = currentView();
-        if (view == null || view.equals(rendered)) {
+        if (view == null) {
+            return;
+        }
+        if (Key.of(view).equals(renderedKey)) {
+            // Only the clock moved. One setText, no panel touched.
+            liveLine.update(elapsedLine(view));
             return;
         }
         long now = clock.get();
@@ -131,12 +155,13 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
             return;
         }
         renderText(view);
+        liveLine.update(elapsedLine(view));
         if (!renderOptions()) {
             // The panel was cleared and then nothing went into it. Leaving the view unrecorded is
             // what makes the next frame retry instead of settling on an empty, inescapable dialog.
             return;
         }
-        rendered = view;
+        renderedKey = Key.of(view);
         lastRenderAtMillis = clock.get();
     }
 
@@ -156,18 +181,29 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
                 if (!view.detail().isEmpty()) {
                     text.addPara(view.detail());
                 }
-                text.addPara("Waiting " + coop.session.CoopLobbyRoster.formatClock(view.elapsedMillis()) + ".");
+                if (!liveLine.showing()) {
+                    text.addPara(elapsedLine(view));
+                }
                 return;
             }
             text.addPara("Joining the co-op session.");
             for (CoopJoinPhase phase : CoopJoinPhase.values()) {
                 text.addPara(phaseLine(phase, view.phase()));
             }
-            text.addPara("Waiting " + coop.session.CoopLobbyRoster.formatClock(view.elapsedMillis()) + ".");
+            if (!liveLine.showing()) {
+                // No label to put it in: the counter freezes at the last phase change rather than
+                // disappearing, which still reads better than a screen with no clock on it.
+                text.addPara(elapsedLine(view));
+            }
         } catch (Throwable ex) {
             renderFailed = true;
             CoopLog.warn(getClass(), "Coop connecting dialog could not render its text", ex);
         }
+    }
+
+    /** The one line that moves on its own. */
+    static String elapsedLine(View view) {
+        return "Waiting " + coop.session.CoopLobbyRoster.formatClock(view.elapsedMillis()) + ".";
     }
 
     /** The phase list line: done, current, or still ahead. */
@@ -255,6 +291,7 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
     public void close() {
         InteractionDialogAPI open = dialog;
         dialog = null;
+        liveLine.clear();
         if (open == null) {
             return;
         }

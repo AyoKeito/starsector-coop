@@ -108,6 +108,19 @@ class CoopDesyncDialogTest {
         assertTrue(body.contains("camp-7f3a"), body);
     }
 
+    @Test
+    void theHostsCampaignIdDialogTalksAboutTheGuestsSaveNotItsOwn() {
+        RecordingDialog panel = show(CoopDesyncDialog.forReason(campaignIdReason(),
+                CoopConnectionRole.HOST, () -> { }, null));
+        String body = String.join("\n", panel.text.paragraphs);
+
+        assertTrue(body.contains("The guest's save is not from this co-op campaign."), body);
+        assertTrue(body.contains("the guest loads the co-op save from this campaign"), body);
+        assertTrue(body.contains("they relaunch with launch-guest.ps1 -AdoptCampaign"), body);
+        assertFalse(body.contains("This save is not from"), "the host did not load a wrong save: " + body);
+        assertTrue(body.contains("camp-7f3a"), body);
+    }
+
     // ------------------------------------------------------------- mods body
 
     @Test

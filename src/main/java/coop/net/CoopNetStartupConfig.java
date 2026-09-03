@@ -6,13 +6,14 @@ import coop.config.CoopOptionsStore;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.regex.Pattern;
 
 /**
  * Launch/connection settings.
  *
  * <p><b>Phase 28 milestone 1.</b> Every value here now resolves through {@link CoopOptionsStore}
  * rather than straight off {@code System.getProperty}, which puts the full precedence stack behind
- * it: {@code -Dcoop.*} beats {@code saves/common/coop_options.json} beats the shipped
+ * it: {@code -Dcoop.*} beats {@code saves/common/coop_options.json.data} beats the shipped
  * {@code data/config/coop_options.json} beats the {@link CoopOptionsRegistry} default. Every public
  * method and constant kept its name and meaning, and a {@code -D}-configured launch resolves to
  * exactly the same values it did before, so the pump, the doctor and the launch scripts are
@@ -21,7 +22,7 @@ import java.util.Properties;
  * <p><b>Strict where a human is watching, forgiving where nobody is.</b> A malformed port, grace
  * window or port-mapping mode given as {@code -D} is still refused outright: whoever typed it is
  * standing at a console, the exception lands in front of them, and guessing what they meant would
- * be worse. The same garbage coming from {@code saves/common/coop_options.json} is <em>coerced</em>
+ * be worse. The same garbage coming from {@code saves/common/coop_options.json.data} is <em>coerced</em>
  * instead - clamped or replaced by {@link CoopOptionsRegistry}, with one WARN naming the key. The
  * file is edited by hand hours before the session, and throwing out of here reaches the player as a
  * host that silently never starts, with one line buried in the log and nothing on screen. So the
@@ -82,6 +83,26 @@ public final class CoopNetStartupConfig {
     /** Latch behind {@link #warnAboutMaxGuestsOnce}. */
     private static boolean maxGuestsWarned;
 
+    /**
+     * The only shape {@code -Dcoop.newGameSeed} is allowed to take: {@code MN-} followed by one or
+     * more decimal digits, matching what the launch scripts default to and what
+     * {@code CoopSectorProcGen} forces onto both {@link com.fs.starfarer.api.characters.CharacterCreationData}
+     * and {@code sector.seedString}. Vanilla's own new-game code reconstructs a {@code long} from the
+     * digits after that prefix and crashes with a bare {@link NumberFormatException} deep inside
+     * {@code CampaignState.createUI} when they overflow a {@code long} - a live crash on
+     * {@code -Dcoop.newGameSeed=MN-9999999999999999999} (19 nines, past {@link Long#MAX_VALUE}). This is
+     * checked once here so the mod never hands vanilla a value it cannot parse.
+     */
+    private static final Pattern NEW_GAME_SEED_PATTERN = Pattern.compile("MN-[0-9]+");
+
+    /** Latch behind {@link #warnAboutNewGameSeedOnce}. */
+    private static boolean newGameSeedWarned;
+
+    /** Test-only: clears the once-per-process new-game-seed warn latch so a test starts fresh. */
+    static void resetNewGameSeedWarnLatchForTests() {
+        newGameSeedWarned = false;
+    }
+
     private static final String PORT_MAPPING_AUTO = "auto";
     private static final String PORT_MAPPING_OFF = "off";
 
@@ -119,7 +140,7 @@ public final class CoopNetStartupConfig {
 
     public static String newGameSeedFromSystemProperties() {
         // -D only, forever (a one-shot new-game gesture): the store never reads a file for it.
-        return trimToEmpty(CoopOptionsStore.system().raw(NEW_GAME_SEED_PROPERTY));
+        return sanitizeNewGameSeed(CoopOptionsStore.system().raw(NEW_GAME_SEED_PROPERTY));
     }
 
     /**
@@ -175,7 +196,7 @@ public final class CoopNetStartupConfig {
         String hostPort = roleValue(store, HOST_PORT_PROPERTY, roleFromProperties);
         String connectHost = roleValue(store, CONNECT_HOST_PROPERTY, roleFromProperties);
         String connectPort = roleValue(store, CONNECT_PORT_PROPERTY, roleFromProperties);
-        String newGameSeed = trimToEmpty(store.raw(NEW_GAME_SEED_PROPERTY));
+        String newGameSeed = sanitizeNewGameSeed(store.raw(NEW_GAME_SEED_PROPERTY));
         // parsePortMapping/parseReconnectGrace throw. That is right for a command line and wrong for
         // a hand-edited file, so the file layers go through the registry-coercing getters instead:
         // store.string() canonicalises the enum (anything unrecognised becomes the default) and
@@ -380,6 +401,58 @@ public final class CoopNetStartupConfig {
         }
         maxGuestsWarned = true;
         coop.util.CoopLog.warn(CoopNetStartupConfig.class, message);
+    }
+
+    /**
+     * The reason {@code value} is not a legal {@code -Dcoop.newGameSeed}, or {@code null} when it is
+     * (including the empty string, which just means "not configured"). See
+     * {@link #NEW_GAME_SEED_PATTERN} for the rule and why it exists.
+     */
+    public static String validateNewGameSeed(String value) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!NEW_GAME_SEED_PATTERN.matcher(value).matches()) {
+            return "must look like \"MN-\" followed by one or more digits";
+        }
+        String digits = value.substring("MN-".length());
+        try {
+            Long.parseLong(digits);
+        } catch (NumberFormatException ex) {
+            return "the digits after \"MN-\" must fit in a signed 64-bit long (max " + Long.MAX_VALUE + ")";
+        }
+        return null;
+    }
+
+    /**
+     * Trims and validates a raw {@code -Dcoop.newGameSeed} reading. An invalid, non-blank value is
+     * logged once (never per read - every caller of {@link #newGameSeedFromSystemProperties()} and
+     * {@link #from(CoopOptionsStore)} asks at least once per launch) and then treated exactly as if
+     * the property had never been set, which leaves the new-game seed field to vanilla instead of
+     * handing it something vanilla's own new-game code cannot parse.
+     */
+    private static String sanitizeNewGameSeed(String raw) {
+        String trimmed = trimToEmpty(raw);
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        String reason = validateNewGameSeed(trimmed);
+        if (reason == null) {
+            return trimmed;
+        }
+        warnAboutNewGameSeedOnce(trimmed, reason);
+        return "";
+    }
+
+    /** Once per process, not once per read; see {@link #warnAboutMaxGuestsOnce} for why. */
+    private static synchronized void warnAboutNewGameSeedOnce(String value, String reason) {
+        if (newGameSeedWarned) {
+            return;
+        }
+        newGameSeedWarned = true;
+        coop.util.CoopLog.warn(CoopNetStartupConfig.class,
+                "Coop ignoring -D" + NEW_GAME_SEED_PROPERTY + "=" + value + ": " + reason
+                        + "; the new-game seed field is left to vanilla");
     }
 
     private static int parsePort(String value, String propertyName) {

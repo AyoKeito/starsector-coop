@@ -99,7 +99,7 @@ can read differently on the two screens until they converge, with the host's rea
 front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in the launcher, then set
 `coop.hostPort` on one PC and `coop.connectHost` plus `coop.connectPort` on the other, along with the
 same `coop.newGameSeed` on both. Settings can go on the `vmparams` line as `-D` properties or in
-`saves\common\coop_options.json`.
+`saves\common\coop_options.json.data`.
 
 ## Reporting a problem
 

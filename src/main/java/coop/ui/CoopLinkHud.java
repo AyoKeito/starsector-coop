@@ -26,7 +26,7 @@ import java.awt.Color;
  * touch runs under {@code catch (Throwable)}, and the first failure disables the instance for good
  * after exactly one log line — a HUD that stops drawing is a nuisance, a HUD that throws sixty times
  * a second in the render pass is a crash. {@code coop.hud.disable=true}, on the command line, in
- * {@code saves/common/coop_options.json} or on the options page, hides the line; the corner and that
+ * {@code saves/common/coop_options.json.data} or on the options page, hides the line; the corner and that
  * flag are both re-read on the refresh tick, so a change from the page applies without a relaunch.
  */
 public final class CoopLinkHud implements CampaignUIRenderingListener {
@@ -34,7 +34,7 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     /**
      * Client preference: when true the line is not drawn. Registered in
      * {@link CoopOptionsRegistry#HUD_DISABLE} and therefore settable from
-     * {@code saves/common/coop_options.json} as well as {@code -D}, which is why it is read through
+     * {@code saves/common/coop_options.json.data} as well as {@code -D}, which is why it is read through
      * {@link CoopOptionsStore} rather than off {@code System.getProperty} - a player who turns the
      * HUD off in their settings file expects it to stay off.
      */
@@ -112,7 +112,7 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
 
     /**
      * The full option stack, not just {@code -D}: command line, then
-     * {@code saves/common/coop_options.json}, then the shipped defaults. A value that is neither
+     * {@code saves/common/coop_options.json.data}, then the shipped defaults. A value that is neither
      * true nor false is warned about once by the store and read as the default (false).
      */
     static boolean disabledByOption() {

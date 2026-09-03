@@ -24,7 +24,7 @@ import java.util.Set;
  *   is everyone except a guest. A guest sees the value with {@link #TAG_HOST_SETTING} and no
  *   button, because "the button is absent, not an error" is the acceptance wording.</li>
  *   <li><b>Client</b> rows are local preferences and are always editable; they are written to
- *   {@code saves/common/coop_options.json}.</li>
+ *   {@code saves/common/coop_options.json.data}.</li>
  *   <li><b>Launch</b> rows are read before any session exists, so they are editable only while no
  *   session is running - changing one mid-session could not do anything but mislead.</li>
  *   <li>Any key given as {@code -D} on the command line is read-only whatever its tier, tagged
@@ -69,7 +69,7 @@ public record CoopOptionsView(List<Section> sections) {
     /** The note on a launch row while a session is running. */
     public static final String NOTE_NEXT_LAUNCH = "takes effect at next launch";
     /** The note on a text row the page cannot edit. */
-    public static final String NOTE_FILE_ONLY = "text setting - edit saves/common/coop_options.json";
+    public static final String NOTE_FILE_ONLY = "text setting - edit saves/common/coop_options.json.data";
 
     /** Section titles. */
     public static final String SECTION_POLICY = "Session rules (host)";
@@ -407,7 +407,7 @@ public record CoopOptionsView(List<Section> sections) {
         }
         if (CoopOptionsRegistry.PASSWORD.equals(key)) {
             return "Clear the session password?\n\nAnyone who can reach your host port will be able"
-                    + " to join. Set a new one in saves/common/coop_options.json or with"
+                    + " to join. Set a new one in saves/common/coop_options.json.data or with"
                     + " -Dcoop.password=... before you host again.";
         }
         // coop.reconnectGraceSeconds used to have a prompt here. It no longer has a control (see
@@ -416,7 +416,7 @@ public record CoopOptionsView(List<Section> sections) {
     }
 
     /**
-     * The keys "Reset to defaults" drops from {@code saves/common/coop_options.json}.
+     * The keys "Reset to defaults" drops from {@code saves/common/coop_options.json.data}.
      *
      * <p>{@link CoopOptionsRegistry.Tier#CLIENT} only. The launch tier - host port, join address,
      * join port, router port mapping, password, display name - is deliberately left alone: it is how

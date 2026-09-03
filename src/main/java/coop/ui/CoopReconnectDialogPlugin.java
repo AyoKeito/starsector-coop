@@ -12,21 +12,25 @@ import java.util.Map;
 import java.util.function.IntSupplier;
 
 /**
- * Shared body of the two Phase 20.2 reconnect dialogs: a headline, a live countdown paragraph, an
- * option that buys more waiting time, and one that ends the session immediately.
+ * Shared body of the two Phase 20.2 reconnect dialogs: a headline, a live countdown, an option that
+ * buys more waiting time, and one that ends the session immediately.
  *
  * <p><b>Why a real interaction dialog.</b> The 20.6 integration rule (corrected 2026-08-26): a real
  * {@link InteractionDialogPlugin} shown through {@code CampaignUIAPI.showInteractionDialog} is the
  * only coop surface that auto-suspends the guest's {@code CoopCampaignInputBlocker}, because that
  * suspend flag is recomputed every frame from {@code ui.isShowingDialog()}. Building this as anything
- * else — a rendering listener, a custom panel — brings back the trapped-guest bug, where the player
- * has a modal on screen and no key that does anything. It also means the engine's own pause applies
- * while the dialog is up, which is precisely the hold this dialog exists to announce.
+ * else (a rendering listener, or a panel of our own with the dialog gone) brings back the
+ * trapped-guest bug, where the player has a modal on screen and no key that does anything. It also
+ * means the engine's own pause applies while the dialog is up, which is precisely the hold this
+ * dialog exists to announce.
  *
- * <p><b>Why the countdown is a paragraph rewrite.</b> There is no API to mutate a rendered label's
- * text, so the countdown is {@link TextPanelAPI#replaceLastParagraph(String)} on the last paragraph,
- * driven from {@link #advance(float)} and rate-limited to one rewrite per whole second — the number
- * only changes that often, and rewriting at frame rate would churn the panel for nothing.
+ * <p><b>Why the countdown is a label, not a paragraph.</b> It used to be
+ * {@code TextPanelAPI.replaceLastParagraph} once a second. Players on both sides reported the whole
+ * panel flashing at exactly that rate: the call re-lays out and re-fades the text panel, and with a
+ * headline and a countdown in it the entire dialog appears to blink. The countdown now lives in a
+ * {@link CoopLiveDialogLine} label in the visual panel, where {@code LabelAPI.setText} changes the
+ * characters and touches nothing else. The text panel is written once, at {@link #init}, and never
+ * again.
  *
  * <p><b>Total, like the rest of the coop UI.</b> Every engine call is wrapped: a dialog that cannot
  * render must never be able to take down the frame that is trying to save the session. The reconnect
@@ -52,8 +56,8 @@ public abstract class CoopReconnectDialogPlugin
     private final Runnable onEndSession;
 
     private InteractionDialogAPI dialog;
+    private final CoopLiveDialogLine countdownLine = new CoopLiveDialogLine();
     private int lastRenderedSeconds = Integer.MIN_VALUE;
-    private boolean bodyRendered;
 
     CoopReconnectDialogPlugin(IntSupplier remainingSeconds, Runnable onWaitMore, Runnable onEndSession) {
         this.remainingSeconds = remainingSeconds == null ? () -> 0 : remainingSeconds;
@@ -79,13 +83,18 @@ public abstract class CoopReconnectDialogPlugin
     @Override
     public void init(InteractionDialogAPI dialog) {
         this.dialog = dialog;
-        try {
-            dialog.hideVisualPanel();
-        } catch (Throwable ignored) {
-            // Cosmetic only: a visual panel that will not hide is a strictly better outcome than no
-            // dialog at all.
-        }
         renderBody();
+        lastRenderedSeconds = remainingSeconds.getAsInt();
+        if (!countdownLine.install(dialog, countdownText(lastRenderedSeconds))) {
+            // No live line: put the visual area back the way the coop dialogs have always had it,
+            // empty, rather than leaving whatever the engine had in there.
+            try {
+                dialog.hideVisualPanel();
+            } catch (Throwable ignored) {
+                // Cosmetic only: a visual panel that will not hide is a strictly better outcome than
+                // no dialog at all.
+            }
+        }
         renderOptions();
     }
 
@@ -94,24 +103,17 @@ public abstract class CoopReconnectDialogPlugin
         refreshCountdown();
     }
 
-    /** Rewrites the countdown paragraph, at most once per whole second of change. */
+    /**
+     * Points the label at the new number, at most once per whole second of change. No text-panel
+     * call is involved, which is the entire point of the exercise.
+     */
     private void refreshCountdown() {
         int seconds = remainingSeconds.getAsInt();
         if (seconds == lastRenderedSeconds) {
             return;
         }
         lastRenderedSeconds = seconds;
-        try {
-            TextPanelAPI text = dialog == null ? null : dialog.getTextPanel();
-            if (text != null && bodyRendered) {
-                text.replaceLastParagraph(countdownText(seconds));
-            }
-        } catch (Throwable ex) {
-            // Stop trying: a panel that throws once will throw every frame, and the headline that is
-            // already on screen carries the message even without the countdown.
-            bodyRendered = false;
-            CoopLog.warn(getClass(), "Coop reconnect dialog could not refresh its countdown", ex);
-        }
+        countdownLine.update(countdownText(seconds));
     }
 
     @Override
@@ -169,6 +171,7 @@ public abstract class CoopReconnectDialogPlugin
     public void close() {
         InteractionDialogAPI open = dialog;
         dialog = null;
+        countdownLine.clear();
         if (open == null) {
             return;
         }
@@ -179,6 +182,7 @@ public abstract class CoopReconnectDialogPlugin
         }
     }
 
+    /** The static half: written once and left alone for as long as the dialog is up. */
     private void renderBody() {
         try {
             TextPanelAPI text = dialog.getTextPanel();
@@ -186,10 +190,6 @@ public abstract class CoopReconnectDialogPlugin
                 return;
             }
             text.addPara(headline());
-            // The countdown must be the LAST paragraph, because that is the only one replaceable.
-            lastRenderedSeconds = remainingSeconds.getAsInt();
-            text.addPara(countdownText(lastRenderedSeconds));
-            bodyRendered = true;
         } catch (Throwable ex) {
             CoopLog.warn(getClass(), "Coop reconnect dialog could not render its text", ex);
         }

@@ -3,15 +3,15 @@
 	# Starsector Coop - shipped option defaults (Phase 28 milestone 1).
 	#
 	# THIS FILE IS OVERWRITTEN EVERY TIME YOU UPDATE THE MOD. Do not edit it to change a setting.
-	# Put your own values in                saves/common/coop_options.json
+	# Put your own values in                saves/common/coop_options.json.data
 	# (same flat "key": value shape, only the keys you actually want to change, and NO comments -
 	# see below) - that folder survives mod updates. This file is the reference: it lists every
 	# option, its tier, its default and when a change takes effect.
 	#
 	# Precedence, highest first:
 	#   1. -Dcoop.<key>=<value> on the launch command line   (dev/debug override, always wins)
-	#   2. saves/common/coop_options.json                     (your settings)
-	#   3. this file                                          (shipped defaults)
+	#   2. saves/common/coop_options.json.data               (your settings)
+	#   3. this file                                         (shipped defaults)
 	#   4. the built-in default compiled into CoopOptionsRegistry
 	#
 	# Tiers:
@@ -40,7 +40,7 @@
 	#
 	# Comments: allowed in THIS file only. The game strips '#' to end of line when it loads a
 	# file out of a mod's data folder, the same way it does for its own data/config/settings.json.
-	# Your saves/common/coop_options.json is read back through a different, save-data reader that
+	# Your saves/common/coop_options.json.data is read back through a different, save-data reader that
 	# does NOT strip them, so a single '#' anywhere in it makes the whole file fail to parse and
 	# EVERY override in it is ignored (you get one warning in starsector.log and nothing on screen).
 	# Keep that file plain JSON. If you want to remember why you changed something, keep a copy of

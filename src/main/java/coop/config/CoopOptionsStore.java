@@ -19,10 +19,10 @@ import java.util.function.Function;
  * Phase 28 milestone 1: the precedence stack behind {@link CoopOptionsRegistry}.
  *
  * <pre>
- *   -Dcoop.*  (highest - dev/debug override, unchanged from before this phase)
- *   saves/common/coop_options.json   (the user's own overrides; survives a mod update)
- *   data/config/coop_options.json    (shipped defaults; overwritten on every mod update)
- *   the registry default             (lowest)
+ *   -Dcoop.*                             (highest - dev/debug override, unchanged from before this phase)
+ *   saves/common/coop_options.json.data  (the user's own overrides; survives a mod update)
+ *   data/config/coop_options.json        (shipped defaults; overwritten on every mod update)
+ *   the registry default                 (lowest)
  * </pre>
  *
  * <p><b>Why the middle layer exists.</b> Anything inside the mod's {@code data/config} is replaced
@@ -54,8 +54,20 @@ public final class CoopOptionsStore {
 
     /** Mod-relative path of the shipped defaults. */
     public static final String SHIPPED_PATH = "data/config/coop_options.json";
-    /** File name under {@code saves/common} holding the user's overrides. */
+    /**
+     * The name handed to {@code SettingsAPI}'s {@code ...Common} calls. Not what the file is called
+     * on disk: see {@link #COMMON_PATH}.
+     */
     public static final String COMMON_FILE = "coop_options.json";
+    /**
+     * Where the user's overrides actually sit, for anything a player reads. The engine appends
+     * {@code .data} to the name in every one of its {@code saves/common} calls - the write, the
+     * read, the existence check and the delete alike - so the file this store writes as
+     * {@link #COMMON_FILE} is {@code coop_options.json.data} when the player goes looking for it.
+     * Confirmed against the 0.98a implementation of {@code SettingsAPI}, which builds
+     * {@code <saves>/common/<name>.data} in all four methods.
+     */
+    public static final String COMMON_PATH = "saves/common/coop_options.json.data";
     /** The mod id {@code loadJSON} resolves {@link #SHIPPED_PATH} against. */
     public static final String MOD_ID = "coop";
 
@@ -91,7 +103,7 @@ public final class CoopOptionsStore {
         /** The shipped {@code data/config/coop_options.json}, or {@code null}. */
         JSONObject shipped();
 
-        /** The user's {@code saves/common/coop_options.json}, or {@code null} when absent. */
+        /** The user's {@code saves/common/coop_options.json.data}, or {@code null} when absent. */
         JSONObject common();
 
         /**
@@ -109,7 +121,7 @@ public final class CoopOptionsStore {
         }
 
         /**
-         * Whether {@code saves/common/coop_options.json} exists at all. Only consulted alongside
+         * Whether {@code saves/common/coop_options.json.data} exists at all. Only consulted alongside
          * {@link #commonReadFailed()}; a source that cannot answer says "no file" and a failed read
          * over a file that is not there is then treated as harmless.
          */
@@ -118,7 +130,7 @@ public final class CoopOptionsStore {
         }
 
         /**
-         * Replaces {@code saves/common/coop_options.json} with {@code json} and makes the new
+         * Replaces {@code saves/common/coop_options.json.data} with {@code json} and makes the new
          * content what {@link #common()} returns from here on.
          *
          * <p>Default: refuse. A source that cannot write says so rather than pretending, so the
@@ -311,7 +323,7 @@ public final class CoopOptionsStore {
     }
 
     /**
-     * Phase 28 milestone 3: writes one user override into {@code saves/common/coop_options.json}.
+     * Phase 28 milestone 3: writes one user override into {@code saves/common/coop_options.json.data}.
      *
      * <p>The file is rewritten whole from the override map that is already loaded, with this key
      * replaced (or removed, for a null {@code value}, which puts the key back to the shipped
@@ -363,7 +375,7 @@ public final class CoopOptionsStore {
             }
             if (option.tier() == CoopOptionsRegistry.Tier.POLICY) {
                 CoopLog.warn(CoopOptionsStore.class, "Coop options: " + key
-                        + " is host policy and belongs to the campaign, not to " + COMMON_FILE);
+                        + " is host policy and belongs to the campaign, not to " + COMMON_PATH);
                 continue;
             }
             accepted.put(key, entry.getValue());
@@ -378,7 +390,7 @@ public final class CoopOptionsStore {
         // set - silently deleting every other setting in it. A file that cannot be read is a file
         // the player has to fix by hand.
         if (commonUnreadable()) {
-            CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: " + COMMON_PATH
                     + " exists but could not be read, so it will not be rewritten - that would throw"
                     + " away everything in it. Fix it by hand (it must be plain JSON, with no #"
                     + " comments) or delete it. " + label + " not saved.");
@@ -413,19 +425,19 @@ public final class CoopOptionsStore {
             }
         } catch (Exception | LinkageError ex) {
             CoopLog.warn(CoopOptionsStore.class, "Coop options: could not compose "
-                    + COMMON_FILE + "; " + label + " not saved", ex);
+                    + COMMON_PATH + "; " + label + " not saved", ex);
             return false;
         }
         boolean written;
         try {
             written = source.writeCommon(json);
         } catch (Exception | LinkageError ex) {
-            CoopLog.warn(CoopOptionsStore.class, "Coop options: could not write saves/common/"
-                    + COMMON_FILE + "; " + label + " not saved", ex);
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: could not write "
+                    + COMMON_PATH + "; " + label + " not saved", ex);
             return false;
         }
         if (!written) {
-            CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+            CoopLog.warn(CoopOptionsStore.class, "Coop options: " + COMMON_PATH
                     + " is not writable here; " + label + " not saved");
             return false;
         }
@@ -521,7 +533,7 @@ public final class CoopOptionsStore {
 
     private Map<String, String> common() {
         if (commonLayer == null) {
-            commonLayer = flatten(safeCommon(), "saves/common/" + COMMON_FILE, COMMON_CONSEQUENCE);
+            commonLayer = flatten(safeCommon(), COMMON_PATH, COMMON_CONSEQUENCE);
         }
         return commonLayer;
     }
@@ -542,7 +554,7 @@ public final class CoopOptionsStore {
             return json;
         } catch (Exception | LinkageError ex) {
             commonFailed = true;
-            warnOnce("layer:common", "could not read saves/common/" + COMMON_FILE + "; "
+            warnOnce("layer:common", "could not read " + COMMON_PATH + "; "
                     + COMMON_CONSEQUENCE + " (" + ex + ")");
             return null;
         }
@@ -701,7 +713,7 @@ public final class CoopOptionsStore {
                 // the safe assumption is that it is: it makes writeOverrides refuse, which is
                 // recoverable, where guessing "absent" would overwrite it.
                 commonExists = true;
-                CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+                CoopLog.warn(CoopOptionsStore.class, "Coop options: " + COMMON_PATH
                         + " could not be read; " + COMMON_CONSEQUENCE, ex);
             }
             return commonJson;
@@ -736,7 +748,7 @@ public final class CoopOptionsStore {
             try {
                 settings.writeJSONToCommon(COMMON_FILE, json, true);
             } catch (Exception | LinkageError ex) {
-                CoopLog.warn(CoopOptionsStore.class, "Coop options: saves/common/" + COMMON_FILE
+                CoopLog.warn(CoopOptionsStore.class, "Coop options: " + COMMON_PATH
                         + " could not be written; the setting holds for this session only", ex);
                 return false;
             }

@@ -355,21 +355,36 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
 
         @Override
         String title() {
-            return reason.campaignIdMismatch()
-                    ? "This save is not from " + partner() + "'s co-op campaign."
-                    : "Your sector and " + partner() + "'s sector are not the same.";
+            if (reason.campaignIdMismatch()) {
+                return role == CoopConnectionRole.HOST
+                        ? "The guest's save is not from this co-op campaign."
+                        : "This save is not from the host's co-op campaign.";
+            }
+            return "Your sector and " + partner() + "'s sector are not the same.";
         }
 
         @Override
         List<String> bodyParagraphs() {
             List<String> body = new ArrayList<>();
             if (reason.campaignIdMismatch()) {
+                if (role == CoopConnectionRole.HOST) {
+                    body.add("Co-op stamps a campaign with an id the first time a session runs in it."
+                            + " The save the guest loaded carries a different id, or none, so it is a"
+                            + " different campaign even when the seed matches.");
+                    body.add("Most likely fix: the guest loads the co-op save from this campaign - the"
+                            + " one written while you were in a session together. Your lobby is"
+                            + " already waiting.");
+                    body.add("If the guest meant to start over inside your campaign instead, they"
+                            + " relaunch with launch-guest.ps1 -AdoptCampaign. That gives them a fresh"
+                            + " world and leaves their old save's progress behind.");
+                    return body;
+                }
                 body.add("Co-op stamps a campaign with an id the first time a session runs in it. The"
                         + " save loaded here carries a different id, so it is a different campaign even"
                         + " when the seed matches.");
                 body.add("Most likely fix: load the co-op save from this campaign - the one written"
                         + " while you were in a session together.");
-                body.add("If you meant to start over inside " + partner() + "'s campaign instead,"
+                body.add("If you meant to start over inside the host's campaign instead,"
                         + " relaunch with launch-guest.ps1 -AdoptCampaign. That accepts a fresh world"
                         + " on this side and leaves this save's progress behind.");
                 return body;
@@ -523,9 +538,10 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
                             + " the session was released."
                             : "Co-op held the world open waiting for the connection to come back. The"
                             + " window ran out before it returned, so the session was released.");
-                    body.add("Start a fresh session: the host loads its co-op save, then the guest"
-                            + " connects again. Both saves carry the same campaign, so the progress up"
-                            + " to the drop is still there.");
+                    body.add("Start a fresh session: whoever dropped loads their co-op save and"
+                            + " connects again; the other side's lobby is already waiting. Both saves"
+                            + " carry the same campaign, so the progress up to the last co-op save is"
+                            + " still there.");
                 }
                 case DIFFERENT_CAMPAIGN -> {
                     body.add("That usually means " + partner() + " restarted, or loaded a different"
@@ -554,8 +570,8 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
                 }
                 case OTHER -> {
                     body.add("The link is down and the session was released.");
-                    body.add("Start a fresh session: the host loads its co-op save, then the guest"
-                            + " connects again.");
+                    body.add("Start a fresh session: whoever dropped loads their co-op save and"
+                            + " connects again; the other side's lobby is already waiting.");
                 }
             }
             return body;
@@ -590,8 +606,8 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
             return List.of(
                     "Co-op does not have a specific message for that one. The text in brackets above"
                             + " is exactly what was reported.",
-                    "Start a fresh session: the host loads its co-op save, then the guest connects"
-                            + " again.");
+                    "Start a fresh session: whoever dropped loads their co-op save and connects"
+                            + " again; the other side's lobby is already waiting.");
         }
 
         @Override

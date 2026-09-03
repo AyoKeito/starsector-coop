@@ -78,16 +78,45 @@ class CoopLobbyRosterTest {
         roster.setReady("guest-1", true, T0);
 
         assertFalse(roster.dropPartial("guest-1"), "past the snapshot the row is not partial");
-        assertTrue(roster.markReconnecting("guest-1", T0));
+        assertTrue(roster.markReconnecting("guest-1", T0, 60_000L));
         assertNotNull(roster.row("guest-1"));
         assertTrue(roster.row("guest-1").ready(), "ready survives the grace window");
-        assertEquals("Reconnecting 0:42", roster.stateWord(roster.row("guest-1"), T0 + 42_000L));
+        // The window's remaining, counting down - not the time since the drop, counting up.
+        assertEquals("Reconnecting 0:18", roster.stateWord(roster.row("guest-1"), T0 + 42_000L));
+        assertEquals("Reconnecting 0:00", roster.stateWord(roster.row("guest-1"), T0 + 90_000L),
+                "an overrun reads 0:00, never a negative clock");
 
         assertFalse(roster.allReady(), "a reconnecting player blocks the gate even while ready");
         assertEquals("Bob", roster.blockingName());
 
         roster.markReconnected("guest-1", T0 + 43_000L);
         assertTrue(roster.allReady());
+    }
+
+    /**
+     * The number is re-read from the coordinator every frame, so a window the player extends shows
+     * the new remaining instead of a countdown that disagrees with the dialog above it.
+     */
+    @Test
+    void theReconnectingRowFollowsTheWindowItIsToldAbout() {
+        CoopLobbyRoster roster = openRoster();
+        roster.admit("guest-1", "Bob", T0);
+        roster.setPhase("guest-1", CoopJoinPhase.SNAPSHOT_APPLIED, T0);
+
+        assertTrue(roster.markReconnecting("guest-1", T0, 60_000L));
+        assertFalse(roster.markReconnecting("guest-1", T0 + 10_000L, 50_000L),
+                "one event, however many frames it is called on");
+        assertEquals("Reconnecting 0:50", roster.stateWord(roster.row("guest-1"), T0 + 10_000L));
+
+        // "Wait longer": +300 s, read straight off the coordinator on the next frame.
+        roster.markReconnecting("guest-1", T0 + 11_000L, 349_000L);
+        assertEquals("Reconnecting 5:49", roster.stateWord(roster.row("guest-1"), T0 + 11_000L));
+        assertEquals(Long.valueOf(T0 + 360_000L), roster.row("guest-1").reconnectingUntilMillis());
+        assertTrue(roster.row("guest-1").reconnecting());
+
+        roster.markReconnected("guest-1", T0 + 12_000L);
+        assertFalse(roster.row("guest-1").reconnecting());
+        assertNull(roster.row("guest-1").reconnectingUntilMillis());
     }
 
     @Test

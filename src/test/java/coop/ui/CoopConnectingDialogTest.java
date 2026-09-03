@@ -34,7 +34,7 @@ class CoopConnectingDialogTest {
         assertTrue(dialog.text.paragraphs.contains("  done: Checking versions (2/5)"));
         assertTrue(dialog.text.paragraphs.contains("> Locking the sector (3/5)"));
         assertTrue(dialog.text.paragraphs.contains("  Syncing the world (4/5)"));
-        assertTrue(dialog.text.paragraphs.contains("Waiting 0:04."),
+        assertEquals("Waiting 0:04.", dialog.live.text(),
                 "never a static frame: the counter is what separates slow from dead");
     }
 
@@ -47,11 +47,15 @@ class CoopConnectingDialogTest {
         RecordingDialog dialog = new RecordingDialog();
         plugin.init(dialog.proxy());
 
+        int afterInit = dialog.text.clears;
         view.set(new CoopConnectingDialog.View(CoopJoinPhase.LINK_ESTABLISHED, 65_000L, null, ""));
         now.addAndGet(CoopConnectingDialog.MIN_RENDER_INTERVAL_MILLIS);
         plugin.advance(0f);
 
-        assertTrue(dialog.text.paragraphs.contains("Waiting 1:05."));
+        assertEquals("Waiting 1:05.", dialog.live.text());
+        assertEquals(List.of("Waiting 1:05."), dialog.live.setTexts);
+        assertEquals(afterInit, dialog.text.clears,
+                "the clock moving is not a reason to rebuild the phase list under it");
     }
 
     @Test
@@ -152,6 +156,7 @@ class CoopConnectingDialogTest {
     private static final class RecordingDialog {
         private final RecordingText text = new RecordingText();
         private final RecordingOptions options = new RecordingOptions();
+        private final RecordingLiveLine live = new RecordingLiveLine();
         private int dismissCount;
         private int escapeOptionCalls;
 
@@ -161,6 +166,7 @@ class CoopConnectingDialogTest {
                     new Class<?>[]{InteractionDialogAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "hideVisualPanel" -> null;
+                        case "getVisualPanel" -> live.proxy();
                         case "getTextPanel" -> text.proxy();
                         case "getOptionPanel" -> options.proxy();
                         case "setOptionOnEscape" -> {

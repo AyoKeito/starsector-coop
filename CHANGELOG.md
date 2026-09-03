@@ -18,9 +18,10 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   per player and as a team.
 - A "Coop Options" page. The host sets the session's rules there and they travel with the campaign's
   save and sync to the guest; each player sets their own preferences separately.
-- Every setting also lives in a file: `saves\common\coop_options.json` for yours, which the options
-  page writes for you, and a shipped `data\config\coop_options.json` listing every key, its default
-  and when a change takes effect.
+- Every setting also lives in a file: `saves\common\coop_options.json.data` for yours, which the
+  options page writes for you, and a shipped `data\config\coop_options.json` listing every key, its
+  default and when a change takes effect. The `.data` suffix is the engine's; the contents are
+  plain JSON.
 - The host can let the world keep running while the guest reads its map, cargo or refit screen.
   Interaction dialogs, the menu and combat still pause both games.
 

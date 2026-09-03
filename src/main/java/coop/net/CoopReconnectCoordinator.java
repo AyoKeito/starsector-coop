@@ -14,17 +14,27 @@ import java.util.Objects;
  * closes that gap: for {@code coop.reconnectGraceSeconds} the session record stays exactly as it was,
  * the shared clock is held, and a peer whose process is still alive can pick the same session back up.
  *
- * <p><b>What it deliberately does not do.</b> Relaunch-from-save rejoin is still out of scope. The
- * grace window only serves a peer whose campaign is still loaded and whose only casualty was the link;
- * a guest that quit to the menu has no session left to resume, and its next connection is an ordinary
- * lobby attempt after the grace expires.
+ * <p><b>What it deliberately does not do.</b> It cannot <em>resume</em> a relaunched peer. A resume
+ * matches a session id and a player id that only exist in the returning process's memory, and a
+ * guest that quit to the menu and loaded its co-op save has neither — the session id is minted per
+ * session at lobby accept and its save predates the one being held. Such a guest can only speak
+ * {@code LOBBY_HELLO}, so what it gets is an ordinary lobby round on a fresh session rather than the
+ * held one; see {@code CoopNetPump.handleLobbyHello}. What it no longer has to do is wait the whole
+ * window out first: an authenticated hello ends the wait on the spot
+ * ({@link #REASON_PARTNER_RELAUNCHED}), which is what the live smoke found missing when the host
+ * player kept pressing "wait longer" while the partner was already knocking.
  *
  * <p><b>Why a stranger cannot end the wait early.</b> {@link #evaluateResumeRequest} matches both the
  * session id and the remote player id before it will accept, and a mismatch is answered with a reject
  * that leaves the wait running. The host keeps the transport's session token cleared for the whole
  * window (so no stale datagram from the dead connection applies) and re-sets it only on an accepted
- * resume. A {@code LOBBY_HELLO} arriving mid-grace is likewise rejected rather than served: until the
- * window closes, the slot belongs to the peer that lost it.
+ * resume. A {@code LOBBY_HELLO} arriving mid-grace is held to the same bar in the one way v1 can
+ * enforce: the host runs its lobby password gate on it first, so an unproven stranger gets a
+ * challenge (or a reject) and the wait keeps running. What v1 cannot tell apart is the returning
+ * partner from a <em>different</em> guest who knows the password, because a relaunched process mints
+ * a new player id and there is nothing left to match on. On a host with no password configured that
+ * distinction does not exist at all, which is the same exposure an unprotected host already accepts
+ * for its first join.
  *
  * <p>Pure logic on a caller-supplied wall clock: no sockets, no engine, no dialogs. Everything the
  * grace has to <em>do</em> — hold the pause, open a dialog, rebroadcast the world, tear the session
@@ -83,7 +93,24 @@ public final class CoopReconnectCoordinator {
     public static final String REASON_ENDED_BY_PLAYER = "ended by player";
     /** Terminal reason (guest): the host answered the resume request with a reject. */
     public static final String REASON_HOST_REJECTED = "host rejected the resume";
-    /** Reject text a {@code LOBBY_HELLO} gets while a window is open. */
+    /**
+     * Terminal reason: the partner came back as a fresh process and asked for an ordinary lobby
+     * round. Not a failure — the held session is cleared so the returning guest can be admitted on
+     * this frame, and the pump deliberately skips the desync dialog and the {@code [COOP-DOCTOR]}
+     * marker for it.
+     */
+    public static final String REASON_PARTNER_RELAUNCHED = "the partner returned through a relaunch";
+
+    /**
+     * Reject text a {@code LOBBY_HELLO} used to get while a window is open.
+     *
+     * <p>No longer sent by this build: a hello that clears the host's password gate ends the wait
+     * instead of being turned away (see {@link #REASON_PARTNER_RELAUNCHED}), and one that does not
+     * clear it gets a challenge or the password reject. It stays in the vocabulary because the guest
+     * still has to handle it — a host on an older build sends it, and that reject arrives before the
+     * handshake that would have caught the version skew. The guest's rule for it is unchanged and
+     * must stay that way: retryable, because the host's answer changes on its own.
+     */
     public static final String LOBBY_REJECT_IN_GRACE = "session in reconnect grace";
 
     /**

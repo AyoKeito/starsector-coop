@@ -142,3 +142,30 @@ function Resolve-CoopTestRoot {
     }
     return Resolve-CoopFullPath $TestRoot
 }
+
+<#
+.SYNOPSIS
+Throws unless $SeedString is blank or matches "MN-" followed by one or more digits that fit a
+signed 64-bit long.
+
+.DESCRIPTION
+Mirrors coop.net.CoopNetStartupConfig.validateNewGameSeed exactly, so a bad -SeedString fails here,
+at the console, instead of being written into vmparams and crashing vanilla's own new-game code deep
+in CampaignState.createUI with a bare NumberFormatException once the player presses New Game (live
+crash: -Dcoop.newGameSeed=MN-9999999999999999999, 19 nines, past [long]::MaxValue).
+#>
+function Assert-CoopSeedString {
+    param([string] $SeedString)
+    if ([string]::IsNullOrWhiteSpace($SeedString)) {
+        return
+    }
+    if ($SeedString -cnotmatch '^MN-[0-9]+$') {
+        throw ("-SeedString '$SeedString' must look like `"MN-`" followed by one or more digits.")
+    }
+    $digits = $SeedString.Substring(3)
+    $parsed = 0L
+    if (-not [long]::TryParse($digits, [ref] $parsed)) {
+        throw ("-SeedString '$SeedString': the digits after `"MN-`" must fit in a signed 64-bit long" +
+            " (max $([long]::MaxValue)).")
+    }
+}

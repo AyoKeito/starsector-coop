@@ -100,6 +100,13 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_RECONNECT_RESUMED = "reconnectResumed";
     private static final String FEED_RECONNECT_ENDED = "reconnectEnded";
     private static final String FEED_RECONNECT_EXTENDED = "reconnectExtended";
+    private static final String FEED_RECONNECT_RELAUNCHED = "reconnectRelaunched";
+    /**
+     * How long a guest that has just sent a deterministic reject holds its socket open so the reject
+     * can leave it. Two seconds is far past any local flush and still short enough that a player
+     * staring at the failure dialog never notices it; the ordinary case exits in the same frame.
+     */
+    private static final long TERMINAL_STOP_LINGER_MILLIS = 2_000L;
     private static final String FEED_LOBBY_JOINED = "lobbyJoined";
     private static final String FEED_LOBBY_LEFT = "lobbyLeft";
     private static final String FEED_LOBBY_READY = "lobbyReady";
@@ -218,6 +225,17 @@ public class CoopNetPump implements EveryFrameScript {
      * edge and read nowhere else; no replication decision depends on it.
      */
     private boolean peerDroppedAfterLiveSession;
+    /**
+     * Host: the guest accepted this session's seed lock, i.e. it reached
+     * {@link coop.session.CoopJoinPhase#SEED_LOCKED}. The host's own
+     * {@link #isGameplaySessionActive()} cannot answer that question - it goes true when the host
+     * records its own seed at {@code SEED_LOCK_REQUEST} time, several round trips earlier.
+     */
+    private boolean guestSeedLockAcked;
+    /** Guest: the reject reason a terminal stop is waiting to send; null when none. See tickTerminalStop. */
+    private String pendingTerminalStopReason;
+    /** When that wait gives up and closes the loop regardless. */
+    private long terminalStopDeadlineMillis;
     // ---- Phase 20 red-team state -----------------------------------------------------------------
     /** Shared throttle for every "this could be a packet flood" log line below. */
     private static final long FAILURE_LOG_INTERVAL_MILLIS = 10_000L;
@@ -348,6 +366,8 @@ public class CoopNetPump implements EveryFrameScript {
     private static final int LOBBY_NO_UI_RELEASE_FRAMES = 60;
     /** Host-authoritative roster; on the guest, the mirror of the host's. */
     private final coop.session.CoopLobbyRoster lobbyRoster = new coop.session.CoopLobbyRoster();
+    /** Inbound messages the pre-drain pulled off the transport but left for {@link #drainInbound()}. */
+    private final java.util.ArrayDeque<CoopMessages.Message> deferredInbound = new java.util.ArrayDeque<>();
     private final coop.ui.CoopDialogController lobbyDialogs =
             new coop.ui.CoopDialogController("lobby", this::nowMillis);
     private final coop.ui.CoopDialogController connectingDialogs =
@@ -883,6 +903,11 @@ public class CoopNetPump implements EveryFrameScript {
         reconnect.end(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER);
     }
 
+    /** Test seam: the player pressed the reconnect dialog's "wait longer" option. */
+    void extendReconnectWaitForTest() {
+        extendReconnectWait();
+    }
+
     // ---- Phase 21 desync dialogs -------------------------------------------------------------------
 
     /**
@@ -1008,11 +1033,55 @@ public class CoopNetPump implements EveryFrameScript {
      * its lobby open for a corrected guest, which is the pre-Phase-21 behaviour and the right one.
      */
     private void goTerminalOnGuestReject(String rawReason) {
-        if (service.role() != CoopConnectionRole.GUEST) {
+        if (service.role() != CoopConnectionRole.GUEST || pendingTerminalStopReason != null) {
             return;
         }
+        // Armed, not executed. See tickTerminalStop.
+        pendingTerminalStopReason = rawReason == null ? "" : rawReason;
+        terminalStopDeadlineMillis = clockMillis.getAsLong() + TERMINAL_STOP_LINGER_MILLIS;
+    }
+
+    /**
+     * Closes the guest's connect loop once the reject that ended it has actually left the socket
+     * (Phase 21 live smoke, wrong-seed guest).
+     *
+     * <p><b>The defect.</b> {@code stopReconnecting} closes every link, and a link closing drops
+     * whatever is still queued on it. The rejects are queued by {@code sendTo} from inside an inbound
+     * handler and only reach the wire on the frame's closing {@code flushOutbound}, so calling
+     * {@code stopReconnecting} from the same handler threw the reject away before it was ever
+     * written. The host then saw a bare disconnect: no {@code SEED_LOCK_REJECT}, no matching
+     * {@code [COOP-DOCTOR]} line, and - until the eligibility rule below - a 60 s reconnect grace for
+     * a session the guest had just refused.
+     *
+     * <p><b>The linger.</b> Called immediately after the frame's closing flush, so in the ordinary
+     * case the wait is a few microseconds: the flush hands the bytes to the kernel, the queue reads
+     * empty, and the loop stops on the same frame the reject was queued. The deadline is the backstop
+     * for a socket that is not draining ({@link #TERMINAL_STOP_LINGER_MILLIS}), and a peer that
+     * closed first needs no linger at all - there is nothing left to write to.
+     *
+     * <p>Deliberately not a "wait N frames" counter: frames are however long the game makes them, and
+     * what this is waiting for is the queue, which the transport can already answer.
+     */
+    private void tickTerminalStop() {
+        if (pendingTerminalStopReason == null) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        boolean queueEmpty = service.outboundQueueDepth() <= 0;
+        boolean expired = now >= terminalStopDeadlineMillis;
+        boolean linkAlreadyGone = !service.isConnected();
+        if (!queueEmpty && !expired && !linkAlreadyGone) {
+            return;
+        }
+        String reason = pendingTerminalStopReason;
+        pendingTerminalStopReason = null;
+        if (expired && !queueEmpty) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not flush the reject to the host within "
+                    + (TERMINAL_STOP_LINGER_MILLIS / 1000L) + " s; closing the connect loop anyway."
+                    + " The host will see a bare disconnect rather than the reason.");
+        }
         try {
-            service.stopReconnecting(rawReason);
+            service.stopReconnecting(reason);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Coop could not stop the connect loop after a reject", ex);
         }
@@ -1844,7 +1913,9 @@ public class CoopNetPump implements EveryFrameScript {
                             + remoteDisplayName() + " dropped.", FEED_WARN_COLOR);
                 }
                 lobbyStartAnyway = false;
-                lobbyRoster.markReconnecting(guestId, now);
+                // The number on the row is the window's remaining, read from the coordinator every
+                // frame: the roster has no window of its own and must not invent one.
+                lobbyRoster.markReconnecting(guestId, now, reconnect.remainingMillis(now));
             } else {
                 lobbyRoster.markReconnected(guestId, now);
             }
@@ -1956,13 +2027,63 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    /**
+     * Clears out what a departed partner left in the lobby (Phase 21 live smoke, second finding).
+     *
+     * <p><b>The bug.</b> The countdown-cancel path keeps the lobby open with the dropped player's row
+     * in its reconnecting state, which is right while the wait is running and wrong the moment it
+     * stops. Nothing removed that row when the wait ended, and {@link #dropDepartedGuestRows} could
+     * not: it only runs while the session record has no guest at all, and a relaunch rejoin fills
+     * that slot on the same frame the wait ends. The host lobby then showed three rows - the host,
+     * the ghost of the old connection still counting, and the real returning guest - so
+     * {@code allReady()} was false and the host was offered "Start anyway" for a partner who was
+     * ready.
+     *
+     * <p>Also drops the phase and ready the departed guest last reported. Those describe a player who
+     * is gone; carried into the next round they show the newcomer further along than it is, and a
+     * still-pending ready would apply to it the moment its row reached SNAPSHOT_APPLIED.
+     *
+     * @param keepPlayerId the one guest allowed to stay (the peer being admitted), or null to drop
+     *                     every guest row; v1 has exactly one guest slot, so two guest rows is always
+     *                     wrong and the survivor is whoever this side is actually talking to
+     * @return true when anything was dropped
+     */
+    private boolean forgetDepartedGuestLobbyRows(String keepPlayerId, String why) {
+        boolean dropped = false;
+        for (coop.session.CoopLobbyRoster.Row row : lobbyRoster.rows()) {
+            if (row.host() || (keepPlayerId != null && keepPlayerId.equals(row.playerId()))) {
+                continue;
+            }
+            String name = row.name();
+            String id = row.playerId();
+            if (lobbyRoster.remove(id)) {
+                dropped = true;
+                CoopLog.info(CoopNetPump.class, "Coop lobby row dropped for " + name
+                        + " (playerId=" + id + "): " + why);
+            }
+        }
+        if (!dropped) {
+            return false;
+        }
+        // The countdown belonged to a roster that no longer exists, and so did the override the host
+        // may have armed against it.
+        lobbyRoster.cancelCountdown();
+        lobbyStartAnyway = false;
+        guestReportedPhase = null;
+        guestReportedReady = false;
+        guestReadyStatePending = false;
+        return true;
+    }
+
     /** Host: the roster on the wire, in the fixed order the lobby renders it. */
     private java.util.List<CoopMessages.LobbyPlayer> lobbyWirePlayers(long now) {
         java.util.List<CoopMessages.LobbyPlayer> players = new java.util.ArrayList<>();
         for (coop.session.CoopLobbyRoster.Row row : lobbyRoster.rows()) {
-            long reconnecting = row.reconnectingSinceMillis() == null
+            // Remaining grace, not elapsed-since-drop: the guest renders the same countdown the
+            // host does, off the same coordinator, without either side trusting the other's clock.
+            long reconnecting = row.reconnectingUntilMillis() == null
                     ? -1L
-                    : Math.max(0L, now - row.reconnectingSinceMillis());
+                    : Math.max(0L, row.reconnectingUntilMillis() - now);
             players.add(new CoopMessages.LobbyPlayer(row.playerId(), row.name(), row.phase().name(),
                     row.ready(), reconnecting, row.reason()));
         }
@@ -2538,7 +2659,7 @@ public class CoopNetPump implements EveryFrameScript {
                     coop.session.CoopJoinPhase.parse(player.phase(),
                             coop.session.CoopJoinPhase.LINK_ESTABLISHED),
                     player.ready(),
-                    player.reconnectingMillis() < 0L ? null : now - player.reconnectingMillis(),
+                    player.reconnectingMillis() < 0L ? null : now + player.reconnectingMillis(),
                     player.reason(), now));
             first = false;
         }
@@ -2552,8 +2673,9 @@ public class CoopNetPump implements EveryFrameScript {
         if (status.released()) {
             if (sessionState.releaseLobby()) {
                 long seconds = Math.max(0L, now - lobbyOpenedAtMillis) / 1000L;
-                CoopLog.info(CoopNetPump.class,
-                        "Coop lobby released (start anyway=false) after " + seconds + " s");
+                // No start-anyway flag: LOBBY_STATUS does not carry one, and printing a constant
+                // false was a wrong answer dressed as a real reading. Only the host knows.
+                CoopLog.info(CoopNetPump.class, "Coop lobby released after " + seconds + " s");
                 postFeed(FEED_LOBBY_STARTED, now, "Co-op: session started.", FEED_GOOD_COLOR);
             }
             closeLobbyUi();
@@ -2888,6 +3010,9 @@ public class CoopNetPump implements EveryFrameScript {
         tickLinkSupervision();
         t = profiler.split(SECTION_LINK_SUPERVISION, t);
         service.flushOutbound();
+        // Immediately behind the flush that carries a deterministic reject onto the wire: the guest's
+        // connect loop may only close once its reason has left the socket.
+        tickTerminalStop();
         profiler.record(SECTION_FLUSH_OUTBOUND_POST, t);
         profiler.endFrame();
     }
@@ -3186,11 +3311,28 @@ public class CoopNetPump implements EveryFrameScript {
                         + " disconnect (connection generation " + lastConnectionGeneration
                         + "); treating it as a drop edge");
             }
+            // The peer's reason before the drop's consequences; see drainTerminalRejectsBeforeDrop.
+            // A reject dispatched here has already ended the session by the time the flags below are
+            // read, which is exactly what makes them read it as a refused join rather than a blip.
+            drainTerminalRejectsBeforeDrop();
             // Read BEFORE anything rewinds: once the lobby is back at HOST_WAITING/GUEST_CONNECTING
             // nothing distinguishes "never had a partner" from "lost the one we had". The HUD
             // needs that distinction to say "guest disconnected, holding" rather than "waiting for
             // guest". Assignment, not OR: a drop during handshake really is not a lost session.
-            peerDroppedAfterLiveSession = isGameplaySessionActive();
+            //
+            // Phase 21 live smoke: "mid-session" has to mean the GUEST reached a session, not that
+            // this host recorded its own seed when it sent the request. isGameplaySessionActive()
+            // goes true on the host at SEED_LOCK_REQUEST time, several round trips before the guest
+            // has accepted anything - so a guest that rejected the seed, or vanished during the
+            // handshake, used to buy a 60 s grace, a reconnect dialog and then a COOP-SESSION expiry
+            // dialog for a session that never existed. SEED_LOCKED is the threshold: below it there
+            // is nothing a resume could restore.
+            boolean guestReachedSeedLock = service.role() != CoopConnectionRole.HOST
+                    || guestPassedSeedLock();
+            peerDroppedAfterLiveSession = isGameplaySessionActive() && guestReachedSeedLock;
+            boolean droppedDuringJoin = isGameplaySessionActive() && !guestReachedSeedLock;
+            // Read before the teardown takes the name away.
+            String departingName = remoteDisplayName();
             // The session id died with the connection: keep accepting datagrams stamped with its token
             // and a reconnecting peer's stale in-flight traffic would apply to the next session. It
             // stays cleared for the whole grace window and is re-set only on an accepted resume.
@@ -3228,6 +3370,15 @@ public class CoopNetPump implements EveryFrameScript {
             } else if (!beginReconnectGrace()) {
                 // Red-team B7: nothing else clears this, and the HUD reads it forever after.
                 peerDroppedAfterLiveSession = false;
+                if (droppedDuringJoin) {
+                    CoopLog.warn(CoopNetPump.class, "Coop guest left during the join handshake before"
+                            + " it accepted the seed lock; no reconnect grace is owed and the lobby"
+                            + " goes back to waiting for a guest");
+                    // Same feed key as the roster's own departure line, so the two collapse into one
+                    // notice rather than telling the player the same thing twice.
+                    postFeed(FEED_LOBBY_LEFT, clockMillis.getAsLong(), "Co-op: " + departingName
+                            + " left during the join handshake.", FEED_WARN_COLOR);
+                }
                 endSessionAfterDrop();
             }
         }
@@ -3313,6 +3464,8 @@ public class CoopNetPump implements EveryFrameScript {
     private void endSessionAfterDrop() {
         boolean changed = sessionState.onChannelDisconnected();
         latestTimeSnapshot = null;
+        // The slot is free, so the next guest owes its own seed-lock ack before it counts as one.
+        guestSeedLockAcked = false;
         // Phase 20.6: drop every live reading but keep the event log, so the page still explains what
         // happened after the session it described is gone.
         intelFeed.endSession();
@@ -3342,6 +3495,24 @@ public class CoopNetPump implements EveryFrameScript {
             reconnect.beginGuestReconnect(sessionId, sessionState.localPlayerId(), now);
         }
         return reconnect.active();
+    }
+
+    /**
+     * Host: has the guest reached {@link coop.session.CoopJoinPhase#SEED_LOCKED}? Three sources, any
+     * of which is proof: the {@code SEED_LOCK_ACK} this host accepted, the phase the guest reports in
+     * {@code READY_STATE} (which covers a guest whose ack this host somehow missed), and a released
+     * lobby. The host's own seed state is deliberately not one of them - that is the value that made
+     * a never-joined guest look mid-session.
+     */
+    private boolean guestPassedSeedLock() {
+        return guestSeedLockAcked
+                || (guestReportedPhase != null
+                        && guestReportedPhase.atLeast(coop.session.CoopJoinPhase.SEED_LOCKED))
+                // A released lobby is proof by construction: the gate cannot open without a guest
+                // that reached SNAPSHOT_APPLIED and pressed Ready, which is two phases past the seed
+                // lock. It is listed because the ack flag is per-connection state and this one is
+                // per-session - a session in play must never lose its grace to a bookkeeping gap.
+                || sessionState.lobbyReleased();
     }
 
     /** Frame tick for the grace window and the dialog's retry-until-it-opens loop. */
@@ -3459,9 +3630,15 @@ public class CoopNetPump implements EveryFrameScript {
 
     /**
      * The only vocabulary an unproven peer may speak while a grace window is open: the resume
-     * exchange itself, a lobby hello (which gets the "session in reconnect grace" reject), and the
-     * heartbeat that keeps the half-open detector honest. Deliberately a whitelist — a new message
-     * type must be argued into this window rather than fall into it.
+     * exchange itself, a lobby hello, and the heartbeat that keeps the half-open detector honest.
+     * Deliberately a whitelist — a new message type must be argued into this window rather than fall
+     * into it.
+     *
+     * <p>The hello is on this list because it is the <em>only</em> thing a relaunched partner can
+     * say, and since the Phase 21 live smoke it is served rather than refused: it runs the host's
+     * password gate and, if it clears, ends the wait and opens a fresh lobby round
+     * ({@link #endHostWaitForReturningPartner}). {@code LOBBY_CHALLENGE} below is what makes the
+     * proof round possible in both directions.
      */
     private static boolean allowedDuringReconnectGrace(CoopMessages.Type type) {
         return type == CoopMessages.Type.SESSION_RESUME_REQUEST
@@ -3657,6 +3834,22 @@ public class CoopNetPump implements EveryFrameScript {
             // process - including the fresh lobby the player opens next.
             peerDroppedAfterLiveSession = false;
             endSessionAfterDrop();
+            if (previous == CoopReconnectCoordinator.State.HOST_WAIT) {
+                // In onEnded rather than at any one of the three exits (relaunch, expiry, the
+                // player's give-up), so they cannot diverge: whichever way the wait ended, the held
+                // session is gone and the row standing in for its guest goes with it.
+                forgetDepartedGuestLobbyRows(null, "the reconnect wait ended (" + reason + ")");
+            }
+            // Phase 21 live smoke: the partner knocking on the lobby takes the whole teardown above
+            // and none of the failure furniture below. endHostWaitForReturningPartner already wrote
+            // the one line this deserves, on the frame it still knew the numbers, and the lobby it
+            // is opening is the explanation - not a WARN, not a "session ended" banner, and not a
+            // [COOP-DOCTOR] marker, because nothing here is a desync.
+            if (CoopReconnectCoordinator.REASON_PARTNER_RELAUNCHED.equals(reason)) {
+                CoopLog.info(CoopNetPump.class, "Coop held session cleared as " + service.role()
+                        + "; the returning partner runs an ordinary lobby round on this connection");
+                return;
+            }
             CoopLog.warn(CoopNetPump.class, "Coop reconnect grace closed without a resume as "
                     + service.role() + " (" + reason + "); the session is over");
             postFeed(FEED_RECONNECT_ENDED, now, "Co-op: session ended - " + reason + ".", FEED_BAD_COLOR);
@@ -3670,32 +3863,91 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
-    private void drainInbound() {
+    /**
+     * The peer's last word, dispatched before this frame acts on the drop that came with it (Phase 21
+     * live smoke, wrong-seed guest).
+     *
+     * <p>A guest that rejects deterministically sends the reject and closes, so the bytes and the FIN
+     * land in the same poll on this side. {@link #detectPeerDisconnect()} runs before
+     * {@link #drainInbound()} for a reason that must not be undone - the drop edge has to open the
+     * reconnect window before the resume request already sitting in the queue is dispatched, or a
+     * returning guest is answered "no window is open" - so this cannot be a blanket pre-drain. It is
+     * a whitelist of the three "here is why this is over" messages instead: everything else is put
+     * aside in {@link #deferredInbound} and reaches {@code drainInbound} in its original order, a few
+     * lines later, exactly as before.
+     *
+     * <p>Dispatching them here rather than after the teardown is what makes the two logs match: the
+     * session record is still whole, so {@code handleSeedLockReject} reads the same session id the
+     * guest stamped on its own {@code [COOP-DOCTOR]} line, and the drop that follows is then judged
+     * against a session the reject has already ended.
+     */
+    private void drainTerminalRejectsBeforeDrop() {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
-            logInbound(message);
-            // Any inbound TCP message proves the peer's process is alive and its pump is running.
-            // That is what lets the UDP-blocked rule tell "the network eats UDP" apart from "the peer
-            // is in combat", where both transports go quiet together.
-            linkQuality.noteInboundTcp(clockMillis.getAsLong());
-            // Log-and-drop guard: handlers throw freely (missing payload fields, unknown enum values,
-            // out-of-order lobby messages). Letting one escape kills EveryFrameScript.advance() and
-            // with it the whole pump, so a version-skewed peer or a stray connection could take the
-            // session down. One bad message is a bug to log, never a peer to disconnect (Phase 12b).
-            long dispatchStart = profiler.start();
-            try {
-                dispatchInbound(message);
-            } catch (RuntimeException | LinkageError ex) {
-                // LinkageError too (red-team C9): a handler that reaches an engine class this build
-                // does not have throws Error, not Exception, and the whole point of this guard is
-                // that no single inbound message may take the pump down.
-                CoopLog.warn(CoopNetPump.class, "Coop dropped malformed/unexpected message type="
-                        + message.type() + " seq=" + message.seq(), ex);
+            if (isTerminalRejectType(message.type())) {
+                dispatchOneInbound(message);
+            } else {
+                deferredInbound.add(message);
             }
-            // Per-type so one expensive handler stands out in the summary rather than hiding inside
-            // the aggregate drain cost. Runs on the throwing path too: the catch above swallows.
-            profiler.record(SECTION_BY_MESSAGE_TYPE[message.type().ordinal()], dispatchStart);
         }
+    }
+
+    /**
+     * The peer's verdicts on a join; see {@link #drainTerminalRejectsBeforeDrop()}.
+     *
+     * <p>{@code HANDSHAKE_RESULT} carries both the accept and the reject - the distinction is in the
+     * payload - so it is whitelisted whole rather than parsed here. Dispatching an accept a few lines
+     * early costs nothing: it validates a handshake the drop is about to tear down anyway, exactly as
+     * it would have from the ordinary drain.
+     *
+     * <p><b>{@code LOBBY_REJECT} is deliberately not on this list</b>, symmetrical as it would look.
+     * The guest's answer to it is F5's: enter {@code REJECTED} <em>after</em> the drop edge has
+     * rewound the lobby, so the reason survives on the HUD and {@code noteChannelConnected} rearms on
+     * the next connection. Pulling it forward puts the rewind last, which wipes the reason the player
+     * is owed. The seed and handshake rejects have no such ordering to protect - what they owe is a
+     * doctor marker carrying the session id, and that only exists before the teardown.
+     */
+    private static boolean isTerminalRejectType(CoopMessages.Type type) {
+        return type == CoopMessages.Type.SEED_LOCK_REJECT
+                || type == CoopMessages.Type.HANDSHAKE_RESULT;
+    }
+
+    private void drainInbound() {
+        CoopMessages.Message message;
+        while ((message = nextInbound()) != null) {
+            dispatchOneInbound(message);
+        }
+    }
+
+    /** Anything the pre-drain set aside comes first, so the peer's order is the order we apply. */
+    private CoopMessages.Message nextInbound() {
+        CoopMessages.Message deferred = deferredInbound.poll();
+        return deferred != null ? deferred : service.pollInbound();
+    }
+
+    private void dispatchOneInbound(CoopMessages.Message message) {
+        logInbound(message);
+        // Any inbound TCP message proves the peer's process is alive and its pump is running.
+        // That is what lets the UDP-blocked rule tell "the network eats UDP" apart from "the peer
+        // is in combat", where both transports go quiet together.
+        linkQuality.noteInboundTcp(clockMillis.getAsLong());
+        // Log-and-drop guard: handlers throw freely (missing payload fields, unknown enum values,
+        // out-of-order lobby messages). Letting one escape kills EveryFrameScript.advance() and
+        // with it the whole pump, so a version-skewed peer or a stray connection could take the
+        // session down. One bad message is a bug to log, never a peer to disconnect (Phase 12b).
+        long dispatchStart = profiler.start();
+        try {
+            dispatchInbound(message);
+        } catch (RuntimeException | LinkageError ex) {
+            // LinkageError too (red-team C9): a handler that reaches an engine class this build
+            // does not have throws Error, not Exception, and the whole point of this guard is
+            // that no single inbound message may take the pump down.
+            CoopLog.warn(CoopNetPump.class, "Coop dropped malformed/unexpected message type="
+                    + message.type() + " seq=" + message.seq(), ex);
+        }
+        // Per-type so one expensive handler stands out in the summary rather than hiding inside
+        // the aggregate drain cost. Runs on the throwing path too: the catch above swallows.
+        profiler.record(SECTION_BY_MESSAGE_TYPE[message.type().ordinal()], dispatchStart);
     }
 
     private void dispatchInbound(CoopMessages.Message message) {
@@ -3847,23 +4099,24 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
-        // Phase 20.2: while a grace window is open the slot still belongs to the partner that lost
-        // it. Note this is also what a *returning* guest gets if it somehow sends a hello instead of
-        // a resume request — it should retry, not be adopted as a new guest on the held session.
-        if (reconnect.hostWaiting()) {
-            CoopMessages.Message reject = CoopMessages.lobbyReject(
-                    service.nextSeq(),
-                    clockMillis.getAsLong(),
-                    CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE);
-            service.sendTo(message.senderId(), reject);
-            log("outbound", reject);
+        // Phase 20.4: the password gate runs before anything touches the session record, so a wrong
+        // guess never takes the guest slot and never has to be rolled back out of it. It also runs
+        // before the reconnect-grace branch below, which is the whole reason that branch can trust
+        // a hello at all: an unproven stranger is challenged or rejected here and never reaches it.
+        if (!checkLobbyPassword(message)) {
             return;
         }
 
-        // Phase 20.4: the password gate runs before anything touches the session record, so a wrong
-        // guess never takes the guest slot and never has to be rolled back out of it.
-        if (!checkLobbyPassword(message)) {
-            return;
+        // Phase 20.2 + the Phase 21 live smoke. A hello arriving mid-grace used to be answered
+        // "session in reconnect grace" on the theory that a returning guest should retry rather than
+        // be adopted. It cannot retry its way in: a relaunched guest holds neither the session id nor
+        // the player id a SESSION_RESUME_REQUEST is matched on (the id is minted per session at lobby
+        // accept, and its save predates the held one), so LOBBY_HELLO is the only thing it can say.
+        // With the dialog's "wait longer" option in the host player's hands, that was a loop with no
+        // exit: the partner knocked every 20 s and was refused every 20 s while the host extended the
+        // wait. So an authenticated hello ends the wait instead, and this frame goes on to serve it.
+        if (reconnect.hostWaiting()) {
+            endHostWaitForReturningPartner();
         }
 
         CoopPlayerInfo guest = new CoopPlayerInfo(
@@ -3881,6 +4134,11 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
+        // Defence in depth for the same finding: whatever put a second guest row in this roster,
+        // the peer being admitted is the only guest this build can have, so anybody else's row is
+        // stale by definition and must not be left to block the Start gate.
+        forgetDepartedGuestLobbyRows(guest.playerId(),
+                "a new guest was accepted into the single v1 guest slot");
         sessionState.hostAcceptGuest(guest);
         CoopMessages.Message accept = CoopMessages.lobbyAccept(
                 service.nextSeq(),
@@ -3893,6 +4151,44 @@ public class CoopNetPump implements EveryFrameScript {
                 "Coop lobby accepted provisionalLobbyId=" + sessionState.provisionalLobbyId()
                         + " hostPlayerId=" + sessionState.localPlayerId()
                         + " guestPlayerId=" + sessionState.remotePlayerId());
+    }
+
+    /**
+     * Ends a host grace window because the partner came back through a relaunch (Phase 21 live
+     * smoke). Called from {@link #handleLobbyHello} only, and only for a hello that has already
+     * cleared {@link #checkLobbyPassword}.
+     *
+     * <p><b>The teardown is the grace expiry's, deliberately.</b> This runs
+     * {@code reconnect.end(...)}, which is the same call {@link CoopReconnectCoordinator#tick} makes
+     * when the window runs out, so it reaches the same {@link ReconnectListener#onEnded}: the
+     * reconnect hold is released and the dialog closed through the arbiter, the datagram token is
+     * cleared, {@link #peerDroppedAfterLiveSession} is reset, and {@code endSessionAfterDrop()}
+     * rewinds the lobby to {@code HOST_WAITING} with the guest slot free — which is exactly what
+     * the fall-through in the caller needs before it can accept this hello. Building a second,
+     * narrower teardown here is how half-torn state gets shipped.
+     *
+     * <p><b>What it does not inherit.</b> {@code onEnded} branches on the reason so this path writes
+     * no {@code [COOP-DOCTOR]} marker and raises no desync dialog: a partner walking back in is not
+     * a desync, and a modal explaining a session failure over a lobby that is about to open is the
+     * dialog loop Phase 21 spent its red-team budget removing.
+     *
+     * <p><b>Ordering.</b> The log line and the feed line come first, while the window still knows how
+     * much time was left and the session record still knows the id and the partner's name; both are
+     * gone the instant {@code end} returns. The pause is untouched on purpose: the reconnect hold is
+     * released inside {@code onEnded} and {@link #maybeHoldPausedUntilSessionReady()} takes the same
+     * clock straight back over as the no-session hold later in this frame, with
+     * {@link #coopHoldPaused} still recording the pause as coop's own (F2).
+     */
+    private void endHostWaitForReturningPartner() {
+        long now = clockMillis.getAsLong();
+        int secondsLeft = reconnect.remainingSeconds(now);
+        String heldSession = sessionState.sessionId();
+        CoopLog.info(CoopNetPump.class, "Coop reconnect wait ended: "
+                + CoopReconnectCoordinator.REASON_PARTNER_RELAUNCHED + "; opening the lobby ("
+                + secondsLeft + " s were left on session " + heldSession + ")");
+        postFeed(FEED_RECONNECT_RELAUNCHED, now, "Co-op: " + remoteDisplayName()
+                + " is back after a relaunch - starting a fresh lobby round.", FEED_GOOD_COLOR);
+        reconnect.end(CoopReconnectCoordinator.REASON_PARTNER_RELAUNCHED);
     }
 
     // ---- Phase 20.4: optional lobby password -----------------------------------------------------
@@ -4132,6 +4428,15 @@ public class CoopNetPump implements EveryFrameScript {
      * window's {@link CoopReconnectCoordinator#LOBBY_REJECT_IN_GRACE} — is retryable, because the
      * host's answer can change without either side relaunching. Those keep the retry loop but back it
      * off to 5 s; a plain TCP drop with no reject still retries at 500 ms.
+     *
+     * <p>{@code LOBBY_REJECT_IN_GRACE} is no longer sent by a host on this build — an authenticated
+     * hello ends the wait instead of being turned away — but it stays retryable here on purpose. It
+     * arrives before the handshake that would have caught a version skew, so a host on an older build
+     * is exactly the peer that still sends it, and the correct answer to it has always been "ask
+     * again in 5 s": that host's window does expire on its own. The related v1 limitation lives on
+     * the host side and cannot be fixed from here: a relaunched process mints a new player id, so the
+     * host cannot tell the returning partner from a different guest who knows the password, and on a
+     * passwordless host it cannot tell it from anyone at all.
      */
     private void handleLobbyReject(CoopMessages.Message message) {
         // Parse once: the second parse used to run after guestRejectLobby had already changed state,
@@ -4525,6 +4830,11 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
+        // The one unambiguous record that the guest reached SEED_LOCKED; read by the grace
+        // eligibility rule in detectPeerDisconnect and cleared with the session in
+        // endSessionAfterDrop. Not cleared on a drop: a session held through a grace window is still
+        // a session whose guest passed the seed lock.
+        guestSeedLockAcked = true;
         CoopLog.info(CoopNetPump.class,
                 "Coop seed lock accepted by guest sectorFingerprint=" + guestFingerprint);
     }

@@ -44,7 +44,10 @@ class CoopReconnectDialogTest {
         assertEquals(List.of(CoopReconnectDialogPlugin.WAIT_MORE_OPTION_TEXT, "End session now"),
                 dialog.options.optionTexts(),
                 "waiting comes first; the destructive option must not be what the eye lands on");
-        assertTrue(dialog.text.paragraphs.get(1).contains("60"));
+        assertEquals(1, dialog.text.paragraphs.size(),
+                "the text panel holds the headline and nothing that ticks");
+        assertEquals(1, dialog.live.panelsShown);
+        assertTrue(dialog.live.text().contains("60"));
 
         // 40 s in, 20 s left, and the host decides to keep waiting.
         now.set(41_000L);
@@ -53,8 +56,11 @@ class CoopReconnectDialogTest {
 
         assertTrue(reconnect.hostWaiting(), "the window stays open");
         assertEquals(320, reconnect.remainingSeconds(now.get()));
-        assertEquals("Holding for 320 more seconds...", dialog.text.paragraphs.get(1),
+        assertEquals("Holding for 320 more seconds...", dialog.live.text(),
                 "the countdown moves on the click, not a frame later");
+        assertEquals(List.of(), dialog.text.replacements,
+                "and it moves by setText; a text-panel write once a second is what players saw"
+                        + " as the whole dialog flashing");
         assertEquals(0, dialog.dismissCount, "waiting must not close the dialog");
         assertEquals(List.of(CoopReconnectDialogPlugin.WAIT_MORE_OPTION_TEXT, "End session now"),
                 dialog.options.optionTexts(),
@@ -89,7 +95,7 @@ class CoopReconnectDialogTest {
 
         assertTrue(reconnect.guestReconnecting());
         assertEquals(310, reconnect.remainingSeconds(now.get()));
-        assertEquals("Retrying for 310 more seconds...", dialog.text.paragraphs.get(1));
+        assertEquals("Retrying for 310 more seconds...", dialog.live.text());
         assertEquals(0, dialog.dismissCount);
     }
 
@@ -126,9 +132,13 @@ class CoopReconnectDialogTest {
         now.set(31_000L);
         plugin.advance(0.016f);
 
-        assertEquals("Holding for 30 more seconds...", dialog.text.paragraphs.get(1));
-        assertEquals(2, dialog.text.paragraphs.size(),
-                "the countdown is a paragraph rewrite, never a second paragraph");
+        assertEquals("Holding for 30 more seconds...", dialog.live.text());
+        assertEquals(List.of("Holding for 30 more seconds..."), dialog.live.setTexts,
+                "one setText, on the second the number changed");
+        assertEquals(1, dialog.text.paragraphs.size(),
+                "the text panel is written once, at init, and never again");
+        assertEquals(List.of(), dialog.text.replacements);
+        assertEquals(0, dialog.hideVisualCalls, "the visual panel is where the countdown lives");
     }
 
     private static final class NoOpListener implements CoopReconnectCoordinator.Listener {
@@ -149,14 +159,20 @@ class CoopReconnectDialogTest {
     private static final class RecordingDialog {
         private final RecordingTextPanel text = new RecordingTextPanel();
         private final RecordingOptionPanel options = new RecordingOptionPanel();
+        private final RecordingLiveLine live = new RecordingLiveLine();
         private int dismissCount;
+        private int hideVisualCalls;
 
         private InteractionDialogAPI proxy() {
             return (InteractionDialogAPI) Proxy.newProxyInstance(
                     InteractionDialogAPI.class.getClassLoader(),
                     new Class<?>[]{InteractionDialogAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
-                        case "hideVisualPanel" -> null;
+                        case "hideVisualPanel" -> {
+                            hideVisualCalls++;
+                            yield null;
+                        }
+                        case "getVisualPanel" -> live.proxy();
                         case "getTextPanel" -> text.proxy();
                         case "getOptionPanel" -> options.proxy();
                         case "dismiss" -> {
@@ -173,6 +189,7 @@ class CoopReconnectDialogTest {
 
     private static final class RecordingTextPanel {
         private final List<String> paragraphs = new ArrayList<>();
+        private final List<String> replacements = new ArrayList<>();
 
         private TextPanelAPI proxy() {
             return (TextPanelAPI) Proxy.newProxyInstance(
@@ -184,6 +201,7 @@ class CoopReconnectDialogTest {
                             yield null;
                         }
                         case "replaceLastParagraph" -> {
+                            replacements.add((String) args[0]);
                             paragraphs.set(paragraphs.size() - 1, (String) args[0]);
                             yield null;
                         }

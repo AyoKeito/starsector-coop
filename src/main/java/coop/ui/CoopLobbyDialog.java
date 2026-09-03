@@ -17,11 +17,11 @@ import java.util.function.Supplier;
  * Phase 21's in-campaign lobby: who is connected, how far along they are, what the connection looks
  * like, and the two-stage gate that starts the session.
  *
- * <p><b>A plain interaction dialog, no custom panel.</b> {@code advance()} ticks every frame while a
- * dialog is open (including while paused), the option panel can be rebuilt in place, and the text
- * panel has {@code clear()} — which is the whole lobby. A {@code CustomPanelAPI} would buy widget
- * layout at the cost of the undocumented "buttonPressed never fires for a plugin-less panel" trap and
- * a documented {@code removeComponent} leak on repeated rebuild. Nothing here needs either.
+ * <p><b>A plain interaction dialog.</b> {@code advance()} ticks every frame while a dialog is open
+ * (including while paused), the option panel can be rebuilt in place, and the text panel has
+ * {@code clear()}, which is the roster. The one custom panel here holds a single label and takes no
+ * input, so neither the "buttonPressed never fires for a plugin-less panel" trap nor the
+ * {@code removeComponent} leak on repeated rebuild applies: it is built once and never rebuilt.
  *
  * <p><b>Inescapable by design:</b> {@code setOptionOnEscape} is never called, exactly as every vanilla
  * tutorial dialog does it. The world is held paused behind this dialog and the only ways out are
@@ -31,6 +31,16 @@ import java.util.function.Supplier;
  * "Yes, start anyway" / "Back" rather than opening a nested {@code showCustomDialog}: a nested dialog
  * fires {@code customDialogCancel()} on ESC no matter what, which would be an ESC that half-escapes
  * an inescapable dialog.
+ *
+ * <p><b>Rebuild rarely, and never for a number.</b> A player watching the countdown reported the
+ * lobby as "pretty much unreadable": the view carries three numbers that move on their own (elapsed,
+ * countdown, RTT), and any of them changing used to clear and rebuild both panels. Writing to the
+ * text panel once a second turned out to be the flash all by itself, however little was written; the
+ * same player saw the reconnect dialog blink on a bare
+ * {@code replaceLastParagraph}. So a text-panel rebuild happens only when
+ * {@link CoopLobbyView#structuralKey()} changes - the roster, the gate, a countdown starting or
+ * being cancelled, the confirmation, a failed render being retried - and every ticking number is a
+ * {@link CoopLiveDialogLine} label in the visual panel, updated with {@code setText}.
  *
  * <p><b>Total, like the rest of the coop UI.</b> Every engine call is wrapped: a dialog that cannot
  * render must never take down the pump frame that is running the session behind it.
@@ -53,7 +63,11 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
     static final String TEXT_READY = "Ready";
     static final String TEXT_NOT_READY = "Not ready";
 
-    /** Cap on re-renders. The view only changes on player actions and a 1 Hz elapsed counter. */
+    /**
+     * Cap on full rebuilds. Structural change is player-driven and rare; this only exists so a peer
+     * flapping between two rosters cannot make the panel strobe. Live ticks are not rate-limited by
+     * the clock at all: they are one setText on a label, and only when the value moved.
+     */
     static final long MIN_RENDER_INTERVAL_MILLIS = 250L;
 
     private final Supplier<CoopLobbyView> viewSupplier;
@@ -64,7 +78,10 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
     private final Consumer<Boolean> onReadyChanged;
 
     private InteractionDialogAPI dialog;
-    private CoopLobbyView rendered;
+    /** The structural half of the last view both panels were built for; null until that succeeds. */
+    private CoopLobbyView.Key renderedKey;
+    /** The ticking numbers, as a label in the visual panel rather than as text-panel content. */
+    private final CoopLiveDialogLine liveLine = new CoopLiveDialogLine();
     private long lastRenderAtMillis = Long.MIN_VALUE;
     private boolean confirmingStartAnyway;
     private boolean renderFailed;
@@ -94,19 +111,27 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
     @Override
     public void init(InteractionDialogAPI dialog) {
         this.dialog = dialog;
-        try {
-            dialog.hideVisualPanel();
-        } catch (Throwable ignored) {
-            // Cosmetic only: a visual panel that will not hide beats no lobby at all.
-        }
         // Never setOptionOnEscape: this dialog is inescapable on purpose.
-        render(currentView(), true);
+        CoopLobbyView view = currentView();
+        if (!liveLine.install(dialog, view == null ? "" : view.liveLine())) {
+            try {
+                dialog.hideVisualPanel();
+            } catch (Throwable ignored) {
+                // Cosmetic only: a visual panel that will not hide beats no lobby at all.
+            }
+        }
+        render(view, true);
     }
 
     @Override
     public void advance(float amount) {
         CoopLobbyView view = currentView();
-        if (view == null || view.equals(rendered)) {
+        if (view == null) {
+            return;
+        }
+        if (view.structuralKey().equals(renderedKey)) {
+            // Nothing a rebuild would change. The label takes the new number; no panel is touched.
+            liveLine.update(view.liveLine());
             return;
         }
         long now = clock.get();
@@ -141,12 +166,15 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
             confirmingStartAnyway = false;
         }
         renderText(view);
+        // The label moves with the rebuild rather than a frame after it: pressing Start should
+        // put the countdown up in the same frame the options change.
+        liveLine.update(view.liveLine());
         if (!renderOptions(view)) {
             // A failed option render leaves the panel cleared and empty, which is the trapped-player
             // bug. Not recording the view as rendered is what makes the next frame try again.
             return;
         }
-        rendered = view;
+        renderedKey = view.structuralKey();
         lastRenderAtMillis = clock.get();
     }
 
@@ -155,10 +183,11 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
      * changed, or everybody readied and the override is not the way in any more.
      */
     private boolean confirmationIsStale(CoopLobbyView view) {
-        if (rendered == null) {
+        if (renderedKey == null) {
             return true;
         }
-        return !rendered.rows().equals(view.rows()) || (view.allReady() && !rendered.allReady());
+        return !renderedKey.rows().equals(view.rows())
+                || (view.allReady() && !renderedKey.allReady());
     }
 
     private void renderText(CoopLobbyView view) {
@@ -170,25 +199,28 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
             if (text == null) {
                 return;
             }
-            // clear()-and-rebuild: the roster is a handful of short lines and it changes only on
-            // player actions, so a full rebuild costs nothing and keeps the ordering honest.
+            // clear()-and-rebuild: the roster is a handful of short lines and, now that the ticking
+            // numbers are handled separately, it changes only on player actions.
             text.clear();
             text.addPara("Co-op lobby - the campaign is held until every player is ready.");
             for (CoopLobbyView.Row row : view.rows()) {
                 text.addPara(row.line());
             }
-            for (String line : view.verdictLines()) {
+            for (String line : view.stableVerdictLines()) {
                 text.addPara(line);
             }
             if (view.afkHint()) {
                 text.addPara("Still waiting after two minutes. \"" + TEXT_START_ANYWAY
                         + "\" starts without them; the guest will mirror a running world.");
             }
-            int seconds = view.countdownSeconds();
-            if (seconds > 0) {
-                text.addPara("Starting in " + seconds + "...");
+            // Nothing that ticks goes in here. The elapsed counter, the countdown and the link
+            // sample are the label in the visual panel; a text panel written once per second is
+            // what the flashing was.
+            if (!liveLine.showing()) {
+                // No label to put them in. Better a number frozen at the moment of the last
+                // structural change than no sign of the countdown at all.
+                text.addPara(view.liveLine());
             }
-            text.addPara("Waiting " + view.elapsedText() + ".");
         } catch (Throwable ex) {
             renderFailed = true;
             CoopLog.warn(getClass(), "Coop lobby could not render its roster", ex);
@@ -211,7 +243,9 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
                         "Keeps waiting.");
                 return true;
             }
-            boolean counting = view.countdownRemainingMillis() >= 0L;
+            // The same predicate the structural key uses, so "a countdown started" always reaches
+            // the option panel even though the seconds inside it never do.
+            boolean counting = view.countingDown();
             if (view.localRole() == CoopConnectionRole.HOST) {
                 if (counting) {
                     options.addOption(TEXT_CANCEL_COUNTDOWN, OPTION_CANCEL_COUNTDOWN,
@@ -280,8 +314,9 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
         CoopLobbyView view = currentView();
         if (view != null) {
             renderText(view);
+            liveLine.update(view.liveLine());
             if (renderOptions(view)) {
-                rendered = view;
+                renderedKey = view.structuralKey();
                 lastRenderAtMillis = clock.get();
             }
         }
@@ -314,6 +349,7 @@ public final class CoopLobbyDialog implements InteractionDialogPlugin, CoopDismi
     public void close() {
         InteractionDialogAPI open = dialog;
         dialog = null;
+        liveLine.clear();
         if (open == null) {
             return;
         }

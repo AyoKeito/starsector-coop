@@ -248,9 +248,10 @@ launch scripts' `-ExtraJvmProps`. All of them are optional in the sense that the
 | `coop.debug.wiretap` | `false` | Logs sampled decoded payloads in both directions plus a per-message-type composed-size histogram every 60 s. Diagnostic only; it prints your session's game state into the log. |
 | `coop.debug.wiretapSample` | `10` | With the wiretap on, log one payload in every N. |
 
-Since Phase 28 milestone 1 these are also file-backed: `saves/common/coop_options.json` for user
-overrides, `mods/coop/data/config/coop_options.json` for the shipped defaults and the full annotated
-schema, `-D` on top of both. `CoopOptionsRegistry` is the typed schema and `CoopOptionsStore` the
+Since Phase 28 milestone 1 these are also file-backed: `saves/common/coop_options.json.data` for
+user overrides (the engine appends `.data` to every `saves/common` name; the store still passes
+`coop_options.json` to `SettingsAPI`), `mods/coop/data/config/coop_options.json` for the shipped
+defaults and the full annotated schema, `-D` on top of both. `CoopOptionsRegistry` is the typed schema and `CoopOptionsStore` the
 precedence stack; the `coop.debug.*` keys are `dOnly` and never read from either file. One rule the
 transport cares about: if any of `coop.hostPort`, `coop.connectHost` or `coop.connectPort` is set as
 a `-D` property, `CoopNetStartupConfig.from` resolves the role from the `-D` layer alone and ignores

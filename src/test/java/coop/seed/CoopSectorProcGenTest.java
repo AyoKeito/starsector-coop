@@ -36,14 +36,14 @@ class CoopSectorProcGenTest {
 
     @Test
     void appliesSeedToCharacterCreationDataWhenPropertyIsSet() {
-        System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, "MN-shared-test-seed");
+        System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, "MN-1234567890123456789");
         Map<String, Object> calls = new HashMap<>();
         CharacterCreationData data = recordingCharacterCreationData(calls);
 
         CoopSectorProcGen.applyCoopSeedIfPresent(data);
 
-        assertEquals("MN-shared-test-seed", calls.get("seedString"));
-        long expectedSeedLong = CoopSeedSync.seedDataFromSeedString("MN-shared-test-seed").seedLong();
+        assertEquals("MN-1234567890123456789", calls.get("seedString"));
+        long expectedSeedLong = CoopSeedSync.seedDataFromSeedString("MN-1234567890123456789").seedLong();
         assertEquals(expectedSeedLong, calls.get("seed"));
     }
 
@@ -72,7 +72,7 @@ class CoopSectorProcGenTest {
 
     @Test
     void tolerantOfNullCharacterCreationData() {
-        System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, "MN-shared-test-seed");
+        System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, "MN-1234567890123456789");
 
         CoopSectorProcGen.applyCoopSeedIfPresent(null);
     }

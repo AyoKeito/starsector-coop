@@ -29,7 +29,16 @@ public final class CoopLobbyRoster {
     /** No countdown is running. */
     public static final long NO_COUNTDOWN = -1L;
 
-    /** Row state words, exactly as the roster renders them. */
+    /**
+     * Row state words, exactly as the roster renders them.
+     *
+     * <p>{@link #STATE_RECONNECTING_PREFIX} is followed by the reconnect grace <em>remaining</em>,
+     * counting down. It used to be followed by the time elapsed since the drop, counting up, which
+     * is what the Phase 21 live smoke read as "Reconnecting 1:55" on a window that had 24 s left:
+     * two different quantities under one label, and the elapsed one kept climbing after the wait it
+     * belonged to was over. The remaining is the only number a player can act on, and the only one
+     * this roster accepts - see {@link #markReconnecting(String, long, long)}.
+     */
     public static final String STATE_CONNECTING = "Connecting...";
     public static final String STATE_READY = "Ready";
     public static final String STATE_NOT_READY = "Not ready";
@@ -47,7 +56,7 @@ public final class CoopLobbyRoster {
         private String name;
         private CoopJoinPhase phase;
         private boolean ready;
-        private Long reconnectingSinceMillis;
+        private Long reconnectingUntilMillis;
         private String reason = "";
         private long lastChangeMillis;
 
@@ -79,9 +88,18 @@ public final class CoopLobbyRoster {
             return ready;
         }
 
-        /** When this row started reconnecting, or null when the player is connected. */
-        public Long reconnectingSinceMillis() {
-            return reconnectingSinceMillis;
+        /**
+         * The instant this row's reconnect grace runs out, on the local clock, or null when the
+         * player is connected. Absolute rather than a duration so the row needs no tick of its own;
+         * the renderer subtracts.
+         */
+        public Long reconnectingUntilMillis() {
+            return reconnectingUntilMillis;
+        }
+
+        /** True while this row is inside a reconnect grace window. */
+        public boolean reconnecting() {
+            return reconnectingUntilMillis != null;
         }
 
         /** A blocking reason that overrides the state word ("Mod mismatch"); "" when there is none. */
@@ -217,24 +235,38 @@ public final class CoopLobbyRoster {
         return changed;
     }
 
-    /** Marks a row as inside its reconnect grace window; the row and its ready value are kept. */
-    public boolean markReconnecting(String playerId, long nowMillis) {
+    /**
+     * Marks a row as inside its reconnect grace window; the row and its ready value are kept.
+     *
+     * <p>{@code remainingMillis} is the window's own remaining time, which only the reconnect
+     * coordinator knows - the roster deliberately cannot make this number up. Re-applied every frame
+     * rather than latched at the drop, so a window the player extends shows the new number on the
+     * next frame instead of a countdown that disagrees with the dialog above it.
+     *
+     * @param remainingMillis milliseconds left in the grace window; clamped at zero
+     * @return true only on the frame the row <em>became</em> reconnecting, so a caller running this
+     *         every frame still gets one event out of it
+     */
+    public boolean markReconnecting(String playerId, long nowMillis, long remainingMillis) {
         Row row = row(playerId);
-        if (row == null || row.reconnectingSinceMillis != null) {
+        if (row == null) {
             return false;
         }
-        row.reconnectingSinceMillis = nowMillis;
-        row.lastChangeMillis = nowMillis;
-        return true;
+        boolean fresh = row.reconnectingUntilMillis == null;
+        row.reconnectingUntilMillis = nowMillis + Math.max(0L, remainingMillis);
+        if (fresh) {
+            row.lastChangeMillis = nowMillis;
+        }
+        return fresh;
     }
 
     /** The reconnect landed: the row goes back to whatever ready value it kept through the window. */
     public boolean markReconnected(String playerId, long nowMillis) {
         Row row = row(playerId);
-        if (row == null || row.reconnectingSinceMillis == null) {
+        if (row == null || row.reconnectingUntilMillis == null) {
             return false;
         }
-        row.reconnectingSinceMillis = null;
+        row.reconnectingUntilMillis = null;
         row.lastChangeMillis = nowMillis;
         return true;
     }
@@ -329,7 +361,7 @@ public final class CoopLobbyRoster {
                 continue;
             }
             sawGuest = true;
-            if (!row.ready || row.reconnectingSinceMillis != null || !row.reason.isEmpty()) {
+            if (!row.ready || row.reconnecting() || !row.reason.isEmpty()) {
                 return false;
             }
         }
@@ -346,7 +378,7 @@ public final class CoopLobbyRoster {
             if (row.host) {
                 continue;
             }
-            if (!row.ready || row.reconnectingSinceMillis != null || !row.reason.isEmpty()) {
+            if (!row.ready || row.reconnecting() || !row.reason.isEmpty()) {
                 return row.name;
             }
         }
@@ -364,8 +396,9 @@ public final class CoopLobbyRoster {
         if (row == null) {
             return "";
         }
-        if (row.reconnectingSinceMillis != null) {
-            return STATE_RECONNECTING_PREFIX + formatClock(Math.max(0L, nowMillis - row.reconnectingSinceMillis));
+        if (row.reconnectingUntilMillis != null) {
+            return STATE_RECONNECTING_PREFIX
+                    + formatClock(Math.max(0L, row.reconnectingUntilMillis - nowMillis));
         }
         if (!row.reason.isEmpty()) {
             return row.reason;
@@ -382,7 +415,7 @@ public final class CoopLobbyRoster {
         return STATE_SYNCING_PREFIX + row.phase.stepIndex() + "/" + CoopJoinPhase.STEP_COUNT;
     }
 
-    /** m:ss, the shape the roster's "Reconnecting 0:42" uses. */
+    /** m:ss, the shape the roster's "Reconnecting 0:42" countdown uses. */
     public static String formatClock(long millis) {
         long totalSeconds = Math.max(0L, millis) / 1000L;
         long minutes = totalSeconds / 60L;
@@ -508,12 +541,12 @@ public final class CoopLobbyRoster {
 
     /** Builds a detached row, for the guest's mirrored roster and for tests. */
     public static Row mirroredRow(String playerId, String name, boolean host, CoopJoinPhase phase,
-                                  boolean ready, Long reconnectingSinceMillis, String reason,
+                                  boolean ready, Long reconnectingUntilMillis, String reason,
                                   long nowMillis) {
         Row row = new Row(requireText(playerId, "playerId"), displayName(name), host,
                 phase == null ? CoopJoinPhase.LINK_ESTABLISHED : phase, nowMillis);
         row.ready = ready;
-        row.reconnectingSinceMillis = reconnectingSinceMillis;
+        row.reconnectingUntilMillis = reconnectingUntilMillis;
         row.reason = reason == null ? "" : reason;
         return row;
     }
