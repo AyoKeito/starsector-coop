@@ -10,6 +10,7 @@ import com.fs.starfarer.api.impl.campaign.procgen.StarAge;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopNetStartupConfig;
 import coop.seed.CoopSectorProcGen;
+import coop.config.CoopOptionsStore;
 import coop.util.CoopLog;
 
 /**
@@ -153,9 +154,13 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
         CoopLog.info(CoopNewGameDialogPlugin.class,
                 "Coop new game panel defaults sectorSize=" + panelSize + " sectorAge=" + panelAge);
 
+        // Through the store, not System.getProperty: -D still wins, but the Phase 31 launcher's
+        // only channel is saves/common/coop_options.json.data, and reading the property directly
+        // made the file layer invisible for exactly these two keys.
+        CoopOptionsStore store = CoopOptionsStore.system();
         CoopNewGameChoices.Choices resolved = CoopNewGameChoices.resolve(
-                System.getProperty(CoopNewGameChoices.SECTOR_SIZE_PROPERTY),
-                System.getProperty(CoopNewGameChoices.SECTOR_AGE_PROPERTY),
+                store.rawOneShot(CoopNewGameChoices.SECTOR_SIZE_PROPERTY),
+                store.rawOneShot(CoopNewGameChoices.SECTOR_AGE_PROPERTY),
                 panelSize,
                 panelAge);
         for (String warning : resolved.warnings()) {

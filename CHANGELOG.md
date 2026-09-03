@@ -64,13 +64,42 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   (`COOP-SEED`, `COOP-MODS`, `COOP-SESSION`) that also lands in both logs.
 - A "connection doctor" block in the log answers "why can't we connect" in one screen, on both sides.
 
+**Starting the game**
+
+- `Coop Launcher.cmd` in the mod folder: a window with the settings in it, so nobody has to learn a
+  `-D` property to play. It runs on the JRE that ships with the game, writes
+  `saves\common\coop_options.json.data`, and starts the game; the vanilla launcher still comes up and
+  you still press Play there. Windows only in this release.
+- An invite line, `coop://host:port/?seed=...&pw=...`. The host presses Copy invite, the guest presses
+  Paste invite and has the address, the port, the password and the seed filled in at once. The
+  password is generated for the host rather than left empty.
+- Check my connection on the host runs the port mapping and the connection doctor before the game is
+  loaded and puts the result on screen. It then holds the port so the guest's Test connection can
+  measure TCP, UDP and round trip against it.
+- An install check that names what is wrong: the missing classpath entry, an unticked mod, a mixed-up
+  pair of jars, an unreadable settings file, and a leftover `-Dcoop.*` in `vmparams` that would
+  silently outrank everything you set in the launcher. It reports and never edits `vmparams` or
+  `enabled_mods.json`.
+- Save a bug report: one zip on your Desktop with both game logs, the launcher log, your settings,
+  your `vmparams`, your mod list, your newest save and a summary carrying the last `[COOP-DOCTOR]`
+  line. The password is blanked out of everything in it. Both players press it; `REPORTING.md` says
+  what to do with the two files.
+- An update check at start, one request to GitHub's releases API, shown as a row in the install
+  check. LazyWizard's Version Checker is supported too, through a `coop.version` file. Both matter
+  more here than in a single-player mod: the handshake compares the commit baked into the jar, so a
+  stale download on one side refuses the session.
+- The release is one packaged artifact. `scripts\package-release.ps1` builds the zip and refuses to
+  make one from an uncommitted tree, mismatched version strings, or jars built at another commit, so
+  the download both players install is the same download.
+
 **Saving**
 
 - Co-ordinated saves on both machines. The guest rejoins by loading its co-op save.
 
 **Fixed before release**
 
-Found in the two-player test run on 2026-09-03 and fixed the same day.
+Found in the two-player test run on 2026-09-03 and in the launcher work that followed, and fixed the
+same day.
 
 - A player who had to restart the game was refused for the whole 60 second wait. Reloading the co-op
   save now ends the wait the moment it connects, and "wait longer" no longer pushes it further away.
@@ -84,6 +113,12 @@ Found in the two-player test run on 2026-09-03 and fixed the same day.
 - A seed longer than the game can store crashed it on the New Game screen. An unusable seed is now
   ignored with a log line, and the launch scripts refuse it before writing it into `vmparams`.
 - Two of the refusal dialogs handed the host the instructions meant for the player at the other end.
+- The seed, the sector size and the star age could only be given as `-D` properties, which left the
+  launcher no way to set them. All three now read from `saves\common\coop_options.json.data` as well.
+- The guest's New Game banner said the seed and world settings come from the host. They do not: the
+  guest generates its own sector and the seed lock verifies it afterwards. It now says the seed comes
+  from the invite.
+- The mod's description in Starsector's own mod list was reworded.
 
 **Known limits.** Both players need identical Starsector versions and identical mod lists, and both
 have to edit one line in `vmparams` by hand. Traffic is plaintext. One guest. Both players

@@ -37,15 +37,15 @@
       "note": "after the private soak / public release"
     }
   ],
-  "hereHead": "You are here: V1 code complete and smoke-verified; outstanding: the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
-  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span> needs the forum-thread URL for the listing text (the desync dialog's support link resolves now that the repository is public), and the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code> still has to be removed or dev-gated before a public build. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass) and the parked Phase 14 cosmetics listed under attention. Everything else in the V1 order is built and smoke-verified; the history is in the phase ledger and the git log.",
+  "hereHead": "You are here: V1 code complete and smoke-verified; outstanding: the coop launcher (Phase 31), the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
+  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is in build: a Swing window that writes <code>saves/common/coop_options.json.data</code>, reports install problems, runs the host doctor plus a guest test connection, and starts the game. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>; its install guide is rewritten around the launcher when Phase 31 lands. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
       "sevLabel": "action",
-      "head": "Two items before Phase 19: the listing URL and the Ziggurat test start",
+      "head": "Before Phase 19: the launcher, the listing URL and the Ziggurat test start",
       "state": "open",
-      "body": "<span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt, <code>a62886d</code>). Left: the forum-thread URL in <code>docs/player/LISTING.md</code>, and the COOP TEST Ziggurat new-game option in <code>data/campaign/rules.csv</code>, which must be removed or dev-gated before a public build. Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the final two-instance checklist, fixes limited to what it fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass)."
+      "body": "<span class=\"rp\" data-jump=\"31\">Phase 31</span> (coop launcher) is the new V1 blocker, decided 2026-09-03: report-only install checks, invite string, host pre-flight, guest test connection, Windows only. <span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt, <code>a62886d</code>). Left there: the forum-thread URL in <code>docs/player/LISTING.md</code>, the COOP TEST Ziggurat new-game option in <code>data/campaign/rules.csv</code> (remove or dev-gate before a public build), and the install-guide rewrite once the launcher exists. Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the final two-instance checklist, fixes limited to what it fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass)."
     },
     {
       "sev": "gap",
@@ -954,6 +954,29 @@
       ],
       "residue": [],
       "note": "Built, live-verified, AND polished 2026-08-25, same day as the spec (c51ee37/4ed9a77 build; live check + automated 7-item 12c smoke portion all PASS; 1f4aed2 fixed every run-surfaced nit and added status.pause stall diagnosis, markets verb, diffable visibility.view, ss_diff ignore, help-popup seeding; 959 mod + 31 MCP tests). Read + diff + setup verbs only — no UI synthesis; UI-listener checks (claim race, sell-back, hire) stay manual by design. Phase 23 dormancy checklist line added."
+    },
+    {
+      "id": "31",
+      "num": 31,
+      "title": "Coop Launcher",
+      "theme": "config",
+      "track": "v1",
+      "status": "built",
+      "summary": "A Windows launcher window (Swing jar on the game's bundled JRE) that writes the options file the mod already reads, checks the install, runs the host doctor and a launcher-to-launcher test connection, then starts the game with a log tail. Invite string carries address, port, seed and password so the guest pastes one line.",
+      "introduces": [
+        "jars/coop-launcher.jar + Coop Launcher.cmd",
+        "invite string coop://host:port/?seed=…",
+        "install check rows (report-only)",
+        "host pre-flight via CoopPortMapper + doctor",
+        "guest test connection (banner-first probe)",
+        "starsector.log status tail"
+      ],
+      "residue": [
+        "Windows only; starsector.sh installs keep the manual path",
+        "seed over the wire stays a Maybe",
+        "no external reachability probe"
+      ],
+      "note": "Created, decided AND built 2026-09-03 (2275 -> 2413 tests): launcher core, bug-report zip, update check, default password, package-release.ps1, Version Checker file, docs rewrite, README, issue forms. Two-instance launcher smoke pending."
     }
   ],
   "buildOrderFallback": [
@@ -976,6 +999,7 @@
     "21",
     "28",
     "23",
+    "31",
     "19"
   ],
   "acceptance": [

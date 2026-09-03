@@ -79,6 +79,26 @@ Confirm the jar exists:
 powershell -NoProfile -Command "Test-Path 'K:\Starsector\mods\coop\jars\coop.jar'"
 ```
 
+### Launcher
+
+`Coop Launcher.cmd` at the mod root is what a player starts. It resolves the install root two levels
+up from itself and runs `<install>\jre\bin\javaw.exe`, so there is no JRE to install and no
+execution-policy prompt.
+
+| Thing | Where |
+| --- | --- |
+| Source set | `src/launcher/java`, package `coop.launcher` |
+| Tests | `src/test/java/coop/launcher`, in the main test source set |
+| Jar | `jars/coop-launcher.jar`, from `launcherJar`; `build` depends on it |
+| Runtime classpath | `jars/coop-launcher.jar`, `jars/coop.jar`, `starsector-core/json.jar`, `starsector-core/log4j-1.2.9.jar` |
+| Log | `mods/coop/coop-launcher.log`, next to the `.cmd` |
+
+**`starfarer.api.jar` is not on that classpath, on purpose.** The launcher reuses `CoopPortMapper`,
+`CoopConnectionDoctor` and `CoopOptionsRegistry` out of `coop.jar`, and none of them link to the game
+API on the paths the launcher walks. Any launcher code path that reaches the API is a bug in the
+launcher, not a missing entry in the classpath: fix the code. `sourceSets.launcher.compileClasspath`
+in `build.gradle` leaves the API jar out so the compiler catches it first.
+
 ## Clean
 
 Use the clean script:
@@ -206,20 +226,27 @@ version number both players reproduce.
 
 Steps:
 
-1. Bump `version` in `mod_info.json` and in `build.gradle`. Same string.
+1. Bump `version` in `mod_info.json` and in `build.gradle`. Same string. Bump `modVersion`'s
+   `major`/`minor`/`patch` in `coop.version` to match, so Version Checker reports the release
+   players actually have.
 2. Update `CHANGELOG.md` and anything in `docs/player/` the release changes.
    `LICENSE` (CC BY-NC 4.0 with the Fractal Softworks exception) ships in the release archive; any
    code vendored since the last release needs its own notice next to it and a line in `LICENSE`'s
    "does not cover" list.
 3. Commit. The commit hash is baked into the jar and compared at connect, so build after committing,
    not before.
-4. `scripts\build.ps1` (clean, test, build). Confirm `jars\coop.jar` and `jars\coop-forks.jar` both
-   have the new timestamp; `build` depends on `forksJar`, so a `jar`-only run is not a release build.
+4. `scripts\build.ps1` (clean, test, build). Confirm `jars\coop.jar`, `jars\coop-forks.jar` and
+   `jars\coop-launcher.jar` all have the new timestamp; `build` depends on `forksJar` and
+   `launcherJar`, so a `jar`-only run is not a release build.
 5. `scripts\deploy-to-test-clients.ps1`, then a two-client session: handshake accepted, both status
    lines read `session active`, and the host log's connection-doctor block names a tier.
-6. Package exactly what `deploy-to-test-clients.ps1` copies: `mod_info.json`, `jars\`, `data\`. Not
-   `build\`, not `src\`, not `forks\`, not `tmp_ff_analysis`. The archive must unpack to a folder
-   named `coop`, because the handshake compares the mod path as `mods/<folder name>`.
+6. `scripts\package-release.ps1` writes `dist\coop-<version>.zip`. It runs step 4's build itself
+   unless you pass `-SkipBuild`, and it refuses to package a dirty tree, mismatched versions, jars
+   whose baked-in commit is not `HEAD`, or a broken classloader split. What it ships:
+   `mod_info.json`, `jars\`, `data\`, `Coop Launcher.cmd`, `coop.version`, `LICENSE`,
+   `CHANGELOG.md`, `docs\player\`. Not `build\`, not `src\`, not `forks\`, not `tools\`, not
+   `tmp_ff_analysis`. The archive unpacks to a folder named `coop`, because the handshake compares
+   the mod path as `mods/<folder name>`.
 7. Check `jar -tf jars\coop.jar` has no `coop/rng/` or `coop/presence/` entries and
    `jar -tf jars\coop-forks.jar` does. Those two packages belong to the system classloader only; a
    duplicate in `coop.jar` breaks the forks silently.

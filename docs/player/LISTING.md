@@ -36,10 +36,13 @@ held paused and gets a banner when the fight starts and another when it ends. Th
 reconciled back into the shared world: ship losses, salvage, reputation, bounties.
 
 **Connecting.** Only the host has to be reachable. At startup the host's game asks the router to open
-its port over UPnP, then NAT-PMP, and writes what happened to the log. There is an optional lobby
-password. A dropped link is held for 60 seconds with a countdown on both screens and the session
-resumes where it stopped if the connection comes back. When a session is refused or ends with a
-reason, you get a dialog naming the cause and the remedy.
+its port over UPnP, then NAT-PMP, and writes what happened to the log. Before the first session the
+host can press Check my connection in the launcher, which runs that same mapping and puts the result
+on screen instead of in a log file, and the guest can then press Test connection to find out whether
+TCP and UDP reach the host at all. There is an optional lobby password, and the launcher generates
+one for the host and puts it in the invite. A dropped link is held for 60 seconds with a countdown on
+both screens and the session resumes where it stopped if the connection comes back. When a session is
+refused or ends with a reason, you get a dialog naming the cause and the remedy.
 
 **Reading the state.** A status line in a corner of the campaign screen shows role, session state,
 who is pausing, round trip, packet loss and which transport your fleet positions travel over. A
@@ -94,21 +97,29 @@ can read differently on the two screens until they converge, with the host's rea
 
 ## Installing
 
-`docs/player/INSTALL.md` is the guide, and both players follow all of it. In short: unzip so
+`docs/player/INSTALL.md` is the guide, and both players follow all of it. Three steps: unzip so
 `mod_info.json` sits in `<Starsector>\mods\coop`, add `..\mods\coop\jars\coop-forks.jar;` to the
-front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in the launcher, then set
-`coop.hostPort` on one PC and `coop.connectHost` plus `coop.connectPort` on the other, along with the
-same `coop.newGameSeed` on both. Settings can go on the `vmparams` line as `-D` properties or in
-`saves\common\coop_options.json.data`.
+front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in Starsector's launcher. That
+`vmparams` line is edited by hand, and it is the only thing you edit by hand.
+
+The rest is `Coop Launcher.cmd`, in the mod folder. It runs on the JRE that ships with the game, so
+there is nothing to install. It checks the install and names what is wrong with it, writes your
+settings into `saves\common\coop_options.json.data`, and starts the game. The host picks a port,
+presses Generate for a seed and presses Copy invite; the guest presses Paste invite and has the
+address, port, password and seed in one go. Windows only in this release; on any other OS the
+settings file and the `-D` properties still work by hand.
 
 ## Reporting a problem
 
-`docs/player/REPORTING.md` has the details. Both players' logs, every time, from
-`<Starsector>\starsector-core\starsector.log`, copied before you relaunch, because the game rewrites
-the file at every launch. If a dialog ended your session, search the log for `[COOP-DOCTOR]` and
-paste that line: it carries the support code the dialog showed you, and a session id that is
-identical in both logs. For anything about connecting, paste the whole `Coop connection doctor:`
-block from both sides.
+Both of you press **Save a bug report** in the launcher, and attach both zips. That packs the logs
+before the next launch overwrites them, together with your settings, your newest save and a summary;
+the password is blanked out of everything in it. One side's zip tells half the story, because a
+refusal is one machine rejecting the other.
+
+Paste the `[COOP-DOCTOR]` line from each side into the text of the report. It carries the code the
+dialog showed you and a session id that is identical in both logs, which is what pairs the two zips
+up. `docs/player/REPORTING.md` has the rest, including what to send when the launcher itself will not
+run.
 
 ## License
 

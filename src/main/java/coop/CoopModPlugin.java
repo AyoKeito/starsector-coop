@@ -48,7 +48,34 @@ public class CoopModPlugin extends BaseModPlugin {
                     "Coop new-game seed override configured via "
                             + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
                             + "=" + newGameSeed);
+            publishSeedForTheForks(newGameSeed);
         }
+    }
+
+    /**
+     * Phase 31: republish the resolved seed as a JVM system property when it did not come from one.
+     *
+     * <p>{@code coop.rng.CoopRandom} lives in {@code coop-forks.jar}, which the JVM system
+     * classloader owns; it cannot see {@code CoopOptionsStore} in the mod classloader, so it reads
+     * {@code coop.newGameSeed} as a plain property and nothing else. Before the launcher existed
+     * that was always true, because the only way to set the seed was a {@code -D} in
+     * {@code vmparams}. The launcher writes the seed into
+     * {@code saves/common/coop_options.json.data} instead, and without this bridge every forked
+     * procgen path would fall back to {@code new Random()} and the two sectors would diverge in
+     * exactly the places the Phase 6 audit added the fork for.
+     *
+     * <p>Runs in {@code onApplicationLoad}, which is long before any new game, and never overwrites
+     * a real {@code -D}: the command line stays the top of the stack.
+     */
+    private static void publishSeedForTheForks(String newGameSeed) {
+        if (System.getProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY) != null) {
+            return;
+        }
+        System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, newGameSeed);
+        CoopLog.info(CoopModPlugin.class,
+                "Coop published the settings-file seed as -D"
+                        + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
+                        + " so coop-forks.jar (system classloader) can see it");
     }
 
     @Override

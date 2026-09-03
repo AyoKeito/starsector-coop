@@ -643,7 +643,7 @@ class CoopNetStartupConfigTest {
             CoopNetStartupConfig.newGameSeedFromSystemProperties();
 
             List<String> matching = appender.warnings().stream()
-                    .filter(message -> message.contains("Coop ignoring -Dcoop.newGameSeed="))
+                    .filter(message -> message.contains("Coop ignoring coop.newGameSeed="))
                     .toList();
             assertEquals(1, matching.size(), matching.toString());
             assertTrue(matching.get(0).contains("MN-9999999999999999999"), matching.get(0));

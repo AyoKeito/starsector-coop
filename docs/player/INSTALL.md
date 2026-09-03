@@ -5,6 +5,8 @@ There is no "client-only" install; the two machines run the same mod and check e
 connect time.
 
 The one step that is not like other mods is the `vmparams` edit in section 3. Do not skip it.
+Everything after it happens in `Coop Launcher.cmd`, in the mod folder: settings, the invite you
+send your partner, the connection check, and starting the game.
 
 ---
 
@@ -88,8 +90,8 @@ session works; the world is lopsided.
 
 ## 4. Enable the mod
 
-Start the launcher, click MODS, tick **Starsector Coop V1**, click OK. Both players. If either of you
-has other mods ticked, the other must tick the identical set.
+Start Starsector's own launcher (`starsector.exe`), click MODS, tick **Starsector Coop V1**, click
+OK. Both players. If either of you has other mods ticked, the other must tick the identical set.
 
 ## 5. Why identical installs are required
 
@@ -111,68 +113,135 @@ mods from the same downloads and it does not come up.
 
 Ironman is checked separately and rejects the session on its own, on either side.
 
-## 6. Launch settings
+## 6. Start the launcher
 
-Everything the mod reads at launch is a JVM property. They go on the same `vmparams` line, anywhere
-before ` -classpath `, each starting with `-D` and separated by spaces:
+Double-click `Coop Launcher.cmd` in `<Starsector>\mods\coop`. It runs on the JRE that ships with the
+game, in `<Starsector>\jre`, so there is nothing to install and no Java to set up. Windows only in
+this release.
+
+The first time you run it after a download, Windows may put up an "Open File - Security Warning" box
+for the `.cmd`. Press Run. That prompt comes from the download flag Windows puts on the file, and it
+appears once.
+
+The launcher works out where the game is from its own location, so leave `Coop Launcher.cmd` in
+`<Starsector>\mods\coop`; a shortcut to it is fine, a copy on the desktop is not. If it guesses
+wrong anyway, **Choose install folder** in the install-check panel sets it straight.
+
+What the launcher does: it writes your settings into `saves\common\coop_options.json.data`, tells you
+about anything wrong with the install, and starts `starsector.exe`. It does not replace the vanilla
+launcher; that window still comes up and you still press Play in it. And it never edits `vmparams` or
+`enabled_mods.json`. Problems in those two are reported, with the exact fix, for you to make by hand.
+
+### The host's fields
+
+1. Pick **Host** under **Your role**. That is what makes this install the host.
+2. Leave **Port** at 7777 unless something else on your PC wants it. It is the TCP and UDP port your
+   partner connects to.
+3. **Password** fills itself in with a generated one when you leave it empty. The invite carries it,
+   so your partner never types it. Clearing the field is allowed and leaves the port open to anyone
+   who finds it while a session is waiting.
+4. Press **Generate** next to **Seed**, or type your own. Both games generate the sector locally from
+   this string, and the check at connect compares what came out.
+5. Press **Look up** under **Your public address**. That is one HTTPS request to a service that
+   replies with the address your packets came from. If the two of you connect over a LAN or a VPN,
+   type that address over the answer instead.
+6. Press **Copy invite**. Send your partner the one line it puts on your clipboard.
+
+The invite looks like this, and it carries the password in clear text, so send it the way you would
+send a password:
 
 ```text
-... -Xss4m -Dcoop.hostPort=7777 -Dcoop.newGameSeed=MN-1234567890123456789 -classpath ..\mods\coop\jars\coop-forks.jar;janino.jar;...
+coop://203.0.113.9:7777/?seed=MN-1234567890123456789&pw=hullmod
 ```
 
-Most of them can also go in a settings file, or be changed on a page inside the game; section 7
-covers both. A property on the command line always wins over either.
+### The guest's fields
 
-### Host
+Pick **Guest**, put the host's line on your clipboard, press **Paste invite**. Address, port,
+password and seed fill in together; an invite that will not parse says which part of it failed
+rather than clearing the fields. **Seed** is read-only here on purpose: it comes from the invite,
+and it is used only when you start a new campaign. Rejoining by loading a co-op save ignores it.
 
-| Property | Meaning |
+You can also type **Host address** and **Port** in by hand and have the host tell you the password.
+The seed still has to match, which is what the invite is for.
+
+### Check my connection, and Test connection
+
+Do this once, before the first session, in this order.
+
+The host presses **Check my connection**. It runs the same UPnP and NAT-PMP port mapping the game
+runs at startup, then the same connection doctor, and prints the doctor's block into the status pane:
+which tier you are on, what the router said, and what to do when the answer is bad. It takes a few
+seconds. The router mapping is released afterwards so the game makes its own at launch. From then on,
+for as long as the host's launcher stays open, it holds the port and answers the guest's test.
+
+The guest then presses **Test connection** and reads four rows:
+
+| Row | What a good result means |
 |---|---|
-| `coop.hostPort` | The TCP and UDP port to listen on, 1 to 65535. Setting it is what makes this install the host. There is no default; without it the game runs with no co-op role. |
+| TCP reachable | The port is open and something accepted the connection. |
+| launcher answered | That something is the host's co-op launcher, and it prints the mod version it is running. |
+| UDP echoed | Fleet positions will travel over UDP. Without it the session still runs, over TCP, with more latency. |
+| round trip | The measured time in milliseconds. |
 
-### Guest
+If TCP connects and no launcher answers, the test says so: something is listening on that port and it
+is not the co-op launcher. The usual cause is that the host's game is already running instead of the
+host's launcher, and then there is nothing to test. Press Launch.
 
-| Property | Meaning |
+The test connects once and never retries. The game counts connection attempts per address, and a
+probe that hammered the port would spend the guest's budget before the real session started.
+
+### The install check
+
+The panel at the bottom lists what the launcher found, one row each, badged `OK`, `WARN` or `FAIL`.
+**Refresh** re-runs them after you fix something, **Open INSTALL.md** opens this file, and **Choose
+install folder** points the launcher at your Starsector folder when it could not work out where the
+game is.
+
+| Row | Fails when |
 |---|---|
-| `coop.connectHost` | The host's address. Hostname, IPv4, or IPv6 (bare `2001:db8::1` or bracketed `[2001:db8::1]`, never with the port glued on). |
-| `coop.connectPort` | The host's port. Required whenever `coop.connectHost` is set. |
+| `Starsector install` | The folder the launcher is looking at has no `starsector.exe`, `vmparams` and `starsector-core` in it. |
+| `starsector.exe` | The executable is not next to the `mods` folder. |
+| `jre\bin\javaw.exe` | The install has no bundled JRE. A modded-JRE install starts the game from a `.bat` instead; launch it that way and use this window for settings only. |
+| `starsector-core` | The folder is missing. |
+| `mods\coop\jars\coop.jar` | The mod is unpacked wrong or incompletely. |
+| `mods\coop\jars\coop-forks.jar` | Same. |
+| `coop-forks.jar first on the JVM classpath` | Section 3 was skipped, or the entry is on the line but behind another jar, where it does nothing. |
+| `no leftover -Dcoop.* in vmparams` | See below. |
+| `co-op enabled in mods\enabled_mods.json` | The mod is not ticked in the Starsector launcher. |
+| `mod_info.json version matches coop.jar` | Two builds got mixed in one folder. Delete `mods\coop` and unzip once. |
+| `settings file saves\common\coop_options.json.data` | The file exists and is not readable as plain JSON. The launcher refuses to overwrite it, because that would throw away every setting in it. |
+| `Update available: <version>` | Not a failure. One request to GitHub's releases API at start, compared against the version baked into your jar. It reads `Up to date: <version>` when you have the newest release, and `Update check: unavailable` with the reason when the request did not go through. |
 
-Setting host and guest properties on the same install stops the game at startup with
-"Configure either host or guest coop startup properties, not both".
+**The `-Dcoop.*` warning is the one that will bite you.** A `-D` property on the `vmparams` line
+outranks the settings file, so a leftover entry silently wins over everything you typed in the
+launcher: an old port, an old address, a seed from a campaign you finished. The row names the exact
+entries to delete. They get left behind by the developer launch scripts, so a normal install will not
+have any.
 
-### Both, for a fresh campaign
+Every row that says `FAIL` is a reason the session will not work, and Launch refuses while one is
+outstanding. A `WARN` row is a reason it will work differently than you meant.
 
-| Property | Meaning |
-|---|---|
-| `coop.newGameSeed` | The sector seed, e.g. `MN-1234567890123456789`. Set the same value on both PCs and both New Game dialogs are pinned to it. Without it you each type a seed by hand and a typo ends the session at the seed check. |
-| `coop.sectorSize` | `small` or `normal`. Omit for the panel default (`normal`). Must match. |
-| `coop.sectorAge` | `young`, `average`, `old` or `mixed`. Omit for the panel default (`mixed`). Must match. |
+### Advanced settings, and Launch
 
-Seed, size and age all feed the sector fingerprint the two games compare, so a difference in any of
-them is caught at connect rather than discovered hours later.
+**Advanced settings** folds open five more: port mapping, reconnect grace, link HUD corner, sector
+size and star age. Each has a `(shipped default)` entry in its list, so you can always put one back
+without knowing what the default was. Leave the fold shut unless you have a reason to open it.
 
-### Optional
+**Launch** writes the settings file, closes the launcher's listener so the game can bind the port,
+and starts `starsector.exe`. The window stays open afterwards and tails `starsector.log` in the
+**Status** pane: the connection doctor block, the `[COOP-DOCTOR]` lines, and every co-op warning.
+Closing the window does not close the game.
 
-| Property | Default | Meaning |
-|---|---|---|
-| `coop.password` | none | Lobby password. Set the same string on both. The guest proves it knows the password without sending it, but the rest of the traffic is plaintext: this stops strangers from joining an open port, it does not encrypt the session. |
-| `coop.portMapping` | `auto` | `auto` asks the router to open the host port (UPnP first, NAT-PMP second). `off` skips it. Any other value stops the game at startup. Guests ignore it. |
-| `coop.reconnectGraceSeconds` | `60` | How long a dropped link is held open before the session ends. `0` ends it on the first drop; the ceiling is 3600. Each side sets its own. |
-| `coop.playerName` | your character's name | The name your partner sees in the HUD and on the session page. |
-| `coop.hudCorner` | `TR` | Where the co-op status line is drawn: `TR`, `TL`, `BR`, `BL`. |
-| `coop.hud.disable` | `false` | `true` removes the status line. |
-| `coop.adoptCampaignId` | `false` | Guest only, and only for the case in the note below. |
-| `coop.maxGuests` | `1` | Peer capacity. Anything other than 1 is clamped back to 1 with a warning in the log. |
+Three buttons sit on that pane. **Open log folder** opens `starsector-core`. **Clear** empties the
+pane. **Save a bug report** packs a zip on your Desktop with the logs, your settings, your save and
+a summary; `REPORTING.md` covers what goes in it and what to do with it.
 
-Rejoining after the guest quits: load the co-op autosave the mod wrote, not New Game. A fresh
-campaign on the same seed is refused because the host's campaign is already in flight.
-`-Dcoop.adoptCampaignId=true` forces it through at the cost of everything the guest had.
+## 7. Changing settings without the launcher
 
-The `coop.debug.*` properties are diagnostics for bug reports and development; `docs/REPORTING.md`
-covers the ones a player is ever asked for.
-
-## 7. Changing settings
-
-Two places hold the same `coop.*` values, and the in-game one is the one to reach for.
+The launcher writes `saves\common\coop_options.json.data`, and that file is not private to it. The
+in-game options page writes the same file, the mod reads it at every launch, and you can edit it in a
+text editor. Everything below is that same set of values reached another way; a normal session needs
+none of it.
 
 ### The "Coop Options" page
 
@@ -250,9 +319,9 @@ guests has no buttons at all: 1 is both its bounds in this build.
 
 ### The settings file
 
-The same `coop.*` names can live in a JSON file instead of on the `vmparams` line. Yours goes here,
-and the options page creates it the first time you change a setting on the page, or you write it
-yourself:
+The same `coop.*` names live in a JSON file. Yours is here. The launcher rewrites it every time you
+press Launch, the options page creates it the first time you change a setting there, and you can
+write it yourself:
 
 ```text
 <Starsector>\saves\common\coop_options.json.data
@@ -318,11 +387,15 @@ The keys most people actually set:
 | `coop.reconnectGraceSeconds` | How long a dropped link is held before the session ends. |
 | `coop.hudCorner`, `coop.hud.disable` | Where the status line sits, or whether it is drawn. |
 
-Some keys are `-D` only, forever, and a value for them in either file is skipped with a warning:
-`coop.newGameSeed`, `coop.sectorSize`, `coop.sectorAge`, `coop.adoptCampaignId`, and the debug
-hatches `coop.debug.*`, `coop.ff.disable`, `coop.clock.disable`, `coop.fullFidelityGuestSystem`. The
-first four are one-shot gestures for starting a campaign, where the friction is the point; the rest
-are not meant to read as ordinary settings.
+Three keys are read from your file and from nowhere else: `coop.newGameSeed`, `coop.sectorSize` and
+`coop.sectorAge`. They are absent from the shipped defaults file and from the options page, and a
+value for them in `data\config\coop_options.json` is skipped with a warning. They are one-shot
+gestures for starting a campaign rather than standing settings, and your file is the layer the
+launcher hands them over in.
+
+The rest are `-D` only, forever, and a value for them in either file is skipped with a warning:
+`coop.adoptCampaignId`, and the debug hatches `coop.debug.*`, `coop.ff.disable`, `coop.clock.disable`
+and `coop.fullFidelityGuestSystem`. Those are not meant to read as ordinary settings.
 
 **The role keys carry one extra rule.** If any of `coop.hostPort`, `coop.connectHost` or
 `coop.connectPort` is given as `-D`, the role is decided by the `-D` layer alone and the file's role
@@ -335,15 +408,96 @@ Cadences, gate semantics, the seed and campaign checks, combat auto-pause, host 
 options, and not going to become options. The shipped file names that list too, so you can tell a
 missing setting from a deliberate one.
 
+### Properties on the `vmparams` line
+
+Every co-op setting can also be given as a `-D` property, on the same long `vmparams` line the
+classpath entry went on, anywhere before ` -classpath `:
+
+```text
+... -Xss4m -Dcoop.hostPort=7777 -Dcoop.newGameSeed=MN-1234567890123456789 -classpath ..\mods\coop\jars\coop-forks.jar;janino.jar;...
+```
+
+This layer outranks the launcher, the options page and both files. That is the whole reason the
+install check warns about a leftover `-Dcoop.*`: a stale entry here quietly wins over the port,
+address or seed you just typed into the launcher. It is a developer path. A player has no reason to
+use it.
+
+Host, guest, and a fresh campaign:
+
+| Property | Meaning |
+|---|---|
+| `coop.hostPort` | The TCP and UDP port to listen on, 1 to 65535. Setting it is what makes this install the host. |
+| `coop.connectHost` | The host's address. Hostname, IPv4, or IPv6 (bare `2001:db8::1` or bracketed `[2001:db8::1]`, never with the port glued on). |
+| `coop.connectPort` | The host's port. Required whenever `coop.connectHost` is set. |
+| `coop.newGameSeed` | The sector seed, e.g. `MN-1234567890123456789`. Same value on both PCs, and both New Game dialogs are pinned to it. |
+| `coop.sectorSize` | `small` or `normal`. Omit for the panel default (`normal`). Must match. |
+| `coop.sectorAge` | `young`, `average`, `old` or `mixed`. Omit for the panel default (`mixed`). Must match. |
+
+Setting host and guest properties on the same install stops the game at startup with "Configure
+either host or guest coop startup properties, not both". Seed, size and age all feed the sector
+fingerprint the two games compare, so a difference in any of them is caught at connect rather than
+discovered hours later.
+
+The rest:
+
+| Property | Default | Meaning |
+|---|---|---|
+| `coop.password` | none | Lobby password. Same string on both. The guest proves it knows the password without sending it, but the rest of the traffic is plaintext: this stops strangers from joining an open port, it does not encrypt the session. |
+| `coop.portMapping` | `auto` | `auto` asks the router to open the host port (UPnP first, NAT-PMP second). `off` skips it. Any other value stops the game at startup. Guests ignore it. |
+| `coop.reconnectGraceSeconds` | `60` | How long a dropped link is held open before the session ends. `0` ends it on the first drop; the ceiling is 3600. Each side sets its own. |
+| `coop.playerName` | your character's name | The name your partner sees in the HUD and on the session page. |
+| `coop.hudCorner` | `TR` | Where the co-op status line is drawn: `TR`, `TL`, `BR`, `BL`. |
+| `coop.hud.disable` | `false` | `true` removes the status line. |
+| `coop.adoptCampaignId` | `false` | Guest only, and only for the case in the note below. |
+| `coop.maxGuests` | `1` | Peer capacity. Anything other than 1 is clamped back to 1 with a warning in the log. |
+
+Rejoining after the guest quits: load the co-op autosave the mod wrote, not New Game. A fresh
+campaign on the same seed is refused because the host's campaign is already in flight.
+`-Dcoop.adoptCampaignId=true` forces it through at the cost of everything the guest had.
+
+The `coop.debug.*` properties are diagnostics for bug reports and development; `REPORTING.md` covers
+the ones a player is ever asked for.
+
 ## 8. First session
 
-1. Both players finish the `vmparams` edit and tick the mod.
-2. The host sets `coop.hostPort` and `coop.newGameSeed`; the guest sets `coop.connectHost`,
-   `coop.connectPort` and the same `coop.newGameSeed`.
-3. The host starts the game and reads `starsector-core\starsector.log` for the line beginning
-   `Coop connection doctor:`. Its `share with guest` line is the address to send. `CONNECT.md`
-   covers what to do when that line has nothing useful on it.
-4. Both start New Game. The guest's Continue option names the host it will connect to.
-5. The status line in the corner reads `HOST · waiting for guest`, then `session active` on both.
+1. Both of you: `vmparams` edited, mod ticked, and every install-check row reading `OK`.
+2. Host: open `Coop Launcher.cmd`, pick Host, set the port, press Generate, press Look up, press
+   Check my connection and read the doctor block, press Copy invite, send the line.
+3. Guest: open the launcher, pick Guest, press Paste invite, press Test connection. Four green rows
+   and you are done checking.
+4. Both press Launch, then Play in the vanilla launcher window when it appears.
+5. Both start New Game. The guest's Continue option names the host it will connect to, and the seed
+   is already filled in from the invite.
+6. Both games load paused into the lobby, with the guest's join steps listed as they pass. The host
+   presses Start; a three second countdown runs; the clock starts.
+7. The status line in the corner reads `HOST · waiting for guest`, then `session active` on both.
 
-If it does not get that far, `CONNECT.md` is the next stop.
+If it does not get that far, `CONNECT.md` is the next stop, and `REPORTING.md` says what to send.
+
+## Updating the mod
+
+**Both of you install the same download.** The handshake compares the git commit baked into the jar,
+not just the version string, so two copies of "the same" version obtained separately are refused with
+`COOP-MODS`. A new release means both of you update before the next session.
+
+The launcher checks at start and puts the answer in the install-check panel: `Update available:
+<version>`, `Up to date: <version>`, or `Update check: unavailable` with the reason. It is one request
+to GitHub's releases API and it never blocks the window. If you run LazyWizard's Version Checker, the
+mod ships a `coop.version` file, so it reports there too.
+
+**A mod update can invalidate a co-op campaign in progress.** Save compatibility across releases is
+not promised. Unless a release note says a save carries over, finish a campaign on the build you
+started it on, or update together and start a new one.
+
+Redo the `vmparams` edit in section 3 after any Starsector update. The installer overwrites that
+file.
+
+## Uninstalling
+
+Delete `<Starsector>\mods\coop`. The classpath entry in `vmparams` can stay where it is: the JVM
+ignores an entry pointing at a jar that is not there, so it costs nothing. Remove it if you prefer a
+clean file.
+
+Two things do not go with the folder. `saves\common\coop_options.json.data` lives in a Starsector
+folder rather than a mod folder, so delete it by hand if you want your settings gone. And a campaign
+that was played in co-op needs the mod to load at all, on both sides, from then on.

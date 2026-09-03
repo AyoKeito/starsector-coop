@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: How to report (docs)
+    url: https://github.com/AyoKeito/starsector-coop/blob/main/docs/player/REPORTING.md
+    about: What the bug-report zip contains and where the doctor line is.
+  - name: Known limitations
+    url: https://github.com/AyoKeito/starsector-coop/blob/main/docs/player/LIMITATIONS.md
+    about: Check here first. Some differences between the two screens are accepted, not bugs.

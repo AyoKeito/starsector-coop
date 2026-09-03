@@ -18,6 +18,40 @@ Tier 0 cannot fail. If you would rather not spend an evening on router pages, st
 
 ---
 
+## Before the first session: Check my connection and Test connection
+
+Find out whether the two of you can reach each other before either game is loaded. Both buttons are
+in `Coop Launcher.cmd`, and the order matters: the host goes first and stays open.
+
+**The host presses Check my connection.** It runs the same UPnP and NAT-PMP request the game runs at
+startup, then the same connection doctor, and prints the doctor's block into the status pane rather
+than into a log file you have to go find. Read it the way "Reading the log" below reads it: the tier
+line says which of the four routes you are on, and the `next step` line says what to do when the
+answer is bad. It takes a few seconds, and the router mapping is released afterwards so the game can
+make its own at launch. The launcher then holds the port open, and says so, until you press Launch.
+
+**The guest presses Test connection** while that is up, with the invite already pasted in. Four rows
+come back:
+
+| Row | Reading it |
+|---|---|
+| TCP reachable | The port is open from where you are sitting. A failure here is the host's port forward, the host's firewall, or a wrong address, and everything below it is moot. |
+| launcher answered | What accepted the connection was the host's co-op launcher, and it prints the mod version it is running. |
+| UDP echoed | Fleet movement will go over UDP. Without it the session still runs over TCP, which costs latency; a router that forwards TCP but not UDP is the usual cause. |
+| round trip | Milliseconds, measured over that TCP connection. |
+
+TCP green and no launcher answer means something else is listening on that port. Nearly always that
+is the host's game already running instead of the host's launcher, in which case there is nothing to
+test: press Launch and join.
+
+The test connects once and does not retry. The game counts connection attempts per address, five to
+a window, and a prober that hammered the port would spend the guest's budget before the real session
+started.
+
+The tiers below are written as `-D` properties on the `vmparams` line. In the launcher they are the
+Port field on the host, the Host address and Port fields on the guest, and Port mapping under
+Advanced settings.
+
 ## Tier 0: a VPN pseudo-LAN
 
 A mesh VPN gives both PCs an extra IP address on a private network that spans the Internet. The mod

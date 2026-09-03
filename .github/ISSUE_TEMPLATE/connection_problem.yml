@@ -1,0 +1,51 @@
+name: Connection problem
+description: The guest cannot reach the host, or the session drops.
+title: "[Connection] "
+labels: ["connection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read `docs/player/CONNECT.md` first. Only the host needs to be reachable. The host's launcher has **Check my connection** and the guest's has **Test connection**; run both before filing and paste what they printed.
+  - type: dropdown
+    id: reach
+    attributes:
+      label: How the host is reachable
+      options:
+        - UPnP or NAT-PMP (the launcher mapped the port)
+        - Port forwarded by hand on the router
+        - IPv6
+        - VPN (Radmin, ZeroTier, Tailscale, WireGuard, other)
+        - Same LAN
+        - I do not know
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Connection doctor output
+      description: The host's `Coop connection doctor:` block from the launcher status pane or report.txt, and the guest's Test connection result.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: Where it stops. A refused connection, a lobby that never fills, a drop after some minutes, a dialog with a code.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mod version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: checkboxes
+    id: attachments
+    attributes:
+      label: Attachments
+      options:
+        - label: Host's bug-report zip is attached
+        - label: Guest's bug-report zip is attached

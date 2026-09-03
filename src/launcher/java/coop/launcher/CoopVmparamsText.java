@@ -1,0 +1,115 @@
+package coop.launcher;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Pure inspection of a {@code vmparams} file's text. Nothing here reads or writes a file: the
+ * launcher reports what it finds and never edits {@code vmparams}, because that file belongs to the
+ * player and to the Starsector installer.
+ *
+ * <p>Two questions matter. First, whether {@code coop-forks.jar} sits at the front of the JVM
+ * {@code -classpath}: the forked engine classes only win over the originals if the system
+ * classloader reaches them first, and Starsector's mod loader is a child loader, so the mod's own
+ * jar list cannot do it. Second, whether any {@code -Dcoop.*} is still on the line: a system
+ * property outranks the settings file the launcher writes, so a leftover from a dev launch script
+ * silently overrides whatever the player just typed into the launcher.
+ */
+public final class CoopVmparamsText {
+
+    /** The literal that separates the JVM flags from the classpath value. */
+    public static final String CLASSPATH_MARKER = " -classpath ";
+
+    /** The entry that has to come first, semicolon included. Mirrors INSTALL.md section 3. */
+    public static final String FORKS_ENTRY = "..\\mods\\coop\\jars\\coop-forks.jar;";
+
+    private static final Pattern COOP_PROPERTY = Pattern.compile("-Dcoop\\.\\S+");
+
+    private CoopVmparamsText() {
+    }
+
+    /** True when the file has a {@code -classpath} at all. A file without one is not a vmparams. */
+    public static boolean hasClasspath(String text) {
+        return classpathValue(text) != null;
+    }
+
+    /**
+     * Everything after {@code " -classpath "}, or {@code null} when the marker is absent. Includes
+     * the main class at the end; callers only look at the front.
+     */
+    public static String classpathValue(String text) {
+        if (text == null) {
+            return null;
+        }
+        int index = text.indexOf(CLASSPATH_MARKER);
+        if (index < 0) {
+            return null;
+        }
+        return text.substring(index + CLASSPATH_MARKER.length());
+    }
+
+    /**
+     * True when the classpath value starts with the forks entry. Forward slashes and letter case are
+     * tolerated - the JVM accepts both on Windows, so refusing them would report a working install
+     * as broken.
+     */
+    public static boolean hasForksFirstOnClasspath(String text) {
+        String value = classpathValue(text);
+        if (value == null) {
+            return false;
+        }
+        return normalise(value).startsWith(normalise(FORKS_ENTRY));
+    }
+
+    /**
+     * True when the forks entry is on the classpath but not at the front. Worth its own answer: the
+     * fix is different (move it, do not add a second copy) and the symptom is identical to it being
+     * absent.
+     */
+    public static boolean hasForksLaterOnClasspath(String text) {
+        String value = classpathValue(text);
+        if (value == null) {
+            return false;
+        }
+        String normalised = normalise(value);
+        String entry = normalise(FORKS_ENTRY);
+        return normalised.contains(entry) && !normalised.startsWith(entry);
+    }
+
+    /**
+     * Every {@code -Dcoop.*} token on the line, in the order they appear. Empty on a clean file.
+     * These are a warning, not a failure: they still launch a working game, they just win over the
+     * settings file.
+     */
+    public static List<String> staleCoopProperties(String text) {
+        if (text == null) {
+            return List.of();
+        }
+        List<String> found = new ArrayList<>();
+        Matcher matcher = COOP_PROPERTY.matcher(text);
+        while (matcher.find()) {
+            found.add(matcher.group());
+        }
+        return Collections.unmodifiableList(found);
+    }
+
+    /** The exact edit to make, shown verbatim in the launcher's fix column. */
+    public static String forksFixText() {
+        return "Open <install>\\vmparams in a text editor, find \" -classpath \" and paste"
+                + " \"" + FORKS_ENTRY + "\" immediately after it, semicolon included."
+                + " See docs/player/INSTALL.md section 3.";
+    }
+
+    /** The fix for a leftover {@code -Dcoop.*}. */
+    public static String stalePropertyFixText(List<String> properties) {
+        return "Delete " + String.join(" ", properties) + " from <install>\\vmparams."
+                + " A -D value wins over the settings file, so the launcher cannot change it.";
+    }
+
+    private static String normalise(String value) {
+        return value.replace('/', '\\').toLowerCase(java.util.Locale.ROOT);
+    }
+}

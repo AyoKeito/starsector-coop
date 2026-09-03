@@ -72,6 +72,16 @@ public final class CoopOptionsStore {
     public static final String MOD_ID = "coop";
 
     /**
+     * The three {@code dOnly} keys the Phase 31 launcher is allowed to hand over through
+     * {@link #COMMON_PATH}. See {@link #rawOneShot} for the reasoning; nothing else reads them from
+     * a file, and they still never appear in the shipped defaults or on the options page.
+     */
+    public static final Set<String> ONE_SHOT_KEYS = Set.of(
+            CoopOptionsRegistry.NEW_GAME_SEED,
+            CoopOptionsRegistry.SECTOR_SIZE,
+            CoopOptionsRegistry.SECTOR_AGE);
+
+    /**
      * What a player loses when the user file cannot be read or parsed, said in full because the
      * failure is otherwise silent: every setting in that file stops applying, not just the bad line.
      * The note about comments is there because the file comes back through
@@ -178,6 +188,8 @@ public final class CoopOptionsStore {
     private final Set<String> warned = new HashSet<>();
 
     private Map<String, String> commonLayer;
+    /** See {@link #oneShotCommon()}. */
+    private Map<String, String> oneShotLayer;
     private Map<String, String> shippedLayer;
 
     /**
@@ -256,6 +268,38 @@ public final class CoopOptionsStore {
         CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
         String value = rawOrNull(option);
         return value == null ? option.defaultValue() : value;
+    }
+
+    /**
+     * Phase 31: the value of a <em>one-shot new-game key</em> - {@code coop.newGameSeed},
+     * {@code coop.sectorSize}, {@code coop.sectorAge} - resolved as {@code -D} first and then the
+     * user's own {@code saves/common/coop_options.json.data}.
+     *
+     * <p><b>Why this exists.</b> Phase 28 classified those three as {@code dOnly}: they are one-shot
+     * gestures, so they are not in the shipped defaults file, they are not on the in-game options
+     * page, and {@link #writeOverrides} refuses them. Phase 31 then added a launcher that cannot set
+     * a {@code -D} at all - it is forbidden from editing {@code vmparams}, and {@code starsector.exe}
+     * reads its JVM flags from nowhere else. The launcher's only channel is the settings file it
+     * writes immediately before starting the game.
+     *
+     * <p>So this method is the one seam between the two decisions, and it is deliberately narrow:
+     * the launcher-written user file is read, the shipped defaults file is <em>not</em> (a value
+     * there would be a standing setting, which is exactly what Phase 28 refused), and no other key
+     * may be read this way.
+     *
+     * @throws IllegalArgumentException when {@code key} is not one of the three
+     */
+    public String rawOneShot(String key) {
+        CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
+        if (!ONE_SHOT_KEYS.contains(key)) {
+            throw new IllegalArgumentException(key + " is not a one-shot new-game key; use raw(...)");
+        }
+        String fromProperty = propertyReader.apply(key);
+        if (fromProperty != null) {
+            return fromProperty.trim();
+        }
+        String fromCommon = oneShotCommon().get(key);
+        return fromCommon == null ? option.defaultValue() : fromCommon;
     }
 
     /** The validated value: enum values canonicalised, bad values replaced, one WARN per key. */
@@ -502,6 +546,7 @@ public final class CoopOptionsStore {
     /** Re-reads both file layers and clears the once-per-key warning memory. */
     public void reload() {
         commonLayer = null;
+        oneShotLayer = null;
         commonFailed = false;
         shippedLayer = null;
         warned.clear();
@@ -536,6 +581,36 @@ public final class CoopOptionsStore {
             commonLayer = flatten(safeCommon(), COMMON_PATH, COMMON_CONSEQUENCE);
         }
         return commonLayer;
+    }
+
+    /**
+     * The {@link #ONE_SHOT_KEYS} present in the user file, which {@link #flatten} deliberately drops
+     * from the ordinary layer. Cached like the others, and cleared by {@link #reload()}.
+     */
+    private Map<String, String> oneShotCommon() {
+        if (oneShotLayer == null) {
+            Map<String, String> values = new LinkedHashMap<>();
+            JSONObject json = safeCommon();
+            if (json != null) {
+                try {
+                    for (String key : ONE_SHOT_KEYS) {
+                        Object value = json.opt(key);
+                        if (value == null || JSONObject.NULL.equals(value)) {
+                            continue;
+                        }
+                        String text = String.valueOf(value).trim();
+                        if (!text.isEmpty()) {
+                            values.put(key, text);
+                        }
+                    }
+                } catch (Exception | LinkageError ex) {
+                    warnOnce("oneShot:" + COMMON_PATH, "could not read the one-shot new-game keys"
+                            + " from " + COMMON_PATH + " (" + ex + ")");
+                }
+            }
+            oneShotLayer = Collections.unmodifiableMap(values);
+        }
+        return oneShotLayer;
     }
 
     private Map<String, String> shipped() {
@@ -598,7 +673,12 @@ public final class CoopOptionsStore {
                     continue;
                 }
                 if (option.dOnly()) {
-                    unknown = append(unknown, key + " (-D only)");
+                    // The three one-shot new-game keys are the Phase 31 launcher's only channel and
+                    // are read by rawOneShot instead, so finding one here is expected rather than a
+                    // mistake worth warning about. Every other -D-only key still is one.
+                    if (!ONE_SHOT_KEYS.contains(key)) {
+                        unknown = append(unknown, key + " (-D only)");
+                    }
                     continue;
                 }
                 Object value = json.opt(key);

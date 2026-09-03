@@ -1,0 +1,31 @@
+{
+    # Version Checker (LazyWizard) support. Format taken from the mod's own canonical file,
+    # https://raw.githubusercontent.com/LazyWizard/version-checker/master/mod/versionchecker.version,
+    # and from its parser, src/org/lazywizard/versionchecker/UpdateInfo.java (VersionFile ctor).
+    # Whole-line and end-of-line "#" comments are stripped before parsing, so they are legal here.
+    #
+    # This file is listed in data/config/version/version_files.csv. Version Checker reads that CSV
+    # (merged across mods, column "version file") and loads each path it names.
+
+    # Where the online copy of this file lives. Must be the raw file, not a redirect page.
+    "masterVersionFile":"https://raw.githubusercontent.com/AyoKeito/starsector-coop/main/coop.version",
+
+    # Displayed in-game. Matches "name" in mod_info.json.
+    "modName":"Starsector Coop V1",
+
+    # Forum thread id (the digits before the dot in the thread URL). 0 means "no thread": the
+    # parser reads it as absent and offers no forum link. Set this once the release post exists.
+    "modThreadId":0,
+
+    # Matches "version" in mod_info.json and build.gradle. patch 0 displays as "v0.1".
+    "modVersion":
+    {
+        "major":0,
+        "minor":1,
+        "patch":0
+    },
+
+    # Optional, read by LunaLib's bundled version checker UI.
+    "directDownloadURL":"https://github.com/AyoKeito/starsector-coop/releases/latest",
+    "changelogURL":"https://raw.githubusercontent.com/AyoKeito/starsector-coop/main/CHANGELOG.md"
+}

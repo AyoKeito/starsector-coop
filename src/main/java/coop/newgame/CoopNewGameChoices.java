@@ -22,6 +22,12 @@ import java.util.Locale;
  */
 final class CoopNewGameChoices {
 
+    /**
+     * Read through {@code CoopOptionsStore.rawOneShot} rather than {@code System.getProperty} since
+     * Phase 31: {@code -D} still wins, but the launcher can only reach these through
+     * {@code saves/common/coop_options.json.data}, so the warnings below name the key without a
+     * {@code -D} prefix.
+     */
     static final String SECTOR_SIZE_PROPERTY = "coop.sectorSize";
     static final String SECTOR_AGE_PROPERTY = "coop.sectorAge";
 
@@ -71,7 +77,7 @@ final class CoopNewGameChoices {
         if (SECTOR_SIZE_SMALL.equals(lower) || SECTOR_SIZE_NORMAL.equals(lower)) {
             return lower;
         }
-        warnings.add("Ignoring -D" + SECTOR_SIZE_PROPERTY + "=" + requested
+        warnings.add("Ignoring " + SECTOR_SIZE_PROPERTY + "=" + requested
                 + ": expected one of [" + SECTOR_SIZE_SMALL + ", " + SECTOR_SIZE_NORMAL
                 + "]; using the new-game panel default " + fallback);
         return fallback;
@@ -87,7 +93,7 @@ final class CoopNewGameChoices {
         if (parsed != null) {
             return parsed;
         }
-        warnings.add("Ignoring -D" + SECTOR_AGE_PROPERTY + "=" + requested
+        warnings.add("Ignoring " + SECTOR_AGE_PROPERTY + "=" + requested
                 + ": expected one of " + starAgeVocabulary()
                 + "; using the new-game panel default " + fallback);
         return fallback;
@@ -126,9 +132,14 @@ final class CoopNewGameChoices {
     /** Banner shown above the new-game options panel. Empty when this is not a coop launch. */
     static String bannerText(CoopConnectionRole role, String host, int port, String seedString) {
         if (role == CoopConnectionRole.GUEST) {
+            // Rewritten in Phase 31. The old text said the settings "come from the host", which is
+            // not what happens: this client generates its own sector from the seed it was given -
+            // by the host's invite, through coop.newGameSeed - and the seed lock verifies the two
+            // sectors match afterwards. Nothing is fetched from the host at this point.
             return "Joining coop host " + trimToEmpty(host) + ":" + port
-                    + ". Seed and world settings come from the host; the seed, sector size and star age"
-                    + " fields below are locked.";
+                    + ". The seed " + trimToEmpty(seedString) + " came from the host's invite, and"
+                    + " sector size and star age are pinned to match the host, so all three fields"
+                    + " below are locked.";
         }
         if (role == CoopConnectionRole.HOST) {
             return "Hosting a coop game on port " + port + ". Seed " + trimToEmpty(seedString)

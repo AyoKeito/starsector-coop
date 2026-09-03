@@ -102,6 +102,30 @@ sourceSets {
         }
         compileClasspath = forksCompileClasspath
     }
+    // Phase 31: the desktop launcher (coop.launcher). Ships as jars/coop-launcher.jar and runs in
+    // its own JVM started by "Coop Launcher.cmd" - the game is not loaded, so starfarer.api.jar is
+    // deliberately absent from this classpath. The launcher reuses CoopPortMapper,
+    // CoopConnectionDoctor, CoopOptionsRegistry and CoopNetStartupConfig.validateNewGameSeed out of
+    // coop.jar; none of those link to the game API on the paths the launcher touches, and CoopLog
+    // falls back to plain log4j when Global is missing. If something here stops compiling without
+    // the API jar, the fix is in the launcher, never in this classpath.
+    launcher {
+        java {
+            srcDirs = ['src/launcher/java']
+        }
+    }
+}
+
+sourceSets.launcher.compileClasspath = sourceSets.main.output + files(
+    "${starsectorCore}/json.jar",
+    "${starsectorCore}/log4j-1.2.9.jar"
+)
+sourceSets.launcher.runtimeClasspath = sourceSets.launcher.output + sourceSets.launcher.compileClasspath
+
+dependencies {
+    // The launcher tests live in the main test tree (src/test/java/coop/launcher), so the launcher
+    // classes have to be visible there. json.jar and log4j are already on the test classpath.
+    testImplementation sourceSets.launcher.output
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -163,7 +187,26 @@ tasks.register('forksJar', Jar) {
     }
 }
 
-// Building the mod always produces both jars.
+tasks.register('launcherJar', Jar) {
+    archiveFileName = 'coop-launcher.jar'
+    destinationDirectory = file('jars')
+    // Only the launcher's own classes. coop.jar, json.jar and log4j-1.2.9.jar are put on the
+    // classpath by "Coop Launcher.cmd" instead of being shaded in, so there is exactly one copy of
+    // every coop class on disk and the launcher can never run against a stale embedded one.
+    from sourceSets.launcher.output
+    manifest {
+        attributes(
+            'Implementation-Title': 'Starsector Coop V1 Launcher',
+            'Implementation-Version': project.version.toString(),
+            'Coop-Build-Time': Instant.now().toString(),
+            'Coop-Git-Commit': coopGitCommit,
+            'Main-Class': 'coop.launcher.CoopLauncherApp'
+        )
+    }
+}
+
+// Building the mod always produces all three jars.
 tasks.named('build').configure {
     dependsOn 'forksJar'
+    dependsOn 'launcherJar'
 }

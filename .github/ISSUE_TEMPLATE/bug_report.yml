@@ -1,0 +1,66 @@
+name: Bug report
+description: Something went wrong in a co-op session, or the game crashed with the mod enabled.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Both players: open the Coop Launcher, press **Save a bug report**, and attach the zip it puts on your desktop. One zip per player. The zip holds the game logs, the launcher log, your settings with the password removed, and your newest save unless you unticked it.
+  - type: dropdown
+    id: role
+    attributes:
+      label: Your role in the session
+      options:
+        - Host
+        - Guest
+        - Both (I am filing for both players)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mod version
+      description: Shown in the launcher title bar and in report.txt inside the zip.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: doctor
+    attributes:
+      label: Doctor line
+      description: If a dialog ended the session, paste the full `[COOP-DOCTOR]` line from report.txt or starsector.log. It carries the support code and a session id that is identical in both players' logs.
+      placeholder: "[COOP-DOCTOR] code=COOP-SEED sessionId=... role=GUEST ..."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw on each screen, and what you expected instead. Say which player saw it.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If it happened more than once, the shortest sequence that triggers it.
+      placeholder: |
+        1. Host loads the co-op save, guest connects.
+        2. Guest docks at ...
+        3. ...
+  - type: checkboxes
+    id: attachments
+    attributes:
+      label: Attachments
+      options:
+        - label: Host's bug-report zip is attached
+        - label: Guest's bug-report zip is attached
+        - label: The launcher could not run, so I attached starsector.log from both PCs by hand
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I checked docs/player/LIMITATIONS.md and this is not listed there
+          required: true
+        - label: Both players run the same mod release and the same Starsector version
+          required: true

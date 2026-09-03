@@ -1,13 +1,19 @@
 package coop.config;
 
 import coop.config.CoopOptionsStore.Source;
+import org.apache.log4j.AppenderSkeleton;
+import org.apache.log4j.Logger;
+import org.apache.log4j.spi.LoggingEvent;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -284,6 +290,112 @@ class CoopOptionsStoreTest {
 
         assertEquals("12345", store.raw("coop.newGameSeed"));
         assertEquals(Source.PROPERTY, store.sourceOf("coop.newGameSeed"));
+    }
+
+    // ---- Phase 31: the one-shot new-game keys --------------------------------------------------
+
+    @Test
+    void oneShotKeysAreReadFromTheUserFileTheLauncherWrites() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of(
+                "coop.newGameSeed", "MN-42",
+                "coop.sectorSize", "small",
+                "coop.sectorAge", "young"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertEquals("MN-42", store.rawOneShot("coop.newGameSeed"));
+        assertEquals("small", store.rawOneShot("coop.sectorSize"));
+        assertEquals("young", store.rawOneShot("coop.sectorAge"));
+        // raw() is unchanged: the ordinary read path still ignores the file for these.
+        assertEquals("", store.raw("coop.newGameSeed"));
+    }
+
+    @Test
+    void oneShotKeysStillLetTheCommandLineWin() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of("coop.newGameSeed", "MN-42"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props("coop.newGameSeed", "MN-7"));
+
+        assertEquals("MN-7", store.rawOneShot("coop.newGameSeed"));
+    }
+
+    @Test
+    void oneShotKeysNeverReadTheShippedDefaults() {
+        FakeSource source = new FakeSource();
+        source.shipped = json(Map.of("coop.sectorSize", "small"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertEquals("", store.rawOneShot("coop.sectorSize"));
+    }
+
+    @Test
+    void anAbsentOneShotKeyFallsBackToTheRegistryDefault() {
+        CoopOptionsStore store = new CoopOptionsStore(new FakeSource(), props());
+
+        assertEquals("", store.rawOneShot("coop.newGameSeed"));
+        assertEquals("", store.rawOneShot("coop.sectorSize"));
+    }
+
+    @Test
+    void noOtherKeyMayBeReadThroughTheOneShotPath() {
+        CoopOptionsStore store = new CoopOptionsStore(new FakeSource(), props());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> store.rawOneShot("coop.adoptCampaignId"));
+        assertThrows(IllegalArgumentException.class, () -> store.rawOneShot("coop.hostPort"));
+        assertThrows(IllegalArgumentException.class, () -> store.rawOneShot("coop.debug.bridge"));
+    }
+
+    /**
+     * The launcher writes the one-shot keys into the user file on every launch, so the "entries this
+     * build does not use" warning must stop naming them. Every other -D-only key still counts.
+     */
+    @Test
+    void aOneShotKeyInTheUserFileIsNotReportedAsAnUnknownEntry() {
+        CapturingAppender appender = new CapturingAppender();
+        Logger logger = Logger.getLogger(CoopOptionsStore.class);
+        logger.addAppender(appender);
+        try {
+            FakeSource source = new FakeSource();
+            source.common = json(Map.of(
+                    "coop.newGameSeed", "MN-42",
+                    "coop.adoptCampaignId", "true",
+                    "coop.hudCorner", "BL"));
+            CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+            store.raw("coop.hudCorner");
+
+            String joined = String.join(" | ", appender.messages);
+            assertTrue(joined.contains("coop.adoptCampaignId"), joined);
+            assertFalse(joined.contains("coop.newGameSeed"), joined);
+        } finally {
+            logger.removeAppender(appender);
+        }
+    }
+
+    /** Minimal log4j sink; the store reports its file complaints as WARN and nowhere else. */
+    private static final class CapturingAppender extends AppenderSkeleton {
+        private final List<String> messages = new ArrayList<>();
+
+        @Override
+        protected void append(LoggingEvent event) {
+            messages.add(String.valueOf(event.getMessage()));
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public boolean requiresLayout() {
+            return false;
+        }
+    }
+
+    @Test
+    void theOneShotSetIsExactlyTheThreeNewGameKeys() {
+        assertEquals(Set.of("coop.newGameSeed", "coop.sectorSize", "coop.sectorAge"),
+                CoopOptionsStore.ONE_SHOT_KEYS);
     }
 
     // ---- validation ---------------------------------------------------------------------------

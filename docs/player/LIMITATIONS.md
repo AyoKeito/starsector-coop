@@ -31,6 +31,12 @@ that generate the world are not in it, so opening it without a host is unsupport
 Both saves need the mod. Once a campaign has been played in co-op it cannot be loaded without the mod
 enabled.
 
+**A mod update can end a campaign in progress.** Save compatibility across releases is not promised,
+because the co-op state written into a save is versioned with the code that wrote it. Unless a
+release note says a save carries over, finish a campaign on the build you started it on. And update
+together either way: the handshake compares the git commit baked into the jar, so one of you updating
+alone refuses the session with `COOP-MODS`.
+
 **Rejoining is by loading the co-op autosave, not by starting a New Game.** The mod writes a
 coordinated autosave carrying the campaign's id. A fresh campaign on the same seed is refused, because
 the host's campaign is already in flight and a brand new one is not it. There is an override for the
@@ -134,6 +140,34 @@ itself continuously and the status line shows the gap once it reaches an hour of
 Running both games on one PC has its own version of this: Starsector caps its per-frame step, so a
 minimised or background window runs its clock slow and looks from the other side like the other client
 running fast. Keep both windows restored and visible.
+
+## The launcher
+
+**Windows only in this release.** `Coop Launcher.cmd` is a Windows batch file that starts
+`jre\bin\javaw.exe`, a Windows executable at a Windows path. A Mac or Linux install starts the game from a shell script
+that carries the classpath inline, and none of that was tested here. Those players set the same
+values by hand: everything the launcher does to your configuration is writing
+`saves\common\coop_options.json.data`, and `INSTALL.md` section 7 is the same settings without it.
+
+**It reports install problems, it does not fix them.** The two things that have to be right and are
+outside the mod's reach are the classpath entry in `vmparams` and the mod tick in
+`enabled_mods.json`. The launcher reads both and names the exact edit; you make it. It writes two
+files in its life: your settings file and its own log next to it in the mod folder.
+
+**The invite carries the password in clear text.** The `pw=` part of that one line is the password
+itself, so whatever you send the line through can read it. Send it the way you would send a password.
+The guest can read it out of their own launcher afterwards, which is the point.
+
+**Look up sends one request to an outside service.** Finding your public address means asking a
+machine on the Internet what address your packets arrive from; the launcher asks `api.ipify.org`, and
+`icanhazip.com` if the first does not answer. That service learns your IP address, which it would
+also learn from any web page you open. If you would rather not, leave the button alone and type the
+address in yourself. The update check is the only other outbound request: one call to GitHub's
+releases API when the window opens.
+
+**A green Test connection is not a promise the session will start.** It proves the port is reachable
+and that the thing answering is the co-op launcher. Mod lists, versions and seeds are compared later,
+by the games, at connect.
 
 ## Networking
 

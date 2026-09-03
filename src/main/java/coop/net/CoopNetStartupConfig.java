@@ -139,8 +139,9 @@ public final class CoopNetStartupConfig {
     }
 
     public static String newGameSeedFromSystemProperties() {
-        // -D only, forever (a one-shot new-game gesture): the store never reads a file for it.
-        return sanitizeNewGameSeed(CoopOptionsStore.system().raw(NEW_GAME_SEED_PROPERTY));
+        // A one-shot new-game gesture: -D first, then the user file the Phase 31 launcher writes,
+        // and nothing else. See CoopOptionsStore.rawOneShot for why that is the only file layer.
+        return sanitizeNewGameSeed(CoopOptionsStore.system().rawOneShot(NEW_GAME_SEED_PROPERTY));
     }
 
     /**
@@ -196,7 +197,7 @@ public final class CoopNetStartupConfig {
         String hostPort = roleValue(store, HOST_PORT_PROPERTY, roleFromProperties);
         String connectHost = roleValue(store, CONNECT_HOST_PROPERTY, roleFromProperties);
         String connectPort = roleValue(store, CONNECT_PORT_PROPERTY, roleFromProperties);
-        String newGameSeed = sanitizeNewGameSeed(store.raw(NEW_GAME_SEED_PROPERTY));
+        String newGameSeed = sanitizeNewGameSeed(store.rawOneShot(NEW_GAME_SEED_PROPERTY));
         // parsePortMapping/parseReconnectGrace throw. That is right for a command line and wrong for
         // a hand-edited file, so the file layers go through the registry-coercing getters instead:
         // store.string() canonicalises the enum (anything unrecognised becomes the default) and
@@ -451,7 +452,7 @@ public final class CoopNetStartupConfig {
         }
         newGameSeedWarned = true;
         coop.util.CoopLog.warn(CoopNetStartupConfig.class,
-                "Coop ignoring -D" + NEW_GAME_SEED_PROPERTY + "=" + value + ": " + reason
+                "Coop ignoring " + NEW_GAME_SEED_PROPERTY + "=" + value + ": " + reason
                         + "; the new-game seed field is left to vanilla");
     }
 

@@ -109,6 +109,11 @@ foreach ($profile in @('host', 'guest')) {
         New-Item -ItemType Directory -Force -Path $destMod | Out-Null
         Copy-Item -LiteralPath (Join-Path $modRoot 'mod_info.json') -Destination $destMod -Force
         Copy-Item -LiteralPath (Join-Path $modRoot 'jars') -Destination $destMod -Recurse -Force
+        # Phase 31: the launcher entry point ships next to mod_info.json, same as in the release zip.
+        $launcherCmd = Join-Path $modRoot 'Coop Launcher.cmd'
+        if (Test-Path -LiteralPath $launcherCmd) {
+            Copy-Item -LiteralPath $launcherCmd -Destination $destMod -Force
+        }
         $dataDir = Join-Path $modRoot 'data'
         if (Test-Path -LiteralPath $dataDir) {
             Copy-Item -LiteralPath $dataDir -Destination $destMod -Recurse -Force

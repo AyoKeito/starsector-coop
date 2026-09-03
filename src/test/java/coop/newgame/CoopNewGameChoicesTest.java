@@ -1,10 +1,14 @@
 package coop.newgame;
 
 import com.fs.starfarer.api.impl.campaign.procgen.StarAge;
+import coop.config.CoopOptionsStore;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopNetStartupConfig;
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -102,12 +106,78 @@ class CoopNewGameChoicesTest {
         assertEquals(2, choices.warnings().size());
     }
 
+    /**
+     * Phase 31: {@code CoopNewGameDialogPlugin} used to read these two off
+     * {@code System.getProperty}, which made the settings file invisible for them - and the file is
+     * the launcher's only channel, because it never edits {@code vmparams}. This joins the two
+     * halves the plugin now wires together: the store's one-shot read and this resolver.
+     */
     @Test
-    void guestBannerNamesTheHostAndSaysTheFieldsAreLocked() {
-        String banner = CoopNewGameChoices.bannerText(CoopConnectionRole.GUEST, "10.0.0.5", 7777, "coop-seed");
+    void aSectorSizeAndAgeSetOnlyInTheSettingsFileAreHonoured() {
+        CoopOptionsStore store = storeWithUserFile(Map.of(
+                "coop.sectorSize", "small",
+                "coop.sectorAge", "old"));
 
-        assertEquals("Joining coop host 10.0.0.5:7777. Seed and world settings come from the host;"
-                + " the seed, sector size and star age fields below are locked.", banner);
+        CoopNewGameChoices.Choices choices = CoopNewGameChoices.resolve(
+                store.rawOneShot(CoopNewGameChoices.SECTOR_SIZE_PROPERTY),
+                store.rawOneShot(CoopNewGameChoices.SECTOR_AGE_PROPERTY),
+                "normal",
+                StarAge.ANY);
+
+        assertEquals("small", choices.sectorSize());
+        assertEquals(StarAge.OLD, choices.sectorAge());
+        assertTrue(choices.warnings().isEmpty(), String.valueOf(choices.warnings()));
+    }
+
+    @Test
+    void aCommandLineValueStillOutranksTheSettingsFile() {
+        CoopOptionsStore store = new CoopOptionsStore(
+                userFileSource(Map.of("coop.sectorSize", "small")),
+                key -> "coop.sectorSize".equals(key) ? "normal" : null);
+
+        CoopNewGameChoices.Choices choices = CoopNewGameChoices.resolve(
+                store.rawOneShot(CoopNewGameChoices.SECTOR_SIZE_PROPERTY), null, "small",
+                StarAge.ANY);
+
+        assertEquals("normal", choices.sectorSize());
+    }
+
+    private static CoopOptionsStore storeWithUserFile(Map<String, String> values) {
+        return new CoopOptionsStore(userFileSource(values), key -> null);
+    }
+
+    private static CoopOptionsStore.JsonSource userFileSource(Map<String, String> values) {
+        JSONObject json = new JSONObject();
+        for (Map.Entry<String, String> entry : values.entrySet()) {
+            try {
+                json.put(entry.getKey(), entry.getValue());
+            } catch (JSONException ex) {
+                throw new IllegalStateException(ex);
+            }
+        }
+        return new CoopOptionsStore.JsonSource() {
+            @Override
+            public JSONObject shipped() {
+                return null;
+            }
+
+            @Override
+            public JSONObject common() {
+                return json;
+            }
+        };
+    }
+
+    @Test
+    void guestBannerNamesTheInviteAsTheSourceOfTheSeed() {
+        String banner = CoopNewGameChoices.bannerText(CoopConnectionRole.GUEST, "10.0.0.5", 7777, "MN-42");
+
+        assertEquals("Joining coop host 10.0.0.5:7777. The seed MN-42 came from the host's invite,"
+                + " and sector size and star age are pinned to match the host, so all three fields"
+                + " below are locked.", banner);
+        // The old wording claimed the settings themselves arrive from the host, which they do not:
+        // this client generates locally and the seed lock verifies afterwards.
+        assertFalse(banner.contains("come from the host"), banner);
     }
 
     @Test
