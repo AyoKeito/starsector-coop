@@ -1,5 +1,7 @@
 package coop.config;
 
+import coop.util.CoopDebug;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -106,8 +108,13 @@ public final class CoopOptionsRegistry {
      *                      password) rather than a mistake
      * @param dOnly         {@code true} for the keys that stay {@code -D}-only forever: one-shot
      *                      consent gestures whose friction is the feature, and debug escape hatches
-     *                      that must not be discoverable as ordinary settings.
-     *                      {@link CoopOptionsStore} never reads a file for these.
+     *                      that must not be discoverable as ordinary settings. Such a key is never
+     *                      in the shipped defaults file (see {@link #fileBackedOptions()}), never on
+     *                      the in-game options page, and {@code CoopOptionsStore.writeOverrides}
+     *                      refuses it - but since Phase 31 it <em>is</em> readable from the
+     *                      launcher-written user file through
+     *                      {@link CoopOptionsStore#rawOneShot(String)}, which is the only seam that
+     *                      may do so and explains why.
      * @param min           inclusive lower bound for {@link Type#INT}
      * @param max           inclusive upper bound for {@link Type#INT}
      * @param allowedValues canonical values for {@link Type#ENUM}, matched case-insensitively
@@ -413,20 +420,25 @@ public final class CoopOptionsRegistry {
         options.add(dOnly(DEBUG_DIAGNOSTICS, Type.BOOL, "false", "Phase 8",
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Master switch for the dormant diagnostics (orbit dumps, dialog state, probes)."));
-        options.add(dOnly(DEBUG_BRIDGE, Type.INT, "0", "Phase 30",
+        options.add(dOnly(DEBUG_BRIDGE, Type.INT, "0", 0, 65535, "Phase 30",
                 "next campaign load", ApplyBoundary.NEXT_CONNECTION,
                 "Port for the 127.0.0.1 agent bridge. Absent, 0 or unparsable means no socket"
                         + " ever."));
         options.add(dOnly(DEBUG_WIRETAP, Type.BOOL, "false", "Phase 20.1",
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Datagram wiretap: per-type size histograms against the 1200 B WAN budget."));
-        options.add(dOnly(DEBUG_WIRETAP_SAMPLE, Type.INT, "10", "Phase 20.1",
+        // No upper bound: CoopWiretap.readSampleInterval only floors the value at 1, and "every
+        // 100000th datagram" is a legitimate way to say "almost never".
+        options.add(dOnly(DEBUG_WIRETAP_SAMPLE, Type.INT, "10", 1, Integer.MAX_VALUE, "Phase 20.1",
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Wiretap sampling interval: log every Nth datagram per (direction, type)."));
         options.add(dOnly(DEBUG_FRAME_PROFILE, Type.BOOL, "false", "Phase 29",
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Per-frame pump profiler."));
-        options.add(dOnly(DEBUG_INTERACTION_DELAY_MS, Type.INT, "0", "Phase 18",
+        // The bound is CoopDebug's, not a second opinion: a javac constant, so naming it here
+        // inlines the number and adds no runtime dependency on an engine-touching class.
+        options.add(dOnly(DEBUG_INTERACTION_DELAY_MS, Type.INT, "0",
+                0, CoopDebug.MAX_INTERACTION_DELAY_MILLIS, "Phase 18",
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Makes the host hold every inbound INTERACTION_CLAIM this many ms, widening the"
                         + " claim race to something a human can hit. A test instrument."));
@@ -558,9 +570,21 @@ public final class CoopOptionsRegistry {
 
     private static Option dOnly(String key, Type type, String defaultValue, String owner,
                                 String appliesAt, ApplyBoundary boundary, String description) {
+        return dOnly(key, type, defaultValue, 0, type == Type.INT ? Integer.MAX_VALUE : 0,
+                owner, appliesAt, boundary, description);
+    }
+
+    /**
+     * A {@code -D}-only key with a real {@link Type#INT} range. Use this whenever the consumer of the
+     * key enforces a bound of its own: the registry's bound and the consumer's clamp then say the
+     * same number, and the launcher's spinner - which reads {@link Option#min()} and
+     * {@link Option#max()} - cannot offer a value the game will silently reduce.
+     */
+    private static Option dOnly(String key, Type type, String defaultValue, int min, int max,
+                                String owner, String appliesAt, ApplyBoundary boundary,
+                                String description) {
         boolean allowsEmpty = type == Type.STRING;
-        int max = type == Type.INT ? Integer.MAX_VALUE : 0;
-        return new Option(key, type, Tier.LAUNCH, defaultValue, allowsEmpty, true, 0, max,
+        return new Option(key, type, Tier.LAUNCH, defaultValue, allowsEmpty, true, min, max,
                 List.of(), owner, appliesAt, boundary, description);
     }
 }

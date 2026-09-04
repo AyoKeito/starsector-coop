@@ -2668,11 +2668,31 @@ public final class CoopLauncherApp {
 
     /** An integer spinner over a registry key's range, starting at its default. */
     private static JSpinner spinner(String key, int step) {
-        CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
-        int min = option.min() == Integer.MIN_VALUE ? 0 : option.min();
-        int max = option.max() == Integer.MAX_VALUE ? 65535 : option.max();
-        int start = Integer.parseInt(option.defaultValue());
+        int min = spinnerMin(key);
+        int max = spinnerMax(key);
+        int start = Integer.parseInt(CoopOptionsRegistry.require(key).defaultValue());
         return new JSpinner(new SpinnerNumberModel(start, Math.min(min, start), Math.max(max, start), step));
+    }
+
+    /** The registry's lower bound for an INT key, floored at 0 for a key that declares none. */
+    static int spinnerMin(String key) {
+        int min = CoopOptionsRegistry.require(key).min();
+        return min == Integer.MIN_VALUE ? 0 : min;
+    }
+
+    /**
+     * The registry's upper bound for an INT key. The registry is the one source: a key that names a
+     * real bound (a port, a delay the game clamps anyway) gets exactly that number here, so the
+     * spinner cannot offer a value the game would silently reduce.
+     *
+     * <p>{@code 65535} is only the fallback for a key that is still deliberately unbounded, because
+     * a {@link SpinnerNumberModel} needs some maximum and {@link Integer#MAX_VALUE} makes a spinner
+     * a player cannot drag anywhere useful. Give the key a real registry bound rather than tuning
+     * this number.
+     */
+    static int spinnerMax(String key) {
+        int max = CoopOptionsRegistry.require(key).max();
+        return max == Integer.MAX_VALUE ? 65535 : max;
     }
 
     private static JCheckBox flag(String text, String tooltip) {
