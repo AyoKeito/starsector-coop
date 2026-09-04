@@ -20,6 +20,8 @@ import java.util.Objects;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
+import coop.save.CoopSaveIndexSchema;
+import coop.save.CoopSaveIndexSchema.Row;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.w3c.dom.Document;
@@ -47,36 +49,29 @@ import org.w3c.dom.NodeList;
  * <p><b>Version.</b> A file that says {@code version} 2 is not guessed at. The launcher says it
  * cannot read it and offers no save, which is a great deal better than naming the wrong one.
  *
+ * <p><b>The format itself is not described here.</b> The version, the key names, the row record and
+ * the row codec live on {@code coop.save.CoopSaveIndexSchema}, which the mod writes through and this
+ * class reads through, so neither side can change the file's shape without the other seeing it. That
+ * class names nothing from the game API on purpose, which is what lets the launcher link it without
+ * {@code starfarer.api.jar}. What stays here is everything the launcher alone does: the file I/O, the
+ * version refusal, the {@code descriptor.xml} join and the error policy below.
+ *
  * <p>Nothing here throws for a bad file: every failure comes back as a {@link Status} and a sentence
  * for the window, because a save list that will not parse must never stop somebody launching.
  */
 public final class CoopSaveIndexReader {
 
     /** The index file, under {@code <install>/saves/common}. The engine appends {@code .data}. */
-    public static final String INDEX_FILE_NAME = "coop_saves.json.data";
+    public static final String INDEX_FILE_NAME = CoopSaveIndexSchema.COMMON_FILE_ON_DISK;
 
     /** The one format this launcher knows how to read. */
-    public static final int SUPPORTED_VERSION = 1;
+    public static final int SUPPORTED_VERSION = CoopSaveIndexSchema.FORMAT_VERSION;
 
     /** Path shown to the player when something is wrong with the file. */
-    public static final String INDEX_DISPLAY_PATH = "saves/common/" + INDEX_FILE_NAME;
+    public static final String INDEX_DISPLAY_PATH = CoopSaveIndexSchema.COMMON_PATH;
 
-    private static final String KEY_VERSION = "version";
-    private static final String KEY_SAVES = "saves";
-    private static final String KEY_CAMPAIGN_ID = "campaignId";
-    private static final String KEY_SAVE_DIR_NAME = "saveDirName";
-    private static final String KEY_CHARACTER_NAME = "characterName";
-    private static final String KEY_LEVEL = "level";
-    private static final String KEY_GAME_DATE_TIMESTAMP = "gameDateTimestamp";
-    private static final String KEY_GAME_DATE = "gameDate";
-    private static final String KEY_SAVED_AT_MILLIS = "savedAtMillis";
-    private static final String KEY_AUTOSAVE = "autosave";
-    private static final String KEY_ROLE = "role";
-    private static final String KEY_SEED_STRING = "seedString";
-    // Added by the mod on 2026-09-04, and optional for good: rows written before then have no
-    // sector size or star age, and the version stayed at 1 precisely so both kinds keep parsing.
-    private static final String KEY_SECTOR_SIZE = "sectorSize";
-    private static final String KEY_SECTOR_AGE = "sectorAge";
+    private static final String KEY_VERSION = CoopSaveIndexSchema.KEY_VERSION;
+    private static final String KEY_SAVES = CoopSaveIndexSchema.KEY_SAVES;
 
     /** {@code 2026-05-28 18:16:01.129 UTC} - the shape {@code descriptor.xml} writes. */
     private static final DateTimeFormatter DESCRIPTOR_DATE =
@@ -265,15 +260,17 @@ public final class CoopSaveIndexReader {
             if (row == null) {
                 continue;
             }
-            Row one = row(row);
-            if (one != null) {
+            Row one = CoopSaveIndexSchema.readRow(row);
+            // A row with no campaign id is what a solo save would look like; there is nothing an
+            // invite could match it against.
+            if (one.usable()) {
                 parsed.add(one);
             }
         }
 
         boolean needsFallback = false;
         for (Row row : parsed) {
-            if (row.saveDirName.isEmpty()) {
+            if (!row.hasSaveDirName()) {
                 needsFallback = true;
                 break;
             }
@@ -284,11 +281,11 @@ public final class CoopSaveIndexReader {
 
         List<Save> joined = new ArrayList<>();
         for (Row row : parsed) {
-            String folder = row.saveDirName;
+            String folder = row.saveDirName();
             Descriptor descriptor;
             if (folder.isEmpty()) {
-                folder = matchByCharacterAndDate(descriptors, row.characterName,
-                        row.gameDateTimestamp);
+                folder = matchByCharacterAndDate(descriptors, row.characterName(),
+                        row.gameDateTimestamp());
                 if (folder == null) {
                     continue;
                 }
@@ -314,52 +311,12 @@ public final class CoopSaveIndexReader {
         return new Index(Status.OK, "", joined);
     }
 
-    /** An index row before the folder join. */
-    private record Row(String campaignId, String saveDirName, String characterName, int level,
-                       String gameDate, long gameDateTimestamp, long savedAtMillis,
-                       Boolean autosave, String role, String seedString, String sectorSize,
-                       String sectorAge) {
-    }
-
-    private static Row row(JSONObject json) {
-        String campaignId = text(json.optString(KEY_CAMPAIGN_ID, ""));
-        if (campaignId.isEmpty()) {
-            // A row with no campaign id is what a solo save would look like; there is nothing an
-            // invite could match it against.
-            return null;
-        }
-        Boolean autosave = null;
-        if (json.has(KEY_AUTOSAVE)) {
-            Object value = json.opt(KEY_AUTOSAVE);
-            if (value instanceof Boolean flag) {
-                autosave = flag;
-            } else if (value != null) {
-                String written = String.valueOf(value).trim();
-                if (written.equalsIgnoreCase("true") || written.equalsIgnoreCase("false")) {
-                    autosave = Boolean.valueOf(written.equalsIgnoreCase("true"));
-                }
-            }
-        }
-        return new Row(campaignId,
-                text(json.optString(KEY_SAVE_DIR_NAME, "")),
-                text(json.optString(KEY_CHARACTER_NAME, "")),
-                json.optInt(KEY_LEVEL, 0),
-                text(json.optString(KEY_GAME_DATE, "")),
-                json.optLong(KEY_GAME_DATE_TIMESTAMP, 0L),
-                json.optLong(KEY_SAVED_AT_MILLIS, 0L),
-                autosave,
-                text(json.optString(KEY_ROLE, "")),
-                text(json.optString(KEY_SEED_STRING, "")),
-                text(json.optString(KEY_SECTOR_SIZE, "")),
-                text(json.optString(KEY_SECTOR_AGE, "")));
-    }
-
     /** Index row plus descriptor, the descriptor winning every field it has an answer for. */
     private static Save merge(Row row, String folder, Descriptor descriptor) {
-        String character = row.characterName;
-        int level = row.level;
-        long savedAt = row.savedAtMillis;
-        Boolean autosave = row.autosave;
+        String character = row.characterName();
+        int level = row.level();
+        long savedAt = row.savedAtMillis();
+        Boolean autosave = row.autosave();
         if (descriptor != null) {
             if (!descriptor.characterName().isEmpty()) {
                 character = descriptor.characterName();
@@ -374,9 +331,9 @@ public final class CoopSaveIndexReader {
                 autosave = descriptor.autosave();
             }
         }
-        return new Save(row.campaignId, folder, character, level, row.gameDate,
-                row.gameDateTimestamp, savedAt, autosave, row.role, row.seedString, row.sectorSize,
-                row.sectorAge);
+        return new Save(row.campaignId(), folder, character, level, row.gameDate(),
+                row.gameDateTimestamp(), savedAt, autosave, row.role(), row.seedString(),
+                row.sectorSize(), row.sectorAge());
     }
 
     /**
