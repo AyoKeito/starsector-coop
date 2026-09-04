@@ -262,7 +262,7 @@ precedence stack; the `coop.debug.*` keys are `dOnly` and never read from either
 transport cares about: if any of `coop.hostPort`, `coop.connectHost` or `coop.connectPort` is set as
 a `-D` property, `CoopNetStartupConfig.from` resolves the role from the `-D` layer alone and ignores
 file-level role keys, so a hosting settings file does not make a `-Dcoop.connectHost` launch fail the
-"host and guest configured together" check. `docs/player/INSTALL.md` section 7 is the player-facing
+"host and guest configured together" check. `docs/player/INSTALL.md` section 9 is the player-facing
 version.
 
 Milestone 2 lifts the `policy` tier out of that stack. Policy values live in

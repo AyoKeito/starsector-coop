@@ -181,7 +181,8 @@ Development tooling gained the agent bridge verbs the smoke checks were missing:
 fuel, crew, capacity, overload) and `addship`, and the bridge accepts four clients at once instead of
 one. None of it runs unless the bridge is switched on.
 
-**Known limits.** Both players need identical Starsector versions and identical mod lists, and both
-have to edit one line in `vmparams` by hand. Traffic is plaintext. One guest. Both players
-piloting in the same battle is not in this release. `docs/player/LIMITATIONS.md` has the full list of
-where two co-op campaigns differ from one solo campaign.
+**Known limits.** Both players need identical Starsector versions and identical mod lists, and one
+line of `vmparams` changed on both PCs, which the launcher's Fix button does for you. Traffic is
+plaintext. One guest. Both players piloting in the same battle is not in this release.
+`docs/player/LIMITATIONS.md` has the full list of where two co-op campaigns differ from one solo
+campaign.

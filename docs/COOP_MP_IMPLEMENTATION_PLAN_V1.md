@@ -3153,3 +3153,13 @@ Out of v1 scope (Phase 20.3 Tier 4 / 20.4). If the IPv6 + port-forward + UPnP + 
 **What it costs to run:** a public relay is a service run forever: public address (not the home server behind the MikroTik unless strangers' traffic on that line is acceptable), abuse limits (an open forwarder gets used for other things), and players depend on it once it exists. Traffic is not encrypted (AEAD is its own Maybe), so the operator sees game state; the password is a proof exchange, not plaintext.
 
 **Shape if promoted:** a **self-hostable relay shipped as a Docker image**, relay address field in the launcher; the author runs one for their own sessions and anyone can run theirs. A public instance only if reports show demand. Trigger for promotion: CGNAT or no-forward hosts showing up in the doctor blocks players send with bug reports.
+
+### Maybe: Guest-side story gate (raised 2026-09-04)
+
+**Question:** should the mod refuse the Galatia Academy dialog options on the guest, instead of leaving the rule to the players? `LIMITATIONS.md` states the rule as it stands since 2026-09-04: story missions are the host's, nothing enforces it, and a guest who accepts one gets a private storyline whose flags and generated places never cross the wire.
+
+**The cheap option is rules.csv-level.** The mod already owns `data/campaign/rules.csv` entries, so a guest-only condition on the Academy chain's entry options would take the options off the guest's screen without touching the mission scripts. That is a refusal, not a replication: the guest sees the Academy and cannot start the chain, which is honest about what is shared but reads as content removed rather than content deferred.
+
+**The expensive option is replicating the story state.** `$` flags in sector memory, the mission's generated entities and the Academy's own progression would all have to travel and stay in step, and the chain creates one-off places whose ids are minted locally — the same identity problem hidden-base markets have. That is a phase, not a rule edit.
+
+**Trigger for promotion:** a soak report where a guest started the chain by accident and the pair could not tell what had diverged. Until then the documented rule is the answer.

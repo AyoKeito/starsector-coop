@@ -5,6 +5,30 @@ shared seed and both of you fly around in it at the same time, on one calendar. 
 the authority: it runs the NPC fleets, the markets, the economy and the colonies, and the guest's
 game mirrors them. Each player pilots their own battles on their own PC. Author: AyoKeito.
 
+## Requirements
+
+- Starsector `0.98a-RC8` on both PCs. A different RC is refused at connect. Same mod list, same
+  versions, same download of this mod, on both. Ironman off on both.
+- The host's machine reachable from the guest, by one of: a VPN pseudo-LAN, IPv6, a port forward you
+  add yourself, or UPnP/NAT-PMP. `docs/player/CONNECT.md` walks through all four and explains what
+  the connection doctor writes to the log. Only the host needs this; nothing dials the guest.
+- Windows for the launcher. On any other OS the settings file and the `-D` properties still work by
+  hand.
+
+## Installing
+
+`docs/player/INSTALL.md` is the guide, and both players follow all of it. Three steps: unzip so
+`mod_info.json` sits in `<Starsector>\mods\coop`, put `..\mods\coop\jars\coop-forks.jar;` at the
+front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in Starsector's launcher. The
+co-op launcher's install check does the last two with a **Fix** button; the guide keeps the hand edit
+for installs where that write is refused.
+
+The rest is `Coop Launcher.cmd`, in the mod folder. It runs on the JRE that ships with the game, so
+there is nothing to install. It checks the install and names what is wrong with it, writes your
+settings into `saves\common\coop_options.json.data`, and starts the game. The host picks a port,
+presses Generate for a seed and presses Copy next to the invite line; the guest presses Paste and has
+the address, port, password and seed in one go.
+
 ## What it is
 
 - Two players. One host, one guest. Not a server, and not a lobby browser: the guest is given the
@@ -27,9 +51,9 @@ shared, and docking refreshes what you see. Faction reputation is shared, which 
 smuggling shows up on your standing.
 
 **Colonies.** One player faction with two governors. Both of you can found colonies, build
-industries, run the construction queue and use colony storage on the same colonies. Monthly income
-splits evenly. Raids and bombardments work in both directions, and an incoming expedition raises a
-warning with a countdown on both screens.
+industries, run the construction queue and use colony storage on the same colonies, one of you at a
+time in the colony screen. Monthly income splits evenly. Raids and bombardments work in both
+directions, and an incoming expedition raises a warning with a countdown on both screens.
 
 **Combat.** Whoever gets engaged fights on their own PC and pilots it as normal. The other player is
 held paused and gets a banner when the fight starts and another when it ends. The result is
@@ -44,6 +68,10 @@ one for the host and puts it in the invite. A dropped link is held for 60 second
 both screens and the session resumes where it stopped if the connection comes back. When a session is
 refused or ends with a reason, you get a dialog naming the cause and the remedy.
 
+**Saving.** Coordinated saves on both machines. The guest rejoins by loading its co-op save, and the
+launcher names which save that is: character, level, save time and folder. Load the wrong one and the
+mod says so in game and points at the right one.
+
 **Reading the state.** A status line in a corner of the campaign screen shows role, session state,
 who is pausing, round trip, packet loss and which transport your fleet positions travel over. A
 "Coop Session" page in the intel screen adds link history, what your partner measures from their
@@ -54,15 +82,12 @@ campaign.
 they sync to the guest, each player sets their own preferences, and the page writes them to your
 settings file for you.
 
-**Saving.** Coordinated saves on both machines. The guest rejoins by loading its co-op save.
-
-## What does not work, and what differs
+## What does not work
 
 The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before you download:
 
-- **Identical installs.** Same Starsector version, same mod list, same versions, same download of
-  this mod, on both PCs. The two games compare manifests at connect and refuse a session over one
-  differing field. Ironman off on both.
+- **Identical installs.** The two games compare manifests at connect and refuse a session over one
+  differing field, down to the git commit baked into the jar.
 - **One line of `vmparams` changed,** on both PCs. `jars/coop-forks.jar` holds engine classes the
   JVM only prefers if they come first on the system classpath, and Starsector's mod loader is too
   late for that. The launcher's install check makes the edit for you with a Fix button, or you paste
@@ -82,37 +107,23 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
 - **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
   rewards go to the host. The mod does not stop the guest from accepting those missions, but the story
   state is not shared, so a guest who does gets a private storyline the host never sees.
-- **Fast forward becomes a toggle** rather than a hold for the duration of a session. Your setting is
-  restored when the session ends.
+- **Fast forward becomes a toggle** rather than a hold for the duration of a session, at the engine's
+  own 2x. Your setting is restored when the session ends.
 
-Accepted divergences, in short: contacts, their missions and person bounties are local to each
-player, and the guest gets no person bounties at all. Sensor ghosts do not appear for the guest. The
-abyss content lives on the host's engine. The two of you see different slipstream maps and different
-hyperspace storms. Bar offers are the same jobs from the same people at different tonnage and pay.
-A system can be remote-surveyed once by each of you. Colony construction bars and shortage markers
-can read differently on the two screens until they converge, with the host's reading canonical.
+## Accepted divergences
 
-## Requirements
+Places where the two games legitimately read differently. None of these is a bug report.
 
-- Starsector `0.98a-RC8` on both PCs. A different RC is refused at connect.
-- The host's machine reachable from the guest, by one of: a VPN pseudo-LAN, IPv6, a port forward you
-  add yourself, or UPnP/NAT-PMP. `docs/player/CONNECT.md` walks through all four and explains what
-  the connection doctor writes to the log. Only the host needs this; nothing dials the guest.
-
-## Installing
-
-`docs/player/INSTALL.md` is the guide, and both players follow all of it. Three steps: unzip so
-`mod_info.json` sits in `<Starsector>\mods\coop`, add `..\mods\coop\jars\coop-forks.jar;` to the
-front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in Starsector's launcher. The
-co-op launcher's install check does the last two with a Fix button; the guide keeps the hand edit
-for installs where that write is refused.
-
-The rest is `Coop Launcher.cmd`, in the mod folder. It runs on the JRE that ships with the game, so
-there is nothing to install. It checks the install and names what is wrong with it, writes your
-settings into `saves\common\coop_options.json.data`, and starts the game. The host picks a port,
-presses Generate for a seed and presses Copy next to the invite line; the guest presses Paste and has
-the address, port, password and seed in one go. Windows only in this release; on any other OS the
-settings file and the `-D` properties still work by hand.
+- Contacts, their missions and person bounties are local to each player, and the guest gets no person
+  bounties at all.
+- Sensor ghosts do not appear for the guest. The abyss content lives on the host's engine.
+- The two of you see different slipstream maps and different hyperspace storms.
+- Bar offers are the same jobs from the same people at different tonnage and pay.
+- A system can be remote-surveyed once by each of you.
+- Colony construction bars and shortage markers can read differently on the two screens until they
+  converge, with the host's reading canonical.
+- A pirate or Luddic Path base is built by whichever game found it, so its market is that game's own:
+  the stock is not synchronised between you.
 
 ## Reporting a problem
 

@@ -106,7 +106,7 @@ campaign's contents into the log:
 The launcher's Advanced card sets these too: **Diagnostics** and **Datagram wiretap** are checkboxes
 in its Developer flags group, and **Wiretap sample (every Nth)** is a spinner next to Reconnect grace
 in the same card. Ticking a box there writes the matching key into your settings file, and the mod
-turns it back into the property above at the next launch; `INSTALL.md` section 7 covers the
+turns it back into the property above at the next launch; `INSTALL.md` section 9 covers the
 mechanism, and shows where to set them as plain `-D` properties on the `vmparams` line instead, for a
 launch without the launcher. Turn them back off, in whichever place you turned them on, when the run
 is over. Left on in the settings file, the next session just runs with diagnostics on; left on as a

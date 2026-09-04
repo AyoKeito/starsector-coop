@@ -4,6 +4,18 @@ Two Starsector installs, each running its own copy of the game engine, kept in a
 over the network. The host's engine is the authority. Everything below follows from that, and none
 of it is a bug report; these are the places where two co-op campaigns differ from one solo campaign.
 
+## The short list
+
+- **You fight your own battles.** Two players in one battle is not in this release.
+- **The host's save is the campaign.** The guest's save is co-op material and needs the mod and a
+  host to be worth loading.
+- **Rejoin by loading the co-op save,** never by starting a New Game on the same seed.
+- **Turn the mod off for solo campaigns.** With it enabled the game is under co-op rules whether or
+  not a session exists.
+- **One guest.** Traffic is plaintext; the lobby password is a gate, not encryption.
+- **Story missions are the host's,** by agreement between the two of you rather than by enforcement.
+- **The launcher is Windows only in this release.**
+
 ---
 
 ## Battles
@@ -12,35 +24,38 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
 normal. Your partner's fleet on your screen is a mirror, not a participant, and it cannot be pulled
 into your battle.
 
-**Your partner is paused and gets a banner**, one when your battle starts and one when it ends. There
-is no in-game view of the fight. A live-updating status panel was built and then removed: it flickered
-on every redraw, and in practice people watch over Discord screen-share, where a full-screen dialog on
-the watching client is in the way.
+**Your partner is paused and gets a banner**, one when your battle starts and one when it ends.
+There is no in-game view of the fight; people watch over a Discord screen share, where a full-screen
+panel on the watching client would be in the way anyway.
 
 **Both players piloting in one battle is not in this release.** It is the largest single item on the
 list of things that could come later.
 
 ## Saves
 
-The host's save is the campaign. It carries the world, the colonies, the markets, and a record of what
-the guest owned as of the last time the guest reported in.
+The host's save is the campaign. It carries the world, the colonies, the markets, and a record of
+what the guest owned as of the last time the guest reported in.
 
 The guest's save is co-op material only. It is not a solo campaign you can load later: the scripts
 that generate the world are not in it, so opening it without a host is unsupported.
 
-Both saves need the mod. Once a campaign has been played in co-op it cannot be loaded without the mod
-enabled.
+Both saves need the mod. Once a campaign has been played in co-op it cannot be loaded without the
+mod enabled.
+
+**Rejoining is by loading the co-op autosave, not by starting a New Game.** The mod writes a
+coordinated autosave carrying the campaign's id. A fresh campaign on the same seed is refused,
+because the host's campaign is already in flight and a brand new one is not it. There is an override
+for the case where the guest's save is genuinely gone, and it costs the guest everything they had.
+
+The launcher names the save to load, down to the character, the level, the save time and the folder,
+so two campaigns' autosaves cannot be confused. Load a save from a different campaign and the mod
+says so in game and names the right one; it is a warning you close, not a refusal.
 
 **A mod update can end a campaign in progress.** Save compatibility across releases is not promised,
 because the co-op state written into a save is versioned with the code that wrote it. Unless a
 release note says a save carries over, finish a campaign on the build you started it on. And update
-together either way: the handshake compares the git commit baked into the jar, so one of you updating
-alone refuses the session with `COOP-MODS`.
-
-**Rejoining is by loading the co-op autosave, not by starting a New Game.** The mod writes a
-coordinated autosave carrying the campaign's id. A fresh campaign on the same seed is refused, because
-the host's campaign is already in flight and a brand new one is not it. There is an override for the
-case where the guest's save is genuinely gone, and it costs the guest everything they had.
+together either way: the handshake compares the git commit baked into the jar, so one of you
+updating alone refuses the session with `COOP-MODS`.
 
 ## Playing alone
 
@@ -57,10 +72,14 @@ session exists, and three of those are visible immediately:
 
 Fast-forward works and both clocks move together, but the mod switches Starsector to toggle mode for
 the duration of a session, so Shift is a tap rather than a hold. Your own preference is restored when
-the session ends. Two edges to know about: leaving the campaign mid-session (exit to menu, load another
-save) leaves toggle mode on until the next session ends or you restart the game, and opening the
-vanilla settings menu during a session and clicking apply writes the forced value into your settings
-file. Neither breaks anything; both explain a "my Shift became a toggle" surprise.
+the session ends. The campaign speed multiplier is also forced to 2, the engine default, on both
+sides for the session, so a `campaignSpeedupMult` you raised in `settings.json` does not apply while
+you are playing together.
+
+Two edges to know about: leaving the campaign mid-session (exit to menu, load another save) leaves
+toggle mode on until the next session ends or you restart the game, and opening the vanilla settings
+menu during a session and clicking apply writes the forced value into your settings file. Neither
+breaks anything; both explain a "my Shift became a toggle" surprise.
 
 ---
 
@@ -89,11 +108,16 @@ and the other player sees it taken.
 
 ## Divergences you will actually run into
 
-**Colonies.** Both of you govern the same colonies under one faction. Two things do not line up. A
-construction bar can read differently on the two screens until the industry finishes, at which point
-the lagging side is forced to completion; the drift never grows past the gap between the two starts.
-And a colony's commodity shortage markers can disagree, because each engine solves supply for the
-whole sector on its own schedule. The host's reading is the one to trust.
+**Colonies.** Both of you govern the same colonies under one faction. Only one of you can have the
+colony screen open at a time: the second player to open it is bounced back to the intel tab with a
+banner naming `colony management`, the same way two players cannot dock at one market at once. Walk
+back in once the other player leaves.
+
+Two things still do not line up. A construction bar can read differently on the two screens until the
+industry finishes, at which point the lagging side is forced to completion; the drift never grows
+past the gap between the two starts. And a colony's commodity shortage markers can disagree, because
+each engine solves supply for the whole sector on its own schedule. The host's reading is the one to
+trust.
 
 Also on the guest: the vanilla hostile-activity meter runs its own simulation and predicts nothing
 real, because the fleets it would spawn are suppressed. The co-op expedition warning, the one with a
@@ -108,6 +132,12 @@ Two smaller effects on the same screen. An offer the host has already taken keep
 guest until the next pool update drops it, so an accept can come back "already taken". And a pirate or
 Pather base rumour is generated locally on each side, which can shuffle the whole list into a
 different order, so the two bars occasionally show different picks out of the same pool.
+
+**Hidden bases are not shared markets.** A pirate or Luddic Path base is built by whichever game
+found it, and its market is minted there with an id the other game cannot resolve. So the shop you
+dock at is your own game's, its stock is not synchronised, and the trade screen opens straight away
+instead of waiting for the host's snapshot the way an ordinary market does. Two players buying from
+one hidden base are buying from two different piles.
 
 **Surveying.** A system can be remote-surveyed once by each of you, where a solo campaign allows one
 sweep. The survey data commodity goes to whoever ran the survey; the other player gets the survey
@@ -150,13 +180,33 @@ Running both games on one PC has its own version of this: Starsector caps its pe
 minimised or background window runs its clock slow and looks from the other side like the other client
 running fast. Keep both windows restored and visible.
 
+## Networking
+
+Traffic is plaintext. Message payloads are readable by anyone on the path between you. The lobby
+password stops strangers from joining an open port; it is a gate, not encryption. A VPN (see
+`CONNECT.md`, tier 0) is the only thing that encrypts the session.
+
+One guest. The wire format can carry more and the setting exists, but any value other than 1 is
+clamped back to 1 with a warning, because the gameplay side of a third player is not built.
+
+The 60 second reconnect wait ends for whoever clears the lobby password first. The host runs the
+password gate on an incoming hello and nothing else: it does not check that the client knocking is
+the partner who dropped. With no `coop.password` set that means anyone who can reach the port while
+the countdown is on screen.
+
+If the host's game crashes rather than exits, the port mapping it asked the router for outlives it.
+Most routers expire it within the hour. At the next launch the mod hits the conflict, asks the router
+who owns that external port, and deletes the entry only when the router names this machine; a port
+held by another device is reported and left alone, and you pick a different `coop.hostPort`. A router
+that refuses timed leases keeps the port open until you next start the game.
+
 ## The launcher
 
 **Windows only in this release.** `Coop Launcher.cmd` is a Windows batch file that starts
-`jre\bin\javaw.exe`, a Windows executable at a Windows path. A Mac or Linux install starts the game from a shell script
-that carries the classpath inline, and none of that was tested here. Those players set the same
-values by hand: everything the launcher does to your configuration is writing
-`saves\common\coop_options.json.data`, and `INSTALL.md` section 7 is the same settings without it.
+`jre\bin\javaw.exe`, a Windows executable at a Windows path. A Mac or Linux install starts the game
+from a shell script that carries the classpath inline, and none of that was tested here. Those
+players set the same values by hand: everything the launcher does to your configuration is writing
+`saves\common\coop_options.json.data`, and `INSTALL.md` section 9 is the same settings without it.
 
 **It edits two install files, and only when you press Fix.** The two things that have to be right
 and are outside the mod's reach are the classpath entry in `vmparams` and the mod tick in
@@ -182,20 +232,3 @@ releases API when the window opens.
 **A green Test connection is not a promise the session will start.** It proves the port is reachable
 and that the thing answering is the co-op launcher. Mod lists, versions and seeds are compared later,
 by the games, at connect.
-
-## Networking
-
-Traffic is plaintext. Message payloads are readable by anyone on the path between you. The lobby
-password stops strangers from joining an open port; it is a gate, not encryption. A VPN (see
-`CONNECT.md`, tier 0) is the only thing that encrypts the session.
-
-One guest. The wire format can carry more and the setting exists, but any value other than 1 is
-clamped back to 1 with a warning, because the gameplay side of a third player is not built.
-
-The 60 second reconnect wait is not tied to the player who dropped. A restarted game arrives with a
-new player id, so whoever clears the lobby password first ends the wait, and with no `coop.password`
-set that is anyone who can reach the port while the countdown is on screen.
-
-If the host's game crashes rather than exits, the port mapping it asked the router for outlives it.
-Most routers expire it within the hour, and the mod deletes any stale mapping it finds at the next
-launch. A router that refuses timed leases keeps the port open until then.
