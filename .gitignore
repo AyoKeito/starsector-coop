@@ -11,3 +11,6 @@
 
 # Local classloader probe scratch. Runtime engine overrides belong under /forks.
 /data/scripts/com/fs/starfarer/api/impl/campaign/procgen/AccretionDiskGenPlugin.java
+
+# Agent worktrees created by Claude Code.
+/.claude/worktrees/
