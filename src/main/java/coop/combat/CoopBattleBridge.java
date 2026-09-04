@@ -500,15 +500,16 @@ public final class CoopBattleBridge {
     }
 
     private void handleBattleBegin(CoopMessages.Message message) {
-        String battleId = CoopMessages.requiredPayloadString(message, "battleId");
-        String enemy = CoopMessages.requiredPayloadString(message, "enemySummary");
-        String location = CoopMessages.requiredPayloadString(message, "locationName");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String battleId = payload.requiredString("battleId");
+        String enemy = payload.requiredString("enemySummary");
+        String location = payload.requiredString("locationName");
         remoteBattleActive = true;
         remoteBattleSignalAtMillis = clock.getAsLong();
         remoteBattleId = battleId;
         remoteBattleNpcFleetIds.clear();
         remoteBattleNpcFleetIds.addAll(
-                splitIds(CoopMessages.requiredPayloadString(message, "npcFleetIds")));
+                splitIds(payload.requiredString("npcFleetIds")));
         remoteStatus = null;
         remoteStatusDigest = "";
         queueBanner(battleBeginBanner(partnerName(), enemy, location));
@@ -517,15 +518,16 @@ public final class CoopBattleBridge {
     }
 
     private void handleBattleStatus(CoopMessages.Message message) {
-        String battleId = CoopMessages.requiredPayloadString(message, "battleId");
-        long statusSeq = CoopMessages.requiredPayloadLong(message, "statusSeq");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String battleId = payload.requiredString("battleId");
+        long statusSeq = payload.requiredLong("statusSeq");
         if (!CoopBattleStatus.isNewer(battleId, statusSeq, remoteStatus)) {
             return;
         }
         remoteBattleSignalAtMillis = clock.getAsLong();
         remoteStatus = CoopBattleStatus.decode(battleId, statusSeq,
-                CoopMessages.requiredPayloadLong(message, "elapsedMillis"),
-                CoopMessages.requiredPayloadString(message, "ships"));
+                payload.requiredLong("elapsedMillis"),
+                payload.requiredString("ships"));
         if (!remoteBattleActive) {
             // Defensive: status without a begin (should be impossible over TCP) still counts as a
             // battle in progress, so the shared combat pause is asserted.
@@ -569,8 +571,9 @@ public final class CoopBattleBridge {
     }
 
     private void handleBattleEnd(CoopMessages.Message message) {
-        String battleId = CoopMessages.requiredPayloadString(message, "battleId");
-        String outcome = CoopMessages.requiredPayloadString(message, "outcome");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String battleId = payload.requiredString("battleId");
+        String outcome = payload.requiredString("outcome");
         // The survivor line rides on the last status that arrived — no new message fields.
         queueBanner(battleEndBanner(partnerName(), outcome, survivorSummary(remoteStatus)));
         remoteBattleActive = false;
@@ -593,8 +596,9 @@ public final class CoopBattleBridge {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
         }
-        String coopFleetId = CoopMessages.requiredPayloadString(message, "coopFleetId");
-        String fleetName = CoopMessages.requiredPayloadString(message, "fleetName");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String coopFleetId = payload.requiredString("coopFleetId");
+        String fleetName = payload.requiredString("fleetName");
         if (localBattleActive || pendingEngage != null || !engageDialogFleetId.isEmpty()) {
             CoopLog.info(CoopBattleBridge.class, "Coop ENGAGE_GUEST ignored (battle already pending/active,"
                     + " or an earlier handoff's encounter is still open) coopFleetId=" + coopFleetId);
@@ -610,9 +614,10 @@ public final class CoopBattleBridge {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
         }
-        String coopFleetId = CoopMessages.requiredPayloadString(message, "coopFleetId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String coopFleetId = payload.requiredString("coopFleetId");
         CoopMessages.DialogKind kind = CoopMessages.DialogKind.valueOf(
-                CoopMessages.requiredPayloadString(message, "kind"));
+                payload.requiredString("kind"));
         if (pendingDialog != null) {
             return;
         }

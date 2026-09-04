@@ -551,10 +551,11 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopRepDelta.TargetType type = CoopRepDelta.TargetType.valueOf(
-                CoopMessages.requiredPayloadString(message, "targetType"));
-        String targetId = CoopMessages.requiredPayloadString(message, "targetId");
-        float resulting = CoopMessages.requiredPayloadFloat(message, "resultingValue");
+                payload.requiredString("targetType"));
+        String targetId = payload.requiredString("targetId");
+        float resulting = payload.requiredFloat("resultingValue");
         repTable.put(CoopRepDelta.relationshipKey(type, targetId), resulting);
         boolean appliedToEngine = false;
         replayGuard.begin();
@@ -595,10 +596,11 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return;
         }
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopRepDelta.TargetType type = CoopRepDelta.TargetType.valueOf(
-                CoopMessages.requiredPayloadString(message, "targetType"));
-        String targetId = CoopMessages.requiredPayloadString(message, "targetId");
-        float delta = CoopMessages.requiredPayloadFloat(message, "delta");
+                payload.requiredString("targetType"));
+        String targetId = payload.requiredString("targetId");
+        float delta = payload.requiredFloat("delta");
         if (type == CoopRepDelta.TargetType.FACTION) {
             handleGuestFactionRepDelta(targetId, delta);
         } else {
@@ -847,9 +849,10 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
-        String factionA = CoopMessages.requiredPayloadString(message, "factionA");
-        String factionB = CoopMessages.requiredPayloadString(message, "factionB");
-        float resulting = CoopMessages.requiredPayloadFloat(message, "resultingValue");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String factionA = payload.requiredString("factionA");
+        String factionB = payload.requiredString("factionB");
+        float resulting = payload.requiredFloat("resultingValue");
         factionRelations.applyResult(factionA, factionB, resulting);
         replayGuard.begin();
         try {
@@ -1248,11 +1251,12 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         List<CoopMissionBoardSync.Entry> entries = CoopMissionBoardSync.decodePool(
-                CoopMessages.requiredPayloadString(message, "pool"));
+                payload.requiredString("pool"));
         missionBoard.applySnapshot(entries);
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied MISSION_POOL_SNAPSHOT entries=" + entries.size());
-        long barSeed = CoopMessages.requiredPayloadLong(message, "barSeed");
+        long barSeed = payload.requiredLong("barSeed");
         if (barSeed != 0L) {
             CoopBarSync.applySeed(barSeed);
         }
@@ -1308,8 +1312,9 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return;
         }
-        String missionId = CoopMessages.requiredPayloadString(message, "missionId");
-        String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String missionId = payload.requiredString("missionId");
+        String playerId = payload.requiredString("playerId");
         // Read before arbitrating: arbitrate() re-accepts the SAME player's repeat claim (it is
         // idempotent by design, so a resent request still gets an accept back), which means
         // accepted() alone is not a dedup. An unheld mission is.
@@ -1371,10 +1376,11 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopMissionClaim claim = new CoopMissionClaim(
-                CoopMessages.requiredPayloadString(message, "missionId"),
-                CoopMessages.requiredPayloadString(message, "playerId"),
-                CoopMessages.requiredPayloadLong(message, "hostSeq"));
+                payload.requiredString("missionId"),
+                payload.requiredString("playerId"),
+                payload.requiredLong("hostSeq"));
         missionBoard.applyAccepted(claim);
         barAcceptanceWatcher.dropRollbackHandle(claim.missionId());
         if (!claim.acceptedByPlayerId().equals(session.localPlayerId())) {
@@ -1391,8 +1397,9 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
-        String missionId = CoopMessages.requiredPayloadString(message, "missionId");
-        String reason = CoopMessages.requiredPayloadString(message, "reason");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String missionId = payload.requiredString("missionId");
+        String reason = payload.requiredString("reason");
         CoopLog.warn(CoopCampaignReplicator.class, "Coop mission claim rejected id=" + missionId
                 + " " + reason);
         rollbackMissionAcceptance(missionId, reason);
@@ -1604,13 +1611,14 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return;
         }
-        String marketId = CoopMessages.requiredPayloadString(message, "marketId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String marketId = payload.requiredString("marketId");
         CoopMarketSync.ItemKind kind = CoopMarketSync.ItemKind.valueOf(
-                CoopMessages.requiredPayloadString(message, "kind"));
-        String itemId = CoopMessages.requiredPayloadString(message, "itemId");
-        int qty = (int) CoopMessages.requiredPayloadLong(message, "qty");
-        String detail = CoopMessages.requiredPayloadString(message, "detail");
-        String actingPlayerId = CoopMessages.requiredPayloadString(message, "actingPlayerId");
+                payload.requiredString("kind"));
+        String itemId = payload.requiredString("itemId");
+        int qty = (int) payload.requiredLong("qty");
+        String detail = payload.requiredString("detail");
+        String actingPlayerId = payload.requiredString("actingPlayerId");
         // Phase 21 stats. Dedup guarantee: MARKET_TXN is guest -> host only and the host never
         // rebroadcasts it, so every message that reaches here is one transaction line, once.
         //
@@ -1620,11 +1628,11 @@ public final class CoopCampaignReplicator
         // markets-traded-with set -- which is what the page's "markets traded with" column counts --
         // but contributes nothing to best-single-trade. Filling that in needs a price on the wire,
         // which is a protocol change this phase is not allowed to make.
-        long netCredits = (long) (qty * CoopMessages.requiredPayloadFloat(message, "unitPrice"));
+        long netCredits = (long) (qty * payload.requiredFloat("unitPrice"));
         tally(sink -> sink.onTrade(actingPlayerId, marketId, netCredits));
         // Keep the in-memory model in step (used by tests / future assertions).
         marketSync.applyTransaction(new CoopMarketSync.Transaction(marketId, kind, itemId, qty,
-                CoopMessages.requiredPayloadFloat(message, "unitPrice"), detail));
+                payload.requiredFloat("unitPrice"), detail));
         // A hire is an availability removal on a second engine structure (the officer manager's pools),
         // not a cargo delta, so it routes past applyItemDeltaToEngine entirely. No credit deduction:
         // credits are per-player and the guest's own engine already charged the hiring bonus.
@@ -1643,9 +1651,10 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
-        String marketId = CoopMessages.requiredPayloadString(message, "marketId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String marketId = payload.requiredString("marketId");
         List<CoopMarketSync.StockItem> items = CoopMarketSync.decodeStock(
-                CoopMessages.requiredPayloadString(message, "stock"));
+                payload.requiredString("stock"));
         marketSync.applySnapshot(marketId, items);
         // One-shot apply to the guest's engine open-market so it shows the host's canonical stock.
         boolean applied = applySnapshotToEngine(marketId, items);
@@ -2414,8 +2423,9 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
-        pendingHostColonyNet = CoopMessages.requiredPayloadFloat(message, "netCredits");
-        pendingHostColonyCount = CoopMessages.requiredPayloadLong(message, "colonyCount");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        pendingHostColonyNet = payload.requiredFloat("netCredits");
+        pendingHostColonyCount = payload.requiredLong("colonyCount");
         maybeLogColonyIncomeDrift();
     }
 
@@ -2600,12 +2610,13 @@ public final class CoopCampaignReplicator
     }
 
     private void handleWorldDelta(CoopMessages.Message message) {
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopWorldDelta delta = new CoopWorldDelta(
-                CoopMessages.requiredPayloadString(message, "entityId"),
-                CoopWorldDelta.Kind.valueOf(CoopMessages.requiredPayloadString(message, "kind")),
-                Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "consumed")),
-                CoopMessages.requiredPayloadString(message, "newStateJson"),
-                CoopMessages.requiredPayloadString(message, "actingPlayerId"));
+                payload.requiredString("entityId"),
+                CoopWorldDelta.Kind.valueOf(payload.requiredString("kind")),
+                Boolean.parseBoolean(payload.requiredString("consumed")),
+                payload.requiredString("newStateJson"),
+                payload.requiredString("actingPlayerId"));
         // Direction check, ahead of the ledger so a refused delta leaves no trace that would make a
         // later legitimate one look like a duplicate. Only DECIV is host-only, and the host is the
         // only side that can enforce it (a guest must still apply the host's).
@@ -3395,9 +3406,10 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
-        String locationId = CoopMessages.requiredPayloadString(message, "locationId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String locationId = payload.requiredString("locationId");
         List<CoopOrbitSync.OrbitEntry> entries = CoopOrbitSync.decode(
-                CoopMessages.requiredPayloadString(message, "orbits"));
+                payload.requiredString("orbits"));
         SectorAPI sector = Global.getSector();
         if (sector == null || entries.isEmpty()) {
             return;
@@ -4079,8 +4091,9 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return;
         }
-        String abilityId = CoopMessages.requiredPayloadString(message, "abilityId");
-        String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String abilityId = payload.requiredString("abilityId");
+        String playerId = payload.requiredString("playerId");
         // The host applies the world-affecting effect against its authoritative NPC fleets/world by
         // running the vanilla ability plugin on the guest's mirror fleet (Phase 12c A1). NPC fleet
         // state changes propagate back to the guest via the Phase 9 NPC_FLEET_SET rebroadcast, and

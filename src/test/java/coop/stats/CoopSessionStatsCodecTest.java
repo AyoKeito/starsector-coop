@@ -161,9 +161,10 @@ class CoopSessionStatsCodecTest {
     void thePayloadIsAFlatJsonObjectTheEnvelopeParserAccepts() {
         String payload = CoopSessionStatsCodec.encodePayload(fullyPopulated());
 
-        // If this ever fails, the payload has grown a nested object, an array, or a bare float --
-        // none of which CoopMessages.Parser understands, and all of which would only be discovered
-        // on the wire.
+        // If this ever fails, the payload has grown a bare float or some other shape the envelope's
+        // flat value model does not carry, which would only be discovered on the wire. (CoopJson
+        // does understand nested objects and arrays -- the manifest needs them -- but the flat
+        // token-line body below is what keeps this payload one level deep.)
         assertTrue(CoopSessionStatsCodec.parseFlatObject(payload).containsKey("body"));
     }
 

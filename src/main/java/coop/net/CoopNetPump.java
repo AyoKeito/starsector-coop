@@ -4518,9 +4518,10 @@ public class CoopNetPump implements EveryFrameScript {
             endHostWaitForReturningPartner();
         }
 
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopPlayerInfo guest = new CoopPlayerInfo(
-                CoopMessages.requiredPayloadString(message, "playerId"),
-                CoopMessages.requiredPayloadString(message, "playerName"));
+                payload.requiredString("playerId"),
+                payload.requiredString("playerName"));
 
         if (!sessionState.canAcceptGuest()) {
             String reason = sessionState.rejectReasonForGuest(guest);
@@ -4814,11 +4815,12 @@ public class CoopNetPump implements EveryFrameScript {
                     + " here was not used. The session is unprotected on the host's port.");
         }
 
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopPlayerInfo host = new CoopPlayerInfo(
-                CoopMessages.requiredPayloadString(message, "hostPlayerId"),
-                CoopMessages.requiredPayloadString(message, "hostName"));
+                payload.requiredString("hostPlayerId"),
+                payload.requiredString("hostName"));
         sessionState.guestAcceptLobby(
-                CoopMessages.requiredPayloadString(message, "provisionalLobbyId"),
+                payload.requiredString("provisionalLobbyId"),
                 host);
         CoopLog.info(CoopNetPump.class,
                 "Coop lobby connected provisionalLobbyId=" + sessionState.provisionalLobbyId()
@@ -5053,7 +5055,8 @@ public class CoopNetPump implements EveryFrameScript {
     private String handshakeDiffFor(CoopMessages.Message message) {
         try {
             boolean hostIronMode = ironModeSupplier.getAsBoolean();
-            boolean guestIronMode = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "ironMode"));
+            CoopMessages.Payload payload = CoopMessages.payload(message);
+            boolean guestIronMode = Boolean.parseBoolean(payload.requiredString("ironMode"));
             if (hostIronMode) {
                 return "ironMode: host=true";
             }
@@ -5063,7 +5066,7 @@ public class CoopNetPump implements EveryFrameScript {
 
             CoopHandshakeManifest hostManifest = manifestSupplier.get();
             CoopHandshakeManifest guestManifest = CoopHandshakeManifest.fromJson(
-                    CoopMessages.requiredPayloadString(message, "manifestJson"));
+                    payload.requiredString("manifestJson"));
             return CoopHandshakeDiff.compare(hostManifest, guestManifest).toDisplayString();
         } catch (RuntimeException ex) {
             // toString(), not getMessage(): the latter is null for exceptions thrown without one
@@ -5077,16 +5080,17 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
-        boolean accepted = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "accepted"));
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        boolean accepted = Boolean.parseBoolean(payload.requiredString("accepted"));
         if (accepted) {
-            String sessionId = CoopMessages.requiredPayloadString(message, "sessionId");
+            String sessionId = payload.requiredString("sessionId");
             sessionState.guestAcceptHandshake(sessionId);
             service.setExpectedSessionToken(CoopMessages.wireToken(sessionId));
             CoopLog.info(CoopNetPump.class, "Coop handshake accepted sessionId=" + sessionId);
             return;
         }
 
-        String diff = CoopMessages.requiredPayloadString(message, "diff");
+        String diff = payload.requiredString("diff");
         String correlationId = desyncCorrelationId();
         // Terminal on the guest: a mod list is fixed by relaunching, so retrying every 5 s can only
         // earn the identical reject and bury the dialog that explains it.
@@ -5100,12 +5104,13 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
-        long seedLong = CoopMessages.requiredPayloadLong(message, "seedLong");
-        String seedString = CoopMessages.requiredPayloadString(message, "seedString");
-        String hostFingerprint = CoopMessages.requiredPayloadString(message, "sectorFingerprint");
-        String hostCampaignId = CoopMessages.requiredPayloadString(message, "campaignId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        long seedLong = payload.requiredLong("seedLong");
+        String seedString = payload.requiredString("seedString");
+        String hostFingerprint = payload.requiredString("sectorFingerprint");
+        String hostCampaignId = payload.requiredString("campaignId");
         boolean hostCampaignIdMinted = Boolean.parseBoolean(
-                CoopMessages.requiredPayloadString(message, "campaignIdMinted"));
+                payload.requiredString("campaignIdMinted"));
         String guestSeedString = sectorSeedStringSupplier.get();
         String guestFingerprint = sectorFingerprintSupplier.get();
         CoopLog.info(CoopNetPump.class,
@@ -5681,10 +5686,11 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void applyPauseIntent(CoopMessages.Message message) {
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopMessages.PauseSource source = CoopMessages.PauseSource.valueOf(
-                CoopMessages.requiredPayloadString(message, "source"));
-        boolean paused = Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "paused"));
-        long intentSeq = CoopMessages.requiredPayloadLong(message, "intentSeq");
+                payload.requiredString("source"));
+        boolean paused = Boolean.parseBoolean(payload.requiredString("paused"));
+        long intentSeq = payload.requiredLong("intentSeq");
         boolean applied = source == CoopMessages.PauseSource.SCREEN
                 ? pauseCoordinator.applyGuestScreenPauseIntent(paused, intentSeq)
                 : pauseCoordinator.applyGuestKeyPauseIntent(paused, intentSeq);
@@ -6132,8 +6138,9 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         try {
-            String playerId = CoopMessages.requiredPayloadString(message, "playerId");
-            String destination = CoopMessages.requiredPayloadString(message, "destinationName");
+            CoopMessages.Payload payload = CoopMessages.payload(message);
+            String playerId = payload.requiredString("playerId");
+            String destination = payload.requiredString("destinationName");
             String name = playerId.equals(sessionState.remotePlayerId()) ? sessionState.remoteName() : null;
             if (name == null || name.isEmpty()) {
                 name = "Remote player";
@@ -6253,9 +6260,10 @@ public class CoopNetPump implements EveryFrameScript {
             // Same exemption stamp as the sender's: the guest is about to stop pumping to write its
             // own coordinated autosave, and so, right now, is the host.
             lastSaveCheckpointAtMillis = clockMillis.getAsLong();
+            CoopMessages.Payload payload = CoopMessages.payload(message);
             saveCheckpoint.onCheckpointReceived(
-                    CoopMessages.requiredPayloadLong(message, "checkpointId"),
-                    CoopMessages.requiredPayloadString(message, "reason"),
+                    payload.requiredLong("checkpointId"),
+                    payload.requiredString("reason"),
                     clockMillis.getAsLong());
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply SAVE_CHECKPOINT", ex);
@@ -6920,9 +6928,10 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
             return;
         }
-        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
-        String entityName = CoopMessages.requiredPayloadString(message, "entityName");
-        String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String entityId = payload.requiredString("entityId");
+        String entityName = payload.requiredString("entityName");
+        String playerId = payload.requiredString("playerId");
         CoopInteractionGate.ClaimResult result = interactionGate.arbitrate(entityId, playerId, entityName);
         if (result.accepted()) {
             CoopMessages.Message accept = CoopMessages.interactionAccept(
@@ -6949,11 +6958,12 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
         }
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         CoopInteractionClaim claim = new CoopInteractionClaim(
-                CoopMessages.requiredPayloadString(message, "entityId"),
-                CoopMessages.requiredPayloadString(message, "playerId"),
-                CoopMessages.requiredPayloadString(message, "entityName"),
-                CoopMessages.requiredPayloadLong(message, "hostSeq"));
+                payload.requiredString("entityId"),
+                payload.requiredString("playerId"),
+                payload.requiredString("entityName"),
+                payload.requiredLong("hostSeq"));
         interactionGate.applyAccepted(claim);
         // The host has ruled on this entity, so the wait is over whichever way it went. Nothing is
         // posted for an answer that arrives late: the accept simply leaves the dialog where it is.
@@ -6979,8 +6989,9 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
         }
-        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
-        String reason = CoopMessages.requiredPayloadString(message, "reason");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String entityId = payload.requiredString("entityId");
+        String reason = payload.requiredString("reason");
         claimWaitTracker.onAnswered(entityId);
         if (rejectTracker.onRejected(entityId)) {
             CoopLog.warn(CoopNetPump.class, "Coop interaction rejected entityId=" + entityId + " "
@@ -6989,8 +7000,9 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void handleInteractionRelease(CoopMessages.Message message) {
-        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
-        String playerId = CoopMessages.requiredPayloadString(message, "playerId");
+        CoopMessages.Payload payload = CoopMessages.payload(message);
+        String entityId = payload.requiredString("entityId");
+        String playerId = payload.requiredString("playerId");
         interactionGate.release(entityId, playerId);
         // Deliberately does NOT cancel a pending forced close. If the winner releases the entity in
         // the same breath as our reject, letting our dialog stay would leave the guest holding an
@@ -7386,12 +7398,13 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         try {
+            CoopMessages.Payload payload = CoopMessages.payload(message);
             CoopBattleResult result = CoopBattleResult.decode(
-                    CoopMessages.requiredPayloadString(message, "battleId"),
-                    CoopMessages.requiredPayloadString(message, "engagingPlayerId"),
-                    CoopMessages.requiredPayloadString(message, "outcome"),
-                    (int) CoopMessages.requiredPayloadLong(message, "engagingFleetSize"),
-                    CoopMessages.requiredPayloadString(message, "body"));
+                    payload.requiredString("battleId"),
+                    payload.requiredString("engagingPlayerId"),
+                    payload.requiredString("outcome"),
+                    (int) payload.requiredLong("engagingFleetSize"),
+                    payload.requiredString("body"));
             // Dedup guarantee: apply() is the battle-id ledger and returns false for a repeat, so a
             // resent BATTLE_RESULT cannot double-count the guest's battle.
             if (battleResultReconciler.apply(result)) {

@@ -321,26 +321,29 @@ public final class CoopMessages {
     }
 
     public static LinkStatus parseLinkStatus(Message message) {
+        // Fourteen fields: read through the static helpers this was fourteen parses of the same
+        // string, once per second per link.
+        Payload payload = payload(message);
         return new LinkStatus(
-                (int) requiredPayloadLong(message, "rttMillis"),
-                (int) requiredPayloadLong(message, "p95RttMillis"),
-                (int) requiredPayloadLong(message, "lossPercent"),
-                Boolean.parseBoolean(requiredPayloadString(message, "udpInboundOk")),
-                requiredPayloadString(message, "transport"),
-                requiredPayloadLong(message, "tcpSilenceMillis"),
-                requiredPayloadLong(message, "droppedTokenMismatch"),
-                requiredPayloadLong(message, "droppedForeignSource"),
-                requiredPayloadLong(message, "pathValidations"),
-                requiredPayloadLong(message, "icmpTransients"),
-                requiredPayloadLong(message, "escalatedToTcp"),
+                (int) payload.requiredLong("rttMillis"),
+                (int) payload.requiredLong("p95RttMillis"),
+                (int) payload.requiredLong("lossPercent"),
+                Boolean.parseBoolean(payload.requiredString("udpInboundOk")),
+                payload.requiredString("transport"),
+                payload.requiredLong("tcpSilenceMillis"),
+                payload.requiredLong("droppedTokenMismatch"),
+                payload.requiredLong("droppedForeignSource"),
+                payload.requiredLong("pathValidations"),
+                payload.requiredLong("icmpTransients"),
+                payload.requiredLong("escalatedToTcp"),
                 // Optional: a peer built before 20.4 has no such field, and a link report is not
                 // worth throwing away over a counter.
-                optionalPayloadLong(message, "connectionsThrottled", 0L),
-                optionalPayloadLong(message, "invalidFrames", 0L),
+                payload.optionalLong("connectionsThrottled", 0L),
+                payload.optionalLong("invalidFrames", 0L),
                 // Optional for the same reason, and its default is load-bearing rather than cosmetic:
                 // a peer built before Phase 29 M2 sends at 10 Hz unconditionally, so "field absent"
                 // and "10 Hz" are the same statement about that peer.
-                (int) optionalPayloadLong(message, "cadenceHz", CoopCadenceTier.DEFAULT.hz()));
+                (int) payload.optionalLong("cadenceHz", CoopCadenceTier.DEFAULT.hz()));
     }
 
     /**
@@ -1204,19 +1207,20 @@ public final class CoopMessages {
     }
 
     public static ShipLost parseShipLost(Message message) {
+        Payload payload = payload(message);
         float day;
         try {
-            day = requiredPayloadFloat(message, "day");
+            day = payload.requiredFloat("day");
         } catch (RuntimeException ex) {
             day = 0f;
         }
         return new ShipLost(
-                optionalPayloadString(message, "playerId", ""),
-                optionalPayloadString(message, "hullName", ""),
-                optionalPayloadString(message, "hullClass", ""),
-                optionalPayloadString(message, "systemName", ""),
+                payload.optionalString("playerId", ""),
+                payload.optionalString("hullName", ""),
+                payload.optionalString("hullClass", ""),
+                payload.optionalString("systemName", ""),
                 day,
-                optionalPayloadString(message, "cause", ""));
+                payload.optionalString("cause", ""));
     }
 
     // ---- Phase 14/15: solo own-fleet combat + spectator bridge + result reconciliation -----------
@@ -1671,7 +1675,7 @@ public final class CoopMessages {
     }
 
     public static Message decode(String json) {
-        Map<String, Object> fields = new Parser(json).parseObject();
+        Map<String, Object> fields = CoopJson.parseObject(json);
         Type type = Type.valueOf(requiredString(fields, "type"));
         String sessionId = nullableString(fields, "sessionId");
         long seq = requiredLong(fields, "seq");
@@ -1685,7 +1689,7 @@ public final class CoopMessages {
 
     public static Map<String, Object> decodePayload(Message message) {
         Objects.requireNonNull(message, "message");
-        return new Parser(message.payloadJson()).parseObject();
+        return CoopJson.parseObject(message.payloadJson());
     }
 
     private static void appendNullableString(StringBuilder json, String value) {
@@ -1704,8 +1708,73 @@ public final class CoopMessages {
         throw new IllegalArgumentException("Missing string field: " + name);
     }
 
+    /**
+     * A payload decoded exactly once.
+     *
+     * <p>The {@code requiredPayload*} / {@code optionalPayload*} statics below each re-parse the
+     * whole payload string, so a reader that wants five fields parses five times. {@code
+     * parseLinkStatus} wanted fourteen, at 1 Hz per link; the campaign replicator's handlers want
+     * three to eight apiece and some of their messages arrive at 5-10 Hz. Decoding once and reading
+     * off the map is the same code with the parse hoisted out of the loop.
+     *
+     * <p>The accessors are field-for-field the same semantics as the statics — same fallbacks, same
+     * exception type, same message text — so converting a call site is mechanical and cannot change
+     * what the peer sees.
+     */
+    public static final class Payload {
+        private final Map<String, Object> fields;
+
+        private Payload(Map<String, Object> fields) {
+            this.fields = fields;
+        }
+
+        /** The decoded fields, in wire order. */
+        public Map<String, Object> raw() {
+            return fields;
+        }
+
+        public String requiredString(String name) {
+            return CoopMessages.requiredString(fields, name);
+        }
+
+        /**
+         * A string field that may be absent, so a message built by an older peer (before the field
+         * existed) still parses. Returns {@code fallback} when the field is missing or is not a
+         * string.
+         */
+        public String optionalString(String name, String fallback) {
+            Object value = fields.get(name);
+            return value instanceof String stringValue ? stringValue : fallback;
+        }
+
+        public long requiredLong(String name) {
+            return CoopMessages.requiredLong(fields, name);
+        }
+
+        /** Long counterpart of {@link #optionalString}, for counters added to shipped messages. */
+        public long optionalLong(String name, long fallback) {
+            Object value = fields.get(name);
+            return value instanceof Long longValue ? longValue : fallback;
+        }
+
+        /** A float that was encoded as a quoted string (see Phase 12 builders). */
+        public float requiredFloat(String name) {
+            return Float.parseFloat(CoopMessages.requiredString(fields, name));
+        }
+
+        /** A field that is allowed to be JSON {@code null}, but not allowed to be a non-string. */
+        public String nullableString(String name) {
+            return CoopMessages.nullableString(fields, name);
+        }
+    }
+
+    /** Decodes {@code message}'s payload once, for readers that want more than one field. */
+    public static Payload payload(Message message) {
+        return new Payload(decodePayload(message));
+    }
+
     public static String requiredPayloadString(Message message, String name) {
-        return requiredString(decodePayload(message), name);
+        return payload(message).requiredString(name);
     }
 
     /**
@@ -1714,23 +1783,21 @@ public final class CoopMessages {
      * a string.
      */
     public static String optionalPayloadString(Message message, String name, String fallback) {
-        Object value = decodePayload(message).get(name);
-        return value instanceof String stringValue ? stringValue : fallback;
+        return payload(message).optionalString(name, fallback);
     }
 
     public static long requiredPayloadLong(Message message, String name) {
-        return requiredLong(decodePayload(message), name);
+        return payload(message).requiredLong(name);
     }
 
     /** Long counterpart of {@link #optionalPayloadString}, for counters added to shipped messages. */
     public static long optionalPayloadLong(Message message, String name, long fallback) {
-        Object value = decodePayload(message).get(name);
-        return value instanceof Long longValue ? longValue : fallback;
+        return payload(message).optionalLong(name, fallback);
     }
 
     /** Reads a float field that was encoded as a quoted string (see Phase 12 builders). */
     public static float requiredPayloadFloat(Message message, String name) {
-        return Float.parseFloat(requiredString(decodePayload(message), name));
+        return payload(message).requiredFloat(name);
     }
 
     private static String nullableString(Map<String, Object> fields, String name) {
@@ -1753,166 +1820,7 @@ public final class CoopMessages {
     }
 
     private static String escapeJson(String value) {
-        StringBuilder escaped = new StringBuilder(value.length() + 8);
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            switch (c) {
-                case '"' -> escaped.append("\\\"");
-                case '\\' -> escaped.append("\\\\");
-                case '\b' -> escaped.append("\\b");
-                case '\f' -> escaped.append("\\f");
-                case '\n' -> escaped.append("\\n");
-                case '\r' -> escaped.append("\\r");
-                case '\t' -> escaped.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        escaped.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        escaped.append(c);
-                    }
-                }
-            }
-        }
-        return escaped.toString();
-    }
-
-    private static final class Parser {
-        private final String json;
-        private int index;
-
-        private Parser(String json) {
-            this.json = Objects.requireNonNull(json, "json");
-        }
-
-        private Map<String, Object> parseObject() {
-            skipWhitespace();
-            expect('{');
-            LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
-            skipWhitespace();
-            if (peek('}')) {
-                index++;
-                return fields;
-            }
-            while (true) {
-                skipWhitespace();
-                String key = parseString();
-                skipWhitespace();
-                expect(':');
-                skipWhitespace();
-                Object value = parseValue();
-                fields.put(key, value);
-                skipWhitespace();
-                if (peek(',')) {
-                    index++;
-                    continue;
-                }
-                expect('}');
-                skipWhitespace();
-                if (index != json.length()) {
-                    throw error("Trailing content");
-                }
-                return fields;
-            }
-        }
-
-        private Object parseValue() {
-            if (peek('"')) {
-                return parseString();
-            }
-            if (startsWith("null")) {
-                index += 4;
-                return null;
-            }
-            return parseLong();
-        }
-
-        private String parseString() {
-            expect('"');
-            StringBuilder value = new StringBuilder();
-            while (index < json.length()) {
-                char c = json.charAt(index++);
-                if (c == '"') {
-                    return value.toString();
-                }
-                if (c != '\\') {
-                    value.append(c);
-                    continue;
-                }
-                if (index >= json.length()) {
-                    throw error("Unterminated escape sequence");
-                }
-                char escaped = json.charAt(index++);
-                switch (escaped) {
-                    case '"' -> value.append('"');
-                    case '\\' -> value.append('\\');
-                    case '/' -> value.append('/');
-                    case 'b' -> value.append('\b');
-                    case 'f' -> value.append('\f');
-                    case 'n' -> value.append('\n');
-                    case 'r' -> value.append('\r');
-                    case 't' -> value.append('\t');
-                    case 'u' -> value.append(parseUnicodeEscape());
-                    default -> throw error("Unsupported escape sequence: \\" + escaped);
-                }
-            }
-            throw error("Unterminated string");
-        }
-
-        private char parseUnicodeEscape() {
-            if (index + 4 > json.length()) {
-                throw error("Incomplete unicode escape");
-            }
-            String digits = json.substring(index, index + 4);
-            index += 4;
-            try {
-                return (char) Integer.parseInt(digits, 16);
-            } catch (NumberFormatException ex) {
-                throw error("Invalid unicode escape: " + digits);
-            }
-        }
-
-        private Long parseLong() {
-            int start = index;
-            if (peek('-')) {
-                index++;
-            }
-            while (index < json.length() && Character.isDigit(json.charAt(index))) {
-                index++;
-            }
-            if (start == index || (json.charAt(start) == '-' && start + 1 == index)) {
-                throw error("Expected number");
-            }
-            try {
-                return Long.parseLong(json.substring(start, index));
-            } catch (NumberFormatException ex) {
-                throw error("Invalid long value");
-            }
-        }
-
-        private void expect(char expected) {
-            if (index >= json.length() || json.charAt(index) != expected) {
-                throw error("Expected '" + expected + "'");
-            }
-            index++;
-        }
-
-        private boolean peek(char expected) {
-            return index < json.length() && json.charAt(index) == expected;
-        }
-
-        private boolean startsWith(String value) {
-            return json.startsWith(value, index);
-        }
-
-        private void skipWhitespace() {
-            while (index < json.length() && Character.isWhitespace(json.charAt(index))) {
-                index++;
-            }
-        }
-
-        private IllegalArgumentException error(String message) {
-            return new IllegalArgumentException(message + " at index " + index);
-        }
+        return CoopJson.escape(value);
     }
 
     // ---- Phase 20 red-team additions -------------------------------------------------------------
