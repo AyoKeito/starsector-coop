@@ -115,7 +115,7 @@ class CoopSkeletonMutationReplicatorTest {
         assertEquals("GATE_ACTIVATED", CoopMessages.requiredPayloadString(service.sent.get(0), "kind"));
         assertEquals("gate-galatia",
                 CoopMessages.requiredPayloadString(service.sent.get(0), "entityId"));
-        assertEquals(CoopSkeletonMutationWatcher.encodeGateState(true, false, false),
+        assertEquals(CoopSkeletonMutationWatcher.encodeGateState(true, false, false, false),
                 CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
     }
 
@@ -176,12 +176,14 @@ class CoopSkeletonMutationReplicatorTest {
         assertEquals(1, service.sent.size());
     }
 
-    /** Gates and deciv stay host-only: the guest's producers for both are suppressed. */
+    /**
+     * Gate scanning is a plain rules.csv dialog option the guest runs locally, so the guest polls
+     * gates too and reports its own scan upward.
+     */
     @Test
-    void guestNeverCapturesGates() {
+    void guestReportsItsOwnGateScan() {
         FakeSector sector = new FakeSector();
-        FakeEntity gate = sector.addGate("gate-galatia");
-        gate.memory.set(GateEntityPlugin.GATE_SCANNED, true);
+        FakeEntity gate = sector.addGate("gate-tia");
         Global.setSector(sector.proxy());
 
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
@@ -190,10 +192,152 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeGuestSession(), clock);
 
         replicator.tickWorldDeltas();
+        assertTrue(service.sent.isEmpty(), "the seeding poll reports nothing");
+
+        gate.memory.set(GateEntityPlugin.GATE_SCANNED, true);
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
         replicator.tickWorldDeltas();
 
-        assertTrue(service.sent.isEmpty(), "the host owns gate activation");
+        assertEquals(1, service.sent.size());
+        assertEquals("GATE_ACTIVATED", CoopMessages.requiredPayloadString(service.sent.get(0), "kind"));
+        assertEquals("gate-tia", CoopMessages.requiredPayloadString(service.sent.get(0), "entityId"));
+        assertEquals(CoopSkeletonMutationWatcher.encodeGateState(true, false, false, false),
+                CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
+    }
+
+    /**
+     * The host applies a guest's scan to the authoritative gate, bumps vanilla's own
+     * {@code $numGatesScanned} counter the way rules.csv does, rebroadcasts once, and its own next
+     * poll finds nothing new to say.
+     */
+    @Test
+    void hostAppliesAGuestGateScanWithoutEchoingItTwice() {
+        FakeSector sector = new FakeSector();
+        FakeEntity gate = sector.addGate("gate-tia");
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableClock clock = new MutableClock(1_000_000L);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), clock);
+
+        replicator.tickWorldDeltas(); // seed silently
+        assertTrue(service.sent.isEmpty());
+
+        replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L, "gate-tia", "GATE_ACTIVATED",
+                false, CoopSkeletonMutationWatcher.encodeGateState(true, false, false, false),
+                "guest-player"));
+
+        assertTrue(gate.memory.getBoolean(GateEntityPlugin.GATE_SCANNED));
+        assertEquals(1, sector.memory.values.get(GateEntityPlugin.NUM_GATES_SCANNED),
+                "vanilla's own counter is bumped alongside the flag");
+        assertEquals(1, service.sent.size(), "rebroadcast exactly once");
+
+        clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
+        replicator.tickWorldDeltas();
+
+        assertEquals(1, service.sent.size(), "the host's poll must not re-report what it just applied");
+    }
+
+    /**
+     * {@code $canScanGates} is the sector global rules.csv gates the "Scan the Gate" option on, and
+     * only the host's story ever sets it. It rides the per-gate payload, so a guest that has never
+     * seen a scanned gate still gets the option.
+     */
+    @Test
+    void canScanGatesPropagatesToTheGuestOnTheGatePayload() {
+        FakeSector sector = new FakeSector();
+        sector.addGate("gate-tia");
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), new MutableClock(1_000_000L));
+
+        replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L, "gate-tia", "GATE_ACTIVATED",
+                false, CoopSkeletonMutationWatcher.encodeGateState(false, false, false, true),
+                "host-player"));
+
+        assertTrue(sector.memory.getBoolean(GateEntityPlugin.CAN_SCAN_GATES));
+        assertFalse(sector.memory.values.containsKey(GateEntityPlugin.NUM_GATES_SCANNED),
+                "nothing was scanned, so nothing counts");
+    }
+
+    /**
+     * The host's own broadcast, echoed back by the guest's poll, changes nothing on the host: no
+     * engine write, and no new state for the host's next poll to report onward. (The host still
+     * relays the packet itself -- that is the unconditional converge-everyone rebroadcast every kind
+     * gets, and the peers' ledgers absorb it.)
+     */
+    @Test
+    void aGateEchoIsInert() {
+        FakeSector sector = new FakeSector();
+        FakeEntity gate = sector.addGate("gate-tia");
+        gate.memory.set(GateEntityPlugin.GATE_SCANNED, true);
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableClock clock = new MutableClock(1_000_000L);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), clock);
+
+        replicator.tickWorldDeltas(); // reports the already-scanned gate
+        assertEquals(1, service.sent.size());
+        int writes = gate.memory.writes;
+
+        replicator.handle(CoopMessages.worldDelta("session-a", 2L, 0L, "gate-tia", "GATE_ACTIVATED",
+                false, CoopSkeletonMutationWatcher.encodeGateState(true, false, false, false),
+                "guest-player"));
+
+        assertEquals(writes, gate.memory.writes, "the echo must not touch the engine");
+
+        int afterRelay = service.sent.size();
+        clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
+        replicator.tickWorldDeltas();
+
+        assertEquals(afterRelay, service.sent.size(), "the echo produced no new state to report");
+    }
+
+    // ---- Host-only kinds -------------------------------------------------------------------------
+
+    /**
+     * DECIV deletes a colony out of the authoritative world and has no legitimate guest producer, so
+     * the host refuses one that arrives from a peer -- before the ledger records it.
+     */
+    @Test
+    void theHostRefusesAGuestSourcedDeciv() {
+        FakeSector sector = new FakeSector();
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), new MutableClock(1_000_000L));
+
+        replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L, "market-a", "DECIV", false,
+                CoopSkeletonMutationWatcher.encodeDeciv(true, 42L), "guest-player"));
+
+        assertTrue(service.sent.isEmpty(), "a refused delta is neither applied nor rebroadcast");
+    }
+
+    /** The guest must still apply the host's DECIV -- the direction check is host-side only. */
+    @Test
+    void theGuestStillAppliesAHostDeciv() {
+        FakeSector sector = new FakeSector();
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), new MutableClock(1_000_000L));
+
+        // The fake economy resolves no market, so the applier skips at its own guard rather than
+        // calling into the engine; reaching that guard at all is what proves the delta was not
+        // refused outright.
+        assertDoesNotThrow(() -> replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L,
+                "market-a", "DECIV", false, CoopSkeletonMutationWatcher.encodeDeciv(true, 42L),
+                "host-player")));
+        assertFalse(CoopWorldDelta.Kind.GATE_ACTIVATED.hostOnly(),
+                "gates travel both ways since guests can scan");
+        assertTrue(CoopWorldDelta.Kind.DECIV.hostOnly());
     }
 
     /**
@@ -625,7 +769,7 @@ class CoopSkeletonMutationReplicatorTest {
     private static CoopMessages.Message gateMessage(String entityId, boolean scanned,
                                                     boolean gatesActive, boolean canUseGates) {
         return CoopMessages.worldDelta("session-a", 1L, 0L, entityId, "GATE_ACTIVATED", false,
-                CoopSkeletonMutationWatcher.encodeGateState(scanned, gatesActive, canUseGates), "host");
+                CoopSkeletonMutationWatcher.encodeGateState(scanned, gatesActive, canUseGates, false), "host");
     }
 
     private static CoopSessionState activeHostSession() {

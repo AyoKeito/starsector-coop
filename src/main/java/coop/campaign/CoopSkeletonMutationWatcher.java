@@ -11,8 +11,8 @@ import java.util.Objects;
  * mutations (campaign-objective ownership, story-gate activation, and since Phase 12c planet survey
  * levels and ruins exploration) and this class decides which of them changed since the last poll.
  * The replicator supplies the engine readings and turns the returned flips into {@code WORLD_DELTA}
- * broadcasts. Gates are polled host-side only; objectives, survey levels and ruins are polled on both
- * roles, because either player produces those and the flip has to reach the other side.
+ * broadcasts. Every one of them is polled on both roles, because either player produces them and the
+ * flip has to reach the other side.
  *
  * <p><b>Why survey is a poll too.</b> {@code SurveyLevel} is one shared field per market with five
  * mutation paths — the survey dialog panel, the {@code remote_survey} ability
@@ -31,6 +31,14 @@ import java.util.Objects;
  * dialog capture or by any mod). Gates have no event at all: {@code GateEntityPlugin.advance} latches
  * its private {@code madeActive} field from {@code canUseGates() && isScanned(entity)}
  * ({@code GateEntityPlugin.java:274-284}), so the poll reads the underlying flags instead.
+ *
+ * <p><b>Why gates run on both roles.</b> They used to be host-only, on the reasoning that the
+ * guest's producers were all suppressed sims. That is true of the war sim, but not of the gate
+ * <em>scan</em>: it is a plain rules.csv dialog option the guest runs locally, so a guest scan stayed
+ * guest-local forever. Both roles polling is safe because every gate write is set-only and monotone
+ * (see {@link #decideGate}) and because the applying side records the payload in the delta ledger
+ * before its own next poll reads it back, so an echo resolves to the value already recorded and
+ * emits nothing.
  *
  * <p><b>Seeding.</b> The first diff after a session starts records the baseline silently — the two
  * clients start from the same deterministic skeleton, so reporting the whole sector as "changed"
@@ -54,11 +62,12 @@ public final class CoopSkeletonMutationWatcher {
     }
 
     /** Decoded {@link #encodeGateState} payload. */
-    public record GateState(boolean scanned, boolean gatesActive, boolean canUseGates) {
+    public record GateState(boolean scanned, boolean gatesActive, boolean canUseGates,
+                            boolean canScanGates) {
     }
 
     /** A gate nobody has scanned, in a campaign where gates are not active: nothing to report. */
-    public static final String DEFAULT_GATE_STATE = encodeGateState(false, false, false);
+    public static final String DEFAULT_GATE_STATE = encodeGateState(false, false, false, false);
 
     /**
      * Vanilla's market-memory flag for "somebody has already salvaged this planet's ruins", set by
@@ -229,23 +238,29 @@ public final class CoopSkeletonMutationWatcher {
     }
 
     /** The writes a {@link CoopWorldDelta.Kind#GATE_ACTIVATED} still needs, given local state. */
-    public record GateApply(boolean setGatesActive, boolean setCanUseGates, boolean setScanned) {
+    public record GateApply(boolean setGatesActive, boolean setCanUseGates, boolean setScanned,
+                            boolean setCanScanGates) {
         public boolean isNoOp() {
-            return !setGatesActive && !setCanUseGates && !setScanned;
+            return !setGatesActive && !setCanUseGates && !setScanned && !setCanScanGates;
         }
     }
 
     /**
-     * Flags are set, never unset: the host only ever reports gates becoming usable, and clearing a
-     * flag the guest set from its own Janus device would take a working gate away from it.
+     * Flags are set, never unset. Two reasons, and both matter more now that the poll runs on both
+     * roles: clearing a flag the peer set from its own Janus device would take a working gate away
+     * from it, and monotone set-only writes are what make two independently polling clients
+     * <em>converge</em> — each apply moves the local state towards the union of both, so neither
+     * side can produce a payload that talks the other back down into an endless flip-flop.
      */
     public static GateApply decideGate(GateState desired, boolean gatesActiveNow,
-                                       boolean canUseGatesNow, boolean scannedNow) {
+                                       boolean canUseGatesNow, boolean scannedNow,
+                                       boolean canScanGatesNow) {
         Objects.requireNonNull(desired, "desired");
         return new GateApply(
                 desired.gatesActive() && !gatesActiveNow,
                 desired.canUseGates() && !canUseGatesNow,
-                desired.scanned() && !scannedNow);
+                desired.scanned() && !scannedNow,
+                desired.canScanGates() && !canScanGatesNow);
     }
 
     // ---- Payload encodings --------------------------------------------------------------------
@@ -254,21 +269,32 @@ public final class CoopSkeletonMutationWatcher {
     // string riding CoopWorldDelta.newStateJson.
 
     /**
-     * {@code scanned|gatesActive|canUseGates}. The two globals are sector-memory flags
-     * ({@code GateEntityPlugin.GATES_ACTIVE} / {@code PLAYER_CAN_USE_GATES}, api_src
-     * {@code GateEntityPlugin.java:41-42}) and are repeated on every gate record so each delta is
-     * self-contained — the guest can apply one packet and be correct.
+     * {@code scanned|gatesActive|canUseGates|canScanGates}. The three globals are sector-memory flags
+     * ({@code GateEntityPlugin.GATES_ACTIVE} / {@code PLAYER_CAN_USE_GATES} / {@code CAN_SCAN_GATES},
+     * api_src {@code GateEntityPlugin.java:40-42}) and are repeated on every gate record so each
+     * delta is self-contained — the peer can apply one packet and be correct.
+     *
+     * <p>{@code canScanGates} is the guest's whole reason for being able to scan anything.
+     * rules.csv gates the "Scan the Gate" option on {@code $global.canScanGates}
+     * ({@code gateOpenDialogCanScan1} / {@code gateScanOpt}), vanilla only ever sets it from the
+     * host's own questline, and nothing else in the mod syncs it — so before this rode along, a guest
+     * could only ever use gates the host had already scanned. Riding it on the per-gate payload
+     * rather than on its own kind means a flip in it reports itself through every gate record with no
+     * new wire kind and no new poll.
      */
-    public static String encodeGateState(boolean scanned, boolean gatesActive, boolean canUseGates) {
-        return scanned + "|" + gatesActive + "|" + canUseGates;
+    public static String encodeGateState(boolean scanned, boolean gatesActive, boolean canUseGates,
+                                         boolean canScanGates) {
+        return scanned + "|" + gatesActive + "|" + canUseGates + "|" + canScanGates;
     }
 
+    /** Tolerant of a missing trailing field, so a short payload decodes as "flag not set". */
     public static GateState decodeGateState(String payload) {
         List<String> fields = CoopDelimited.split(CoopDelimited.normalize(payload));
         return new GateState(
                 fields.size() > 0 && Boolean.parseBoolean(fields.get(0)),
                 fields.size() > 1 && Boolean.parseBoolean(fields.get(1)),
-                fields.size() > 2 && Boolean.parseBoolean(fields.get(2)));
+                fields.size() > 2 && Boolean.parseBoolean(fields.get(2)),
+                fields.size() > 3 && Boolean.parseBoolean(fields.get(3)));
     }
 
     /** Separates the {@code fullDestroy} flag from the occurrence stamp. */

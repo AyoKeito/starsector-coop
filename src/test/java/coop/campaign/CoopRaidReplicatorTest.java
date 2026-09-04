@@ -3,6 +3,7 @@ package coop.campaign;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.Industry;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
@@ -236,7 +237,103 @@ class CoopRaidReplicatorTest {
         assertNull(sector.listenerOfType(ColonyPlayerHostileActListener.class));
     }
 
+    // ---- Saturation bombardment: the decivilization rides RAID_RESULT --------------------------
+
+    /**
+     * A guest resolves a saturation bombardment entirely inside vanilla's {@code MarketCMD}, and its
+     * deciv capture is host-gated, so no DECIV world-delta ever leaves it. {@code RAID_RESULT} is the
+     * only report the host gets, and applying it has to drive the decivilization itself -- otherwise
+     * the host keeps a colony the guest already deleted and the guest's next reconnect fails the
+     * world fingerprint.
+     */
+    @Test
+    void aGuestSaturationBombardmentDecivilizesTheHostColony() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addMarket("market_agreus", 3);
+        market.hasPrimaryEntity = true;
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        replicator.handle(decivMessage("guest-player:1"));
+
+        assertEquals(1, market.decivilizeEntries, "the host runs vanilla's own deciv routine");
+        assertEquals(Boolean.TRUE, market.memory.values.get("$recentlyBombarded"),
+                "the memory flag the outcome carries still rides");
+    }
+
+    /** The host's rebroadcast comes straight back at it; the raid ledger makes that a no-op. */
+    @Test
+    void aSecondApplyOfTheSameBombardmentDecivilizesNothing() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addMarket("market_agreus", 3);
+        market.hasPrimaryEntity = true;
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        replicator.handle(decivMessage("guest-player:1"));
+        replicator.handle(decivMessage("guest-player:1"));
+
+        assertEquals(1, market.decivilizeEntries);
+    }
+
+    /**
+     * The host-initiated case: the real DECIV delta already landed, so the market is gone from the
+     * economy (vanilla's routine ends with {@code removeMarket}) or already carries the condition,
+     * and the RAID_RESULT that follows must not fight a transition that already happened.
+     */
+    @Test
+    void anAlreadyDecivilizedColonyIsLeftAlone() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addMarket("market_agreus", 3);
+        market.hasPrimaryEntity = true;
+        market.decivilized = true;
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        replicator.handle(decivMessage("guest-player:1"));
+
+        assertEquals(0, market.decivilizeEntries);
+    }
+
+    /** An ordinary raid is untouched: nothing decivilizes, and the market state still applies. */
+    @Test
+    void aNonDecivilizingOutcomeNeverCallsTheDecivRoutine() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addMarket("market_agreus", 6);
+        market.addIndustry("heavyindustry");
+        market.hasPrimaryEntity = true;
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        replicator.handle(raidMessage("guest-player:1", 12f));
+
+        assertEquals(0, market.decivilizeEntries);
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------
+
+    private static CoopMessages.Message decivMessage(String outcomeId) {
+        CoopRaidOutcomeSync.Outcome outcome = new CoopRaidOutcomeSync.Outcome(outcomeId,
+                CoopRaidOutcomeSync.Kind.BOMBARD_SATURATION, "market_agreus", "guest-player",
+                3, 0, "", false, false, true, List.of(), List.of());
+        return CoopMessages.raidResult("session-a", 1L, 0L, outcome.encode());
+    }
 
     private static CoopMessages.Message raidMessage(String outcomeId, float disruptedDays) {
         CoopRaidOutcomeSync.Outcome outcome = new CoopRaidOutcomeSync.Outcome(outcomeId,
@@ -351,10 +448,37 @@ class CoopRaidReplicatorTest {
         private final Map<String, FakeIndustry> industries = new LinkedHashMap<>();
         private final FakeMemory memory = new FakeMemory();
         private MarketAPI cached;
+        /** What {@code hasCondition} answers -- the applier only ever asks about DECIVILIZED here. */
+        private boolean decivilized;
+        private boolean hasPrimaryEntity;
+        /**
+         * How many times {@code DecivTracker.decivilize} was entered with this market. Counted off
+         * {@code getPrimaryEntity().isDiscoverable()}, vanilla's second statement
+         * ({@code DecivTracker.java:197}) -- and answering {@code true} there makes vanilla return
+         * immediately, so the count is observable without running the destructive twenty-odd steps
+         * that follow against proxies that cannot survive them.
+         */
+        private int decivilizeEntries;
 
         private FakeMarket(String id, int size) {
             this.id = id;
             this.size = size;
+        }
+
+        private SectorEntityToken primaryEntity() {
+            return (SectorEntityToken) Proxy.newProxyInstance(
+                    SectorEntityToken.class.getClassLoader(),
+                    new Class<?>[]{SectorEntityToken.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "isDiscoverable" -> {
+                            decivilizeEntries++;
+                            yield true;
+                        }
+                        case "toString" -> "PrimaryEntity[" + id + "]";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
         }
 
         FakeIndustry addIndustry(String industryId) {
@@ -386,6 +510,8 @@ class CoopRaidReplicatorTest {
                             }
                             yield all;
                         }
+                        case "hasCondition" -> decivilized;
+                        case "getPrimaryEntity" -> hasPrimaryEntity ? primaryEntity() : null;
                         case "getMemoryWithoutUpdate", "getMemory" -> memoryProxy;
                         case "toString" -> "Market[" + id + "]";
                         case "hashCode" -> System.identityHashCode(proxy);

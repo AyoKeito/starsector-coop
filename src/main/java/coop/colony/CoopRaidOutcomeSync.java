@@ -541,10 +541,16 @@ public final class CoopRaidOutcomeSync {
      * {@code RECENTLY_BOMBARDED} memory flag and nothing else. {@code DecivTracker.decivilize}
      * strips industries, people, commodities and every {@code isDecivRemove} condition
      * ({@code DecivTracker.java:206-239}), so the industry/unrest/size/pollution state captured
-     * alongside is meaningless there — and the DECIV delta arrives first (vanilla decivilizes at
-     * {@code MarketCMD.java:2646}, before firing the saturation-bombardment listener at
-     * {@code :2652}), so writing any of it afterwards would fight a transition that already landed.
-     * The one thing decivilize does not touch is market memory, which is why the flag still rides.
+     * alongside is meaningless there. The one thing decivilize does not touch is market memory,
+     * which is why the flag still rides.
+     *
+     * <p><b>The decivilization itself is the caller's job.</b> This class stays engine-free beyond
+     * the market writes above, and the transition needs a listener-firing engine call, so
+     * {@code CoopCampaignReplicator.handleRaidResult} makes it right after this returns. Do not
+     * assume a {@code DECIV} world-delta got there first: that assumption held only for a
+     * host-originated bombardment. A <em>guest</em> resolves the whole act locally in vanilla's
+     * {@code MarketCMD} and its deciv capture is host-gated, so from a guest this outcome is the only
+     * report that ever leaves — and it has to be self-sufficient.
      */
     public static void applyToMarket(MarketAPI market, Outcome outcome) {
         Objects.requireNonNull(market, "market");

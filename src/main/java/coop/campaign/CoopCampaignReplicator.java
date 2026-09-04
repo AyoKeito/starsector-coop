@@ -157,6 +157,11 @@ public final class CoopCampaignReplicator
     private final Set<String> salvageScanScratch = new HashSet<>();
     /** Scratch, reused across passes: tracked ids that vanished on the current pass. */
     private final List<String> salvageConsumedScratch = new ArrayList<>();
+    /**
+     * Scratch, reused across passes: entities that appeared at the watched location on the current
+     * pass and are player constructions worth replicating (see {@link #isReplicableConstruction}).
+     */
+    private final List<SectorEntityToken> constructionScratch = new ArrayList<>();
 
     // Orbit-angle sync: host re-broadcasts orbiting-body angles ~1Hz so the guest can snap out the
     // small clock-drift offset that makes shared systems' planets/jumps appear at different angles.
@@ -433,6 +438,7 @@ public final class CoopCampaignReplicator
         trackedSalvageables.clear();
         salvageScanScratch.clear();
         salvageConsumedScratch.clear();
+        constructionScratch.clear();
         watchedLocationId = null;
         lastSalvageScanMillis = 0L;
     }
@@ -1930,6 +1936,24 @@ public final class CoopCampaignReplicator
                 + " deficits=" + outcome.deficits().size() + " deciv=" + outcome.decivilized());
     }
 
+    /**
+     * <p><b>Why the deciv call lives here and not in {@link CoopRaidOutcomeSync}.</b> A saturation
+     * bombardment that wipes a colony out is resolved entirely inside vanilla's {@code MarketCMD} on
+     * whichever client ran the dialog — {@code DecivTracker.decivilize(market, true)} at
+     * {@code MarketCMD.java:2638}, then {@code reportSaturationBombardmentFinished} at {@code :2652}.
+     * On a <em>guest</em> that produces no {@code DECIV} world-delta at all (the deciv capture is
+     * host-gated by design), so {@code RAID_RESULT} is the only report that leaves, and it has to be
+     * self-sufficient: without this the host kept a colony the guest had already deleted and the
+     * guest's next reconnect failed the world fingerprint. {@link CoopRaidOutcomeSync} stays
+     * engine-free apart from the market writes it already owns, so the engine call belongs here.
+     *
+     * <p><b>Deliberately outside the replay guard.</b> {@code decivilizeMarket} is what makes the
+     * host's own {@code ColonyDecivListener} fire, which is what broadcasts the normal host
+     * {@code DECIV} delta onward — inert on the guest that already decivilized (its market is gone
+     * from the economy), and the only thing that would reach a third client. The guard would swallow
+     * that capture. It cannot echo back as a {@code RAID_RESULT} either: decivilizing fires no
+     * hostile-act listener, and the raid ledger already holds this outcome.
+     */
     private void handleRaidResult(CoopMessages.Message message) {
         CoopRaidOutcomeSync.Outcome outcome = CoopRaidOutcomeSync.decode(
                 CoopMessages.requiredPayloadString(message, "outcome"));
@@ -1942,6 +1966,14 @@ public final class CoopCampaignReplicator
                 CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply RAID_RESULT", ex);
             } finally {
                 replayGuard.end();
+            }
+            if (outcome.decivilized()) {
+                try {
+                    decivilizeMarket(outcome.marketId(), true, "RAID_RESULT");
+                } catch (RuntimeException | LinkageError ex) {
+                    CoopLog.warn(CoopCampaignReplicator.class,
+                            "Failed to decivilize for RAID_RESULT market=" + outcome.marketId(), ex);
+                }
             }
         }
         // The host owns the canonical market: it integrates the guest's report and rebroadcasts so
@@ -2391,6 +2423,15 @@ public final class CoopCampaignReplicator
                 Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "consumed")),
                 CoopMessages.requiredPayloadString(message, "newStateJson"),
                 CoopMessages.requiredPayloadString(message, "actingPlayerId"));
+        // Direction check, ahead of the ledger so a refused delta leaves no trace that would make a
+        // later legitimate one look like a duplicate. Only DECIV is host-only, and the host is the
+        // only side that can enforce it (a guest must still apply the host's).
+        if (isHost() && delta.kind().hostOnly()) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop refused host-only WORLD_DELTA "
+                    + delta.kind() + " entity=" + delta.entityId() + " from "
+                    + delta.actingPlayerId() + ": that kind never travels guest->host");
+            return;
+        }
         boolean firstApply = worldLedger.apply(delta);
         if (firstApply && delta.consumed()) {
             // Phase 21 stats. Dedup guarantee: worldLedger.apply() returns true exactly once per
@@ -2536,23 +2577,40 @@ public final class CoopCampaignReplicator
      * second implementation to keep in sync with every engine update; the vanilla call is exact.
      */
     private void applyDecivToEngine(CoopWorldDelta delta) {
+        decivilizeMarket(delta.entityId(),
+                CoopSkeletonMutationWatcher.decodeDecivFullDestroy(delta.newStateJson()), "DECIV");
+    }
+
+    /**
+     * The one place this client ever calls {@code DecivTracker.decivilize} on a peer's behalf, so the
+     * idempotence guard is identical no matter which delta asked for it — a {@code DECIV} from the
+     * host, or a {@code RAID_RESULT} whose saturation bombardment wiped the colony out on the
+     * originator ({@link #handleRaidResult}).
+     *
+     * <p>Vanilla's routine ends with {@code getEconomy().removeMarket(market)}, so "already done"
+     * shows up as an unresolvable market id and the guard costs one lookup.
+     *
+     * @return {@code true} only when this call actually decivilized the market.
+     */
+    private boolean decivilizeMarket(String marketId, boolean fullDestroy, String source) {
         SectorAPI sector = Global.getSector();
-        if (sector == null || sector.getEconomy() == null) {
-            return;
+        if (sector == null || sector.getEconomy() == null || marketId == null) {
+            return false;
         }
-        MarketAPI market = sector.getEconomy().getMarket(delta.entityId());
+        MarketAPI market = sector.getEconomy().getMarket(marketId);
         CoopSkeletonMutationWatcher.DecivDecision decision = CoopSkeletonMutationWatcher.decideDeciv(
                 market != null,
                 market != null && market.hasCondition(Conditions.DECIVILIZED),
                 market != null && market.getPrimaryEntity() != null);
         if (decision != CoopSkeletonMutationWatcher.DecivDecision.DECIVILIZE) {
-            CoopLog.warn(CoopCampaignReplicator.class, "DECIV market=" + delta.entityId()
-                    + " skipped: " + decision);
-            return;
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop deciv market=" + marketId + " via "
+                    + source + " skipped: " + decision);
+            return false;
         }
-        DecivTracker.decivilize(market, CoopSkeletonMutationWatcher.decodeDecivFullDestroy(
-                delta.newStateJson()), true);
-        CoopLog.info(CoopCampaignReplicator.class, "Coop applied DECIV market=" + delta.entityId());
+        DecivTracker.decivilize(market, fullDestroy, true);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop applied deciv market=" + marketId
+                + " via " + source);
+        return true;
     }
 
     /**
@@ -2599,13 +2657,21 @@ public final class CoopCampaignReplicator
     }
 
     /**
-     * Guest: mirror the host's gate state. Vanilla's {@code madeActive} latch is private and derived
+     * Mirror the peer's gate state. Vanilla's {@code madeActive} latch is private and derived
      * ({@code GateEntityPlugin.advance}, api_src lines 274-284, sets it once
-     * {@code canUseGates() && isScanned(entity)}), so setting the two inputs is both sufficient and
-     * reflection-free: the guest's own gate plugin latches on its next frame.
+     * {@code canUseGates() && isScanned(entity)}), so setting the inputs is both sufficient and
+     * reflection-free: this client's own gate plugin latches on its next frame.
      *
      * <p>The sector-global flags are applied even when the gate itself does not resolve — they are
      * the half that makes every gate usable — and are only ever set, never unset.
+     *
+     * <p>Runs on both roles now that either player can scan: host&rarr;guest carries the story's
+     * activation plus {@code $canScanGates}, guest&rarr;host carries the guest's own scan.
+     * {@code $numGatesScanned} is <em>not</em> on the wire — it is derived here instead, by calling
+     * vanilla's own {@code addGateScanned()} whenever this client actually flips a gate's scanned
+     * flag from a peer report. That keeps the counter equal to the number of gates this client knows
+     * to be scanned on both sides (the Galatia questline reads it as a rules condition) without a
+     * shared counter two independent polls would have to agree on.
      */
     private void applyGateStateToEngine(CoopWorldDelta delta) {
         SectorAPI sector = Global.getSector();
@@ -2623,7 +2689,8 @@ public final class CoopCampaignReplicator
         CoopSkeletonMutationWatcher.GateApply apply = CoopSkeletonMutationWatcher.decideGate(state,
                 sectorMemory != null && sectorMemory.getBoolean(GateEntityPlugin.GATES_ACTIVE),
                 sectorMemory != null && sectorMemory.getBoolean(GateEntityPlugin.PLAYER_CAN_USE_GATES),
-                gate == null || GateEntityPlugin.isScanned(gate));
+                gate == null || GateEntityPlugin.isScanned(gate),
+                sectorMemory != null && sectorMemory.getBoolean(GateEntityPlugin.CAN_SCAN_GATES));
         if (apply.isNoOp()) {
             return;
         }
@@ -2634,9 +2701,16 @@ public final class CoopCampaignReplicator
             if (apply.setCanUseGates()) {
                 sectorMemory.set(GateEntityPlugin.PLAYER_CAN_USE_GATES, true);
             }
+            if (apply.setCanScanGates()) {
+                sectorMemory.set(GateEntityPlugin.CAN_SCAN_GATES, true);
+            }
         }
         if (apply.setScanned() && gate.getMemoryWithoutUpdate() != null) {
             gate.getMemoryWithoutUpdate().set(GateEntityPlugin.GATE_SCANNED, true);
+            // Vanilla's own counter, bumped exactly where rules.csv bumps it (alongside
+            // "$gateScanned = true"). Idempotent because decideGate only asks for the write when the
+            // flag is not already set.
+            GateEntityPlugin.addGateScanned();
         }
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied GATE_ACTIVATED entity="
                 + delta.entityId() + " " + apply);
@@ -2777,9 +2851,21 @@ public final class CoopCampaignReplicator
      * latest-wins payload dedup absorbs both the host's echo back to the guest and the guest's own
      * next poll (which sees the value it already recorded).
      *
-     * <p><b>Gates and deciv stay host-only.</b> Both of the guest's producers for those are
-     * suppressed — there is no guest-side sim to observe — so a guest poll could only ever report the
-     * host's own change back at it.
+     * <p><b>Gates run on both roles too.</b> They were host-only on the reasoning that the guest's
+     * producers were suppressed sims, which is true of the war sim but not of the gate <em>scan</em>:
+     * that is a plain rules.csv dialog option ({@code gateScanSel}) the guest runs locally, so a
+     * guest scan never left the guest. Reversing the restriction is safe for the same two reasons
+     * objectives are: every gate write is set-only and monotone
+     * ({@link CoopSkeletonMutationWatcher#decideGate}), so the two polls converge rather than
+     * oscillate; and {@link #handleWorldDelta} records the applied payload in the ledger, so the
+     * applying side's own next poll reads back a value the ledger already holds and
+     * {@link #emitSkeletonDelta} drops it. The host still owns the story flags — the guest cannot set
+     * {@code $gatesActive} on its own — and it is the host&rarr;guest half of the same payload that
+     * carries {@code $canScanGates}, which is what lets the guest be offered the scan at all.
+     *
+     * <p><b>Deciv stays host-only.</b> Its guest producer really is suppressed, and a guest-sourced
+     * DECIV would delete a colony out of the authoritative world; {@link CoopWorldDelta.Kind#hostOnly}
+     * refuses it on arrival.
      */
     private void tickSkeletonMutations() {
         if (!isActive()) {
@@ -2790,7 +2876,6 @@ public final class CoopCampaignReplicator
             return;
         }
         lastSkeletonPollMillis = nowMillis;
-        boolean host = isHost();
         try {
             SectorAPI sector = Global.getSector();
             if (sector == null) {
@@ -2801,6 +2886,8 @@ public final class CoopCampaignReplicator
                     && sectorMemory.getBoolean(GateEntityPlugin.GATES_ACTIVE);
             boolean canUseGates = sectorMemory != null
                     && sectorMemory.getBoolean(GateEntityPlugin.PLAYER_CAN_USE_GATES);
+            boolean canScanGates = sectorMemory != null
+                    && sectorMemory.getBoolean(GateEntityPlugin.CAN_SCAN_GATES);
 
             Map<String, String> objectiveOwners = new LinkedHashMap<>();
             Map<String, String> gateStates = new LinkedHashMap<>();
@@ -2812,9 +2899,7 @@ public final class CoopCampaignReplicator
                 }
                 collectObjectiveOwners(location, objectiveOwners);
                 collectSurveyState(location, surveyLevels, ruinsExplored);
-                if (host) {
-                    collectGateStates(location, gatesActive, canUseGates, gateStates);
-                }
+                collectGateStates(location, gatesActive, canUseGates, canScanGates, gateStates);
             }
             for (CoopSkeletonMutationWatcher.Flip flip
                     : skeletonWatcher.diffObjectiveOwners(objectiveOwners)) {
@@ -2828,17 +2913,22 @@ public final class CoopCampaignReplicator
                     : skeletonWatcher.diffRuinsExplored(ruinsExplored)) {
                 emitSkeletonDelta(CoopWorldDelta.Kind.RUINS_EXPLORED, flip);
             }
-            if (host) {
-                for (CoopSkeletonMutationWatcher.Flip flip
-                        : skeletonWatcher.diffGateStates(gateStates)) {
-                    emitSkeletonDelta(CoopWorldDelta.Kind.GATE_ACTIVATED, flip);
-                }
+            for (CoopSkeletonMutationWatcher.Flip flip
+                    : skeletonWatcher.diffGateStates(gateStates)) {
+                emitSkeletonDelta(CoopWorldDelta.Kind.GATE_ACTIVATED, flip);
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Skeleton mutation poll failed", ex);
         }
     }
 
+    /**
+     * Keys on the coop id for a player-built objective and on the engine id for a gen-time one, the
+     * same rule {@link #consumeKeyIfTracked} uses. A built objective comes out of
+     * {@code addCustomEntity(null, ...)}, so its engine id is minted per client and an ownership flip
+     * reported under it could never resolve on the peer — which is exactly the
+     * "OBJECTIVE_OWNERSHIP for unknown entity" warn this removes.
+     */
     private void collectObjectiveOwners(LocationAPI location, Map<String, String> out) {
         List<SectorEntityToken> objectives = location.getEntitiesWithTag(Tags.OBJECTIVE);
         if (objectives == null) {
@@ -2848,12 +2938,22 @@ public final class CoopCampaignReplicator
             if (objective == null || objective.getId() == null || objective.getFaction() == null) {
                 continue;
             }
-            out.put(objective.getId(), objective.getFaction().getId());
+            out.put(coopIdOrEngineId(objective), objective.getFaction().getId());
         }
     }
 
+    /** The coop id a replicated entity was tagged with, or its engine id when it has none. */
+    private static String coopIdOrEngineId(SectorEntityToken entity) {
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        Object coopId = memory == null ? null : memory.get(CoopWorldEntitySpawn.COOP_ENTITY_TAG);
+        if (coopId != null && !String.valueOf(coopId).isBlank()) {
+            return String.valueOf(coopId);
+        }
+        return entity.getId();
+    }
+
     private void collectGateStates(LocationAPI location, boolean gatesActive, boolean canUseGates,
-                                   Map<String, String> out) {
+                                   boolean canScanGates, Map<String, String> out) {
         List<SectorEntityToken> gates = location.getEntitiesWithTag(Tags.GATE);
         if (gates == null) {
             return;
@@ -2863,7 +2963,7 @@ public final class CoopCampaignReplicator
                 continue;
             }
             out.put(gate.getId(), CoopSkeletonMutationWatcher.encodeGateState(
-                    GateEntityPlugin.isScanned(gate), gatesActive, canUseGates));
+                    GateEntityPlugin.isScanned(gate), gatesActive, canUseGates, canScanGates));
         }
     }
 
@@ -2963,6 +3063,7 @@ public final class CoopCampaignReplicator
             // Scratch set, cleared and refilled: a fresh HashSet per pass was pure churn.
             Set<String> current = salvageScanScratch;
             current.clear();
+            constructionScratch.clear();
             for (SectorEntityToken entity : location.getAllEntities()) {
                 // One getMemoryWithoutUpdate() per entity, not two — the call allocates a Memory for
                 // entities that lack one, so the old track-then-key pair did that twice over the whole
@@ -2970,6 +3071,11 @@ public final class CoopCampaignReplicator
                 String key = consumeKeyIfTracked(entity);
                 if (key != null) {
                     current.add(key);
+                    // Same diff, other direction: an id that is present now and was not last pass is
+                    // a new entity. Only player constructions are worth a SPAWN.
+                    if (!trackedSalvageables.contains(key) && isReplicableConstruction(entity)) {
+                        constructionScratch.add(entity);
+                    }
                 }
             }
             // Entering a new location: re-seed the baseline silently (the old location's entities are
@@ -2978,11 +3084,28 @@ public final class CoopCampaignReplicator
                 watchedLocationId = location.getId();
                 trackedSalvageables.clear();
                 trackedSalvageables.addAll(current);
+                constructionScratch.clear();
                 if (CoopDebug.diagnosticsEnabled()) {
                     dumpOrbitDiagnostics(location); // dormant; opt-in via CoopDebug
                 }
                 return;
             }
+            // Adds before removes, deliberately: a construction consumes a stable location in the
+            // same frame it creates the objective, and reporting the SPAWN first means the peer has
+            // the replacement before the CONSUME for what it replaced arrives.
+            for (int i = 0; i < constructionScratch.size(); i++) {
+                SectorEntityToken built = constructionScratch.get(i);
+                String previousKey = consumeKeyIfTracked(built);
+                String coopId = reportLocalConstruction(built, location);
+                if (coopId != null) {
+                    // Tagging changed the entity's consume key from its engine id to its coop id;
+                    // the scratch set still holds the old one, and leaving it there would make the
+                    // next pass see the engine id vanish and report a phantom CONSUME.
+                    current.remove(previousKey);
+                    current.add(coopId);
+                }
+            }
+            constructionScratch.clear();
             // A tracked entity that is no longer present was consumed by the local player this pass.
             // Collected first because the report path is free to touch the tracked set.
             salvageConsumedScratch.clear();
@@ -3389,6 +3512,106 @@ public final class CoopCampaignReplicator
     }
 
     /**
+     * Vanilla's own back-reference from a built objective to the stable location it replaced
+     * ({@code Objectives.build} sets it to the removed entity, api_src
+     * {@code rulecmd/salvage/Objectives.java:387}). There is no {@code MemFlags} constant for it.
+     */
+    private static final String ORIGINAL_STABLE_LOCATION = "$originalStableLocation";
+
+    /**
+     * Whether a newly-appeared entity is a player construction the peer needs materialized.
+     *
+     * <p>Two shapes, both of them halves of the same vanilla round trip. Building runs
+     * {@code Objectives.build}: {@code addCustomEntity(null, null, comm_relay_makeshift|
+     * nav_buoy_makeshift|sensor_array_makeshift, player)}, copy the stable location's orbit, remove
+     * the stable location. Disassembling runs {@code Objectives.salvage}, which does the reverse and
+     * puts a fresh {@code stable_location} back. Both create the entity with a null id, so the engine
+     * mints one per client and the peer could never resolve it — hence a coop id and a SPAWN, exactly
+     * as for cargo pods.
+     *
+     * <p>Already-coop-tagged entities are excluded, which is what stops the peer's applied copy from
+     * being re-reported straight back at the originator.
+     */
+    private static boolean isReplicableConstruction(SectorEntityToken entity) {
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        if (memory != null && memory.contains(CoopWorldEntitySpawn.COOP_ENTITY_TAG)) {
+            return false;
+        }
+        return isConstructionShape(entity.hasTag(Tags.OBJECTIVE), entity.hasTag(Tags.MAKESHIFT),
+                entity.hasTag(Tags.STABLE_LOCATION));
+    }
+
+    /**
+     * Pure decision function (unit-tested) behind {@link #isReplicableConstruction}.
+     *
+     * <p>{@code objective && makeshift} rather than {@code objective} alone: gen-time comm relays and
+     * nav buoys carry {@code objective} too, and they exist identically on both clients already —
+     * only the makeshift variants are player-built ({@code custom_entities.json} tags them
+     * {@code [..., "objective", "makeshift"]}).
+     */
+    static boolean isConstructionShape(boolean objective, boolean makeshift, boolean stableLocation) {
+        return (objective && makeshift) || stableLocation;
+    }
+
+    /**
+     * Tag a local construction with a coop id and report it as a {@code SPAWN}.
+     *
+     * @return the assigned coop id, or {@code null} when nothing was reported.
+     */
+    private String reportLocalConstruction(SectorEntityToken built, LocationAPI location) {
+        try {
+            String coopEntityId = session.localPlayerId() + ":" + built.getId();
+            MemoryAPI memory = built.getMemoryWithoutUpdate();
+            if (memory == null) {
+                return null;
+            }
+            memory.set(CoopWorldEntitySpawn.COOP_ENTITY_TAG, coopEntityId);
+
+            SectorEntityToken focus = built.getOrbitFocus();
+            CoopWorldEntitySpawn.Orbit orbit = focus == null || focus.getId() == null
+                    ? CoopWorldEntitySpawn.Orbit.NONE
+                    : new CoopWorldEntitySpawn.Orbit(focus.getId(), built.getCircularOrbitAngle(),
+                            built.getCircularOrbitRadius(), built.getCircularOrbitPeriod());
+            FactionAPI faction = built.getFaction();
+            CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn(
+                    coopEntityId,
+                    built.getCustomEntityType(),
+                    location.getId(),
+                    built.getLocation() == null ? 0f : built.getLocation().x,
+                    built.getLocation() == null ? 0f : built.getLocation().y,
+                    0f, 0f,
+                    Map.of(),
+                    faction == null || faction.getId() == null ? "" : faction.getId(),
+                    consumedStableLocationId(memory),
+                    orbit);
+
+            CoopWorldDelta delta = new CoopWorldDelta(coopEntityId, CoopWorldDelta.Kind.SPAWN, false,
+                    spawn.encode(), session.localPlayerId());
+            // Ledger first, so the host's echo rebroadcast is a no-op here (same as the pod path).
+            if (worldLedger.apply(delta)) {
+                reportWorldDelta(delta);
+                CoopLog.info(CoopCampaignReplicator.class, "Coop reported construction id="
+                        + coopEntityId + " type=" + spawn.entityType() + " faction="
+                        + spawn.factionId() + " consumed=" + spawn.consumedEntityId());
+            }
+            return coopEntityId;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to report a local construction", ex);
+            return null;
+        }
+    }
+
+    /** The stable location vanilla removed to make room for this objective, keyed as a CONSUME would. */
+    private String consumedStableLocationId(MemoryAPI memory) {
+        Object original = memory.get(ORIGINAL_STABLE_LOCATION);
+        if (original instanceof SectorEntityToken token) {
+            String key = consumeKeyIfTracked(token);
+            return key == null ? "" : key;
+        }
+        return "";
+    }
+
+    /**
      * Everything a pod holds, keyed {@code KIND:id}. Commodities alone would silently drop the
      * weapons, fighters, and ships players most want to hand each other — and a vanishing ship is a
      * far worse failure than a missing crate of supplies.
@@ -3464,14 +3687,21 @@ public final class CoopCampaignReplicator
             return;
         }
         SectorEntityToken entity = location.addCustomEntity(null, null, spawn.entityType(),
-                Factions.NEUTRAL);
+                spawn.factionId().isBlank() ? Factions.NEUTRAL : spawn.factionId());
         entity.getLocation().set(spawn.x(), spawn.y());
         // Velocity rides the wire because Misc.addCargoPods draws it from Math.random().
         entity.getVelocity().set(spawn.velocityX(), spawn.velocityY());
-        entity.setSensorProfile(1f);
-        entity.setDiscoverable(null);
-        entity.setDiscoveryXP(null);
+        if (Entities.CARGO_PODS.equals(spawn.entityType())) {
+            // Misc.addCargoPods' own post-creation tweaks. Deliberately not applied to a built
+            // objective: a comm relay's sensor profile and discoverability come from its spec, and
+            // pinning them to the pod values would make the peer's copy read wrong on the map.
+            entity.setSensorProfile(1f);
+            entity.setDiscoverable(null);
+            entity.setDiscoveryXP(null);
+        }
+        applySpawnOrbit(sector, entity, spawn);
         entity.getMemoryWithoutUpdate().set(CoopWorldEntitySpawn.COOP_ENTITY_TAG, spawn.coopEntityId());
+        removeConsumedStableLocation(sector, spawn);
         if (entity instanceof CustomCampaignEntityAPI custom && custom.getCargo() != null) {
             for (Map.Entry<String, Integer> entry : spawn.contents().entrySet()) {
                 addSpawnContent(custom.getCargo(), entry.getKey(), entry.getValue());
@@ -3479,7 +3709,61 @@ public final class CoopCampaignReplicator
         }
         pinMirrorExpiry(entity);
         CoopLog.info(CoopCampaignReplicator.class, "Coop materialized entity " + spawn.coopEntityId()
-                + " type=" + spawn.entityType() + " in " + spawn.locationId());
+                + " type=" + spawn.entityType() + " faction=" + spawn.factionId()
+                + " in " + spawn.locationId());
+    }
+
+    /**
+     * Put a replicated construction in the same orbit the originator's copy holds.
+     *
+     * <p>Vanilla copies the orbit object straight off the entity it replaces
+     * ({@code built.setOrbit(entity.getOrbit().makeCopy())}); here the four circular-orbit numbers
+     * ride the wire instead, so the apply does not depend on the replaced stable location still being
+     * present. Its {@code CONSUME} is emitted by the same watcher pass and may land first.
+     *
+     * <p>The focus is a gen-time body (a planet or a star), so its engine id resolves on both
+     * clients. If it does not, the entity keeps the fixed position that already rode along — wrong as
+     * it drifts, but present and interactable, which is the better failure.
+     */
+    private void applySpawnOrbit(SectorAPI sector, SectorEntityToken entity,
+                                 CoopWorldEntitySpawn spawn) {
+        CoopWorldEntitySpawn.Orbit orbit = spawn.orbit();
+        if (!orbit.isPresent()) {
+            return;
+        }
+        SectorEntityToken focus = findEntityForDelta(sector, orbit.focusId());
+        if (focus == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop spawn " + spawn.coopEntityId()
+                    + " keeps its fixed position: unknown orbit focus " + orbit.focusId());
+            return;
+        }
+        entity.setCircularOrbit(focus, orbit.angle(), orbit.radius(), orbit.period());
+    }
+
+    /**
+     * Remove the stable location a construction consumed, if this client still has it.
+     *
+     * <p>Redundant with the {@code CONSUME} the originator's watcher emits for the same entity, and
+     * that redundancy is the point: whichever of the two lands first does the removal and the other
+     * finds nothing to do. The tag check keeps a stale or malformed id from deleting something else.
+     */
+    private void removeConsumedStableLocation(SectorAPI sector, CoopWorldEntitySpawn spawn) {
+        if (spawn.consumedEntityId().isBlank()) {
+            return;
+        }
+        SectorEntityToken consumed = findEntityForDelta(sector, spawn.consumedEntityId());
+        if (consumed == null || consumed.getContainingLocation() == null) {
+            return;
+        }
+        if (!consumed.hasTag(Tags.STABLE_LOCATION)) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop spawn " + spawn.coopEntityId()
+                    + " names " + spawn.consumedEntityId() + " as its consumed stable location, but"
+                    + " that entity is not one; leaving it alone");
+            return;
+        }
+        consumed.getContainingLocation().removeEntity(consumed);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop removed stable location "
+                + spawn.consumedEntityId() + " consumed by construction " + spawn.coopEntityId());
     }
 
     /**

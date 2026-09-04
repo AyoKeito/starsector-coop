@@ -1,21 +1,10 @@
 package coop.campaign;
 
-import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
-import com.fs.starfarer.api.campaign.FactionAPI;
-import com.fs.starfarer.api.campaign.LocationAPI;
-import com.fs.starfarer.api.campaign.SectorAPI;
-import com.fs.starfarer.api.campaign.SectorEntityToken.VisibilityLevel;
 import com.fs.starfarer.api.characters.AbilityPlugin;
-import com.fs.starfarer.api.impl.campaign.CoreReputationPlugin.RepActionEnvelope;
-import com.fs.starfarer.api.impl.campaign.CoreReputationPlugin.RepActions;
-import com.fs.starfarer.api.impl.campaign.abilities.InterdictionPulseAbility;
 import com.fs.starfarer.api.impl.campaign.ids.Abilities;
-import com.fs.starfarer.api.util.Misc;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.util.CoopLog;
-
-import java.util.List;
 
 /**
  * Host-side execution of a guest's world-affecting ability (Phase 12c task A1).
@@ -126,6 +115,16 @@ public final class CoopAbilityEffectApplier {
         return decision;
     }
 
+    /**
+     * Runs the vanilla plugin and stops there.
+     *
+     * <p><b>No reputation hit here.</b> Vanilla's own {@code INTERDICTED} charge is gated on
+     * {@code fleet.isPlayerFleet()} ({@code InterdictionPulseAbility.java:293}), which the mirror is
+     * not — but on the <em>guest</em> the real pulse fires against the guest's own player fleet, so
+     * vanilla charges the guest locally and {@code onPlayerReputationChange} forwards it to the host
+     * as a {@code GUEST_REP_DELTA}. Re-applying the hit on the mirror as well charged the canonical
+     * host standing twice per victim, and the host then rebroadcast the doubled value.
+     */
     private static void activateOnMirror(CampaignFleetAPI mirror, String abilityId, String playerId) {
         ActivationResult result;
         try {
@@ -137,9 +136,6 @@ public final class CoopAbilityEffectApplier {
         }
         CoopLog.info(CoopAbilityEffectApplier.class, "Coop ability " + abilityId + " from " + playerId
                 + " on the guest mirror: " + result);
-        if (result == ActivationResult.ACTIVATED && Abilities.INTERDICTION_PULSE.equals(abilityId)) {
-            applyInterdictionRepHit(mirror);
-        }
     }
 
     private static ActivationResult activate(CampaignFleetAPI mirror, String abilityId) {
@@ -155,106 +151,5 @@ public final class CoopAbilityEffectApplier {
         }
         plugin.activate();
         return ActivationResult.ACTIVATED;
-    }
-
-    // ---- Interdiction reputation hit ----------------------------------------------------------
-
-    /**
-     * Replicates the standing hit vanilla's interdiction pulse takes for the guest.
-     *
-     * <p>{@code InterdictionPulseAbility.applyEffect} (api_src lines 293-297) gates its
-     * {@code adjustPlayerReputation(RepActions.INTERDICTED, ...)} on {@code fleet.isPlayerFleet()},
-     * which the mirror is not — so the mirror's pulse interdicts its victims but silently costs the
-     * guest nothing. We re-apply the hit here against the host's sector, which is the authoritative
-     * owner of player-faction standings; the existing {@code onPlayerReputationChange} capture turns
-     * it into a {@code REP_DELTA} for the guest with no new channel.
-     *
-     * <p><b>Deviation: timing.</b> Vanilla applies the hit inside {@code applyEffect} at pulse time —
-     * after the charge-up, against the fleets in range <em>then</em>. Hooking that moment would mean
-     * forking {@code InterdictionPulseAbility}, so this runs at activation time instead, over the
-     * fleets in range at activation. A fleet that flees the radius during the charge-up (or enters it)
-     * therefore counts differently for standing than it does for the interdict itself. Same victim
-     * conditions otherwise.
-     *
-     * <p><b>Deviation: visibility.</b> Vanilla's "Interdict avoided!" skip reads
-     * {@code getVisibilityLevelToPlayerFleet()}, which on the host means visibility to the
-     * <em>host's</em> fleet, not the guest's. Kept as-is: it only decides whether a
-     * zero-second (fully avoided) interdict still costs standing, and there is no per-guest
-     * visibility surface to substitute.
-     */
-    private static void applyInterdictionRepHit(CampaignFleetAPI mirror) {
-        try {
-            SectorAPI sector = Global.getSector();
-            LocationAPI location = mirror.getContainingLocation();
-            if (sector == null || location == null) {
-                return;
-            }
-            FactionAPI mirrorFaction = mirror.getFaction();
-            List<CampaignFleetAPI> fleets = location.getFleets();
-            if (fleets == null) {
-                return;
-            }
-            float range = InterdictionPulseAbility.getRange(mirror);
-            int hits = 0;
-            for (int i = 0; i < fleets.size(); i++) {
-                CampaignFleetAPI other = fleets.get(i);
-                if (other == null || other == mirror || other.getFaction() == null) {
-                    continue;
-                }
-                boolean sameFaction = mirrorFaction != null
-                        && mirrorFaction.getId() != null
-                        && mirrorFaction.getId().equals(other.getFaction().getId());
-                float distance = Misc.getDistance(mirror.getLocation(), other.getLocation());
-                if (!shouldTakeInterdictionRepHit(sameFaction, other.isInHyperspaceTransition(),
-                        distance <= range, isVisibleToPlayerFleet(other),
-                        InterdictionPulseAbility.getInterdictSeconds(mirror, other),
-                        other.knowsWhoPlayerIs())) {
-                    continue;
-                }
-                sector.adjustPlayerReputation(
-                        new RepActionEnvelope(RepActions.INTERDICTED, null, null, false),
-                        other.getFaction().getId());
-                hits++;
-            }
-            if (hits > 0) {
-                CoopLog.info(CoopAbilityEffectApplier.class,
-                        "Coop interdiction rep hit applied for the guest against " + hits + " fleet(s)");
-            }
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopAbilityEffectApplier.class,
-                    "Failed to apply the guest's interdiction reputation hit", ex);
-        }
-    }
-
-    /**
-     * The victim conditions of vanilla's interdiction rep hit, collapsed into one predicate.
-     *
-     * <p>Vanilla's loop: skip the pulsing fleet itself, skip same-faction fleets, skip fleets in
-     * hyperspace transition, skip fleets outside the pulse radius, then {@code continue} on a victim
-     * that both sees the pulse and shrugs it off ({@code interdictSeconds <= 0}), and finally require
-     * {@code other.knowsWhoPlayerIs()}. The same-faction test appears twice in vanilla (once as an
-     * early {@code continue}, once in the rep gate itself) and is collapsed here.
-     */
-    static boolean shouldTakeInterdictionRepHit(boolean sameFaction, boolean inHyperspaceTransition,
-                                                boolean inRange, boolean visibleToPlayerFleet,
-                                                float interdictSeconds, boolean knowsWhoPlayerIs) {
-        if (sameFaction || inHyperspaceTransition || !inRange) {
-            return false;
-        }
-        if (visibleToPlayerFleet && interdictSeconds <= 0f) {
-            return false; // "Interdict avoided!" — vanilla skips the victim entirely.
-        }
-        return knowsWhoPlayerIs;
-    }
-
-    /**
-     * Vanilla's third case is {@code SENSOR_CONTACT && fleet.isPlayerFleet()} — true for a player
-     * pulse, and the guest's pulse is one in every sense that matters here, so it is kept unqualified.
-     */
-    private static boolean isVisibleToPlayerFleet(CampaignFleetAPI fleet) {
-        VisibilityLevel vis = fleet.getVisibilityLevelToPlayerFleet();
-        return vis == VisibilityLevel.COMPOSITION_AND_FACTION_DETAILS
-                || vis == VisibilityLevel.COMPOSITION_DETAILS
-                || vis == VisibilityLevel.SENSOR_CONTACT;
     }
 }

@@ -19,17 +19,22 @@ import java.util.Set;
  * by the other. Loot RNG is per-player and need not match (it only fills the actor's cargo), so no
  * determinism fork is needed.
  *
- * <p>The same channel carries stable-location construction ({@link Kind#CONSTRUCT}: comm relay / nav
- * buoy / sensor array), rare shared-world dialog mutations ({@link Kind#PARLEY}: spend SP to make a
- * fleet leave, etc.), and generic consumption ({@link Kind#CONSUME}). Anything not explicitly wired
- * relies on the host self-healing rebroadcast backstop.
+ * <p>The same channel carries stable-location construction — comm relay / nav buoy / sensor array,
+ * which ride {@link Kind#SPAWN} rather than the never-wired {@link Kind#CONSTRUCT} — rare
+ * shared-world dialog mutations ({@link Kind#PARLEY}: spend SP to make a fleet leave, etc.), and
+ * generic consumption ({@link Kind#CONSUME}). Anything not explicitly wired relies on the host
+ * self-healing rebroadcast backstop.
  *
- * <p>Phase 13 adds the three host&rarr;guest skeleton mutations its runtime-content inventory found
- * beyond what Phases 9/12 already replicate: {@link Kind#DECIV}, {@link Kind#OBJECTIVE_OWNERSHIP},
- * and {@link Kind#GATE_ACTIVATED}. {@link Kind#DECIV} and {@link Kind#GATE_ACTIVATED} flow
- * host&rarr;guest only (the host owns the sims that produce them); {@link Kind#OBJECTIVE_OWNERSHIP}
- * is bidirectional since Phase 12c, because a guest can capture an objective through its own local
- * dialog. All three are captured by {@link CoopSkeletonMutationWatcher} plus a colony-deciv listener.
+ * <p>Phase 13 adds the three skeleton mutations its runtime-content inventory found beyond what
+ * Phases 9/12 already replicate: {@link Kind#DECIV}, {@link Kind#OBJECTIVE_OWNERSHIP}, and
+ * {@link Kind#GATE_ACTIVATED}. Only {@link Kind#DECIV} is host&rarr;guest
+ * ({@link Kind#hostOnly() host-only}): the host owns the deciv sim, and nothing on a guest may
+ * delete a colony out of the authoritative world unasked. {@link Kind#OBJECTIVE_OWNERSHIP} is
+ * bidirectional since Phase 12c (a guest can capture an objective through its own local dialog) and
+ * {@link Kind#GATE_ACTIVATED} became bidirectional when guest gate scanning landed (the guest scans
+ * gates in its own dialog, and the {@code $canScanGates} global that unlocks the option rides the
+ * same payload host&rarr;guest). All three are captured by {@link CoopSkeletonMutationWatcher} plus a
+ * colony-deciv listener.
  *
  * <p>Phase 12c adds two more world-state values to the same poll, both bidirectional because either
  * player produces them: {@link Kind#SURVEY} (a planet's survey level) and
@@ -42,6 +47,13 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
         SALVAGE,
         EXPLORE,
         CONSUME,
+        /**
+         * Reserved and unused. Stable-location construction turned out to need exactly what
+         * {@link #SPAWN} already carries — a coop-assigned id, a spec, a position — plus a faction,
+         * an orbit and the id of the stable location it consumed, so it was cheaper to widen that
+         * payload than to grow a second materializer. Kept as a wire constant so an older peer's
+         * delta still parses rather than throwing out of {@code valueOf}.
+         */
         CONSTRUCT,
         PARLEY,
         /**
@@ -50,9 +62,18 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * in stable orbit — which are how two players hand each other anything at all, v1 having no
          * direct trade UI. The details ride {@link #newStateJson} as a {@link CoopWorldEntitySpawn}.
          *
+         * <p>Player <b>constructions</b> ride this kind too: the makeshift comm relay / nav buoy /
+         * sensor array {@code Objectives.build} puts on a stable location, and the fresh stable
+         * location {@code Objectives.salvage} puts back when one is disassembled. Same reason as the
+         * pods — vanilla builds them with {@code addCustomEntity(null, ...)} — and the payload
+         * carries the faction, the orbit, and the stable location the build consumed.
+         *
          * <p>Unlike every other kind, the {@code entityId} here is <em>coop-assigned</em> rather than
          * an engine id: {@code Misc.addCargoPods} calls {@code addCustomEntity(null, ...)}, so the
          * engine mints an id independently on each client and they never match.
+         *
+         * <p>Bidirectional: either player builds, and the host applies a guest's construction and
+         * rebroadcasts it.
          */
         SPAWN,
         /**
@@ -124,6 +145,21 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
         public boolean latestWins() {
             return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED || this == SURVEY
                     || this == DECIV;
+        }
+
+        /**
+         * Whether only the host may originate this kind, i.e. the host must refuse it when it
+         * arrives from a peer. True for {@link #DECIV} alone: it deletes a colony out of the
+         * authoritative world, it has no legitimate guest producer (the deciv capture is host-gated
+         * and the guest's deciv sim is suppressed), and the guest's own saturation bombardment
+         * already reaches the host as a {@code RAID_RESULT} that re-drives the transition there.
+         *
+         * <p>Guests are trusted friends, so this is not a security boundary — it is the check that
+         * keeps a modified or desynced jar from silently erasing a colony, and it costs one enum
+         * test per delta.
+         */
+        public boolean hostOnly() {
+            return this == DECIV;
         }
     }
 
