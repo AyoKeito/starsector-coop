@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static coop.testing.ProxyDefaults.defaultValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -294,27 +295,5 @@ class CoopBattleResultReconcilerEngineFleetsTest {
             SectorAPI sector = sector();
             return new CoopBattleResultReconciler.EngineFleets(() -> sector, () -> { }, id -> { });
         }
-    }
-
-    private static Object defaultValue(Class<?> type) {
-        if (!type.isPrimitive()) {
-            return null;
-        }
-        if (type == boolean.class) {
-            return false;
-        }
-        if (type == void.class) {
-            return null;
-        }
-        if (type == float.class) {
-            return 0f;
-        }
-        if (type == double.class) {
-            return 0d;
-        }
-        if (type == long.class) {
-            return 0L;
-        }
-        return 0;
     }
 }

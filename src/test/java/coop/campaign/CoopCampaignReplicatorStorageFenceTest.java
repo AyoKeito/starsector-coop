@@ -11,8 +11,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
-import coop.session.CoopPlayerInfo;
-import coop.session.CoopSessionState;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -21,7 +20,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -98,16 +96,8 @@ class CoopCampaignReplicatorStorageFenceTest {
 
     private static CoopCampaignReplicator guestReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(CoopConnectionRole.GUEST), activeGuestSession(), () -> 5678L);
-    }
-
-    private static CoopSessionState activeGuestSession() {
-        CoopSessionState session = new CoopSessionState(new SequencedIds("guest-player"));
-        session.startGuest("Guest");
-        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
-        session.guestAcceptHandshake("session-a");
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
+                new SilentNetService(CoopConnectionRole.GUEST), TestSessions.activeGuestSession(),
+                () -> 5678L);
     }
 
     /** A market with both an open submarket and a stocked storage submarket. */
@@ -276,22 +266,6 @@ class CoopCampaignReplicatorStorageFenceTest {
 
         @Override
         public void send(CoopMessages.Message message) {
-        }
-    }
-
-    private static final class SequencedIds implements Supplier<String> {
-        private final List<String> ids;
-        private int index;
-
-        private SequencedIds(String... ids) {
-            this.ids = List.of(ids);
-        }
-
-        @Override
-        public String get() {
-            String id = ids.get(Math.min(index, ids.size() - 1));
-            index++;
-            return id;
         }
     }
 }

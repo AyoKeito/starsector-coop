@@ -11,8 +11,7 @@ import com.fs.starfarer.api.impl.campaign.CargoPodsEntityPlugin;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
-import coop.session.CoopPlayerInfo;
-import coop.session.CoopSessionState;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -300,16 +299,7 @@ class CoopWorldEntityReplicationTest {
 
     private static CoopCampaignReplicator guestReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(), activeGuestSession(), () -> 10L);
-    }
-
-    private static CoopSessionState activeGuestSession() {
-        CoopSessionState session = new CoopSessionState(() -> "guest-player");
-        session.startGuest("Guest");
-        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
-        session.guestAcceptHandshake("session-a");
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
+                new SilentNetService(), TestSessions.activeGuestSession(), () -> 10L);
     }
 
     private static final class SilentNetService extends CoopNetService {
