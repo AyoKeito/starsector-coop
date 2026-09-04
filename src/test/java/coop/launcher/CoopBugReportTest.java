@@ -214,6 +214,19 @@ class CoopBugReportTest {
         assertNotNull(CoopBugReport.blankPassword("{\"coop.password\":\"x\"}"));
     }
 
+    /**
+     * Blanking answers {@code null} both when there was no password and when the rewrite failed.
+     * Only one of those is safe to pack in silence, and the password is stored in plain text.
+     */
+    @Test
+    void aFileWithNothingToBlankIsToldApartFromOneThatHasAPassword() {
+        assertTrue(CoopBugReport.hasPassword("{\"coop.password\":\"hunter2\"}"));
+        assertFalse(CoopBugReport.hasPassword("{\"coop.password\":\"\"}"));
+        assertFalse(CoopBugReport.hasPassword("{\"coop.hostPort\":7777}"));
+        assertFalse(CoopBugReport.hasPassword("not json at all"));
+        assertFalse(CoopBugReport.hasPassword(null));
+    }
+
     // ---- the save guard -------------------------------------------------------------------------
 
     @Test
