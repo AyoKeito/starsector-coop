@@ -27,11 +27,13 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
+import coop.testing.RecordingNetService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static coop.testing.TestSessions.activeGuestSession;
+import static coop.testing.TestSessions.activeHostSession;
 
 /**
  * {@code SpecialItemData} stacks — AI cores, nanoforges, blueprints, modspecs (Phase 12c gap 2c).
@@ -298,70 +300,4 @@ class CoopSpecialStackSyncTest {
         }
     }
 
-    private static CoopSessionState activeHostSession() {
-        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
-        session.startHost("Host");
-        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
-        session.hostAcceptHandshake();
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
-    }
-
-    private static CoopSessionState activeGuestSession() {
-        CoopSessionState session = new CoopSessionState(new SequencedIds("guest-player"));
-        session.startGuest("Guest");
-        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
-        session.guestAcceptHandshake("session-a");
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
-    }
-
-    private static final class RecordingNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-        private final List<CoopMessages.Message> sent = new ArrayList<>();
-
-        private RecordingNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        private CoopMessages.Message lastOfType(CoopMessages.Type type) {
-            for (int i = sent.size() - 1; i >= 0; i--) {
-                if (sent.get(i).type() == type) {
-                    return sent.get(i);
-                }
-            }
-            throw new AssertionError("no " + type + " sent; got " + sent.stream().map(CoopMessages.Message::type).toList());
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-            sent.add(message);
-        }
-    }
-
-    private static final class SequencedIds implements Supplier<String> {
-        private final List<String> ids;
-        private int index;
-
-        private SequencedIds(String... ids) {
-            this.ids = List.of(ids);
-        }
-
-        @Override
-        public String get() {
-            String id = ids.get(Math.min(index, ids.size() - 1));
-            index++;
-            return id;
-        }
-    }
 }

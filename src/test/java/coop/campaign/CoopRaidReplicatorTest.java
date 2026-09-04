@@ -29,11 +29,15 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import coop.testing.RecordingNetService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static coop.testing.ProxyDefaults.defaultValue;
+import static coop.testing.TestSessions.activeGuestSession;
+import static coop.testing.TestSessions.activeHostSession;
 
 /**
  * Phase 24 milestone 1 engine glue: the hostile-act capture the replicator registers, and the
@@ -360,25 +364,6 @@ class CoopRaidReplicatorTest {
                 });
     }
 
-    private static CoopSessionState activeHostSession() {
-        CoopSessionState session = new CoopSessionState(
-                new SequencedIds("lobby-a", "host-player", "session-a"));
-        session.startHost("Host");
-        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
-        session.hostAcceptHandshake();
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
-    }
-
-    private static CoopSessionState activeGuestSession() {
-        CoopSessionState session = new CoopSessionState(new SequencedIds("guest-player"));
-        session.startGuest("Guest");
-        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
-        session.guestAcceptHandshake("session-a");
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
-    }
-
     // ---- Engine fakes --------------------------------------------------------------------------
 
     private static final class FakeMemory {
@@ -597,69 +582,4 @@ class CoopRaidReplicatorTest {
         }
     }
 
-    private static Object defaultValue(Class<?> type) {
-        if (type == boolean.class) {
-            return false;
-        }
-        if (type == byte.class) {
-            return (byte) 0;
-        }
-        if (type == short.class) {
-            return (short) 0;
-        }
-        if (type == int.class) {
-            return 0;
-        }
-        if (type == long.class) {
-            return 0L;
-        }
-        if (type == float.class) {
-            return 0f;
-        }
-        if (type == double.class) {
-            return 0d;
-        }
-        if (type == char.class) {
-            return '\0';
-        }
-        return null;
-    }
-
-    private static final class SequencedIds implements java.util.function.Supplier<String> {
-        private final List<String> ids;
-        private int index;
-
-        private SequencedIds(String... ids) {
-            this.ids = List.of(ids);
-        }
-
-        @Override
-        public String get() {
-            return ids.get(index++);
-        }
-    }
-
-    private static final class RecordingNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-        private final List<CoopMessages.Message> sent = new ArrayList<>();
-
-        private RecordingNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-            sent.add(message);
-        }
-    }
 }

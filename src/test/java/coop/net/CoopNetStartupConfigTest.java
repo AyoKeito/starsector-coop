@@ -2,10 +2,6 @@ package coop.net;
 
 import coop.config.CoopOptionsStore;
 import coop.ui.CoopHudCorner;
-import org.apache.log4j.AppenderSkeleton;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
-import org.apache.log4j.spi.LoggingEvent;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import coop.testing.LogCapture;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -633,7 +630,7 @@ class CoopNetStartupConfigTest {
 
     @Test
     void theMalformedNewGameSeedWarnIsEmittedExactlyOnce() {
-        CapturingAppender appender = CapturingAppender.attach(CoopNetStartupConfig.class);
+        LogCapture appender = LogCapture.attach(CoopNetStartupConfig.class);
         try {
             Properties properties = new Properties();
             properties.setProperty("coop.newGameSeed", "MN-9999999999999999999");
@@ -654,42 +651,4 @@ class CoopNetStartupConfigTest {
         }
     }
 
-    /** Minimal log4j sink so the warn-once behaviour can be asserted on rather than assumed. */
-    private static final class CapturingAppender extends AppenderSkeleton {
-        private final List<String> warnings = new ArrayList<>();
-        private Logger attachedTo;
-
-        private static CapturingAppender attach(Class<?> source) {
-            CapturingAppender appender = new CapturingAppender();
-            appender.attachedTo = Logger.getLogger(source);
-            appender.attachedTo.addAppender(appender);
-            return appender;
-        }
-
-        private void detach() {
-            if (attachedTo != null) {
-                attachedTo.removeAppender(this);
-            }
-        }
-
-        private List<String> warnings() {
-            return warnings;
-        }
-
-        @Override
-        protected void append(LoggingEvent event) {
-            if (event.getLevel().isGreaterOrEqual(Level.WARN)) {
-                warnings.add(String.valueOf(event.getMessage()));
-            }
-        }
-
-        @Override
-        public void close() {
-        }
-
-        @Override
-        public boolean requiresLayout() {
-            return false;
-        }
-    }
 }

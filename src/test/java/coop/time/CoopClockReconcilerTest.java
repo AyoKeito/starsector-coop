@@ -1,13 +1,10 @@
 package coop.time;
 
-import org.apache.log4j.AppenderSkeleton;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
-import org.apache.log4j.spi.LoggingEvent;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import coop.testing.LogCapture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -581,7 +578,7 @@ class CoopClockReconcilerTest {
     void sustainedGuestAheadLogsExactlyOneWarning() {
         FakeClock clock = new FakeClock(BASE);
         Wall wall = new Wall();
-        CapturingAppender appender = CapturingAppender.attach(CoopClockReconciler.class);
+        LogCapture appender = LogCapture.attach(CoopClockReconciler.class);
         try {
             CoopClockReconciler reconciler = reconciler(clock, wall);
             fillRing(reconciler, clock, -days(0.5));
@@ -610,7 +607,7 @@ class CoopClockReconcilerTest {
         FakeClock clock = new FakeClock(BASE);
         clock.throwOnGet = true;
         Wall wall = new Wall();
-        CapturingAppender appender = CapturingAppender.attach(CoopClockReconciler.class);
+        LogCapture appender = LogCapture.attach(CoopClockReconciler.class);
         try {
             CoopClockReconciler reconciler = reconciler(clock, wall);
 
@@ -637,7 +634,7 @@ class CoopClockReconcilerTest {
         FakeClock clock = new FakeClock(BASE);
         clock.throwOnSet = true;
         Wall wall = new Wall();
-        CapturingAppender appender = CapturingAppender.attach(CoopClockReconciler.class);
+        LogCapture appender = LogCapture.attach(CoopClockReconciler.class);
         try {
             CoopClockReconciler reconciler = reconciler(clock, wall);
             fillRing(reconciler, clock, DAY);
@@ -656,7 +653,7 @@ class CoopClockReconcilerTest {
         FakeClock clock = new FakeClock(BASE);
         Wall wall = new Wall();
         boolean[] resolverCalled = {false};
-        CapturingAppender appender = CapturingAppender.attach(CoopClockReconciler.class);
+        LogCapture appender = LogCapture.attach(CoopClockReconciler.class);
         try {
             CoopClockReconciler reconciler = new CoopClockReconciler(() -> {
                 resolverCalled[0] = true;
@@ -777,51 +774,4 @@ class CoopClockReconcilerTest {
         }
     }
 
-    private static final class CapturingAppender extends AppenderSkeleton {
-        private final List<String> warnings = new ArrayList<>();
-        private Logger attachedTo;
-
-        private static CapturingAppender attach(Class<?> source) {
-            CapturingAppender appender = new CapturingAppender();
-            appender.attachedTo = Logger.getLogger(source);
-            appender.attachedTo.addAppender(appender);
-            return appender;
-        }
-
-        private void detach() {
-            if (attachedTo != null) {
-                attachedTo.removeAppender(this);
-            }
-        }
-
-        private List<String> warnings() {
-            return warnings;
-        }
-
-        private List<String> matching(String needle) {
-            List<String> hits = new ArrayList<>();
-            for (String warning : warnings) {
-                if (warning.contains(needle)) {
-                    hits.add(warning);
-                }
-            }
-            return hits;
-        }
-
-        @Override
-        protected void append(LoggingEvent event) {
-            if (event.getLevel().isGreaterOrEqual(Level.WARN)) {
-                warnings.add(String.valueOf(event.getMessage()));
-            }
-        }
-
-        @Override
-        public void close() {
-        }
-
-        @Override
-        public boolean requiresLayout() {
-            return false;
-        }
-    }
 }
