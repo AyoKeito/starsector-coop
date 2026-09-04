@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -96,8 +97,18 @@ class CoopShipDetailTest {
     @Test
     void decimalCommaLocalesCannotCorruptCR() {
         // %.4f under Locale.ROOT, not the default locale: a de_DE host would otherwise emit "0,4200"
-        // and the guest's parseFloat would throw.
-        assertTrue(battered().encode().contains("0.4200"), battered().encode());
+        // and the guest's parseFloat would throw. The default locale has to actually be a
+        // decimal-comma one for the assertion to mean anything -- on an en-US box the test passed
+        // whether or not the formatting named Locale.ROOT, which is the regression it exists to catch.
+        Locale previous = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.GERMANY);
+            String encoded = battered().encode();
+            assertTrue(encoded.contains("0.4200"), encoded);
+            assertEquals(0.42f, CoopShipDetail.decode(encoded).baseCR(), 1e-6f);
+        } finally {
+            Locale.setDefault(previous);
+        }
     }
 
     @Test

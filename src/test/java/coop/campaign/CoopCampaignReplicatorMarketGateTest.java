@@ -155,6 +155,61 @@ class CoopCampaignReplicatorMarketGateTest {
         assertTrue(dialog.text.paras.isEmpty());
     }
 
+    @Test
+    void aHiddenBaseMarketIsNeverGated() {
+        // A guest's mirrored pirate/Luddic-path base is built locally with Misc.genUID(), so its id
+        // cannot exist in the host's economy and no snapshot is ever coming. It does have an open
+        // submarket, so the stock predicate alone armed the gate and shut the shop for the full
+        // timeout on every dock at a hidden base.
+        FakeDialog dialog = new FakeDialog();
+        FakeMarket market = new FakeMarket("1c3f", true).hidden();
+        Global.setSector(sector(market, dialog));
+        CoopCampaignReplicator replicator = guestReplicator();
+
+        replicator.onPlayerOpenedMarket(market.api(), false);
+
+        assertNull(replicator.marketSyncGate().pendingMarketId());
+        replicator.tickMarketSyncGate();
+        assertTrue(dialog.options.enabled.isEmpty());
+        assertTrue(dialog.text.paras.isEmpty());
+    }
+
+    @Test
+    void aGateThatCannotReachTheUiPutsTheOptionsBackBeforeItForgetsItself() {
+        // "Fail open" has to mean re-enabling what the same pass just disabled. Clearing the gate
+        // zeroes pendingMarketId, and every path that would restore the options is gated on the gate
+        // still being armed -- so a bare clear() left the dialog greyed out with nothing to fix it.
+        FakeDialog dialog = new FakeDialog();
+        dialog.text.throwOnAddPara = true;
+        FakeMarket market = new FakeMarket("sindria", true);
+        Global.setSector(sector(market, dialog));
+        CoopCampaignReplicator replicator = guestReplicator();
+
+        replicator.onPlayerOpenedMarket(market.api(), false);
+        replicator.tickMarketSyncGate();
+
+        assertNull(replicator.marketSyncGate().pendingMarketId());
+        assertTrue(dialog.options.enabled.get("marketOpenCoreUI"));
+        assertTrue(dialog.options.enabled.get("marketOpenRefit"));
+    }
+
+    @Test
+    void losingTheSessionPutsTheOptionsBackToo() {
+        FakeDialog dialog = new FakeDialog();
+        FakeMarket market = new FakeMarket("sindria", true);
+        Global.setSector(sector(market, dialog));
+        CoopCampaignReplicator replicator = guestReplicator();
+
+        replicator.onPlayerOpenedMarket(market.api(), false);
+        replicator.tickMarketSyncGate();
+        assertFalse(dialog.options.enabled.get("marketOpenCoreUI"));
+
+        replicator.dispose(Global.getSector());
+
+        assertNull(replicator.marketSyncGate().pendingMarketId());
+        assertTrue(dialog.options.enabled.get("marketOpenCoreUI"));
+    }
+
     // ---- fakes ---------------------------------------------------------------------------------
 
     private CoopCampaignReplicator guestReplicator() {
@@ -226,12 +281,17 @@ class CoopCampaignReplicatorMarketGateTest {
 
     private static final class FakeTextPanel {
         private final List<String> paras = new ArrayList<>();
+        /** Models a dialog whose text panel is gone by the time the gate reaches for it. */
+        private boolean throwOnAddPara;
 
         private TextPanelAPI api() {
             return (TextPanelAPI) Proxy.newProxyInstance(
                     TextPanelAPI.class.getClassLoader(), new Class<?>[]{TextPanelAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "addPara" -> {
+                            if (throwOnAddPara) {
+                                throw new IllegalStateException("no text panel");
+                            }
                             paras.add(String.valueOf(args[0]));
                             yield null;
                         }
@@ -267,10 +327,16 @@ class CoopCampaignReplicatorMarketGateTest {
         private final String id;
         private final boolean hasOpenSubmarket;
         private boolean snapshotApplied;
+        private boolean hidden;
 
         private FakeMarket(String id, boolean hasOpenSubmarket) {
             this.id = id;
             this.hasOpenSubmarket = hasOpenSubmarket;
+        }
+
+        private FakeMarket hidden() {
+            this.hidden = true;
+            return this;
         }
 
         private MarketAPI api() {
@@ -303,6 +369,7 @@ class CoopCampaignReplicatorMarketGateTest {
                     (proxy, method, args) -> switch (method.getName()) {
                         case "hasSubmarket" -> hasOpenSubmarket;
                         case "getSubmarket" -> hasOpenSubmarket ? submarket : null;
+                        case "isHidden" -> hidden;
                         case "getId" -> id;
                         case "getPeopleCopy" -> List.of();
                         case "toString" -> "FakeMarket[" + id + "]";

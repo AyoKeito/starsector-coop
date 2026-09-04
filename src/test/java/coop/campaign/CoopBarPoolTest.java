@@ -28,9 +28,9 @@ class CoopBarPoolTest {
         CoopBarPoolCapture capture = new CoopBarPoolCapture();
         List<CoopMissionBoardSync.Entry> pool = List.of(offer("a", 1L), offer("b", 2L));
 
-        assertTrue(capture.markChanged(pool), "the first pool ever seen is always a change");
-        assertFalse(capture.markChanged(pool));
-        assertFalse(capture.markChanged(new ArrayList<>(pool)), "a fresh equal list is not a change");
+        assertTrue(capture.markChanged(pool, 0L), "the first pool ever seen is always a change");
+        assertFalse(capture.markChanged(pool, 0L));
+        assertFalse(capture.markChanged(new ArrayList<>(pool), 0L), "a fresh equal list is not a change");
     }
 
     @Test
@@ -39,17 +39,17 @@ class CoopBarPoolTest {
         // and Collections.shuffle's permutation depends only on size + random. Same members in a
         // different order therefore show a different subset, so the guest must be told.
         CoopBarPoolCapture capture = new CoopBarPoolCapture();
-        capture.markChanged(List.of(offer("a", 1L), offer("b", 2L)));
+        capture.markChanged(List.of(offer("a", 1L), offer("b", 2L)), 0L);
 
-        assertTrue(capture.markChanged(List.of(offer("b", 2L), offer("a", 1L))));
+        assertTrue(capture.markChanged(List.of(offer("b", 2L), offer("a", 1L)), 0L));
     }
 
     @Test
     void aChangedContentSeedIsAChange() {
         CoopBarPoolCapture capture = new CoopBarPoolCapture();
-        capture.markChanged(List.of(offer("a", 1L)));
+        capture.markChanged(List.of(offer("a", 1L)), 0L);
 
-        assertTrue(capture.markChanged(List.of(offer("a", 999L))));
+        assertTrue(capture.markChanged(List.of(offer("a", 999L)), 0L));
     }
 
     @Test
@@ -57,20 +57,35 @@ class CoopBarPoolTest {
         // expiresAtDay ticks down continuously; if it counted, every single poll would rebroadcast
         // the whole pool.
         CoopBarPoolCapture capture = new CoopBarPoolCapture();
-        capture.markChanged(List.of(CoopMissionBoardSync.Entry.barOffer("a", "a", 1L, "", 30L)));
+        capture.markChanged(List.of(CoopMissionBoardSync.Entry.barOffer("a", "a", 1L, "", 30L)), 0L);
 
-        assertFalse(capture.markChanged(List.of(CoopMissionBoardSync.Entry.barOffer("a", "a", 1L, "", 12L))));
+        assertFalse(capture.markChanged(List.of(CoopMissionBoardSync.Entry.barOffer("a", "a", 1L, "", 12L)), 0L));
+    }
+
+    @Test
+    void aManagerSeedRerollAloneIsAChange() {
+        // Vanilla's BarEventManager re-rolls its seed on a 20-40 day timer of its own, and the
+        // guest's copy of the manager is removed by the suppressor so it never re-rolls a matching
+        // one. With the seed outside the change test a re-roll over a stable pool sent nothing, and
+        // the two clients shuffled the same list into different shown subsets from then on.
+        CoopBarPoolCapture capture = new CoopBarPoolCapture();
+        List<CoopMissionBoardSync.Entry> pool = List.of(offer("a", 1L), offer("b", 2L));
+        capture.markChanged(pool, 111L);
+
+        assertFalse(capture.markChanged(pool, 111L), "same pool, same seed: nothing to say");
+        assertTrue(capture.markChanged(pool, 222L), "the seed is half of what the guest shuffles with");
+        assertFalse(capture.markChanged(pool, 222L));
     }
 
     @Test
     void resetRearmsTheRebroadcastForARejoiningGuest() {
         CoopBarPoolCapture capture = new CoopBarPoolCapture();
         List<CoopMissionBoardSync.Entry> pool = List.of(offer("a", 1L));
-        capture.markChanged(pool);
+        capture.markChanged(pool, 0L);
 
         capture.reset();
 
-        assertTrue(capture.markChanged(pool));
+        assertTrue(capture.markChanged(pool, 0L));
     }
 
     @Test

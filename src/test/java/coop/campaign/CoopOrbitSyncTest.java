@@ -7,6 +7,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopOrbitSyncTest {
@@ -44,6 +45,21 @@ class CoopOrbitSyncTest {
         assertEquals("corvus", back.get(1).focusId());
         assertEquals(7800f, back.get(1).radius());
         assertEquals(225.82f, back.get(1).angle());
+    }
+
+    @Test
+    void aFocuslessBodySurvivesTheRoundTripAsNullRatherThanEmpty() {
+        // CoopDelimited writes a null field as "", so a focus-less body used to come back with
+        // focusId "" -- which signature() maps to "" while the guest's own pool is keyed with
+        // null -> "-", so the signature fallback could never match it, and the orbit apply's
+        // "focusId != null" guard ran a sector-wide getEntityById("") once per entry.
+        List<CoopOrbitSync.OrbitEntry> back = CoopOrbitSync.decode(CoopOrbitSync.encode(List.of(
+                new CoopOrbitSync.OrbitEntry("1b9", null, 4500f, 200f, 136.63f))));
+
+        assertEquals(1, back.size());
+        assertNull(back.get(0).focusId());
+        assertEquals(CoopOrbitSync.signature(null, 4500f, 200f),
+                CoopOrbitSync.signature(back.get(0).focusId(), back.get(0).radius(), back.get(0).period()));
     }
 
     @Test

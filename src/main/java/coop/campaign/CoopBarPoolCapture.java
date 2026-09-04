@@ -165,12 +165,19 @@ public final class CoopBarPoolCapture {
     }
 
     /**
-     * True when {@code entries} differs from the last broadcast pool; records it as the new baseline.
-     * {@code expiresAtDay} is deliberately outside the signature — it ticks down continuously and
-     * would make every poll a "change".
+     * True when {@code entries} or {@code barSeed} differs from the last broadcast pool; records the
+     * pair as the new baseline. {@code expiresAtDay} is deliberately outside the signature — it ticks
+     * down continuously and would make every poll a "change".
+     *
+     * <p>The seed is inside it because it is half of what the guest needs: vanilla's
+     * {@code BarEventManager.advance} re-rolls the manager seed on its own 20-40 day timer
+     * ({@code tracker2} &rarr; {@code updateSeed()}), and the guest's manager script is removed by the
+     * suppressor so it never re-rolls a matching one. A re-roll over an otherwise stable pool sends
+     * nothing, and from then on the two clients shuffle the same list with different seeds and show
+     * different bar subsets — the exact divergence the seed sync exists to prevent.
      */
-    public boolean markChanged(List<CoopMissionBoardSync.Entry> entries) {
-        String signature = signature(entries);
+    public boolean markChanged(List<CoopMissionBoardSync.Entry> entries, long barSeed) {
+        String signature = barSeed + SEP + signature(entries);
         if (signature.equals(lastSignature)) {
             return false;
         }

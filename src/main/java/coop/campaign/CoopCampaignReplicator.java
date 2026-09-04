@@ -7,6 +7,7 @@ import com.fs.starfarer.api.campaign.CommDirectoryAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.PlayerMarketTransaction;
+import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CustomCampaignEntityAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
@@ -30,6 +31,7 @@ import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
+import com.fs.starfarer.api.impl.campaign.CargoPodsEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.events.OfficerManagerEvent;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
@@ -418,6 +420,12 @@ public final class CoopCampaignReplicator
         missionBoard.clear();
         marketSync.clear();
         appliedHireables.clear();
+        // Same rule as tickMarketSyncGate: put the trade options back before forgetting the gate,
+        // or a teardown mid-dock leaves them greyed out with nothing left to re-enable them.
+        if (marketSyncGate.pendingMarketId() != null) {
+            releaseMarketSyncGate("session teardown");
+            marketSyncGate.clear();
+        }
         worldLedger.clear();
         // Salvage-watcher baseline too: leaving it populated meant that on reconnect in the same
         // system, every entity consumed last session looked "newly missing" and was re-reported as a
@@ -880,6 +888,19 @@ public final class CoopCampaignReplicator
             // visit) describes people this client's own OfficerManagerEvent may since have pruned,
             // so if the reply does not land before the screen closes the guest silently wipes the
             // host's pool. No snapshot, no claim.
+            // ...but diff it first. The vanilla open callback fires more than once per dock session
+            // (CampaignState.showInteractionDialog on the dock dialog, then the core Crew/Cargo
+            // screen's own reportPlayerOpenedMarketAndCargoUpdated), and a hire made in between --
+            // the comm directory is reachable from the dock dialog -- would otherwise never be
+            // diffed at close, while the second snapshot re-added the hired person to the pool.
+            if (appliedHireables.containsKey(market.getId())) {
+                try {
+                    reportHiresOnClose(market);
+                } catch (RuntimeException | LinkageError ex) {
+                    CoopLog.warn(CoopCampaignReplicator.class,
+                            "Failed to diff hireable pool on market re-open", ex);
+                }
+            }
             appliedHireables.remove(market.getId());
             send(CoopMessages.marketOpen(session.sessionId(), service.nextSeq(), now(),
                     market.getId(), session.localPlayerId()));
@@ -887,7 +908,14 @@ public final class CoopCampaignReplicator
             // Phase 20 M6: hold the trade screens shut until that reply lands. Only for a market that
             // actually has stock to be wrong about -- a procgen derelict never gets a snapshot back,
             // and there is nothing on its dialog for the gate to disable anyway.
-            if (hasOpenSubmarket(market)) {
+            //
+            // Hidden markets are excluded for the same reason, one step further along: a pirate or
+            // Luddic-path base market is minted locally with Misc.genUID() (vanilla PirateBaseIntel /
+            // LuddicPathBaseIntel), so the guest's mirrored copy carries an id the host's economy
+            // cannot resolve. It has an open submarket, so the old predicate armed the gate on every
+            // dock at a hidden base and held the shop shut for the full timeout with no snapshot
+            // ever on its way.
+            if (hasOpenSubmarket(market) && !isHiddenMarket(market)) {
                 marketSyncGate.onOpenRequested(market.getId(), now());
             }
         }
@@ -986,6 +1014,11 @@ public final class CoopCampaignReplicator
             return;
         }
         if (!isGuest() || !isActive()) {
+            // Re-enable first: clearing zeroes pendingMarketId, and every path that would put the
+            // options back (the per-frame re-assert, the snapshot release) is gated on the gate
+            // still being armed. A bare clear() therefore leaves whatever the last frame disabled
+            // greyed out in a still-open dialog, forever.
+            releaseMarketSyncGate("session/role lost");
             marketSyncGate.clear();
             return;
         }
@@ -1013,8 +1046,12 @@ public final class CoopCampaignReplicator
                 announceMarketSyncing();
             }
         } catch (RuntimeException | LinkageError ex) {
-            // A gate that cannot reach the UI must fail open, not wedge the dialog.
+            // A gate that cannot reach the UI must fail open, not wedge the dialog. Failing open
+            // means putting the options back, not just forgetting the gate: the disable above may
+            // already have landed before the throw (announceMarketSyncing is the likely thrower),
+            // and after clear() nothing re-enables them.
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply the coop market sync gate", ex);
+            releaseMarketSyncGate("gate failure");
             marketSyncGate.clear();
         }
     }
@@ -1067,6 +1104,19 @@ public final class CoopCampaignReplicator
     private static boolean hasOpenSubmarket(MarketAPI market) {
         try {
             return market != null && market.hasSubmarket(Submarkets.SUBMARKET_OPEN);
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    /**
+     * A market with no cross-client identity: hidden-base markets (pirate/Luddic path) are minted on
+     * whichever client built the base, so the two never share an id. Total; treated as "not hidden"
+     * on any failure, which just restores the old behaviour for that market.
+     */
+    private static boolean isHiddenMarket(MarketAPI market) {
+        try {
+            return market != null && market.isHidden();
         } catch (RuntimeException | LinkageError ex) {
             return false;
         }
@@ -1158,13 +1208,19 @@ public final class CoopCampaignReplicator
         List<CoopMissionBoardSync.Entry> entries = barPoolCapture.capture();
         // Null means "could not read the pool", which is not the same as "the pool is empty" — an
         // empty snapshot tells the guest to clear its bar, so it must only ever be a real reading.
-        if (entries == null || !barPoolCapture.markChanged(entries)) {
+        if (entries == null) {
             return;
         }
         // The manager seed rides with the pool: it is what BarCMD shuffles the pool with, so sending
-        // one without the other still shows the two players different bars.
+        // one without the other still shows the two players different bars. It is part of the change
+        // test for the same reason — vanilla re-rolls it on a timer of its own, and a re-roll over an
+        // unchanged pool is still a divergence.
         Long barSeed = CoopBarSync.hostSeed();
-        broadcastMissionPool(BAR_POOL_MARKET_ID, entries, barSeed == null ? 0L : barSeed);
+        long seedValue = barSeed == null ? 0L : barSeed;
+        if (!barPoolCapture.markChanged(entries, seedValue)) {
+            return;
+        }
+        broadcastMissionPool(BAR_POOL_MARKET_ID, entries, seedValue);
         CoopLog.info(CoopCampaignReplicator.class, "Coop MISSION_POOL_SNAPSHOT bar offers="
                 + entries.size() + " barSeed=" + (barSeed == null ? "unreadable" : barSeed));
     }
@@ -1403,13 +1459,18 @@ public final class CoopCampaignReplicator
                 CoopMessages.requiredPayloadString(message, "stock"));
         marketSync.applySnapshot(marketId, items);
         // One-shot apply to the guest's engine open-market so it shows the host's canonical stock.
-        applySnapshotToEngine(marketId, items);
+        boolean applied = applySnapshotToEngine(marketId, items);
         // The hireable pool lives on the market, not in the submarket cargo, so it applies even when
         // the guest has no materialized open-market cargo to replace.
         applyHireablePool(findMarket(marketId), items);
         // Phase 20 M6: the stock is canonical now, so the trade screens open. Ordering is load-bearing
         // -- the release happens after applySnapshotToEngine, never before, so there is no frame on
-        // which the options are live and the cargo is still the guest's own roll.
+        // which the options are live and the cargo is still the guest's own roll. An apply that wrote
+        // nothing leaves the gate armed: its own timeout is then the thing that opens the shop, and
+        // the log must not claim a success that did not happen.
+        if (!applied) {
+            return;
+        }
         if (marketSyncGate.onResolved(marketId)) {
             releaseMarketSyncGate("snapshot applied");
         }
@@ -1417,11 +1478,34 @@ public final class CoopCampaignReplicator
                 + " items=" + items.size());
     }
 
-    /** Guest: replace the open-market stock (all kinds) with the host's canonical set. */
-    private void applySnapshotToEngine(String marketId, List<CoopMarketSync.StockItem> items) {
-        CargoAPI cargo = openMarketCargo(marketId);
+    /**
+     * Guest: replace the open-market stock (all kinds) with the host's canonical set.
+     *
+     * @return {@code true} only when the replacement actually ran against a real cargo.
+     */
+    private boolean applySnapshotToEngine(String marketId, List<CoopMarketSync.StockItem> items) {
+        MarketAPI market = findMarket(marketId);
+        CargoAPI cargo = openMarketCargo(market);
         if (cargo == null) {
-            return;
+            // First dock at a market this client has never opened: BaseSubmarketPlugin builds the
+            // submarket cargo lazily in getCargo(), so getCargoNullOk() is still null at snapshot
+            // time (the dock dialog reports the open before anything stocks it). Bailing out here
+            // wrote nothing at all and left the guest's own, unseeded roll to materialize under the
+            // trade screen a moment later -- with the gate already released and "applied" logged.
+            //
+            // Stock it the way the host does before its own capture. That both materializes the
+            // cargo and spends the plugin's restock windows (sinceLastCargoUpdate and sinceSWUpdate
+            // are zeroed), so the engine's own updateCargoPrePlayerInteraction cannot roll fresh
+            // weapons/fighters/ships on top of the host set once the trade UI opens. Plain
+            // getCargo() would create the cargo but leave those windows open, i.e. re-introduce the
+            // guest's own roll by a slower route.
+            ensureOpenMarketStocked(market);
+            cargo = openMarketCargo(market);
+        }
+        if (cargo == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_SNAPSHOT not applied to engine:"
+                    + " no open-market cargo for market=" + marketId);
+            return false;
         }
         replayGuard.begin();
         try {
@@ -1475,8 +1559,10 @@ public final class CoopCampaignReplicator
                             + item.kind() + ":" + item.itemId(), ex);
                 }
             }
+            return true;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply market snapshot to engine", ex);
+            return false;
         } finally {
             replayGuard.end();
         }
@@ -2375,10 +2461,41 @@ public final class CoopCampaignReplicator
         }
         // Remove the consumed entity wherever it lives so it cannot be re-looted on this client.
         // Resolved by coop id first for replicated entities, whose engine ids differ per client.
-        SectorEntityToken entity = findEntityForDelta(sector, delta.entityId());
+        SectorEntityToken entity = findConsumeTarget(sector, delta.entityId());
         if (entity != null && entity.getContainingLocation() != null) {
             entity.getContainingLocation().removeEntity(entity);
         }
+    }
+
+    /**
+     * The entity a {@code CONSUME} delta is allowed to remove, or null.
+     *
+     * <p>{@link #findEntityForDelta} resolves an engine id through {@code sector.getEntityById},
+     * which answers for <em>anything</em> — a fleet, a planet, a station, a jump point. Engine ids
+     * are only stable across clients for entities that came out of worldgen: everything the engine
+     * mints at runtime (post-battle wrecks, debris fields, mission tokens) takes its id from that
+     * client's own {@code CampaignEngine} counter, so the same id names different objects on the two
+     * clients. Removing whatever answers to it deletes an unrelated object out of the authoritative
+     * world, and the host's rebroadcast makes that permanent.
+     *
+     * <p>The guard is the symmetric check: the sender reported an id that <em>its</em>
+     * {@link #consumeKeyIfTracked} produced, so a local target that does not produce the same id is
+     * not the thing that was salvaged. That structurally excludes fleets (Phase 9 owns those),
+     * planets and jump points, and it refuses an engine-id match that lands on a coop-replicated
+     * mirror (which keys on its coop id, never its engine id).
+     */
+    private SectorEntityToken findConsumeTarget(SectorAPI sector, String entityId) {
+        SectorEntityToken entity = findEntityForDelta(sector, entityId);
+        if (entity == null) {
+            return null;
+        }
+        if (!entityId.equals(consumeKeyIfTracked(entity))) {
+            CoopLog.info(CoopCampaignReplicator.class, "Coop WORLD_DELTA CONSUME ignored: local"
+                    + " entity " + entityId + " is not a consumable this client tracks (runtime-minted"
+                    + " engine ids differ per client)");
+            return null;
+        }
+        return entity;
     }
 
     // ---- Phase 13 skeleton mutations (DECIV / OBJECTIVE_OWNERSHIP / GATE_ACTIVATED) ------------
@@ -2394,8 +2511,14 @@ public final class CoopCampaignReplicator
             return;
         }
         try {
+            // The campaign timestamp is what makes a second deciv on the same market id a distinct
+            // payload; without it the ledger latched the first one for the whole session and a
+            // colony re-founded on the same planet could never decivilize again on the guest. It is
+            // deliberately the campaign clock and not a counter: a repeat fire of the *same* event
+            // reads the same timestamp and is still deduped, exactly as before.
             CoopWorldDelta delta = new CoopWorldDelta(market.getId(), CoopWorldDelta.Kind.DECIV, false,
-                    CoopSkeletonMutationWatcher.encodeDeciv(fullyDestroyed), session.localPlayerId());
+                    CoopSkeletonMutationWatcher.encodeDeciv(fullyDestroyed, campaignTimestamp()),
+                    session.localPlayerId());
             if (worldLedger.apply(delta)) {
                 reportWorldDelta(delta);
                 CoopLog.info(CoopCampaignReplicator.class, "Coop captured DECIV market="
@@ -3354,11 +3477,38 @@ public final class CoopCampaignReplicator
                 addSpawnContent(custom.getCargo(), entry.getKey(), entry.getValue());
             }
         }
-        // Deliberately no CargoPodsResponse decay script on the mirror copy: decay stays owned by
-        // the creating client, which reports the removal as a CONSUME and takes the pod out on both
-        // sides. Running two independent decay timers would just race to the same outcome.
+        pinMirrorExpiry(entity);
         CoopLog.info(CoopCampaignReplicator.class, "Coop materialized entity " + spawn.coopEntityId()
                 + " type=" + spawn.entityType() + " in " + spawn.locationId());
+    }
+
+    /**
+     * Stop a mirrored copy from expiring on a timer of its own.
+     *
+     * <p>Decay is not a script the creator attaches and we can decline to copy: {@code cargo_pods}
+     * declares {@code CargoPodsEntityPlugin} as its {@code pluginClass} in
+     * {@code data/config/custom_entities.json}, so every {@code addCustomEntity(Entities.CARGO_PODS,
+     * ...)} — including the one above — gets the decay plugin whether we want it or not, running its
+     * own {@code elapsed} from zero. Worse, the plugin's {@code maxDays} only grows past its 1-day
+     * default inside {@code updateBaseMaxDays()}, which it calls only while the entity is in the
+     * <em>local</em> player's current location: the mirror of a pod dropped in a system the receiving
+     * player is nowhere near therefore expires after a single day. Whichever copy expires first while
+     * its own player is in that location is reported as a {@code CONSUME}, which then takes the
+     * still-live original out from under the player who created it.
+     *
+     * <p>So the mirror never expires; decay stays owned by the creating client, which reports the
+     * removal as a {@code CONSUME} and takes the pod out on both sides — which is what the old
+     * comment here claimed was already happening.
+     */
+    void pinMirrorExpiry(SectorEntityToken entity) {
+        try {
+            if (entity != null && entity.getCustomPlugin() instanceof CargoPodsEntityPlugin pods) {
+                pods.setNeverExpire(true);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Failed to pin the mirrored entity's expiry; it may decay on its own", ex);
+        }
     }
 
     /** Adds one {@code KIND:id} content entry back into a materialized pod's cargo. */
@@ -3403,6 +3553,16 @@ public final class CoopCampaignReplicator
         }
         LocationAPI hyperspace = sector.getHyperspace();
         return hyperspace != null && locationId.equals(hyperspace.getId()) ? hyperspace : null;
+    }
+
+    /** Test seam: the guest hire baseline a snapshot would have installed. */
+    void setHireBaselineForTest(String marketId, Map<String, CoopMarketSync.ItemKind> baseline) {
+        appliedHireables.put(marketId, new LinkedHashMap<>(baseline));
+    }
+
+    /** Test seam: the current guest hire baseline for a market, or null. */
+    Map<String, CoopMarketSync.ItemKind> hireBaselineForTest(String marketId) {
+        return appliedHireables.get(marketId);
     }
 
     /** Test seam: in play this is reached from the salvage watcher's per-frame removal diff. */
@@ -4030,6 +4190,17 @@ public final class CoopCampaignReplicator
         }
         SubmarketAPI open = market.getSubmarket(Submarkets.SUBMARKET_OPEN);
         return open == null ? null : open.getCargoNullOk();
+    }
+
+    /** The campaign clock's timestamp, or 0 when there is no readable clock. Total. */
+    private long campaignTimestamp() {
+        try {
+            SectorAPI sector = Global.getSector();
+            CampaignClockAPI clock = sector == null ? null : sector.getClock();
+            return clock == null ? 0L : clock.getTimestamp();
+        } catch (RuntimeException | LinkageError ex) {
+            return 0L;
+        }
     }
 
     private MarketAPI findMarket(String marketId) {

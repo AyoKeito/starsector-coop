@@ -57,9 +57,16 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
         SPAWN,
         /**
          * A market on the host decivilized (Phase 13). {@code entityId} is the market id;
-         * {@link #newStateJson} carries {@code fullDestroy}. Host-only capture, months-to-years
-         * cadence. The guest reproduces the vanilla outcome by calling the same public static
-         * {@code DecivTracker.decivilize} the host's tracker called.
+         * {@link #newStateJson} carries {@code fullDestroy} and the campaign timestamp. Host-only
+         * capture, months-to-years cadence. The guest reproduces the vanilla outcome by calling the
+         * same public static {@code DecivTracker.decivilize} the host's tracker called.
+         *
+         * <p>Latest-wins, and the timestamp is why: this is an event rather than a state, and
+         * the set-based {@code (kind, entityId)} key latched it for the whole session. Vanilla re-uses
+         * the planet's gen-time market object when a colony is founded, so a market that decivilizes,
+         * is re-founded and decivilizes again produced a second delta that the host dropped before
+         * sending — leaving the guest with a live colony the host no longer has, and nothing later to
+         * repair it. See {@code CoopSkeletonMutationWatcher.encodeDeciv(boolean, long)}.
          */
         DECIV,
         /**
@@ -115,7 +122,8 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * change repeatedly — including changing back to a value it already held.
          */
         public boolean latestWins() {
-            return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED || this == SURVEY;
+            return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED || this == SURVEY
+                    || this == DECIV;
         }
     }
 

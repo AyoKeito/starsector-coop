@@ -223,15 +223,50 @@ public final class CoopBaseAuthority {
         if (items == null) {
             return result;
         }
+        addLiveIntel(result, items);
+        return result;
+    }
+
+    /**
+     * Live intel of one type from the added list <em>and</em> the comm queue.
+     *
+     * <p>{@code IntelManagerAPI.getIntel(Class)} reads only the added list; the queue is a separate
+     * repository reachable through {@code getCommQueue}. That distinction is not academic here:
+     * {@code PirateActivityIntel}'s constructor queues itself instead of adding whenever its target
+     * system holds no player market, which is the common case for a base the guest mirrors — while
+     * still calling {@code Global.getSector().addScript(this)}, so the queued intel keeps running and
+     * keeps stamping {@code PIRATE_ACTIVITY} onto the guest's markets. Sweeping only the added list
+     * left it there forever. {@code removeIntel} unqueues as well as removes, so ending it from here
+     * is complete.
+     */
+    static List<Object> liveIntelIncludingQueued(IntelManagerAPI intel, Class<?> type) {
+        List<Object> result = liveIntel(intel, type);
+        if (intel == null) {
+            return result;
+        }
+        List<IntelInfoPlugin> queued;
+        try {
+            queued = intel.getCommQueue(type);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopBaseAuthority.class, "Failed to read the intel comm queue", ex);
+            return result;
+        }
+        addLiveIntel(result, queued);
+        return result;
+    }
+
+    private static void addLiveIntel(List<Object> out, List<IntelInfoPlugin> items) {
+        if (items == null) {
+            return;
+        }
         for (IntelInfoPlugin item : items) {
             if (item instanceof BaseIntelPlugin plugin && (plugin.isEnding() || plugin.isEnded())) {
                 continue;
             }
-            if (item != null) {
-                result.add(item);
+            if (item != null && !out.contains(item)) {
+                out.add(item);
             }
         }
-        return result;
     }
 
     /**
@@ -627,14 +662,14 @@ public final class CoopBaseAuthority {
 
         @Override
         public void endDerivedActivityIntel() {
-            for (Object activity : collect(PirateActivityIntel.class)) {
+            for (Object activity : collectIncludingQueued(PirateActivityIntel.class)) {
                 endAndRemove(activity);
             }
         }
 
         /** Ends the activity intel a specific base spawned; ordering matters, see {@link #remove}. */
         private void endActivityIntelFrom(Object base) {
-            for (Object activity : collect(PirateActivityIntel.class)) {
+            for (Object activity : collectIncludingQueued(PirateActivityIntel.class)) {
                 try {
                     if (((PirateActivityIntel) activity).getSource() == base) {
                         endAndRemove(activity);
@@ -696,6 +731,11 @@ public final class CoopBaseAuthority {
 
         private List<Object> collect(Class<?> type) {
             return liveIntel(intel, type);
+        }
+
+        /** {@link #collect} plus the comm queue — see {@link #liveIntelIncludingQueued}. */
+        private List<Object> collectIncludingQueued(Class<?> type) {
+            return liveIntelIncludingQueued(intel, type);
         }
 
         /**

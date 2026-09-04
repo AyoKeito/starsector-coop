@@ -203,12 +203,30 @@ class CoopWorldDeltaTest {
         assertTrue(CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP.latestWins());
         assertTrue(CoopWorldDelta.Kind.GATE_ACTIVATED.latestWins());
         assertTrue(CoopWorldDelta.Kind.SURVEY.latestWins());
-        assertFalse(CoopWorldDelta.Kind.DECIV.latestWins());
+        // Not a value, but a repeatable event: a market id can decivilize twice in a session (deciv,
+        // re-found on the same planet, deciv again), and the set-based key latched the first one.
+        assertTrue(CoopWorldDelta.Kind.DECIV.latestWins());
         assertFalse(CoopWorldDelta.Kind.CONSTRUCT.latestWins());
         assertFalse(CoopWorldDelta.Kind.PARLEY.latestWins());
         assertFalse(CoopWorldDelta.Kind.SPAWN.latestWins());
         // A single one-way flip with a constant payload: the set-based key is the right one.
         assertFalse(CoopWorldDelta.Kind.RUINS_EXPLORED.latestWins());
+    }
+
+    @Test
+    void twoDecivsOfTheSameMarketBothApplyButTheEchoOfEitherDoesNot() {
+        CoopWorldDelta.Ledger ledger = new CoopWorldDelta.Ledger();
+        CoopWorldDelta first = deciv("market_yama", "false#100");
+        CoopWorldDelta second = deciv("market_yama", "true#7776000");
+
+        assertTrue(ledger.apply(first));
+        assertFalse(ledger.apply(first), "the host's verbatim echo is still a no-op");
+        assertTrue(ledger.apply(second), "a re-founded colony can decivilize again");
+        assertFalse(ledger.apply(second));
+    }
+
+    private static CoopWorldDelta deciv(String marketId, String payload) {
+        return new CoopWorldDelta(marketId, CoopWorldDelta.Kind.DECIV, false, payload, "host");
     }
 
     private static CoopWorldDelta survey(String entityId, String level) {

@@ -271,12 +271,35 @@ public final class CoopSkeletonMutationWatcher {
                 fields.size() > 2 && Boolean.parseBoolean(fields.get(2)));
     }
 
+    /** Separates the {@code fullDestroy} flag from the occurrence stamp. */
+    private static final char DECIV_SEP = '#';
+
     /** {@code fullDestroy} — the one parameter of {@code DecivTracker.decivilize} that changes the outcome. */
     public static String encodeDeciv(boolean fullDestroy) {
         return Boolean.toString(fullDestroy);
     }
 
+    /**
+     * As {@link #encodeDeciv(boolean)}, plus the campaign timestamp the deciv happened at.
+     *
+     * <p>Decivilization is an <em>event</em>, not a state, and a market id can carry more than one of
+     * them in a session: vanilla re-uses the planet's gen-time market object when a colony is founded,
+     * so a colony that decivilizes, is re-founded on the same planet and decivilizes again produces
+     * two deltas with the same {@code (kind, entityId)}. The stamp makes the second one a distinct
+     * payload, which is what the latest-wins ledger keys on.
+     *
+     * <p>The campaign timestamp rather than a counter, deliberately: it separates two events months
+     * apart while reading <em>identical</em> for a repeat report of the same one, so the host's echo
+     * rebroadcast and a same-frame double fire of the vanilla listener are both still deduped.
+     */
+    public static String encodeDeciv(boolean fullDestroy, long campaignTimestamp) {
+        return fullDestroy + String.valueOf(DECIV_SEP) + campaignTimestamp;
+    }
+
+    /** Reads the flag out of either payload form; the occurrence stamp is ledger-only. */
     public static boolean decodeDecivFullDestroy(String payload) {
-        return Boolean.parseBoolean(CoopDelimited.normalize(payload).trim());
+        String text = CoopDelimited.normalize(payload).trim();
+        int sep = text.indexOf(DECIV_SEP);
+        return Boolean.parseBoolean(sep < 0 ? text : text.substring(0, sep));
     }
 }

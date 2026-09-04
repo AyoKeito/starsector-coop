@@ -1,6 +1,7 @@
 package coop.campaign;
 
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -451,13 +452,46 @@ class CoopSkeletonMutationReplicatorTest {
 
         ColonyDecivListener capture = sector.listenerOfType(ColonyDecivListener.class);
         capture.reportColonyDecivilized(market("market_yama", false, true), false);
-        // Vanilla can fire more than once across a session; the ledger keeps the wire clean.
+        // Vanilla can fire more than once across a session; the ledger keeps the wire clean. The
+        // payload's occurrence stamp is the campaign timestamp precisely so that a repeat report of
+        // the SAME event reads identically and is still deduped.
         capture.reportColonyDecivilized(market("market_yama", false, true), false);
 
         assertEquals(1, service.sent.size());
         assertEquals("DECIV", CoopMessages.requiredPayloadString(service.sent.get(0), "kind"));
         assertEquals("market_yama", CoopMessages.requiredPayloadString(service.sent.get(0), "entityId"));
-        assertEquals("false", CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
+        assertEquals("false#0", CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
+        assertFalse(CoopSkeletonMutationWatcher.decodeDecivFullDestroy(
+                CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson")));
+    }
+
+    /**
+     * Vanilla re-uses the planet's gen-time market object when a colony is founded, so a colony that
+     * decivilizes, is re-founded on the same planet and decivilizes again produces two events under
+     * one market id. The set-based ledger key latched the first one for the whole session: the host
+     * sent nothing the second time and the guest kept a live colony the host no longer had.
+     */
+    @Test
+    void aSecondDecivOfTheSameMarketMonthsLaterIsReplicated() {
+        FakeSector sector = new FakeSector();
+        Global.setSector(sector.proxy());
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), new MutableClock(1_000_000L));
+        replicator.registerOn(sector.proxy());
+
+        ColonyDecivListener capture = sector.listenerOfType(ColonyDecivListener.class);
+        capture.reportColonyDecivilized(market("market_yama", false, true), false);
+        sector.campaignTimestamp = 90L * 24L * 3600L;
+        capture.reportColonyDecivilized(market("market_yama", false, true), true);
+
+        assertEquals(2, service.sent.size());
+        assertEquals("false#0", CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
+        assertEquals("true#7776000",
+                CoopMessages.requiredPayloadString(service.sent.get(1), "newStateJson"));
+        assertTrue(CoopSkeletonMutationWatcher.decodeDecivFullDestroy(
+                CoopMessages.requiredPayloadString(service.sent.get(1), "newStateJson")));
     }
 
     // ---- Guest apply ---------------------------------------------------------------------------
@@ -553,7 +587,8 @@ class CoopSkeletonMutationReplicatorTest {
         assertDoesNotThrow(() -> replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L,
                 "no-such-market", "DECIV", false, "false", "host")));
         // Recorded either way, so a later echo cannot re-trigger it.
-        assertNull(replicator.worldLedger().latestState(CoopWorldDelta.Kind.DECIV, "no-such-market"));
+        assertEquals("false",
+                replicator.worldLedger().latestState(CoopWorldDelta.Kind.DECIV, "no-such-market"));
         assertTrue(service.sent.isEmpty());
     }
 
@@ -768,6 +803,7 @@ class CoopSkeletonMutationReplicatorTest {
         private final Map<String, FakePlanet> planets = new LinkedHashMap<>();
         private final FakeMemory memory = new FakeMemory();
         private final List<Object> listeners = new ArrayList<>();
+        private long campaignTimestamp;
         private SectorAPI cached;
 
         FakeEntity addObjective(String id, String factionId) {
@@ -881,6 +917,16 @@ class CoopSkeletonMutationReplicatorTest {
                         case "equals" -> proxy == args[0];
                         default -> defaultValue(method.getReturnType());
                     });
+            CampaignClockAPI clock = (CampaignClockAPI) Proxy.newProxyInstance(
+                    CampaignClockAPI.class.getClassLoader(),
+                    new Class<?>[]{CampaignClockAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getTimestamp" -> campaignTimestamp;
+                        case "toString" -> "Clock";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> defaultValue(method.getReturnType());
+                    });
             MemoryAPI memoryProxy = memory.proxy();
             cached = (SectorAPI) Proxy.newProxyInstance(
                     SectorAPI.class.getClassLoader(),
@@ -888,6 +934,7 @@ class CoopSkeletonMutationReplicatorTest {
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getAllLocations" -> List.of(location);
                         case "getHyperspace" -> location;
+                        case "getClock" -> clock;
                         case "getEntityById" -> byId((String) args[0]);
                         case "getMemoryWithoutUpdate" -> memoryProxy;
                         case "getListenerManager" -> listenerManager;

@@ -1,5 +1,8 @@
 package coop.campaign;
 
+import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
+import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
+import com.fs.starfarer.api.impl.campaign.intel.bases.PirateActivityIntel;
 import com.fs.starfarer.api.impl.campaign.intel.bases.PirateBaseIntel;
 import coop.campaign.CoopBaseAuthority.Action;
 import coop.campaign.CoopBaseAuthority.ActionType;
@@ -9,6 +12,7 @@ import coop.campaign.CoopBaseRecord.Kind;
 import coop.net.CoopConnectionRole;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -336,6 +340,78 @@ class CoopBaseAuthorityTest {
     }
 
     // ---- Seam fake ----------------------------------------------------------------------------
+
+    // ---- Intel sweep --------------------------------------------------------------------------
+
+    /**
+     * {@code PirateActivityIntel}'s constructor <em>queues</em> itself instead of adding whenever its
+     * target system holds no player market -- the common case for a base the guest mirrors -- while
+     * still calling {@code Global.getSector().addScript(this)}. {@code getIntel(Class)} reads only the
+     * added list, so the guest's sweep walked straight past a script that goes on stamping
+     * {@code PIRATE_ACTIVITY} onto its markets forever.
+     */
+    @Test
+    void theIntelSweepSeesTheCommQueueAsWellAsTheAddedList() {
+        IntelInfoPlugin added = intel();
+        IntelInfoPlugin queued = intel();
+        IntelManagerAPI manager = intelManager(List.of(added), List.of(queued));
+
+        assertEquals(List.of(added), CoopBaseAuthority.liveIntel(manager, PirateActivityIntel.class));
+        assertEquals(List.of(added, queued),
+                CoopBaseAuthority.liveIntelIncludingQueued(manager, PirateActivityIntel.class));
+    }
+
+    @Test
+    void intelThatIsBothAddedAndQueuedIsOnlySweptOnce() {
+        IntelInfoPlugin both = intel();
+        IntelManagerAPI manager = intelManager(List.of(both), List.of(both));
+
+        assertEquals(List.of(both),
+                CoopBaseAuthority.liveIntelIncludingQueued(manager, PirateActivityIntel.class));
+    }
+
+    @Test
+    void anUnreadableCommQueueStillYieldsTheAddedList() {
+        IntelInfoPlugin added = intel();
+        IntelManagerAPI manager = (IntelManagerAPI) Proxy.newProxyInstance(
+                IntelManagerAPI.class.getClassLoader(), new Class<?>[]{IntelManagerAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getIntel" -> List.of(added);
+                    case "getCommQueue" -> throw new IllegalStateException("no comm queue");
+                    case "toString" -> "FakeIntelManager";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+
+        assertEquals(List.of(added),
+                CoopBaseAuthority.liveIntelIncludingQueued(manager, PirateActivityIntel.class));
+    }
+
+    private static IntelManagerAPI intelManager(List<IntelInfoPlugin> added,
+                                                List<IntelInfoPlugin> queued) {
+        return (IntelManagerAPI) Proxy.newProxyInstance(
+                IntelManagerAPI.class.getClassLoader(), new Class<?>[]{IntelManagerAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getIntel" -> added;
+                    case "getCommQueue" -> queued;
+                    case "toString" -> "FakeIntelManager";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+    }
+
+    private static IntelInfoPlugin intel() {
+        return (IntelInfoPlugin) Proxy.newProxyInstance(
+                IntelInfoPlugin.class.getClassLoader(), new Class<?>[]{IntelInfoPlugin.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "toString" -> "FakeIntel";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+    }
 
     /**
      * Stands in for the guest's intel manager. The engine base constructors cannot run in a unit

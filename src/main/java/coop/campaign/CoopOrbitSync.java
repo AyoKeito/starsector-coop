@@ -21,6 +21,18 @@ public final class CoopOrbitSync {
     }
 
     public record OrbitEntry(String entityId, String focusId, float radius, float period, float angle) {
+        /**
+         * A focus-less body writes its null {@code focusId} as the empty field {@link CoopDelimited}
+         * emits for a null, and {@link #decode} hands that {@code ""} straight back. Normalizing it
+         * to null here makes the wire round trip identity-preserving, which two callers depend on:
+         * {@link #signature(String, float, float)} maps null to {@code "-"} but {@code ""} to
+         * {@code ""}, so the signature fallback could never match a focus-less body; and the
+         * {@code focusId != null} guard in the orbit apply would run a sector-wide
+         * {@code getEntityById("")} once per entry.
+         */
+        public OrbitEntry {
+            focusId = focusId == null || focusId.isEmpty() ? null : focusId;
+        }
     }
 
     /** A leaf hex id (e.g. {@code 372f}, {@code 95af}) is assigned per-instance and won't match by id. */
