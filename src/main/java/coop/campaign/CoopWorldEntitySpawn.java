@@ -23,15 +23,40 @@ import java.util.Objects;
  * key on it. The <b>position and velocity</b> ride too, because {@code addCargoPods} draws its
  * velocity from {@code Math.random()} and would otherwise diverge.
  *
+ * <p>Since stable-location construction rides the same kind, three more fields hang off the header:
+ * the {@link #factionId} the entity flies (a built objective is {@code player}; a pod is neutral),
+ * the {@link #consumedEntityId} the construction replaced (the stable location vanilla removes in
+ * {@code Objectives.build}), and the {@link #orbit} to place it in. The orbit rides the wire rather
+ * than being copied from the consumed entity on arrival so the two deltas are order-independent: the
+ * {@code CONSUME} for that stable location is emitted by the same pass and may land first.
+ *
  * <p>Encoded as a single delimited string (the TCP envelope parser is flat — no JSON arrays), reusing
  * {@link CoopDelimited}. Layout: a header record, then one record per cargo stack.
  */
 public record CoopWorldEntitySpawn(String coopEntityId, String entityType, String locationId,
                                    float x, float y, float velocityX, float velocityY,
-                                   Map<String, Integer> contents) {
+                                   Map<String, Integer> contents, String factionId,
+                                   String consumedEntityId, Orbit orbit) {
 
     /** Memory key both clients set on a replicated entity so it can be matched across the session. */
     public static final String COOP_ENTITY_TAG = "$coopEntityId";
+
+    /**
+     * A circular orbit, in the only four numbers {@code SectorEntityToken.setCircularOrbit} takes.
+     * {@link #NONE} means "this entity is placed at a fixed {@code x,y}" — which is every cargo pod.
+     */
+    public record Orbit(String focusId, float angle, float radius, float period) {
+        public static final Orbit NONE = new Orbit("", 0f, 0f, 0f);
+
+        public Orbit {
+            focusId = CoopDelimited.normalize(focusId);
+        }
+
+        /** An orbit is only usable when it names a focus and actually turns. */
+        public boolean isPresent() {
+            return !focusId.isBlank() && period != 0f;
+        }
+    }
 
     /**
      * What a pod can hold. Keys in {@link #contents} are {@code KIND:id} so one map carries every
@@ -66,8 +91,19 @@ public record CoopWorldEntitySpawn(String coopEntityId, String entityType, Strin
         return kind.name() + ":" + id;
     }
 
+    /** The cargo-pod shape (Phase 12d): neutral faction, nothing consumed, fixed position. */
+    public CoopWorldEntitySpawn(String coopEntityId, String entityType, String locationId,
+                                float x, float y, float velocityX, float velocityY,
+                                Map<String, Integer> contents) {
+        this(coopEntityId, entityType, locationId, x, y, velocityX, velocityY, contents,
+                "", "", Orbit.NONE);
+    }
+
     public CoopWorldEntitySpawn {
         coopEntityId = requireText(coopEntityId, "coopEntityId");
+        factionId = CoopDelimited.normalize(factionId);
+        consumedEntityId = CoopDelimited.normalize(consumedEntityId);
+        orbit = orbit == null ? Orbit.NONE : orbit;
         entityType = requireText(entityType, "entityType");
         locationId = CoopDelimited.normalize(locationId);
         Map<String, Integer> copy = new LinkedHashMap<>();
@@ -94,6 +130,14 @@ public record CoopWorldEntitySpawn(String coopEntityId, String entityType, Strin
                 .append('|').append(floatText(velocityX))
                 .append('|').append(floatText(velocityY))
                 .append('|').append(contents.size());
+        // Trailing header fields, appended after the stack count so an older-shaped header still
+        // parses: decode reads them only when present.
+        out.append('|').append(CoopDelimited.field(factionId))
+                .append('|').append(CoopDelimited.field(consumedEntityId))
+                .append('|').append(CoopDelimited.field(orbit.focusId()))
+                .append('|').append(floatText(orbit.angle()))
+                .append('|').append(floatText(orbit.radius()))
+                .append('|').append(floatText(orbit.period()));
         // Sorted so the encoding is stable regardless of map iteration order (Phase 8 rule).
         List<String> ids = new ArrayList<>(contents.keySet());
         ids.sort(String::compareTo);
@@ -123,10 +167,17 @@ public record CoopWorldEntitySpawn(String coopEntityId, String entityType, Strin
             }
             contents.put(fields.get(0), Integer.parseInt(fields.get(1).trim()));
         }
+        Orbit orbit = header.size() > 13
+                ? new Orbit(header.get(10), Float.parseFloat(header.get(11)),
+                        Float.parseFloat(header.get(12)), Float.parseFloat(header.get(13)))
+                : Orbit.NONE;
         return new CoopWorldEntitySpawn(header.get(0), header.get(1), header.get(2),
                 Float.parseFloat(header.get(3)), Float.parseFloat(header.get(4)),
                 Float.parseFloat(header.get(5)), Float.parseFloat(header.get(6)),
-                contents);
+                contents,
+                header.size() > 8 ? header.get(8) : "",
+                header.size() > 9 ? header.get(9) : "",
+                orbit);
     }
 
     /** Locale-independent, so a comma-decimal locale cannot corrupt the wire format. */

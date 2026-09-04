@@ -193,4 +193,52 @@ class CoopWorldEntitySpawnTest {
     void aClockThatStepsBackwardsDoesNotWedgeTheWatcher() {
         assertTrue(CoopCampaignReplicator.shouldScanSalvage(1_000_000L, 999_000L));
     }
+
+    // ---- Construction fields ---------------------------------------------------------------------
+
+    @Test
+    void aConstructionRoundTripsItsFactionConsumedIdAndOrbit() {
+        CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn("guest-player:runtime_7",
+                "comm_relay_makeshift", "corvus", 12.5f, -8.25f, 0f, 0f, Map.of(),
+                "player", "corvus_stable_1",
+                new CoopWorldEntitySpawn.Orbit("corvus_planet", 1.25f, 220.5f, 61.75f));
+
+        CoopWorldEntitySpawn decoded = CoopWorldEntitySpawn.decode(spawn.encode());
+
+        assertEquals(spawn, decoded);
+        assertEquals("player", decoded.factionId());
+        assertEquals("corvus_stable_1", decoded.consumedEntityId());
+        assertEquals("corvus_planet", decoded.orbit().focusId());
+        assertEquals(220.5f, decoded.orbit().radius(), 0.001f);
+        assertTrue(decoded.orbit().isPresent());
+    }
+
+    /** The cargo-pod constructor keeps the old shape: neutral, nothing consumed, no orbit. */
+    @Test
+    void aCargoPodCarriesNoConstructionFields() {
+        CoopWorldEntitySpawn decoded = CoopWorldEntitySpawn.decode(podsWith(Map.of()).encode());
+
+        assertEquals("", decoded.factionId());
+        assertEquals("", decoded.consumedEntityId());
+        assertFalse(decoded.orbit().isPresent());
+    }
+
+    /** A header without the trailing fields still parses -- they read as absent, not as garbage. */
+    @Test
+    void aHeaderMissingTheTrailingFieldsDecodesAsAbsent() {
+        CoopWorldEntitySpawn decoded = CoopWorldEntitySpawn.decode(
+                "guest-player:pods_1|cargo_pods|corvus|1.000|2.000|0.000|0.000|0");
+
+        assertEquals("", decoded.factionId());
+        assertEquals("", decoded.consumedEntityId());
+        assertEquals(CoopWorldEntitySpawn.Orbit.NONE, decoded.orbit());
+    }
+
+    /** An orbit with no focus, or with a zero period, is not an orbit. */
+    @Test
+    void anIncompleteOrbitIsNotPresent() {
+        assertFalse(new CoopWorldEntitySpawn.Orbit("", 0f, 100f, 60f).isPresent());
+        assertFalse(new CoopWorldEntitySpawn.Orbit("corvus_planet", 0f, 100f, 0f).isPresent());
+        assertTrue(new CoopWorldEntitySpawn.Orbit("corvus_planet", 0f, 100f, 60f).isPresent());
+    }
 }

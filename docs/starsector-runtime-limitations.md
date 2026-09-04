@@ -344,6 +344,23 @@ Full fix, Phase 26 milestone 2: replicate each encounter's outcome (EPs are tran
 
 `SensorGhostManager` seeds from `new Random(Misc.genRandomSeed())` (`SensorGhostManager.java:79`). Unlike the items above, this one is not left to diverge — it is suppressed guest-side, so hyperspace sensor ghosts do not spawn on the guest at all. Several ghost types spawn real encounters or fleets (EncounterTrickster, ShipGhost) or touch story state (Ziggurat/guide ghosts), so an independent guest-side roll risks story-state or NPC-authority conflicts, not just a visual mismatch. The suppressor nulls the cached sector-memory handle after removal. The loss is cosmetic only: the guest never sees ghosts, host or otherwise.
 
+## Gate Scanning and Stable-Location Construction: Accepted Residues
+
+Both were guest-limiting gaps rather than engine limits, and both are closed. What is left is small and worth knowing.
+
+**Gate scanning.** The "Scan the Gate" option is gated by rules.csv on `$global.canScanGates` (`gateOpenDialogCanScan1`, `gateScanOpt`), a sector-memory flag only the host's Galatia questline ever sets. It now rides the `GATE_ACTIVATED` payload alongside `$gatesActive` and `$playerCanUseGates`, and the poll that produces that payload runs on both roles, so a guest can scan and both players get the gate.
+
+- Because the three globals repeat on every gate record, a flip in any of them re-reports **every** gate in the sector on the next poll. That is a dozen-odd deltas, a handful of times per campaign, and it is what makes each packet self-contained.
+- `$numGatesScanned` is derived rather than synced: whichever client applies a peer's scan calls vanilla's own `GateEntityPlugin.addGateScanned()`. Both clients therefore count the gates they know to be scanned, which converges — but a client that never hears about a scan (a gate scanned while it was disconnected and never re-reported) counts one low, which only matters as a rules condition inside the Galatia questline.
+- A guest that **rejoins from a save** where gates were already scanned reports each of them upward once on its seeding poll. The host applies them as no-ops. Harmless, and cheaper than tracking which flips the guest learned from the host in a previous session.
+
+**Stable-location construction.** `Objectives.build` creates the makeshift relay/buoy/array with `addCustomEntity(null, ...)`, so the engine mints its id per client; the same is true of the stable location `Objectives.salvage` puts back on disassembly. Both now ride a `SPAWN` world-delta carrying a coop-assigned id, the spec, the faction, the orbit, and the id of the stable location the build consumed.
+
+- The consumed stable location is removed **twice** on the receiving client — once by the `SPAWN` apply and once by the `CONSUME` the originator's watcher emits for it — and the peer's own removal then reports a `CONSUME` back. All three are idempotent and the ledger absorbs them; suppressing the redundancy would mean tracking a per-entity exception through two watchers to save one packet.
+- The orbit rides the wire rather than being copied off the consumed stable location, so the two deltas are order-independent. If the orbit focus does not resolve on the peer (it is a gen-time planet or star, so it should), the entity materializes at the fixed position that rode along and does not orbit.
+- Only the entity is replicated, not the interaction that produced it. Build costs come out of the acting player's own cargo, and the reputation hit for disassembling somebody else's objective (`Objectives.salvage`) is charged to the acting client alone.
+- The Phase 6b world fingerprint covers markets only, so neither half of this can move it.
+
 ## Phase 12c — Guest Distress Call Retains the Mirror Fleet in the Host Save
 
 When the guest activates `distress_call`, the host runs the vanilla plugin on the guest's mirror fleet (`CoopAbilityEffectApplier`). `DistressCallAbility.activate()` immediately calls `addResponseScript`, which does **not** create the route — it calls `Global.getSector().addScript(new DelayedActionScript(delayDays) { ... })` (`impl/campaign/abilities/DistressCallAbility.java:194,220`). That anonymous script holds an implicit reference to `DistressCallAbility.this`, which holds the mirror fleet through `getFleet()`. Ten to twenty in-game days later the script fires and calls `RouteManager.getInstance().addRoute("dca_distress_call", ..., DistressCallAbility.this, data)`, so a `RouteData` then holds the same plugin as its `RouteFleetSpawner`. Both are serialized into the host save, and the mirror fleet is reachable from them for as long as they live.
@@ -361,7 +378,9 @@ Second-order consequence, also accepted: because `spawnFleet` positions the resp
 
 `InterdictionPulseAbility.getRange` and `getInterdictSeconds` both read `fleet.getSensorRangeMod().computeEffective(fleet.getSensorStrength())` (`InterdictionPulseAbility.java:123,309`). Phase 14b's `CoopSensorSync` pins the mirror's *sensor strength* and its `detectedRangeMod` totals, but not `sensorRangeMod`, so a guest whose skills or hullmods modify sensor range gets a pulse on the host that is slightly the wrong size and slightly the wrong strength against each victim. Accepted for v1: the error is a percentage on a 500+ su radius, and the pulse is not a state the two clients have to agree on — the host's result is the only one that exists.
 
-The standing hit the pulse costs is also applied at **activation** time rather than at pulse time (`CoopAbilityEffectApplier.applyInterdictionRepHit`). Vanilla charges it from inside `applyEffect`, after the charge-up, against whoever is in range then; hooking that moment would mean forking the ability. A fleet that leaves or enters the radius during the charge-up therefore counts differently for reputation than it does for the interdict itself.
+The standing hit is charged by the **guest's own** vanilla pulse, not by the host. On the guest the pulsing fleet *is* the player fleet, so `InterdictionPulseAbility.applyEffect` runs its `INTERDICTED` adjustment locally at pulse time, and `onPlayerReputationChange` forwards it to the host as a `GUEST_REP_DELTA`. The host used to re-apply the hit against the mirror as well (`CoopAbilityEffectApplier.applyInterdictionRepHit`), which charged the canonical standing twice per victim and then rebroadcast the doubled value; that code is gone.
+
+The residue is a narrow **undercharge**: the guest's own pulse only sees the fleets the guest's client knows about, so a fleet inside the host's pulse radius that the guest never mirrored costs the guest nothing. The victim set is also gated by the guest's transponder and detection state rather than the host's. Accepted — undercharging by a fleet the guest could not see beats double-charging every fleet it could.
 
 ## Phase 12c — Market Capture Fidelity: Accepted Gaps
 

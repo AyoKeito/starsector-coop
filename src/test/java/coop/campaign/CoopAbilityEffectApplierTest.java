@@ -4,12 +4,11 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The two decisions the host makes for a guest's world-affecting ability, both extracted as pure
- * statics so they can be exercised without an engine: which ability gets run on the guest mirror,
- * and which fleets the guest's interdiction pulse costs standing with.
+ * The one decision the host makes for a guest's world-affecting ability, extracted as a pure static
+ * so it can be exercised without an engine: which ability gets run on the guest mirror. Reputation is
+ * deliberately not one of this class's concerns any more -- the guest's own vanilla pulse charges it.
  */
 class CoopAbilityEffectApplierTest {
 
@@ -64,40 +63,21 @@ class CoopAbilityEffectApplierTest {
                 CoopAbilityEffectApplier.decide("  interdiction_pulse  ", true));
     }
 
-    // ---- Interdiction reputation hit -----------------------------------------------------------
-
-    private static boolean hit(boolean sameFaction, boolean transition, boolean inRange,
-                               boolean visible, float seconds, boolean knowsPlayer) {
-        return CoopAbilityEffectApplier.shouldTakeInterdictionRepHit(
-                sameFaction, transition, inRange, visible, seconds, knowsPlayer);
-    }
-
-    @Test
-    void aVisibleHostileInRangeThatKnowsThePlayerCostsStanding() {
-        assertTrue(hit(false, false, true, true, 3f, true));
-    }
-
-    @Test
-    void vanillaSkipConditionsAreHonoured() {
-        assertFalse(hit(true, false, true, true, 3f, true), "same faction");
-        assertFalse(hit(false, true, true, true, 3f, true), "in hyperspace transition");
-        assertFalse(hit(false, false, false, true, 3f, true), "out of range");
-        assertFalse(hit(false, false, true, true, 3f, false), "does not know who the player is");
-    }
-
-    /** Vanilla's "Interdict avoided!" branch: a victim that sees the pulse and shrugs it off. */
-    @Test
-    void anAvoidedInterdictOnAVisibleVictimCostsNothing() {
-        assertFalse(hit(false, false, true, true, 0f, true));
-        assertFalse(hit(false, false, true, true, -1f, true));
-    }
+    // ---- No reputation hit ---------------------------------------------------------------------
 
     /**
-     * The avoidance skip is inside vanilla's visibility branch, so an unseen victim still costs
-     * standing even at zero interdict seconds. Replicated verbatim rather than "fixed".
+     * The guest's own vanilla pulse already charges {@code INTERDICTED} locally (its fleet <em>is</em>
+     * the player fleet there) and {@code onPlayerReputationChange} forwards that to the host as a
+     * {@code GUEST_REP_DELTA}. The host-side manual hit that used to live here made the canonical
+     * standing move twice per victim, so it is gone -- and must stay gone.
      */
     @Test
-    void anAvoidedInterdictOnAnUnseenVictimStillCostsStanding() {
-        assertTrue(hit(false, false, true, false, 0f, true));
+    void theHostAppliesNoReputationHitOfItsOwnForAGuestPulse() {
+        for (java.lang.reflect.Method method
+                : CoopAbilityEffectApplier.class.getDeclaredMethods()) {
+            String name = method.getName().toLowerCase(java.util.Locale.ROOT);
+            assertFalse(name.contains("rep"),
+                    "reputation is charged by the guest's own vanilla pulse, not here: " + name);
+        }
     }
 }

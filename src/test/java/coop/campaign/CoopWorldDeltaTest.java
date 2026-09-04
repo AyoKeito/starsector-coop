@@ -241,7 +241,7 @@ class CoopWorldDeltaTest {
     private static CoopWorldDelta gate(String entityId, boolean scanned, boolean gatesActive,
                                        boolean canUseGates) {
         return new CoopWorldDelta(entityId, CoopWorldDelta.Kind.GATE_ACTIVATED, false,
-                CoopSkeletonMutationWatcher.encodeGateState(scanned, gatesActive, canUseGates), "host");
+                CoopSkeletonMutationWatcher.encodeGateState(scanned, gatesActive, canUseGates, false), "host");
     }
 
     @Test
@@ -256,5 +256,24 @@ class CoopWorldDeltaTest {
         assertTrue(Boolean.parseBoolean(CoopMessages.requiredPayloadString(decoded, "consumed")));
         assertEquals("{\"looted\":true}", CoopMessages.requiredPayloadString(decoded, "newStateJson"));
         assertEquals("guest", CoopMessages.requiredPayloadString(decoded, "actingPlayerId"));
+    }
+
+    // ---- Direction ------------------------------------------------------------------------------
+
+    /**
+     * DECIV is the only kind a host refuses from a peer: it deletes a colony out of the authoritative
+     * world and the guest's own saturation bombardment already reaches the host as a RAID_RESULT.
+     */
+    @Test
+    void decivIsTheOnlyHostOnlyKind() {
+        for (CoopWorldDelta.Kind kind : CoopWorldDelta.Kind.values()) {
+            assertEquals(kind == CoopWorldDelta.Kind.DECIV, kind.hostOnly(), kind.name());
+        }
+    }
+
+    /** Gate activation travels both ways since a guest can scan a gate in its own dialog. */
+    @Test
+    void gateActivationIsNotHostOnly() {
+        assertFalse(CoopWorldDelta.Kind.GATE_ACTIVATED.hostOnly());
     }
 }
