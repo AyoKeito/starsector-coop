@@ -63,10 +63,11 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
 - **Identical installs.** Same Starsector version, same mod list, same versions, same download of
   this mod, on both PCs. The two games compare manifests at connect and refuse a session over one
   differing field. Ironman off on both.
-- **One line of `vmparams` edited by hand,** by both players. `jars/coop-forks.jar` holds engine
-  classes the JVM only prefers if they come first on the system classpath, and Starsector's mod
-  loader is too late for that. Skip the edit and the game still runs, with NPC fleets clustering
-  around the host and largely ignoring the guest.
+- **One line of `vmparams` changed,** on both PCs. `jars/coop-forks.jar` holds engine classes the
+  JVM only prefers if they come first on the system classpath, and Starsector's mod loader is too
+  late for that. The launcher's install check makes the edit for you with a Fix button, or you paste
+  one entry by hand. Skip it and the game still runs, with NPC fleets clustering around the host and
+  largely ignoring the guest.
 - **Traffic is plaintext.** Anyone on the network path between the two of you can read the message
   payloads. The lobby password stops strangers from joining an open port; it does not encrypt
   anything. A VPN is the only thing that does.
@@ -78,6 +79,9 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
   is skipped, and the career list gains a test start. Turn the mod off for solo campaigns.
 - **The guest's save is co-op material,** not a solo campaign you can load later. Both saves need the
   mod from then on.
+- **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
+  rewards go to the host. The mod does not stop the guest from accepting those missions, but the story
+  state is not shared, so a guest who does gets a private storyline the host never sees.
 - **Fast forward becomes a toggle** rather than a hold for the duration of a session. Your setting is
   restored when the session ends.
 
@@ -99,8 +103,9 @@ can read differently on the two screens until they converge, with the host's rea
 
 `docs/player/INSTALL.md` is the guide, and both players follow all of it. Three steps: unzip so
 `mod_info.json` sits in `<Starsector>\mods\coop`, add `..\mods\coop\jars\coop-forks.jar;` to the
-front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in Starsector's launcher. That
-`vmparams` line is edited by hand, and it is the only thing you edit by hand.
+front of the `-classpath` in `<Starsector>\vmparams`, tick the mod in Starsector's launcher. The
+co-op launcher's install check does the last two with a Fix button; the guide keeps the hand edit
+for installs where that write is refused.
 
 The rest is `Coop Launcher.cmd`, in the mod folder. It runs on the JRE that ships with the game, so
 there is nothing to install. It checks the install and names what is wrong with it, writes your

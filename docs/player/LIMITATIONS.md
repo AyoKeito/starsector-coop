@@ -78,6 +78,15 @@ contents from it. Same rule for survey data.
 each player. The guest gets no person bounties at all; the script that generates them is one of the
 ones held back so it does not spawn a second copy of the host's world.
 
+**Story missions are the host's.** The Galatia Academy chain and the missions it unlocks run on one
+engine only, the host's, and their rewards go to the host. This is a rule you keep, not one the mod
+enforces: nothing stops the guest from docking at the Academy and accepting the same missions, but
+the story flags and the places those missions create live in each game's own memory and are not
+copied across. A guest who starts the chain gets a private second storyline the host never sees,
+and the two worlds drift apart from there. One-of-a-kind finds in the shared world are a different
+matter: a derelict, a ruin, a cryosleeper or a one-time bar offer goes to whoever gets there first,
+and the other player sees it taken.
+
 ## Divergences you will actually run into
 
 **Colonies.** Both of you govern the same colonies under one faction. Two things do not line up. A
@@ -149,10 +158,15 @@ that carries the classpath inline, and none of that was tested here. Those playe
 values by hand: everything the launcher does to your configuration is writing
 `saves\common\coop_options.json.data`, and `INSTALL.md` section 7 is the same settings without it.
 
-**It reports install problems, it does not fix them.** The two things that have to be right and are
-outside the mod's reach are the classpath entry in `vmparams` and the mod tick in
-`enabled_mods.json`. The launcher reads both and names the exact edit; you make it. It writes two
-files in its life: your settings file and its own log next to it in the mod folder.
+**It edits two install files, and only when you press Fix.** The two things that have to be right
+and are outside the mod's reach are the classpath entry in `vmparams` and the mod tick in
+`enabled_mods.json`. The launcher reads both, and when one is wrong the red row carries a Fix button
+that makes the exact edit described in `INSTALL.md`: `vmparams` is backed up to `vmparams.backup`
+first and rewritten as the same single line with the entry moved to the front, and `enabled_mods.json`
+gains `coop` with the other mods left in their order. An install under Program Files may refuse the
+write; the launcher then offers to restart itself as administrator, and if you decline it shows the
+manual edit instead. Beyond those two, it writes your settings file and its own log next to it in the
+mod folder.
 
 **The invite carries the password in clear text.** The `pw=` part of that one line is the password
 itself, so whatever you send the line through can read it. Send it the way you would send a password.
