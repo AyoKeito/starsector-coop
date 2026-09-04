@@ -1,5 +1,8 @@
 package coop.launcher;
 
+import coop.config.CoopOptionsRegistry;
+import coop.util.CoopDebug;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -20,6 +23,33 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * co-op port and the address field once they land back on the event dispatch thread.
  */
 class CoopLauncherAppTest {
+
+    // ---- the Advanced card's spinners ------------------------------------------------------------
+
+    /**
+     * The spinner's ceiling has to be the registry's, or the Advanced card offers a number the game
+     * then quietly clamps - which is exactly what 65535 on the interaction-delay spinner did while
+     * {@code CoopDebug} stopped at 60 s.
+     */
+    @Test
+    void aSpinnerTakesItsCeilingFromTheRegistryNotFromThePortFallback() {
+        assertEquals(CoopDebug.MAX_INTERACTION_DELAY_MILLIS,
+                CoopLauncherApp.spinnerMax(CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS));
+        assertEquals(CoopOptionsRegistry.require(CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS).max(),
+                CoopLauncherApp.spinnerMax(CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS));
+
+        assertEquals(65535, CoopLauncherApp.spinnerMax(CoopOptionsRegistry.DEBUG_BRIDGE));
+        assertEquals(3600, CoopLauncherApp.spinnerMax(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS));
+    }
+
+    /** 65535 survives only as the fallback for a key that is still deliberately unbounded. */
+    @Test
+    void anUnboundedKeyStillFallsBackToThePortCeiling() {
+        assertEquals(Integer.MAX_VALUE,
+                CoopOptionsRegistry.require(CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE).max());
+        assertEquals(65535, CoopLauncherApp.spinnerMax(CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE));
+        assertEquals(1, CoopLauncherApp.spinnerMin(CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE));
+    }
 
     // ---- the connection check and the co-op port ------------------------------------------------
 

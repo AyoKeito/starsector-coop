@@ -4,6 +4,7 @@ import coop.config.CoopOptionsRegistry.Coercion;
 import coop.config.CoopOptionsRegistry.Option;
 import coop.config.CoopOptionsRegistry.Tier;
 import coop.config.CoopOptionsRegistry.Type;
+import coop.util.CoopDebug;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
@@ -101,6 +102,49 @@ class CoopOptionsRegistryTest {
                 "coop.debug.wiretapSample",
                 "coop.debug.frameProfile",
                 "coop.debug.interactionDelayMs"), dOnly);
+    }
+
+    /**
+     * The bound on the latency lever lived in three places at once: {@code CoopDebug} clamped at
+     * 60 s, the registry said "unbounded", and the launcher's spinner therefore offered its
+     * unbounded-key fallback of 65535. A player could pick 65535 and get 60000 with no sign of it.
+     * The registry now names {@code CoopDebug}'s constant, so there is one number to change.
+     */
+    @Test
+    void theLatencyLeverIsBoundedByTheConstantTheGameClampsWith() {
+        Option option = CoopOptionsRegistry.require("coop.debug.interactionDelayMs");
+
+        assertEquals(CoopDebug.MAX_INTERACTION_DELAY_MILLIS, option.max());
+        assertEquals(0, option.min());
+
+        Coercion tooBig = option.coerce("70000");
+        assertEquals(String.valueOf(CoopDebug.MAX_INTERACTION_DELAY_MILLIS), tooBig.value());
+        assertFalse(tooBig.clean());
+        assertTrue(tooBig.warning().contains(String.valueOf(CoopDebug.MAX_INTERACTION_DELAY_MILLIS)),
+                tooBig.warning());
+
+        assertTrue(option.coerce(String.valueOf(CoopDebug.MAX_INTERACTION_DELAY_MILLIS)).clean());
+    }
+
+    /** The bridge key is a TCP port, and 0 is its "no socket ever" value rather than a bad one. */
+    @Test
+    void theBridgePortIsBoundedLikeAPort() {
+        Option option = CoopOptionsRegistry.require("coop.debug.bridge");
+
+        assertEquals(0, option.min());
+        assertEquals(65535, option.max());
+        assertEquals("65535", option.coerce("70000").value());
+        assertTrue(option.coerce("0").clean());
+    }
+
+    /** The wiretap interval has no useful ceiling, but CoopWiretap floors it at 1, so the registry does too. */
+    @Test
+    void theWiretapSampleIsFlooredWhereTheWiretapFloorsIt() {
+        Option option = CoopOptionsRegistry.require("coop.debug.wiretapSample");
+
+        assertEquals(1, option.min());
+        assertEquals(Integer.MAX_VALUE, option.max());
+        assertEquals("1", option.coerce("0").value());
     }
 
     @Test

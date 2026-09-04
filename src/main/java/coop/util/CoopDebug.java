@@ -35,8 +35,15 @@ public final class CoopDebug {
      */
     public static final String INTERACTION_DELAY_PROPERTY = "coop.debug.interactionDelayMs";
 
-    /** Sanity cap on the lever: past this the session is unplayable and the value is a typo. */
-    static final int MAX_INTERACTION_DELAY_MILLIS = 60_000;
+    /**
+     * Sanity cap on the lever: past this the session is unplayable and the value is a typo.
+     *
+     * <p>Public because it is the <em>one</em> source for this bound. {@code CoopOptionsRegistry}
+     * declares it as the key's {@code max} (so the registry clamps a file value to it and the
+     * launcher's spinner will not offer more), and {@link #readInteractionClaimDelayMillis()}
+     * applies it again to the raw {@code -D} path, which never passes through the registry.
+     */
+    public static final int MAX_INTERACTION_DELAY_MILLIS = 60_000;
 
     /** How often {@link #pollFrame()} re-reads the toggle, in pump frames (~5 s at 60 fps). */
     static final int TOGGLE_POLL_FRAMES = 300;
