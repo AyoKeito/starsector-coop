@@ -147,6 +147,24 @@ public final class CoopInstallLayout {
         return new File(starsectorCore(), "starsector.log");
     }
 
+    /**
+     * The engine's own jar. Its modification time is the only timestamp on disk that moves when the
+     * player updates Starsector in place, which is what lets the launcher notice that
+     * {@code starsector.log} still names the version before the update.
+     */
+    public File starfarerObfJar() {
+        return new File(starsectorCore(), "starfarer_obf.jar");
+    }
+
+    /**
+     * The API jar, used as the update timestamp when {@code starfarer_obf.jar} is not there. Both
+     * ship in every build and both are rewritten by an update; the obfuscated one is the engine
+     * itself, so it is asked first.
+     */
+    public File starfarerApiJar() {
+        return new File(starsectorCore(), "starfarer.api.jar");
+    }
+
     public File launcherLog() {
         return new File(modRoot, "coop-launcher.log");
     }
