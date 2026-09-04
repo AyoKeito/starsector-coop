@@ -25,8 +25,13 @@ class CoopCampaignPickerTest {
 
     private static CoopSaveIndexReader.Save save(String campaignId, String folder, String character,
                                                  int level, long savedAt, String role) {
+        return save(campaignId, folder, character, level, savedAt, role, "MN-42");
+    }
+
+    private static CoopSaveIndexReader.Save save(String campaignId, String folder, String character,
+                                                 int level, long savedAt, String role, String seed) {
         return new CoopSaveIndexReader.Save(campaignId, folder, character, level, "Cycle 206",
-                500L, savedAt, Boolean.FALSE, role, "MN-42");
+                500L, savedAt, Boolean.FALSE, role, seed);
     }
 
     private static CoopSaveIndexReader.Index ok(CoopSaveIndexReader.Save... saves) {
@@ -84,12 +89,55 @@ class CoopCampaignPickerTest {
         assertEquals(1, CoopCampaignPicker.entries("MN-42", null, UTC).size());
     }
 
+    // ---- the seed a pick carries ----------------------------------------------------------------
+
+    @Test
+    void everyEntryCarriesTheSeedTheSectorCameFrom() {
+        List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries("MN-draft",
+                ok(save("cA", "save_a", "Kaz", 12, SAVED, "HOST", "MN-777")), UTC);
+
+        assertEquals("MN-draft", entries.get(0).seedString());
+        assertEquals("MN-777", entries.get(1).seedString());
+    }
+
+    /** The bug: the invite kept quoting the draft seed while a saved campaign was selected. */
+    @Test
+    void pickingASavedCampaignPutsThatCampaignsSeedInTheBox() {
+        CoopCampaignPicker.Entry saved =
+                new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "MN-777");
+
+        assertEquals("MN-777", CoopCampaignPicker.seedAfterPick(saved, "MN-draft", "MN-draft"));
+    }
+
+    @Test
+    void goingBackToNewRestoresTheDraftSeed() {
+        CoopCampaignPicker.Entry brandNew = CoopCampaignPicker.newCampaignEntry("MN-777");
+
+        assertEquals("MN-draft", CoopCampaignPicker.seedAfterPick(brandNew, "MN-draft", "MN-777"));
+        assertEquals("MN-draft", CoopCampaignPicker.seedAfterPick(null, "MN-draft", "MN-777"));
+    }
+
+    /** A row written before the mod recorded seeds. Blanking the box would be worse than leaving it. */
+    @Test
+    void aSavedCampaignWithNoRecordedSeedLeavesTheBoxAlone() {
+        CoopCampaignPicker.Entry saved = new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "");
+
+        assertEquals("MN-draft", CoopCampaignPicker.seedAfterPick(saved, "MN-draft", "MN-draft"));
+    }
+
+    @Test
+    void aHostWithNoDraftYetKeepsWhateverIsInTheBox() {
+        assertEquals("MN-777",
+                CoopCampaignPicker.seedAfterPick(CoopCampaignPicker.newCampaignEntry(""), "  ",
+                        "MN-777"));
+    }
+
     // ---- what the pick turns on and off ---------------------------------------------------------
 
     @Test
     void theSeedAndWorldSettingsAreLiveOnlyForANewCampaign() {
         CoopCampaignPicker.Entry brandNew = CoopCampaignPicker.newCampaignEntry("MN-42");
-        CoopCampaignPicker.Entry existing = new CoopCampaignPicker.Entry("cA", "Kaz", "save_a");
+        CoopCampaignPicker.Entry existing = new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "MN-42");
 
         assertTrue(CoopCampaignPicker.worldControlsEnabled(brandNew));
         assertTrue(CoopCampaignPicker.worldControlsEnabled(null));
@@ -99,7 +147,7 @@ class CoopCampaignPickerTest {
     @Test
     void theFolderLineNamesTheSaveAndIsBlankForANewCampaign() {
         assertEquals("folder save_a",
-                CoopCampaignPicker.folderLine(new CoopCampaignPicker.Entry("cA", "Kaz", "save_a")));
+                CoopCampaignPicker.folderLine(new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "MN-42")));
         assertEquals("", CoopCampaignPicker.folderLine(CoopCampaignPicker.newCampaignEntry("MN-1")));
         assertEquals("", CoopCampaignPicker.folderLine(null));
     }
@@ -129,6 +177,19 @@ class CoopCampaignPickerTest {
 
         assertEquals("Load the save \"Kaz Alba\", level 12, saved 2026-05-28 18:16"
                 + " (folder save_ds_140).", hint);
+    }
+
+    /**
+     * The seed box cannot be put right for a save row from before the mod recorded seeds, so the
+     * hint line has to say the seed on screen is not this campaign's.
+     */
+    @Test
+    void aSaveWithNoRecordedSeedSaysTheSeedBoxIsNotItsOwn() {
+        String hint = CoopCampaignPicker.hint("cA",
+                ok(save("cA", "save_ds_140", "Kaz Alba", 12, SAVED, "HOST", "")), UTC);
+
+        assertTrue(hint.startsWith("Load the save \"Kaz Alba\""), hint);
+        assertTrue(hint.contains("does not record its seed"), hint);
     }
 
     @Test

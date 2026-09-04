@@ -96,6 +96,18 @@ public final class CoopInstallCheck {
      *                        {@link #gameVersionInLogText(String)}.
      * @param allowGameVersionMismatch whether the Advanced developer flag is ticked, which turns the
      *                        game-version row from a FAIL into a WARN so it stops blocking Launch
+     * @param jarGitCommit    {@code Coop-Git-Commit} out of coop.jar, or {@code null}
+     * @param forksJarVersion {@code Implementation-Version} out of coop-forks.jar, or {@code null}
+     * @param forksJarGitCommit {@code Coop-Git-Commit} out of coop-forks.jar, or {@code null}
+     * @param forksEntryResolved whether the first {@code -classpath} entry, resolved against
+     *                        {@code starsector-core}, is the same file as
+     *                        {@code mods\coop\jars\coop-forks.jar}. Meaningless unless
+     *                        {@code forksEntryTarget} says something.
+     * @param forksEntryTarget where the first classpath entry resolves to, or {@code ""} when there
+     *                        was nothing to resolve (no vmparams, no classpath, or an entry that is
+     *                        not a forks jar at all - those already have their own row)
+     * @param forksJarPath    where the mod's own {@code coop-forks.jar} is, for the sentence that
+     *                        has to name both paths, or {@code ""} when it is not known
      */
     public record Inputs(String installRoot,
                          boolean starsectorExe,
@@ -110,9 +122,17 @@ public final class CoopInstallCheck {
                          String settingsError,
                          String modGameVersion,
                          String gameVersion,
-                         boolean allowGameVersionMismatch) {
+                         boolean allowGameVersionMismatch,
+                         String jarGitCommit,
+                         String forksJarVersion,
+                         String forksJarGitCommit,
+                         boolean forksEntryResolved,
+                         String forksEntryTarget,
+                         String forksJarPath) {
         public Inputs {
             installRoot = installRoot == null ? "" : installRoot;
+            forksEntryTarget = forksEntryTarget == null ? "" : forksEntryTarget;
+            forksJarPath = forksJarPath == null ? "" : forksJarPath;
         }
     }
 
@@ -123,6 +143,8 @@ public final class CoopInstallCheck {
     public static List<Row> inspect(CoopInstallLayout layout, String settingsError,
                                     boolean allowGameVersionMismatch) {
         Objects.requireNonNull(layout, "layout");
+        String vmparamsText = readTextOrNull(layout.vmparams());
+        File resolvedEntry = resolveForksEntry(layout, vmparamsText);
         return rows(new Inputs(
                 layout.installRoot().getPath(),
                 layout.starsectorExe().isFile(),
@@ -130,14 +152,59 @@ public final class CoopInstallCheck {
                 layout.starsectorCore().isDirectory(),
                 layout.coopJar().isFile(),
                 layout.forksJar().isFile(),
-                readTextOrNull(layout.vmparams()),
+                vmparamsText,
                 readTextOrNull(layout.enabledMods()),
                 readModInfoVersion(layout.modInfo()),
                 readJarVersion(layout.coopJar()),
                 settingsError,
                 readModInfoGameVersion(layout.modInfo()),
                 readGameVersion(layout),
-                allowGameVersionMismatch));
+                allowGameVersionMismatch,
+                readJarAttribute(layout.coopJar(), GIT_COMMIT_ATTRIBUTE),
+                readJarVersion(layout.forksJar()),
+                readJarAttribute(layout.forksJar(), GIT_COMMIT_ATTRIBUTE),
+                resolvedEntry != null && sameFile(resolvedEntry, layout.forksJar()),
+                resolvedEntry == null ? "" : canonicalPath(resolvedEntry),
+                canonicalPath(layout.forksJar())));
+    }
+
+    /** The manifest attribute that tells two builds of the same version apart. */
+    static final String GIT_COMMIT_ATTRIBUTE = "Coop-Git-Commit";
+
+    /**
+     * The file the first {@code -classpath} entry actually points at, or {@code null} when there is
+     * nothing to point at: no vmparams, no classpath, or a first entry that is not a forks jar (the
+     * classpath row already says so, and resolving a stock {@code janino.jar} would only produce a
+     * second complaint about the same thing).
+     *
+     * <p>Relative entries resolve against {@code starsector-core}, which is the working directory
+     * {@code starsector.exe} gives the JVM - the same rule {@link CoopInstallFixer} writes by.
+     */
+    static File resolveForksEntry(CoopInstallLayout layout, String vmparamsText) {
+        String entry = CoopVmparamsText.firstClasspathEntry(vmparamsText);
+        if (entry == null || entry.isEmpty() || !CoopVmparamsText.isForksEntry(entry)) {
+            return null;
+        }
+        File file = new File(entry.replace('/', File.separatorChar));
+        return file.isAbsolute() ? file : new File(layout.starsectorCore(), entry);
+    }
+
+    /** True when two paths name the same file on disk, canonical form and all. */
+    private static boolean sameFile(File left, File right) {
+        return canonicalPath(left).equalsIgnoreCase(canonicalPath(right));
+    }
+
+    /**
+     * The canonical path, falling back to the absolute one. A path that cannot be canonicalised -
+     * a missing file on a drive that is not there - still has to be printable, because naming it is
+     * the whole point of the row that uses this.
+     */
+    private static String canonicalPath(File file) {
+        try {
+            return file.getCanonicalPath();
+        } catch (IOException | RuntimeException ex) {
+            return file.getAbsolutePath();
+        }
     }
 
     /** The pure half: inputs in, rows out, in the order they are shown. */
@@ -166,10 +233,13 @@ public final class CoopInstallCheck {
                 "Unzip the mod so that mod_info.json sits directly in <install>\\mods\\coop."
                         + " See docs/player/INSTALL.md section 2."));
 
-        rows.add(classpathRow(in.vmparamsText()));
+        rows.add(classpathRow(in.vmparamsText(), in.forksEntryResolved(), in.forksEntryTarget(),
+                in.forksJarPath()));
         rows.add(stalePropertyRow(in.vmparamsText()));
         rows.add(enabledModsRow(in.enabledModsText()));
         rows.add(versionRow(in.modInfoVersion(), in.jarVersion()));
+        rows.add(forksIdentityRow(in.jarVersion(), in.jarGitCommit(), in.forksJarVersion(),
+                in.forksJarGitCommit()));
         rows.add(gameVersionRow(in.modGameVersion(), in.gameVersion(),
                 in.allowGameVersionMismatch()));
         rows.add(settingsRow(in.settingsError()));
@@ -193,7 +263,8 @@ public final class CoopInstallCheck {
                 : new Row(label, Status.FAIL, missingDetail, fix);
     }
 
-    private static Row classpathRow(String vmparamsText) {
+    private static Row classpathRow(String vmparamsText, boolean resolved, String target,
+                                    String forksJarPath) {
         String label = "coop-forks.jar first on the JVM classpath";
         if (vmparamsText == null) {
             return new Row(label, Status.FAIL, "vmparams is missing or unreadable",
@@ -204,6 +275,20 @@ public final class CoopInstallCheck {
                     "That file is not a Starsector vmparams. Restore it from your backup.");
         }
         if (CoopVmparamsText.hasForksFirstOnClasspath(vmparamsText)) {
+            // The entry is spelled right. Whether it leads to THIS mod folder's jar is a separate
+            // question, and only ever a warning: a path the launcher did not expect can still be a
+            // working one (a junction, a second install sharing one mods folder), and the previous
+            // audit's stricter version of this check blocked Launch on installs that ran fine.
+            if (!target.isEmpty() && !resolved) {
+                return new Row(label, Status.WARN,
+                        "yes, but it points at " + target + " rather than this mod folder's "
+                                + forksJarPath,
+                        "The game will load the forked classes from " + target + ". If that is not"
+                                + " the same build as this folder's, co-op will behave in ways no"
+                                + " log explains. Point the first -classpath entry in"
+                                + " <install>\\vmparams at " + forksJarPath + " unless you meant"
+                                + " it.");
+            }
             return new Row(label, Status.OK, "yes", "");
         }
         if (CoopVmparamsText.hasForksLaterOnClasspath(vmparamsText)) {
@@ -280,6 +365,44 @@ public final class CoopInstallCheck {
                 "mod_info.json says " + modInfoVersion + ", coop.jar says " + jarVersion,
                 "Two builds got mixed in one folder. Delete <install>\\mods\\coop and unzip the"
                         + " download again.");
+    }
+
+    /**
+     * Do the two jars in {@code mods\coop\jars} come from the same build?
+     *
+     * <p>They are one program split across two classloaders: {@code coop.jar} runs under the mod
+     * loader, {@code coop-forks.jar} under the system one, and every forked engine class calls into
+     * the other jar. Nothing at runtime notices when they disagree - the handshake reports
+     * {@code coop.jar}'s version on behalf of both, so two players can pass a version check and
+     * still be running different forked engines. The commit is what tells them apart; the version
+     * is {@code 0.1.0} on every build so far and would catch nothing on its own.
+     */
+    private static Row forksIdentityRow(String jarVersion, String jarGitCommit,
+                                        String forksJarVersion, String forksJarGitCommit) {
+        String label = "coop-forks.jar matches coop.jar";
+        if (forksJarVersion == null && forksJarGitCommit == null) {
+            return new Row(label, Status.FAIL, "coop-forks.jar has no version in its manifest",
+                    "Unzip the mod again; the jar is not the shipped one.");
+        }
+        if (jarVersion == null && jarGitCommit == null) {
+            return new Row(label, Status.FAIL, "coop.jar has no version in its manifest",
+                    "Unzip the mod again; the jar is not the shipped one.");
+        }
+        boolean sameVersion = Objects.equals(jarVersion, forksJarVersion);
+        boolean sameCommit = Objects.equals(jarGitCommit, forksJarGitCommit);
+        if (sameVersion && sameCommit) {
+            return new Row(label, Status.OK,
+                    forksJarVersion + " (" + describe(forksJarGitCommit) + ")", "");
+        }
+        return new Row(label, Status.FAIL,
+                "coop.jar is " + jarVersion + " (" + describe(jarGitCommit) + "), coop-forks.jar is "
+                        + forksJarVersion + " (" + describe(forksJarGitCommit) + ")",
+                "Two builds got mixed in one folder. Delete <install>\\mods\\coop and unzip the"
+                        + " download again.");
+    }
+
+    private static String describe(String gitCommit) {
+        return gitCommit == null ? "no commit" : gitCommit;
     }
 
     /**

@@ -1,9 +1,12 @@
 package coop.launcher;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -127,6 +130,65 @@ class CoopLauncherAppTest {
                 + "\\Fractal Softworks\\Starsector\\mods\\coop\\jars\\a.jar;"), script);
         assertTrue(script.contains("json.jar' + [char]34 + ' coop.launcher.CoopLauncherApp "
                 + CoopLauncherApp.APPLY_FIX_FLAG + "')"), script);
+    }
+
+    // ---- the one-shot adopt consent ---------------------------------------------------------------
+
+    /**
+     * The tick is written for one launch. Every way that launch can end has to take it back out,
+     * including the way that has no game to exit: {@code CoopGameProcess.launch} throwing, which
+     * used to return straight out of the launch method and leave the consent behind for the next
+     * plain double-click of starsector.exe.
+     */
+    @Test
+    void aLaunchThatNeverStartedStillClearsTheConsent(@TempDir Path temp) throws IOException {
+        File file = temp.resolve("coop_options.json.data").toFile();
+        CoopLauncherConfig.read(file).write(file, true, java.util.Map.of(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.ADOPT_CAMPAIGN_ID, "true"));
+
+        assertTrue(CoopLauncherApp.clearAdoptConsent(file, "the launch failed to start"));
+
+        assertFalse(CoopLauncherConfig.read(file).keys().contains(
+                CoopLauncherConfig.ADOPT_CAMPAIGN_ID));
+        assertEquals("7777", CoopLauncherConfig.read(file).value(CoopLauncherConfig.HOST_PORT));
+    }
+
+    /** Whatever went wrong, clearing the consent must not throw a second problem on top of it. */
+    @Test
+    void clearingAConsentThatIsNotThereIsQuiet(@TempDir Path temp) {
+        assertFalse(CoopLauncherApp.clearAdoptConsent(
+                temp.resolve("not-there.json.data").toFile(), "the launch failed to start"));
+        assertFalse(CoopLauncherApp.clearAdoptConsent(null, "there is no install"));
+    }
+
+    // ---- what a finished bug report says on screen -------------------------------------------------
+
+    /**
+     * The notes are the warnings about what did NOT get scrubbed out of the archive. They were
+     * written into report.txt inside the zip, which the player only reads after posting it.
+     */
+    @Test
+    void everyBugReportNoteReachesTheStatusPane() {
+        CoopBugReport.Result result = new CoopBugReport.Result(new File("C:\\zips\\coop.zip"),
+                List.of("report.txt"), List.of(),
+                List.of("saves/common/coop_options.json.data does not parse as JSON, so it was"
+                        + " packed exactly as it is."), true);
+
+        List<String> lines = CoopLauncherApp.bugReportStatusLines(result);
+
+        assertEquals(3, lines.size(), lines.toString());
+        assertTrue(lines.get(0).startsWith("Saved C:\\zips\\coop.zip"), lines.get(0));
+        assertTrue(lines.get(1).contains("does not parse as JSON"), lines.get(1));
+        assertTrue(lines.get(2).contains("still being written"), lines.get(2));
+    }
+
+    @Test
+    void aCleanBugReportSaysOnlyThatItWasSaved() {
+        CoopBugReport.Result result = new CoopBugReport.Result(new File("C:\\zips\\coop.zip"),
+                List.of("report.txt"), List.of(), List.of(), false);
+
+        assertEquals(1, CoopLauncherApp.bugReportStatusLines(result).size());
     }
 
     /** An apostrophe in a folder name is PowerShell's own escape, so it has to be doubled. */

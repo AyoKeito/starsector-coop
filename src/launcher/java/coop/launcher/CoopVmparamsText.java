@@ -83,6 +83,24 @@ public final class CoopVmparamsText {
     }
 
     /**
+     * The first {@code -classpath} entry as it is written, quotes stripped and trimmed, or
+     * {@code null} when the file has no classpath at all.
+     *
+     * <p>Whoever resolves this into a real path has to do it against
+     * {@code <install>\starsector-core}, not the install root: {@code starsector.exe} starts the JVM
+     * with that as its working directory, which is why every stock entry
+     * ({@code janino.jar}, {@code starfarer.api.jar}) is a bare file name and why the entry this
+     * launcher writes starts with {@code ..\}.
+     */
+    public static String firstClasspathEntry(String text) {
+        List<String> entries = classpathEntries(text);
+        if (entries.isEmpty()) {
+            return null;
+        }
+        return unquote(entries.get(0).trim());
+    }
+
+    /**
      * The {@code -classpath} value split into entries. The last one still carries the main class
      * after a space, which no caller here looks at.
      */
@@ -96,11 +114,16 @@ public final class CoopVmparamsText {
 
     /** True when one classpath entry, however it is spelled, points at the forks jar. */
     static boolean isForksEntry(String entry) {
-        String normalised = normalise(entry).trim();
-        if (normalised.startsWith("\"") && normalised.endsWith("\"") && normalised.length() > 1) {
-            normalised = normalised.substring(1, normalised.length() - 1);
-        }
+        String normalised = unquote(normalise(entry).trim());
         return normalised.equals(FORKS_JAR) || normalised.endsWith("\\" + FORKS_JAR);
+    }
+
+    /** One classpath entry with its surrounding double quotes taken off, if it had any. */
+    private static String unquote(String value) {
+        if (value.length() > 1 && value.startsWith("\"") && value.endsWith("\"")) {
+            return value.substring(1, value.length() - 1);
+        }
+        return value;
     }
 
     /**

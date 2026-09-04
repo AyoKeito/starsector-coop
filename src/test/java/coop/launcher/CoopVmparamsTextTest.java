@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -123,6 +124,23 @@ class CoopVmparamsTextTest {
         assertFalse(CoopVmparamsText.hasClasspath("java.exe -Xmx2048m"));
         assertFalse(CoopVmparamsText.hasForksFirstOnClasspath("java.exe -Xmx2048m"));
         assertFalse(CoopVmparamsText.hasClasspath(null));
+    }
+
+    /**
+     * Handed back as written, quotes off. Whoever resolves it has to know the paths are relative to
+     * starsector-core, which is why this returns the text rather than a file.
+     */
+    @Test
+    void theFirstClasspathEntryComesBackAsWrittenWithItsQuotesOff() {
+        assertEquals("..\\mods\\coop\\jars\\coop-forks.jar",
+                CoopVmparamsText.firstClasspathEntry(PATCHED));
+        assertEquals("janino.jar", CoopVmparamsText.firstClasspathEntry(STOCK));
+        assertEquals("C:\\Program Files\\coop\\jars\\coop-forks.jar",
+                CoopVmparamsText.firstClasspathEntry(FLAGS_TAIL
+                        + CoopVmparamsText.CLASSPATH_MARKER
+                        + "\"C:\\Program Files\\coop\\jars\\coop-forks.jar\";" + STOCK_CLASSPATH));
+        assertNull(CoopVmparamsText.firstClasspathEntry("java.exe -Xmx2048m"));
+        assertNull(CoopVmparamsText.firstClasspathEntry(null));
     }
 
     @Test

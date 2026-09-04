@@ -19,6 +19,10 @@ public record CoopHandshakeDiff(List<String> lines) {
         compareField(lines, "gameVersion", host.gameVersion(), guest.gameVersion());
         compareField(lines, "coopBuildVersion", host.coopBuildVersion(), guest.coopBuildVersion());
         compareField(lines, "coopGitCommit", host.coopGitCommit(), guest.coopGitCommit());
+        // coop-forks.jar is the second jar of the same build, loaded by the system classloader.
+        // Same rule as the commit above: identical coop.jar builds with different forked engine
+        // classes desync the world and leave nothing in either log to explain it.
+        compareField(lines, "coopForksBuild", host.coopForksBuild(), guest.coopForksBuild());
 
         Map<String, CoopHandshakeManifest.ModEntry> hostMods = byId(host.enabledMods());
         Map<String, CoopHandshakeManifest.ModEntry> guestMods = byId(guest.enabledMods());

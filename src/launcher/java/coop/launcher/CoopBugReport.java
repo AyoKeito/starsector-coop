@@ -199,6 +199,24 @@ public final class CoopBugReport {
      * of those mean "pack the file exactly as it is": a settings file that will not parse is
      * precisely the settings file a bug report is about, and rewriting it would hide the bug.
      */
+    /**
+     * True when {@code json} holds a password worth worrying about. Only used to tell a settings
+     * file with nothing to blank apart from one whose blanking failed, which are the same
+     * {@code null} out of {@link #blankPassword}.
+     */
+    static boolean hasPassword(String json) {
+        if (json == null) {
+            return false;
+        }
+        try {
+            JSONObject parsed = new JSONObject(json);
+            return !parsed.optString(CoopLauncherConfig.PASSWORD, "").isEmpty();
+        } catch (Exception ex) {
+            // org.json in starsector-core throws a checked JSONException, so this has to be broad.
+            return false;
+        }
+    }
+
     static String blankPassword(String json) {
         if (json == null) {
             return null;
@@ -416,6 +434,15 @@ public final class CoopBugReport {
         String modCommit = CoopInstallCheck.readJarAttribute(layout.coopJar(), "Coop-Git-Commit");
         line(text, "Mod version", modVersion == null ? "unknown (coop.jar has no manifest version)"
                 : modVersion + (modCommit == null ? "" : " (commit " + modCommit + ")"));
+        // The forked engine jar is a second build with its own manifest, and a report that only
+        // names coop.jar cannot show the one mix-up that produces unexplainable behaviour.
+        String forksVersion = CoopInstallCheck.readJarAttribute(layout.forksJar(),
+                "Implementation-Version");
+        String forksCommit = CoopInstallCheck.readJarAttribute(layout.forksJar(),
+                CoopInstallCheck.GIT_COMMIT_ATTRIBUTE);
+        line(text, "Forks version", forksVersion == null
+                ? "unknown (coop-forks.jar has no manifest version)"
+                : forksVersion + (forksCommit == null ? "" : " (commit " + forksCommit + ")"));
         line(text, "Launcher version", CoopInstallCheck.launcherVersion());
         String builtFor = CoopInstallCheck.readModInfoGameVersion(layout.modInfo());
         String gameVersion = CoopInstallCheck.readGameVersion(layout);
@@ -520,6 +547,14 @@ public final class CoopBugReport {
         }
         String blanked = blankPassword(text);
         if (blanked == null) {
+            // Two ways to get here, and only one of them is harmless: the file has no password in
+            // it, or the rewrite failed on a file that does. The second must not be packed under
+            // silence, because the password is stored in plain text.
+            if (hasPassword(text)) {
+                notes.add("coop.password could NOT be blanked in the packed copy of " + entry
+                        + ", so it was packed exactly as it is. Take the password out by hand"
+                        + " before you post the archive.");
+            }
             planned.add(new Planned(entry, options, null));
             return;
         }

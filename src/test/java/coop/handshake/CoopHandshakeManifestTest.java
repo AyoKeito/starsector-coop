@@ -93,6 +93,66 @@ class CoopHandshakeManifestTest {
         assertEquals(manifest.toJson(), decoded.toJson());
     }
 
+    // ---- the second jar --------------------------------------------------------------------------
+
+    /**
+     * coop-forks.jar is the other half of the same build, loaded by the system classloader. Two
+     * players can hold the same coop.jar commit and still run different forked engine classes, and
+     * nothing else on the wire looks at that jar.
+     */
+    @Test
+    void aDifferentForksBuildIsItsOwnDiffLine() {
+        CoopHandshakeManifest host = manifestWithForksBuild("0.1.0/commit-a");
+        CoopHandshakeManifest guest = manifestWithForksBuild("0.1.0/commit-b");
+
+        assertEquals(List.of("coopForksBuild: host=0.1.0/commit-a guest=0.1.0/commit-b"),
+                CoopHandshakeDiff.compare(host, guest).lines());
+    }
+
+    @Test
+    void aMissingForksJarSaysAbsentRatherThanMatchingAnything() {
+        assertEquals(CoopHandshakeManifest.FORKS_BUILD_ABSENT,
+                manifestWithForksBuild("   ").coopForksBuild());
+        assertEquals(CoopHandshakeManifest.FORKS_BUILD_ABSENT,
+                manifestWithForksBuild(null).coopForksBuild());
+        assertFalse(CoopHandshakeDiff.compare(manifestWithForksBuild("0.1.0/commit-a"),
+                manifestWithForksBuild(null)).isEmpty());
+    }
+
+    /**
+     * A peer built before the field existed sends a manifest without the key. That has to read as
+     * "the other side did not say", not as a parse failure - a handshake that throws tells the
+     * player nothing about which build they are on.
+     */
+    @Test
+    void aManifestFromBeforeTheFieldExistedStillParsesAndShowsUpInTheDiff() {
+        CoopHandshakeManifest current = manifestWithForksBuild("0.1.0/commit-a");
+        String olderJson = current.toJson()
+                .replace(",\"coopForksBuild\":\"0.1.0/commit-a\"", "");
+        assertFalse(olderJson.contains("coopForksBuild"), olderJson);
+
+        CoopHandshakeManifest older = CoopHandshakeManifest.fromJson(olderJson);
+
+        assertEquals(CoopHandshakeManifest.FORKS_BUILD_NOT_REPORTED, older.coopForksBuild());
+        assertEquals(List.of("coopForksBuild: host=0.1.0/commit-a guest=not-reported"),
+                CoopHandshakeDiff.compare(current, older).lines());
+    }
+
+    @Test
+    void theForksBuildSurvivesAJsonRoundTrip() {
+        CoopHandshakeManifest manifest = manifestWithForksBuild("0.1.0/commit-a");
+
+        CoopHandshakeManifest decoded = CoopHandshakeManifest.fromJson(manifest.toJson());
+
+        assertEquals("0.1.0/commit-a", decoded.coopForksBuild());
+        assertEquals(manifest, decoded);
+        assertEquals(manifest.toJson(), decoded.toJson());
+    }
+
+    private static CoopHandshakeManifest manifestWithForksBuild(String forksBuild) {
+        return new CoopHandshakeManifest("0.98a-RC8", "0.1.0", "commit-a", forksBuild, List.of());
+    }
+
     @Test
     void checksumUsesSha256HexForTextResource() {
         String checksum = CoopChecksum.sha256Text("{\"id\":\"utility\"}");

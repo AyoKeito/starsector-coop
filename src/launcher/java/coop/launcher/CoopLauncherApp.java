@@ -212,6 +212,16 @@ public final class CoopLauncherApp {
     private boolean writingGuestInvite;
     /** True while the code, not the player, is repopulating the campaign picker. */
     private boolean writingCampaignBox;
+    /** True while the code, not the player, is writing the host seed field. */
+    private boolean writingSeedField;
+    /**
+     * The seed for a new campaign, kept aside while a saved campaign is selected. The box itself
+     * shows the picked campaign's own seed then, so this is the only copy of what the host had
+     * drafted, and going back to New puts it back.
+     */
+    private String draftSeed = "";
+    /** The campaign the picker was last on, so a pick can be told from a redraw of the same pick. */
+    private String pickedCampaignId = CoopCampaignPicker.NEW_CAMPAIGN_ID;
 
     /**
      * The co-op save list as of the last read. Never null: an install with no list reads as
@@ -528,6 +538,7 @@ public final class CoopLauncherApp {
         hostSeedGenerateButton = CoopTheme.inline("Generate");
         hostSeedGenerateButton.addActionListener(event -> {
             String seed = CoopSeeds.generate();
+            draftSeed = seed;
             hostSeedField.setText(seed);
             LOG.info("Generated a new seed: " + seed);
             append("New seed " + seed + ". Copy the invite so your partner gets the same one.");
@@ -599,17 +610,17 @@ public final class CoopLauncherApp {
         hostSeedField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent event) {
-                refreshCampaignEntries();
+                onSeedFieldEdited();
             }
 
             @Override
             public void removeUpdate(DocumentEvent event) {
-                refreshCampaignEntries();
+                onSeedFieldEdited();
             }
 
             @Override
             public void changedUpdate(DocumentEvent event) {
-                refreshCampaignEntries();
+                onSeedFieldEdited();
             }
         });
         publicAddressField.getDocument().addDocumentListener(preview);
@@ -997,6 +1008,7 @@ public final class CoopLauncherApp {
         guestPasswordField.setText(password);
 
         String seed = config.value(CoopLauncherConfig.NEW_GAME_SEED);
+        draftSeed = seed.trim();
         hostSeedField.setText(seed);
         guestSeedField.setText(seed);
 
@@ -1108,8 +1120,10 @@ public final class CoopLauncherApp {
             return;
         }
         String wanted = selectedCampaignId();
+        // The draft, not the field: while a saved campaign is picked the field shows that
+        // campaign's seed, and the New entry has to keep quoting the seed New would use.
         List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries(
-                hostSeedField.getText(), saveIndex, ZoneId.systemDefault());
+                draftSeed, saveIndex, ZoneId.systemDefault());
         writingCampaignBox = true;
         try {
             campaignBox.removeAllItems();
@@ -1129,6 +1143,7 @@ public final class CoopLauncherApp {
      */
     private void onCampaignPicked() {
         CoopCampaignPicker.Entry entry = selectedCampaignEntry();
+        applyPickedSeed(entry);
         boolean newCampaign = CoopCampaignPicker.worldControlsEnabled(entry);
         hostSeedField.setEnabled(newCampaign);
         hostSeedGenerateButton.setEnabled(newCampaign);
@@ -1140,6 +1155,57 @@ public final class CoopLauncherApp {
         setHint(hostSaveHint, CoopCampaignPicker.hint(
                 entry == null ? "" : entry.campaignId(), saveIndex, ZoneId.systemDefault()), true);
         refreshInvitePreview();
+    }
+
+    /**
+     * The seed box follows the picker: a saved campaign puts its own seed there, New puts the draft
+     * back. Only on an actual change of pick - a redraw of the same pick must not fight the field.
+     *
+     * <p>The write is queued rather than done here because this method is reachable from the seed
+     * field's own document listener (a keystroke rebuilds the picker), and Swing throws
+     * "Attempt to mutate in notification" for a document changed inside its own notification.
+     */
+    private void applyPickedSeed(CoopCampaignPicker.Entry entry) {
+        String picked = entry == null ? CoopCampaignPicker.NEW_CAMPAIGN_ID : entry.campaignId();
+        if (picked.equals(pickedCampaignId)) {
+            return;
+        }
+        if (pickedCampaignId.isEmpty()) {
+            // Leaving New: whatever is in the box is the draft, even if it was never generated.
+            draftSeed = hostSeedField.getText().trim();
+        }
+        pickedCampaignId = picked;
+        String wanted = CoopCampaignPicker.seedAfterPick(entry, draftSeed,
+                hostSeedField.getText().trim());
+        if (wanted.equals(hostSeedField.getText().trim())) {
+            return;
+        }
+        LOG.info("Campaign picked (" + (picked.isEmpty() ? "new" : picked) + "); seed field set to "
+                + wanted);
+        SwingUtilities.invokeLater(() -> {
+            writingSeedField = true;
+            try {
+                hostSeedField.setText(wanted);
+            } finally {
+                writingSeedField = false;
+            }
+            refreshInvitePreview();
+        });
+    }
+
+    /**
+     * A keystroke in the seed box. While a new campaign is picked the box <em>is</em> the draft, so
+     * the draft follows it; the picker redraws either way because the New entry quotes the seed.
+     */
+    private void onSeedFieldEdited() {
+        if (writingSeedField) {
+            // Our own write, made to match a pick that has already been applied everywhere.
+            return;
+        }
+        if (CoopCampaignPicker.worldControlsEnabled(selectedCampaignEntry())) {
+            draftSeed = hostSeedField.getText().trim();
+        }
+        refreshCampaignEntries();
     }
 
     private CoopCampaignPicker.Entry selectedCampaignEntry() {
@@ -1186,6 +1252,7 @@ public final class CoopLauncherApp {
             return;
         }
         String seed = CoopSeeds.generate();
+        draftSeed = seed;
         hostSeedField.setText(seed);
         LOG.info("Generated a seed for the host: " + seed);
         append("Generated seed " + seed + ". It only matters for a new campaign; the invite carries"
@@ -2047,12 +2114,8 @@ public final class CoopLauncherApp {
                 LOG.info("Bug report written to " + finished.zip() + " with "
                         + finished.entries().size() + " entries; missing " + finished.missing()
                         + "; notes " + finished.notes());
-                append("Saved " + finished.zip() + ". It contains your public address from the"
-                        + " doctor block and the last two game logs; attach both players' zips to"
-                        + " the report.");
-                if (finished.saveInFlight()) {
-                    append("The newest save was still being written, run the report again in a"
-                            + " moment.");
+                for (String line : bugReportStatusLines(finished)) {
+                    append(line);
                 }
                 openPath(finished.zip().getParentFile());
             });
@@ -2224,6 +2287,10 @@ public final class CoopLauncherApp {
             gameProcess = CoopGameProcess.launch(layout);
         } catch (Exception ex) {
             LOG.error("Could not start starsector.exe", ex);
+            // The tick was consumed by the settings file this launch just wrote, and nothing is
+            // going to exit to clear it: without this, a launch that never started leaves the
+            // one-shot consent in coop_options.json.data for the next plain start of the game.
+            clearAdoptConsent(layout, "the launch failed to start");
             fail("Could not start the game:\n\n" + ex.getMessage());
             return;
         }
@@ -2328,14 +2395,32 @@ public final class CoopLauncherApp {
         if (target == null) {
             return;
         }
+        clearAdoptConsent(target.coopOptions(), reason);
+    }
+
+    /**
+     * The file half of it, static so the three moments that have to clear the tick - a launcher
+     * start that found one left behind, a game that exited, and a launch that threw before the game
+     * ever started - all go through one tested piece of code. Never throws: a settings file that
+     * cannot be rewritten is a warning in the log, not a dialog on top of whatever just went wrong.
+     *
+     * @return true when the file was rewritten
+     */
+    static boolean clearAdoptConsent(File options, String reason) {
+        if (options == null) {
+            return false;
+        }
         try {
-            if (CoopLauncherConfig.clearAdoptCampaignConsent(target.coopOptions())) {
-                LOG.info("Cleared " + CoopLauncherConfig.ADOPT_CAMPAIGN_ID + " from "
-                        + target.coopOptions() + " because " + reason);
+            if (CoopLauncherConfig.clearAdoptCampaignConsent(options)) {
+                LOG.info("Cleared " + CoopLauncherConfig.ADOPT_CAMPAIGN_ID + " from " + options
+                        + " because " + reason);
+                return true;
             }
+            return false;
         } catch (Exception ex) {
-            LOG.warn("Could not clear " + CoopLauncherConfig.ADOPT_CAMPAIGN_ID + " from "
-                    + target.coopOptions(), ex);
+            LOG.warn("Could not clear " + CoopLauncherConfig.ADOPT_CAMPAIGN_ID + " from " + options,
+                    ex);
+            return false;
         }
     }
 
@@ -2351,6 +2436,26 @@ public final class CoopLauncherApp {
             checkTimer.stop();
             checkTimer = null;
         }
+    }
+
+    /**
+     * What the status pane says about a finished bug report, in order.
+     *
+     * <p>The notes are the point. Every one of them is about what did or did not get taken out of
+     * the archive - a settings file that would not parse is packed with the password still in it -
+     * and until now they only went into {@code report.txt} inside the zip, which is the wrong side
+     * of the door: the player is about to post that zip on a public forum, so the warning has to
+     * reach them before they do, not after somebody downloads it.
+     */
+    static List<String> bugReportStatusLines(CoopBugReport.Result result) {
+        List<String> lines = new ArrayList<>();
+        lines.add("Saved " + result.zip() + ". It contains your public address from the doctor"
+                + " block and the last two game logs; attach both players' zips to the report.");
+        lines.addAll(result.notes());
+        if (result.saveInFlight()) {
+            lines.add("The newest save was still being written, run the report again in a moment.");
+        }
+        return List.copyOf(lines);
     }
 
     /**

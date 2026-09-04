@@ -3,6 +3,7 @@ package coop.handshake;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.ModSpecAPI;
 import coop.build.CoopBuildInfo;
+import coop.build.CoopForksBuildInfo;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -16,15 +17,35 @@ public record CoopHandshakeManifest(
         String gameVersion,
         String coopBuildVersion,
         String coopGitCommit,
+        String coopForksBuild,
         List<ModEntry> enabledMods
 ) {
+    /** What {@link #coopForksBuild()} says when coop-forks.jar carries no build stamp at all. */
+    public static final String FORKS_BUILD_ABSENT = "absent";
+
+    /** What it says when the peer's build predates the field, so its manifest never had one. */
+    public static final String FORKS_BUILD_NOT_REPORTED = "not-reported";
+
     public CoopHandshakeManifest {
         gameVersion = requireText(gameVersion, "gameVersion");
         coopBuildVersion = normalize(coopBuildVersion, "dev");
         coopGitCommit = normalize(coopGitCommit, "dev-uncommitted");
+        coopForksBuild = normalize(coopForksBuild, FORKS_BUILD_ABSENT);
         enabledMods = enabledMods == null ? List.of() : enabledMods.stream()
                 .sorted(Comparator.comparing(ModEntry::id))
                 .toList();
+    }
+
+    /**
+     * The shape before {@code coopForksBuild} existed, for callers that have no answer for it. The
+     * two that matter - {@link #capture()} and {@link #fromJson(String)} - always do, and use the
+     * canonical constructor; this one exists so a caller only interested in the mod list does not
+     * have to invent a build stamp, and it says {@link #FORKS_BUILD_ABSENT} rather than pretending
+     * to match anything.
+     */
+    public CoopHandshakeManifest(String gameVersion, String coopBuildVersion, String coopGitCommit,
+                                 List<ModEntry> enabledMods) {
+        this(gameVersion, coopBuildVersion, coopGitCommit, FORKS_BUILD_ABSENT, enabledMods);
     }
 
     public static CoopHandshakeManifest capture() {
@@ -32,7 +53,8 @@ public record CoopHandshakeManifest(
         List<ModEntry> mods = Global.getSettings().getModManager().getEnabledModsCopy().stream()
                 .map(CoopHandshakeManifest::fromModSpec)
                 .toList();
-        return new CoopHandshakeManifest(gameVersion, captureBuildVersion(), captureGitCommit(), mods);
+        return new CoopHandshakeManifest(gameVersion, captureBuildVersion(), captureGitCommit(),
+                captureForksBuild(), mods);
     }
 
     public String toJson() {
@@ -43,6 +65,8 @@ public record CoopHandshakeManifest(
         appendField(json, "coopBuildVersion", coopBuildVersion);
         json.append(',');
         appendField(json, "coopGitCommit", coopGitCommit);
+        json.append(',');
+        appendField(json, "coopForksBuild", coopForksBuild);
         json.append(",\"enabledMods\":[");
         for (int i = 0; i < enabledMods.size(); i++) {
             if (i > 0) {
@@ -82,10 +106,16 @@ public record CoopHandshakeManifest(
                     checksums));
         }
 
+        // Tolerant on purpose: a peer built before this field existed sends a manifest without the
+        // key, and refusing to parse it would turn "your partner is on an older build" into "the
+        // handshake is broken". The placeholder makes it a diff line instead, which says so.
+        Object forksBuild = object.get("coopForksBuild");
         return new CoopHandshakeManifest(
                 requireString(object.get("gameVersion"), "gameVersion"),
                 requireString(object.get("coopBuildVersion"), "coopBuildVersion"),
                 requireString(object.get("coopGitCommit"), "coopGitCommit"),
+                forksBuild == null ? FORKS_BUILD_NOT_REPORTED
+                        : requireString(forksBuild, "coopForksBuild"),
                 mods);
     }
 
@@ -140,6 +170,30 @@ public record CoopHandshakeManifest(
 
     private static String captureGitCommit() {
         return normalize(CoopBuildInfo.GIT_COMMIT, "dev-uncommitted");
+    }
+
+    /**
+     * The identity of the OTHER jar: {@code coop-forks.jar}, which holds the forked engine classes
+     * and is loaded by the system classloader rather than the mod one.
+     *
+     * <p>Everything above this method describes {@code coop.jar}. Two players can hold identical
+     * {@code coopBuildVersion} and {@code coopGitCommit} while running different forked engines,
+     * because nothing on the wire had ever looked at the second jar - and a forked
+     * {@code RouteManager} that differs between the two machines desyncs the world with no line in
+     * either log to say why.
+     *
+     * <p>{@link CoopForksBuildInfo} is generated into {@code coop-forks.jar} only, so a forks jar
+     * that is missing or built before this existed fails to resolve here. That is a
+     * {@link LinkageError}, not an exception, which is why the guard catches one: the answer is
+     * {@link #FORKS_BUILD_ABSENT}, and the peer's diff line says so.
+     */
+    private static String captureForksBuild() {
+        try {
+            return normalize(CoopForksBuildInfo.version() + "/" + CoopForksBuildInfo.gitCommit(),
+                    FORKS_BUILD_ABSENT);
+        } catch (LinkageError | RuntimeException ex) {
+            return FORKS_BUILD_ABSENT;
+        }
     }
 
     private static void appendField(StringBuilder json, String name, String value) {

@@ -34,13 +34,18 @@ public final class CoopCampaignPicker {
      * @param campaignId {@code ""} for the new-campaign entry
      * @param label      what the drop-down shows
      * @param folderName the save folder this entry loads, {@code ""} for a new campaign
+     * @param seedString the seed that sector came from: the host's draft seed on the new-campaign
+     *                   entry, and the seed the mod recorded in the save index on a saved campaign.
+     *                   {@code ""} on a row written before the mod recorded seeds, which is the one
+     *                   case the launcher must not overwrite the seed box for.
      */
-    public record Entry(String campaignId, String label, String folderName) {
+    public record Entry(String campaignId, String label, String folderName, String seedString) {
 
         public Entry {
             campaignId = text(campaignId);
             label = text(label);
             folderName = text(folderName);
+            seedString = text(seedString);
         }
 
         public boolean newCampaign() {
@@ -66,7 +71,8 @@ public final class CoopCampaignPicker {
         entries.add(newCampaignEntry(seed));
         if (index != null && index.ok()) {
             for (CoopSaveIndexReader.Save save : index.newestPerHostCampaign()) {
-                entries.add(new Entry(save.campaignId(), save.label(zone), save.saveDirName()));
+                entries.add(new Entry(save.campaignId(), save.label(zone), save.saveDirName(),
+                        save.seedString()));
             }
         }
         return List.copyOf(entries);
@@ -76,7 +82,8 @@ public final class CoopCampaignPicker {
     public static Entry newCampaignEntry(String seed) {
         String trimmed = text(seed);
         return new Entry(NEW_CAMPAIGN_ID,
-                trimmed.isEmpty() ? "New campaign" : "New campaign (seed " + trimmed + ")", "");
+                trimmed.isEmpty() ? "New campaign" : "New campaign (seed " + trimmed + ")", "",
+                trimmed);
     }
 
     /**
@@ -86,6 +93,30 @@ public final class CoopCampaignPicker {
      */
     public static boolean worldControlsEnabled(Entry selected) {
         return selected == null || selected.newCampaign();
+    }
+
+    /**
+     * What the seed box should hold once the picker has moved to {@code selected}.
+     *
+     * <p>The seed is not decoration. It travels in the invite, the partner's game generates its
+     * whole sector from it, and the mod rebinds its runtime RNG off it - so a saved campaign shown
+     * next to the seed of some unrelated new game is an invite that quietly builds the wrong world
+     * on the other machine. Picking a saved campaign therefore puts that campaign's own seed in the
+     * box, and going back to New restores whatever the host had drafted before.
+     *
+     * @param draftSeed   the seed the host last typed or generated for a new campaign
+     * @param currentSeed what is in the box now, which is the answer whenever there is nothing
+     *                    better: a save row written before the mod recorded seeds has none, and
+     *                    blanking the box there would take a working invite away from a host who
+     *                    knows their own seed
+     */
+    public static String seedAfterPick(Entry selected, String draftSeed, String currentSeed) {
+        if (selected == null || selected.newCampaign()) {
+            String draft = text(draftSeed);
+            return draft.isEmpty() ? text(currentSeed) : draft;
+        }
+        String saved = selected.seedString();
+        return saved.isEmpty() ? text(currentSeed) : saved;
     }
 
     /** The folder line under the picker, or {@code ""} when a new campaign is selected. */
@@ -132,8 +163,17 @@ public final class CoopCampaignPicker {
         if (save == null) {
             return noSave();
         }
-        return "Load the save \"" + save.characterName() + "\", level " + save.level()
+        String line = "Load the save \"" + save.characterName() + "\", level " + save.level()
                 + ", saved " + save.savedLocal(zone) + " (folder " + save.saveDirName() + ").";
+        if (save.seedString().isEmpty()) {
+            // The row predates the mod recording seeds, so the box above still shows whatever seed
+            // was last drafted. Loading a save does not use it - but the invite carries it, and a
+            // partner without a save of this campaign would generate a sector out of it.
+            line += " This save does not record its seed, so the Seed box above is not this"
+                    + " campaign's: your partner has to load their own save of it rather than start"
+                    + " a new game.";
+        }
+        return line;
     }
 
     private static String noSave() {
