@@ -4,8 +4,9 @@ Two people, two copies of Starsector, one shared campaign. Both of you do everyt
 There is no "client-only" install; the two machines run the same mod and check each other at
 connect time.
 
-The one step that is not like other mods is the `vmparams` edit in section 3. Do not skip it.
-Everything after it happens in `Coop Launcher.cmd`, in the mod folder: settings, the invite you
+The one step that is not like other mods is the classpath entry in section 3. It is a button in
+`Coop Launcher.cmd`, in the mod folder, and the manual version is written out in case the button
+cannot reach your install. Everything after it happens in that same window: settings, the invite you
 send your partner, the connection check, and starting the game.
 
 ---
@@ -37,13 +38,33 @@ If your unzip produced `mods\coop\coop\mod_info.json`, move the inner folder up 
 produced `mods\starsector-coop-1.0\`, rename it to `coop`. The folder name travels over the wire as
 part of the install comparison, so `coop-v1` on one PC and `coop` on the other will not connect.
 
-## 3. Edit `vmparams` (the unusual step)
+## 3. Put `coop-forks.jar` on the classpath
 
 `jars/coop.jar` loads the way every mod's jar loads: the launcher reads it from `mod_info.json`.
 `jars/coop-forks.jar` cannot. It holds ten engine classes copied from Starsector and modified
 (`Misc`, `RouteManager`, `SourceBasedFleetManager` and seven more), and the JVM only prefers a copy
 over the original if the copy comes earlier on the system classpath. Starsector's mod loader is a
-child classloader, which is too late. So the jar has to be named in `vmparams`, by hand, once.
+child classloader, which is too late. So the jar has to be named in `vmparams`, the file holding the
+JVM command line the game starts with.
+
+**Press Fix in the launcher and it is done.** Start `Coop Launcher.cmd` (section 6). The Install card
+shows a red row reading `coop-forks.jar first on the JVM classpath`, with a **Fix** button on it. The
+button copies `<Starsector>\vmparams` to `vmparams.backup`, then puts one 33-character entry at the
+front of the classpath. Nothing else on the line changes, the file stays one line, and no newline is
+added to the end of it. If a `vmparams.backup` is already sitting there it is left alone, so the copy
+you took before your first edit is the one that survives.
+
+A Starsector update overwrites `vmparams` and the row goes red again. Press **Fix** again; there is
+nothing else to redo.
+
+Two cases send you to the manual edit below. On an install under `Program Files`, Windows refuses the
+write to an ordinary process: the launcher asks whether to restart itself as administrator, and if
+you approve the Windows prompt a second launcher window opens and makes the edit. Refuse the prompt
+and nothing is written. On a modded-JRE install the game starts from a `.bat` file carrying its own
+`-classpath` and `vmparams` is never read at all, so the launcher refuses to touch it and prints
+these instructions instead.
+
+### Doing it by hand
 
 **Back up the file first.** Copy `<Starsector>\vmparams` to `vmparams.backup`.
 
@@ -72,7 +93,8 @@ Rules for the edit:
   is the install root.
 - It must be first in the list. Behind `starfarer.api.jar` it does nothing.
 - Save as plain text. Do not let the editor turn the single line into several, and do not change
-  anything else on it.
+  anything else on it. A `vmparams` that arrives split over several lines is one the launcher's Fix
+  button will refuse, because it cannot tell which line the JVM reads.
 - Redo the edit after any Starsector update; the installer overwrites `vmparams`.
 - On a modded JRE setup where the launcher is a `.bat` file instead, put the same entry at the front
   of that file's `-classpath`.
@@ -92,6 +114,11 @@ session works; the world is lopsided.
 
 Start Starsector's own launcher (`starsector.exe`), click MODS, tick **Starsector Coop V1**, click
 OK. Both players. If either of you has other mods ticked, the other must tick the identical set.
+
+The co-op launcher can do it instead: its `co-op enabled in mods\enabled_mods.json` row carries the
+same **Fix** button, which adds `"coop"` to `<Starsector>\mods\enabled_mods.json` and leaves every
+other mod in the list where it was. It writes the file the vanilla launcher would have written, so
+ticking and unticking mods afterwards works as normal.
 
 ## 5. Why identical installs are required
 
@@ -129,8 +156,11 @@ wrong anyway, **Folder** in the Install card sets it straight.
 
 What the launcher does: it writes your settings into `saves\common\coop_options.json.data`, tells you
 about anything wrong with the install, and starts `starsector.exe`. It does not replace the vanilla
-launcher; that window still comes up and you still press Play in it. And it never edits `vmparams` or
-`enabled_mods.json`. Problems in those two are reported, with the exact fix, for you to make by hand.
+launcher; that window still comes up and you still press Play in it.
+
+The only files it edits outside `saves\common` are `vmparams` and `mods\enabled_mods.json`, and only
+when you press the **Fix** button on the row that names one of them. Every other red row is reported
+with the fix and left to you.
 
 ### The host's fields
 
@@ -216,6 +246,10 @@ only the rows that are not `OK`, badged `OK`, `WARN` or `FAIL`; **Show all check
 the rest. **Refresh** re-runs them after you fix something, **Guide** opens this file, and **Folder**
 points the launcher at your Starsector folder when it could not work out where the game is.
 
+Two rows carry a **Fix** button, and pressing it makes the edit: `coop-forks.jar first on the JVM
+classpath` (section 3) and `co-op enabled in mods\enabled_mods.json` (section 4). Whatever the button
+did, or refused to do, is written into the log drawer at the bottom of the window.
+
 | Row | Fails when |
 |---|---|
 | `Starsector install` | The folder the launcher is looking at has no `starsector.exe`, `vmparams` and `starsector-core` in it. |
@@ -224,9 +258,9 @@ points the launcher at your Starsector folder when it could not work out where t
 | `starsector-core` | The folder is missing. |
 | `mods\coop\jars\coop.jar` | The mod is unpacked wrong or incompletely. |
 | `mods\coop\jars\coop-forks.jar` | Same. |
-| `coop-forks.jar first on the JVM classpath` | Section 3 was skipped, or the entry is on the line but behind another jar, where it does nothing. Any way of writing the path counts (relative or absolute, either slash, any capitalisation); only its position on the line matters. |
-| `no leftover -Dcoop.* in vmparams` | See below. |
-| `co-op enabled in mods\enabled_mods.json` | The mod is not ticked in the Starsector launcher. |
+| `coop-forks.jar first on the JVM classpath` | Section 3 was skipped, or the entry is on the line but behind another jar, where it does nothing. Any way of writing the path counts (relative or absolute, either slash, any capitalisation); only its position on the line matters. **Fix** makes the edit, moving an entry that is in the wrong place rather than adding a second copy. |
+| `no leftover -Dcoop.* in vmparams` | See below. No **Fix** button: these are flags somebody put there deliberately, and the launcher does not delete them. |
+| `co-op enabled in mods\enabled_mods.json` | The mod is not ticked in the Starsector launcher. **Fix** ticks it. |
 | `mod_info.json version matches coop.jar` | Two builds got mixed in one folder. Delete `mods\coop` and unzip once. |
 | `Game version` | Your Starsector is not the one the mod was built for. Part of the mod is compiled against the game's own classes, so the mod refuses to start a session on any other version and says `COOP-GAME`. The version is read out of the `Starting Starsector <version> launcher` line the game writes at the top of `starsector-core\starsector.log`, so before the game has run once here the row reads `unknown until the game has run once`. Ticking **Allow game version mismatch** under Advanced drops it to a `WARN` and lets LAUNCH work. |
 | `settings file saves\common\coop_options.json.data` | The file exists and is not readable as plain JSON. The launcher refuses to overwrite it, because that would throw away every setting in it. |
@@ -546,8 +580,9 @@ mod ships a `coop.version` file, so it reports there too.
 not promised. Unless a release note says a save carries over, finish a campaign on the build you
 started it on, or update together and start a new one.
 
-Redo the `vmparams` edit in section 3 after any Starsector update. The installer overwrites that
-file.
+A Starsector update overwrites `vmparams`, which drops the classpath entry from section 3. The
+install check goes red again at the next launcher start and the **Fix** button on that row puts the
+entry back.
 
 ## Uninstalling
 

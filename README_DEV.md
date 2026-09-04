@@ -105,6 +105,28 @@ execution-policy prompt.
 FlatLaf (Apache-2.0) is fetched by Gradle into `jars/flatlaf.jar` via `copyLauncherLibs` and sits on
 the `.cmd`'s classpath alongside `coop-launcher.jar`.
 
+**The launcher writes two files outside `saves/common`.** `CoopInstallFixer` applies the two install
+edits the mod itself cannot reach, on a **Fix** button hanging off the row that failed:
+
+- `<install>\vmparams`, ported from `Set-CoopVmParams` in `scripts/launch-host.ps1`. Copy to
+  `vmparams.backup` unless one exists, drop every existing `coop-forks.jar` entry in any spelling
+  `CoopVmparamsText.isForksEntry` accepts, insert `..\mods\coop\jars\coop-forks.jar;` after the
+  ` -classpath ` marker, write the bytes back through `ISO-8859-1` with no trailing newline. Refused
+  when the file has no ` -classpath `, spans several lines, or the install has no `jre\bin\javaw.exe`
+  (a modded-JRE `.bat` setup, whose `vmparams` the JVM never reads). `-Dcoop.*` is never stripped;
+  that row stays a warning about flags somebody set on purpose.
+- `<install>\mods\enabled_mods.json`, re-emitted in the vanilla two-space shape with `"coop"`
+  appended and the other ids in their original order. Created when absent; refused when the file is
+  there and does not parse.
+
+An `AccessDeniedException` (a game under `Program Files`) offers an elevated relaunch:
+`powershell -NoProfile -Command Start-Process -Verb RunAs` on `java.home\bin\javaw.exe` with the
+running `java.class.path` and `CoopLauncherApp.APPLY_FIX_FLAG`, after which the unelevated instance
+closes. The classpath's double quotes are built PowerShell-side with `[char]34` so `ProcessBuilder`
+never sees a double quote to swallow. `CoopLauncherApp.elevatedRelaunchCommand` is unit-tested;
+`elevatedRelaunchFailure` (the UAC answer) is not testable and is kept to one `waitFor` and a log
+line.
+
 **`starfarer.api.jar` is not on that classpath, on purpose.** The launcher reuses `CoopPortMapper`,
 `CoopConnectionDoctor` and `CoopOptionsRegistry` out of `coop.jar`, and none of them link to the game
 API on the paths the launcher walks. Any launcher code path that reaches the API is a bug in the

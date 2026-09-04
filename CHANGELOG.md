@@ -82,8 +82,15 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   measure TCP, UDP and round trip against it.
 - An install check that names what is wrong: the missing classpath entry, an unticked mod, a mixed-up
   pair of jars, an unreadable settings file, and a leftover `-Dcoop.*` in `vmparams` that would
-  silently outrank everything you set in the launcher. It reports and never edits `vmparams` or
-  `enabled_mods.json`.
+  silently outrank everything you set in the launcher.
+- A **Fix** button on the two rows the launcher can put right itself. It adds
+  `..\mods\coop\jars\coop-forks.jar;` to the front of the classpath in `vmparams`, keeping a copy of
+  the old file as `vmparams.backup` and changing nothing else on the line, and it adds `coop` to
+  `mods\enabled_mods.json` without touching the other mods in the list. A Starsector update wipes the
+  classpath entry out again; the row goes red and the same button puts it back. If the game lives
+  under `Program Files`, where Windows refuses the write, the launcher offers to restart itself as
+  administrator. The by-hand instructions stay in `INSTALL.md` for the installs that refuse both, and
+  a leftover `-Dcoop.*` is never deleted for you.
 - The mod checks the Starsector it is running on against the one it was built for, and refuses to
   start a session on any other version with the code `COOP-GAME`. Parts of the mod are compiled
   against the game's own classes, so this is the failure that produced the strangest bug reports.
