@@ -3,8 +3,9 @@
 Plan reference: `COOP_MP_IMPLEMENTATION_PLAN_V1.md` line 1351 ("Spike first — do this step before any
 other in this phase"). Engine-facts block: lines 1318-1326.
 
-Harness: `src/main/java/coop/combat/CoopCombatSpike.java`, called once per frame from
-`CoopNetPump.advance` via `tickCombatSpike()`. Every spike is gated twice: `CoopDebug.diagnosticsEnabled()`
+Harness: `src/main/java/coop/combat/CoopCombatSpike.java`, removed 2026-09-04; see git history.
+While it existed it was called once per frame from `CoopNetPump.advance` via `tickCombatSpike()`.
+Every spike was gated twice: `CoopDebug.diagnosticsEnabled()`
 (JVM arg `-Dcoop.debug.diagnostics=true` or sector memory `$coopDebug`) plus a per-spike sector memory
 flag that the harness unsets when it fires.
 
@@ -458,8 +459,8 @@ if the pre-0.8 reading is right.
 
 ## Where each verdict landed in the implementation (2026-08-19)
 
-Phase 14 was implemented directly on these verdicts; the harness (`coop.combat.CoopCombatSpike`) is
-kept as the historical record and is not called from production code.
+Phase 14 was implemented directly on these verdicts; the harness (`coop.combat.CoopCombatSpike`) was
+removed 2026-09-04; see git history.
 
 - Verdict (a) &rarr; `coop.combat.CoopCustomsDialogStaging`. The `toff` flag set, the `$sourceMarket`
   pick, and the precondition logging were re-derived here rather than reused from the spike; the one

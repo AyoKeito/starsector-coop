@@ -15,7 +15,6 @@ import coop.campaign.CoopCampaignReplicator;
 import coop.combat.CoopBattleBridge;
 import coop.combat.CoopBattleResult;
 import coop.combat.CoopBattleResultReconciler;
-import coop.combat.CoopCombatSpike;
 import coop.combat.CoopNpcThreatWatcher;
 import coop.fleet.CoopFleetMirror;
 import coop.fleet.CoopFleetMirrorRegistry;
@@ -186,7 +185,6 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_BAR_SUPPRESSOR = "bar.suppressGeneration";
     private static final String SECTION_INTERACTION_GATE = "interaction.gate";
     private static final String SECTION_DEBUG_DIALOG_STATE = "debug.dialogState";
-    private static final String SECTION_COMBAT_SPIKE = "combat.spike";
     private static final String SECTION_REPLICATOR_SYNC = "replicator.sync";
     private static final String SECTION_REPLICATOR_WORLD_DELTAS = "replicator.worldDeltas";
     private static final String SECTION_REPLICATOR_ORBIT_SYNC = "replicator.orbitSync";
@@ -552,7 +550,6 @@ public class CoopNetPump implements EveryFrameScript {
     private int lastNpcMirrorIdsHash;
     private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
-    private final CoopCombatSpike combatSpike = new CoopCombatSpike();
     private final CoopBattleBridge battleBridge;
     private final CoopNpcThreatWatcher npcThreatWatcher;
     private final CoopBattleResultReconciler battleResultReconciler;
@@ -3150,8 +3147,6 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_INTERACTION_GATE, t);
         debugDialogState();
         t = profiler.split(SECTION_DEBUG_DIALOG_STATE, t);
-        tickCombatSpike();
-        t = profiler.split(SECTION_COMBAT_SPIKE, t);
         syncCampaignReplicator();
         t = profiler.split(SECTION_REPLICATOR_SYNC, t);
         campaignReplicator.tickWorldDeltas();
@@ -7356,20 +7351,6 @@ public class CoopNetPump implements EveryFrameScript {
             }
         } catch (RuntimeException | LinkageError ex) {
             // diagnostics must never disrupt the pump
-        }
-    }
-
-    /**
-     * Phase 14 spike harness (throwaway). Inert unless {@link CoopDebug#diagnosticsEnabled()} and one
-     * of the per-spike sector memory flags is set; see {@link CoopCombatSpike} and
-     * {@code docs/PHASE14_SPIKE_NOTES.md}.
-     */
-    private void tickCombatSpike() {
-        try {
-            combatSpike.maybeRun(Global.getSector(), service.role() == CoopConnectionRole.HOST,
-                    isGameplaySessionActive(), clockMillis.getAsLong());
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopNetPump.class, "Phase 14 spike harness failed", ex);
         }
     }
 
