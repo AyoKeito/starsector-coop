@@ -206,6 +206,93 @@ class CoopLauncherProbeTest {
         }
     }
 
+    /**
+     * net-fix-3: the listener answered with {@code readLine()}, which buffers until a newline
+     * arrives. A client that opened the socket and sent megabytes without one grew the launcher's
+     * heap for as long as it kept going, and the accept loop is serial, so it also denied the check
+     * to the real guest.
+     */
+    @Test
+    void anUnboundedRequestLineIsRefusedAndTheSocketClosed() throws Exception {
+        try (CoopLauncherProbe.HostListener listener =
+                     CoopLauncherProbe.HostListener.open(0, "0.1.0-test", LOOPBACK);
+             Socket client = new Socket()) {
+            client.connect(new InetSocketAddress(LOOPBACK, listener.port()), 3000);
+            client.setSoTimeout(10_000);
+            assertTrue(readLine(client).startsWith(CoopLauncherProbe.BANNER_PREFIX));
+
+            byte[] flood = new byte[CoopLauncherProbe.MAX_REQUEST_BYTES * 8];
+            java.util.Arrays.fill(flood, (byte) 'A');
+            try {
+                client.getOutputStream().write(flood);
+                client.getOutputStream().flush();
+            } catch (IOException ignored) {
+                // The listener may already have closed under us, which is the behaviour under test.
+            }
+
+            assertEquals(-1, client.getInputStream().read(),
+                    "the listener must close on an over-long request line, not keep buffering it");
+
+            // And the listener is still serving: the refusal ends one connection, not the check.
+            assertTrue(CoopLauncherProbe.GuestProber
+                    .probe(LOOPBACK.getHostAddress(), listener.port()).launcherAnswered());
+        }
+    }
+
+    /**
+     * net-fix-3, the other half: {@code setSoTimeout} bounds idle time only, so a client that sent
+     * one byte every few seconds could hold the serial accept loop open indefinitely. The deadline is
+     * absolute, measured from accept.
+     */
+    @Test
+    void aTricklingClientIsCutOffAtTheAbsoluteDeadline() throws Exception {
+        try (CoopLauncherProbe.HostListener listener =
+                     CoopLauncherProbe.HostListener.open(0, "0.1.0-test", LOOPBACK);
+             Socket client = new Socket()) {
+            client.connect(new InetSocketAddress(LOOPBACK, listener.port()), 3000);
+            client.setSoTimeout(15_000);
+            assertTrue(readLine(client).startsWith(CoopLauncherProbe.BANNER_PREFIX));
+
+            long start = System.currentTimeMillis();
+            // 512 bytes at one every 250 ms is over two minutes, so the request-length cap cannot be
+            // what ends this; only the wall clock can.
+            long limit = start + CoopLauncherProbe.CONNECTION_DEADLINE_MILLIS + 2000L;
+            boolean closed = false;
+            while (System.currentTimeMillis() < limit) {
+                try {
+                    // One byte, well inside the idle timeout, forever. Never a newline.
+                    client.getOutputStream().write('A');
+                    client.getOutputStream().flush();
+                } catch (IOException ex) {
+                    closed = true;
+                    break;
+                }
+                Thread.sleep(250L);
+            }
+            if (!closed) {
+                client.setSoTimeout(2000);
+                try {
+                    closed = client.getInputStream().read() < 0;
+                } catch (SocketTimeoutException ex) {
+                    closed = false;
+                }
+            }
+            assertTrue(closed, "the listener served a trickling client past its absolute deadline");
+        }
+    }
+
+    private static String readLine(Socket socket) throws IOException {
+        InputStream in = socket.getInputStream();
+        StringBuilder line = new StringBuilder();
+        int value;
+        while ((value = in.read()) >= 0 && value != '\n') {
+            if (value != '\r') {
+                line.append((char) value);
+            }
+        }
+        return line.toString();
+    }
+
     @Test
     void noncesAreHexAndCarryNoSpaces() {
         for (int i = 0; i < 200; i++) {

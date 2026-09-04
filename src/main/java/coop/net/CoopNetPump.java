@@ -377,7 +377,10 @@ public class CoopNetPump implements EveryFrameScript {
     /** Host-authoritative roster; on the guest, the mirror of the host's. */
     private final coop.session.CoopLobbyRoster lobbyRoster = new coop.session.CoopLobbyRoster();
     /** Inbound messages the pre-drain pulled off the transport but left for {@link #drainInbound()}. */
-    private final java.util.ArrayDeque<CoopMessages.Message> deferredInbound = new java.util.ArrayDeque<>();
+    private final java.util.ArrayDeque<DeferredInbound> deferredInbound = new java.util.ArrayDeque<>();
+    /** net-fix-2 counters: pre-drop messages the grace window let through, and ones it discarded. */
+    private long preDropMessagesApplied;
+    private long preDropMessagesDiscarded;
     private final coop.ui.CoopDialogController lobbyDialogs =
             new coop.ui.CoopDialogController("lobby", this::nowMillis);
     private final coop.ui.CoopDialogController connectingDialogs =
@@ -577,6 +580,13 @@ public class CoopNetPump implements EveryFrameScript {
     private final Supplier<String> storedCampaignIdSupplier;
     private final Consumer<String> campaignIdStore;
     private final BooleanSupplier adoptCampaignIdSupplier;
+    /**
+     * Burns the adopt-campaign consent at the moment it is acted on (net-fix-10). The gesture is a
+     * system property, and a new pump is built on every game load, so without this one
+     * {@code -Dcoop.adoptCampaignId=true} silently re-adopted the host's campaign id onto every
+     * further save loaded from the main menu in the same process.
+     */
+    private final Runnable adoptCampaignIdConsumer;
     private final Supplier<String> canonicalFingerprintSupplier;
     private final BooleanSupplier priorCoopSessionSupplier;
     private final CoopTimeLock timeLock;
@@ -692,6 +702,25 @@ public class CoopNetPump implements EveryFrameScript {
                        BooleanSupplier adoptCampaignIdSupplier,
                        Supplier<String> canonicalFingerprintSupplier,
                        BooleanSupplier priorCoopSessionSupplier) {
+        this(service, sessionState, clockMillis, manifestSupplier, ironModeSupplier,
+                hostSeedSupplier, sectorFingerprintSupplier, sectorSeedStringSupplier, timeLock,
+                storedCampaignIdSupplier, campaignIdStore, adoptCampaignIdSupplier,
+                canonicalFingerprintSupplier, priorCoopSessionSupplier,
+                () -> System.clearProperty(ADOPT_CAMPAIGN_ID_PROPERTY));
+    }
+
+    public CoopNetPump(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis,
+                       Supplier<CoopHandshakeManifest> manifestSupplier, BooleanSupplier ironModeSupplier,
+                       Supplier<CoopSeedSync.SeedData> hostSeedSupplier,
+                       Supplier<String> sectorFingerprintSupplier,
+                       Supplier<String> sectorSeedStringSupplier,
+                       CoopTimeLock timeLock,
+                       Supplier<String> storedCampaignIdSupplier,
+                       Consumer<String> campaignIdStore,
+                       BooleanSupplier adoptCampaignIdSupplier,
+                       Supplier<String> canonicalFingerprintSupplier,
+                       BooleanSupplier priorCoopSessionSupplier,
+                       Runnable adoptCampaignIdConsumer) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
@@ -703,6 +732,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.storedCampaignIdSupplier = Objects.requireNonNull(storedCampaignIdSupplier, "storedCampaignIdSupplier");
         this.campaignIdStore = Objects.requireNonNull(campaignIdStore, "campaignIdStore");
         this.adoptCampaignIdSupplier = Objects.requireNonNull(adoptCampaignIdSupplier, "adoptCampaignIdSupplier");
+        this.adoptCampaignIdConsumer = Objects.requireNonNull(adoptCampaignIdConsumer, "adoptCampaignIdConsumer");
         this.canonicalFingerprintSupplier = Objects.requireNonNull(canonicalFingerprintSupplier, "canonicalFingerprintSupplier");
         this.priorCoopSessionSupplier = Objects.requireNonNull(priorCoopSessionSupplier, "priorCoopSessionSupplier");
         this.timeLock = Objects.requireNonNull(timeLock, "timeLock");
@@ -789,6 +819,12 @@ public class CoopNetPump implements EveryFrameScript {
         // forced one behind the lobby release (releaseLobbyNow), and letting the periodic timer also
         // fire on the first frame would put two identical payloads on the wire back to back.
         this.nextStatsBroadcastAtMillis = now + STATS_BROADCAST_INTERVAL_MILLIS;
+        // net-fix-1: the outbound twin of dispatchInbound's grace whitelist, installed on the
+        // transport itself. Last, so every field the two predicates read is assigned. Semantic
+        // traffic written onto an unproven socket during a grace window is not delivered - the
+        // receiver's own whitelist drops it - so it has to stay queued rather than be written.
+        service.setOutboundWriteGate(
+                type -> peerProvenForOutbound() || allowedDuringReconnectGrace(type));
     }
 
     /**
@@ -810,6 +846,16 @@ public class CoopNetPump implements EveryFrameScript {
     /** Test-only read of the grace state machine. */
     CoopReconnectCoordinator reconnectCoordinatorForTest() {
         return reconnect;
+    }
+
+    /** Test read: pre-drop messages applied after a grace window opened; see {@link #survivesTheDropEdge}. */
+    long preDropMessagesAppliedForTest() {
+        return preDropMessagesApplied;
+    }
+
+    /** Test read: pre-drop messages the drop edge had already invalidated. */
+    long preDropMessagesDiscardedForTest() {
+        return preDropMessagesDiscarded;
     }
 
     // ---- Phase 30 agent-bridge accessors (dev tooling) -----------------------------------------
@@ -1603,7 +1649,10 @@ public class CoopNetPump implements EveryFrameScript {
      * tallier, so anything the guest holds is a strictly older copy of the same thing.
      */
     private void handleSessionStats(CoopMessages.Message message) {
-        if (service.role() != CoopConnectionRole.GUEST) {
+        // net-fix-4: the session gate the default dispatch arm applies to every other campaign
+        // message. SESSION_STATS and SHIP_LOST are routed around it by their own switch arms, so
+        // they have to carry it themselves.
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) {
             return;
         }
         try {
@@ -1619,13 +1668,25 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
-    /** Host: one hull the guest reported losing. */
+    /**
+     * Host: one hull the guest reported losing.
+     *
+     * <p>net-fix-4: gated three ways, because this arm of the dispatch switch bypasses the default
+     * arm's {@code isGameplaySessionActive()} check and the host's listener is open to the Internet.
+     * Any client that completes a TCP connect could otherwise send a well-formed SHIP_LOST and have
+     * {@code CoopSessionStats.player(id)} mint a column for a name it chose, indefinitely.
+     */
     private void handleShipLost(CoopMessages.Message message) {
-        if (service.role() != CoopConnectionRole.HOST) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
             return;
         }
         try {
             CoopMessages.ShipLost loss = CoopMessages.parseShipLost(message);
+            if (!isKnownSessionPlayerId(loss.playerId())) {
+                CoopLog.warn(CoopNetPump.class, "Coop ignoring SHIP_LOST for playerId="
+                        + loss.playerId() + ": not a player in this session");
+                return;
+            }
             // Dedup guarantee: the guest sends exactly one SHIP_LOST per hull it detected missing,
             // from a roster diff it then clears (see settleShipLosses). There is no rebroadcast and
             // no echo path, so the host counts what arrives.
@@ -1634,6 +1695,15 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply SHIP_LOST", ex);
         }
+    }
+
+    /** The two ids this session knows about; anything else is a stranger naming itself. */
+    private boolean isKnownSessionPlayerId(String playerId) {
+        if (playerId == null || playerId.trim().isEmpty()) {
+            return false;
+        }
+        String id = playerId.trim();
+        return id.equals(sessionState.localPlayerId()) || id.equals(sessionState.remotePlayerId());
     }
 
     // ---- Phase 21 ship-loss detection --------------------------------------------------------------
@@ -2966,6 +3036,9 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void advanceFrame(float amount) {
+        // net-fix-3: the transport's inbound frame and byte budgets are per campaign frame, and this
+        // is the one call per frame that opens them. First, before any flushOutbound() below.
+        service.beginFrame();
         // Instrumentation only (CoopFrameProfiler): dormant unless -Dcoop.debug.frameProfile=true or
         // the $coopFrameProfile memory flag is set, in which case each split() below is one clock read.
         // Disabled, every call here is a static boolean read and a return.
@@ -3838,6 +3911,18 @@ public class CoopNetPump implements EveryFrameScript {
         if (service.role() != CoopConnectionRole.GUEST || !reconnect.guestReconnecting()) {
             return;
         }
+        // net-fix-2: an accept can reach this handler with no socket under it - it arrived on the
+        // pre-drop connection, was parked by drainTerminalRejectsBeforeDrop, and is dispatched after
+        // the drop edge that killed the link. Resuming on it unpauses the guest against a host that
+        // cannot hear it, for as long as it takes the host's handshake deadline to force a fresh
+        // drop edge. The window stays open instead, and resumeRequestDue() re-asks on the next
+        // socket - which is the one exchange that can prove the link is really back.
+        if (!service.isConnected()) {
+            CoopLog.info(CoopNetPump.class, "Coop ignoring SESSION_RESUME_ACCEPT for session "
+                    + sessionState.sessionId() + ": there is no live connection to resume on;"
+                    + " the reconnect window keeps running and the request goes out again");
+            return;
+        }
         String accepted = CoopMessages.parseResumeSessionId(message);
         if (accepted == null || !accepted.equals(sessionState.sessionId())) {
             CoopLog.warn(CoopNetPump.class, "Coop SESSION_RESUME_ACCEPT named session " + accepted
@@ -3881,6 +3966,64 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.LOBBY_CHALLENGE
                 || type == CoopMessages.Type.PING
                 || type == CoopMessages.Type.PONG;
+    }
+
+    /**
+     * Of the messages that arrived over the <em>proven</em> pre-drop connection and were parked by
+     * {@link #drainTerminalRejectsBeforeDrop()}, the ones still worth applying once the drop edge has
+     * run (net-fix-2).
+     *
+     * <p>The rule is not "is it safe from a stranger" - these did not come from a stranger, they came
+     * from the partner, before the link died. The rule is "did the drop edge already destroy what
+     * this would have been applied to". {@link #detectPeerDisconnect()} clears the session token,
+     * rewinds the lobby round (hello/manifest/seed-lock flags, the outstanding password nonce), and
+     * runs {@link #resetInteractionState()}. So:
+     *
+     * <ul>
+     *   <li><b>Applied</b> - campaign deltas, events and snapshots. They describe the world, not this
+     *   connection: a MARKET_TXN the partner made a frame before its router died is as true after the
+     *   drop as before it, and dropping it is a silent divergence that survives the resume (the
+     *   forced rebroadcast heals host-to-guest snapshot state only, and nothing at all heals
+     *   guest-to-host events).</li>
+     *   <li><b>Discarded</b> - INTERACTION_* and DIALOG_BEGIN, because resetInteractionState() has
+     *   already released every claim they refer to and applying one re-creates the permanent
+     *   "Remote player is interacting" lock that reset exists to clear; the lobby, handshake,
+     *   seed-lock and resume vocabularies, because the drop edge rewound the round they belong to and
+     *   the new connection runs its own; LINK_STATUS/PING/PONG and READY_STATE, which measure or
+     *   describe a connection that no longer exists.</li>
+     * </ul>
+     *
+     * <p>Enumerated in full, with no {@code default -> true}: a message type added later must be
+     * argued onto this list rather than inherit a pass.
+     */
+    private static boolean survivesTheDropEdge(CoopMessages.Type type) {
+        return switch (type) {
+            // Campaign deltas and events: the world moved, and it stays moved.
+            case WORLD_DELTA, MARKET_OPEN, MARKET_SNAPSHOT, MARKET_TXN,
+                 RAID_RESULT, SHIP_LOST,
+                 COLONY_FOUNDED, COLONY_ABANDONED, COLONY_MGMT, COLONY_INCOME, EXPEDITION_WARNING,
+                 MISSION_POOL_SNAPSHOT, MISSION_CLAIM_REQUEST, MISSION_CLAIM_ACCEPT,
+                 MISSION_CLAIM_REJECT,
+                 REP_DELTA, GUEST_REP_DELTA, PLAYER_REP_SNAPSHOT, FACTION_REL_DELTA,
+                 ABILITY_ACTIVATE,
+                 BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
+                 SAVE_CHECKPOINT, RESPAWN_PLAYER, STALL_NOTICE,
+                 // Snapshots. Superseded by the resume's forced rebroadcast when one comes, and the
+                 // best available picture of the world when it does not.
+                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, FLEET_SNAPSHOT,
+                 FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
+                 TIME_SNAPSHOT, PAUSE_INTENT,
+                 OPTIONS_SNAPSHOT, OPTIONS_APPLIED -> true;
+            // Scoped to the connection the drop edge just tore down, or to state it just reset.
+            case INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
+                 DIALOG_BEGIN,
+                 HELLO, LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
+                 HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
+                 SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
+                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
+                 READY_STATE, FLEET_ROSTER_REQUEST, LINK_STATUS,
+                 PING, PONG, UDP_PROBE, PATH_PROBE, DISCONNECT -> false;
+        };
     }
 
     /**
@@ -4115,11 +4258,22 @@ public class CoopNetPump implements EveryFrameScript {
         CoopMessages.Message message;
         while ((message = service.pollInbound()) != null) {
             if (isTerminalRejectType(message.type())) {
-                dispatchOneInbound(message);
+                dispatchOneInbound(message, true);
             } else {
-                deferredInbound.add(message);
+                // net-fix-2: tagged proven. These bytes came off the socket that WAS the partner,
+                // before the drop edge existed; the grace whitelist a few lines later exists to
+                // filter whoever holds the slot AFTER it, and must not swallow the departing
+                // partner's last campaign deltas.
+                deferredInbound.add(new DeferredInbound(message, true));
             }
         }
+    }
+
+    /**
+     * An inbound message plus whether it arrived over the proven pre-drop connection; see
+     * {@link #drainTerminalRejectsBeforeDrop()} and {@link #survivesTheDropEdge}.
+     */
+    private record DeferredInbound(CoopMessages.Message message, boolean preDropProven) {
     }
 
     /**
@@ -4143,19 +4297,24 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void drainInbound() {
-        CoopMessages.Message message;
-        while ((message = nextInbound()) != null) {
-            dispatchOneInbound(message);
+        DeferredInbound next;
+        while ((next = nextInbound()) != null) {
+            dispatchOneInbound(next.message(), next.preDropProven());
         }
     }
 
     /** Anything the pre-drain set aside comes first, so the peer's order is the order we apply. */
-    private CoopMessages.Message nextInbound() {
-        CoopMessages.Message deferred = deferredInbound.poll();
-        return deferred != null ? deferred : service.pollInbound();
+    private DeferredInbound nextInbound() {
+        DeferredInbound deferred = deferredInbound.poll();
+        if (deferred != null) {
+            return deferred;
+        }
+        CoopMessages.Message message = service.pollInbound();
+        // Anything read from the socket now arrived AFTER the drop edge, from whoever holds the slot.
+        return message == null ? null : new DeferredInbound(message, false);
     }
 
-    private void dispatchOneInbound(CoopMessages.Message message) {
+    private void dispatchOneInbound(CoopMessages.Message message, boolean preDropProven) {
         logInbound(message);
         // Any inbound TCP message proves the peer's process is alive and its pump is running.
         // That is what lets the UDP-blocked rule tell "the network eats UDP" apart from "the peer
@@ -4167,7 +4326,7 @@ public class CoopNetPump implements EveryFrameScript {
         // session down. One bad message is a bug to log, never a peer to disconnect (Phase 12b).
         long dispatchStart = profiler.start();
         try {
-            dispatchInbound(message);
+            dispatchInbound(message, preDropProven);
         } catch (RuntimeException | LinkageError ex) {
             // LinkageError too (red-team C9): a handler that reaches an engine class this build
             // does not have throws Error, not Exception, and the whole point of this guard is
@@ -4180,7 +4339,7 @@ public class CoopNetPump implements EveryFrameScript {
         profiler.record(SECTION_BY_MESSAGE_TYPE[message.type().ordinal()], dispatchStart);
     }
 
-    private void dispatchInbound(CoopMessages.Message message) {
+    private void dispatchInbound(CoopMessages.Message message, boolean preDropProven) {
         // Phase 20.2. During a grace window the session record is deliberately still live, so
         // isGameplaySessionActive() is true and every campaign handler below would happily run — for
         // whoever happens to be on the far end of this socket, which has not yet proved it is the
@@ -4188,12 +4347,26 @@ public class CoopNetPump implements EveryFrameScript {
         // are dispatched. Pre-20.2 the teardown made this impossible by making the session inactive;
         // keeping the session is what re-opens the question.
         if (reconnect.active() && !allowedDuringReconnectGrace(message.type())) {
-            if (!graceTrafficDropWarned) {
-                graceTrafficDropWarned = true;
-                CoopLog.warn(CoopNetPump.class, "Coop ignoring type=" + message.type()
-                        + " from an unproven peer during the reconnect grace window");
+            if (preDropProven && survivesTheDropEdge(message.type())) {
+                // net-fix-2: not an unproven peer at all - this one arrived over the connection that
+                // died, and is the partner's last word on the campaign. Applied, and logged so the
+                // two machines' logs can be lined up over exactly what crossed the edge.
+                preDropMessagesApplied++;
+                CoopLog.info(CoopNetPump.class, "Coop applying pre-drop type=" + message.type()
+                        + " seq=" + message.seq() + " after the reconnect window opened");
+            } else {
+                if (preDropProven) {
+                    preDropMessagesDiscarded++;
+                    CoopLog.info(CoopNetPump.class, "Coop discarding pre-drop type=" + message.type()
+                            + " seq=" + message.seq()
+                            + ": the drop edge already reset what it would have applied to");
+                } else if (!graceTrafficDropWarned) {
+                    graceTrafficDropWarned = true;
+                    CoopLog.warn(CoopNetPump.class, "Coop ignoring type=" + message.type()
+                            + " from an unproven peer during the reconnect grace window");
+                }
+                return;
             }
-            return;
         }
         switch (message.type()) {
             case LOBBY_HELLO -> handleLobbyHello(message);
@@ -5051,6 +5224,7 @@ public class CoopNetPump implements EveryFrameScript {
             }
             if (adoptCampaignIdSupplier.getAsBoolean()) {
                 campaignIdStore.accept(hostCampaignId);
+                consumeAdoptCampaignIdConsent();
                 CoopLog.warn(CoopNetPump.class, "Coop campaign id adopted by explicit override ("
                         + ADOPT_CAMPAIGN_ID_PROPERTY + "=true): fresh guest campaign joins in-flight"
                         + " campaignId=" + hostCampaignId + "; fresh-start divergence knowingly accepted");
@@ -5065,6 +5239,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
         if (adoptCampaignIdSupplier.getAsBoolean()) {
             campaignIdStore.accept(hostCampaignId);
+            consumeAdoptCampaignIdConsent();
             CoopLog.warn(CoopNetPump.class, "Coop campaign id adopted by explicit override ("
                     + ADOPT_CAMPAIGN_ID_PROPERTY + "=true): host=" + hostCampaignId
                     + " replaced stored=" + stored + "; state divergence is knowingly accepted");
@@ -5074,6 +5249,22 @@ public class CoopNetPump implements EveryFrameScript {
                 "campaignId: host=" + hostCampaignId + " guest=" + stored
                         + "; guest save is not from this coop campaign. To adopt the host campaign anyway,"
                         + " relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true");
+    }
+
+    /**
+     * Burns the one-shot adopt consent, at the point it was actually acted on and nowhere else
+     * (net-fix-10). A lock that was rejected, or aborted before the adoption branch, must leave the
+     * gesture intact - the player asked for one adoption, not for a process-lifetime licence.
+     */
+    private void consumeAdoptCampaignIdConsent() {
+        try {
+            adoptCampaignIdConsumer.run();
+            CoopLog.info(CoopNetPump.class, "Coop consumed the -D" + ADOPT_CAMPAIGN_ID_PROPERTY
+                    + " consent; a further save loaded in this process will not adopt silently");
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not consume the -D"
+                    + ADOPT_CAMPAIGN_ID_PROPERTY + " consent", ex);
+        }
     }
 
     private boolean rejectCampaignId(CoopMessages.Message message, String reason) {

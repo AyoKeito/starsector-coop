@@ -325,4 +325,29 @@ class CoopSessionStatsTest {
         restored.noteBattle(HOST, true);
         assertEquals(1L, restored.player(HOST).battlesFought());
     }
+
+    /**
+     * net-fix-4, defence in depth. Columns are minted on demand from an id that came off the wire,
+     * and the lookup behind them is a linear scan, so an unbounded column list is an unbounded amount
+     * of work per message. The pump's own gates are what should stop a stranger's id reaching here;
+     * this is what bounds the damage if one ever does.
+     */
+    @Test
+    void thePlayerColumnListIsCapped() {
+        CoopSessionStats stats = new CoopSessionStats();
+        for (int i = 0; i < CoopSessionStats.MAX_PLAYER_COLUMNS; i++) {
+            stats.notePlayer("player-" + i, "Player " + i);
+        }
+        assertEquals(CoopSessionStats.MAX_PLAYER_COLUMNS, stats.playerIds().size());
+
+        stats.notePlayer("one-too-many", "Nobody");
+
+        assertEquals(CoopSessionStats.MAX_PLAYER_COLUMNS, stats.playerIds().size(),
+                "the cap must refuse the column, not grow past it");
+        assertFalse(stats.playerIds().contains("one-too-many"));
+        // Loudly, not with a throwaway object whose counters silently go nowhere.
+        assertThrows(IllegalStateException.class, () -> stats.player("one-too-many"));
+        // The players that do have columns are untouched.
+        assertEquals("Player 0", stats.playerName("player-0"));
+    }
 }

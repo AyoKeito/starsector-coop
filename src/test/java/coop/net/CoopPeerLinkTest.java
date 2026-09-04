@@ -273,12 +273,70 @@ class CoopPeerLinkTest {
         assertTrue(link.outboundDatagrams().isEmpty());
     }
 
+    // ---- the half-written frame (net-fix-1) ------------------------------------------------------
+
+    /**
+     * net-fix-1: {@code flushOutboundLocked} polls a message off the queue, encodes it, and parks the
+     * remainder in {@code pendingWrite} when the kernel buffer says "full". Before this, {@code
+     * detach()} nulled that buffer and the message existed nowhere else — so a MARKET_TXN or a
+     * COLONY_FOUNDED caught by a NAT drop mid-write was simply gone, on both sides, permanently.
+     */
+    @Test
+    void aHalfWrittenSemanticMessageGoesBackToTheHeadOfTheQueueWhenTheSocketDies() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.enqueue(snapshot(9L));
+        CoopMessages.Message inFlight = semantic(7L);
+        link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1, 2, 3}), inFlight);
+
+        link.detach();
+
+        assertEquals(2, link.outboundDepth(), "the in-flight message is owed a resend, not a funeral");
+        assertSame(inFlight, link.outbound().peek(),
+                "it was ahead of everything queued behind it and must stay ahead");
+        assertNull(link.pendingWrite());
+        assertNull(link.pendingWriteMessage());
+    }
+
+    /**
+     * The other half of net-fix-1: a verdict caught mid-write belongs to the connection that died.
+     * The next connection runs its own lobby round, so re-sending it would answer a question the new
+     * peer never asked — the exact failure {@code dropConnectionScopedOutbound} exists to prevent.
+     */
+    @Test
+    void aHalfWrittenConnectionScopedVerdictIsNotResent() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1, 2, 3}),
+                CoopMessages.handshakeResultReject(4L, 0L, "mods differ"));
+
+        link.detach();
+
+        assertEquals(0, link.outboundDepth(), "a dead connection's verdict is not the next peer's");
+        assertNull(link.pendingWriteMessage());
+    }
+
+    /** A frame that went out whole owes nothing; the next detach must not resurrect it. */
+    @Test
+    void aFullyWrittenFrameIsNotResentOnTheNextConnection() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1}), semantic(7L));
+        link.clearPendingWrite();
+
+        link.detach();
+
+        assertEquals(0, link.outboundDepth());
+    }
+
     // ---- warn-once flags -------------------------------------------------------------------------
 
     @Test
     void warnOnceFlagsFireExactlyOncePerConnection() throws Exception {
         CoopPeerLink link = link();
 
+        assertTrue(link.shouldWarnOversizedFrame());
+        assertFalse(link.shouldWarnOversizedFrame());
         assertTrue(link.shouldWarnForeignSource());
         assertFalse(link.shouldWarnForeignSource());
         assertTrue(link.shouldLogCandidateTimeout());
@@ -300,6 +358,13 @@ class CoopPeerLinkTest {
         // every connection after it, which is the run where the evidence was wanted.
         assertTrue(link.shouldWarnQueueDepth(), "a fresh connection re-arms the queue-depth warning");
         assertTrue(link.shouldWarnDatagramSendFailure());
+        assertTrue(link.shouldWarnOversizedFrame(),
+                "net-fix-3: one oversized-frame line per connection, not one per megabyte");
+    }
+
+    /** A semantic event: nothing coalesces it and nothing is allowed to lose it. */
+    private static CoopMessages.Message semantic(long seq) {
+        return new CoopMessages.Message(CoopMessages.Type.MARKET_TXN, SESSION, seq, 1000L, "{}");
     }
 
     private static CoopMessages.Message snapshot(long seq) {

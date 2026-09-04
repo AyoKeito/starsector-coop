@@ -3205,6 +3205,17 @@ class CoopNetPumpTest {
                                                     boolean adoptFlag, boolean priorCoopSession,
                                                     String guestFingerprint,
                                                     Supplier<String> canonicalSupplier) {
+        return pumpForGuestSeedLock(service, session, campaignIdStore, adoptFlag, priorCoopSession,
+                guestFingerprint, canonicalSupplier, () -> { });
+    }
+
+    /** net-fix-10: the same pump with a watchable consumer for the one-shot adopt consent. */
+    private static CoopNetPump pumpForGuestSeedLock(RecordingNetService service, CoopSessionState session,
+                                                    java.util.concurrent.atomic.AtomicReference<String> campaignIdStore,
+                                                    boolean adoptFlag, boolean priorCoopSession,
+                                                    String guestFingerprint,
+                                                    Supplier<String> canonicalSupplier,
+                                                    Runnable adoptConsentConsumer) {
         return new CoopNetPump(service, session, () -> 14000L,
                 () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
                 () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
@@ -3212,7 +3223,7 @@ class CoopNetPumpTest {
                 () -> "coop-seed",
                 new CoopTimeLock(),
                 campaignIdStore::get, campaignIdStore::set, () -> adoptFlag, canonicalSupplier,
-                () -> priorCoopSession);
+                () -> priorCoopSession, adoptConsentConsumer);
     }
 
     private static CoopMessages.Message seedLockRequestIn(RecordingNetService service) {
@@ -7340,5 +7351,198 @@ class CoopNetPumpTest {
         return coop.ui.CoopSessionIntelFeed.currentModel().events().stream()
                 .filter(e -> e.line().equals(text))
                 .count();
+    }
+
+    // ---- net-fix-2: the drop edge and the messages that crossed it -------------------------------
+
+    /**
+     * A resume accept can reach the guest with no socket under it: it arrived on the pre-drop
+     * connection, was parked by {@code drainTerminalRejectsBeforeDrop}, and is dispatched after the
+     * drop edge that killed the link. Resuming on it unpauses the guest against a host that cannot
+     * hear it, until the host's 15 s handshake deadline forces a fresh drop edge.
+     */
+    @Test
+    void aResumeAcceptWithNoLiveSocketDoesNotEndTheReconnectWindow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting(), "the window opened");
+
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 3L, 2000L));
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting(),
+                "an accept with no connection under it must not resume the session");
+        assertTrue(pump.pauseCoordinatorForBridge().reconnectHold(), "the hold stands");
+
+        // ...and the next real socket gets the request again, which is what actually proves the link.
+        service.connected = true;
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 4L, 3000L));
+        pump.advance(0f);
+        assertFalse(pump.reconnectCoordinatorForTest().active(),
+                "the same accept on a live socket resumes normally");
+    }
+
+    /**
+     * The parked messages arrived over the connection that WAS the partner, before the drop edge
+     * existed. The grace whitelist exists to filter whoever holds the slot after it, and used to
+     * swallow the partner's last campaign deltas — MARKET_TXN, COLONY_*, WORLD_DELTA consume — which
+     * nothing else heals, in either direction.
+     */
+    @Test
+    void aPreDropCampaignMessageIsStillAppliedAfterTheGraceWindowOpens() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+
+        pump.advance(0f);
+        // Queued before the drop is noticed, so the pre-drain parks it as proven.
+        service.inbound.add(new CoopMessages.Message(
+                CoopMessages.Type.MARKET_TXN, "session-a", 9L, 1500L, "{}"));
+        service.connected = false;
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(), "the window opened");
+        assertEquals(1L, pump.preDropMessagesAppliedForTest(),
+                "the partner's last campaign message must survive the drop edge");
+        assertEquals(0L, pump.preDropMessagesDiscardedForTest());
+    }
+
+    /**
+     * The other side of the same rule: the drop edge runs {@code resetInteractionState()}, so a claim
+     * parked before it would re-create the permanent "Remote player is interacting" lock that reset
+     * exists to clear.
+     */
+    @Test
+    void aPreDropInteractionMessageIsDiscardedBecauseTheDropEdgeAlreadyResetIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.interactionClaim("session-a", 9L, 1500L, "market-a",
+                "guest-player", "Guest"));
+        service.connected = false;
+        pump.advance(0f);
+
+        assertEquals(0L, pump.preDropMessagesAppliedForTest());
+        assertEquals(1L, pump.preDropMessagesDiscardedForTest(),
+                "a claim the drop edge already released must not come back");
+    }
+
+    // ---- net-fix-4: SHIP_LOST is not an open column factory --------------------------------------
+
+    @Test
+    void shipLostIsIgnoredBeforeTheSessionIsActive() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        // A host with no session at all: the listener is open, so this is what a stranger reaches.
+        CoopNetPump pump = new CoopNetPump(service, () -> 1000L);
+
+        service.inbound.add(CoopMessages.shipLost("session-a", 13L, 1000L, "guest-player",
+                "ISS Bad Idea", "Wolf", "Corvus", 42.5f, "battle"));
+        pump.advance(0f);
+
+        assertTrue(pump.sessionStatsForTest().playerIds().isEmpty(),
+                "a pre-session SHIP_LOST must not mint a stats column");
+    }
+
+    @Test
+    void shipLostForAnUnknownPlayerIdIsIgnored() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        CoopNetPump pump = livePump(service, session, () -> 1000L);
+
+        service.inbound.add(CoopMessages.shipLost("session-a", 13L, 1000L, "not-in-this-session",
+                "ISS Bad Idea", "Wolf", "Corvus", 42.5f, "battle"));
+        pump.advance(0f);
+
+        assertFalse(pump.sessionStatsForTest().playerIds().contains("not-in-this-session"),
+                "only the session's own player ids may open a column");
+        assertTrue(pump.sessionStatsForTest().shipLossLedger().isEmpty());
+    }
+
+    // ---- net-fix-10: the adopt-campaign gesture is one-shot --------------------------------------
+
+    @Test
+    void adoptingTheHostCampaignIdConsumesTheConsent() {
+        java.util.concurrent.atomic.AtomicReference<String> stored =
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-old");
+        java.util.concurrent.atomic.AtomicInteger consumed = new java.util.concurrent.atomic.AtomicInteger();
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host",
+                "campaign-host", false));
+
+        pumpForGuestSeedLock(service, session, stored, true, false, "fingerprint-host", () -> "",
+                consumed::incrementAndGet).advance(0f);
+
+        assertEquals("campaign-host", stored.get());
+        assertEquals(1, consumed.get(),
+                "the player consented to one adoption, not to a process-lifetime licence");
+    }
+
+    @Test
+    void aLockThatDoesNotAdoptLeavesTheConsentIntact() {
+        java.util.concurrent.atomic.AtomicReference<String> stored =
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-host");
+        java.util.concurrent.atomic.AtomicInteger consumed = new java.util.concurrent.atomic.AtomicInteger();
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        // The stored id already matches, so checkOrAdoptCampaignId returns before any adoption.
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host",
+                "campaign-host", false));
+
+        pumpForGuestSeedLock(service, session, stored, true, false, "fingerprint-host", () -> "",
+                consumed::incrementAndGet).advance(0f);
+
+        assertEquals(0, consumed.get(), "a lock that adopted nothing must not burn the gesture");
+    }
+
+    @Test
+    void aSecondPumpAfterTheConsentWasConsumedDoesNotAdopt() {
+        // The property is the gesture and a new pump is built on every game load, so this stands for
+        // "adopt once, then load a different co-op save from the main menu".
+        java.util.concurrent.atomic.AtomicReference<Boolean> consent =
+                new java.util.concurrent.atomic.AtomicReference<>(Boolean.TRUE);
+        java.util.concurrent.atomic.AtomicReference<String> stored =
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-old");
+
+        RecordingNetService first = new RecordingNetService(CoopConnectionRole.GUEST);
+        first.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host",
+                "campaign-host", false));
+        new CoopNetPump(first, guestSessionReadyForSeedLock(), () -> 14000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host", () -> "coop-seed", new CoopTimeLock(),
+                stored::get, stored::set, consent::get, () -> "", () -> false,
+                () -> consent.set(Boolean.FALSE)).advance(0f);
+        assertEquals("campaign-host", stored.get(), "the first load adopts");
+
+        // A different save, loaded in the same process.
+        java.util.concurrent.atomic.AtomicReference<String> otherSave =
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-somewhere-else");
+        RecordingNetService second = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState secondSession = guestSessionReadyForSeedLock();
+        second.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host",
+                "campaign-host", false));
+        new CoopNetPump(second, secondSession, () -> 14000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-host", () -> "coop-seed", new CoopTimeLock(),
+                otherSave::get, otherSave::set, consent::get, () -> "", () -> false,
+                () -> consent.set(Boolean.FALSE)).advance(0f);
+
+        assertEquals("campaign-somewhere-else", otherSave.get(),
+                "the consumed gesture must not silently re-adopt onto the next save");
+        assertEquals(CoopLobbyState.REJECTED, secondSession.connectionState());
     }
 }
