@@ -27,12 +27,33 @@ class CoopNpcFleetReplicatorTest {
     private final List<String> sent = new ArrayList<>();
 
     private CoopNpcFleetReplicator replicator() {
+        return replicator(new CoopStreamClock());
+    }
+
+    private CoopNpcFleetReplicator replicator(CoopStreamClock streamClock) {
         CoopSessionState session = new CoopSessionState();
         session.startHost("Host");
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
         return new CoopNpcFleetReplicator(new CoopNetService(), session, () -> 1000L,
-                new CoopStreamClock(), sent::add);
+                streamClock, sent::add);
+    }
+
+    /**
+     * The motion smoother divides a segment's travel by the segment's duration, and the receiver's
+     * Hermite multiplies the velocity that comes out by a stream-time interval. Measured on the wall
+     * clock, a fast-forwarded stride is FF times shorter than the game time it covers and every
+     * non-full-fidelity fleet went on the wire at FF times its true speed.
+     */
+    @Test
+    void motionSegmentsAreMeasuredOnStreamTimeNotWallTime() {
+        CoopStreamClock streamClock = new CoopStreamClock();
+        CoopNpcFleetReplicator replicator = replicator(streamClock);
+
+        streamClock.advance(0.5f, false);
+
+        assertEquals(500L, replicator.motionSampleClockMillis(),
+                "the wall clock supplier says 1000; the segment axis must be the sample axis");
     }
 
     private static CoopNpcFleetMotion motion(int index) {

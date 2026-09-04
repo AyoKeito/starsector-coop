@@ -1,9 +1,19 @@
 package coop.fleet;
 
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Proxy;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -117,6 +127,168 @@ class CoopFleetMirrorTest {
     void aNonEmptyPlayerRosterAppliesNormally() {
         assertFalse(CoopFleetMirror.shouldSkipRosterApply(true, 1));
         assertFalse(CoopFleetMirror.shouldSkipRosterApply(true, 30));
+    }
+
+    @Test
+    void anEmptySnapshotNeverCreatesAPlayerMirrorInTheFirstPlace() {
+        // The other half of the wipe guard: with no mirror yet, building one from a 0-member snapshot
+        // hands the engine a member-less CampaignFleet, which advance() despawns as NO_MEMBERS - and
+        // the next snapshot then builds another. Creation waits for a roster worth showing.
+        assertTrue(CoopFleetMirror.shouldDeferPlayerFleetCreation(false, 0));
+        assertFalse(CoopFleetMirror.shouldDeferPlayerFleetCreation(true, 0),
+                "a live mirror keeps its last roster instead - that is shouldSkipRosterApply's job");
+        assertFalse(CoopFleetMirror.shouldDeferPlayerFleetCreation(false, 1));
+    }
+
+    // ---- The same-hash fast path ------------------------------------------------------------------
+
+    @Test
+    void aMirrorWhoseRosterShrankUnderneathItIsRebuiltEvenAtTheSameHash() {
+        // The freeze the registry holds after a local battle promises that the host's authoritative
+        // set resurrects an unreported kill. It could not: the thawed apply carries the host's
+        // unchanged hash, so the gate took the fast path and updateMemberState bailed on the count
+        // mismatch, leaving a six-ship fleet mirrored as the three ships the battle left.
+        assertFalse(CoopFleetMirror.rosterStillIntact(3, 6));
+        assertTrue(CoopFleetMirror.rosterStillIntact(6, 6));
+    }
+
+    @Test
+    void anUnbuildableRosterStillDoesNotRebuildForever() {
+        // The count compared against is what the last rebuild actually BUILT, not what the snapshot
+        // asked for, or a roster with one unresolvable variant would rebuild on every set for the
+        // life of the fleet - the storm the retry latch exists to bound.
+        assertTrue(CoopFleetMirror.rosterStillIntact(4, 4), "built 4 of 6, and 4 are still there");
+        assertTrue(CoopFleetMirror.rosterStillIntact(-1, 6), "an unreadable fleet is not a shrink");
+        assertTrue(CoopFleetMirror.rosterStillIntact(0, -1), "nothing has been built yet");
+    }
+
+    // ---- Per-ship state pairing -------------------------------------------------------------------
+
+    @Test
+    void perShipStateFollowsTheShipWhenTheSenderReordersAtAnUnchangedHash() {
+        // The structural hash sorts, so a reorder alone never rebuilds the mirror. Paired by raw
+        // position, every ship would then wear a sibling's CR until the ship set itself changed.
+        List<String> built = List.of("m-wolf", "m-lasher");
+        List<CoopFleetSnapshot.Member> reordered = List.of(member("m-lasher"), member("m-wolf"));
+
+        int[] pairing = CoopFleetMirror.memberPairing(built, reordered);
+
+        assertNotNull(pairing);
+        assertEquals(1, pairing[0], "mirror slot 0 is the wolf, which is now member 1");
+        assertEquals(0, pairing[1]);
+    }
+
+    @Test
+    void anUnchangedOrderPairsByPositionWithNoPermutationAtAll() {
+        assertNull(CoopFleetMirror.memberPairing(List.of("m-wolf", "m-lasher"),
+                List.of(member("m-wolf"), member("m-lasher"))));
+    }
+
+    @Test
+    void anythingLessThanACleanOneToOneFallsBackToPosition() {
+        // Half a permutation is worse than none: the unmapped slots would take whatever was left.
+        assertNull(CoopFleetMirror.memberPairing(List.of("m-wolf"),
+                List.of(member("m-wolf"), member("m-lasher"))), "sizes disagree");
+        assertNull(CoopFleetMirror.memberPairing(List.of("m-wolf", "m-lasher"),
+                List.of(member("m-wolf"), member("m-hound"))), "a slot the snapshot does not name");
+        assertNull(CoopFleetMirror.memberPairing(List.of("m-wolf", "m-lasher"),
+                List.of(member("m-wolf"), member(""))), "an id-less member");
+        assertNull(CoopFleetMirror.memberPairing(List.of("m-wolf", "m-wolf"),
+                List.of(member("m-wolf"), member("m-wolf"))), "duplicate ids");
+        assertNull(CoopFleetMirror.memberPairing(null, List.of(member("m-wolf"))));
+    }
+
+    private static CoopFleetSnapshot.Member member(String id) {
+        return new CoopFleetSnapshot.Member(id, "wolf", "wolf_Assault", "Ship", "Cpt", 0.5f, 1f);
+    }
+
+    // ---- Ordering against the motion stream -------------------------------------------------------
+
+    @Test
+    void aSetOlderThanTheBufferedMotionIsNotAllowedToMoveTheMirrorBack() {
+        // The 1 Hz NPC set rides TCP and the motion stream rides UDP, so a set built before a jump can
+        // land after the datagrams that already carried the fleet through it. Re-placing the mirror
+        // from it would remove/add the entity, clear the interpolation buffer and hard-set the old
+        // position, for one interval, on every jump the set lags.
+        assertTrue(CoopFleetMirror.isStaleSample(12.5, 12.4));
+        assertTrue(CoopFleetMirror.isStaleSample(12.5, 12.5), "a repeat of the newest sample too");
+        assertFalse(CoopFleetMirror.isStaleSample(12.5, 12.6));
+        assertFalse(CoopFleetMirror.isStaleSample(Double.NaN, 12.6), "an empty buffer is never stale");
+    }
+
+    // ---- The battle pull-in shield ----------------------------------------------------------------
+
+    @Test
+    void aLiveMirrorGetsItsPullInShieldReAssertedNotJustSetAtCreation() {
+        // FLEET_IGNORES_OTHER_FLEETS is the only flag pullInNearbyFleets consults (it never calls
+        // canBeEngaged), and it lives in fleet memory that dialog staging and restores can drop.
+        FakeMemory memory = new FakeMemory();
+
+        CoopFleetMirror.assertIgnoresOtherFleets(fleetWith(memory));
+
+        assertEquals(Boolean.TRUE, memory.values.get(MemFlags.FLEET_IGNORES_OTHER_FLEETS));
+        assertEquals(1, memory.writes);
+    }
+
+    @Test
+    void aShieldThatIsAlreadyUpIsNotRewrittenOnEveryApply() {
+        FakeMemory memory = new FakeMemory();
+        memory.values.put(MemFlags.FLEET_IGNORES_OTHER_FLEETS, Boolean.TRUE);
+
+        CoopFleetMirror.assertIgnoresOtherFleets(fleetWith(memory));
+
+        assertEquals(0, memory.writes, "one memory read per apply, a write only when it is gone");
+    }
+
+    @Test
+    void aFleetThatCannotAnswerForItsMemoryNeverBreaksAnApply() {
+        CampaignFleetAPI throwing = (CampaignFleetAPI) Proxy.newProxyInstance(
+                CampaignFleetAPI.class.getClassLoader(),
+                new Class<?>[] {CampaignFleetAPI.class},
+                (proxy, method, args) -> {
+                    throw new IllegalStateException("no memory");
+                });
+
+        CoopFleetMirror.assertIgnoresOtherFleets(throwing);
+        CoopFleetMirror.assertIgnoresOtherFleets(null);
+    }
+
+    /** Just the two MemoryAPI calls the shield assert makes, with a write counter. */
+    private static final class FakeMemory {
+        final Map<String, Object> values = new HashMap<>();
+        int writes;
+
+        MemoryAPI proxy() {
+            return (MemoryAPI) Proxy.newProxyInstance(
+                    MemoryAPI.class.getClassLoader(),
+                    new Class<?>[] {MemoryAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getBoolean" -> Boolean.TRUE.equals(values.get((String) args[0]));
+                        case "set" -> {
+                            writes++;
+                            values.put((String) args[0], args[1]);
+                            yield null;
+                        }
+                        case "toString" -> "FakeMemory";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> throw new UnsupportedOperationException(method.getName());
+                    });
+        }
+    }
+
+    private static CampaignFleetAPI fleetWith(FakeMemory memory) {
+        MemoryAPI api = memory.proxy();
+        return (CampaignFleetAPI) Proxy.newProxyInstance(
+                CampaignFleetAPI.class.getClassLoader(),
+                new Class<?>[] {CampaignFleetAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getMemoryWithoutUpdate" -> api;
+                    case "toString" -> "FakeFleet";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     @Test

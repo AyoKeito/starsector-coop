@@ -124,6 +124,26 @@ class CoopGuestPresenceTest {
     }
 
     @Test
+    void aReleasedSlotIsRepublishedByTheNextTickInsteadOfTwoSecondsLater() {
+        // One pump frame that does not tick - a caught exception earlier in the frame, a tick-ordering
+        // skip - released the slot, and the 2 s pass interval then left it null for ~120 frames. With
+        // no presence entity the forked RouteManager measures distance to the host alone and despawns
+        // every route fleet around a guest parked far from them.
+        FakeFleet mirror = FakeFleet.withMemory(Map.of(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG, true));
+        FakeSector sector = new FakeSector(List.of(new FakeLocation(mirror)), null);
+        CoopGuestPresence presence = new CoopGuestPresence();
+
+        presence.tick(sector.proxy(), 0L);
+        CoopGuestPresence.frameBoundary();      // ticked
+        CoopGuestPresence.frameBoundary();      // missed frame: released
+        assertNull(CoopPresenceRegistry.get());
+
+        presence.tick(sector.proxy(), 16L);     // the very next frame, far inside the pass interval
+
+        assertNotNull(CoopPresenceRegistry.get());
+    }
+
+    @Test
     void resetReleasesThePresenceSlot() {
         FakeFleet mirror = FakeFleet.withMemory(Map.of(CoopNpcFleetReplicator.PLAYER_MIRROR_TAG, true));
         FakeSector sector = new FakeSector(List.of(new FakeLocation(mirror)), null);

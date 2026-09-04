@@ -14,6 +14,16 @@ package coop.fleet;
  * the cursor outright: replaying or slow-absorbing 30 s of motion is worse than the one visible jump
  * the mirrors' own teleport guard already handles.
  *
+ * <p><b>The re-seat is forward-only, and the cursor is bounded ahead of its target (2026-09-04).</b>
+ * While the stream is starved the target stands still and the cursor keeps advancing on local frame
+ * time, so a symmetric {@code |drift|} test made the cursor overrun by a full re-seat window and then
+ * snap <em>back</em> a second — once a second, for the whole outage. Every mirror hopped from its
+ * parked pose to the last received sample and re-coasted, a sawtooth that read as rubber-banding.
+ * Advancing past {@code target + }{@link #RESEAT_SECONDS} is now simply refused: the mirrors run out
+ * their starvation ladder ({@code CoopMotionInterpolator}: coast, decay, park) and stay parked, which
+ * is what the phase's acceptance criterion asks for. A cursor left <em>behind</em> its target by more
+ * than the window (a real outage, a resume) still re-seats, as before.
+ *
  * <p>Pure math, no engine types; the pump owns one per remote peer (exactly one in v1).
  */
 public final class CoopMotionTimeline {
@@ -86,7 +96,7 @@ public final class CoopMotionTimeline {
             return cursor;
         }
         double drift = target - cursor;
-        if (Math.abs(drift) > RESEAT_SECONDS) {
+        if (drift > RESEAT_SECONDS) {
             cursor = target;
             driftEma = 0.0;
             return cursor;
@@ -100,7 +110,13 @@ public final class CoopMotionTimeline {
             } else if (driftEma < -DEAD_ZONE_SECONDS) {
                 timescale = SLOWDOWN_TIMESCALE;
             }
-            cursor += gameDtSeconds * timescale;
+            // The cursor never runs more than one re-seat window past its target: with the stream
+            // starved the target stands still, and an unbounded cursor would walk off it forever.
+            // Monotonic on purpose — min() alone would rewind the cursor whenever a widened delay
+            // moved the target back under it, and a rewind is the visible hop this bound exists to
+            // remove. See the starvation note on the class.
+            cursor = Math.min(cursor + gameDtSeconds * timescale,
+                    Math.max(cursor, target + RESEAT_SECONDS));
         }
         return cursor;
     }

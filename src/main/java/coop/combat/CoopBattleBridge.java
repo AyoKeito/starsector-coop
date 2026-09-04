@@ -1421,6 +1421,11 @@ public final class CoopBattleBridge {
      * {@link #buildResult} turns the first into a destruction report — so without the engine roster
      * cross-check below, one throw on this side despawns a live fleet on the other. A roster the
      * engine says is non-empty but that captured nothing is reported as unreadable, not as a loss.
+     *
+     * <p>Same reasoning one step further (2026-09-04): a roster that captured <em>some</em> of its
+     * ships is short by the rest, and {@code CoopBattleResultReconciler.applySurvivingRoster} deletes
+     * every ship the survivor list does not name. A partial read is therefore unreadable here too —
+     * the omission costs one unreconciled fleet, the alternative costs real ships.
      */
     private static List<CoopFleetSnapshot.Member> safeMembers(CampaignFleetAPI fleet) {
         List<FleetMemberAPI> engineRoster;
@@ -1429,12 +1434,16 @@ public final class CoopBattleBridge {
         } catch (RuntimeException | LinkageError ex) {
             return null;
         }
-        List<CoopFleetSnapshot.Member> members;
+        CoopFleetSnapshotFactory.Capture capture;
         try {
-            members = CoopFleetSnapshotFactory.captureMembers(fleet);
+            capture = CoopFleetSnapshotFactory.captureRoster(fleet);
         } catch (RuntimeException | LinkageError ex) {
             return null;
         }
+        if (capture.partial()) {
+            return null;
+        }
+        List<CoopFleetSnapshot.Member> members = capture.members();
         return members.isEmpty() && engineRoster != null && !engineRoster.isEmpty() ? null : members;
     }
 

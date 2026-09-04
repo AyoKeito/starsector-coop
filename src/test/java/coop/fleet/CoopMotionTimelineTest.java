@@ -97,6 +97,48 @@ class CoopMotionTimelineTest {
         assertEquals(40.0 - DELAY, timeline.advance(0.016), 1e-9);
     }
 
+    /**
+     * The starved-stream sawtooth (2026-09-04). With the target frozen and the game unpaused the
+     * cursor used to overrun by a full re-seat window, snap back a second, and do it again roughly
+     * once a second for the whole outage — every mirror hopping from its parked pose back to the last
+     * received sample and re-coasting. A cursor that is ahead of its target is starved, not out of
+     * sync; it parks instead.
+     */
+    @Test
+    void aStarvedStreamParksTheCursorInsteadOfRewindingItOnceASecond() {
+        timeline.noteSample(10.0);
+        double previous = timeline.advance(0.1);
+
+        for (int frame = 0; frame < 300; frame++) {   // 30 s of frames with nothing arriving
+            double cursor = timeline.advance(0.1);
+            assertTrue(cursor >= previous - 1e-9,
+                    "the cursor rewound from " + previous + " to " + cursor);
+            previous = cursor;
+        }
+
+        assertTrue(timeline.cursor() <= (10.0 - DELAY) + CoopMotionTimeline.RESEAT_SECONDS + 1e-9,
+                "a starved cursor must stop, not walk off: " + timeline.cursor());
+        // Far enough past the last sample that CoopMotionInterpolator's ladder has coasted, decayed
+        // and parked the mirror — the outcome the phase's acceptance criterion asks for.
+        assertTrue(timeline.cursor() - 10.0 >= CoopMotionInterpolator.EXTRAPOLATION_CAP_SECONDS
+                        + CoopMotionInterpolator.DECAY_WINDOW_SECONDS,
+                "the ladder must still run out: " + (timeline.cursor() - 10.0));
+    }
+
+    @Test
+    void trafficResumingAfterAStarvedStretchStillReSeatsForward() {
+        timeline.noteSample(10.0);
+        timeline.advance(0.1);
+        for (int frame = 0; frame < 300; frame++) {
+            timeline.advance(0.1);
+        }
+
+        timeline.noteSample(40.0);
+
+        assertEquals(40.0 - DELAY, timeline.advance(0.1), 1e-9,
+                "a cursor left far behind a resumed stream still re-seats");
+    }
+
     @Test
     void pausedFramesFreezeTheCursor() {
         timeline.noteSample(10.0);

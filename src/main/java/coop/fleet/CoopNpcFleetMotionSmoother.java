@@ -35,7 +35,9 @@ import java.util.Map;
  * through here; anything the host is looking at keeps the untouched engine values, so the smoothing
  * cannot regress the case that already worked. A fleet that changes location, or that has not been
  * seen before, snaps -- no interpolation across a system boundary. A fleet the engine has stopped
- * moving converges on its true position and stays there. Nothing here can throw or block.
+ * moving converges on its true position and stays there, and once a stride has passed with no
+ * movement it reports the engine's own velocity again rather than the spent segment's average.
+ * Nothing here can throw or block.
  *
  * <p>This is a source-side stand-in for the guest-side dead reckoning of Phase 29 M1; the host is
  * the right place for it because the staircase is a property of the host's simulation, not of the
@@ -103,6 +105,17 @@ public final class CoopNpcFleetMotionSmoother {
             track.curAtMillis = nowMillis;
         }
 
+        if (spent(nowMillis - track.curAtMillis)) {
+            // The engine has not moved this fleet for longer than one of its own strides, so it is
+            // parked, not mid-segment. Collapse the segment onto the current position: without this
+            // prev != cur stays true for the rest of the track's life, the parked branch below is
+            // unreachable after the first real move, and every later sample reports the long-finished
+            // segment's average velocity — which a starved receiver then dead-reckons with, coasting
+            // the mirror off a fleet that has been standing still for a minute.
+            track.prevX = track.curX;
+            track.prevY = track.curY;
+        }
+
         float progress = progress(nowMillis - track.curAtMillis, track.segmentMillis);
         float outX = track.prevX + (track.curX - track.prevX) * progress;
         float outY = track.prevY + (track.curY - track.prevY) * progress;
@@ -135,6 +148,15 @@ public final class CoopNpcFleetMotionSmoother {
             return MIN_SEGMENT_MILLIS;
         }
         return Math.min(measuredMillis, MAX_SEGMENT_MILLIS);
+    }
+
+    /**
+     * True when a segment that started {@code sinceMillis} ago is not just finished but stale: the
+     * engine's own stride for a coarse system is ~1 s, so nothing new by {@link #MAX_SEGMENT_MILLIS}
+     * means the fleet stopped rather than that the next stride is late.
+     */
+    static boolean spent(long sinceMillis) {
+        return sinceMillis > MAX_SEGMENT_MILLIS;
     }
 
     static float progress(long sinceMillis, long segmentMillis) {

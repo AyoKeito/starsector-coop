@@ -144,7 +144,8 @@ public final class CoopNpcActionTextCapture {
         }
 
         view.avoidingPlayerHalfheartedly = avoidingPlayerHalfheartedly(fleet);
-        view.avoidingAbyssalHyperspace = avoidingAbyssalHyperspace(fleet);
+        view.abyssalFlag = abyssalFlag(fleet);
+        view.avoidingAbyssalHyperspace = view.abyssalFlag && inHyperspace(fleet);
         return view;
     }
 
@@ -156,12 +157,29 @@ public final class CoopNpcActionTextCapture {
         }
     }
 
-    private static boolean avoidingAbyssalHyperspace(CampaignFleetAPI fleet) {
+    /**
+     * The raw {@code $avoidingAbyssalHyperspace} memory flag, unqualified by where the fleet is.
+     *
+     * <p>Vanilla reads it exactly once and uses it twice, and the two uses are not the same test
+     * ({@code StandardTooltipV2$9}: the local is assigned inside
+     * {@code if ((bl = ...getBoolean(...)) && ...isInHyperspace())}, so it always carries the raw
+     * flag, and the trailing "looking for" block later gates on {@code !bl} alone). Folding the
+     * hyperspace qualifier into the one field made a fleet that still carried the flag outside
+     * hyperspace resolve to "looking for ..." here and to its assignment text in the vanilla tooltip
+     * this class transcribes line by line.
+     */
+    private static boolean abyssalFlag(CampaignFleetAPI fleet) {
         try {
             MemoryAPI memory = fleet.getMemoryWithoutUpdate();
-            return memory != null
-                    && memory.getBoolean(MemFlags.AVOIDING_ABYSSAL_HYPERSPACE)
-                    && fleet.isInHyperspace();
+            return memory != null && memory.getBoolean(MemFlags.AVOIDING_ABYSSAL_HYPERSPACE);
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
+    }
+
+    private static boolean inHyperspace(CampaignFleetAPI fleet) {
+        try {
+            return fleet.isInHyperspace();
         } catch (RuntimeException | LinkageError ignored) {
             return false;
         }
@@ -286,8 +304,9 @@ public final class CoopNpcActionTextCapture {
                 }
             }
 
-            if (targetFleet != null && !targetFleet.visibleToObserved()
-                    && !view.avoidingAbyssalHyperspace) {
+            // Vanilla gates this block on the RAW memory flag, not on the hyperspace-qualified text
+            // condition above it — see abyssalFlag().
+            if (targetFleet != null && !targetFleet.visibleToObserved() && !view.abyssalFlag) {
                 text = "looking for";
                 if (assignment != FleetAssignment.STANDING_DOWN) {
                     if (targetFleet.isGuestMirror() || targetFleet.isHostPlayer()) {
@@ -427,6 +446,9 @@ public final class CoopNpcActionTextCapture {
         /** Already-invoked {@code FleetActionTextProvider.getActionText(fleet)}. */
         String providerActionText;
         boolean avoidingPlayerHalfheartedly;
+        /** Raw {@code $avoidingAbyssalHyperspace}; gates the trailing "looking for" block. */
+        boolean abyssalFlag;
+        /** {@link #abyssalFlag} and in hyperspace; the "avoiding abyssal hyperspace" text itself. */
         boolean avoidingAbyssalHyperspace;
         float distanceToLargestEnemy;
         /** What the guest calls the host player; substituted wherever vanilla says "your fleet". */

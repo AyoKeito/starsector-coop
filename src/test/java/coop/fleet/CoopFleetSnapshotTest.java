@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -277,6 +278,36 @@ class CoopFleetSnapshotTest {
         assertTrue(snapshot.fleetHash().startsWith(snapshot.fleetHash16()));
         assertEquals("abc", CoopFleetSnapshot.hash16("abc"), "shorter hashes pass through");
         assertEquals("", CoopFleetSnapshot.hash16(null));
+    }
+
+    /**
+     * The tick carries no member ids, so the only thing that can pair its state to the roster's ships
+     * is an order both ends derive the same way. The capture order is not that order — the hash sorts,
+     * so a reordered fleet is the same hash and the roster is never resent — which is why the tick
+     * emits in {@code canonicalOrderIndexes} order and the cache reads it back the same way.
+     */
+    @Test
+    void tickStateRidesInTheHashesCanonicalOrderNotTheCaptureOrder() {
+        CoopFleetSnapshot.Member wolf = new CoopFleetSnapshot.Member(
+                "m1", "wolf", "wolf_Assault", "Wolf", "Cpt", 0.1f, 0.11f);
+        CoopFleetSnapshot.Member lasher = new CoopFleetSnapshot.Member(
+                "m2", "lasher", "lasher_CS", "Lasher", "Cpt", 0.2f, 0.22f);
+        CoopFleetSnapshot.Member onslaught = new CoopFleetSnapshot.Member(
+                "m3", "onslaught", "onslaught_Standard", "Onslaught", "Cpt", 0.3f, 0.33f);
+
+        CoopFleetSnapshot captured = CoopFleetSnapshot.create("p1", "Alice", "corvus",
+                0f, 0f, 0f, 0f, "player", true, sensors(650f, 420f),
+                List.of(onslaught, wolf, lasher));
+
+        CoopFleetSnapshot.Tick tick = CoopFleetSnapshot.Tick.of(captured);
+
+        assertEquals(List.of(0.1f, 0.2f, 0.3f), List.of(
+                tick.members().get(0).cr(),
+                tick.members().get(1).cr(),
+                tick.members().get(2).cr()));
+        assertArrayEquals(new int[] {1, 2, 0},
+                CoopFleetSnapshot.canonicalOrderIndexes(captured.members()),
+                "m1, m2, then m3 - the order the hash itself sorts into");
     }
 
     @Test

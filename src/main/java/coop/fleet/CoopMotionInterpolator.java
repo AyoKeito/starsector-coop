@@ -97,6 +97,16 @@ public final class CoopMotionInterpolator {
     }
 
     /**
+     * Stream time of the newest queued sample, or NaN while the buffer is empty. Read by the mirror to
+     * recognise a record that is older than what it has already consumed — {@link #addSample} drops
+     * one of those itself, but the caller has placement work it must skip too.
+     */
+    public double newestSampleTime() {
+        Sample last = samples.peekLast();
+        return last == null ? Double.NaN : last.time();
+    }
+
+    /**
      * The pose at the render cursor, or null while the buffer is empty. Consumed samples (older than
      * the segment bracketing the cursor) are pruned as the cursor passes them.
      */

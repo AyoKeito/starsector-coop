@@ -112,6 +112,42 @@ class CoopNpcFleetMotionSmootherTest {
         assertEquals(300f, smoother.smooth(FLEET, ASKONIA, 300f, 0f, 300f, 0f, 9000L).x(), TOL);
     }
 
+    @Test
+    void aFleetThatMovedAndThenStoppedReportsItsEngineVelocityAgain() {
+        // Position converged but velocity did not: prev != cur stayed true for the rest of the
+        // track's life, so the parked branch was unreachable after the first real move and every
+        // later sample re-reported the spent segment's 300 u/s. A receiver whose stream then stopped
+        // dead-reckoned on that, coasting the mirror ~100 su off a fleet standing still.
+        CoopNpcFleetMotionSmoother smoother = new CoopNpcFleetMotionSmoother();
+        smoother.smooth(FLEET, ASKONIA, 0f, 0f, 0f, 0f, 0L);
+        smoother.smooth(FLEET, ASKONIA, 300f, 0f, 300f, 0f, 1000L);
+
+        // One stride later the engine has still not moved it: the segment is spent, not late.
+        CoopNpcFleetMotionSmoother.Motion parked =
+                smoother.smooth(FLEET, ASKONIA, 300f, 0f, 0f, 0f, 3000L);
+
+        assertEquals(300f, parked.x(), TOL);
+        assertEquals(0f, parked.y(), TOL);
+        assertEquals(0f, parked.velocityX(), TOL, "a parked fleet must report the engine's velocity");
+        assertEquals(0f, parked.velocityY(), TOL);
+    }
+
+    @Test
+    void aStalledSegmentIsNotCollapsedBeforeTheEngineStrideIsUp() {
+        // The stride is ~1 s and samples are 10 Hz, so "no movement yet" is the ordinary mid-segment
+        // state: collapsing on the first idle sample would throw away the interpolation entirely.
+        CoopNpcFleetMotionSmoother smoother = new CoopNpcFleetMotionSmoother();
+        smoother.smooth(FLEET, ASKONIA, 0f, 0f, 0f, 0f, 0L);
+        smoother.smooth(FLEET, ASKONIA, 300f, 0f, 300f, 0f, 1000L);
+
+        CoopNpcFleetMotionSmoother.Motion midSegment =
+                smoother.smooth(FLEET, ASKONIA, 300f, 0f, 0f, 0f, 1500L);
+
+        assertEquals(300f, midSegment.velocityX(), TOL, "still gliding the last segment");
+        assertTrue(CoopNpcFleetMotionSmoother.spent(CoopNpcFleetMotionSmoother.MAX_SEGMENT_MILLIS + 1L));
+        assertTrue(!CoopNpcFleetMotionSmoother.spent(CoopNpcFleetMotionSmoother.MAX_SEGMENT_MILLIS));
+    }
+
     // ---- Snapping instead of interpolating -------------------------------------------------------
 
     @Test

@@ -234,6 +234,34 @@ class CoopNpcActionTextCaptureTest {
         assertEquals("scavenging the debris field", CoopNpcActionTextCapture.resolve(view));
     }
 
+    /**
+     * Vanilla reads {@code $avoidingAbyssalHyperspace} once and uses it twice, and the two uses are
+     * not the same test: the "avoiding abyssal hyperspace" text needs the flag <em>and</em>
+     * {@code isInHyperspace()}, while the trailing "looking for" block is gated on the raw flag alone
+     * ({@code StandardTooltipV2$9}). Folding the qualifier into one field made a fleet that still
+     * carried the flag outside hyperspace read as "looking for ..." on the mirror and as its
+     * assignment on the host.
+     */
+    @Test
+    void aLingeringAbyssalFlagOutsideHyperspaceKeepsTheAssignmentWording() {
+        CoopNpcActionTextCapture.View view = assignment(FleetAssignment.GO_TO_LOCATION);
+        view.assignmentActionText = "travelling to Jangala";
+        view.tacticalTarget = CoopNpcActionTextCapture.Target.fleet("Pirate Raiders").notVisible();
+        view.abyssalFlag = true;
+        view.avoidingAbyssalHyperspace = false;   // the fleet has left hyperspace
+
+        assertEquals("travelling to Jangala", CoopNpcActionTextCapture.resolve(view));
+    }
+
+    @Test
+    void anInvisibleTargetWithoutTheFlagStillBecomesLookingFor() {
+        CoopNpcActionTextCapture.View view = assignment(FleetAssignment.GO_TO_LOCATION);
+        view.assignmentActionText = "travelling to Jangala";
+        view.tacticalTarget = CoopNpcActionTextCapture.Target.fleet("Pirate Raiders").notVisible();
+
+        assertEquals("looking for Pirate Raiders", CoopNpcActionTextCapture.resolve(view));
+    }
+
     @Test
     void abyssalHyperspaceAvoidanceOverridesTheRest() {
         CoopNpcActionTextCapture.View view = assignment(FleetAssignment.GO_TO_LOCATION);

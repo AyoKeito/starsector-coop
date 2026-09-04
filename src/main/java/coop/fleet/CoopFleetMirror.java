@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.ai.CampaignFleetAIAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
@@ -17,7 +18,9 @@ import coop.util.CoopLog;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -128,6 +131,17 @@ public class CoopFleetMirror implements CoopNpcMirror {
      */
     private float[] crInvalidationReferences;
 
+    /**
+     * The sender-side member ids of the ships {@link #rebuildRoster} actually built, in the order it
+     * built them — i.e. the mirror's live slot order. Two jobs: it pairs incoming per-ship state to
+     * the slot that ship really occupies even when the sender's list order has moved under an
+     * unchanged structural hash, and its size is what the same-hash fast path checks the live
+     * {@code FleetData} against (see {@link #rosterStillIntact}). Empty until the first rebuild.
+     */
+    private List<String> builtMemberIds = List.of();
+    /** {@link #builtMemberIds}'s size, or -1 while no rebuild has run yet (an empty build is 0). */
+    private int builtMemberCount = -1;
+
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
     }
@@ -156,6 +170,11 @@ public class CoopFleetMirror implements CoopNpcMirror {
             return;
         }
         try {
+            if (shouldDeferPlayerFleetCreation(mirrorFleet != null && mirrorFleet.isAlive(),
+                    snapshot.members().size())) {
+                noteEmptyPlayerRosterSkipped(snapshot.fleetHash());
+                return;
+            }
             ensurePlayerFleet(snapshot, localPlayerFactionId);
             placeInLocation(location, snapshot.x(), snapshot.y());
             feedMotion(sampleTimeSeconds, snapshot.x(), snapshot.y(),
@@ -192,9 +211,11 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
         try {
             ensureNpcFleet(snapshot);
-            placeInLocation(location, snapshot.x(), snapshot.y());
-            feedMotion(sampleTimeSeconds, snapshot.x(), snapshot.y(),
-                    snapshot.velocityX(), snapshot.velocityY());
+            if (!isStaleSample(motionInterpolator.newestSampleTime(), sampleTimeSeconds)) {
+                placeInLocation(location, snapshot.x(), snapshot.y());
+                feedMotion(sampleTimeSeconds, snapshot.x(), snapshot.y(),
+                        snapshot.velocityX(), snapshot.velocityY());
+            }
             acceptTransponder(snapshot.transponderOn());
             acceptSensors(snapshot.sensors());
             refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
@@ -305,6 +326,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private void ensurePlayerFleet(CoopFleetSnapshot snapshot, String localPlayerFactionId) {
         if (mirrorFleet != null && mirrorFleet.isAlive()) {
+            assertIgnoresOtherFleets(mirrorFleet);
             return;
         }
         String factionId = CoopPresenceIndicator.presenceFactionId(localPlayerFactionId);
@@ -344,6 +366,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         String label = snapshot.name().isEmpty() ? DEFAULT_NPC_NAME : snapshot.name();
         if (mirrorFleet != null && mirrorFleet.isAlive()) {
             refreshIdentity(label, factionId);
+            assertIgnoresOtherFleets(mirrorFleet);
             return;
         }
         mirrorFleet = Global.getFactory().createEmptyFleet(factionId, label, true);
@@ -364,6 +387,30 @@ public class CoopFleetMirror implements CoopNpcMirror {
         CoopLog.info(CoopFleetMirror.class,
                 "Created coop NPC mirror fleet coopFleetId=" + snapshot.coopFleetId()
                         + " name=" + label + " faction=" + factionId);
+    }
+
+    /**
+     * Re-asserts the battle pull-in shield on a mirror that already exists (2026-09-04). The flag is
+     * set once at creation, but it lives in the fleet's memory and the memory outlives this class's
+     * knowledge of it: anything that copies, restores or rebuilds a mirror's memory — the customs
+     * staging path did exactly that until {@code CoopCustomsDialogStaging.restoreEngagementShield}
+     * (c5caed1) — leaves the mirror joinable by {@code FleetInteractionDialogPluginImpl
+     * .pullInNearbyFleets}, which consults this flag and nothing else (never {@code canBeEngaged()}).
+     * Defence in depth on the snapshot path: one memory read per apply, a write only when the flag is
+     * actually gone.
+     */
+    static void assertIgnoresOtherFleets(CampaignFleetAPI fleet) {
+        if (fleet == null) {
+            return;
+        }
+        try {
+            MemoryAPI memory = fleet.getMemoryWithoutUpdate();
+            if (memory != null && !memory.getBoolean(MemFlags.FLEET_IGNORES_OTHER_FLEETS)) {
+                memory.set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+            }
+        } catch (RuntimeException ignored) {
+            // A mirror that cannot answer for its own memory is not worth aborting an apply over.
+        }
     }
 
     /**
@@ -686,15 +733,31 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * a ship) hashes exactly the same as the good snapshot it came from, so committing it means the
      * mirror never gets another chance. One retry costs a single extra rebuild and covers the transient
      * causes; after that the hash is accepted so an genuinely unbuildable roster cannot rebuild forever.
+     *
+     * <p><b>The gate also has to notice the roster shrinking underneath it (2026-09-04).</b> A local
+     * battle can destroy ships out of a live mirror's {@code FleetData} — the freeze
+     * {@code CoopFleetMirrorRegistry} holds afterwards promises that the host's authoritative set
+     * resurrects an unreported kill once the freeze times out, and that promise was not kept: the
+     * thawed apply arrives with the host's unchanged hash, takes this fast path, and
+     * {@link #updateMemberState} bails on the member-count mismatch, so the mirror wears its shrunken
+     * roster until the host fleet's own roster changes. Comparing the live count against
+     * {@link #builtMemberIds} (what the last rebuild actually produced, <em>not</em> what the snapshot
+     * asked for) forces the rebuild without re-opening the unbuildable-roster storm the latch above
+     * exists to prevent.
      */
     private void refreshRosterIfChanged(String fleetHash, List<CoopFleetSnapshot.Member> members) {
         if (Objects.equals(fleetHash, lastFleetHash)) {
-            // Same ship set: keep the roster and track the slow-moving repair state in place. The
-            // hash is structural on purpose — CR/hull recovery used to flip it every second or two
-            // per damaged fleet and the resulting rebuild storm dropped the guest to 39 fps
-            // (2026-08-17); see CoopFleetSnapshot.computeFleetHash.
-            updateMemberState(members);
-            return;
+            // One read of the live roster, shared with the update below: this runs at snapshot rate
+            // for every mirrored fleet in the sector.
+            List<FleetMemberAPI> current = mirrorFleet.getFleetData().getMembersListCopy();
+            if (rosterStillIntact(current.size(), builtMemberCount)) {
+                // Same ship set: keep the roster and track the slow-moving repair state in place. The
+                // hash is structural on purpose — CR/hull recovery used to flip it every second or two
+                // per damaged fleet and the resulting rebuild storm dropped the guest to 39 fps
+                // (2026-08-17); see CoopFleetSnapshot.computeFleetHash.
+                updateMemberState(current, members);
+                return;
+            }
         }
         boolean complete = rebuildRoster(members, fleetHash);
         if (shouldCommitRoster(complete, fleetHash, retriedFleetHash)) {
@@ -712,6 +775,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
      */
     static boolean shouldCommitRoster(boolean complete, String fleetHash, String retriedFleetHash) {
         return complete || Objects.equals(fleetHash, retriedFleetHash);
+    }
+
+    /**
+     * True when the live mirror still holds every ship the last rebuild built, so the same-hash fast
+     * path is safe. A negative {@code liveMemberCount} means the fleet could not be read at all, which
+     * is not evidence of a shrink and must not trigger a rebuild.
+     */
+    static boolean rosterStillIntact(int liveMemberCount, int builtMemberCount) {
+        return liveMemberCount < 0 || builtMemberCount < 0 || liveMemberCount == builtMemberCount;
     }
 
     /**
@@ -737,6 +809,40 @@ public class CoopFleetMirror implements CoopNpcMirror {
         return playerMirror && memberCount == 0;
     }
 
+    /**
+     * The other half of the empty-roster guard: do not <em>create</em> a player mirror out of a
+     * 0-member snapshot either.
+     *
+     * <p>{@link #shouldSkipRosterApply} keeps a live mirror's last roster through the wipe window, but
+     * when there is no mirror yet (a session that starts, resumes or rejoins mid-wipe) the same
+     * snapshot used to build an empty {@link CampaignFleetAPI} and {@link #placeInLocation} added it to
+     * the world before the roster was ever considered. {@code CampaignFleet.advance()} despawns a
+     * member-less fleet as {@code FleetDespawnReason.NO_MEMBERS} — the branch
+     * {@code setNoAutoDespawn(true)} does not cover — so the next snapshot found the mirror dead and
+     * built another one: the create/despawn loop at snapshot rate, complete with a
+     * {@code reportFleetDespawned} to every vanilla listener, that the guard was written to prevent.
+     * Creation waits for a roster worth showing.
+     */
+    static boolean shouldDeferPlayerFleetCreation(boolean mirrorAlive, int memberCount) {
+        return !mirrorAlive && memberCount == 0;
+    }
+
+    /**
+     * True when a record's stream stamp is at or behind the newest sample already buffered, i.e. it
+     * describes a moment the mirror has moved past.
+     *
+     * <p>The 1 Hz {@code NPC_FLEET_SET} rides TCP while the motion stream rides UDP, so a set built
+     * before a jump can land after the motion datagrams that already carried the fleet through it.
+     * {@link CoopMotionInterpolator#addSample} drops the stale sample by itself, but the placement in
+     * front of it does not: it would move the mirror back to the older location, clear the buffer and
+     * hard-set the old position, only for the next datagram to restart it all one interval later.
+     * Roster, identity and sensor state are still applied from a stale set — those are latest-wins
+     * facts, not positions.
+     */
+    static boolean isStaleSample(double newestSampleTime, double sampleTimeSeconds) {
+        return !Double.isNaN(newestSampleTime) && sampleTimeSeconds <= newestSampleTime;
+    }
+
     /** One line per wipe episode, not per 10 Hz snapshot; rare enough to stay at INFO. */
     private void noteEmptyPlayerRosterSkipped(String fleetHash) {
         if (emptyRosterSkipLogged) {
@@ -749,10 +855,14 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     /**
-     * Applies CR/hull onto the existing mirror members without a rebuild. Members are matched by
-     * list position: both sides preserve fleet order (the roster was built in snapshot order and the
-     * structural hash pins the same ship set), and a transient order mismatch merely paints repair
-     * state onto a same-set sibling until the next structural rebuild.
+     * Applies CR/hull onto the existing mirror members without a rebuild. Members are matched by their
+     * sender-side id through {@link #builtMemberIds}, falling back to list position when the ids do not
+     * line up one-for-one (a partially built roster, an id-less snapshot).
+     *
+     * <p><b>Position alone is not enough (2026-09-04).</b> The structural hash is order-independent, so
+     * a sender that merely reorders its fleet ships the same hash with a different member order and the
+     * mirror never rebuilds — a "transient" order mismatch that in fact lasts until the ship set itself
+     * changes, with every ship wearing a sibling's CR and hull the whole time.
      *
      * <p><b>The CR write must be followed by {@code setStatUpdateNeeded(true)} (Phase 14b).</b>
      * {@code RepairTracker.setCR(float)} is a bare field assignment — it invalidates nothing — while
@@ -778,22 +888,24 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * per-tick noise around a stable CR still moves no reference and still invalidates nothing — while
      * making a slow monotonic recovery fire once per 0.005 of real movement.
      */
-    private void updateMemberState(List<CoopFleetSnapshot.Member> members) {
-        List<FleetMemberAPI> current = mirrorFleet.getFleetData().getMembersListCopy();
+    private void updateMemberState(List<FleetMemberAPI> current,
+                                   List<CoopFleetSnapshot.Member> members) {
         if (current.size() != members.size()) {
             return;
         }
         float[] references = crInvalidationReferences(current.size());
+        int[] pairing = memberPairing(builtMemberIds, members);
         for (int i = 0; i < current.size(); i++) {
             try {
                 FleetMemberAPI member = current.get(i);
-                float cr = members.get(i).cr();
+                CoopFleetSnapshot.Member state = members.get(pairing == null ? i : pairing[i]);
+                float cr = state.cr();
                 if (Float.isNaN(references[i])) {
                     references[i] = member.getRepairTracker().getCR();
                 }
                 boolean crChanged = crDiffers(references[i], cr);
                 member.getRepairTracker().setCR(cr);
-                member.getStatus().setHullFraction(members.get(i).hullFraction());
+                member.getStatus().setHullFraction(state.hullFraction());
                 if (crChanged) {
                     member.setStatUpdateNeeded(true);
                     references[i] = cr;
@@ -831,6 +943,41 @@ public class CoopFleetMirror implements CoopNpcMirror {
         return crDiffers(reference, incoming) ? incoming : reference;
     }
 
+    /**
+     * Which snapshot member describes each live mirror slot: {@code result[slot]} indexes
+     * {@code members}. Null means "pair by position" — either because the order already is the
+     * identity (the overwhelmingly common case, and no reason to walk an array for it) or because the
+     * ids are not resolvable, which is what every pre-2026-09-04 build assumed unconditionally.
+     *
+     * <p>Null is returned rather than a partial map whenever the two sides are not a clean one-to-one
+     * by id: differing sizes, a blank id, a duplicate id, or a slot whose ship is not in the snapshot
+     * at all. Half a permutation would be worse than the positional fallback, because the unmapped
+     * slots would silently take whatever index was left.
+     */
+    static int[] memberPairing(List<String> builtMemberIds, List<CoopFleetSnapshot.Member> members) {
+        if (builtMemberIds == null || members == null || builtMemberIds.size() != members.size()) {
+            return null;
+        }
+        Map<String, Integer> byId = new HashMap<>(members.size() * 2);
+        for (int i = 0; i < members.size(); i++) {
+            String id = members.get(i).fleetMemberId();
+            if (id == null || id.isEmpty() || byId.put(id, i) != null) {
+                return null;
+            }
+        }
+        int[] pairing = new int[builtMemberIds.size()];
+        boolean permuted = false;
+        for (int slot = 0; slot < pairing.length; slot++) {
+            Integer index = byId.get(builtMemberIds.get(slot));
+            if (index == null) {
+                return null;
+            }
+            pairing[slot] = index;
+            permuted |= index != slot;
+        }
+        return permuted ? pairing : null;
+    }
+
     /** @return true when every member in the snapshot was actually built and attached. */
     private boolean rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
         // Diagnostic counter only; a no-op unless the frame profiler is enabled.
@@ -841,12 +988,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
         for (FleetMemberAPI existing : mirrorFleet.getFleetData().getMembersListCopy()) {
             mirrorFleet.getFleetData().removeFleetMember(existing);
         }
-        int built = 0;
+        List<String> builtIds = new ArrayList<>(members.size());
         for (CoopFleetSnapshot.Member member : members) {
             if (addMirrorMember(member)) {
-                built++;
+                builtIds.add(member.fleetMemberId());
             }
         }
+        builtMemberIds = builtIds;
+        builtMemberCount = builtIds.size();
+        int built = builtIds.size();
         mirrorFleet.getFleetData().setSyncNeeded();
         CoopLog.info(CoopFleetMirror.class,
                 "Coop mirror fleet roster refreshed to " + built + " of " + members.size()
@@ -1157,6 +1307,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         lastFleetHash = null;
         retriedFleetHash = null;
         crInvalidationReferences = null;
+        builtMemberIds = List.of();
+        builtMemberCount = -1;
         lastLocationId = null;
         coopFleetId = "";
         appliedName = "";

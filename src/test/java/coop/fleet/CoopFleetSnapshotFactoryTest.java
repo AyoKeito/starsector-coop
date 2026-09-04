@@ -1,7 +1,13 @@
 package coop.fleet;
 
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.loading.HullModSpecAPI;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -10,6 +16,8 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Regression cover for the 2026-08-19 "guest mirrors wore the wrong roster" investigation: the host's
@@ -141,5 +149,78 @@ class CoopFleetSnapshotFactoryTest {
         assertEquals("falcon", CoopFleetSnapshotFactory.baseHullId("falcon_default_D"));
         assertEquals("falcon", CoopFleetSnapshotFactory.baseHullId("falcon"));
         assertEquals("", CoopFleetSnapshotFactory.baseHullId(null));
+    }
+
+    // ---- D-mod capture ---------------------------------------------------------------------------
+
+    @Test
+    void aHullsOwnBuiltInDmodIsNotStreamedAsAcquiredDamage() {
+        // vanilla colossus2 builds in ill_advised, which carries the dmod tag. Streaming it made the
+        // receiver run DModManager.setDHull on a pristine ship: the mirror wore the _D hull, sprite
+        // and "(D)" designation its owner's ship does not, baked into the structural hash.
+        Global.setSettings(hullModSpecs("ill_advised", "compromised_storage"));
+        try {
+            assertEquals("", CoopFleetSnapshotFactory.captureDmodIds(
+                    variantWhoseNonBuiltInModsAre(List.of())));
+            assertEquals("compromised_storage", CoopFleetSnapshotFactory.captureDmodIds(
+                    variantWhoseNonBuiltInModsAre(List.of("compromised_storage", "augmented_drive"))),
+                    "a d-mod the ship actually acquired still travels");
+        } finally {
+            Global.setSettings(null);
+        }
+    }
+
+    /** A variant that answers for its non-built-in mods and fails the test if the built-ins are read. */
+    private static ShipVariantAPI variantWhoseNonBuiltInModsAre(List<String> ids) {
+        return (ShipVariantAPI) Proxy.newProxyInstance(
+                ShipVariantAPI.class.getClassLoader(),
+                new Class<?>[] {ShipVariantAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getNonBuiltInHullmods" -> ids;
+                    case "getHullMods" -> throw new AssertionError(
+                            "getHullMods() includes the hull's built-ins; capture the acquired set");
+                    case "toString" -> "FakeVariant";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+    }
+
+    /** Settings whose hullmod specs carry the d-mod tag for exactly {@code dmodIds}. */
+    private static SettingsAPI hullModSpecs(String... dmodIds) {
+        Set<String> dmods = new HashSet<>(Arrays.asList(dmodIds));
+        return (SettingsAPI) Proxy.newProxyInstance(
+                SettingsAPI.class.getClassLoader(),
+                new Class<?>[] {SettingsAPI.class},
+                (settings, method, args) -> {
+                    if (!"getHullModSpec".equals(method.getName())) {
+                        return method.getName().equals("toString") ? "FakeSettings" : null;
+                    }
+                    boolean dmod = dmods.contains((String) args[0]);
+                    return Proxy.newProxyInstance(
+                            HullModSpecAPI.class.getClassLoader(),
+                            new Class<?>[] {HullModSpecAPI.class},
+                            (spec, specMethod, specArgs) -> switch (specMethod.getName()) {
+                                case "hasTag" -> dmod && Tags.HULLMOD_DMOD.equals(specArgs[0]);
+                                case "toString" -> "FakeHullModSpec";
+                                case "hashCode" -> System.identityHashCode(spec);
+                                case "equals" -> spec == specArgs[0];
+                                default -> null;
+                            });
+                });
+    }
+
+    // ---- Partial rosters -------------------------------------------------------------------------
+
+    @Test
+    void aCaptureSaysHowMuchOfTheRosterItLost() {
+        // captureMembers answers "four ships" and "four of six, two threw" with the same list. That is
+        // the right trade for the 10 Hz mirror stream and the wrong one for CoopBattleBridge, whose
+        // survivor list deletes every ship it does not name.
+        assertFalse(new CoopFleetSnapshotFactory.Capture(
+                capture(List.of("wolf", "lasher"), List.of(), List.of()), 0).partial());
+        assertTrue(new CoopFleetSnapshotFactory.Capture(
+                capture(List.of("wolf", "lasher"), List.of(1), List.of()), 1).partial());
+        assertEquals(1, capture(List.of("wolf", "lasher"), List.of(1), List.of()).size());
     }
 }

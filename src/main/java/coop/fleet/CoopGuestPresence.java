@@ -82,6 +82,21 @@ public final class CoopGuestPresence {
     /** Mirrors the registry slot, so an idle frame is a boolean test and not a write. */
     private static boolean presenceRegistered;
 
+    /**
+     * Set when a registered slot was actually released, and consumed by the next {@link
+     * #tick(SectorAPI, long)} to run its pass immediately instead of waiting out
+     * {@link #INTERVAL_MILLIS}.
+     *
+     * <p>Without it one skipped pump frame — a caught exception earlier in the frame, a tick-ordering
+     * hiccup — cost up to two seconds of null slot, roughly 120 frames in which every presence fork
+     * evaluates as vanilla. That is not a cosmetic window: with no presence entity the forked
+     * {@code RouteManager} measures distance to the host alone, and every route fleet around a guest
+     * parked more than {@code DESPAWN_DIST_LY_FAR} from the host despawns as {@code PLAYER_FAR_AWAY},
+     * to be respawned at route-interpolated positions when the pass finally ran. Re-publishing is one
+     * sector scan, so paying it a frame early is the cheap side of this trade.
+     */
+    private static boolean presenceReleased;
+
     // ---- Per-pass entry point --------------------------------------------------------------------
 
     /**
@@ -90,9 +105,10 @@ public final class CoopGuestPresence {
      */
     public void tick(SectorAPI sector, long nowMillis) {
         tickedSinceFrameBoundary = true;
-        if (sector == null || nowMillis < nextPassAtMillis) {
+        if (sector == null || (nowMillis < nextPassAtMillis && !presenceReleased)) {
             return;
         }
+        presenceReleased = false;
         nextPassAtMillis = nowMillis + INTERVAL_MILLIS;
         try {
             runPass(sector);
@@ -220,6 +236,7 @@ public final class CoopGuestPresence {
             return;
         }
         presenceRegistered = false;
+        presenceReleased = true;
         try {
             coop.presence.CoopPresenceRegistry.clear();
         } catch (LinkageError ignored) {

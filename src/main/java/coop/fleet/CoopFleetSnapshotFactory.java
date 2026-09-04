@@ -93,6 +93,21 @@ public final class CoopFleetSnapshotFactory {
      * {@link CoopInflationLatch}. Fleets without an inflater, the player's included, are untouched.
      */
     public static List<CoopFleetSnapshot.Member> captureMembers(CampaignFleetAPI fleet) {
+        return captureRoster(fleet).members();
+    }
+
+    /**
+     * One fleet's replicable roster together with how much of it was lost to unreadable slots.
+     *
+     * <p>{@link #captureMembers} answers "read everything, there are four ships" and "read four of
+     * six, the other two threw" with the same four-element list, and a caller that treats the roster
+     * as authoritative then acts on a short one. For the 10 Hz mirror stream that is the documented,
+     * deliberate trade — a mirror short by a ship until the next rebuild beats no roster at all — but
+     * {@code CoopBattleBridge}'s post-battle survivor list is not a display: the receiver deletes
+     * every ship the list does not name. Callers that delete on absence read {@link Capture#partial()}
+     * and refuse, the way they already refuse an empty roster the engine says is non-empty.
+     */
+    public static Capture captureRoster(CampaignFleetAPI fleet) {
         Objects.requireNonNull(fleet, "fleet");
         List<CoopFleetSnapshot.Member> members = new ArrayList<>();
         List<FleetMemberAPI> source;
@@ -102,10 +117,10 @@ public final class CoopFleetSnapshotFactory {
             // The fleet itself cannot report a roster: nothing to salvage.
             CoopLog.warn(CoopFleetSnapshotFactory.class,
                     "Coop could not read the fleet data of " + safeName(fleet), ex);
-            return members;
+            return new Capture(members, 0);
         }
         if (source == null) {
-            return members;
+            return new Capture(members, 0);
         }
         int skipped = captureInto(members, engineSource(source));
         if (skipped > 0) {
@@ -113,7 +128,21 @@ public final class CoopFleetSnapshotFactory {
                     + " unreadable ship(s) while capturing the roster of " + safeName(fleet)
                     + "; the mirror will be short by that many");
         }
-        return INFLATION_LATCH.reconcile(fleet, capturesRealFit(fleet), members);
+        return new Capture(INFLATION_LATCH.reconcile(fleet, capturesRealFit(fleet), members), skipped);
+    }
+
+    /** A captured roster and the count of slots that threw while being read (see {@link #captureRoster}). */
+    public record Capture(List<CoopFleetSnapshot.Member> members, int skipped) {
+
+        public Capture {
+            members = members == null ? List.of() : List.copyOf(members);
+            skipped = Math.max(0, skipped);
+        }
+
+        /** True when the fleet has ships this roster does not name. */
+        public boolean partial() {
+            return skipped > 0;
+        }
     }
 
     /**
@@ -247,13 +276,24 @@ public final class CoopFleetSnapshotFactory {
     /**
      * The variant's d-mods as the wire field. Best-effort like every other per-member read: a ship
      * that cannot report its hullmods replicates as a clean one rather than costing the whole roster.
+     *
+     * <p><b>Non-built-in only (2026-09-04).</b> {@code getHullMods()} includes the hull spec's own
+     * built-ins, and a handful of stock hulls build in a {@code dmod}-tagged mod (vanilla
+     * {@code colossus2} builds in {@code ill_advised}). Streaming those made a pristine hull arrive as
+     * a damaged one: {@code CoopShipMods.apply} sees a non-empty d-mod list, runs
+     * {@code DModManager.setDHull} and the mirror wears the {@code _D} hull, sprite and "(D)"
+     * designation its owner's ship does not — baked into the structural hash, so it persists. The
+     * engine draws the same distinction for the same reason
+     * ({@code DModManager.getNumNonBuiltInDMods} skips {@code getHullSpec().getBuiltInMods()}), and
+     * the hull's own built-ins already reach the receiver through {@code hullId}/{@code variantId}.
      */
-    private static String captureDmodIds(ShipVariantAPI variant) {
+    static String captureDmodIds(ShipVariantAPI variant) {
         if (variant == null) {
             return "";
         }
         try {
-            return CoopShipMods.encode(variant.getHullMods(), CoopFleetSnapshotFactory::isDmodHullMod);
+            return CoopShipMods.encode(variant.getNonBuiltInHullmods(),
+                    CoopFleetSnapshotFactory::isDmodHullMod);
         } catch (RuntimeException | LinkageError ignored) {
             return "";
         }

@@ -289,7 +289,7 @@ public final class CoopNpcFleetReplicator {
         CampaignFleetAPI guestMirror = CoopGuestMirrorHandle.current();
         String hostPlayerLabel = CoopPresenceIndicator.presenceLabel(sessionState.localName());
         forEachReplicatedFleet(sector, fleet -> fleets.add(
-                toSnapshot(fleet, hostLocation, now, hostPlayerFleet, guestMirror, hostPlayerLabel)));
+                toSnapshot(fleet, hostLocation, hostPlayerFleet, guestMirror, hostPlayerLabel)));
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
         if (set.setHash().equals(lastSetHash)) {
             return;
@@ -364,7 +364,7 @@ public final class CoopNpcFleetReplicator {
                 filtered[0]++;
                 return;
             }
-            CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
+            CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation);
             motions.add(new CoopNpcFleetMotion(fleet.getId(), loc.getId(),
                     motion.x(), motion.y(), motion.velocityX(), motion.velocityY(),
                     CoopSensorSync.capture(fleet)));
@@ -627,11 +627,11 @@ public final class CoopNpcFleetReplicator {
                 + RANGE_MARGIN + "x)");
     }
 
-    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation, long now,
+    private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation,
                                             CampaignFleetAPI hostPlayerFleet,
                                             CampaignFleetAPI guestMirror, String hostPlayerLabel) {
         LocationAPI loc = fleet.getContainingLocation();
-        CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation, now);
+        CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation);
         return CoopNpcFleetSnapshot.create(
                 fleet.getId(),
                 factionId(fleet),
@@ -649,6 +649,24 @@ public final class CoopNpcFleetReplicator {
     }
 
     /**
+     * The axis NPC motion segments are measured on: stream (game) time, the same axis the samples are
+     * stamped with and the same one the receiver's cursor runs on.
+     *
+     * <p>It used to be the pump's wall clock, and that was a unit error (2026-09-04). The smoother
+     * derives a velocity as {@code segment delta / segment seconds}, and the receiver's Hermite
+     * multiplies that velocity by a stream-time interval to build its tangents. Under fast-forward a
+     * wall-measured stride is FF times shorter than the game-time stride it covers, so every
+     * non-full-fidelity fleet went on the wire at FF times its true speed: tangents several times the
+     * chord, a mirror that runs ahead early in each segment and behind late, and a {@code setVelocity}
+     * that pulses at the sample rate. Measuring both ends on the same clock removes the factor, and
+     * makes {@link CoopNpcFleetMotionSmoother}'s MIN/MAX segment constants game-time values matching
+     * the engine's own stride.
+     */
+    long motionSampleClockMillis() {
+        return streamClock.gameTimeMillis();
+    }
+
+    /**
      * The position/velocity to put on the wire for one fleet.
      *
      * <p>Fleets in the host's current location are reported verbatim: the engine advances that
@@ -663,9 +681,11 @@ public final class CoopNpcFleetReplicator {
      * timestep, so there is no staircase left to interpolate away and smoothing would only cost a
      * stride of latency. The smoother stays in place for every case the driver does not cover — kill
      * switch off, resolve failure, guest in hyperspace, or any other non-current location.
+     *
+     * <p>The smoother is clocked on {@link #motionSampleClockMillis()}, not on the wall clock.
      */
     private CoopNpcFleetMotionSmoother.Motion replicatedMotion(CampaignFleetAPI fleet, LocationAPI loc,
-                                                               LocationAPI hostLocation, long now) {
+                                                               LocationAPI hostLocation) {
         Vector2f pos = fleet.getLocation();
         Vector2f vel = fleet.getVelocity();
         float x = pos == null ? 0f : pos.x;
@@ -676,7 +696,8 @@ public final class CoopNpcFleetReplicator {
             return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
         }
         try {
-            return motionSmoother.smooth(fleet.getId(), loc.getId(), x, y, vx, vy, now);
+            return motionSmoother.smooth(fleet.getId(), loc.getId(), x, y, vx, vy,
+                    motionSampleClockMillis());
         } catch (RuntimeException | LinkageError ex) {
             return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
         }

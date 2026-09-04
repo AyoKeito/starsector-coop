@@ -66,6 +66,33 @@ class CoopRosterCacheTest {
         assertEquals(0.95f, composed.members().get(0).cr());
     }
 
+    /**
+     * The reorder defect (2026-09-04). The structural hash sorts its members, so a fleet the player
+     * merely drags into a different order hashes identically and no new roster is sent — while the
+     * tick's per-ship pairs were emitted in the sender's raw fleet order. Indexed straight into the
+     * cached roster they landed on the wrong ships and stayed there for the rest of the session: on
+     * this data the mirror showed the wolf at 0.2 CR and the lasher at 0.9. Both halves order by the
+     * hash's own canonical order instead, so the pairing survives any reorder.
+     */
+    @Test
+    void perShipStateFollowsTheShipsWhenTheSenderReordersItsFleet() {
+        CoopFleetSnapshot source = snapshot(List.of(
+                member("m-wolf", "wolf", 0.9f), member("m-lasher", "lasher", 0.2f)));
+        CoopRosterCache cache = new CoopRosterCache();
+        cache.accept(CoopFleetRoster.of(source));
+
+        // Dragged the lasher above the wolf in the fleet screen: same ships, same hash, no roster.
+        CoopFleetSnapshot reordered = snapshot(List.of(
+                member("m-lasher", "lasher", 0.2f), member("m-wolf", "wolf", 0.9f)));
+        assertEquals(source.fleetHash16(), reordered.fleetHash16(), "a reorder is not a new ship set");
+
+        CoopFleetSnapshot composed = cache.compose(tick(reordered), "fallback-id", "Fallback", 1000L);
+
+        assertEquals("wolf", composed.members().get(0).hullId(), "the roster's own order is kept");
+        assertEquals(0.9f, composed.members().get(0).cr(), "the wolf keeps its own CR");
+        assertEquals(0.2f, composed.members().get(1).cr(), "and the lasher keeps its own");
+    }
+
     @Test
     void aTickForAnUnknownRosterKeepsTheCachedOneAndItsHash() {
         CoopFleetSnapshot cached = snapshot(List.of(member("m1", "wolf", 0.7f)));

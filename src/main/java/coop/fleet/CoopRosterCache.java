@@ -91,7 +91,13 @@ public final class CoopRosterCache {
                 roster.fleetHash16(), applyStates(roster.members(), lastStates));
     }
 
-    /** Roster members with their CR/hull replaced positionally by {@code states}, when there are any. */
+    /**
+     * Roster members with their CR/hull replaced by {@code states}, when there are any. The pairing is
+     * the roster's <em>canonical</em> order, which is exactly the order the sender's
+     * {@link CoopFleetSnapshot.Tick#of} emitted them in — the sender's raw fleet order is not on the
+     * wire and, because the hash is order-independent, is not even guaranteed to be this roster's.
+     * The result keeps the roster's own order, which is the order the mirror was built in.
+     */
     private static List<CoopFleetSnapshot.Member> applyStates(List<CoopFleetSnapshot.Member> members,
                                                               List<CoopFleetSnapshot.MemberState> states) {
         if (states == null || states.size() != members.size()) {
@@ -99,11 +105,12 @@ public final class CoopRosterCache {
             // values) or a size disagreement that the caller already refused to index into.
             return members;
         }
-        List<CoopFleetSnapshot.Member> out = new ArrayList<>(members.size());
-        for (int i = 0; i < members.size(); i++) {
-            CoopFleetSnapshot.Member member = members.get(i);
-            CoopFleetSnapshot.MemberState state = states.get(i);
-            out.add(new CoopFleetSnapshot.Member(member.fleetMemberId(), member.hullId(),
+        int[] order = CoopFleetSnapshot.canonicalOrderIndexes(members);
+        List<CoopFleetSnapshot.Member> out = new ArrayList<>(members);
+        for (int k = 0; k < order.length; k++) {
+            CoopFleetSnapshot.Member member = members.get(order[k]);
+            CoopFleetSnapshot.MemberState state = states.get(k);
+            out.set(order[k], new CoopFleetSnapshot.Member(member.fleetMemberId(), member.hullId(),
                     member.variantId(), member.shipName(), member.captainName(),
                     state.cr(), state.hullFraction(), member.dmodIds(), member.sModIds(),
                     member.sModdedBuiltInIds()));

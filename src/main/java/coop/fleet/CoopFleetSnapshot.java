@@ -3,6 +3,7 @@ package coop.fleet;
 import coop.handshake.CoopChecksum;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
@@ -133,15 +134,11 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * in place on the existing members instead ({@code CoopFleetMirror#updateMemberState}).
      */
     public static String computeFleetHash(List<Member> members) {
-        List<Member> sorted = new ArrayList<>(members == null ? List.of() : members);
-        sorted.sort(Comparator.comparing(Member::fleetMemberId)
-                .thenComparing(Member::hullId)
-                .thenComparing(Member::variantId)
-                .thenComparing(Member::shipName)
-                .thenComparing(Member::captainName)
-                .thenComparing(Member::dmodIds)
-                .thenComparing(Member::sModIds)
-                .thenComparing(Member::sModdedBuiltInIds));
+        List<Member> safe = members == null ? List.of() : members;
+        List<Member> sorted = new ArrayList<>(safe.size());
+        for (int index : canonicalOrderIndexes(safe)) {
+            sorted.add(safe.get(index));
+        }
 
         StringBuilder canonical = new StringBuilder(sorted.size() * 48);
         for (Member member : sorted) {
@@ -158,6 +155,46 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .append('|').append(member.sModdedBuiltInIds());
         }
         return CoopChecksum.sha256Text(canonical.toString());
+    }
+
+    /** The order {@link #computeFleetHash} hashes in, and with it the order {@link Tick} pairs on. */
+    private static final Comparator<Member> CANONICAL_ORDER =
+            Comparator.comparing(Member::fleetMemberId)
+                    .thenComparing(Member::hullId)
+                    .thenComparing(Member::variantId)
+                    .thenComparing(Member::shipName)
+                    .thenComparing(Member::captainName)
+                    .thenComparing(Member::dmodIds)
+                    .thenComparing(Member::sModIds)
+                    .thenComparing(Member::sModdedBuiltInIds);
+
+    /**
+     * The permutation that puts {@code members} into the hash's canonical order: element {@code k} is
+     * the index in {@code members} of the {@code k}-th canonical member.
+     *
+     * <p><b>This is the join between the two halves of the roster split.</b> The hash is
+     * order-independent on purpose — a fleet whose ships the player merely dragged around is the same
+     * ship set and must not force a mirror rebuild — but that also means the roster is <em>not</em>
+     * resent on a reorder ({@code CoopNetPump.maybeSendFleetRoster} returns early on an unchanged
+     * hash). Pairing the tick's per-ship state by raw list position would then hand every ship its
+     * neighbour's CR and hull for the rest of the session. Both halves order by this instead: it is
+     * derivable from the roster alone, so it costs nothing on the wire and needs no member ids in the
+     * tick.
+     */
+    static int[] canonicalOrderIndexes(List<Member> members) {
+        List<Member> safe = members == null ? List.of() : members;
+        Integer[] boxed = new Integer[safe.size()];
+        for (int i = 0; i < boxed.length; i++) {
+            boxed[i] = i;
+        }
+        // Stable sort: members that compare equal on every structural field keep capture order, which
+        // is the only tie-break available and is immaterial anyway (they are interchangeable ships).
+        Arrays.sort(boxed, (left, right) -> CANONICAL_ORDER.compare(safe.get(left), safe.get(right)));
+        int[] order = new int[boxed.length];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = boxed[i];
+        }
+        return order;
     }
 
     /** The first {@link #WIRE_HASH_CHARS} of {@link #fleetHash}; what the wire and the cache compare. */
@@ -189,10 +226,13 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * sender, and it is the field the transport has validated. The pump matches that against the
      * remote player rather than trusting a body field a spoofer would get to choose.
      *
-     * <p>Per-ship state is positional — {@code members.get(i)} is the roster's member {@code i} —
-     * because a member id costs 20-40 bytes and buys nothing the shared {@code fleetHash16} does not
-     * already guarantee: a roster whose order or membership changed has a different hash, and a tick
-     * whose hash does not match the cached roster is never applied to it.
+     * <p>Per-ship state is positional in the roster's <em>canonical</em> order — {@code members.get(k)}
+     * is the {@code k}-th member of {@link #canonicalOrderIndexes(List)} — because a member id costs
+     * 20-40 bytes and buys nothing that order does not already give for free. It is the canonical
+     * order and not the roster's own list order because the hash is order-independent (2026-09-04): a
+     * reorder alone keeps the hash, so the roster is never resent, and a raw positional pairing would
+     * then paint each ship's CR and hull onto a sibling until the ship set itself changed. A tick
+     * whose hash does not match the cached roster is never applied to it either way.
      */
     public record Tick(String locationId, float x, float y, float velocityX, float velocityY,
                        boolean transponderOn, CoopSensorSync.Profile sensors, String fleetHash16,
@@ -210,11 +250,13 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             members = members == null ? List.of() : List.copyOf(members);
         }
 
-        /** The tick view of a full snapshot, in the snapshot's own member order. */
+        /** The tick view of a full snapshot, in the roster's canonical order (see the class note). */
         public static Tick of(CoopFleetSnapshot snapshot) {
             Objects.requireNonNull(snapshot, "snapshot");
-            List<MemberState> states = new ArrayList<>(snapshot.members().size());
-            for (Member member : snapshot.members()) {
+            List<Member> members = snapshot.members();
+            List<MemberState> states = new ArrayList<>(members.size());
+            for (int index : canonicalOrderIndexes(members)) {
+                Member member = members.get(index);
                 states.add(new MemberState(member.cr(), member.hullFraction()));
             }
             return new Tick(snapshot.locationId(), snapshot.x(), snapshot.y(),
