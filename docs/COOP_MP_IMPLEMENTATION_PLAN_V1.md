@@ -3276,6 +3276,86 @@ mission claim rejected id=` (guest), `Coop mission rollback id=`, `Coop consumed
 6. Let an offer expire instead of accepting it (leave the bar and let 20+ days pass). No
    `Coop mission claim` line of any kind may appear for it.
 
+## Third fix pass (2026-09-04, review findings)
+
+Nine review findings, all confirmed against the code before any fix, taken in three worktree
+branches and merged into `main` at `7d7e553`: `8411e64` save/combat, `be17480` launcher, `02ad6d3`
+net (plus `49acd32` on `main` for the debug lever). Suite 2943 green, no failures, one pre-existing
+skip. Deployed to both test profiles. Everything below is unit-verified; the four items marked
+**smoke** have not been in front of a running game.
+
+**Net (`coop.net`):**
+
+- **A replacement socket's traffic could pass as the dead partner's (P0).** `pollInbound()` re-polls
+  the network when its queue runs dry, and one poll can close a half-open link, accept its
+  replacement and read from it. The drop-edge drain then tagged every queued message as proven, so
+  during a reconnect grace a `GUEST_REP_DELTA` or `MARKET_TXN` from an unauthenticated socket reached
+  the campaign handlers through the pre-drop exemption. Every inbound TCP message now carries the
+  attach generation of the socket it came off (`CoopNetService.Inbound`,
+  `CoopPeerLink.attachGeneration`); the pump exempts only messages stamped with the generation that
+  died, and a drop while a window is already open exempts nothing, because that socket never
+  resumed. **Smoke:** cut the guest mid-purchase and reconnect; expect `Coop applying pre-drop
+  type=MARKET_TXN` once and no campaign type ever applied before the resume line.
+- **The abuse throttles trusted any occupied slot (P1).** `isKnownPeerLocked` read "occupied" as
+  "known", but attach happens before the lobby round, so one connection bought a stranger an
+  exemption from both gates and an unbounded `rejecting extra connection` warn stream. The
+  known-peer memory was written on the global session token, so an unproven replacement closed
+  during a grace window was remembered for 120 s; and the handshake deadline skipped every peer while
+  the token was set, so a replacement could hold the slot for the whole window. Trust is per
+  connection now: `CoopPeerLink.proven`, set from `setExpectedSessionToken` (each of its three
+  non-null call sites follows an accept), cleared on attach and detach. The extra-connection warning
+  is one line per 60 s with a suppressed count.
+- **The queue cap dropped the only copy of a hash-suppressed snapshot (P2).** Coalescing keeps one
+  message per key, so `dropOldestCoalescable` never had "a newer copy behind it"; a dropped
+  `NPC_FLEET_SET` or `MISSION_POOL_SNAPSHOT` stayed dropped until the producer's hash changed. The
+  service records the dropped types; the pump forces a resend the next frame (`forceResendSet`,
+  the new `forceResendMissionPool`, and the rep snapshot for good measure). `TIME_SNAPSHOT`,
+  `LINK_STATUS` and `STATE_DATAGRAM` are periodic and self-heal.
+- **The debug latency lever delayed `INTERACTION_CLAIM` but not `INTERACTION_RELEASE` (P2).** A
+  dialog closed inside the configured delay sent the release first; it released nothing, and the
+  orphan claim then held the entity until teardown. Both ride the same delay queue now.
+
+**Save and combat (`coop.save`, `coop.combat`):**
+
+- **Loading another game made the guest autosave past the host (P1).** `onGameLoad` sends the
+  "session end" checkpoint after the engine has already swapped the sector, and Starsector never
+  writes the campaign being left. The guest saved on it anyway, overwriting its coordinated autosave
+  with one ahead of the host's last real save, which is the file the rejoin model loads.
+  `CoopSaveCheckpoint.onCheckpointReceived` now treats `REASON_SESSION_END` as a notice: handled for
+  the duplicate ledger, no autosave, and an autosave already parked from a real save still runs. The
+  send is kept; nothing else consumed the reason. **Smoke:** host loads a different save mid-session;
+  the guest log must show `no coordinated autosave is taken` and no `coordinated autosave performed`.
+- **A failed battle reconcile was recorded as applied (P1).** `apply()` wrote the battle id to the
+  ledger before mutating, and `EngineFleets` swallowed despawn and roster failures, so a transient
+  engine throw left a ghost fleet and every resend was answered "already applied". `despawn` and
+  `applySurvivingRoster` return a boolean now; the first refusal abandons the pass, the id leaves the
+  ledger, the set rebroadcast still goes out (it releases the guest's frozen mirrors), and `apply`
+  returns false. Replay is safe: a fleet already gone is success, and the roster pass recomputes
+  removals against the live fleet.
+
+**Launcher (`coop.launcher`):**
+
+- **The bug-report zip could carry the lobby password (P1).** A settings file that did not parse was
+  packed verbatim with a note; the vmparams scrub stopped at whitespace, so `-Dcoop.password="two
+  words"` left `words"` behind. Nothing in the repo writes that token into vmparams (the launcher
+  keeps the password in `coop_options.json.data`), so every such line was typed by hand, which is
+  why quoting matters. Both files now fail closed: the settings file is packed only when the blanked
+  copy re-parses with an empty password, vmparams only when the scrubbed text contains neither
+  `coop.password` nor the settings file's password value; otherwise the file is left out and the
+  report says so. `REPORTING.md` states the same. **Smoke:** put a quoted password in vmparams,
+  press the bug-report button, open the zip.
+- **An unverified `coop-forks.jar` kept Launch enabled (P1).** The classpath row warned when the
+  first `-classpath` entry pointed outside the mod folder, but the identity row read the local jar,
+  not the one the JVM would load, and a missing target was also only a warning. A missing target is
+  FAIL with the Fix button; an existing different target stays WARN (junctions and shared mods
+  folders run fine) and the identity row reads that jar's manifest and names it.
+- **A stale log locked the launcher after an in-place game update (P2).** The game version came from
+  the last launcher line in `starsector.log`, so after an update the row said the old version and
+  blocked the very launch that would rewrite it. When `starfarer_obf.jar` is newer than the log the
+  version reads as unknown, which is the INFO row. **Smoke:** touch the jar's timestamp and expect
+  the row to go grey, not red.
+
+
 ## Maybe (Post-V1 Ideas — Not Committed)
 
 > Researched candidates that are out of committed v1 scope. Each needs a design decision before it becomes a phase. Do not implement from this section without promoting it into a numbered phase first.
