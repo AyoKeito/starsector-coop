@@ -113,6 +113,23 @@ class CoopInteractionGateTest {
         assertEquals("host", gate.holderOf("market-2"));
     }
 
+    /**
+     * The session-edge reset asks the gate itself whether there is anything to clear. Its own
+     * bookkeeping cannot answer: a claim the drain accepted this frame is here and in none of the
+     * pump's side flags, which is how one used to survive a session edge and lock a player out.
+     */
+    @Test
+    void isEmptySeesAClaimNothingElseHasObservedYet() {
+        CoopInteractionGate gate = new CoopInteractionGate();
+        assertTrue(gate.isEmpty());
+
+        gate.applyAccepted(new CoopInteractionClaim("market-1", "guest", "Jangala", 1L));
+        assertFalse(gate.isEmpty());
+
+        gate.clear();
+        assertTrue(gate.isEmpty());
+    }
+
     @Test
     void interactionMessagesRoundTrip() {
         CoopMessages.Message claim = CoopMessages.interactionClaim(

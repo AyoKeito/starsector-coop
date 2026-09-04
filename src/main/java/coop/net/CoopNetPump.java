@@ -133,6 +133,14 @@ public class CoopNetPump implements EveryFrameScript {
      * spamming claims; past it the host arbitrates immediately rather than growing without bound.
      */
     private static final int MAX_DELAYED_INTERACTION_CLAIMS = 256;
+    /**
+     * Synthetic claim id for the colony-management core tab (Phase 24 / the gate's blind spot). Not
+     * an entity id: it is prefixed so it can never collide with one, and both players claim the same
+     * one so the second player into the colony editor is refused the way a dialog race is.
+     */
+    static final String COLONY_MANAGEMENT_ENTITY_ID = "coop:colony-management";
+    /** What the banners call {@link #COLONY_MANAGEMENT_ENTITY_ID}. */
+    static final String COLONY_MANAGEMENT_ENTITY_NAME = "colony management";
     private static final String HOST_PORT_FLAG = "coop.hostPort";
     private static final String CONNECT_HOST_FLAG = "coop.connectHost";
     private static final String CONNECT_PORT_FLAG = "coop.connectPort";
@@ -549,6 +557,8 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopRespawnNotifier respawnNotifier = new CoopRespawnNotifier();
     private String localInteractionEntityId;
     private String lastBlockedEntityName;
+    /** Phase 30 bridge lever: a guest-side screen-level pause intent asserted by the agent bridge. */
+    private boolean bridgePauseIntent;
     /** Phase 18: the local claim the host rejected, until its dialog is actually closed. */
     private final CoopRejectTracker rejectTracker = new CoopRejectTracker();
     /** Phase 20 M6: the guest's own unanswered-claim timer (the "waiting for the host" notice). */
@@ -837,6 +847,28 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     /**
+     * Bridge-only guest pause lever (Phase 30). The guest has no authority over the clock, so the
+     * only honest thing its {@code pause} verb can do is raise the same screen-level intent an open
+     * blocking screen raises and let the host decide — which means the intent has to live somewhere
+     * the pump's own per-frame recompute ORs in, not in the coordinator's latch that recompute
+     * overwrites.
+     *
+     * @return true when the lever moved (nothing is sent for a repeat of the level it already held)
+     */
+    public boolean setBridgePauseIntent(boolean on) {
+        if (bridgePauseIntent == on) {
+            return false;
+        }
+        bridgePauseIntent = on;
+        return true;
+    }
+
+    /** Bridge-only: the lever's current level, for {@code status} and for tests. */
+    public boolean bridgePauseIntent() {
+        return bridgePauseIntent;
+    }
+
+    /**
      * Bridge-only: the very predicate the guest's screen-pause intent is driven by, so the bridge's
      * {@code status} verb reports the screen state that actually holds the shared clock rather than a
      * second opinion about what counts as a blocking screen.
@@ -1097,7 +1129,10 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         long now = clockMillis.getAsLong();
-        boolean queueEmpty = service.outboundQueueDepth() <= 0;
+        // Idle, not depth-zero: a reject the kernel took only the first bytes of sits in the peer's
+        // pendingWrite, where the depth cannot see it, and closing on that frame truncates the very
+        // frame the linger exists to deliver.
+        boolean queueEmpty = service.outboundIdle();
         boolean expired = now >= terminalStopDeadlineMillis;
         boolean linkAlreadyGone = !service.isConnected();
         if (!queueEmpty && !expired && !linkAlreadyGone) {
@@ -1416,7 +1451,12 @@ public class CoopNetPump implements EveryFrameScript {
             // agreement about whose sensor strength counts, and in a game where a system is the unit
             // of shared activity it is also the half a player would recognise. Mutual-sensor-range is
             // recorded as the refinement, not built.
-            if (hostLocation != null && hostLocation.equals(guestLocation)) {
+            //
+            // The credit is a wall second of *flying*, so a stopped clock earns nothing: the sample
+            // is on a wall-clock cadence, and without this gate twenty minutes parked in a market
+            // screen (shared pause, both fleets frozen in the same system) added twenty minutes of
+            // "flown together" to a stat whose own card reads as time in flight.
+            if (hostLocation != null && hostLocation.equals(guestLocation) && !sector.isPaused()) {
                 stats.noteTogether(STATS_SAMPLE_INTERVAL_MILLIS / 1000f);
             }
 
@@ -3513,6 +3553,14 @@ public class CoopNetPump implements EveryFrameScript {
             linkSupervisionArmed = false;
             applyStateStreamFallback(false, "peer disconnected", false, clockMillis.getAsLong());
             resetLinkSupervision(clockMillis.getAsLong());
+            // The claims the dead connection was holding go with it. syncInteractionGate() resets on
+            // a frame that reads !isConnected(), and on the half-open replacement path there is no
+            // such frame: the stale socket is closed and the returning peer accepted inside one
+            // pollNetworkLocked, so connected reads true before and after and the peer's claim from
+            // drop time survived into the resumed session - a permanent "Remote player is
+            // interacting: X" that disallowed every local interaction until the peer happened to
+            // re-open and close X. The drop edge is the one place that sees every case.
+            resetInteractionState();
             // Phase 20.2: a live session gets a grace window instead of a teardown. Everything above
             // is transport hygiene that applies either way; the session record itself survives only
             // on the grace path.
@@ -5335,7 +5383,10 @@ public class CoopNetPump implements EveryFrameScript {
             // Phase 12 market model trades against open-time state (correctness, not comfort), and
             // the in-game menu pauses because the player has left the game. Only the core tabs -
             // map/fleet/character/refit/cargo/intel, all local-only views - are behind the policy.
-            boolean screenOpen = dialogOrMenu || (coreTab && optionsPolicy.appliedBool(
+            // The bridge lever rides the same level as a screen (Phase 30). Without it the verb only
+            // flipped the coordinator's latch and this line recomputed it from the real UI on the
+            // very next frame, so a scripted "pause" on the guest was a no-op that reported success.
+            boolean screenOpen = bridgePauseIntent || dialogOrMenu || (coreTab && optionsPolicy.appliedBool(
                     coop.config.CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS));
             if (pauseCoordinator.updateGuestScreenLevel(screenOpen)) {
                 sendPauseIntent(CoopMessages.PauseSource.SCREEN, screenOpen);
@@ -5442,6 +5493,9 @@ public class CoopNetPump implements EveryFrameScript {
             // world's only pause in the middle of a reconnect.
             return;
         }
+        // The bridge lever belongs to the session it was pulled in; carrying it across the edge would
+        // pause the next one with nothing on screen to explain it.
+        bridgePauseIntent = false;
         if (!hostSharedPauseInitialized
                 && !pauseCoordinator.guestKeyPauseIntent()
                 && !pauseCoordinator.guestScreenPauseIntent()
@@ -6801,6 +6855,18 @@ public class CoopNetPump implements EveryFrameScript {
                 currentEntityName = target.getName();
             }
         }
+        // Phase 24 colony management. The colony screen is a CORE TAB, not a dialog: reached from the
+        // command UI it docks nothing and has no interaction target at all, so the gate never saw it
+        // and both players could edit one colony at once - and COLONY_MGMT ships absolute state, so
+        // the loser's edit is overwritten with no refund for the credits it charged. One id for both
+        // players, deliberately: with no API for "which colony is on screen" the whole editor is the
+        // resource, and serialising it is what the plan's "the interaction gate prevents simultaneous
+        // editing" criterion asks for. It outranks the dialog target because the tab is what the
+        // player is actually editing; the dialog's own claim is re-taken when the tab closes.
+        if (isColonyManagementOpen(ui)) {
+            currentEntityId = COLONY_MANAGEMENT_ENTITY_ID;
+            currentEntityName = COLONY_MANAGEMENT_ENTITY_NAME;
+        }
 
         // Phase 18: a claim the host rejected takes the dialog away again, before any of the
         // claim/release bookkeeping below runs for it.
@@ -6864,7 +6930,7 @@ public class CoopNetPump implements EveryFrameScript {
                 }
                 CoopLog.info(CoopNetPump.class, "Coop force-closing rejected interaction dialog"
                         + " entityId=" + openEntityId);
-                if (ui != null && ui.getCurrentCoreTab() != null) {
+                if (dialog != null && ui != null && ui.getCurrentCoreTab() != null) {
                     // Only reachable if the reject landed after the player already opened a core
                     // tab (trade/refit) from the dialog, which the ~100 ms race window makes very
                     // unlikely. Dismiss anyway: an open shop on the losing client is the defect
@@ -6875,12 +6941,36 @@ public class CoopNetPump implements EveryFrameScript {
             }
             if (dialog != null) {
                 dialog.dismiss();
+            } else if (COLONY_MANAGEMENT_ENTITY_ID.equals(openEntityId)) {
+                // The colony editor has no dialog to dismiss, so the equivalent of taking the screen
+                // away is switching the core UI off that tab. Re-issued every frame like the dismiss
+                // until the tab is really gone, and the player can walk straight back in once the
+                // other side lets go.
+                leaveColonyManagementTab(ui);
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to force-close rejected interaction dialog"
                     + " entityId=" + openEntityId, ex);
         }
         return true;
+    }
+
+    /** Whether the vanilla colony-management (OUTPOSTS) core tab is on screen. */
+    private static boolean isColonyManagementOpen(CampaignUIAPI ui) {
+        return ui != null && ui.getCurrentCoreTab() == com.fs.starfarer.api.campaign.CoreUITabId.OUTPOSTS;
+    }
+
+    /**
+     * Bounces the local player out of the colony editor after a lost claim. There is no "close the
+     * core UI" API, so this switches to the intel tab - the screen the colony list is reached from -
+     * rather than leaving the player somewhere they cannot spend credits the peer's state is about
+     * to overwrite.
+     */
+    private void leaveColonyManagementTab(CampaignUIAPI ui) {
+        if (!isColonyManagementOpen(ui)) {
+            return;
+        }
+        ui.showCoreUITab(com.fs.starfarer.api.campaign.CoreUITabId.INTEL);
     }
 
     /** Display name for the player holding the claim we lost; falls back to a neutral label. */
@@ -6912,9 +7002,15 @@ public class CoopNetPump implements EveryFrameScript {
                         entityId, localPlayerId, entityName, result.hostSeq());
                 service.send(accept);
                 log("outbound", accept);
-            } else {
+            } else if (rejectTracker.onRejected(entityId)) {
+                // Phase 18 applied to the host's own lost race. Logging it and leaving the dialog up
+                // put both players in the same shop - exactly the state this gate exists to prevent,
+                // and the host is the side whose open market screen the guest's re-open re-rolls.
+                // The same tracker the guest uses closes it on the next frame, banner included, and
+                // localInteractionEntityId stays set so no re-claim loop starts.
                 CoopLog.warn(CoopNetPump.class, "Host opened interaction on entityId=" + entityId
-                        + " already claimed by " + result.rejectedByPlayerId());
+                        + " already claimed by " + result.rejectedByPlayerId()
+                        + "; closing the local dialog");
             }
         } else {
             CoopMessages.Message claim = CoopMessages.interactionClaim(
@@ -6971,8 +7067,12 @@ public class CoopNetPump implements EveryFrameScript {
         claimWaitTracker.clear();
         boolean hadDelayedClaims = !delayedInteractionClaims.isEmpty();
         delayedInteractionClaims.clear();
+        // The gate itself is asked, not just the four side flags. A remote claim accepted inside
+        // this frame's inbound drain is recorded in the gate and in none of them (applyLocalBlocking
+        // has not run for it yet), so a link that dies on that same frame used to skip the clear and
+        // carry the claim into the next session, where it blocked every local interaction.
         if (localInteractionEntityId == null && lastBlockedEntityName == null
-                && !hadRejection && !hadDelayedClaims) {
+                && !hadRejection && !hadDelayedClaims && interactionGate.isEmpty()) {
             return;
         }
         localInteractionEntityId = null;
@@ -7244,7 +7344,7 @@ public class CoopNetPump implements EveryFrameScript {
             if (sector == null) {
                 return;
             }
-            boolean active = service.isConnected() && isGameplaySessionActive();
+            boolean active = campaignReplicatorShouldBeActive();
             if (active && !campaignReplicator.isRegistered()) {
                 campaignReplicator.registerOn(sector);
             } else if (!active && campaignReplicator.isRegistered()) {
@@ -7253,6 +7353,20 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign replicator", ex);
         }
+    }
+
+    /**
+     * Whether the campaign replicator belongs on the sector this frame; package private as the test
+     * seam for the grace rule.
+     *
+     * <p>A reconnect window is deliberately <em>not</em> a teardown. {@code dispose} is session-end
+     * work — it drops the world/colony/salvage baselines and ends every mirrored expedition warning —
+     * and running it for a three-second blip took the guest's read, unstarred warning entries away and
+     * gave them back on resume as fresh, re-starred interrupts. The session record is alive for the
+     * whole window (that is what the window is), so the replicator stays with it.
+     */
+    boolean campaignReplicatorShouldBeActive() {
+        return (service.isConnected() || reconnect.active()) && isGameplaySessionActive();
     }
 
     private void syncGuestInputBlocker() {
@@ -7598,6 +7712,13 @@ public class CoopNetPump implements EveryFrameScript {
     /**
      * The delay the peer's send {@code intervalMillis} and the measured {@code jitterMillis} ask for,
      * clamped. Pure, and the test seam for the formula.
+     *
+     * <p><b>Unit note.</b> The interval is stream (game) milliseconds and the sigma is wall
+     * milliseconds, and the sum is spent on the cursor's game-time axis. Under fast-forward that
+     * makes the sigma term buy proportionally less buffer than a wall-time reading of it suggests.
+     * Left as it is on purpose: the certified Phase 29 M2 formula is {@code 2*interval + sigma}, the
+     * conversion would need the campaign speed multiplier in force at sample time (which moves every
+     * frame and is not carried on the arrival path), and the term it would scale is the small one.
      */
     static long interpolationDelayTargetMillis(long intervalMillis, long jitterMillis) {
         long minDelay = Math.round(coop.fleet.CoopMotionTimeline.MIN_DELAY_SECONDS * 1000.0);

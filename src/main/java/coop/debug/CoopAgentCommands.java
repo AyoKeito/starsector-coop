@@ -1598,11 +1598,15 @@ public final class CoopAgentCommands {
      * Pause through the shared coordinator, never {@code sector.setPaused} directly.
      *
      * <p>Host: {@code setHostPauseIntent} — the non-toggling authority lever the pump ORs into
-     * {@code effectivePaused()} on its next frame. Guest: the screen-level intent, which is the only
-     * guest-side lever with on/off (rather than toggle) semantics; the pump ships it as a
+     * {@code effectivePaused()} on its next frame. Guest: {@code setBridgePauseIntent}, a
+     * screen-level lever the pump ORs into the intent it recomputes every frame and ships as a
      * {@code PAUSE_INTENT(SCREEN)} exactly as opening a blocking screen would, and the host decides.
-     * With no session at all the coordinator is absent and this is a refusal, not a local
-     * {@code setPaused} — a bridge that could desync the clock locally would defeat its own purpose.
+     * Writing the coordinator's guest latch directly instead looks identical and does nothing: the
+     * pump overwrites it from the real UI on the next frame and the host never hears about it.
+     *
+     * <p>With no live session this is a refusal, not a local {@code setPaused} — a bridge that could
+     * desync the clock locally would defeat its own purpose, and nothing applies an intent raised for
+     * a session that does not exist.
      */
     static JSONObject pause(JSONObject args, Context context) throws JSONException {
         boolean on = requiredPauseState(args);
@@ -1612,10 +1616,14 @@ public final class CoopAgentCommands {
         }
         CoopSharedPauseCoordinator coordinator = pump.pauseCoordinatorForBridge();
         CoopConnectionRole role = roleOf(pump);
+        if (role == CoopConnectionRole.NONE || !pump.gameplaySessionActiveForBridge()) {
+            throw new IllegalStateException("no coop session; pause has no shared clock to hold"
+                    + " (role=" + role.name() + ")");
+        }
 
         boolean changed;
         if (role == CoopConnectionRole.GUEST) {
-            changed = coordinator.updateGuestScreenLevel(on);
+            changed = pump.setBridgePauseIntent(on);
         } else {
             coordinator.setHostPauseIntent(on);
             changed = true;

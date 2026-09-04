@@ -736,6 +736,304 @@ class CoopNetPumpTest {
         assertTrue(ui.messages.isEmpty(), "no message for an unrelated rejection: " + ui.messages);
     }
 
+    // ---- Bug hunt: claims across a session edge, and the host's own lost race -------------------
+
+    /**
+     * A NAT drop whose replacement socket is accepted inside one poll never shows the pump a
+     * disconnected frame, so the claim the peer held at drop time used to survive into the resumed
+     * session: "Remote player is interacting: X" every frame, and no local interaction possible at
+     * all, until the peer happened to open and close X again.
+     */
+    @Test
+    void aStaleRemoteClaimIsDroppedWhenTheSocketIsReplacedWithoutADisconnect() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, ""));
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, timeLock);
+
+        service.inbound.add(CoopMessages.interactionClaim(
+                "session-a", 7L, 1000L, "market-1", "Jangala", "guest-player"));
+        pump.advance(0f);
+        assertTrue(ui.messages.stream().anyMatch(m -> m.contains("Remote player is interacting")),
+                "the guest holds the market: " + ui.messages);
+        ui.messages.clear();
+        int blockedFrames = ui.disallowInteractionCount;
+
+        // The half-open link is replaced inside one poll: isConnected() reads true either side of it.
+        service.connectionGeneration++;
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(blockedFrames, ui.disallowInteractionCount,
+                "the claim died with the socket that made it; the host is free to interact");
+        assertTrue(ui.messages.stream().noneMatch(m -> m.contains("Remote player is interacting")),
+                "no lockout banner after the replacement: " + ui.messages);
+        assertEquals(new InteractionBlock(false, null),
+                timeLock.interactionBlocks.get(timeLock.interactionBlocks.size() - 1));
+    }
+
+    /**
+     * The same claim, recorded by the drain on the very frame the socket died — the interleaving the
+     * transport really produces, since one poll both queues the frames it read and closes the link on
+     * the read that hit the end of the stream. None of the reset's four side flags has seen that
+     * claim (applyLocalBlocking never ran for it), so the reset used to skip the gate entirely and
+     * the claim blocked every host interaction in the resumed session.
+     */
+    @Test
+    void aRemoteClaimAcceptedOnTheFrameTheLinkDiedDoesNotOutliveIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, ""));
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, timeLock);
+        pump.advance(0f);
+
+        service.dropWhenDrained = true;
+        service.inbound.add(CoopMessages.interactionClaim(
+                "session-a", 7L, 1100L, "market-1", "Jangala", "guest-player"));
+        pump.advance(0f);
+        pump.advance(0f);
+        ui.messages.clear();
+        int blockedFrames = ui.disallowInteractionCount;
+
+        // The guest comes back inside the grace window.
+        service.dropWhenDrained = false;
+        service.connected = true;
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(blockedFrames, ui.disallowInteractionCount,
+                "a claim from the dead connection must not lock the host out of the resumed session");
+        assertTrue(ui.messages.stream().noneMatch(m -> m.contains("Remote player is interacting")),
+                "no lockout banner after the resume: " + ui.messages);
+    }
+
+    /**
+     * Phase 18 for the host's own dialog. The guest's claim is drained before the host's freshly
+     * opened dialog is detected, so the host can lose the race on its own machine — and logging it
+     * while leaving the dialog up left both players in one shop, the state the gate exists to
+     * prevent.
+     */
+    @Test
+    void theHostsOwnDialogIsForceClosedWhenItLosesTheClaimRace() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingEntity entity = new RecordingEntity("market-1", "Jangala");
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        service.inbound.add(CoopMessages.interactionClaim(
+                "session-a", 7L, 1000L, "market-1", "Jangala", "guest-player"));
+        pump.advance(0f);
+
+        // The engine opened the host's dialog on the same market between frames.
+        ui.target = entity;
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1, ui.dismissCount, "the host's losing dialog must be dismissed too");
+        assertTrue(ui.messages.stream().anyMatch(m -> m.contains("Guest is using Jangala")),
+                "and the host told why: " + ui.messages);
+        assertEquals("guest-player", CoopMessages.requiredPayloadString(
+                        lastOfType(service, CoopMessages.Type.INTERACTION_ACCEPT), "playerId"),
+                "the only accept on the wire is the guest's; the host's own claim was refused");
+    }
+
+    // ---- colony-3: the colony editor is a core tab, not a dialog --------------------------------
+
+    @Test
+    void theColonyEditorIsClaimedThroughTheGateWhileTheOutpostsTabIsOpen() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        ui.coreTab = com.fs.starfarer.api.campaign.CoreUITabId.OUTPOSTS;
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_CLAIM),
+                "the colony screen edits a colony; it has to hold the claim while it is open");
+        CoopMessages.Message claim = lastOfType(service, CoopMessages.Type.INTERACTION_CLAIM);
+        assertEquals(CoopNetPump.COLONY_MANAGEMENT_ENTITY_ID,
+                CoopMessages.requiredPayloadString(claim, "entityId"));
+        assertEquals(CoopNetPump.COLONY_MANAGEMENT_ENTITY_NAME,
+                CoopMessages.requiredPayloadString(claim, "entityName"));
+
+        ui.coreTab = null;
+        pump.advance(0f);
+
+        CoopMessages.Message release = lastOfType(service, CoopMessages.Type.INTERACTION_RELEASE);
+        assertEquals(CoopNetPump.COLONY_MANAGEMENT_ENTITY_ID,
+                CoopMessages.requiredPayloadString(release, "entityId"),
+                "closing the tab lets the other player in");
+    }
+
+    @Test
+    void theSecondPlayerIntoTheColonyEditorIsBouncedOutOfIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        service.inbound.add(CoopMessages.interactionClaim("session-a", 7L, 1000L,
+                CoopNetPump.COLONY_MANAGEMENT_ENTITY_ID, CoopNetPump.COLONY_MANAGEMENT_ENTITY_NAME,
+                "guest-player"));
+        pump.advance(0f);
+
+        // The host opens its own colony screen while the guest is still in one.
+        ui.coreTab = com.fs.starfarer.api.campaign.CoreUITabId.OUTPOSTS;
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(List.of(com.fs.starfarer.api.campaign.CoreUITabId.INTEL), ui.coreTabSwitches,
+                "there is no dialog to dismiss, so the editor is taken away by leaving the tab");
+        assertTrue(ui.messages.stream().anyMatch(m -> m.contains("Guest is using colony management")),
+                "and the player is told why: " + ui.messages);
+    }
+
+    // ---- Bug hunt: stats, the terminal-stop linger, grace and the bridge lever ------------------
+
+    /**
+     * "Time flown together" is sampled on a wall-clock cadence, so a stopped clock has to earn
+     * nothing: twenty minutes parked in a market screen used to add twenty minutes of flight to a
+     * counter that is persisted into the coordinated save.
+     */
+    @Test
+    void timeFlownTogetherDoesNotAccrueWhileTheClockIsStopped() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        RecordingFleet hostFleet = new RecordingFleet();
+        hostFleet.locationId = "corvus";
+        RecordingSector sector = new RecordingSector(true, ui, hostFleet);
+        Global.setSector(sector.proxy());
+        RecordingFleet guestMirror = new RecordingFleet();
+        guestMirror.locationId = "corvus";
+        coop.fleet.CoopGuestMirrorHandle.publish(guestMirror.proxy());
+        try {
+            AtomicLong now = new AtomicLong(1000L);
+            CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                    new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+            pump.advance(0f);
+            now.addAndGet(1000L);
+            pump.advance(0f);
+
+            coop.stats.CoopSessionStats stats = coop.stats.CoopSessionStatsStore.current();
+            assertEquals(0f, stats.timeFlownTogetherSeconds(), 0.001f,
+                    "the two fleets share a system, but nobody is flying");
+
+            sector.paused = false;
+            now.addAndGet(1000L);
+            pump.advance(0f);
+
+            assertEquals(1f, stats.timeFlownTogetherSeconds(), 0.001f,
+                    "one sample of a running clock in the same system is one second together");
+        } finally {
+            coop.fleet.CoopGuestMirrorHandle.clear();
+            coop.stats.CoopSessionStatsStore.clear();
+        }
+    }
+
+    /**
+     * The linger waits for the reject to leave the socket. A frame the kernel took only part of is
+     * parked in the peer's pendingWrite, where the queue depth cannot see it — closing there is the
+     * truncated frame the linger was written to prevent.
+     */
+    @Test
+    void theTerminalStopWaitsForAFrameTheKernelOnlyTookPartOf() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        service.inbound.add(hostSeedLockRequest());
+        service.partialWritePending = true;
+        CoopNetPump pump = pumpForGuestSeedLock(service, session,
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-a"),
+                false, false, "fingerprint-guest", () -> "");
+
+        pump.advance(0f);
+
+        assertEquals(1, countOf(service, CoopMessages.Type.SEED_LOCK_REJECT));
+        assertTrue(service.stopReconnectingReasons.isEmpty(),
+                "the reject is still half-written; closing now truncates it");
+
+        service.partialWritePending = false;
+        pump.advance(0f);
+
+        assertEquals(1, service.stopReconnectingReasons.size(),
+                "and the loop closes as soon as the socket has really taken it");
+    }
+
+    /**
+     * A reconnect window is not a session end. Disposing the campaign replicator for a link blip
+     * ended every mirrored expedition warning the guest was reading and handed them back on resume
+     * as fresh, re-starred interrupts.
+     */
+    @Test
+    void theCampaignReplicatorIsKeptThroughAReconnectGraceWindow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+        pump.advance(0f);
+        assertTrue(pump.campaignReplicatorShouldBeActive());
+
+        service.connected = false;
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(), "the window is open");
+        assertTrue(pump.campaignReplicatorShouldBeActive(),
+                "the session record is alive for the whole window, and so is its replicated state");
+    }
+
+    /**
+     * Phase 30 bridge lever, guest side. Writing the coordinator's screen latch looked like it
+     * worked and did nothing: the pump recomputes that level from the real UI every frame, so the
+     * intent was reverted before it was ever sent.
+     */
+    @Test
+    void theBridgePauseLeverShipsAGuestScreenIntentTheNextFrameKeeps() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = activeGuestSession();
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        CoopNetPump pump = pumpWithTimeLock(service, session, () -> 1000L, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        assertEquals(0, countOfType(service, CoopMessages.Type.PAUSE_INTENT),
+                "nothing is open, so nothing is asserted");
+
+        assertTrue(pump.setBridgePauseIntent(true));
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.PAUSE_INTENT));
+        CoopMessages.Message intent = lastOfType(service, CoopMessages.Type.PAUSE_INTENT);
+        assertEquals("SCREEN", CoopMessages.requiredPayloadString(intent, "source"));
+        assertEquals("true", CoopMessages.requiredPayloadString(intent, "paused"));
+
+        pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.PAUSE_INTENT),
+                "the per-frame recompute must not revert the lever underneath the host");
+
+        assertTrue(pump.setBridgePauseIntent(false));
+        pump.advance(0f);
+        assertEquals("false", CoopMessages.requiredPayloadString(
+                lastOfType(service, CoopMessages.Type.PAUSE_INTENT), "paused"));
+    }
+
     @Test
     void hostHoldsInboundClaimsForTheDebugLatencyLever() {
         String saved = System.getProperty(coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY);
@@ -4584,6 +4882,14 @@ class CoopNetPumpTest {
         boolean connected = true;
         /** Phase 29 M2 cadence input: what {@code outboundBacklogged()} is derived from. */
         int outboundDepth;
+        /**
+         * A frame the kernel took only part of, parked in the peer's {@code pendingWrite}. Invisible
+         * to the queue depth, which is exactly why the terminal-stop linger has to ask
+         * {@code outboundIdle()} instead.
+         */
+        boolean partialWritePending;
+        /** Sockets attached over this service's life; a bump with no disconnect is a half-open replace. */
+        long connectionGeneration;
 
         RecordingNetService(CoopConnectionRole role) {
             this.role = role;
@@ -4605,9 +4911,19 @@ class CoopNetPumpTest {
             pendingOutbound.add(message);
         }
 
+        /**
+         * Models the transport reading a frame and the end of the stream in one pass: the message is
+         * handed over and the link is down by the time the frame's later steps look at it.
+         */
+        boolean dropWhenDrained;
+
         @Override
         public CoopMessages.Message pollInbound() {
-            return inbound.poll();
+            CoopMessages.Message next = inbound.poll();
+            if (next != null && dropWhenDrained && inbound.isEmpty()) {
+                connected = false;
+            }
+            return next;
         }
 
         /** F4: every {@code stopReconnecting} reason, so a test can prove the loop really ended. */
@@ -4658,6 +4974,16 @@ class CoopNetPumpTest {
         @Override
         public int outboundQueueDepth() {
             return outboundDepth;
+        }
+
+        @Override
+        public boolean outboundIdle() {
+            return outboundDepth <= 0 && pendingOutbound.isEmpty() && !partialWritePending;
+        }
+
+        @Override
+        public long connectionGeneration() {
+            return connectionGeneration;
         }
 
         private void noteUdpInboundAt(long atMillis) {
@@ -4730,6 +5056,8 @@ class CoopNetPumpTest {
         private Object coreTab;
         private int disallowInteractionCount;
         private int dismissCount;
+        /** Every {@code showCoreUITab} the pump asked for, in order. */
+        private final List<Object> coreTabSwitches = new ArrayList<>();
         /**
          * Phase 18: whether a {@code dismiss()} takes the dialog off screen. True models the engine
          * closing it; false models the frame(s) where the dialog is still up, which is what the
@@ -4769,6 +5097,13 @@ class CoopNetPumpTest {
                             }
                             case "getCurrentCoreTab" -> {
                                 return coreTab;
+                            }
+                            // colony-3: the only way to take the colony editor away from a player
+                            // who lost the claim race is to switch the core UI off that tab.
+                            case "showCoreUITab" -> {
+                                coreTab = args[0];
+                                coreTabSwitches.add(args[0]);
+                                return null;
                             }
                             case "setDisallowPlayerInteractionsForOneFrame" -> {
                                 disallowInteractionCount++;
@@ -6450,6 +6785,8 @@ class CoopNetPumpTest {
     /** A player fleet whose membership a test can change between the two edges of a battle. */
     private static final class RecordingFleet {
         private final List<Object[]> members = new ArrayList<>();
+        /** Containing-location id, or null for a fleet the stats sampler cannot place. */
+        private String locationId;
 
         private void add(String id, String shipName) {
             members.add(new Object[]{id, shipName});
@@ -6470,9 +6807,31 @@ class CoopNetPumpTest {
                         }
                         return switch (method.getName()) {
                             case "getFleetData" -> fleetDataProxy();
-                            case "getContainingLocation", "getLocation", "getCargo" -> null;
+                            case "getContainingLocation" -> locationProxy(locationId);
+                            case "isAlive" -> true;
+                            case "getLocation", "getCargo" -> null;
                             default -> throw new UnsupportedOperationException(method.getName());
                         };
+                    });
+        }
+
+        /** A containing location with nothing but an id — all the stats sampler reads. */
+        private static com.fs.starfarer.api.campaign.LocationAPI locationProxy(String locationId) {
+            if (locationId == null) {
+                return null;
+            }
+            return (com.fs.starfarer.api.campaign.LocationAPI) Proxy.newProxyInstance(
+                    com.fs.starfarer.api.campaign.LocationAPI.class.getClassLoader(),
+                    new Class<?>[]{com.fs.starfarer.api.campaign.LocationAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) {
+                            return objectMethod;
+                        }
+                        if ("getId".equals(method.getName())) {
+                            return locationId;
+                        }
+                        throw new UnsupportedOperationException(method.getName());
                     });
         }
 

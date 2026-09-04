@@ -209,6 +209,46 @@ class CoopAgentQueryVerbsTest {
         assertFalse(pause.has("hostIntent"), "role NONE has no intent breakdown");
     }
 
+    // ---- pause: the verb itself ------------------------------------------------------------------
+
+    /**
+     * The guest has no authority over the clock, so its {@code pause} is a screen-level intent — and
+     * it has to be raised where the pump's own per-frame recompute picks it up. Written into the
+     * coordinator's latch instead, it reported {@code changed:true} and was overwritten from the real
+     * UI on the next frame, so the host never heard about it at all.
+     */
+    @Test
+    void theGuestPauseVerbPullsALeverThePumpActuallyShips() throws JSONException {
+        coop.net.CoopNetPump pump = sessionPump(CoopConnectionRole.GUEST);
+        JSONObject on = new JSONObject();
+        on.put("on", true);
+
+        JSONObject response = CoopAgentCommands.pause(on, contextFor(null, pump));
+
+        assertEquals("GUEST", response.getString("role"));
+        assertTrue(response.getBoolean("changed"));
+        assertTrue(pump.bridgePauseIntent(),
+                "the lever the pump ORs into the guest's screen intent is what has to move");
+
+        assertFalse(CoopAgentCommands.pause(on, contextFor(null, pump)).getBoolean("changed"),
+                "a repeat of the level already held sends nothing");
+    }
+
+    @Test
+    void pauseIsRefusedWhenThereIsNoSessionToHold() {
+        coop.net.CoopNetPump pump = new coop.net.CoopNetPump(new coop.net.CoopNetService());
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> {
+            JSONObject on = new JSONObject();
+            on.put("on", true);
+            CoopAgentCommands.pause(on, contextFor(null, pump));
+        });
+
+        assertTrue(failure.getMessage().contains("no coop session"), failure.getMessage());
+        assertFalse(pump.pauseCoordinatorForBridge().hostPauseIntent(),
+                "and nothing was written into a coordinator no session is applying");
+    }
+
     // ---- markets: enumeration only ---------------------------------------------------------------
 
     @Test
@@ -1411,6 +1451,45 @@ class CoopAgentQueryVerbsTest {
                 return null;
             }
         };
+    }
+
+    private static CoopAgentCommands.Context contextFor(SectorAPI sector, coop.net.CoopNetPump pump) {
+        return new CoopAgentCommands.Context() {
+            @Override
+            public SectorAPI sector() {
+                return sector;
+            }
+
+            @Override
+            public coop.net.CoopNetPump pump() {
+                return pump;
+            }
+        };
+    }
+
+    /** A pump whose session is live enough for the pause verb: handshake validated plus a seed. */
+    private static coop.net.CoopNetPump sessionPump(CoopConnectionRole role) {
+        coop.session.CoopSessionState session = new coop.session.CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new coop.session.CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        session.releaseLobby();
+        return new coop.net.CoopNetPump(new RoleNetService(role), session, () -> 1000L);
+    }
+
+    /** Transport stand-in: nothing is sent in these tests, only the role is read. */
+    private static final class RoleNetService extends coop.net.CoopNetService {
+        private final CoopConnectionRole role;
+
+        private RoleNetService(CoopConnectionRole role) {
+            this.role = role;
+        }
+
+        @Override
+        public CoopConnectionRole role() {
+            return role;
+        }
     }
 
     private static SectorAPI sectorWithFleets(CampaignFleetAPI player, List<CampaignFleetAPI> fleets) {

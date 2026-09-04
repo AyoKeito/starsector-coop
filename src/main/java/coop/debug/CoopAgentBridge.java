@@ -24,11 +24,13 @@ import java.util.Objects;
  * a human reading two screens.
  *
  * <p><b>Dormant unless asked for.</b> {@code -Dcoop.debug.bridge=<port>}. Absent, {@code 0}, a
- * non-number or an out-of-range port all mean the same thing: no socket is ever opened, no log line
- * is ever written, and the script is not installed at all. A release build with the property unset is
- * byte-for-byte the same behaviour as a build without this class. The property is parsed the way
- * {@code CoopDebug} parses its own levers — a typo disables the instrument rather than taking the
- * session down.
+ * non-number or an out-of-range port all mean the same thing: no socket is ever opened and the script
+ * is not installed at all. A release build with the property unset is byte-for-byte the same
+ * behaviour as a build without this class — absent or {@code 0}, nothing is logged either. A
+ * non-number or an above-range number does get one WARN, because it is unambiguously a typo and a
+ * silently dormant instrument someone believes they turned on is worse. The property is parsed the
+ * way {@code CoopDebug} parses its own levers — a typo disables the instrument rather than taking
+ * the session down.
  *
  * <p><b>Campaign thread only.</b> No threads and no {@code Selector}: the listening
  * {@link ServerSocketChannel} and the single client {@link SocketChannel} are both non-blocking, and
@@ -82,6 +84,8 @@ public final class CoopAgentBridge implements EveryFrameScript {
     private SocketChannel client;
     private ByteBuffer pendingWrite;
     private int requestFrameLength;
+    /** The peer sent EOF; the client is kept only until what it already framed has been answered. */
+    private boolean peerClosed;
     private boolean discardingOversized;
     private boolean listenerFailed;
     private boolean stopped;
@@ -96,8 +100,9 @@ public final class CoopAgentBridge implements EveryFrameScript {
 
     /**
      * The configured port, or {@code 0} for dormant. A missing property, a blank one, a non-number
-     * and anything outside the usable TCP range all mean dormant; only an out-of-range <em>number</em>
-     * is worth a log line, and only because it is unambiguously a typo rather than an absent flag.
+     * and anything outside the usable TCP range all mean dormant; a non-number and an above-range
+     * number are worth a log line, and only because they are unambiguously typos rather than a flag
+     * someone deliberately switched off ({@code 0} and negatives are silent for that reason).
      */
     public static int configuredPort() {
         String raw = System.getProperty(PORT_PROPERTY);
@@ -206,6 +211,23 @@ public final class CoopAgentBridge implements EveryFrameScript {
         readRequests();
         dispatchBuffered();
         flushResponses();
+        closeAfterPeerHalfClose();
+    }
+
+    /**
+     * Finishes a half-closed client: the peer sent EOF, so nothing more will be read, but whatever it
+     * framed before closing is still owed an answer. Closes as soon as the last of it has been
+     * written (the dispatch budget can spread that over several frames).
+     */
+    private void closeAfterPeerHalfClose() {
+        if (!peerClosed || client == null) {
+            return;
+        }
+        if (!pendingRequests.isEmpty() || !pendingResponses.isEmpty() || pendingWrite != null) {
+            return;
+        }
+        CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client disconnected");
+        closeClient();
     }
 
     /** Releases both channels. Idempotent; the bridge stays inert afterwards. */
@@ -284,8 +306,16 @@ public final class CoopAgentBridge implements EveryFrameScript {
                 read = channel.read(readBuffer);
             }
             if (read < 0) {
-                CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client disconnected");
-                closeClient();
+                // A one-shot client writes its request, half-closes its send side and waits for the
+                // answer, so the framed line and the EOF arrive in the same read pass. Tearing the
+                // client down here threw that request away before dispatch and the caller saw an
+                // empty close it could not tell from a crash. The teardown is deferred to
+                // closeAfterPeerHalfClose(), which runs once everything queued has been answered.
+                peerClosed = true;
+                if (pendingRequests.isEmpty() && pendingResponses.isEmpty() && pendingWrite == null) {
+                    CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client disconnected");
+                    closeClient();
+                }
             }
         } catch (Exception ex) {
             CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge read failed; dropping client", ex);
@@ -373,6 +403,7 @@ public final class CoopAgentBridge implements EveryFrameScript {
     private void closeClient() {
         SocketChannel channel = client;
         client = null;
+        peerClosed = false;
         pendingWrite = null;
         pendingRequests.clear();
         pendingResponses.clear();

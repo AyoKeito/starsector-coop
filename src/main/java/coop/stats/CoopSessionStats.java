@@ -210,7 +210,12 @@ public class CoopSessionStats {
         }
     }
 
-    /** Game-seconds during which both fleets shared a system or saw each other. Team-owned. */
+    /**
+     * Seconds of running clock during which both fleets shared a system or saw each other.
+     * Team-owned. Wall seconds, not game seconds: the caller samples on a wall-clock cadence and
+     * skips a paused sector, so this is "time the two of you spent flying in the same place", which
+     * is what the card claims and what a shared save can add up across sessions.
+     */
     public void noteTogether(float seconds) {
         if (seconds <= 0f || Float.isNaN(seconds) || Float.isInfinite(seconds)) {
             return;

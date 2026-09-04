@@ -742,6 +742,25 @@ public class CoopNetService {
     }
 
     /**
+     * Whether every peer's outbound side is fully drained: nothing queued <em>and</em> no frame
+     * half-written. {@link #outboundQueueDepth()} cannot answer this — {@code flushOutboundLocked}
+     * polls a message off the queue before parking its remainder in {@code pendingWrite}, so a frame
+     * the kernel only took part of reads as depth 0. A caller that is about to close the link (the
+     * terminal-stop linger) has to wait for this, not for the depth, or it truncates the last frame
+     * it went out of its way to send.
+     */
+    public boolean outboundIdle() {
+        synchronized (lifecycleLock) {
+            for (CoopPeerLink peer : peers) {
+                if (peer.outboundDepth() > 0 || peer.pendingWrite() != null) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /**
      * Phase 29 M2 cadence input: whether any peer's outbound TCP queue has reached the depth at which
      * this transport starts coalescing ({@link #COALESCE_BACKLOG_MESSAGES}).
      *

@@ -80,6 +80,15 @@ public final class CoopInteractionGate {
         claimsByEntity.clear();
     }
 
+    /**
+     * Whether no claim is held at all. The session-edge reset asks this rather than inferring it
+     * from its own bookkeeping: a claim accepted in the same frame the session died is in here and
+     * in none of the pump's side flags yet.
+     */
+    public synchronized boolean isEmpty() {
+        return claimsByEntity.isEmpty();
+    }
+
     public synchronized String holderOf(String entityId) {
         CoopInteractionClaim claim = claimsByEntity.get(requireText(entityId, "entityId"));
         return claim == null ? null : claim.playerId();

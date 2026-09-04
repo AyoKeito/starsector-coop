@@ -395,6 +395,44 @@ class CoopAgentBridgeTest {
         return new CoopAgentBridge(1, new CoopAgentCommands(handlers), EMPTY_CONTEXT);
     }
 
+    /**
+     * A one-shot client writes its request, half-closes its send side and waits. The line and the EOF
+     * land in the same read pass, and tearing the client down on the EOF threw the request away
+     * before dispatch — the caller saw an empty close it could not tell from a crash.
+     */
+    @Test
+    void aRequestFramedInTheSameReadAsTheEofIsStillAnswered() throws IOException, JSONException {
+        int port = reserveLocalPort();
+        CoopAgentBridge bridge = new CoopAgentBridge(port, echoRegistry(), EMPTY_CONTEXT);
+
+        SocketChannel client = null;
+        try {
+            bridge.advanceForTesting();
+            client = connect(port);
+            bridge.advanceForTesting();
+
+            write(client, "{\"id\":9,\"cmd\":\"echo\",\"args\":{\"what\":\"last words\"}}");
+            client.shutdownOutput();
+
+            JSONObject response = new JSONObject(readLine(client, bridge));
+            assertEquals(9, response.getInt("id"));
+            assertEquals("last words", response.getJSONObject("data").getString("seen"));
+
+            // ...and the client is still torn down once it has been answered.
+            bridge.advanceForTesting();
+            bridge.advanceForTesting();
+            SocketChannel second = connect(port);
+            bridge.advanceForTesting();
+            write(second, "{\"id\":10,\"cmd\":\"echo\",\"args\":{\"what\":\"next\"}}");
+            assertEquals(10, new JSONObject(readLine(second, bridge)).getInt("id"),
+                    "the half-closed client must not hold the single slot forever");
+            close(second);
+        } finally {
+            close(client);
+            bridge.shutdown();
+        }
+    }
+
     private static int reserveLocalPort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
             return socket.getLocalPort();
