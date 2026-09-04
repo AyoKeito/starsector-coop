@@ -1,0 +1,205 @@
+package coop.launcher;
+
+import java.time.ZoneId;
+import java.util.List;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * The drop-down the host picks a campaign from and the one line under each card that says which
+ * save to load. Pure, so every sentence a player can be shown is pinned here rather than only in a
+ * window somebody has to open.
+ */
+class CoopCampaignPickerTest {
+
+    private static final ZoneId UTC = ZoneId.of("UTC");
+
+    /** 2026-05-28 18:16:01.129 UTC, the timestamp out of a real {@code descriptor.xml}. */
+    private static final long SAVED = 1779992161129L;
+
+    private static CoopSaveIndexReader.Save save(String campaignId, String folder, String character,
+                                                 int level, long savedAt, String role) {
+        return new CoopSaveIndexReader.Save(campaignId, folder, character, level, "Cycle 206",
+                500L, savedAt, Boolean.FALSE, role, "MN-42");
+    }
+
+    private static CoopSaveIndexReader.Index ok(CoopSaveIndexReader.Save... saves) {
+        return new CoopSaveIndexReader.Index(CoopSaveIndexReader.Status.OK, "", List.of(saves));
+    }
+
+    // ---- the drop-down --------------------------------------------------------------------------
+
+    @Test
+    void newCampaignIsAlwaysFirstAndQuotesTheSeed() {
+        List<CoopCampaignPicker.Entry> entries =
+                CoopCampaignPicker.entries("MN-42", CoopSaveIndexReader.Index.absent(), UTC);
+
+        assertEquals(1, entries.size());
+        assertEquals("New campaign (seed MN-42)", entries.get(0).label());
+        assertTrue(entries.get(0).newCampaign());
+        assertEquals("", entries.get(0).campaignId());
+    }
+
+    @Test
+    void aSeedlessHostStillGetsANewCampaignEntry() {
+        assertEquals("New campaign", CoopCampaignPicker.newCampaignEntry("  ").label());
+    }
+
+    @Test
+    void oneEntryPerCampaignNewestFirstAfterTheNewOne() {
+        List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries("MN-42",
+                ok(save("cA", "save_a2", "Kaz Alba", 12, SAVED, "HOST"),
+                        save("cB", "save_b", "Vela", 4, SAVED - 86_400_000L, "NONE"),
+                        save("cA", "save_a1", "Kaz Alba", 3, 1L, "HOST")), UTC);
+
+        assertEquals(3, entries.size());
+        assertTrue(entries.get(0).newCampaign());
+        assertEquals("cA", entries.get(1).campaignId());
+        assertEquals("save_a2", entries.get(1).folderName());
+        assertEquals("Kaz Alba, level 12, Cycle 206, saved 2026-05-28 18:16", entries.get(1).label());
+        assertEquals("cB", entries.get(2).campaignId());
+    }
+
+    @Test
+    void aCampaignThisPlayerOnlyEverGuestedInIsNotOfferedForHosting() {
+        List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries("MN-42",
+                ok(save("cG", "save_g", "Rho", 2, SAVED, "GUEST")), UTC);
+
+        assertEquals(1, entries.size());
+        assertTrue(entries.get(0).newCampaign());
+    }
+
+    @Test
+    void anUnreadableIndexLeavesTheDropDownWithNothingButNewCampaign() {
+        CoopSaveIndexReader.Index broken = new CoopSaveIndexReader.Index(
+                CoopSaveIndexReader.Status.UNREADABLE, "it is half a file", List.of());
+
+        assertEquals(1, CoopCampaignPicker.entries("MN-42", broken, UTC).size());
+        assertEquals(1, CoopCampaignPicker.entries("MN-42", null, UTC).size());
+    }
+
+    // ---- what the pick turns on and off ---------------------------------------------------------
+
+    @Test
+    void theSeedAndWorldSettingsAreLiveOnlyForANewCampaign() {
+        CoopCampaignPicker.Entry brandNew = CoopCampaignPicker.newCampaignEntry("MN-42");
+        CoopCampaignPicker.Entry existing = new CoopCampaignPicker.Entry("cA", "Kaz", "save_a");
+
+        assertTrue(CoopCampaignPicker.worldControlsEnabled(brandNew));
+        assertTrue(CoopCampaignPicker.worldControlsEnabled(null));
+        assertFalse(CoopCampaignPicker.worldControlsEnabled(existing));
+    }
+
+    @Test
+    void theFolderLineNamesTheSaveAndIsBlankForANewCampaign() {
+        assertEquals("folder save_a",
+                CoopCampaignPicker.folderLine(new CoopCampaignPicker.Entry("cA", "Kaz", "save_a")));
+        assertEquals("", CoopCampaignPicker.folderLine(CoopCampaignPicker.newCampaignEntry("MN-1")));
+        assertEquals("", CoopCampaignPicker.folderLine(null));
+    }
+
+    @Test
+    void aPickIsKeptAcrossARefreshAndFallsBackToNewWhenItsLastSaveIsGone() {
+        List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries("MN-42",
+                ok(save("cA", "save_a", "Kaz", 12, SAVED, "HOST")), UTC);
+
+        assertEquals("cA", CoopCampaignPicker.select(entries, "cA").campaignId());
+        assertTrue(CoopCampaignPicker.select(entries, "cGone").newCampaign());
+        assertTrue(CoopCampaignPicker.select(List.of(), "cA").newCampaign());
+    }
+
+    // ---- the hint line --------------------------------------------------------------------------
+
+    @Test
+    void aNewCampaignSaysToStartANewGame() {
+        assertEquals("Start a New Game with the seed above.",
+                CoopCampaignPicker.hint("", ok(), UTC));
+    }
+
+    @Test
+    void aCampaignWithASaveHereIsNamedDownToTheFolder() {
+        String hint = CoopCampaignPicker.hint("cA",
+                ok(save("cA", "save_ds_140", "Kaz Alba", 12, SAVED, "HOST")), UTC);
+
+        assertEquals("Load the save \"Kaz Alba\", level 12, saved 2026-05-28 18:16"
+                + " (folder save_ds_140).", hint);
+    }
+
+    @Test
+    void theNewestSaveOfTheCampaignIsTheOneNamed() {
+        String hint = CoopCampaignPicker.hint("cA",
+                ok(save("cA", "save_new", "Kaz Alba", 12, SAVED, "HOST"),
+                        save("cA", "save_old", "Kaz Alba", 3, 1L, "HOST")), UTC);
+
+        assertTrue(hint.contains("save_new"), hint);
+        assertFalse(hint.contains("save_old"), hint);
+    }
+
+    @Test
+    void aCampaignWithNoSaveOnThisMachineSaysSoAndPointsAtTheSeed() {
+        assertEquals("No co-op save for this campaign on this machine: start a New Game with the"
+                        + " seed above.",
+                CoopCampaignPicker.hint("cA", ok(save("cB", "save_b", "Vela", 4, SAVED, "HOST")),
+                        UTC));
+    }
+
+    @Test
+    void aGuestSaveOfTheRightCampaignStillCounts() {
+        // Hosting it is another matter, but a guest rejoining has to be told to load exactly this.
+        String hint = CoopCampaignPicker.hint("cG",
+                ok(save("cG", "save_g", "Rho", 2, SAVED, "GUEST")), UTC);
+
+        assertTrue(hint.startsWith("Load the save \"Rho\""), hint);
+    }
+
+    @Test
+    void anInstallWithNoSaveListYetIsToldSoCalmly() {
+        String hint = CoopCampaignPicker.hint("cA", CoopSaveIndexReader.Index.absent(), UTC);
+
+        assertEquals("No co-op saves have been recorded on this machine yet: start a New Game with"
+                + " the seed above.", hint);
+    }
+
+    @Test
+    void anUnreadableOrNewerSaveListSaysSoAndSaysLaunchingStillWorks() {
+        String unreadable = CoopCampaignPicker.hint("cA", new CoopSaveIndexReader.Index(
+                CoopSaveIndexReader.Status.UNREADABLE, "it is half a file", List.of()), UTC);
+        String tooNew = CoopCampaignPicker.hint("cA", new CoopSaveIndexReader.Index(
+                CoopSaveIndexReader.Status.TOO_NEW, "it is version 2", List.of()), UTC);
+
+        assertTrue(unreadable.contains(CoopSaveIndexReader.INDEX_DISPLAY_PATH), unreadable);
+        assertTrue(unreadable.contains("it is half a file"), unreadable);
+        assertTrue(unreadable.endsWith("Launching still works."), unreadable);
+        assertTrue(tooNew.contains("newer version of the mod"), tooNew);
+        assertTrue(tooNew.endsWith("Launching still works."), tooNew);
+    }
+
+    @Test
+    void noIndexAtAllStillProducesASentence() {
+        assertNotNull(CoopCampaignPicker.hint("cA", null, UTC));
+    }
+
+    // ---- what may travel in an invite -----------------------------------------------------------
+
+    @Test
+    void aUuidCampaignIdIsFineAndABlankOneIsNotAProblem() {
+        assertNull(CoopCampaignPicker.campaignIdProblem(
+                "6f1a3c2e-9b44-4f2a-8d21-0c7e5a9b1f30"));
+        assertNull(CoopCampaignPicker.campaignIdProblem(""));
+        assertNull(CoopCampaignPicker.campaignIdProblem(null));
+    }
+
+    @Test
+    void aCampaignIdWithSomethingThatIsNotOneInItIsRefused() {
+        assertNotNull(CoopCampaignPicker.campaignIdProblem("has a space"));
+        assertNotNull(CoopCampaignPicker.campaignIdProblem("a&b=c"));
+        assertNotNull(CoopCampaignPicker.campaignIdProblem("../../etc"));
+        assertNotNull(CoopCampaignPicker.campaignIdProblem("x".repeat(129)));
+    }
+}

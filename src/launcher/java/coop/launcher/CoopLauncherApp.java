@@ -17,6 +17,7 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -130,14 +131,19 @@ public final class CoopLauncherApp {
     private JTextField hostPortField;
     private JPasswordField hostPasswordField;
     private JTextField hostSeedField;
+    private JButton hostSeedGenerateButton;
     private JTextField publicAddressField;
     private JTextField invitePreviewField;
     private JButton copyInviteButton;
     private JComboBox<String> sectorSizeBox;
     private JComboBox<String> sectorAgeBox;
+    private JComboBox<CoopCampaignPicker.Entry> campaignBox;
+    private JLabel campaignFolderLabel;
+    private JTextArea hostSaveHint;
 
     private JTextField guestInviteField;
     private JTextArea guestInviteNote;
+    private JTextArea guestSaveHint;
     private JTextField guestHostField;
     private JTextField guestPortField;
     private JPasswordField guestPasswordField;
@@ -204,6 +210,24 @@ public final class CoopLauncherApp {
     private boolean writingHostPassword;
     /** True while the code, not the player, is writing the guest invite field. */
     private boolean writingGuestInvite;
+    /** True while the code, not the player, is repopulating the campaign picker. */
+    private boolean writingCampaignBox;
+
+    /**
+     * The co-op save list as of the last read. Never null: an install with no list reads as
+     * {@link CoopSaveIndexReader.Status#ABSENT}, which is what a first session looks like and not
+     * something to complain about.
+     */
+    private CoopSaveIndexReader.Index saveIndex = CoopSaveIndexReader.Index.absent();
+    /**
+     * Bumped by every save-index read, so an older one landing late cannot overwrite a newer one.
+     * Reads happen on window focus, which can outrun itself when somebody alt-tabs twice.
+     */
+    private int saveIndexGeneration;
+    /** The campaign the pasted invite names, {@code ""} for a new campaign or no invite. */
+    private String invitedCampaignId = "";
+    /** True once an invite has parsed, which is when the guest's save hint has anything to say. */
+    private boolean guestInviteAccepted;
 
     private CoopLauncherProbe.HostListener listener;
     private CoopLogTail logTail;
@@ -327,6 +351,15 @@ public final class CoopLauncherApp {
             @Override
             public void windowClosing(WindowEvent event) {
                 shutdown();
+            }
+        });
+        // The player saves in the game and alt-tabs back here to check what to load next time. The
+        // save list is a small file and a handful of stats, so re-reading it on focus is cheaper
+        // than a Refresh button nobody would know to press.
+        frame.addWindowFocusListener(new WindowAdapter() {
+            @Override
+            public void windowGainedFocus(WindowEvent event) {
+                refreshSaveIndex("the launcher window came back to the front");
             }
         });
 
@@ -464,6 +497,21 @@ public final class CoopLauncherApp {
         panel.setOpaque(false);
         Form form = new Form(panel);
 
+        campaignBox = new JComboBox<>();
+        campaignBox.setToolTipText("New generates a sector from the seed. Picking one of your saved"
+                + " co-op campaigns tells your partner which save to load instead.");
+        campaignBox.addItem(CoopCampaignPicker.newCampaignEntry(""));
+        campaignBox.addActionListener(event -> {
+            if (!writingCampaignBox) {
+                onCampaignPicked();
+            }
+        });
+        form.full("Campaign", campaignBox);
+        campaignFolderLabel = CoopTheme.muted("");
+        campaignFolderLabel.setBorder(BorderFactory.createEmptyBorder(0, 2, 10, 0));
+        campaignFolderLabel.setVisible(false);
+        form.raw(campaignFolderLabel);
+
         hostPortField = CoopTheme.textField(String.valueOf(DEFAULT_PORT));
         hostPortField.setText(String.valueOf(DEFAULT_PORT));
         hostPortField.setToolTipText("The TCP and UDP port your partner connects to.");
@@ -477,14 +525,14 @@ public final class CoopLauncherApp {
         hostSeedField = CoopTheme.textField("press Generate");
         hostSeedField.setToolTipText("Both games generate the same sector from this. New campaigns"
                 + " only.");
-        JButton generate = CoopTheme.inline("Generate");
-        generate.addActionListener(event -> {
+        hostSeedGenerateButton = CoopTheme.inline("Generate");
+        hostSeedGenerateButton.addActionListener(event -> {
             String seed = CoopSeeds.generate();
             hostSeedField.setText(seed);
             LOG.info("Generated a new seed: " + seed);
             append("New seed " + seed + ". Copy the invite so your partner gets the same one.");
         });
-        CoopTheme.trailing(hostSeedField, generate);
+        CoopTheme.trailing(hostSeedField, hostSeedGenerateButton);
 
         publicAddressField = CoopTheme.textField("press Look up, or type a LAN or VPN address");
         publicAddressField.setToolTipText("What your partner connects to. Overwrite it with a LAN or"
@@ -507,6 +555,10 @@ public final class CoopLauncherApp {
         copyInviteButton.addActionListener(event -> copyInvite());
         CoopTheme.trailing(invitePreviewField, copyInviteButton);
         form.full("Invite for your partner", invitePreviewField);
+
+        hostSaveHint = CoopTheme.paragraph("");
+        hostSaveHint.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 0));
+        form.raw(hostSaveHint);
 
         DocumentListener preview = new DocumentListener() {
             @Override
@@ -543,6 +595,23 @@ public final class CoopLauncherApp {
         });
         hostPasswordField.getDocument().addDocumentListener(preview);
         hostSeedField.getDocument().addDocumentListener(preview);
+        // The new-campaign entry carries the seed, so it has to follow the field it is quoting.
+        hostSeedField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                refreshCampaignEntries();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                refreshCampaignEntries();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                refreshCampaignEntries();
+            }
+        });
         publicAddressField.getDocument().addDocumentListener(preview);
         sectorSizeBox.addActionListener(event -> refreshInvitePreview());
         sectorAgeBox.addActionListener(event -> refreshInvitePreview());
@@ -618,6 +687,11 @@ public final class CoopLauncherApp {
         guestSectorAgeField.setText(DEFAULT_STAR_AGE);
         guestSectorAgeField.setToolTipText("From the invite. New campaigns only.");
         form.pair("Sector size", guestSectorSizeField, "Star age", guestSectorAgeField);
+
+        guestSaveHint = CoopTheme.paragraph("");
+        guestSaveHint.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 0));
+        guestSaveHint.setVisible(false);
+        form.raw(guestSaveHint);
         return panel;
     }
 
@@ -895,6 +969,7 @@ public final class CoopLauncherApp {
         }
         prefill();
         refreshInstallRows();
+        refreshSaveIndex("the install was adopted");
     }
 
     private void prefill() {
@@ -949,6 +1024,7 @@ public final class CoopLauncherApp {
         setFlag(allowGameVersionMismatchBox, CoopLauncherConfig.ALLOW_GAME_VERSION_MISMATCH);
         // One-shot consent: never prefilled, so a previous launch's choice cannot repeat itself.
         adoptCampaignBox.setSelected(false);
+        refreshCampaignEntries();
         onRoleChanged();
     }
 
@@ -975,6 +1051,133 @@ public final class CoopLauncherApp {
         updateLaunchGate();
         sessionCard.revalidate();
         sessionCard.repaint();
+    }
+
+    // ---- which save to load ---------------------------------------------------------------------
+
+    /**
+     * Re-reads {@code saves/common/coop_saves.json.data} and the save folders it names, then
+     * redraws the picker and both hint lines.
+     *
+     * <p>Off the event dispatch thread even though it is one small file and a stat per row: this
+     * runs whenever the window comes back to the front, and a save folder on a slow or sleeping
+     * drive would freeze the window for as long as the disk took. Same generation-counter shape as
+     * the connection check - an alt-tab can start a second read before the first has landed, and
+     * the older answer must not win.
+     */
+    private void refreshSaveIndex(String reason) {
+        if (layout == null) {
+            return;
+        }
+        java.nio.file.Path savesRoot = layout.saves().toPath();
+        int generation = ++saveIndexGeneration;
+        try {
+            background.submit(() -> {
+                CoopSaveIndexReader.Index read = CoopSaveIndexReader.read(savesRoot);
+                SwingUtilities.invokeLater(() -> {
+                    if (generation != saveIndexGeneration) {
+                        return;
+                    }
+                    saveIndex = read;
+                    LOG.info("Co-op save list read because " + reason + ": " + read.status() + ", "
+                            + read.saves().size() + " save(s)"
+                            + (read.problem().isEmpty() ? "" : "; " + read.problem()));
+                    if (read.status() == CoopSaveIndexReader.Status.UNREADABLE
+                            || read.status() == CoopSaveIndexReader.Status.TOO_NEW) {
+                        append("The co-op save list (" + CoopSaveIndexReader.INDEX_DISPLAY_PATH
+                                + ") could not be used: " + read.problem() + ". Nothing else is"
+                                + " affected; you can still launch.");
+                    }
+                    refreshCampaignEntries();
+                    refreshGuestSaveHint();
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ex) {
+            // The window is closing and the worker is gone. Nothing left to draw the answer on.
+            LOG.info("Not reading the co-op save list; the launcher is shutting down");
+        }
+    }
+
+    /**
+     * Rebuilds the campaign drop-down from the current seed and save list, keeping whatever the
+     * player had picked. A campaign whose last save has just been pruned falls back to New rather
+     * than leaving a dead entry selected.
+     */
+    private void refreshCampaignEntries() {
+        if (campaignBox == null || hostSaveHint == null) {
+            return;
+        }
+        String wanted = selectedCampaignId();
+        List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries(
+                hostSeedField.getText(), saveIndex, ZoneId.systemDefault());
+        writingCampaignBox = true;
+        try {
+            campaignBox.removeAllItems();
+            for (CoopCampaignPicker.Entry entry : entries) {
+                campaignBox.addItem(entry);
+            }
+            campaignBox.setSelectedItem(CoopCampaignPicker.select(entries, wanted));
+        } finally {
+            writingCampaignBox = false;
+        }
+        onCampaignPicked();
+    }
+
+    /**
+     * The picker changed: the seed and world settings only mean something for a new campaign, the
+     * folder line names the save, and the invite has to carry the campaign id from now on.
+     */
+    private void onCampaignPicked() {
+        CoopCampaignPicker.Entry entry = selectedCampaignEntry();
+        boolean newCampaign = CoopCampaignPicker.worldControlsEnabled(entry);
+        hostSeedField.setEnabled(newCampaign);
+        hostSeedGenerateButton.setEnabled(newCampaign);
+        sectorSizeBox.setEnabled(newCampaign);
+        sectorAgeBox.setEnabled(newCampaign);
+        String folder = CoopCampaignPicker.folderLine(entry);
+        campaignFolderLabel.setText(folder);
+        campaignFolderLabel.setVisible(!folder.isEmpty());
+        setHint(hostSaveHint, CoopCampaignPicker.hint(
+                entry == null ? "" : entry.campaignId(), saveIndex, ZoneId.systemDefault()), true);
+        refreshInvitePreview();
+    }
+
+    private CoopCampaignPicker.Entry selectedCampaignEntry() {
+        Object item = campaignBox == null ? null : campaignBox.getSelectedItem();
+        return item instanceof CoopCampaignPicker.Entry entry ? entry : null;
+    }
+
+    /** The campaign the host picked, {@code ""} for a new one. */
+    private String selectedCampaignId() {
+        CoopCampaignPicker.Entry entry = selectedCampaignEntry();
+        return entry == null ? "" : entry.campaignId();
+    }
+
+    /** The guest's line, which only says anything once an invite has parsed. */
+    private void refreshGuestSaveHint() {
+        if (guestSaveHint == null) {
+            return;
+        }
+        if (!guestInviteAccepted) {
+            guestSaveHint.setText("");
+            guestSaveHint.setVisible(false);
+            return;
+        }
+        setHint(guestSaveHint,
+                CoopCampaignPicker.hint(invitedCampaignId, saveIndex, ZoneId.systemDefault()), true);
+    }
+
+    /**
+     * Writes one hint line. A line that names a save is picked out in the accent colour, because it
+     * is the one sentence on the card the player has to act on before pressing anything.
+     */
+    private void setHint(JTextArea target, String text, boolean visible) {
+        target.setText(text);
+        target.setForeground(text.startsWith("Load the save") ? CoopTheme.ACCENT : CoopTheme.MUTED);
+        target.setVisible(visible && !text.isEmpty());
+        if (target.getParent() != null) {
+            target.getParent().revalidate();
+        }
     }
 
     /** A host always has a seed: a new campaign without one cannot be matched by the guest. */
@@ -1141,7 +1344,7 @@ public final class CoopLauncherApp {
         }
         try {
             return CoopInvite.format(address, port, seed, password(hostPasswordField),
-                    selected(sectorSizeBox), selected(sectorAgeBox));
+                    selected(sectorSizeBox), selected(sectorAgeBox), selectedCampaignId());
         } catch (IllegalArgumentException ex) {
             if (loud) {
                 fail("Could not build an invite: " + ex.getMessage());
@@ -1534,6 +1737,9 @@ public final class CoopLauncherApp {
         if (text.isEmpty()) {
             guestInviteNote.setForeground(CoopTheme.MUTED);
             guestInviteNote.setText("Fills the fields below. You can also type them in.");
+            guestInviteAccepted = false;
+            invitedCampaignId = "";
+            refreshGuestSaveHint();
             return;
         }
         applyInviteText(text, false);
@@ -1544,6 +1750,9 @@ public final class CoopLauncherApp {
         if (!parsed.ok()) {
             guestInviteNote.setForeground(CoopTheme.FAIL);
             guestInviteNote.setText("Not a usable invite: " + parsed.error());
+            guestInviteAccepted = false;
+            invitedCampaignId = "";
+            refreshGuestSaveHint();
             if (loud) {
                 LOG.warn("Invite could not be parsed: " + parsed.error());
                 fail("That is not a usable invite: " + parsed.error());
@@ -1564,8 +1773,12 @@ public final class CoopLauncherApp {
                 + (invite.password().isEmpty() ? ", no password" : ", password set") + ".";
         guestInviteNote.setForeground(CoopTheme.OK);
         guestInviteNote.setText(summary);
+        invitedCampaignId = invite.campaignId();
+        guestInviteAccepted = true;
+        refreshGuestSaveHint();
         LOG.info("Invite accepted: " + invite);
         append(summary);
+        append(guestSaveHint.getText());
     }
 
     private void lookUpPublicAddress(Runnable then) {
@@ -1932,6 +2145,20 @@ public final class CoopLauncherApp {
             }
             owned.put(CoopLauncherConfig.NEW_GAME_SEED, seed);
         }
+        // Which campaign this launch is for, so the mod can say so in-game when the save the player
+        // loads belongs to a different one. Blank for a new campaign, and blank for a guest whose
+        // host is on a release that did not put a campaign id in the invite; a blank value takes
+        // the key back out of the file, which is what "nothing expected" has to look like.
+        String expectedCampaign = host ? selectedCampaignId() : invitedCampaignId;
+        owned.put(CoopLauncherConfig.EXPECTED_CAMPAIGN_ID, expectedCampaign);
+        if (expectedCampaign.isEmpty()) {
+            append("This launch is for a new campaign: start a New Game with the seed above.");
+        } else {
+            String advice = CoopCampaignPicker.hint(expectedCampaign, saveIndex,
+                    ZoneId.systemDefault());
+            LOG.info("Launch is for campaign " + expectedCampaign + "; " + advice);
+            append(advice);
+        }
         owned.put(CoopLauncherConfig.PORT_MAPPING, selected(portMappingBox));
         owned.put(CoopLauncherConfig.RECONNECT_GRACE_SECONDS,
                 String.valueOf(reconnectGraceSpinner.getValue()));
@@ -2018,6 +2245,10 @@ public final class CoopLauncherApp {
                 launchButton.setText("LAUNCH");
                 gameRunning = false;
                 updateLaunchGate();
+                // The session just wrote saves. The picker and both hints are about to be read by
+                // somebody deciding what to load next time, so they must not still show what was
+                // on disk before this run.
+                refreshSaveIndex("the game exited");
             });
         });
         setDrawerVisible(true);

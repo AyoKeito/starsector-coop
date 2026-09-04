@@ -143,6 +143,27 @@ class CoopLauncherConfigTest {
         assertEquals("young", json.optString("coop.sectorAge", null));
     }
 
+    /**
+     * The campaign a launch is for. Written only when the host picked a campaign or the invite
+     * named one: for a new campaign the key has to come back out of the file, or the mod's in-game
+     * guard would warn about an invite nobody is acting on any more.
+     */
+    @Test
+    void theExpectedCampaignIsWrittenOnlyWhenThereIsOneToWrite() {
+        String picked = CoopLauncherConfig.parse("{}").compose(true, owned(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.EXPECTED_CAMPAIGN_ID, "6f1a3c2e-9b44-4f2a-8d21-0c7e5a9b1f30"));
+
+        assertEquals("6f1a3c2e-9b44-4f2a-8d21-0c7e5a9b1f30",
+                reparse(picked).optString("coop.expectedCampaignId"));
+
+        String brandNew = CoopLauncherConfig.parse(picked).compose(true, owned(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.EXPECTED_CAMPAIGN_ID, ""));
+
+        assertFalse(brandNew.contains("coop.expectedCampaignId"), brandNew);
+    }
+
     @Test
     void keysTheLauncherDoesNotOwnAreCarriedThroughUntouched() {
         CoopLauncherConfig config = CoopLauncherConfig.parse(

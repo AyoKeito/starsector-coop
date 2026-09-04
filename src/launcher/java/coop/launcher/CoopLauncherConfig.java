@@ -60,6 +60,7 @@ public final class CoopLauncherConfig {
     public static final String DEBUG_FRAME_PROFILE = CoopOptionsRegistry.DEBUG_FRAME_PROFILE;
     public static final String DEBUG_INTERACTION_DELAY_MS = CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS;
     public static final String ADOPT_CAMPAIGN_ID = CoopOptionsRegistry.ADOPT_CAMPAIGN_ID;
+    public static final String EXPECTED_CAMPAIGN_ID = CoopOptionsRegistry.EXPECTED_CAMPAIGN_ID;
     public static final String ALLOW_GAME_VERSION_MISMATCH =
             CoopOptionsRegistry.ALLOW_GAME_VERSION_MISMATCH;
 
@@ -88,7 +89,8 @@ public final class CoopLauncherConfig {
             DEBUG_FRAME_PROFILE,
             DEBUG_INTERACTION_DELAY_MS,
             ALLOW_GAME_VERSION_MISMATCH,
-            ADOPT_CAMPAIGN_ID);
+            ADOPT_CAMPAIGN_ID,
+            EXPECTED_CAMPAIGN_ID);
 
     private final Map<String, Object> existing;
     private final boolean fileExisted;

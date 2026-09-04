@@ -237,6 +237,65 @@ class CoopInviteTest {
         assertTrue(text.contains("password=set"), text);
     }
 
+    // ---- the campaign id ------------------------------------------------------------------------
+
+    @Test
+    void theCampaignIdRidesLastAndRoundTrips() {
+        String id = "6f1a3c2e-9b44-4f2a-8d21-0c7e5a9b1f30";
+        String text = CoopInvite.format("203.0.113.9", 7777, "MN-1", "pw", "normal", "mixed", id);
+
+        assertEquals("coop://203.0.113.9:7777/?seed=MN-1&pw=pw&size=normal&age=mixed&cid=" + id,
+                text);
+        CoopInvite.Parsed parsed = CoopInvite.parse(text);
+        assertTrue(parsed.ok(), parsed.error());
+        assertEquals(id, parsed.invite().campaignId());
+    }
+
+    @Test
+    void aNewCampaignInviteLeavesTheCampaignIdOutEntirely() {
+        String text = CoopInvite.format("203.0.113.9", 7777, "MN-1", "pw", "normal", "mixed", "");
+
+        assertFalse(text.contains("cid="), text);
+        assertEquals("", CoopInvite.parse(text).invite().campaignId());
+    }
+
+    /** Hosts on the release before this one produce invites without a cid, and they still work. */
+    @Test
+    void anInviteFromBeforeTheCampaignIdParsesAsNoCampaign() {
+        CoopInvite.Parsed parsed =
+                CoopInvite.parse("coop://203.0.113.9:7777/?seed=MN-1&pw=pw&size=small&age=old");
+
+        assertTrue(parsed.ok(), parsed.error());
+        assertEquals("", parsed.invite().campaignId());
+        assertEquals("small", parsed.invite().sectorSize());
+    }
+
+    @Test
+    void aCampaignIdOnItsOwnStillProducesAReadableLine() {
+        String id = "6f1a3c2e-9b44-4f2a-8d21-0c7e5a9b1f30";
+
+        assertEquals("coop://203.0.113.9:7777/?cid=" + id,
+                CoopInvite.format("203.0.113.9", 7777, "", "", "", "", id));
+    }
+
+    @Test
+    void aCampaignIdWithCharactersACampaignIdCannotHaveIsRefusedAtBothEnds() {
+        assertThrows(() -> CoopInvite.format("h", 1, "MN-1", "", "", "", "not an id"));
+
+        CoopInvite.Parsed parsed =
+                CoopInvite.parse("coop://203.0.113.9:7777/?cid=not%20an%20id");
+
+        assertFalse(parsed.ok());
+        assertTrue(parsed.error().contains("campaign id"), parsed.error());
+    }
+
+    @Test
+    void toStringSaysWhichCampaignWithoutSayingThePassword() {
+        assertTrue(new CoopInvite("h", 1, "MN-1", "hunter2").toString().contains("campaign=new"));
+        assertTrue(new CoopInvite("h", 1, "MN-1", "hunter2", "", "", "cA").toString()
+                .contains("campaign=cA"));
+    }
+
     @Test
     void theValidatorAgreesWithAnEmptySeed() {
         assertNull(CoopSeeds.validate(""));

@@ -11,16 +11,22 @@ import java.util.Objects;
  * The one line a host hands a guest.
  *
  * <pre>
- *   coop://&lt;host&gt;:&lt;port&gt;/?seed=&lt;seed&gt;&amp;pw=&lt;url-encoded password&gt;
+ *   coop://&lt;host&gt;:&lt;port&gt;/?seed=&lt;seed&gt;&amp;pw=&lt;url-encoded password&gt;&amp;cid=&lt;campaign id&gt;
  * </pre>
  *
  * <p>IPv6 hosts are bracketed, the password is URL-encoded UTF-8 and left out entirely when there is
  * none, and the seed is left out when the host has not pinned one. Hand-parsed rather than run
  * through {@link java.net.URI}: the failure messages have to name the part that broke, and a URI
  * parse failure names a character offset.
+ *
+ * <p><b>{@code cid}</b> is the campaign the host picked in the launcher, and it is what lets the
+ * guest be told which of their saves to load. It is absent for a new campaign, and it is absent
+ * from every invite a host on an older release produced - so the parser reads a missing one as "no
+ * campaign named" rather than as a broken line. Last in the query on purpose: an invite that
+ * predates it and one that carries it then differ only by a suffix.
  */
 public record CoopInvite(String host, int port, String seed, String password, String sectorSize,
-                         String sectorAge) {
+                         String sectorAge, String campaignId) {
 
     /** Scheme, lower case, including the separator. */
     public static final String SCHEME = "coop://";
@@ -31,11 +37,18 @@ public record CoopInvite(String host, int port, String seed, String password, St
         password = password == null ? "" : password;
         sectorSize = trim(sectorSize).toLowerCase(Locale.ROOT);
         sectorAge = trim(sectorAge).toLowerCase(Locale.ROOT);
+        campaignId = trim(campaignId);
     }
 
     /** An invite without world settings: the guest falls back to the launcher defaults. */
     public CoopInvite(String host, int port, String seed, String password) {
-        this(host, port, seed, password, "", "");
+        this(host, port, seed, password, "", "", "");
+    }
+
+    /** An invite for a new campaign: world settings pinned, no campaign named. */
+    public CoopInvite(String host, int port, String seed, String password, String sectorSize,
+                      String sectorAge) {
+        this(host, port, seed, password, sectorSize, sectorAge, "");
     }
 
     /** A parse attempt: exactly one of {@link #invite()} and {@link #error()} is set. */
@@ -50,7 +63,7 @@ public record CoopInvite(String host, int port, String seed, String password, St
      * broken invite is a bug here, not something the guest should have to diagnose.
      */
     public static String format(String host, int port, String seed, String password) {
-        return format(host, port, seed, password, "", "");
+        return format(host, port, seed, password, "", "", "");
     }
 
     /**
@@ -58,6 +71,15 @@ public record CoopInvite(String host, int port, String seed, String password, St
      */
     public static String format(String host, int port, String seed, String password,
                                 String sectorSize, String sectorAge) {
+        return format(host, port, seed, password, sectorSize, sectorAge, "");
+    }
+
+    /**
+     * Renders an invite that also names the campaign the host picked. The campaign id is left out
+     * when blank, which is what a new campaign looks like.
+     */
+    public static String format(String host, int port, String seed, String password,
+                                String sectorSize, String sectorAge, String campaignId) {
         String cleanHost = trim(host);
         if (cleanHost.isEmpty()) {
             throw new IllegalArgumentException("an invite needs a host address");
@@ -99,6 +121,19 @@ public record CoopInvite(String host, int port, String seed, String password, St
                 text.append('&');
             }
             text.append("age=").append(encode(cleanAge));
+            first = false;
+        }
+        String cleanCampaign = trim(campaignId);
+        if (!cleanCampaign.isEmpty()) {
+            String campaignProblem = CoopCampaignPicker.campaignIdProblem(cleanCampaign);
+            if (campaignProblem != null) {
+                throw new IllegalArgumentException("that campaign id cannot go into an invite: "
+                        + campaignProblem);
+            }
+            if (!first) {
+                text.append('&');
+            }
+            text.append("cid=").append(encode(cleanCampaign));
         }
         // Trailing "?" with nothing after it is legal and round-trips, but it reads like a mistake
         // on a line someone pastes into a chat window.
@@ -110,7 +145,7 @@ public record CoopInvite(String host, int port, String seed, String password, St
 
     /** Convenience for a value already in hand. */
     public String format() {
-        return format(host, port, seed, password, sectorSize, sectorAge);
+        return format(host, port, seed, password, sectorSize, sectorAge, campaignId);
     }
 
     /**
@@ -195,6 +230,7 @@ public record CoopInvite(String host, int port, String seed, String password, St
         String password = "";
         String sectorSize = "";
         String sectorAge = "";
+        String campaignId = "";
         if (!query.isEmpty()) {
             for (String pair : query.split("&", -1)) {
                 if (pair.isEmpty()) {
@@ -215,6 +251,7 @@ public record CoopInvite(String host, int port, String seed, String password, St
                     case "pw" -> password = decoded;
                     case "size" -> sectorSize = decoded;
                     case "age" -> sectorAge = decoded;
+                    case "cid" -> campaignId = decoded;
                     default -> {
                         return fail("the invite carries an unknown setting \"" + name + "\"");
                     }
@@ -225,7 +262,12 @@ public record CoopInvite(String host, int port, String seed, String password, St
         if (seedProblem != null) {
             return fail("the seed \"" + seed + "\" is not usable: " + seedProblem);
         }
-        return new Parsed(new CoopInvite(host, port, seed, password, sectorSize, sectorAge), null);
+        String campaignProblem = CoopCampaignPicker.campaignIdProblem(campaignId);
+        if (campaignProblem != null) {
+            return fail("the campaign id \"" + campaignId + "\" is not usable: " + campaignProblem);
+        }
+        return new Parsed(new CoopInvite(host, port, seed, password, sectorSize, sectorAge,
+                campaignId), null);
     }
 
     private static Parsed fail(String reason) {
@@ -293,6 +335,7 @@ public record CoopInvite(String host, int port, String seed, String password, St
     public String toString() {
         // Never the password: this string ends up in the launcher log.
         return "CoopInvite[" + Objects.toString(host) + ":" + port + " seed=" + seed
+                + " campaign=" + (campaignId.isEmpty() ? "new" : campaignId)
                 + " password=" + (password.isEmpty() ? "none" : "set") + "]";
     }
 }
