@@ -538,7 +538,7 @@ public final class CoopLauncherApp {
         hostPasswordField = CoopTheme.passwordField("no password");
         hostPasswordField.setToolTipText("Generated for you. Clear it for an open session. The invite"
                 + " carries it.");
-        hostPasswordField.getDocument().addDocumentListener(new PasswordWatcher());
+        hostPasswordField.getDocument().addDocumentListener(onAnyEdit(this::noticeHostPasswordCleared));
         form.pair("Port", hostPortField, "Password", hostPasswordField);
 
         hostSeedField = CoopTheme.textField("press Generate");
@@ -580,58 +580,13 @@ public final class CoopLauncherApp {
         hostSaveHint.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 0));
         form.raw(hostSaveHint);
 
-        DocumentListener preview = new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent event) {
-                refreshInvitePreview();
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent event) {
-                refreshInvitePreview();
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent event) {
-                refreshInvitePreview();
-            }
-        };
+        DocumentListener preview = onAnyEdit(this::refreshInvitePreview);
         hostPortField.getDocument().addDocumentListener(preview);
-        hostPortField.getDocument().addDocumentListener(new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent event) {
-                updateLaunchGate();
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent event) {
-                updateLaunchGate();
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent event) {
-                updateLaunchGate();
-            }
-        });
+        hostPortField.getDocument().addDocumentListener(onAnyEdit(this::updateLaunchGate));
         hostPasswordField.getDocument().addDocumentListener(preview);
         hostSeedField.getDocument().addDocumentListener(preview);
         // The new-campaign entry carries the seed, so it has to follow the field it is quoting.
-        hostSeedField.getDocument().addDocumentListener(new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent event) {
-                onSeedFieldEdited();
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent event) {
-                onSeedFieldEdited();
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent event) {
-                onSeedFieldEdited();
-            }
-        });
+        hostSeedField.getDocument().addDocumentListener(onAnyEdit(this::onSeedFieldEdited));
         publicAddressField.getDocument().addDocumentListener(preview);
         sectorSizeBox.addActionListener(event -> onWorldBoxEdited());
         sectorAgeBox.addActionListener(event -> onWorldBoxEdited());
@@ -647,22 +602,7 @@ public final class CoopLauncherApp {
         JButton paste = CoopTheme.inline("Paste");
         paste.addActionListener(event -> pasteInvite());
         CoopTheme.trailing(guestInviteField, paste);
-        guestInviteField.getDocument().addDocumentListener(new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent event) {
-                onGuestInviteTyped();
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent event) {
-                onGuestInviteTyped();
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent event) {
-                onGuestInviteTyped();
-            }
-        });
+        guestInviteField.getDocument().addDocumentListener(onAnyEdit(this::onGuestInviteTyped));
         form.full("Invite from your host", guestInviteField);
         guestInviteNote = CoopTheme.paragraph("Fills the fields below. You can also type them in.");
         guestInviteNote.setBorder(BorderFactory.createEmptyBorder(0, 2, 10, 0));
@@ -672,22 +612,7 @@ public final class CoopLauncherApp {
         guestPortField = CoopTheme.textField(String.valueOf(DEFAULT_PORT));
         guestPortField.setText(String.valueOf(DEFAULT_PORT));
         form.pair("Host address", guestHostField, "Port", guestPortField);
-        DocumentListener gate = new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent event) {
-                updateLaunchGate();
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent event) {
-                updateLaunchGate();
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent event) {
-                updateLaunchGate();
-            }
-        };
+        DocumentListener gate = onAnyEdit(this::updateLaunchGate);
         guestHostField.getDocument().addDocumentListener(gate);
         guestPortField.getDocument().addDocumentListener(gate);
 
@@ -1389,6 +1314,26 @@ public final class CoopLauncherApp {
         }
     }
 
+    /** A document listener that runs the same action on every kind of edit. */
+    private static DocumentListener onAnyEdit(Runnable action) {
+        return new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                action.run();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                action.run();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                action.run();
+            }
+        };
+    }
+
     /**
      * Fills an empty host password field with a generated one. Does nothing once the player has
      * emptied the field themselves, and nothing when they have already typed something.
@@ -1411,31 +1356,13 @@ public final class CoopLauncherApp {
     }
 
     /** Notices the player emptying the host password field, so nothing refills it afterwards. */
-    private final class PasswordWatcher implements DocumentListener {
-
-        @Override
-        public void insertUpdate(DocumentEvent event) {
-            check();
+    private void noticeHostPasswordCleared() {
+        if (writingHostPassword || hostPasswordCleared) {
+            return;
         }
-
-        @Override
-        public void removeUpdate(DocumentEvent event) {
-            check();
-        }
-
-        @Override
-        public void changedUpdate(DocumentEvent event) {
-            check();
-        }
-
-        private void check() {
-            if (writingHostPassword || hostPasswordCleared) {
-                return;
-            }
-            if (password(hostPasswordField).isEmpty()) {
-                hostPasswordCleared = true;
-                LOG.info("The player emptied the host password field; it stays empty for this run");
-            }
+        if (password(hostPasswordField).isEmpty()) {
+            hostPasswordCleared = true;
+            LOG.info("The player emptied the host password field; it stays empty for this run");
         }
     }
 
