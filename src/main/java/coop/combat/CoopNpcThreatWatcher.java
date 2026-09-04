@@ -34,7 +34,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
-import java.util.function.LongSupplier;
 
 /**
  * Host-side bridge between vanilla's own pursuit AI and the guest's local combat (Phase 14, rebuilt by
@@ -347,7 +346,6 @@ public final class CoopNpcThreatWatcher {
 
     private final CoopNetService service;
     private final CoopSessionState session;
-    private final LongSupplier clock;
     private final BooleanSupplier synthesizedPursuit;
     private final IntSupplier p95RttMillis;
     private final Cooldowns cooldowns = new Cooldowns();
@@ -364,8 +362,8 @@ public final class CoopNpcThreatWatcher {
     private int graceAppliedCount;
 
     /** Loopback/test constructor: no link measurement, so the handoff keeps its Phase 14 geometry. */
-    public CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock) {
-        this(service, session, clock, () -> 0);
+    public CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session) {
+        this(service, session, () -> 0);
     }
 
     /**
@@ -374,22 +372,11 @@ public final class CoopNpcThreatWatcher {
      *                     {@code CoopLinkQuality::p95RttMillis} with its null mapped to 0). Zero is
      *                     the loopback contract: see {@link #handoffMargin}.
      */
-    public CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock,
+    public CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session,
                                 IntSupplier p95RttMillis) {
-        this(service, session, clock, CoopNpcThreatWatcher::synthesizedPursuitConfigured, p95RttMillis);
-    }
-
-    CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock,
-                         BooleanSupplier synthesizedPursuit) {
-        this(service, session, clock, synthesizedPursuit, () -> 0);
-    }
-
-    CoopNpcThreatWatcher(CoopNetService service, CoopSessionState session, LongSupplier clock,
-                         BooleanSupplier synthesizedPursuit, IntSupplier p95RttMillis) {
         this.service = Objects.requireNonNull(service, "service");
         this.session = Objects.requireNonNull(session, "session");
-        this.clock = Objects.requireNonNull(clock, "clock");
-        this.synthesizedPursuit = Objects.requireNonNull(synthesizedPursuit, "synthesizedPursuit");
+        this.synthesizedPursuit = CoopNpcThreatWatcher::synthesizedPursuitConfigured;
         this.p95RttMillis = Objects.requireNonNull(p95RttMillis, "p95RttMillis");
     }
 

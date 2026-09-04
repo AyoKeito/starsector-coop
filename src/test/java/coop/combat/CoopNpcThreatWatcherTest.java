@@ -553,7 +553,7 @@ class CoopNpcThreatWatcherTest {
     private static CoopNpcThreatWatcher watcher() {
         // Neither the service nor the session is touched by the cooldown bookkeeping under test.
         return new CoopNpcThreatWatcher(new coop.net.CoopNetService(),
-                new coop.session.CoopSessionState(), () -> 0L);
+                new coop.session.CoopSessionState());
     }
 
     // ---- fixtures ---------------------------------------------------------------------------------

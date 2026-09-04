@@ -16,7 +16,6 @@ public final class CoopMessages {
     }
 
     public enum Type {
-        HELLO,
         LOBBY_HELLO,
         /**
          * Phase 20.4: host &rarr; guest, "this session wants a password; prove it against this
@@ -99,7 +98,6 @@ public final class CoopMessages {
         UDP_PROBE,
         /** Datagram-only: QUIC-style path challenge/echo that proves a new UDP source before it is streamed to. */
         PATH_PROBE,
-        DISCONNECT,
         /**
          * Phase 20 red-team B4: "my process is about to stop pumping, and it is not a battle." Sent
          * by <em>both</em> roles from {@code beforeGameSave} and flushed inline, so the peer's
@@ -226,11 +224,6 @@ public final class CoopMessages {
 
     /** Characters of hex in a {@link #wireToken(String)}; 16 hex = 64 bits. */
     public static final int WIRE_TOKEN_CHARS = 16;
-
-    public static Message hello(String sessionId, long seq, long sentAtMillis, CoopConnectionRole role) {
-        Objects.requireNonNull(role, "role");
-        return new Message(Type.HELLO, sessionId, seq, sentAtMillis, "{\"role\":\"" + role.name() + "\"}");
-    }
 
     public static Message ping(String sessionId, long seq, long sentAtMillis) {
         return new Message(Type.PING, sessionId, seq, sentAtMillis, "{}");
@@ -1385,11 +1378,6 @@ public final class CoopMessages {
                 "{\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
                         + "\"destinationName\":\""
                         + escapeJson(destinationName == null ? "" : destinationName) + "\"}");
-    }
-
-    public static Message disconnect(String sessionId, long seq, long sentAtMillis, String reason) {
-        return new Message(Type.DISCONNECT, sessionId, seq, sentAtMillis,
-                "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
     }
 
     /**

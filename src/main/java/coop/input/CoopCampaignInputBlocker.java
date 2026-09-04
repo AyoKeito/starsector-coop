@@ -37,7 +37,6 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
     // player is locked out of the world (COOP_MP_DESIGN.md 8.5). This is layered on top of the
     // always-on pause/fast-forward lock above. Toggled per-frame by CoopNetPump.
     private volatile boolean interactionBlocked;
-    private volatile String blockingEntityName = "";
 
     // While a vanilla blocking screen (interaction dialog / in-game menu / core tab) owns the
     // keyboard, the guest blocker must NOT consume input: spacebar advances a station dialog to its
@@ -47,9 +46,8 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
     // frame, so suspending consumption here cannot let the guest independently pause/fast-forward.
     private volatile boolean suspended;
 
-    public void setInteractionBlocked(boolean blocked, String entityName) {
+    public void setInteractionBlocked(boolean blocked) {
         this.interactionBlocked = blocked;
-        this.blockingEntityName = entityName == null ? "" : entityName;
     }
 
     public void setSuspended(boolean suspended) {
@@ -62,10 +60,6 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
 
     public boolean isInteractionBlocked() {
         return interactionBlocked;
-    }
-
-    public String blockingEntityName() {
-        return blockingEntityName;
     }
 
     @Override

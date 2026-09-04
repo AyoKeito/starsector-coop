@@ -412,8 +412,8 @@ public class CoopNetPump implements EveryFrameScript {
     /**
      * Seam for the Phase 21 desync dialogs: when one of them owns the failure — seed lock, mod
      * mismatch, resume reject — the connecting dialog steps aside instead of showing a second,
-     * weaker version of the same message. Defaults to the pump's own live predicate; a test may
-     * swap it out through {@link #setDesyncFailureOwner}.
+     * weaker version of the same message. Always the pump's own live predicate
+     * ({@link #desyncOwnsReason}); the field exists so the check reads as one seam.
      */
     private java.util.function.Predicate<String> desyncOwnsFailure = this::desyncOwnsReason;
 
@@ -744,7 +744,7 @@ public class CoopNetPump implements EveryFrameScript {
         // Phase 20 M6: the pre-contact handoff band is derived against the measured link, so the
         // watcher reads p95 RTT from the same place the HUD does. Null (no PONG yet) maps to 0, which
         // the watcher treats as "unmeasured" and answers with Phase 14's flat loopback geometry.
-        this.npcThreatWatcher = new CoopNpcThreatWatcher(service, sessionState, clockMillis,
+        this.npcThreatWatcher = new CoopNpcThreatWatcher(service, sessionState,
                 this::p95RttMillisOrZero);
         // Phase 14: vanilla's battle-result callbacks only enrich the outcome string; the coop battle
         // window itself is opened/closed by the bridge's combat-frame and campaign-resume seams.
@@ -952,11 +952,6 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private boolean peerProvenForOutbound() {
         return !reconnect.active();
-    }
-
-    /** Test seam for the desync dialogs' hand-off; see {@link #desyncOwnsFailure}. */
-    void setDesyncFailureOwner(java.util.function.Predicate<String> owner) {
-        this.desyncOwnsFailure = owner == null ? reason -> false : owner;
     }
 
     /**
@@ -3924,7 +3919,7 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         String accepted = CoopMessages.parseResumeSessionId(message);
-        if (accepted == null || !accepted.equals(sessionState.sessionId())) {
+        if (!accepted.equals(sessionState.sessionId())) {
             CoopLog.warn(CoopNetPump.class, "Coop SESSION_RESUME_ACCEPT named session " + accepted
                     + " but this guest holds " + sessionState.sessionId() + "; ending the session");
             reconnect.end("resume accept named a different session");
@@ -4017,12 +4012,12 @@ public class CoopNetPump implements EveryFrameScript {
             // Scoped to the connection the drop edge just tore down, or to state it just reset.
             case INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
                  DIALOG_BEGIN,
-                 HELLO, LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
+                 LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
                  SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
                  SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
                  READY_STATE, FLEET_ROSTER_REQUEST, LINK_STATUS,
-                 PING, PONG, UDP_PROBE, PATH_PROBE, DISCONNECT -> false;
+                 PING, PONG, UDP_PROBE, PATH_PROBE -> false;
         };
     }
 
@@ -7260,7 +7255,7 @@ public class CoopNetPump implements EveryFrameScript {
                 ui.setDisallowPlayerInteractionsForOneFrame();
             }
             // Guest-only input lock (consume world input except camera). No-op on host.
-            timeLock.setInteractionBlocked(true, blocking.entityName());
+            timeLock.setInteractionBlocked(true);
             if (!blocking.entityName().equals(lastBlockedEntityName)) {
                 if (ui != null) {
                     ui.addMessage("Remote player is interacting: " + blocking.entityName());
@@ -7268,7 +7263,7 @@ public class CoopNetPump implements EveryFrameScript {
                 lastBlockedEntityName = blocking.entityName();
             }
         } else {
-            timeLock.setInteractionBlocked(false, null);
+            timeLock.setInteractionBlocked(false);
             lastBlockedEntityName = null;
         }
     }
@@ -7292,7 +7287,7 @@ public class CoopNetPump implements EveryFrameScript {
         lastBlockedEntityName = null;
         interactionGate.clear();
         try {
-            timeLock.setInteractionBlocked(false, null);
+            timeLock.setInteractionBlocked(false);
         } catch (RuntimeException ex) {
             // No active sector to clear the blocker on; the blocker is removed by syncGuestInputBlocker.
         }
@@ -8157,14 +8152,14 @@ public class CoopNetPump implements EveryFrameScript {
         return state == CoopLobbyState.HOST_CONNECTED || state == CoopLobbyState.GUEST_CONNECTED;
     }
 
-    /** Lobby / handshake / seed lock / resume / disconnect: the pre-session control plane. */
+    /** Lobby / handshake / seed lock / resume: the pre-session control plane. */
     private static boolean isControlPlane(CoopMessages.Type type) {
         return switch (type) {
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
                  SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
-                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
-                 DISCONNECT -> true;
+                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT,
+                 SESSION_RESUME_REJECT -> true;
             default -> false;
         };
     }

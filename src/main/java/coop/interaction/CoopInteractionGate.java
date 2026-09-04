@@ -65,17 +65,6 @@ public final class CoopInteractionGate {
         return false;
     }
 
-    /** Force-release an entity regardless of holder (e.g. combat start/end on that entity). */
-    public synchronized boolean releaseEntity(String entityId) {
-        return claimsByEntity.remove(requireText(entityId, "entityId")) != null;
-    }
-
-    /** Drop every claim held by a player (e.g. that player disconnected). */
-    public synchronized void releaseAll(String playerId) {
-        String normPlayer = requireText(playerId, "playerId");
-        claimsByEntity.values().removeIf(claim -> claim.playerId().equals(normPlayer));
-    }
-
     public synchronized void clear() {
         claimsByEntity.clear();
     }

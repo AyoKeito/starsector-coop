@@ -143,7 +143,7 @@ public class CoopTimeLock {
      * installed, which is the host case (the host blocks its own new interactions via
      * {@code setDisallowPlayerInteractionsForOneFrame} instead).
      */
-    public void setInteractionBlocked(boolean blocked, String entityName) {
+    public void setInteractionBlocked(boolean blocked) {
         SectorAPI sector = sectorOrNull();
         if (sector == null) {
             return;
@@ -153,7 +153,7 @@ public class CoopTimeLock {
             return;
         }
         for (CoopCampaignInputBlocker blocker : listeners.getListeners(CoopCampaignInputBlocker.class)) {
-            blocker.setInteractionBlocked(blocked, entityName);
+            blocker.setInteractionBlocked(blocked);
         }
     }
 

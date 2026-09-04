@@ -95,7 +95,6 @@ public final class CoopFullFidelitySystemDriver {
     private static boolean tickedSinceFrameBoundary;
     private static boolean saveInProgress;
     private static boolean warnedNoFrameDelta;
-    private static int swapCount;
 
     private CoopFullFidelitySystemDriver() {
     }
@@ -156,11 +155,6 @@ public final class CoopFullFidelitySystemDriver {
         return drivenSystemId;
     }
 
-    /** Number of phase-slot swaps performed. Expected to be about one per second while driving. */
-    public static int swapCount() {
-        return swapCount;
-    }
-
     /** True once a resolve or drive failure has taken the feature out for this process. */
     public static boolean isPermanentlyDisabled() {
         return permanentlyDisabled;
@@ -171,7 +165,6 @@ public final class CoopFullFidelitySystemDriver {
     /** Session (re)start: drop ownership so the next tick logs afresh. Does not clear the kill switch. */
     public static void reset() {
         release("session reset");
-        swapCount = 0;
         // A save that failed used to leave this latched for the rest of the process, across campaign
         // loads, with nothing but a successful save able to clear it. CoopModPlugin.onGameSaveFailed
         // is the direct fix; clearing it here as well means a stuck flag can never outlive the
@@ -286,7 +279,6 @@ public final class CoopFullFidelitySystemDriver {
             return;
         }
         Collections.swap(systems, index, target);
-        swapCount++;
     }
 
     /**

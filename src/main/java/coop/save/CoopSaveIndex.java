@@ -489,7 +489,7 @@ public final class CoopSaveIndex {
             return null;
         }
         String campaignId = CoopSeedSync.currentCampaignId();
-        if (campaignId == null || campaignId.trim().isEmpty()) {
+        if (campaignId.trim().isEmpty()) {
             return null;
         }
         return new Row(campaignId,
