@@ -42,14 +42,15 @@ class CoopMessagesTest {
     }
 
     @Test
-    void nullableSessionIdRoundTripsForEarlyHello() {
-        CoopMessages.Message hello = CoopMessages.hello(null, 1L, 2000L, CoopConnectionRole.GUEST);
+    void nullableSessionIdRoundTripsForLobbyHello() {
+        CoopMessages.Message hello = CoopMessages.lobbyHello(1L, 2000L,
+                new CoopPlayerInfo("guest-player", "Guest"));
 
         CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(hello));
 
-        assertEquals(CoopMessages.Type.HELLO, decoded.type());
+        assertEquals(CoopMessages.Type.LOBBY_HELLO, decoded.type());
         assertNull(decoded.sessionId());
-        assertEquals("{\"role\":\"GUEST\"}", decoded.payloadJson());
+        assertEquals("{\"playerId\":\"guest-player\",\"playerName\":\"Guest\"}", decoded.payloadJson());
     }
 
     @Test

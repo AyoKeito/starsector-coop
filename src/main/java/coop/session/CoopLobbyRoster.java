@@ -58,14 +58,12 @@ public final class CoopLobbyRoster {
         private boolean ready;
         private Long reconnectingUntilMillis;
         private String reason = "";
-        private long lastChangeMillis;
 
         private Row(String playerId, String name, boolean host, CoopJoinPhase phase, long nowMillis) {
             this.playerId = playerId;
             this.name = name;
             this.host = host;
             this.phase = phase;
-            this.lastChangeMillis = nowMillis;
         }
 
         public String playerId() {
@@ -105,10 +103,6 @@ public final class CoopLobbyRoster {
         /** A blocking reason that overrides the state word ("Mod mismatch"); "" when there is none. */
         public String reason() {
             return reason;
-        }
-
-        public long lastChangeMillis() {
-            return lastChangeMillis;
         }
     }
 
@@ -206,7 +200,6 @@ public final class CoopLobbyRoster {
             // Falling back below the ready gate cannot leave a stale ready standing.
             row.ready = false;
         }
-        row.lastChangeMillis = nowMillis;
         return true;
     }
 
@@ -229,9 +222,6 @@ public final class CoopLobbyRoster {
         boolean changed = row.ready != ready;
         row.ready = ready;
         row.phase = ready ? CoopJoinPhase.READY : CoopJoinPhase.SNAPSHOT_APPLIED;
-        if (changed) {
-            row.lastChangeMillis = nowMillis;
-        }
         return changed;
     }
 
@@ -254,9 +244,6 @@ public final class CoopLobbyRoster {
         }
         boolean fresh = row.reconnectingUntilMillis == null;
         row.reconnectingUntilMillis = nowMillis + Math.max(0L, remainingMillis);
-        if (fresh) {
-            row.lastChangeMillis = nowMillis;
-        }
         return fresh;
     }
 
@@ -267,7 +254,6 @@ public final class CoopLobbyRoster {
             return false;
         }
         row.reconnectingUntilMillis = null;
-        row.lastChangeMillis = nowMillis;
         return true;
     }
 
@@ -308,7 +294,6 @@ public final class CoopLobbyRoster {
             return false;
         }
         row.reason = text;
-        row.lastChangeMillis = nowMillis;
         return true;
     }
 
@@ -332,7 +317,6 @@ public final class CoopLobbyRoster {
             }
             row.ready = false;
             row.phase = CoopJoinPhase.SNAPSHOT_APPLIED;
-            row.lastChangeMillis = nowMillis;
             affected.add(row.name);
         }
         cancelCountdown();

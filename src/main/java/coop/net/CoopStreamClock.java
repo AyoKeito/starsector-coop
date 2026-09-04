@@ -51,11 +51,4 @@ public final class CoopStreamClock {
     public long nextEpoch() {
         return ++epoch;
     }
-
-    /** Test seam only — production code never resets (see the class doc). */
-    void reset() {
-        gameSeconds = 0.0;
-        epoch = 0L;
-        frozen = true;
-    }
 }

@@ -80,7 +80,6 @@ public final class CoopBaseAuthority {
     // Host state.
     private long nextHostPollAtMillis;
     private String lastSetHash = "";
-    private int lastBaseCount;
 
     // Guest state.
     private List<CoopBaseRecord> desiredSet = List.of();
@@ -127,7 +126,6 @@ public final class CoopBaseAuthority {
         service.send(CoopMessages.baseSet(sessionState.sessionId(), service.nextSeq(), now,
                 CoopBaseRecord.encodeSet(records)));
         lastSetHash = hash;
-        lastBaseCount = records.size();
         CoopLog.info(CoopBaseAuthority.class, "Coop sent BASE_SET bases=" + records.size());
     }
 
@@ -280,17 +278,8 @@ public final class CoopBaseAuthority {
      */
     public void reset() {
         lastSetHash = "";
-        lastBaseCount = 0;
         nextGuestReconcileAtMillis = 0L;
         constructionFailures.clear();
-    }
-
-    public String lastSetHash() {
-        return lastSetHash;
-    }
-
-    public int lastBaseCount() {
-        return lastBaseCount;
     }
 
     // ---- Guest --------------------------------------------------------------------------------

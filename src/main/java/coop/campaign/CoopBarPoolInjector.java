@@ -3,7 +3,6 @@ package coop.campaign;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -75,20 +74,14 @@ public final class CoopBarPoolInjector {
     public record Rebuild(int removed, int kept, int injected, int failed) {
     }
 
-    private final Set<String> injectedIds = new LinkedHashSet<>();
     private String lastAppliedSignature;
     /** Lazily probed event-id -> creator index; null means "not built for this session yet". */
     private Map<String, BarEventManager.GenericBarEventCreator> creatorsByEventId;
 
     /** Session (re)start: forget the creator index and force the next snapshot to rebuild. */
     public void reset() {
-        injectedIds.clear();
         lastAppliedSignature = null;
         creatorsByEventId = null;
-    }
-
-    public Set<String> injectedIds() {
-        return new LinkedHashSet<>(injectedIds);
     }
 
     /**
@@ -108,8 +101,6 @@ public final class CoopBarPoolInjector {
             }
             EnginePool pool = new EnginePool(data);
             Rebuild result = rebuild(pool, offers);
-            injectedIds.clear();
-            injectedIds.addAll(pool.injected);
             lastAppliedSignature = signature;
             CoopLog.info(CoopBarPoolInjector.class, "Coop guest rebuilt portside bar pool: removed="
                     + result.removed() + " keptIntelBacked=" + result.kept()

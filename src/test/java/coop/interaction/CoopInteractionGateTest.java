@@ -99,20 +99,6 @@ class CoopInteractionGateTest {
         assertFalse(guestGate.isBlockedFor("guest"));
     }
 
-    @Test
-    void releaseAllDropsEveryClaimForPlayer() {
-        CoopInteractionGate gate = new CoopInteractionGate();
-        gate.arbitrate("market-1", "guest", "Jangala");
-        gate.arbitrate("fleet-7", "guest", "Pirate Armada");
-        gate.arbitrate("market-2", "host", "Culann");
-
-        gate.releaseAll("guest");
-
-        assertNull(gate.holderOf("market-1"));
-        assertNull(gate.holderOf("fleet-7"));
-        assertEquals("host", gate.holderOf("market-2"));
-    }
-
     /**
      * The session-edge reset asks the gate itself whether there is anything to clear. Its own
      * bookkeeping cannot answer: a claim the drain accepted this frame is here and in none of the

@@ -97,7 +97,6 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private String coopFleetId = "";
     private String appliedName = "";
     private String appliedFactionId = "";
-    private int applyCount;
     /** True while the shield is deliberately down for the player's interaction target (edge-tracked). */
     private boolean shieldReleased;
     /** When {@code setNoEngaging(1f)} was last called, or {@link #NEVER_ASSERTED}. */
@@ -190,7 +189,6 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
             }
             presenceIndicator.apply(mirrorFleet, snapshot.username());
-            applyCount++;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop fleet snapshot", ex);
         }
@@ -220,7 +218,6 @@ public class CoopFleetMirror implements CoopNpcMirror {
             acceptSensors(snapshot.sensors());
             refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
             applyActionText(snapshot.aiAssignmentSummary());
-            applyCount++;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop NPC fleet snapshot", ex);
         }
@@ -316,7 +313,6 @@ public class CoopFleetMirror implements CoopNpcMirror {
             feedMotion(sampleTimeSeconds, motion.x(), motion.y(),
                     motion.velocityX(), motion.velocityY());
             acceptSensors(motion.sensors());
-            applyCount++;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop NPC fleet motion", ex);
         }
@@ -1313,7 +1309,6 @@ public class CoopFleetMirror implements CoopNpcMirror {
         coopFleetId = "";
         appliedName = "";
         appliedFactionId = "";
-        applyCount = 0;
         shieldReleased = false;
         shieldAssertedAtMillis = NEVER_ASSERTED;
         sensors = CoopSensorSync.Profile.UNKNOWN;

@@ -247,10 +247,6 @@ public final class CoopPeerLink {
         deferredInbound = ByteBuffer.wrap(copy);
     }
 
-    void clearDeferredInbound() {
-        deferredInbound = null;
-    }
-
     void noteInboundBytes(long nowMillis) {
         lastInboundFrameAtMillis = nowMillis;
     }

@@ -226,7 +226,7 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
             // without java.lang.reflect (the same route Phase 7b uses for the fast-forward class).
             Object continueId = continueOptionId();
             OptionPanelAPI options = dialog.getOptionPanel();
-            if (continueId == null || options == null || !options.hasOption(continueId)) {
+            if (options == null || !options.hasOption(continueId)) {
                 CoopLog.warn(CoopNewGameDialogPlugin.class,
                         "Coop new game: Continue option not found; no join cue shown");
                 return;

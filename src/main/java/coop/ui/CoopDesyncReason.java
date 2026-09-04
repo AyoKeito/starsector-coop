@@ -642,7 +642,6 @@ public final class CoopDesyncReason {
                 switch (field) {
                     case "name" -> {
                         draft.name = sides[0].isEmpty() ? sides[1] : sides[0];
-                        draft.otherDiffers = true;
                         if (draft.detail.isEmpty()) {
                             draft.detail = "name";
                         }
@@ -653,7 +652,6 @@ public final class CoopDesyncReason {
                         draft.versionDiffers = true;
                     }
                     default -> {
-                        draft.otherDiffers = true;
                         if (draft.detail.isEmpty()) {
                             draft.detail = field;
                         }
@@ -667,8 +665,6 @@ public final class CoopDesyncReason {
             draft.missingOnGuest = true;
         } else if (tail.contains("extra on guest")) {
             draft.missingOnHost = true;
-        } else {
-            draft.otherDiffers = true;
         }
     }
 
@@ -900,7 +896,6 @@ public final class CoopDesyncReason {
         private String guestVersion = "";
         private boolean versionDiffers;
         private boolean contentDiffers;
-        private boolean otherDiffers;
         private boolean missingOnGuest;
         private boolean missingOnHost;
         private String detail = "";

@@ -51,7 +51,7 @@ class CoopCampaignInputBlockerTest {
     @Test
     void interactionBlockConsumesWorldInputButAllowsMouseCameraInput() {
         CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker();
-        blocker.setInteractionBlocked(true, "Jangala");
+        blocker.setInteractionBlocked(true);
         RecordingInputEvent mouseClick = RecordingInputEvent.mouseClick();
         RecordingInputEvent keyboard = RecordingInputEvent.keyboard();
         RecordingInputEvent mouseMove = RecordingInputEvent.mouseMove();
@@ -70,8 +70,8 @@ class CoopCampaignInputBlockerTest {
     @Test
     void worldInputPassesThroughWhenInteractionBlockIsCleared() {
         CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker();
-        blocker.setInteractionBlocked(true, "Jangala");
-        blocker.setInteractionBlocked(false, null);
+        blocker.setInteractionBlocked(true);
+        blocker.setInteractionBlocked(false);
         RecordingInputEvent mouseClick = RecordingInputEvent.mouseClick();
         RecordingInputEvent keyboard = RecordingInputEvent.keyboard();
 
@@ -86,7 +86,7 @@ class CoopCampaignInputBlockerTest {
     void suspendedBlockerConsumesNothingSoDialogKeysReachTheDialog() {
         CoopSharedPauseCoordinator coordinator = new CoopSharedPauseCoordinator();
         CoopCampaignInputBlocker blocker = new CoopCampaignInputBlocker(coordinator);
-        blocker.setInteractionBlocked(true, "Jangala");
+        blocker.setInteractionBlocked(true);
         blocker.setSuspended(true);
 
         // While a blocking screen owns the keyboard: pause key, world clicks, and keyboard all pass

@@ -627,15 +627,13 @@ class CoopNetPumpTest {
 
         assertEquals(2, ui.disallowInteractionCount);
         assertEquals(List.of("Remote player is interacting: Jangala"), ui.messages);
-        assertEquals(List.of(
-                new InteractionBlock(true, "Jangala"),
-                new InteractionBlock(true, "Jangala")), timeLock.interactionBlocks);
+        assertEquals(List.of(true, true), timeLock.interactionBlocks);
 
         service.inbound.add(CoopMessages.interactionRelease(
                 "session-a", 9L, 1300L, "market-1", "host-player"));
         pump.advance(0f);
 
-        assertEquals(new InteractionBlock(false, null),
+        assertEquals(false,
                 timeLock.interactionBlocks.get(timeLock.interactionBlocks.size() - 1));
     }
 
@@ -771,7 +769,7 @@ class CoopNetPumpTest {
                 "the claim died with the socket that made it; the host is free to interact");
         assertTrue(ui.messages.stream().noneMatch(m -> m.contains("Remote player is interacting")),
                 "no lockout banner after the replacement: " + ui.messages);
-        assertEquals(new InteractionBlock(false, null),
+        assertEquals(false,
                 timeLock.interactionBlocks.get(timeLock.interactionBlocks.size() - 1));
     }
 
@@ -5259,9 +5257,6 @@ class CoopNetPumpTest {
         };
     }
 
-    private record InteractionBlock(boolean blocked, String entityName) {
-    }
-
     // ---- Phase 16: coordinated saves + guest snapshot -------------------------------------------
 
     @Test
@@ -6318,7 +6313,7 @@ class CoopNetPumpTest {
         private final CoopTimeLock.TimeSnapshot snapshot;
         private final List<CoopTimeLock.TimeSnapshot> applied = new ArrayList<>();
         private final List<Boolean> inputBlockerStates = new ArrayList<>();
-        private final List<InteractionBlock> interactionBlocks = new ArrayList<>();
+        private final List<Boolean> interactionBlocks = new ArrayList<>();
         private final List<String> capturedPauseHolders = new ArrayList<>();
 
         private RecordingTimeLock(CoopTimeLock.TimeSnapshot snapshot) {
@@ -6348,8 +6343,8 @@ class CoopNetPumpTest {
         }
 
         @Override
-        public void setInteractionBlocked(boolean blocked, String entityName) {
-            interactionBlocks.add(new InteractionBlock(blocked, entityName));
+        public void setInteractionBlocked(boolean blocked) {
+            interactionBlocks.add(blocked);
         }
     }
     // ---- Phase 21: desync dialogs ------------------------------------------------------------------
