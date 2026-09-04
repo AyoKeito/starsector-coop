@@ -18,7 +18,22 @@ def resolveGitCommit = {
             ignoreExitValue = true
         }
         def value = stdout.toString().trim()
-        return result.exitValue == 0 && value ? value : 'dev-uncommitted'
+        if (result.exitValue != 0 || !value) {
+            return 'dev-uncommitted'
+        }
+        // A build from a modified tree is not the commit it sits on. Stamping the bare hash let two
+        // machines hold equal Coop-Git-Commit values while their jars differed, which is the one
+        // thing the handshake's commit compare exists to catch; the suffix makes it a different
+        // string, so a clean build of the same commit no longer matches a dirty one.
+        def statusOut = new ByteArrayOutputStream()
+        def statusResult = exec {
+            commandLine 'git', 'status', '--porcelain'
+            standardOutput = statusOut
+            errorOutput = new ByteArrayOutputStream()
+            ignoreExitValue = true
+        }
+        def status = statusOut.toString().trim()
+        return statusResult.exitValue == 0 && status ? value + '-dirty' : value
     } catch (Exception ignored) {
         return 'dev-uncommitted'
     }
@@ -33,7 +48,12 @@ java {
     }
 }
 
-def starsectorCore = file('../../starsector-core')
+// The install whose starsector-core holds the compile-time jars. The default is the install this
+// mod folder sits in, which is where the game itself requires the mod to live; -PstarsectorCore
+// (passed by scripts\build.ps1 -BaseInstallRoot) or a STARSECTOR_CORE environment variable point a
+// checkout somewhere else at a real install instead of failing with a wall of "cannot find symbol".
+def starsectorCoreSetting = project.findProperty('starsectorCore') ?: System.getenv('STARSECTOR_CORE')
+def starsectorCore = starsectorCoreSetting ? file(starsectorCoreSetting.toString()) : file('../../starsector-core')
 def starsectorJars = files(
     "${starsectorCore}/starfarer.api.jar",
     "${starsectorCore}/xstream-1.4.10.jar",

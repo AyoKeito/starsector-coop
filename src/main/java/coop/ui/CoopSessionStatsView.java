@@ -408,8 +408,8 @@ final class CoopSessionStatsView {
                 "Markets traded with: credited to the player who opened the market screen.",
                 "Missions claimed: credited to the player whose claim the host accepted.",
                 "Colonies: founding is credited to the founder; held is what the shared faction owns.",
-                "Time flown together: team-wide, counted only while both fleets are in the same star "
-                        + "system.");
+                "Time flown together: team-wide, counted while both fleets are in the same location, "
+                        + "hyperspace included, and only while the shared clock is running.");
     }
 
     // ---- formatting ------------------------------------------------------------------------------

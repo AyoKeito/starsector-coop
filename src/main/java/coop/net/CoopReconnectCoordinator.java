@@ -128,8 +128,10 @@ public final class CoopReconnectCoordinator {
     private State state = State.IDLE;
     private String sessionId;
     private String peerPlayerId;
+    private long graceStartedAtMillis;
     private long graceEndsAtMillis;
     private boolean resumeRequestSent;
+    private long expiredWindowMillis = -1L;
 
     /**
      * @param graceMillis how long a window stays open; clamped at zero, which makes every drop end the
@@ -167,6 +169,19 @@ public final class CoopReconnectCoordinator {
     /** Configured window length in milliseconds. */
     public long graceMillis() {
         return graceMillis;
+    }
+
+    /**
+     * How long the last window that ran out was open, extensions included, or -1 when no window has
+     * expired.
+     *
+     * <p>Not the configured length: {@link #extend} moves the deadline without touching it, so a
+     * window a player kept alive for six minutes was reported to them as the sixty seconds it was
+     * configured for. Read after the window has been cleared, which is when the dialog that states
+     * the number is raised, so this deliberately survives {@code clear()}.
+     */
+    public long expiredWindowMillis() {
+        return expiredWindowMillis;
     }
 
     /** Milliseconds left in the window, floored at zero; zero when idle. */
@@ -216,8 +231,10 @@ public final class CoopReconnectCoordinator {
         this.state = target;
         this.sessionId = sessionId;
         this.peerPlayerId = peerPlayerId;
+        this.graceStartedAtMillis = nowMillis;
         this.graceEndsAtMillis = nowMillis + graceMillis;
         this.resumeRequestSent = false;
+        this.expiredWindowMillis = -1L;
         listener.onGraceStarted(target, graceMillis);
     }
 
@@ -251,6 +268,11 @@ public final class CoopReconnectCoordinator {
         if (state == State.IDLE || nowMillis < graceEndsAtMillis) {
             return false;
         }
+        // Recorded before end() clears the window: the dialog raised by the listener states how long
+        // the world was held, and extensions mean that is not the configured length. Measured
+        // deadline-to-start rather than now-to-start so the number is the window the player was
+        // promised, not that window plus however late the frame that noticed the expiry ran.
+        expiredWindowMillis = Math.max(0L, graceEndsAtMillis - graceStartedAtMillis);
         end(REASON_GRACE_EXPIRED);
         return true;
     }
@@ -347,7 +369,10 @@ public final class CoopReconnectCoordinator {
         state = State.IDLE;
         sessionId = null;
         peerPlayerId = null;
+        graceStartedAtMillis = 0L;
         graceEndsAtMillis = 0L;
         resumeRequestSent = false;
+        // expiredWindowMillis is deliberately left alone: it describes the window that just ended and
+        // is read afterwards, by the dialog explaining the ending.
     }
 }

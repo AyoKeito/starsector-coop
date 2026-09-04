@@ -803,8 +803,9 @@ public final class CoopBattleBridge {
             List<CoopFleetSnapshot.Member> members = safeMembers(fleet);
             if (members == null) {
                 CoopLog.warn(CoopBattleBridge.class, "Coop omitted coopFleetId=" + coopFleetId
-                        + " from the battle result: its roster could not be read off a fleet that is"
-                        + " still alive");
+                        + " from the battle result: its roster could not be read in full off a fleet"
+                        + " that is still alive (the read threw, came back empty, or came back"
+                        + " short of the ships the engine lists)");
                 continue;
             }
             if (members.isEmpty()) {

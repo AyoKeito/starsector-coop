@@ -133,8 +133,9 @@ class CoopOptionsViewTest {
     }
 
     @Test
-    void aCommandLineValueIsReadOnlyWhateverItsTier() {
+    void aCommandLineValueIsReadOnlyWhereItIsTheValueInForce() {
         FakeReader reader = new FakeReader();
+        reader.policyInstalled = false;
         reader.commandLine.add(PAUSE);
         reader.commandLine.add(CoopOptionsRegistry.HUD_CORNER);
 
@@ -142,6 +143,29 @@ class CoopOptionsViewTest {
 
         assertEquals(CoopOptionsView.TAG_COMMAND_LINE, row(view, PAUSE).sourceTag());
         assertFalse(row(view, PAUSE).editable());
+        assertEquals(CoopOptionsView.TAG_COMMAND_LINE, row(view, CoopOptionsRegistry.HUD_CORNER).sourceTag());
+        assertFalse(row(view, CoopOptionsRegistry.HUD_CORNER).editable());
+    }
+
+    /**
+     * The -D is consulted once, when the campaign is seeded; from then on the campaign's own value
+     * wins. Tagging the row "(command line)" named a source that did not supply the number on screen,
+     * and locking it left the host unable to change a rule it owns.
+     */
+    @Test
+    void aSeededPolicyRowIgnoresACommandLineThatNoLongerRulesIt() {
+        FakeReader reader = new FakeReader();
+        reader.policy.put(PAUSE, "true");
+        reader.local.put(PAUSE, "false");
+        reader.commandLine.add(PAUSE);
+        reader.commandLine.add(CoopOptionsRegistry.HUD_CORNER);
+
+        CoopOptionsView view = CoopOptionsView.of(CoopConnectionRole.HOST, false, reader);
+
+        assertEquals("true", row(view, PAUSE).rawValue(), "the campaign's value is the one in force");
+        assertEquals(CoopOptionsView.TAG_CAMPAIGN, row(view, PAUSE).sourceTag());
+        assertTrue(row(view, PAUSE).editable(), "the host owns its campaign's rules");
+        // Client tier is unchanged: there the command line really is the top of the stack.
         assertEquals(CoopOptionsView.TAG_COMMAND_LINE, row(view, CoopOptionsRegistry.HUD_CORNER).sourceTag());
         assertFalse(row(view, CoopOptionsRegistry.HUD_CORNER).editable());
     }

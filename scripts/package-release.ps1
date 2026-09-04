@@ -11,9 +11,12 @@ or .git.
 The refusals are the point. A release is one built artifact that both players install, so the
 script will not produce an archive that the handshake would reject at connect time:
 
-  * a dirty working tree, because the commit baked into the jar would read "dev-uncommitted";
+  * a dirty working tree, because the commit baked into the jar reads "<hash>-dirty" and no clean
+    build of the same commit reports that string;
   * mod_info.json and build.gradle disagreeing on version, because the handshake compares both
     (mod_info.json via ModSpecAPI.getVersion, build.gradle via coop.build.CoopBuildInfo.VERSION);
+  * coop.version's modVersion disagreeing with them, because that is the number Version Checker
+    reports to every player as the current release;
   * jar manifests whose Coop-Git-Commit is not HEAD, which is what a build made before the
     release commit looks like;
   * coop.jar carrying coop/rng/ or coop/presence/, or coop-forks.jar missing them -- those two
@@ -34,8 +37,8 @@ param(
     # runs, so this only saves time when the jars are already a build of HEAD.
     [switch] $SkipBuild,
 
-    # Package despite uncommitted changes. The jars will report "dev-uncommitted" as their commit
-    # and no other machine's build can match them. Local experiments only.
+    # Package despite uncommitted changes. The jars will report "<hash>-dirty" as their commit, so
+    # no clean build of that commit can match them. Local experiments only.
     [switch] $AllowDirty,
 
     # Skip the Coop-Git-Commit == HEAD check. Local dry runs only; an archive built this way is
@@ -95,6 +98,25 @@ function Get-CoopGradleVersion {
         throw ("Could not find a `"version = '...'`" line in $Path.")
     }
     return $match.Groups[1].Value
+}
+
+<#
+.SYNOPSIS
+coop.version's modVersion, as the "major.minor.patch" string mod_info.json spells out.
+#>
+function Get-CoopVersionFileVersion {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    # Whole-line and end-of-line "#" comments are legal in this file and Version Checker's parser
+    # strips them before reading it, so strip them here too rather than parsing around them.
+    $text = ((Get-Content -LiteralPath $Path) | ForEach-Object { $_ -replace '#.*$', '' }) -join "`n"
+    $match = [regex]::Match($text,
+        '"modVersion"\s*:\s*\{\s*"major"\s*:\s*(\d+)\s*,\s*"minor"\s*:\s*(\d+)\s*,\s*"patch"\s*:\s*(\d+)')
+    if (-not $match.Success) {
+        throw ("Could not find a `"modVersion`" object with major/minor/patch in $Path. The release" +
+            " checklist needs it to agree with mod_info.json's version.")
+    }
+    return ("{0}.{1}.{2}" -f $match.Groups[1].Value, $match.Groups[2].Value, $match.Groups[3].Value)
 }
 
 <#
@@ -168,7 +190,8 @@ $OutDir = Resolve-CoopFullPath $OutDir
 
 $modInfoPath = Join-Path $modRoot 'mod_info.json'
 $buildGradlePath = Join-Path $modRoot 'build.gradle'
-foreach ($required in @($modInfoPath, $buildGradlePath)) {
+$versionFilePath = Join-Path $modRoot 'coop.version'
+foreach ($required in @($modInfoPath, $buildGradlePath, $versionFilePath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Missing $required - this script must live in the coop mod's scripts folder."
     }
@@ -181,6 +204,13 @@ if ($modInfoVersion -cne $gradleVersion) {
         " '$gradleVersion'. The handshake compares both, so a session with mismatched files is" +
         " rejected. Make them the same string (release checklist step 1).")
 }
+$versionFileVersion = Get-CoopVersionFileVersion -Path $versionFilePath
+if ($modInfoVersion -cne $versionFileVersion) {
+    throw ("Version mismatch: mod_info.json says '$modInfoVersion', coop.version's modVersion says" +
+        " '$versionFileVersion'. That file is what Version Checker reads over the network, so a" +
+        " release that disagrees with it is never offered to players as an update. Bump" +
+        " major/minor/patch to match (release checklist step 1).")
+}
 $version = $modInfoVersion
 
 $dirty = @(Invoke-CoopGit -Arguments @('status', '--porcelain'))
@@ -188,15 +218,21 @@ $dirty = @($dirty | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if ($dirty.Count -gt 0) {
     if (-not $AllowDirty) {
         throw ("The working tree has $($dirty.Count) uncommitted change(s), so the jars would" +
-            " report their commit as `"dev-uncommitted`" and no other machine could match them." +
-            " Commit first (release checklist step 3), or pass -AllowDirty for a local archive" +
-            " that is not a release.`n  " + (($dirty | Select-Object -First 20) -join "`n  "))
+            " report their commit as `"<hash>-dirty`" and no clean build of that commit could" +
+            " match them. Commit first (release checklist step 3), or pass -AllowDirty for a local" +
+            " archive that is not a release.`n  " + (($dirty | Select-Object -First 20) -join "`n  "))
     }
     Write-Warning ("-AllowDirty: packaging with $($dirty.Count) uncommitted change(s). This" +
         " archive is not a release.")
 }
 
 $headCommit = (Invoke-CoopGit -Arguments @('rev-parse', '--short=12', 'HEAD') | Select-Object -First 1).Trim()
+# build.gradle stamps "<hash>-dirty" when it builds from a modified tree, so that is the string the
+# manifests carry on an -AllowDirty run and the one to compare against.
+$expectedCommit = $headCommit
+if ($dirty.Count -gt 0) {
+    $expectedCommit = "$headCommit-dirty"
+}
 
 # ---------------------------------------------------------------------------------------------
 # Build
@@ -281,14 +317,14 @@ else {
         if ($null -eq $jarCommit) {
             throw "$jar has no Coop-Git-Commit manifest attribute. Rebuild with scripts\build.ps1."
         }
-        if ($jarCommit -cne $headCommit) {
-            throw ("$jar was built at commit '$jarCommit' but HEAD is '$headCommit'. The commit is" +
-                " baked into the jar and compared at connect, so build after committing, not" +
-                " before (release checklist steps 3 and 4). Rerun without -SkipBuild, or pass" +
-                " -SkipCommitCheck for a local dry run.")
+        if ($jarCommit -cne $expectedCommit) {
+            throw ("$jar was built at commit '$jarCommit' but this build expects" +
+                " '$expectedCommit'. The commit is baked into the jar and compared at connect, so" +
+                " build after committing, not before (release checklist steps 3 and 4). Rerun" +
+                " without -SkipBuild, or pass -SkipCommitCheck for a local dry run.")
         }
     }
-    Write-Host "Jar manifests all report Coop-Git-Commit $headCommit."
+    Write-Host "Jar manifests all report Coop-Git-Commit $expectedCommit."
 }
 
 # Classloader split (release checklist step 7).

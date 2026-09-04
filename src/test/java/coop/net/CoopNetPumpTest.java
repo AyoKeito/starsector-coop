@@ -2997,6 +2997,59 @@ class CoopNetPumpTest {
         assertFalse(pump.lobbyDialogRequestedForTest());
     }
 
+    /**
+     * The lobby's cancel option tells the guest "any player may cancel". A "start anyway" countdown
+     * runs over a guest that never readied, so taking its ready back changed nothing the change
+     * detection could see: the press cancelled the local mirror for one status interval and the host
+     * released the session anyway.
+     */
+    @Test
+    void theGuestsCancelDuringAStartAnywayCountdownIsSentToTheHost() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        RecordingCampaignUi ui = new RecordingCampaignUi(null);
+        Global.setSector(new RecordingSector(false, ui).proxy());
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(true, false, 222333444L, 17L, 1000L, "")));
+
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 9L, true, false, 222333444L, 17L,
+                now.get(), ""));
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertEquals(2, countOfType(service, CoopMessages.Type.READY_STATE),
+                "SEED_LOCKED then SNAPSHOT_APPLIED, and this guest never readies");
+
+        // The host starts anyway: the countdown runs over a guest whose row says not ready.
+        service.inbound.add(CoopMessages.lobbyStatus("session-a", 20L, now.get(), List.of(
+                        new CoopMessages.LobbyPlayer("host-player", "Host", "READY", true, -1L, ""),
+                        new CoopMessages.LobbyPlayer("guest-player", "Guest", "SNAPSHOT_APPLIED",
+                                false, -1L, "")),
+                3_000L, false, "", 30_000L));
+        now.addAndGet(16L);
+        pump.advance(0f);
+        assertTrue(pump.lobbyRosterForTest().countdownActive());
+        assertEquals(2, countOfType(service, CoopMessages.Type.READY_STATE));
+
+        pump.lobbyCancelCountdownForTest();
+        now.addAndGet(16L);
+        pump.advance(0f);
+
+        assertEquals(3, countOfType(service, CoopMessages.Type.READY_STATE),
+                "the press has to leave the guest's machine or the host never cancels");
+        CoopMessages.ReadyState sent = CoopMessages.parseReadyState(
+                lastOfType(service, CoopMessages.Type.READY_STATE));
+        assertFalse(sent.ready());
+        assertEquals("SNAPSHOT_APPLIED", sent.phase());
+        assertFalse(pump.lobbyRosterForTest().countdownActive(),
+                "and the local mirror stops counting while the host's answer is on its way");
+    }
+
     @Test
     void aGuestThatCancelsTheJoinStopsTheRetryLoopAndDisturbsNothingElse() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
@@ -6406,6 +6459,31 @@ class CoopNetPumpTest {
         // The window length is a number the dialog is required to state and only the pump knows.
         assertEquals(CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS,
                 pump.desyncReasonForTest().graceSeconds());
+    }
+
+    /**
+     * "Wait longer" moves the deadline and leaves the configured length alone, so a world a player
+     * held for six and a half minutes told them it had been held for sixty seconds.
+     */
+    @Test
+    void anExtendedWindowStatesTheTimeItWasActuallyHeldNotTheConfiguredLength() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+
+        // The window opened at 1000 and was due at 61000; the extension pushes it 300 s past that.
+        now.addAndGet(30_000L);
+        pump.extendReconnectWaitForTest();
+        pump.advance(0f);
+        now.set(1000L + CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS * 1000L
+                + CoopReconnectCoordinator.WAIT_MORE_MILLIS);
+        pump.advance(0f);
+
+        assertEquals(CoopDesyncReason.SessionCause.GRACE_EXPIRED,
+                pump.desyncReasonForTest().sessionCause());
+        assertEquals(360, pump.desyncReasonForTest().graceSeconds(),
+                "60 s configured plus the 300 s the player asked for is what the world was held for");
     }
 
     @Test

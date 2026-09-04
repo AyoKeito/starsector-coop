@@ -281,8 +281,12 @@ class CoopSessionStatsViewTest {
         assertTrue(footer.stream().anyMatch(line -> line.startsWith("Distance:")
                         && line.contains("sampled once a second") && !line.contains("every frame")),
                 footer.toString());
+        // The tally is an id equality on the containing location, and hyperspace is one location, so
+        // "same star system" promised a stricter rule than the sampler applies.
         assertTrue(footer.stream().anyMatch(line -> line.startsWith("Time flown together:")
-                        && line.contains("same star system") && !line.contains("sensors")),
+                        && line.contains("same location") && line.contains("hyperspace included")
+                        && line.contains("shared clock is running")
+                        && !line.contains("same star system") && !line.contains("sensors")),
                 footer.toString());
         assertTrue(footer.stream().anyMatch(line -> line.contains("guest's is not measured")
                         && line.contains("wire carries no price")),

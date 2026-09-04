@@ -27,9 +27,12 @@ import java.util.Set;
  *   {@code saves/common/coop_options.json.data}.</li>
  *   <li><b>Launch</b> rows are read before any session exists, so they are editable only while no
  *   session is running - changing one mid-session could not do anything but mislead.</li>
- *   <li>Any key given as {@code -D} on the command line is read-only whatever its tier, tagged
- *   {@link #TAG_COMMAND_LINE}: the command line is the top of the precedence stack, and a page that
- *   let you "change" a value the next read would override is a lie.</li>
+ *   <li>A key given as {@code -D} on the command line is read-only wherever the {@code -D} is the
+ *   value in force, tagged {@link #TAG_COMMAND_LINE}: the command line is the top of the install
+ *   precedence stack, and a page that let you "change" a value the next read would override is a
+ *   lie. A policy key of a campaign that has already been seeded is the one case where the
+ *   {@code -D} is <em>not</em> in force - the campaign's stored value wins over it - so that row
+ *   stays a normal campaign row.</li>
  * </ul>
  *
  * <h2>What the page cannot do</h2>
@@ -238,20 +241,27 @@ public record CoopOptionsView(List<Section> sections) {
 
         String value;
         String tag;
+        // A -D only rules the row when it is what supplied the value in force. On a policy key of a
+        // campaign that has already been seeded it did not: the stored campaign value wins over the
+        // install default from the seeding onwards (CoopOptionsPolicy.ensureSeeded), so tagging that
+        // row "(command line)" named the wrong source, and locking it stopped the host editing a
+        // campaign rule policy.set would have taken.
+        boolean commandLineInForce = commandLine;
         if (policy) {
             String fromPolicy = reader.policyValue(key);
+            commandLineInForce = commandLine && fromPolicy == null;
             value = fromPolicy == null ? option.coerce(reader.localValue(key)).value() : fromPolicy;
             tag = guest ? TAG_HOST_SETTING : (fromPolicy == null ? TAG_DEFAULT : TAG_CAMPAIGN);
         } else {
             value = option.coerce(reader.localValue(key)).value();
             tag = reader.userFile(key) ? TAG_LOCAL : TAG_DEFAULT;
         }
-        if (commandLine) {
+        if (commandLineInForce) {
             tag = TAG_COMMAND_LINE;
         }
 
         boolean editable;
-        if (commandLine) {
+        if (commandLineInForce) {
             editable = false;
         } else if (policy) {
             // Everyone except a guest owns their own campaign's rules - including a client that has

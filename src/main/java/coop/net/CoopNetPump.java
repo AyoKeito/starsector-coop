@@ -1048,8 +1048,7 @@ public class CoopNetPump implements EveryFrameScript {
                                       String correlationId) {
         coop.ui.CoopDesyncReason reason;
         try {
-            reason = coop.ui.CoopDesyncReason.classify(rawReason, source)
-                    .withGraceSeconds((int) (reconnect.graceMillis() / 1000L));
+            reason = withWindowSeconds(coop.ui.CoopDesyncReason.classify(rawReason, source));
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Coop could not classify a desync reason: " + rawReason, ex);
             return;
@@ -1058,15 +1057,31 @@ public class CoopNetPump implements EveryFrameScript {
                 sessionState.localName(), sessionState.remoteName());
     }
 
+    /**
+     * Stamps the window length the dialog prints. The coordinator's reason strings are bare phrases
+     * and this is the only place that knows the number.
+     *
+     * <p>For a window that ran out, the number is how long it was actually open: "wait longer" moves
+     * the deadline without changing the configured length, so a world held for three minutes used to
+     * be reported to the player as the sixty seconds it was launched with. Everything else still
+     * reports the configured length, which is all there is to say about a window that has not run.
+     */
+    private coop.ui.CoopDesyncReason withWindowSeconds(coop.ui.CoopDesyncReason reason) {
+        long millis = reconnect.graceMillis();
+        if (reason.sessionCause() == coop.ui.CoopDesyncReason.SessionCause.GRACE_EXPIRED
+                && reconnect.expiredWindowMillis() >= 0L) {
+            millis = reconnect.expiredWindowMillis();
+        }
+        return reason.withGraceSeconds((int) (millis / 1000L));
+    }
+
     private void raiseDesyncDialog(String rawReason, coop.ui.CoopDesyncReason.Source source,
                                    String sessionIdAtReject) {
         coop.ui.CoopDesyncReason reason;
         try {
             reason = coop.ui.CoopDesyncReason.classify(rawReason, source);
             if (source == coop.ui.CoopDesyncReason.Source.SESSION_RESUME) {
-                // The coordinator's reason strings are bare phrases; the dialog is required to state
-                // the window as a number, and this is the only place that knows how long it was.
-                reason = reason.withGraceSeconds((int) (reconnect.graceMillis() / 1000L));
+                reason = withWindowSeconds(reason);
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Coop could not classify a desync reason: " + rawReason, ex);
@@ -2491,6 +2506,13 @@ public class CoopNetPump implements EveryFrameScript {
             // The guest cancels by taking its ready back; the host treats that as both.
             guestReadyRequested = false;
             lobbyRoster.cancelCountdown();
+            // A "start anyway" countdown runs over a guest that is already not ready, so taking a
+            // ready back changes nothing maybeSendReadyState would notice and the press reached the
+            // host as silence: the local mirror flipped for one status interval and the next
+            // LOBBY_STATUS put the countdown straight back. Clearing the change-detection state is
+            // what turns the press into a READY_STATE the host's cancel path actually runs on.
+            lastSentJoinPhase = null;
+            lastSentReady = null;
             return;
         }
         if (!lobbyRoster.cancelCountdown()) {
