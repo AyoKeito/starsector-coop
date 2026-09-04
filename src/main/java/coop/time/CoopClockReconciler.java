@@ -3,6 +3,7 @@ package coop.time;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import coop.config.CoopOptionsRegistry;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
@@ -64,7 +65,7 @@ import java.util.function.LongSupplier;
 public final class CoopClockReconciler {
 
     /** Debug lever (read once at construction) that forces the no-op path without a code edit. */
-    public static final String DISABLE_PROPERTY = "coop.clock.disable";
+    public static final String DISABLE_PROPERTY = CoopOptionsRegistry.CLOCK_DISABLE;
 
     /** Campaign-calendar milliseconds in one game day ({@code getElapsedDaysSince} divides by 8.64E7). */
     public static final long MILLIS_PER_GAME_DAY = 86_400_000L;

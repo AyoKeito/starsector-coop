@@ -1,6 +1,7 @@
 package coop.newgame;
 
 import com.fs.starfarer.api.impl.campaign.procgen.StarAge;
+import coop.config.CoopOptionsRegistry;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopNetStartupConfig;
 
@@ -28,8 +29,8 @@ final class CoopNewGameChoices {
      * {@code saves/common/coop_options.json.data}, so the warnings below name the key without a
      * {@code -D} prefix.
      */
-    static final String SECTOR_SIZE_PROPERTY = "coop.sectorSize";
-    static final String SECTOR_AGE_PROPERTY = "coop.sectorAge";
+    static final String SECTOR_SIZE_PROPERTY = CoopOptionsRegistry.SECTOR_SIZE;
+    static final String SECTOR_AGE_PROPERTY = CoopOptionsRegistry.SECTOR_AGE;
 
     static final String SECTOR_SIZE_SMALL = "small";
     static final String SECTOR_SIZE_NORMAL = "normal";

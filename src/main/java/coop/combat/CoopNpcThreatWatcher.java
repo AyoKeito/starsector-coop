@@ -17,6 +17,7 @@ import com.fs.starfarer.api.campaign.ai.TacticalModulePlugin;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopMirrorTags;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
@@ -261,8 +262,8 @@ public final class CoopNpcThreatWatcher {
     /** Opt-in switch for the synthesized-pursuit fallback model. */
     public static final String SYNTHESIZED_PURSUIT_PROPERTY = "coop.pursuit.synthesized";
 
-    private static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
-    private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    private static final String PLAYER_MIRROR_TAG = CoopMirrorTags.PLAYER_MIRROR_TAG;
+    private static final String NPC_MIRROR_TAG = CoopMirrorTags.NPC_MIRROR_TAG;
 
     /** What the watcher should do about one nearby fleet this scan. */
     public enum Action {

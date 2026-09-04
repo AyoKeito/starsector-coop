@@ -28,8 +28,8 @@ import java.util.ArrayList;
  */
 public final class CoopMirrorOrphanSweeper {
 
-    static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
-    static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    static final String PLAYER_MIRROR_TAG = CoopMirrorTags.PLAYER_MIRROR_TAG;
+    static final String NPC_MIRROR_TAG = CoopMirrorTags.NPC_MIRROR_TAG;
 
     private CoopMirrorOrphanSweeper() {
     }

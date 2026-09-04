@@ -16,6 +16,7 @@ import coop.combat.CoopBattleBridge;
 import coop.combat.CoopBattleResult;
 import coop.combat.CoopBattleResultReconciler;
 import coop.combat.CoopNpcThreatWatcher;
+import coop.config.CoopOptionsRegistry;
 import coop.fleet.CoopFleetMirror;
 import coop.fleet.CoopFleetMirrorRegistry;
 import coop.fleet.CoopFleetSnapshot;
@@ -140,12 +141,12 @@ public class CoopNetPump implements EveryFrameScript {
     static final String COLONY_MANAGEMENT_ENTITY_ID = "coop:colony-management";
     /** What the banners call {@link #COLONY_MANAGEMENT_ENTITY_ID}. */
     static final String COLONY_MANAGEMENT_ENTITY_NAME = "colony management";
-    private static final String HOST_PORT_FLAG = "coop.hostPort";
-    private static final String CONNECT_HOST_FLAG = "coop.connectHost";
-    private static final String CONNECT_PORT_FLAG = "coop.connectPort";
-    private static final String PLAYER_NAME_PROPERTY = "coop.playerName";
+    private static final String HOST_PORT_FLAG = CoopOptionsRegistry.HOST_PORT;
+    private static final String CONNECT_HOST_FLAG = CoopOptionsRegistry.CONNECT_HOST;
+    private static final String CONNECT_PORT_FLAG = CoopOptionsRegistry.CONNECT_PORT;
+    private static final String PLAYER_NAME_PROPERTY = CoopOptionsRegistry.PLAYER_NAME;
     /** Explicit-consent override: adopt the host's campaign id over a mismatching stored one (6b). */
-    static final String ADOPT_CAMPAIGN_ID_PROPERTY = "coop.adoptCampaignId";
+    static final String ADOPT_CAMPAIGN_ID_PROPERTY = CoopOptionsRegistry.ADOPT_CAMPAIGN_ID;
 
     // CoopFrameProfiler section keys. Compile-time constants so the hot path never builds a string.
     private static final String SECTION_CFG_PROPERTIES = "cfg.systemProperties";

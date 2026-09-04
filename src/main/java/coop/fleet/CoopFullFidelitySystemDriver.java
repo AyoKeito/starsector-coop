@@ -3,6 +3,7 @@ package coop.fleet;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import coop.config.CoopOptionsRegistry;
 import coop.util.CoopLog;
 
 import java.lang.invoke.MethodHandle;
@@ -67,7 +68,7 @@ import java.util.List;
 public final class CoopFullFidelitySystemDriver {
 
     /** Kill switch. Defaults to on; set {@code -Dcoop.fullFidelityGuestSystem=false} to fall back. */
-    public static final String ENABLED_PROPERTY = "coop.fullFidelityGuestSystem";
+    public static final String ENABLED_PROPERTY = CoopOptionsRegistry.FULL_FIDELITY_GUEST_SYSTEM;
 
     /**
      * Read once at class init: it is a launch-time JVM property, so it cannot change mid-session, and

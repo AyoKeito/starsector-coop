@@ -2,6 +2,7 @@ package coop.time;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import coop.config.CoopOptionsRegistry;
 import coop.util.CoopLog;
 
 import java.lang.invoke.MethodHandle;
@@ -51,7 +52,7 @@ public final class CoopFastForwardLock {
     /** Fallback lock: 1x for everyone, matching pre-7b behaviour, via public API only. */
     public static final float FALLBACK_MULT = 1f;
     /** Debug lever (read once) that forces the fallback path without a code edit. */
-    public static final String DISABLE_PROPERTY = "coop.ff.disable";
+    public static final String DISABLE_PROPERTY = CoopOptionsRegistry.FF_DISABLE;
 
     private static final String MULT_KEY = "campaignSpeedupMult";
 

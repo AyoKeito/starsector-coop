@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 
+import coop.config.CoopOptionsRegistry;
 import coop.util.CoopLog;
 
 import java.nio.charset.StandardCharsets;
@@ -63,9 +64,9 @@ import java.util.function.LongSupplier;
  */
 public final class CoopWiretap {
 
-    public static final String PROPERTY = "coop.debug.wiretap";
+    public static final String PROPERTY = CoopOptionsRegistry.DEBUG_WIRETAP;
     public static final String MEMORY_FLAG = "$coopWiretap";
-    public static final String SAMPLE_PROPERTY = "coop.debug.wiretapSample";
+    public static final String SAMPLE_PROPERTY = CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE;
 
     /** Log one datagram in ten per {@code (direction, type)} unless {@link #SAMPLE_PROPERTY} says otherwise. */
     static final int DEFAULT_SAMPLE_INTERVAL = 10;

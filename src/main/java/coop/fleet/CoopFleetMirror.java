@@ -61,8 +61,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
     static final long SHIELD_REASSERT_INTERVAL_MILLIS = 250L;
     /** Sentinel for "the shield has never been asserted", checked explicitly to dodge overflow. */
     static final long NEVER_ASSERTED = Long.MIN_VALUE;
-    private static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
-    private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    private static final String PLAYER_MIRROR_TAG = CoopMirrorTags.PLAYER_MIRROR_TAG;
+    private static final String NPC_MIRROR_TAG = CoopMirrorTags.NPC_MIRROR_TAG;
     private static final String DEFAULT_NPC_FACTION = "independent";
     private static final String DEFAULT_NPC_NAME = "Fleet";
 
