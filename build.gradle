@@ -5,7 +5,10 @@ plugins {
 import java.time.Instant
 
 group = 'coop'
-version = '0.1.0'
+// mod_info.json is the single source of truth for the mod version (ModSpecAPI.getVersion reads it
+// at runtime); read it here too so build.gradle can never drift from it the way a second hardcoded
+// literal could.
+version = new groovy.json.JsonSlurper().parse(file('mod_info.json')).version.toString()
 
 def resolveGitCommit = {
     try {
