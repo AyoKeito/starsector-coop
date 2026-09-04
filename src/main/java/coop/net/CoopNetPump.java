@@ -192,6 +192,7 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String SECTION_REPLICATOR_ORBIT_SYNC = "replicator.orbitSync";
     private static final String SECTION_REPLICATOR_REP_SYNC = "replicator.playerRepSync";
     private static final String SECTION_REPLICATOR_BAR_POOL = "replicator.barPool";
+    private static final String SECTION_REPLICATOR_BAR_ACCEPT = "replicator.barAccept";
     private static final String SECTION_REPLICATOR_COLONY = "replicator.colonyLifecycle";
     private static final String SECTION_REPLICATOR_COLONY_MGMT = "replicator.colonyManagement";
     private static final String SECTION_REPLICATOR_COLONY_INCOME = "replicator.colonyIncome";
@@ -3164,6 +3165,11 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_REPLICATOR_ORBIT_SYNC, t);
         campaignReplicator.tickPlayerRepSync();
         t = profiler.split(SECTION_REPLICATOR_REP_SYNC, t);
+        // Before tickBarPool on purpose: the acceptance watcher names the offer that vanished
+        // from the local pool, and on the host the claim it raises has to land while that
+        // offer is still in the mission board's pool — the very next capture drops it.
+        campaignReplicator.tickBarAcceptance();
+        t = profiler.split(SECTION_REPLICATOR_BAR_ACCEPT, t);
         campaignReplicator.tickBarPool();
         t = profiler.split(SECTION_REPLICATOR_BAR_POOL, t);
         campaignReplicator.tickColonyLifecycle();

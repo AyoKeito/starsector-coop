@@ -973,9 +973,9 @@ Implement Phase 12 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Replicate the v1 camp
 - [x] Define `MISSION_POOL_SNAPSHOT` fields: `marketId`, `sourceType` (`BAR`, `CONTACT`, `BOUNTY`, `MISSION_BOARD`), `missionId`, `title`, `giverId`, `rewardSummary`, `acceptedByPlayerId`, and `expiresAtDay`. (`CoopMissionBoardSync.Entry`; list ships as a self-contained delimited string via `CoopDelimited`, same as the Phase 8 fleet encoding.)
 - [x] Host captures the currently visible mission/bar/contact/bounty entries when a shared board opens and broadcasts `MISSION_POOL_SNAPSHOT`; guest renders/filters from the host pool instead of generating an independent pool. (`broadcastMissionPool` + guest `applyMissionPool` + `visibleEntriesFor`. **In-game extension point:** the concrete enumeration of a market's bar/mission-board offers — `BarEventManager` / mission-board intel — is wired in-game; the snapshot/claim infrastructure is complete and unit-tested.)
 - [x] Define `MISSION_CLAIM_REQUEST`, `MISSION_CLAIM_ACCEPT`, and `MISSION_CLAIM_REJECT` messages.
-- [x] Host accepts the first claim for an unclaimed `missionId`, records `acceptedByPlayerId`, rejects later claims with `already_claimed_by:<playerId>`, and logs the claim sequence number. (`CoopMissionBoardSync.arbitrate`, monotonic `hostSeq` — first-come by host receive order, mirroring `CoopInteractionGate`.)
-- [x] Apply mission reward ownership to the accepting player. Mission rewards are never split; combat spoils go to the solo fighter (Phase 15). The two paths do not mix — there is no 50/50 splitter in v1. (Claim records `acceptedByPlayerId`; no splitter exists.)
-- [x] Add same-market bar presence text so a bar listing can show the other player's presence without granting both players the same first-click claim. (`claimHolder(missionId)` surfaces the holder for presence text without granting the claim; the gate stays first-come.)
+- [x] Host accepts the first claim for an unclaimed `missionId`, records `acceptedByPlayerId`, rejects later claims with `already_claimed_by:<playerId>`, and logs the claim sequence number. (`CoopMissionBoardSync.arbitrate`, monotonic `hostSeq` — first-come by host receive order, mirroring `CoopInteractionGate`.) *(**Arbitration was ticked in error until 2026-09-04:** the receive side was live but `hostClaimMissionLocally` and `guestRequestMissionClaim` had zero callers, so no `MISSION_CLAIM_REQUEST` was ever sent, `claimsByMissionId` stayed empty all session, and both players could accept the same bar offer. **Trigger wired 2026-09-04** — `CoopBarAcceptanceWatcher` + `CoopCampaignReplicator.tickBarAcceptance`; see the Second fix pass at the end of this document.)*
+- [x] Apply mission reward ownership to the accepting player. Mission rewards are never split; combat spoils go to the solo fighter (Phase 15). The two paths do not mix — there is no 50/50 splitter in v1. (Claim records `acceptedByPlayerId`; no splitter exists. The claim that carries the ownership is only actually raised since 2026-09-04 — same note as the line above.)
+- [ ] Add same-market bar presence text so a bar listing can show the other player's presence without granting both players the same first-click claim. *(**Ticked in error until 2026-09-04:** `claimHolder(missionId)` exists and is correct, but nothing ever called it and no bar listing ever showed a presence line. **Deliberately not built** — a per-offer line inside the bar option list is new UI surface in `BarCMD`'s option rendering, for which the verified 0.98a UI surface inventory records no API seam. What shipped instead on 2026-09-04 is the losing side of the race being told: a `CoopFeed` campaign message, `"<partner> already took that offer."`. Promote this line to a phase if the pair report that they need to see the offer is contested *before* clicking it rather than after.)*
 - [x] Add lightweight event messages for market open/cargo update and economy tick index to support logging and later assertions. (`reportPlayerOpenedMarket{AndCargoUpdated}` → `MARKET_SNAPSHOT`; `reportEconomyTick` drives the faction-relation diff; both logged.)
 
 **Market contents + transactions (host-authoritative):**
@@ -3186,6 +3186,95 @@ unit-verified only. For the next two-instance session:
    and the guest can use that gate afterwards.
 5. Mismatch the two jars on purpose (an old `coop-forks.jar` beside a fresh `coop.jar`) and confirm
    the new install row goes red and the handshake reports `coopForksBuild`.
+
+### Mission claim trigger (2026-09-04)
+
+Phase 12's first-come mission arbitration was half-built and never fired. The receive side was
+complete — dispatch, `CoopMissionBoardSync.arbitrate`, accept/reject replies, `survivesTheDropEdge`
+— but `hostClaimMissionLocally` and `guestRequestMissionClaim` had no callers at all. Nothing sent a
+`MISSION_CLAIM_REQUEST`, so `claimsByMissionId` was empty for the whole session, the
+`visibleEntriesFor` / injector claim filters were no-ops, and **both players could accept the same bar
+offer**. The comment in `applyMissionPool` asserting the filter *was* the arbitration was simply
+wrong and has been replaced.
+
+**Detection signal.** Vanilla has no mission-accepted listener and no accepted flag on a
+`PortsideBarEvent`. It has one funnel: every acceptance path calls
+`BarEventManager.notifyWasInteractedWith(event)` — `BarCMD`'s `accept` command for
+`HubMissionBarEventWrapper` missions, and `BaseGetCommodityBarEvent` / `HistorianBarEvent` /
+`PlanetaryShieldBarEvent` calling it on themselves — and that removes the event from
+`PortsideBarData`. So `CoopBarAcceptanceWatcher` polls the local pool and looks for an id that was
+there last poll and is gone now.
+
+Disappearance alone is not enough, because offers also expire, and claiming on an expiry would hand
+the partner a mission neither of them took. The discriminator is `BarEventManager.getCreatorFor`,
+read against the event reference retained from the previous poll, because the two removal paths
+differ in exactly that map:
+
+- **Accepted** — `notifyWasInteractedWith` drops the event from the pool and from `active` but
+  leaves it in `barEventCreators`; `getCreatorFor` still answers.
+- **Expired** — `BarEventManager.advance`'s orphan sweep does `barEventCreators.remove(event)`
+  *before* `PortsideBarData.removeEvent`; `getCreatorFor` returns null.
+
+An event the manager never owned at all is read as accepted, because nothing else can remove it.
+That covers the guest's entire pool: `CoopBarPoolInjector` deliberately keeps injected offers out of
+both manager maps and `CoopBarGenerationSuppressor` stops the manager's script, so the guest has no
+expiry path in the first place. Known false negative: the evidence decays at the next orphan sweep
+(0.4–0.6 game days), so a poll that lands after it reads an acceptance as an expiry and the claim is
+simply not raised. Known false positive: a bulk pool rewrite of our own, which is why the guest's
+snapshot apply calls `resync()` after the injector runs and the claim handlers call `forget(id)`.
+
+The trigger runs every frame from `CoopNetPump` (`replicator.barAccept`, immediately before
+`replicator.barPool` so the claim lands while the offer is still in the mission board's pool). Host
+detections go to `hostClaimMissionLocally`, guest detections to `guestRequestMissionClaim`.
+
+**Two holes the trigger exposed, both fixed here.**
+
+- `CoopMissionBoardSync.applySnapshot` replaced the pool with freshly captured entries, whose
+  `acceptedByPlayerId` is always blank (the host reads identity and seed off the engine, not the
+  claim ledger). Every rebroadcast therefore un-took every taken offer. The surviving claims are now
+  re-stamped onto the new entries after the purge; the ledger is the authority, not the field.
+- Filtering the *snapshot* does not stop the client that still has the offer sitting in its live
+  engine pool. Whichever side loses the claim now consumes the offer out of its own
+  `PortsideBarData` via `notifyWasInteractedWith` (`consumeLocalBarOffer`), and
+  `CoopBarPoolInjector.injectable` drops every claimed entry rather than only the partner's — our
+  own claimed entry must not be re-injected either, since the acceptance already took it out.
+
+**Rollback is best effort, and the gap is named.** On `MISSION_CLAIM_REJECT` the guest (and the host,
+on the rare case where it detected its own acceptance a frame after the guest's request landed) undoes
+what it can: the retained event reference gives back the `HubMission`, and `abort()` +
+`IntelManager.removeIntel` + `Sector.removeScript` reverse the intel entry, the sector script and the
+mission's own `Abortable` changes. `BarCMD.abortMissions` cannot have got there first — it only walks
+events still in the pool, and an accepted one has left it. What is *not* reversed: `cargoOnAccept`
+stacks already in the player's hold, and non-mission offers (historian, commodity, planetary shield),
+which are consummated transactions with no handle at all. Those log at WARN
+(`Coop mission rollback id=... could not be undone`). The player-facing notice is posted either way —
+`"<partner> already took that offer."` — because a silent failure leaves someone holding a duplicate
+mission with no idea why.
+
+Presence text (the "Add same-market bar presence text" step above) was **not** built and its checkbox
+is un-ticked; it needs a new UI seam inside `BarCMD`'s option list that the API does not offer.
+
+**Log markers:** `Coop mission claimed locally id=` (host detection), `Coop mission claim requested
+id=` (guest detection), `Coop mission claim accepted id=` (guest applying the host's accept), `Coop
+mission claim rejected id=` (guest), `Coop mission rollback id=`, `Coop consumed local bar offer id=`.
+
+**Manual smoke (not yet run):**
+
+1. Both players dock at the same market and open the bar. The offer lists must match (Phase 12c
+   already covers that); pick one mission both can see.
+2. One player accepts it. On the accepting client, expect `Coop mission claimed locally id=<specId>`
+   (host) or `Coop mission claim requested id=` followed by `Coop mission claim accepted id=` (guest).
+3. The other player re-enters the bar. The offer must be gone, and their log must show `Coop consumed
+   local bar offer id=<specId> (claimed by the other player)`. Their intel screen must have no entry
+   for that mission.
+4. The accepting player's intel screen has the mission, once.
+5. Race it: both accept within the same second (easiest by having the guest click while the host is
+   already in the accept dialog). Exactly one player keeps the mission. The loser gets the campaign
+   message `"<partner> already took that offer."`, a `Coop mission rollback id=` line, and — for a
+   plain courier/delivery mission — no intel entry left behind. Check the loser's cargo: a mission
+   that grants cargo on accept leaves it there, which is the documented gap, not a new bug.
+6. Let an offer expire instead of accepting it (leave the bar and let 20+ days pass). No
+   `Coop mission claim` line of any kind may appear for it.
 
 ## Maybe (Post-V1 Ideas — Not Committed)
 

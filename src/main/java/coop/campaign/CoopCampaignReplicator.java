@@ -40,7 +40,12 @@ import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarData;
+import com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarEvent;
+import com.fs.starfarer.api.impl.campaign.intel.bar.events.BarEventManager;
 import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
+import com.fs.starfarer.api.impl.campaign.missions.hub.HubMission;
+import com.fs.starfarer.api.impl.campaign.missions.hub.HubMissionBarEventWrapper;
 import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.util.Misc;
 import com.fs.starfarer.api.EveryFrameScript;
@@ -48,6 +53,7 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.OptionPanelAPI;
 import com.fs.starfarer.api.campaign.TextPanelAPI;
+import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
 import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import coop.colony.CoopColonyIncome;
 import coop.colony.CoopColonyManagement;
@@ -56,12 +62,15 @@ import coop.colony.CoopExpeditionWarning;
 import coop.colony.CoopExpeditionWarningSync;
 import coop.colony.CoopRaidOutcomeSync;
 import coop.rewards.CoopRewardSplitter;
+import coop.ui.CoopFeed;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
+
+import java.awt.Color;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -248,6 +257,8 @@ public final class CoopCampaignReplicator
     static final String BAR_POOL_MARKET_ID = "";
     private final CoopBarPoolCapture barPoolCapture = new CoopBarPoolCapture();
     private final CoopBarPoolInjector barPoolInjector = new CoopBarPoolInjector();
+    /** Phase 12 first-come trigger: watches the local pool for the player accepting an offer. */
+    private final CoopBarAcceptanceWatcher barAcceptanceWatcher = new CoopBarAcceptanceWatcher();
     private long lastBarPoolPollMillis;
 
     private CoopCampaignEventListener listener;
@@ -276,6 +287,7 @@ public final class CoopCampaignReplicator
         // the first poll rather than waiting for the host's next offer to spawn or expire.
         barPoolCapture.reset();
         barPoolInjector.reset();
+        barAcceptanceWatcher.reset();
         lastBarPoolPollMillis = 0L;
         // CargoScreenListener is dispatched through the listener manager, not the campaign-event
         // list, so it needs its own transient registration (Phase 12d: cargo pod replication).
@@ -419,6 +431,7 @@ public final class CoopCampaignReplicator
         lastBarPoolPollMillis = 0L;
         barPoolCapture.reset();
         barPoolInjector.reset();
+        barAcceptanceWatcher.reset();
         skeletonWatcher.clear();
         repTable.clear();
         factionRelations.clear();
@@ -1244,14 +1257,51 @@ public final class CoopCampaignReplicator
             CoopBarSync.applySeed(barSeed);
         }
         // Bar offers are the one pool source that has a live engine counterpart to rebuild; contact
-        // and bounty entries stay per-player by design and are model-only here. Going through
-        // visibleEntriesFor means an offer the host has already claimed never reaches the guest's
-        // pool, which is the existing first-come machinery doing the arbitration.
+        // and bounty entries stay per-player by design and are model-only here. visibleEntriesFor
+        // plus the injector's own claimed-entry filter keep a claimed offer out of the rebuilt pool,
+        // but only because something now raises those claims: until 2026-09-04 nothing ever sent a
+        // MISSION_CLAIM_REQUEST, claimsByMissionId stayed empty for the whole session, and this
+        // filter was a no-op that let both players accept the same offer. The arbitration lives in
+        // the host's arbitrate(); the trigger that feeds it is tickBarAcceptance().
         String playerId = session.localPlayerId();
         List<CoopMissionBoardSync.Entry> offers = playerId == null || playerId.trim().isEmpty()
                 ? missionBoard.pool()
                 : missionBoard.visibleEntriesFor(playerId);
-        barPoolInjector.apply(offers, playerId);
+        // Drain any pending local acceptance before the rebuild, then re-baseline after it: the
+        // rebuild removes and re-adds pool events wholesale, and every one of those removals would
+        // otherwise read as the player having accepted it.
+        tickBarAcceptance();
+        barPoolInjector.apply(offers);
+        barAcceptanceWatcher.resync();
+    }
+
+    /**
+     * Phase 12 first-come trigger: raise a claim for every bar offer the local player just accepted.
+     *
+     * <p>Cheap enough to run every frame — {@link CoopBarAcceptanceWatcher} compares id sets and only
+     * touches the engine for an id that actually vanished. Runs on both roles: the host arbitrates
+     * its own acceptance locally, the guest asks.
+     */
+    public void tickBarAcceptance() {
+        if (!isActive()) {
+            return;
+        }
+        List<String> accepted = barAcceptanceWatcher.poll();
+        for (String missionId : accepted) {
+            if (isHost()) {
+                if (hostClaimMissionLocally(missionId)) {
+                    CoopLog.info(CoopCampaignReplicator.class,
+                            "Coop mission claimed locally id=" + missionId);
+                } else {
+                    // The guest's request reached arbitrate() first. Rare (the host arbitrates its
+                    // own acceptance in-process) but possible across a WAN round trip.
+                    rollbackMissionAcceptance(missionId, "host lost the race to " + partnerName());
+                }
+            } else if (isGuest()) {
+                CoopLog.info(CoopCampaignReplicator.class, "Coop mission claim requested id=" + missionId);
+                guestRequestMissionClaim(missionId);
+            }
+        }
     }
 
     private void hostHandleMissionClaim(CoopMessages.Message message) {
@@ -1270,6 +1320,14 @@ public final class CoopCampaignReplicator
                     service.nextSeq(), now(), missionId, playerId, result.hostSeq()));
             CoopLog.info(CoopCampaignReplicator.class, "Coop mission claim accepted missionId=" + missionId
                     + " playerId=" + playerId + " hostSeq=" + result.hostSeq());
+            if (freshClaim && !playerId.equals(session.localPlayerId())) {
+                // The offer is taken, so it must leave the host's own bar too. Filtering the guest's
+                // snapshot is not enough: the host's engine pool is where the offers actually live,
+                // and leaving it there let the host walk into the same bar and accept it a second
+                // time. notifyWasInteractedWith is exactly the vanilla consume - it drops the event
+                // from the pool and from active, and puts the creator on its accepted timeout.
+                consumeLocalBarOffer(missionId);
+            }
             if (freshClaim) {
                 tally(sink -> sink.onMissionClaimed(playerId));
             }
@@ -1291,6 +1349,7 @@ public final class CoopCampaignReplicator
         if (result.accepted()) {
             send(CoopMessages.missionClaimAccept(session.sessionId(), service.nextSeq(), now(),
                     missionId, session.localPlayerId(), result.hostSeq()));
+            barAcceptanceWatcher.dropRollbackHandle(missionId);
             // Same unheld-mission dedup as the remote path above: one tally per missionId, ever.
             if (freshClaim) {
                 tally(sink -> sink.onMissionClaimed(session.localPlayerId()));
@@ -1317,7 +1376,14 @@ public final class CoopCampaignReplicator
                 CoopMessages.requiredPayloadString(message, "playerId"),
                 CoopMessages.requiredPayloadLong(message, "hostSeq"));
         missionBoard.applyAccepted(claim);
-        CoopLog.info(CoopCampaignReplicator.class, "Coop applied MISSION_CLAIM_ACCEPT missionId="
+        barAcceptanceWatcher.dropRollbackHandle(claim.missionId());
+        if (!claim.acceptedByPlayerId().equals(session.localPlayerId())) {
+            // The host took it. Filtering the next snapshot is not enough on its own: the offer is
+            // sitting in this client's live pool right now, and the guest could walk into the bar and
+            // accept it before the host's pool even changes.
+            consumeLocalBarOffer(claim.missionId());
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop mission claim accepted id="
                 + claim.missionId() + " playerId=" + claim.acceptedByPlayerId());
     }
 
@@ -1325,9 +1391,126 @@ public final class CoopCampaignReplicator
         if (!isGuest()) {
             return;
         }
-        CoopLog.warn(CoopCampaignReplicator.class, "Coop mission claim rejected missionId="
-                + CoopMessages.requiredPayloadString(message, "missionId") + " "
-                + CoopMessages.requiredPayloadString(message, "reason"));
+        String missionId = CoopMessages.requiredPayloadString(message, "missionId");
+        String reason = CoopMessages.requiredPayloadString(message, "reason");
+        CoopLog.warn(CoopCampaignReplicator.class, "Coop mission claim rejected id=" + missionId
+                + " " + reason);
+        rollbackMissionAcceptance(missionId, reason);
+    }
+
+    /**
+     * Undo a locally accepted bar mission the host refused the claim for, and tell the player why.
+     *
+     * <p><b>Best effort, and the gap is real.</b> A {@code HubMissionBarEventWrapper} keeps the
+     * {@code HubMission} it built, and that object is reachable through the event reference
+     * {@link CoopBarAcceptanceWatcher} retained when it detected the acceptance - {@code BarCMD}
+     * cannot have aborted it in the meantime, because {@code abortMissions} only walks events still
+     * in the pool and an accepted one has left it. So the intel entry, the sector script and the
+     * mission's own {@code Abortable} changes can all be undone through public API. What cannot:
+     * anything {@code BaseHubMission.accept} handed over before the intel was added -
+     * {@code cargoOnAccept} stacks are in the player's hold and stay there. Non-mission offers (the
+     * historian, commodity and planetary-shield events) have no handle to undo at all; those are
+     * already-consummated transactions, so the player keeps the goods and only gets the message.
+     *
+     * <p>The message is posted either way. A silent rollback failure would leave a player holding a
+     * mission their partner also holds, with no idea why the two diverged.
+     */
+    private void rollbackMissionAcceptance(String missionId, String reason) {
+        CoopLog.warn(CoopCampaignReplicator.class, "Coop mission rollback id=" + missionId
+                + " reason=" + reason);
+        PortsideBarEvent handle = barAcceptanceWatcher.rollbackHandle(missionId);
+        barAcceptanceWatcher.dropRollbackHandle(missionId);
+        boolean undone = false;
+        try {
+            if (handle instanceof HubMissionBarEventWrapper wrapper) {
+                undone = undoAcceptedMission(wrapper.getMission());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Coop mission rollback id=" + missionId + " threw while undoing the mission", ex);
+        }
+        if (!undone) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop mission rollback id=" + missionId
+                    + " could not be undone (no live mission handle); the local player keeps whatever"
+                    + " the offer already gave them");
+        }
+        CoopFeed.post(partnerName() + " already took that offer.", negativeColor());
+    }
+
+    /** Removes an accepted mission's intel, script and setup changes. True when it was undone. */
+    private boolean undoAcceptedMission(HubMission mission) {
+        if (mission == null) {
+            return false;
+        }
+        SectorAPI sector = Global.getSector();
+        if (sector == null) {
+            return false;
+        }
+        replayGuard.begin();
+        try {
+            mission.abort();
+            if (mission instanceof IntelInfoPlugin intel && sector.getIntelManager() != null) {
+                sector.getIntelManager().removeIntel(intel);
+            }
+            if (mission instanceof EveryFrameScript script) {
+                sector.removeScript(script);
+            }
+            return true;
+        } finally {
+            replayGuard.end();
+        }
+    }
+
+    /**
+     * Consume one bar offer out of this client's own portside pool, the way vanilla does when it is
+     * accepted. Used when the <em>other</em> player won the claim, so the offer cannot be taken twice.
+     */
+    private void consumeLocalBarOffer(String missionId) {
+        if (missionId == null || missionId.trim().isEmpty()) {
+            return;
+        }
+        String id = missionId.trim();
+        try {
+            PortsideBarData data = PortsideBarData.getInstance();
+            if (data == null || data.getEvents() == null) {
+                return;
+            }
+            for (PortsideBarEvent event : new ArrayList<>(data.getEvents())) {
+                if (event == null || !id.equals(event.getBarEventId())) {
+                    continue;
+                }
+                BarEventManager manager = BarEventManager.getInstance();
+                if (manager != null) {
+                    manager.notifyWasInteractedWith(event);
+                } else {
+                    data.removeEvent(event);
+                }
+                // Our own removal, so it must not come back as "the local player accepted it".
+                barAcceptanceWatcher.forget(id);
+                CoopLog.info(CoopCampaignReplicator.class,
+                        "Coop consumed local bar offer id=" + id + " (claimed by the other player)");
+                return;
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class,
+                    "Coop could not consume local bar offer id=" + id, ex);
+        }
+    }
+
+    /** The feed's "bad news" colour, or null (plain text) outside a running game. */
+    private static Color negativeColor() {
+        try {
+            return Misc.getNegativeHighlightColor();
+        } catch (RuntimeException | LinkageError ex) {
+            // Misc reads it out of Global.getSettings(); a message without a colour still lands.
+            return null;
+        }
+    }
+
+    /** The partner's display name for player-facing text, with a neutral fallback. */
+    private String partnerName() {
+        String name = session.remoteName();
+        return name == null || name.trim().isEmpty() ? "Your partner" : name.trim();
     }
 
     // ---- Market contents + transactions -------------------------------------------------------
