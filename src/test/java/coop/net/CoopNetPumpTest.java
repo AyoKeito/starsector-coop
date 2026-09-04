@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
 import coop.session.CoopLobbyState;
@@ -1029,13 +1030,19 @@ class CoopNetPumpTest {
         java.util.concurrent.atomic.AtomicReference<String> stored = new java.util.concurrent.atomic.AtomicReference<>("");
 
         RecordingNetService first = new RecordingNetService(CoopConnectionRole.HOST);
-        pumpForHostSeedLock(first, hostSessionReadyForSeedLock("session-a"), stored).advance(0f);
+        CoopNetPump firstPump = pumpForHostSeedLock(first, hostSessionReadyForSeedLock("session-a"), stored);
+        firstPump.advance(0f);
         CoopMessages.Message firstRequest = seedLockRequestIn(first);
         String minted = CoopMessages.requiredPayloadString(firstRequest, "campaignId");
         assertFalse(minted.isBlank());
-        assertEquals(minted, stored.get(), "the minted id must be stored for the campaign's lifetime");
+        assertEquals("", stored.get(),
+                "the id is written to the save only once a guest has accepted the lock it rode on");
         assertEquals("true", CoopMessages.requiredPayloadString(firstRequest, "campaignIdMinted"),
                 "the birth seed lock must announce the id as freshly minted");
+
+        first.inbound.add(CoopMessages.seedLockAck("session-a", 9L, 14100L, "fingerprint-host"));
+        firstPump.advance(0f);
+        assertEquals(minted, stored.get(), "the accepted id is stored for the campaign's lifetime");
 
         // A later session of the same campaign (fresh pump + session state) reuses the stored id.
         RecordingNetService second = new RecordingNetService(CoopConnectionRole.HOST);
@@ -1044,6 +1051,42 @@ class CoopNetPumpTest {
         assertEquals(minted, CoopMessages.requiredPayloadString(secondRequest, "campaignId"));
         assertEquals("false", CoopMessages.requiredPayloadString(secondRequest, "campaignIdMinted"),
                 "an in-flight campaign must not present as being born");
+    }
+
+    /**
+     * net-15: a birth seed lock that no guest ever accepted must not leave the campaign looking
+     * "already in flight". Persisting at request time made the corrected guest's fresh campaign
+     * unjoinable without -AdoptCampaign, for a campaign that had never run a session.
+     */
+    @Test
+    void aRejectedBirthSeedLockStillPresentsAsTheBirthLockToTheNextGuest() {
+        java.util.concurrent.atomic.AtomicReference<String> stored =
+                new java.util.concurrent.atomic.AtomicReference<>("");
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = hostSessionReadyForSeedLock("session-a");
+        CoopNetPump pump = pumpForHostSeedLock(service, session, stored);
+        pump.advance(0f);
+        String minted = CoopMessages.requiredPayloadString(seedLockRequestIn(service), "campaignId");
+
+        // The guest typed the wrong seed and refuses the lock, then quits.
+        service.inbound.add(CoopMessages.seedLockReject("session-a", 9L, 14100L,
+                "seedString: host=coop-seed guest=other-seed"));
+        pump.advance(0f);
+        assertEquals("", stored.get(), "nothing accepted the id, so nothing was written to the save");
+
+        // A corrected fresh guest reconnects and the host runs a second lock in the same process.
+        RecordingNetService second = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump secondPump = pumpForHostSeedLock(second, hostSessionReadyForSeedLock("session-b"), stored);
+        secondPump.advance(0f);
+        CoopMessages.Message secondRequest = seedLockRequestIn(second);
+        assertEquals("true", CoopMessages.requiredPayloadString(secondRequest, "campaignIdMinted"),
+                "a campaign nobody ever joined is still being born");
+
+        second.inbound.add(CoopMessages.seedLockAck("session-b", 11L, 14200L, "fingerprint-host"));
+        secondPump.advance(0f);
+        assertEquals(CoopMessages.requiredPayloadString(secondRequest, "campaignId"), stored.get());
+        assertFalse(minted.isEmpty());
     }
 
     @Test
@@ -1948,7 +1991,13 @@ class CoopNetPumpTest {
                 "an empty proof earns the reject that tells the player why");
     }
 
-    /** The host end of the same case: an empty proof is a wrong proof. */
+    /**
+     * The host end of the same case: an empty proof answering an outstanding challenge is a wrong
+     * proof (net-1). Re-challenging it instead was an endless ping-pong - the passwordless guest
+     * answers every challenge with another empty proof, one round per frame, until the handshake
+     * deadline drops the socket and the retry loop starts it over - and the reject that names the
+     * cause never fired.
+     */
     @Test
     void anEmptyProofFromAPasswordlessGuestIsRejected() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
@@ -1957,17 +2006,48 @@ class CoopNetPumpTest {
         service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
         CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
         pump.advance(0f);
+        assertEquals(1, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE),
+                "the first hello cannot carry a proof, so it earns the one challenge");
 
-        // An explicit empty-string proof reads as "no proof" and gets challenged again rather than
-        // rejected: the host cannot distinguish it from a first hello, and re-challenging is the
-        // cheaper of the two mistakes.
         service.inbound.add(CoopMessages.lobbyHello(2L, 7100L,
                 new CoopPlayerInfo("guest-player", "Guest"), ""));
         pump.advance(0f);
 
-        assertEquals(2, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE));
+        assertEquals(1, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE),
+                "the challenge is not re-issued to a peer that already failed to answer it");
         assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_ACCEPT));
+        assertEquals(1, countOfType(service, CoopMessages.Type.LOBBY_REJECT));
+        assertEquals(CoopNetPump.LOBBY_REJECT_PASSWORD, CoopMessages.requiredPayloadString(
+                service.sent.stream()
+                        .filter(m -> m.type() == CoopMessages.Type.LOBBY_REJECT)
+                        .findFirst().orElseThrow(),
+                "reason"));
         assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+    }
+
+    /**
+     * net-1, the other half: a fresh connection after that reject still gets its own first
+     * challenge. The nonce is cleared on the disconnect edge, so the guard cannot strand a guest
+     * that does have the password.
+     */
+    @Test
+    void aNewConnectionAfterAFailedProofStillGetsItsOwnChallenge() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        service.inbound.add(CoopMessages.lobbyHello(1L, 7000L, new CoopPlayerInfo("guest-player", "Guest")));
+        CoopNetPump pump = hostPumpWithPassword(service, session, PASSWORD);
+        pump.advance(0f);
+
+        // The wrong-password guest goes away and a correctly configured one dials in.
+        service.connected = false;
+        pump.advance(0f);
+        service.connected = true;
+        service.inbound.add(CoopMessages.lobbyHello(3L, 7200L, new CoopPlayerInfo("guest-two", "Guest")));
+        pump.advance(0f);
+
+        assertEquals(2, countOfType(service, CoopMessages.Type.LOBBY_CHALLENGE));
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_REJECT));
     }
 
     // ---- F4/F5: what a guest does with a LOBBY_REJECT --------------------------------------------
@@ -3887,6 +3967,345 @@ class CoopNetPumpTest {
         }
     }
 
+    /**
+     * net-48: LOBBY_STATUS carries how long the host's lobby has been open and the guest used to
+     * throw it away, starting its own counter at its first status frame. A slow handshake then had
+     * the host reading 1:30 and the guest 0:00, with the two-minute AFK hint 90 seconds apart.
+     */
+    @Test
+    void theGuestLobbyCounterIsRebasedOntoTheHostsElapsedTime() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        // Seed-locked but not released: the lobby is still on screen, which is what the counter is on.
+        CoopSessionState session = new CoopSessionState(() -> "guest-player");
+        session.startGuest("Guest");
+        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        session.guestAcceptHandshake("session-a");
+        session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+        AtomicLong now = new AtomicLong(500_000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+
+        service.inbound.add(CoopMessages.lobbyStatus("session-a", 20L, now.get(), List.of(
+                        new CoopMessages.LobbyPlayer("host-player", "Host", "READY", true, -1L, ""),
+                        new CoopMessages.LobbyPlayer("guest-player", "Guest", "SNAPSHOT_APPLIED", false, -1L, "")),
+                -1L, false, "", 90_000L));
+        pump.advance(0f);
+
+        assertEquals(90_000L, pump.lobbyRosterForTest().elapsedMillis(now.get()),
+                "both screens read the same clock, so the AFK hint fires on both at once");
+    }
+
+    // ---- bug-hunt fixes: startup, identity and grace -------------------------------------------
+
+    /**
+     * net-12: the port was taken. That used to be reported as "Invalid coop networking JVM
+     * properties" and nothing else - the host loaded into a campaign with no lobby, no pause hold and
+     * no explanation, while the guest's connect loop hammered a closed port.
+     */
+    @Test
+    void aHostPortThatCannotBeBoundIsNamedOnScreenInsteadOfBlamingTheProperties() {
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "27015");
+        try {
+            StartupNetService service = new StartupNetService();
+            service.startHostFailure = new IllegalStateException("Unable to start coop TCP host on port 27015");
+            CoopSessionState session = new CoopSessionState();
+            CoopNetPump pump = new CoopNetPump(service, session, () -> 1_000_000L);
+            pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, () -> 1_000_000L));
+
+            pump.advance(0f);
+
+            assertEquals(CoopConnectionRole.NONE, session.role(), "no session may look started");
+            assertTrue(pump.desyncDialogRequestedForTest(),
+                    "the player has to be told the port would not open");
+            assertTrue(pump.desyncReasonForTest().rawReason().contains("27015"),
+                    pump.desyncReasonForTest().rawReason());
+        } finally {
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
+    /** A genuinely unparseable property is still reported as one, and raises no dialog. */
+    @Test
+    void anUnparseablePortIsStillReportedAsABadProperty() {
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "not-a-port");
+        try {
+            StartupNetService service = new StartupNetService();
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), () -> 1_000_000L);
+
+            pump.advance(0f);
+
+            assertEquals(CoopConnectionRole.NONE, service.role());
+            assertFalse(pump.desyncDialogRequestedForTest());
+        } finally {
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
+    /**
+     * net-3: the same human must keep one player id across launches of the same save. A per-process
+     * UUID gave the Phase 21 stats tally a fresh, zeroed column on every reload beside the old one,
+     * which kept the counters and was never marked away.
+     */
+    @Test
+    void theLocalPlayerIdIsStableAcrossLaunchesOfTheSameSave() {
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "27015");
+        try {
+            java.util.concurrent.atomic.AtomicReference<String> stored =
+                    new java.util.concurrent.atomic.AtomicReference<>("");
+
+            StartupNetService first = new StartupNetService();
+            CoopSessionState firstSession = new CoopSessionState();
+            CoopNetPump firstPump = new CoopNetPump(first, firstSession, () -> 1_000_000L);
+            firstPump.setLocalPlayerIdStoreForTest(stored::get, stored::set);
+            firstPump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, () -> 1_000_000L));
+            firstPump.advance(0f);
+
+            String minted = firstSession.localPlayerId();
+            assertFalse(minted == null || minted.isBlank());
+            assertEquals(minted, stored.get(), "the first launch writes its id into the save");
+            assertEquals(minted, first.localSenderId, "and it is the id the wire carries");
+
+            // The save is reloaded: a brand-new pump and session state, same persistent data.
+            StartupNetService second = new StartupNetService();
+            CoopSessionState secondSession = new CoopSessionState();
+            CoopNetPump secondPump = new CoopNetPump(second, secondSession, () -> 1_000_000L);
+            secondPump.setLocalPlayerIdStoreForTest(stored::get, stored::set);
+            secondPump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, () -> 1_000_000L));
+            secondPump.advance(0f);
+
+            assertEquals(minted, secondSession.localPlayerId(),
+                    "a reload is the same player, not a second column in the stats tally");
+            assertEquals(minted, second.localSenderId);
+        } finally {
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
+    /**
+     * net-10: sector memory is serialized into the save, and the flag reader runs every frame while
+     * the role is NONE. A flag left standing turned a bind failure into an open/bind/close cycle at
+     * frame rate and re-fired the join on every later load of that save.
+     */
+    @Test
+    void memoryLaunchFlagsAreConsumedOnceEvenWhenTheHostPortWillNotBind() {
+        java.util.Map<String, Object> memory = new java.util.HashMap<>();
+        memory.put("coop.hostPort", 27015);
+        StartupNetService service = new StartupNetService();
+        service.startHostFailure = new IllegalStateException("Unable to start coop TCP host on port 27015");
+        CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), () -> 1_000_000L);
+        pump.setPortMapperFactory(port -> CoopPortMapper.startOffline(port, () -> 1_000_000L));
+
+        pump.consumeMemoryFlags(fakeMemory(memory));
+        pump.consumeMemoryFlags(fakeMemory(memory));
+
+        assertTrue(memory.isEmpty(), "a consumed flag is gone from the save, not read again next frame");
+        assertEquals(1, service.startHostAttempts, "a failed bind is not retried at frame rate");
+    }
+
+    @Test
+    void memoryJoinFlagsAreClearedSoTheyCannotRedialOnALaterLoad() {
+        java.util.Map<String, Object> memory = new java.util.HashMap<>();
+        memory.put("coop.connectHost", "10.0.0.5");
+        memory.put("coop.connectPort", 27015);
+        StartupNetService service = new StartupNetService();
+        CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), () -> 1_000_000L);
+
+        pump.consumeMemoryFlags(fakeMemory(memory));
+
+        assertEquals(CoopConnectionRole.GUEST, service.role());
+        assertTrue(memory.isEmpty());
+    }
+
+    /** A {@link MemoryAPI} over a map; only the methods the flag reader uses do anything. */
+    private static MemoryAPI fakeMemory(java.util.Map<String, Object> backing) {
+        return (MemoryAPI) java.lang.reflect.Proxy.newProxyInstance(
+                MemoryAPI.class.getClassLoader(), new Class<?>[]{MemoryAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "contains" -> backing.containsKey(args[0]);
+                    case "get" -> backing.get(args[0]);
+                    case "unset" -> {
+                        backing.remove(args[0]);
+                        yield null;
+                    }
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "fakeMemory";
+                    default -> defaultValue(method.getReturnType());
+                });
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (!type.isPrimitive()) {
+            return null;
+        }
+        if (type == boolean.class) {
+            return false;
+        }
+        if (type == float.class) {
+            return 0f;
+        }
+        if (type == long.class) {
+            return 0L;
+        }
+        if (type == void.class) {
+            return null;
+        }
+        return 0;
+    }
+
+    /**
+     * net-16 / ui-session-1: a retryable reject drained BEFORE the drop leaves REJECTED behind, and
+     * the rewind out of it means guestRearmLobby - the only other place that cleared the reason -
+     * never runs. The stale reason then read as a live HOST_REFUSED over a lobby that was open, so
+     * the guest sat on the connecting screen with Cancel as its only option.
+     */
+    @Test
+    void aRejectDrainedBeforeTheDropDoesNotHauntTheNextAcceptedLobbyRound() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = connectingGuestSession();
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 9000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> new CoopSeedSync.SeedData(1L, "unused", "unused"),
+                () -> "fingerprint-guest",
+                () -> "coop-seed");
+        pump.setLobbyPasswordForTest("");
+        pump.advance(0f);
+
+        // Frame N: the reject lands while the socket is still up.
+        service.inbound.add(CoopMessages.lobbyReject(6L, 9100L, RETRYABLE_REJECT));
+        pump.advance(0f);
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+        assertEquals(coop.ui.CoopConnectingDialog.Failure.HOST_REFUSED,
+                pump.connectingViewForTest().failure());
+
+        // Frame N+k: the host's handshake deadline closes the link.
+        service.connected = false;
+        pump.advance(0f);
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, session.connectionState());
+        assertNull(session.rejectReason(), "the reason died with the connection that carried it");
+
+        // The next round is accepted.
+        service.connected = true;
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.lobbyAccept(
+                7L, 9200L, "lobby-a", new CoopPlayerInfo("host-player", "Host")));
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTED, session.connectionState());
+        assertNull(session.rejectReason());
+        assertNull(pump.connectingViewForTest().failure(),
+                "an admitted guest is not looking at a host-refused screen");
+    }
+
+    /**
+     * net-17 / save-seed-handshake-3: the guest's CoopSaveCheckpoint lives for the life of the pump
+     * while the host's is rebuilt on every game load and numbers from 1 again. Without a reset on the
+     * session edge, a new session's first SAVE_CHECKPOINT read as "already handled" and the guest
+     * quietly skipped the coordinated autosave that keeps the two saves in step.
+     */
+    @Test
+    void aNewSessionGivesTheGuestACleanCheckpointHistory() {
+        java.util.concurrent.atomic.AtomicReference<String> stored =
+                new java.util.concurrent.atomic.AtomicReference<>("campaign-host");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        CoopNetPump pump = pumpForGuestSeedLock(
+                service, session, stored, false, false, "fingerprint-host", () -> "");
+
+        coop.save.CoopSaveCheckpoint checkpoint = pump.saveCheckpointForTest();
+        checkpoint.onCheckpointReceived(1L, "host save", 1000L);
+        assertTrue(checkpoint.isAutosavePending());
+        checkpoint.cancel();
+
+        service.inbound.add(CoopMessages.seedLockRequest(
+                "session-a", 4L, 13000L, 123456789L, "coop-seed", "fingerprint-host", "campaign-host", false));
+        pump.advance(0f);
+        assertEquals(Long.valueOf(123456789L), session.seedLong(), "the session really was established");
+
+        checkpoint.onCheckpointReceived(1L, "host save", 2000L);
+        assertTrue(checkpoint.isAutosavePending(),
+                "the new host's checkpoint 1 is not the previous session's checkpoint 1");
+    }
+
+    /**
+     * net-19: the host could not build its seed lock. It used to reject locally and go silent - and
+     * because the accepted handshake had already set the expected session token, no deadline applied,
+     * so the guest waited for a request that would never come on a socket nothing would ever drop.
+     */
+    @Test
+    void aHostSeedLockThatCannotBeBuiltTellsTheGuestAndClosesTheConnection() {
+        DroppingNetService service = new DroppingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = hostSessionReadyForSeedLock("session-a");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 14000L,
+                () -> emptyManifest("0.98a-RC8", "commit-a"), () -> false,
+                () -> {
+                    throw new IllegalStateException("sector fingerprint unavailable");
+                },
+                () -> "fingerprint-host",
+                () -> "coop-seed",
+                new CoopTimeLock(),
+                () -> "", id -> { }, () -> false, () -> "", () -> false);
+
+        pump.advance(0f);
+
+        assertEquals(1, countOfType(service, CoopMessages.Type.SEED_LOCK_REJECT),
+                "every other reject site tells the peer; this one used to be the exception");
+        assertFalse(service.drops.isEmpty(), "and the socket goes, so the deadline rules apply again");
+        assertEquals(CoopLobbyState.REJECTED, session.connectionState());
+    }
+
+    /**
+     * net-45: SEED_LOCK_REJECT was the one seed type with no state gate, so any peer that reached the
+     * port could flip a waiting host to REJECTED and raise a modal dialog about a session that never
+     * existed - while holding the single v1 lobby slot.
+     */
+    @Test
+    void aSeedLockRejectBeforeAnyHandshakeIsIgnored() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player"));
+        session.startHost("Host");
+        CoopNetPump pump = new CoopNetPump(service, session, () -> 1000L);
+
+        service.inbound.add(CoopMessages.seedLockReject("session-x", 1L, 1000L, "sectorFingerprint: nope"));
+        pump.advance(0f);
+
+        assertEquals(CoopLobbyState.HOST_WAITING, session.connectionState());
+        assertFalse(pump.desyncDialogRequestedForTest());
+    }
+
+    /**
+     * net-46: the outbound twin of the grace-window inbound whitelist. During a grace window the
+     * session record is live but the socket in the freed peer slot has proved nothing, and the host
+     * used to hand it the campaign's options policy and a session-stamped TIME_SNAPSHOT unasked.
+     */
+    @Test
+    void nothingSessionShapedLeavesTheHostWhileTheGraceWindowIsOpen() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+
+        // A stranger dials the freed slot.
+        service.sent.clear();
+        service.connected = true;
+        for (int frame = 0; frame < 4; frame++) {
+            now.addAndGet(1_000L);
+            pump.advance(0f);
+        }
+
+        assertEquals(0, countOfType(service, CoopMessages.Type.OPTIONS_SNAPSHOT));
+        assertEquals(0, countOfType(service, CoopMessages.Type.TIME_SNAPSHOT));
+        assertEquals(0, countOfType(service, CoopMessages.Type.LOBBY_STATUS));
+        assertEquals(0, countOfType(service, CoopMessages.Type.SESSION_STATS));
+    }
+
     private static void restoreProperty(String key, String saved) {
         if (saved == null) {
             System.clearProperty(key);
@@ -3912,9 +4331,12 @@ class CoopNetPumpTest {
     }
 
     /** Minimal transport for the startup paths: records what they asked for, opens nothing. */
-    private static final class StartupNetService extends CoopNetService {
+    private static class StartupNetService extends CoopNetService {
         private CoopConnectionRole role = CoopConnectionRole.NONE;
         private int hostPort;
+        private int startHostAttempts;
+        private String localSenderId;
+        private RuntimeException startHostFailure;
 
         @Override
         public CoopConnectionRole role() {
@@ -3922,7 +4344,16 @@ class CoopNetPumpTest {
         }
 
         @Override
+        public void setLocalSenderId(String senderId) {
+            localSenderId = senderId;
+        }
+
+        @Override
         public void startHost(int port) {
+            startHostAttempts++;
+            if (startHostFailure != null) {
+                throw startHostFailure;
+            }
             hostPort = port;
             role = CoopConnectionRole.HOST;
         }
@@ -3957,10 +4388,6 @@ class CoopNetPumpTest {
 
         @Override
         public void setExpectedSessionToken(String token) {
-        }
-
-        @Override
-        public void setLocalSenderId(String playerId) {
         }
     }
 

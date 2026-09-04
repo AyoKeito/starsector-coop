@@ -70,6 +70,30 @@ public class CoopSessionState {
         localName = normalizeName(name, "Guest");
     }
 
+    /**
+     * Replaces the freshly minted local player id with one that survives a reload.
+     *
+     * <p>{@link #startHost(String)} / {@link #startGuest(String)} mint a {@code UUID} per process,
+     * which makes the same human a different player on every launch. Anything keyed by player id and
+     * carried in the save — the Phase 21 session-stats columns above all — then gains a duplicate
+     * column per reload while the previous one keeps its counters. The pump hands in the id stored in
+     * the campaign's persistent data instead, so a seat keeps its identity across reloads and rejoins.
+     *
+     * <p>Call it immediately after {@code startHost}/{@code startGuest} and before the id is handed to
+     * the transport as the sender id; the {@link IllegalStateException} enforces that ordering rather
+     * than letting a live session change identity underneath the peer.
+     */
+    public synchronized void adoptLocalPlayerId(String playerId) {
+        String id = playerId == null ? "" : playerId.trim();
+        if (id.isEmpty() || id.equals(localPlayerId)) {
+            return;
+        }
+        if (role == CoopConnectionRole.NONE || remotePlayerId != null || sessionId != null) {
+            throw new IllegalStateException("Local player id can only be adopted before a peer joins");
+        }
+        localPlayerId = id;
+    }
+
     public synchronized boolean canAcceptGuest() {
         return role == CoopConnectionRole.HOST
                 && connectionState == CoopLobbyState.HOST_WAITING
@@ -107,6 +131,12 @@ public class CoopSessionState {
         remotePlayerId = host.playerId();
         remoteName = host.name();
         connectionState = CoopLobbyState.GUEST_CONNECTED;
+        // An accepted round can never carry the previous round's refusal: rejectReason is what
+        // CoopNetPump.guestJoinFailure() reads to decide the join failed, so a leftover one keeps the
+        // "host refused" screen up over a lobby that is actually open.
+        rejectReason = null;
+        rejectTerminal = false;
+        handshakeRejectReason = null;
         clearCanonicalSession();
     }
 
@@ -202,6 +232,12 @@ public class CoopSessionState {
         remotePlayerId = null;
         remoteName = null;
         handshakeRejectReason = null;
+        // The retryable reject died with the connection that carried it. Leaving it set is what made
+        // a reject-then-drop ordering stick: the rewind out of REJECTED means guestRearmLobby() (the
+        // only other place that clears it) never runs again, so the next accepted lobby round still
+        // read as HOST_REFUSED and the guest never got past the connecting screen. The terminal case
+        // returned above, so nothing readable is lost here.
+        rejectReason = null;
         if (role == CoopConnectionRole.GUEST) {
             // Host-minted; the next lobby accept supplies a fresh one.
             provisionalLobbyId = null;

@@ -297,4 +297,30 @@ class CoopLobbyRosterTest {
         roster.setPhase("guest-1", CoopJoinPhase.SEED_LOCKED, T0 + 1L);
         assertFalse(roster.row("guest-1").ready());
     }
+
+    /**
+     * net-48: the host's elapsed reading is mirrored onto this side's clock the same way the
+     * countdown is, so both screens say the same thing however late the guest joined.
+     */
+    @Test
+    void theHostsElapsedReadingIsMirroredOntoTheLocalClock() {
+        CoopLobbyRoster roster = new CoopLobbyRoster();
+        roster.open(10_000L);
+        assertEquals(0L, roster.elapsedMillis(10_000L));
+
+        roster.applyElapsed(90_000L, 10_000L);
+
+        assertEquals(90_000L, roster.elapsedMillis(10_000L));
+        assertEquals(91_000L, roster.elapsedMillis(11_000L), "and it keeps ticking from there");
+
+        // A lobby that has not been opened yet is opened by the host's reading.
+        CoopLobbyRoster fresh = new CoopLobbyRoster();
+        fresh.applyElapsed(5_000L, 1_000L);
+        assertTrue(fresh.opened());
+        assertEquals(5_000L, fresh.elapsedMillis(1_000L));
+
+        // A missing reading (-1) changes nothing.
+        fresh.applyElapsed(-1L, 2_000L);
+        assertEquals(6_000L, fresh.elapsedMillis(2_000L));
+    }
 }

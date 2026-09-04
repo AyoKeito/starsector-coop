@@ -489,6 +489,10 @@ public class CoopNetPump implements EveryFrameScript {
     /** Source of the challenge nonces; the same 64-bit width the UDP path challenge uses. */
     private final java.security.SecureRandom lobbyNonceSource = new java.security.SecureRandom();
 
+    /** This save's stable player id; see {@link #adoptStableLocalPlayerId()}. */
+    private Supplier<String> storedLocalPlayerIdSupplier = CoopSeedSync::currentLocalPlayerId;
+    private Consumer<String> localPlayerIdStore = CoopSeedSync::storeLocalPlayerId;
+
     // ---- Phase 20.6 session intel ----------------------------------------------------------------
     /**
      * Feed behind the "Coop Session" intel page. Owned by the pump because everything the page shows
@@ -857,6 +861,21 @@ public class CoopNetPump implements EveryFrameScript {
         return isGameplaySessionActive() && sessionState.lobbyReleased();
     }
 
+    /**
+     * The outbound twin of {@link #dispatchInbound}'s grace whitelist (Phase 20.2).
+     *
+     * <p>During a reconnect grace window the session record is deliberately still live, so every
+     * "is there a session?" gate stays true — while the socket in the peer slot may belong to
+     * anybody, the transport having freed the slot on the drop. Inbound has always been filtered
+     * down to the messages that can prove identity; outbound was not, so a stranger who dialled the
+     * freed slot was handed the campaign's options policy and a {@code TIME_SNAPSHOT} stamped with
+     * the held session id before saying a word. Nothing but the challenge/resume exchange leaves
+     * this client until the window closes on an accepted resume.
+     */
+    private boolean peerProvenForOutbound() {
+        return !reconnect.active();
+    }
+
     /** Test seam for the desync dialogs' hand-off; see {@link #desyncOwnsFailure}. */
     void setDesyncFailureOwner(java.util.function.Predicate<String> owner) {
         this.desyncOwnsFailure = owner == null ? reason -> false : owner;
@@ -881,6 +900,15 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     /** Test read: whether the connecting dialog is being asked for. */
+    coop.ui.CoopConnectingDialog.View connectingViewForTest() {
+        return connectingView();
+    }
+
+    /** Test read: the guest's coordinated-save checkpoint state. */
+    coop.save.CoopSaveCheckpoint saveCheckpointForTest() {
+        return saveCheckpoint;
+    }
+
     boolean connectingDialogRequestedForTest() {
         return connectingDialogs.isRequested();
     }
@@ -1496,6 +1524,7 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void maybeSendSessionStats(long now, boolean force) {
         if (service.role() != CoopConnectionRole.HOST || !service.isConnected()
+                || !peerProvenForOutbound()
                 || !isGameplaySessionActive() || sessionState.sessionId() == null) {
             return;
         }
@@ -2099,7 +2128,7 @@ public class CoopNetPump implements EveryFrameScript {
      * broadcast for no extra information.
      */
     private void maybeSendLobbyStatus(long now, boolean released) {
-        if (!isGameplaySessionActive() || !service.isConnected()
+        if (!isGameplaySessionActive() || !service.isConnected() || !peerProvenForOutbound()
                 || sessionState.remotePlayerId() == null || sessionState.sessionId() == null) {
             return;
         }
@@ -2268,7 +2297,7 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void maybeSendOptionsSnapshot() {
         if (service.role() != CoopConnectionRole.HOST || !service.isConnected()
-                || !isSessionPlayable()) {
+                || !peerProvenForOutbound() || !isSessionPlayable()) {
             return;
         }
         int version = optionsPolicy.version();
@@ -2563,7 +2592,10 @@ public class CoopNetPump implements EveryFrameScript {
             detail = String.valueOf(sessionState.rejectReason());
         }
         long elapsed = guestConnectStartedAtMillis == 0L ? 0L : Math.max(0L, now - guestConnectStartedAtMillis);
-        return new coop.ui.CoopConnectingDialog.View(guestJoinPhase(), elapsed, failure, detail);
+        // Only a terminal reject (the wrong lobby password) stops the connect loop; everything else
+        // is back off five seconds and dial again, and the remedy line has to say so.
+        boolean retrying = !sessionState.rejectTerminal();
+        return new coop.ui.CoopConnectingDialog.View(guestJoinPhase(), elapsed, failure, detail, retrying);
     }
 
     /**
@@ -2666,6 +2698,7 @@ public class CoopNetPump implements EveryFrameScript {
             first = false;
         }
         lobbyRoster.replaceAll(rows, now);
+        lobbyRoster.applyElapsed(status.elapsedMillis(), now);
         lobbyRoster.applyCountdownRemaining(status.countdownRemainingMillis(), now);
         if (!status.resetReason().isEmpty()) {
             guestReadyRequested = false;
@@ -3177,27 +3210,28 @@ public class CoopNetPump implements EveryFrameScript {
         }
         startupConfigChecked = true;
 
+        CoopNetStartupConfig config;
         try {
-            CoopNetStartupConfig config = CoopNetStartupConfig.fromSystemProperties();
-            if (!config.isPresent()) {
-                return;
-            }
+            config = CoopNetStartupConfig.fromSystemProperties();
+        } catch (RuntimeException ex) {
+            // Parse failures only. Opening the socket is a separate try below, because a port that
+            // cannot be bound used to land here and be reported as "invalid properties" — the one
+            // explanation that is certainly wrong, on the one failure the player has to act on.
+            CoopLog.warn(CoopNetPump.class, "Invalid coop networking JVM properties", ex);
+            return;
+        }
+        if (!config.isPresent()) {
+            return;
+        }
+        try {
             if (config.role() == CoopConnectionRole.HOST) {
                 service.startHost(config.port());
-                sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
-                service.setLocalSenderId(sessionState.localPlayerId());
-                lobbyHelloSent = false;
-                handshakeManifestSent = false;
-                seedLockRequestSent = false;
+                beginLocalRole(CoopConnectionRole.HOST);
                 startPortMapper(config.port());
                 CoopLog.info(CoopNetPump.class, "Coop host started from JVM property "
                         + CoopNetStartupConfig.HOST_PORT_PROPERTY + "=" + config.port());
             } else if (config.role() == CoopConnectionRole.GUEST) {
-                sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
-                service.setLocalSenderId(sessionState.localPlayerId());
-                lobbyHelloSent = false;
-                handshakeManifestSent = false;
-                seedLockRequestSent = false;
+                beginLocalRole(CoopConnectionRole.GUEST);
                 guestConnectHost = config.host();
                 guestConnectPort = config.port();
                 service.connect(config.host(), config.port());
@@ -3206,7 +3240,67 @@ public class CoopNetPump implements EveryFrameScript {
                         + CoopNetStartupConfig.CONNECT_PORT_PROPERTY + "=" + config.port());
             }
         } catch (RuntimeException ex) {
-            CoopLog.warn(CoopNetPump.class, "Invalid coop networking JVM properties", ex);
+            reportStartupFailure(config, ex);
+        }
+    }
+
+    /**
+     * The socket would not open. Says so on screen instead of leaving the player on a campaign with
+     * no lobby, no pause hold and a log line blaming the launch properties: {@code startHost} rolls
+     * its own transport back and rethrows, so the only trace used to be that one misleading WARN
+     * while the partner's connect loop retried forever against a closed port.
+     */
+    private void reportStartupFailure(CoopNetStartupConfig config, RuntimeException ex) {
+        String what = config.role() == CoopConnectionRole.HOST
+                ? "could not open the co-op host port " + config.port()
+                : "could not start the co-op connection to " + config.host() + ":" + config.port();
+        String detail = ex.getMessage() == null ? ex.toString() : ex.getMessage();
+        CoopLog.error(CoopNetPump.class, "Coop " + what + "; no session will start", ex);
+        raiseDesyncDialog(what + " (" + detail + "). Another program - often a game instance that has"
+                        + " not finished shutting down - may already hold it. Free the port or pick"
+                        + " another, then relaunch.",
+                coop.ui.CoopDesyncReason.Source.OTHER, desyncCorrelationId());
+    }
+
+    /**
+     * Takes the local role and settles this client's identity before anything is sent: a stable
+     * player id (see {@link #adoptStableLocalPlayerId()}) has to be in place before it becomes the
+     * transport's sender id and rides the first {@code LOBBY_HELLO}.
+     */
+    private void beginLocalRole(CoopConnectionRole role) {
+        if (role == CoopConnectionRole.HOST) {
+            sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
+        } else {
+            sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
+        }
+        adoptStableLocalPlayerId();
+        service.setLocalSenderId(sessionState.localPlayerId());
+        lobbyHelloSent = false;
+        handshakeManifestSent = false;
+        seedLockRequestSent = false;
+    }
+
+    /**
+     * Replaces the per-process {@code UUID} with the one this save has used since its first coop
+     * launch, minting and storing it when there is none.
+     *
+     * <p>Player id is the key of everything per-player that rides the save, and the Phase 21 stats
+     * tally is where a per-launch id shows: {@code notePlayer} matches on id, so every reload — and
+     * the documented rejoin-by-loading-the-autosave — appended a fresh column with zeroed counters
+     * beside the old one, which kept the numbers and was never marked away. Never fatal: a save that
+     * will not answer keeps the freshly minted id and the launch proceeds.
+     */
+    private void adoptStableLocalPlayerId() {
+        try {
+            String stored = storedLocalPlayerIdSupplier.get();
+            if (stored != null && !stored.trim().isEmpty()) {
+                sessionState.adoptLocalPlayerId(stored.trim());
+                return;
+            }
+            localPlayerIdStore.accept(sessionState.localPlayerId());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not settle a stable local player id;"
+                    + " this launch uses a fresh one", ex);
         }
     }
 
@@ -3227,17 +3321,33 @@ public class CoopNetPump implements EveryFrameScript {
         if (sector == null) {
             return;
         }
+        consumeMemoryFlags(sector.getMemoryWithoutUpdate());
+    }
 
-        MemoryAPI memory = sector.getMemoryWithoutUpdate();
+    /** The flag half of {@link #maybeStartFromMemoryFlags()}, separated so it can be driven in tests. */
+    void consumeMemoryFlags(MemoryAPI memory) {
+        boolean hosting = memory.contains(HOST_PORT_FLAG);
+        boolean joining = memory.contains(CONNECT_HOST_FLAG) && memory.contains(CONNECT_PORT_FLAG);
+        if (!hosting && !joining) {
+            return;
+        }
+        // Read once, then clear, before anything can throw. Sector memory is serialized into the
+        // save, and this method runs every frame while the role is NONE: a flag left standing made
+        // "consumed" a lie twice over - a bind failure repeated the open/bind/close cycle at frame
+        // rate behind a single WARN, and the flags re-fired on every later load of that save, so a
+        // one-off console join silently redialled the recorded address months later.
+        Object hostPortValue = hosting ? memory.get(HOST_PORT_FLAG) : null;
+        Object connectHostValue = joining ? memory.get(CONNECT_HOST_FLAG) : null;
+        Object connectPortValue = joining ? memory.get(CONNECT_PORT_FLAG) : null;
+        memory.unset(HOST_PORT_FLAG);
+        memory.unset(CONNECT_HOST_FLAG);
+        memory.unset(CONNECT_PORT_FLAG);
+
         try {
-            if (memory.contains(HOST_PORT_FLAG)) {
-                int port = parsePort(memory.get(HOST_PORT_FLAG), HOST_PORT_FLAG);
+            if (hosting) {
+                int port = parsePort(hostPortValue, HOST_PORT_FLAG);
                 service.startHost(port);
-                sessionState.startHost(localPlayerName(CoopConnectionRole.HOST));
-                service.setLocalSenderId(sessionState.localPlayerId());
-                lobbyHelloSent = false;
-                handshakeManifestSent = false;
-                seedLockRequestSent = false;
+                beginLocalRole(CoopConnectionRole.HOST);
                 // Same launch-time -Dcoop.portMapping property as the JVM-property path; see
                 // startPortMapper for why there is no memory-flag equivalent.
                 startPortMapper(port);
@@ -3245,24 +3355,18 @@ public class CoopNetPump implements EveryFrameScript {
                 return;
             }
 
-            if (memory.contains(CONNECT_HOST_FLAG) && memory.contains(CONNECT_PORT_FLAG)) {
-                String host = String.valueOf(memory.get(CONNECT_HOST_FLAG)).trim();
-                int port = parsePort(memory.get(CONNECT_PORT_FLAG), CONNECT_PORT_FLAG);
-                if (host.isEmpty()) {
-                    throw new IllegalArgumentException(CONNECT_HOST_FLAG + " is blank");
-                }
-                sessionState.startGuest(localPlayerName(CoopConnectionRole.GUEST));
-                service.setLocalSenderId(sessionState.localPlayerId());
-                lobbyHelloSent = false;
-                handshakeManifestSent = false;
-                seedLockRequestSent = false;
-                guestConnectHost = host;
-                guestConnectPort = port;
-                service.connect(host, port);
-                CoopLog.info(CoopNetPump.class,
-                        "Coop guest control consumed memory flags " + CONNECT_HOST_FLAG + "=" + host
-                                + ", " + CONNECT_PORT_FLAG + "=" + port);
+            String host = String.valueOf(connectHostValue).trim();
+            int port = parsePort(connectPortValue, CONNECT_PORT_FLAG);
+            if (host.isEmpty()) {
+                throw new IllegalArgumentException(CONNECT_HOST_FLAG + " is blank");
             }
+            beginLocalRole(CoopConnectionRole.GUEST);
+            guestConnectHost = host;
+            guestConnectPort = port;
+            service.connect(host, port);
+            CoopLog.info(CoopNetPump.class,
+                    "Coop guest control consumed memory flags " + CONNECT_HOST_FLAG + "=" + host
+                            + ", " + CONNECT_PORT_FLAG + "=" + port);
         } catch (RuntimeException ex) {
             if (!memoryConfigWarningLogged) {
                 CoopLog.warn(CoopNetPump.class, "Invalid coop networking memory flags", ex);
@@ -4275,7 +4379,14 @@ public class CoopNetPump implements EveryFrameScript {
             return false;
         }
         String proof = CoopMessages.parseLobbyProof(message);
-        if (proof.isEmpty()) {
+        // Only the FIRST hello of a connection reads as "no proof yet"; the pending nonce is what
+        // distinguishes it. Without that guard a guest launched with no password answers every
+        // challenge with an empty proof and gets challenged again, one round per frame, until the
+        // 15 s handshake deadline drops the socket and its retry loop starts the same ping-pong over
+        // - the LOBBY_REJECT_PASSWORD that names the cause never fires. Same shape as
+        // checkResumePassword. The nonce is cleared on the disconnect edge, so a fresh connection
+        // still gets its own first challenge.
+        if (proof.isEmpty() && pendingLobbyNonce == null) {
             issueLobbyChallenge(message.senderId());
             return false;
         }
@@ -4448,6 +4559,12 @@ public class CoopNetPump implements EveryFrameScript {
         this.lobbyPassword = password == null ? "" : password.trim();
     }
 
+    /** Test seam: the save's persistent data everywhere else. See {@link #adoptStableLocalPlayerId()}. */
+    void setLocalPlayerIdStoreForTest(Supplier<String> reader, Consumer<String> writer) {
+        this.storedLocalPlayerIdSupplier = reader == null ? () -> "" : reader;
+        this.localPlayerIdStore = writer == null ? id -> { } : writer;
+    }
+
     private void handleLobbyAccept(CoopMessages.Message message) {
         if (service.role() != CoopConnectionRole.GUEST) {
             return;
@@ -4605,8 +4722,25 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException ex) {
             String reason = "seedLock: " + ex.getMessage();
             String correlationId = desyncCorrelationId();
+            // Read before the reject clears the canonical session out from under it.
+            String rejectedSessionId = sessionState.sessionId();
             sessionState.rejectHandshake(reason);
             CoopLog.warn(CoopNetPump.class, "Failed to create coop seed lock request", ex);
+            // Tell the guest and close the socket. Every other reject site does; this one used to
+            // reject locally and go quiet, and because hostAcceptHandshake had already set the
+            // expected session token the handshake deadline no longer applied - the guest sat
+            // waiting for a SEED_LOCK_REQUEST that would never come, on a connection nothing would
+            // ever drop, while the host's lobby stayed REJECTED and admitted nobody else.
+            CoopMessages.Message reject = CoopMessages.seedLockReject(
+                    rejectedSessionId,
+                    service.nextSeq(),
+                    clockMillis.getAsLong(),
+                    reason);
+            service.send(reject);
+            log("outbound", reject);
+            service.flushOutbound();
+            service.setExpectedSessionToken(null);
+            service.dropActiveConnection(reason);
             noteDesync(reason, coop.ui.CoopDesyncReason.Source.SEED_LOCK, correlationId);
         }
     }
@@ -4617,21 +4751,44 @@ public class CoopNetPump implements EveryFrameScript {
      * the life of the campaign, across sessions and saves — it is what distinguishes "this campaign,
      * resumed" from "a fresh re-roll of the same seed", which the seed string and structural
      * fingerprint cannot (both are pure functions of the seed).
+     *
+     * <p><b>Minted here, written to the save only when a guest acks it.</b> Storing at request time
+     * made a failed birth lock permanent: the guest that mistyped its seed was rejected, the id it
+     * never accepted stayed in the host's persistent data, and every later request carried
+     * {@code minted=false} — so the corrected fresh guest was turned away as joining a campaign
+     * "already in flight" that had never run one, recoverable only with {@code -AdoptCampaign}. The
+     * id is held in this field meanwhile, so retries inside the same process reuse it and still
+     * present as the birth lock.
      */
     private CampaignIdResolution resolveHostCampaignId() {
         String stored = storedCampaignIdSupplier.get();
         if (stored != null && !stored.trim().isEmpty()) {
             return new CampaignIdResolution(stored.trim(), false);
         }
-        String minted = UUID.randomUUID().toString();
+        if (mintedCampaignId == null) {
+            mintedCampaignId = UUID.randomUUID().toString();
+            CoopLog.info(CoopNetPump.class, "Coop campaign id minted campaignId=" + mintedCampaignId);
+        }
+        return new CampaignIdResolution(mintedCampaignId, true);
+    }
+
+    /** Persists a minted campaign id once the guest has accepted the lock it rode on. */
+    private void commitMintedCampaignId() {
+        String minted = mintedCampaignId;
+        if (minted == null) {
+            return;
+        }
+        mintedCampaignId = null;
         campaignIdStore.accept(minted);
-        CoopLog.info(CoopNetPump.class, "Coop campaign id minted campaignId=" + minted);
-        return new CampaignIdResolution(minted, true);
+        CoopLog.info(CoopNetPump.class, "Coop campaign id confirmed by the guest campaignId=" + minted);
     }
 
     /** {@code minted} = the id was created at this very seed lock, i.e. the campaign is being born. */
     private record CampaignIdResolution(String id, boolean minted) {
     }
+
+    /** Host: a campaign id minted this process and not yet accepted by any guest. */
+    private String mintedCampaignId;
 
     /**
      * Logs the full canonical fingerprint text (one line per entry, the exact SHA input) so the two
@@ -4765,6 +4922,12 @@ public class CoopNetPump implements EveryFrameScript {
         }
 
         sessionState.recordSeedLock(seedLong, seedString, hostFingerprint);
+        // A new session on the same guest process gets a clean checkpoint history. The host's
+        // CoopSaveCheckpoint is rebuilt with every game load and numbers from 1 again, while this
+        // guest's lives for the life of the pump: if the last id it handled in the previous session
+        // was 1, the new session's first SAVE_CHECKPOINT read as "already handled" and the guest
+        // silently skipped the coordinated autosave that keeps the two saves in step.
+        saveCheckpoint.reset();
         CoopSeedSync.storeCurrentSectorPersistentData(new CoopSeedSync.SeedData(seedLong, seedString, hostFingerprint));
         CoopMessages.Message ack = CoopMessages.seedLockAck(
                 message.sessionId(),
@@ -4891,11 +5054,23 @@ public class CoopNetPump implements EveryFrameScript {
         // endSessionAfterDrop. Not cleared on a drop: a session held through a grace window is still
         // a session whose guest passed the seed lock.
         guestSeedLockAcked = true;
+        // The campaign's birth is only real now that somebody else has accepted the id.
+        commitMintedCampaignId();
         CoopLog.info(CoopNetPump.class,
                 "Coop seed lock accepted by guest sectorFingerprint=" + guestFingerprint);
     }
 
     private void handleSeedLockReject(CoopMessages.Message message) {
+        // Same state gate the request and ack handlers carry. Without it this was the one seed-lock
+        // type any connected peer could send before saying hello: a scanner or an old build speaking
+        // the protocol flipped a waiting host to REJECTED, earned it a doctor marker and a modal
+        // dialog about a session that never existed, and held the single lobby slot until its socket
+        // closed.
+        if (!sessionState.handshakeValidated()) {
+            CoopLog.warn(CoopNetPump.class, "Coop ignoring a SEED_LOCK_REJECT that arrived before a"
+                    + " validated handshake");
+            return;
+        }
         String reason = CoopMessages.requiredPayloadString(message, "reason");
         String correlationId = desyncCorrelationId();
         // Reached by both roles (the guest rejects the host's request, the host rejects the guest's
@@ -5364,7 +5539,8 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void maybeSendTimeSnapshot() {
-        if (service.role() != CoopConnectionRole.HOST || !service.isConnected() || !isGameplaySessionActive()) {
+        if (service.role() != CoopConnectionRole.HOST || !service.isConnected()
+                || !peerProvenForOutbound() || !isGameplaySessionActive()) {
             return;
         }
 
@@ -5724,7 +5900,7 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private void maybeSendGuestSnapshot() {
         if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()
-                || !isGameplaySessionActive()) {
+                || !peerProvenForOutbound() || !isGameplaySessionActive()) {
             return;
         }
         long now = clockMillis.getAsLong();

@@ -75,8 +75,33 @@ class CoopConnectingDialogTest {
                 CoopConnectingDialog.failureHeadline(CoopConnectingDialog.Failure.HOST_REFUSED),
                 CoopConnectingDialog.failureHeadline(CoopConnectingDialog.Failure.VERSION_MISMATCH),
                 CoopConnectingDialog.failureHeadline(CoopConnectingDialog.Failure.TIMED_OUT)).size());
-        assertTrue(CoopConnectingDialog.failureRemedy(CoopConnectingDialog.Failure.TIMED_OUT)
+        assertTrue(CoopConnectingDialog.failureRemedy(CoopConnectingDialog.Failure.TIMED_OUT, true)
                 .contains(String.valueOf(CoopConnectingDialog.CONNECT_TIMEOUT_MILLIS / 1000L)));
+    }
+
+    /**
+     * ui-session-8: only the wrong password stops the connect loop. Telling a player refused for
+     * "lobby already has a guest" that nothing retries is what makes them cancel or relaunch five
+     * seconds before the retry would have got them in.
+     */
+    @Test
+    void aRetryableRefusalSaysItIsStillRetryingAndATerminalOneDoesNot() {
+        String retryable = CoopConnectingDialog.failureRemedy(
+                CoopConnectingDialog.Failure.HOST_REFUSED, true);
+        String terminal = CoopConnectingDialog.failureRemedy(
+                CoopConnectingDialog.Failure.HOST_REFUSED, false);
+
+        assertTrue(retryable.contains("retrying"), retryable);
+        assertTrue(retryable.contains("Cancel"), retryable);
+        assertTrue(terminal.contains("Nothing here retries on its own"), terminal);
+
+        // And the two render differently rather than collapsing onto one cached panel.
+        CoopConnectingDialog.View terminalView = new CoopConnectingDialog.View(
+                null, 2_000L, CoopConnectingDialog.Failure.HOST_REFUSED, "Wrong lobby password", false);
+        CoopConnectingDialog plugin = new CoopConnectingDialog(() -> terminalView, () -> 0L, () -> { });
+        RecordingDialog dialog = new RecordingDialog();
+        plugin.init(dialog.proxy());
+        assertTrue(dialog.text.paragraphs.contains(terminal), dialog.text.paragraphs.toString());
     }
 
     @Test

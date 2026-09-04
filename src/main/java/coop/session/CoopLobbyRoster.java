@@ -473,6 +473,20 @@ public final class CoopLobbyRoster {
     }
 
     /**
+     * Mirrors the host's "how long has this lobby been open" onto this side's clock, the same way
+     * {@link #applyCountdownRemaining(long, long)} mirrors the countdown. Without it the guest's
+     * counter started at its own first {@code LOBBY_STATUS}, so a slow handshake had the host
+     * reading 1:30 and the guest 0:00 and the two-minute AFK hint firing at different moments.
+     */
+    public void applyElapsed(long elapsedMillis, long nowMillis) {
+        if (elapsedMillis < 0L) {
+            return;
+        }
+        opened = true;
+        openedAtMillis = nowMillis - elapsedMillis;
+    }
+
+    /**
      * True once the lobby has been open for {@link #AFK_HINT_MILLIS} with a guest still not ready.
      * It surfaces the host's override; it never fires it. The correct outcome of a non-response here
      * is "stay paused".

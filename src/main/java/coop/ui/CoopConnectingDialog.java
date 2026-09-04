@@ -69,10 +69,22 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
      * @param failure the named cause, or null while the join is still running
      * @param detail  the host's own words for {@link Failure#HOST_REFUSED} / the handshake diff for a
      *                mismatch; "" when there is nothing more to say
+     * @param retrying whether the connect loop is still running behind this screen. Only the wrong
+     *                 password stops it; every other refusal ("lobby already has a guest", the grace
+     *                 window, the transport's extra-connection reject) backs off five seconds and
+     *                 dials again, and the remedy line used to tell all of them that nothing retries
+     *                 on its own — which is the sentence that makes a player press Cancel or relaunch
+     *                 five seconds before they would have been let in.
      */
-    public record View(CoopJoinPhase phase, long elapsedMillis, Failure failure, String detail) {
+    public record View(CoopJoinPhase phase, long elapsedMillis, Failure failure, String detail,
+                       boolean retrying) {
         public View {
             detail = detail == null ? "" : detail;
+        }
+
+        /** The common case: the join is still being retried. */
+        public View(CoopJoinPhase phase, long elapsedMillis, Failure failure, String detail) {
+            this(phase, elapsedMillis, failure, detail, true);
         }
     }
 
@@ -89,9 +101,9 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
     private boolean renderFailed;
 
     /** Everything in a {@link View} except the clock: what the phase list is drawn from. */
-    private record Key(CoopJoinPhase phase, Failure failure, String detail) {
+    private record Key(CoopJoinPhase phase, Failure failure, String detail, boolean retrying) {
         static Key of(View view) {
-            return new Key(view.phase(), view.failure(), view.detail());
+            return new Key(view.phase(), view.failure(), view.detail(), view.retrying());
         }
     }
 
@@ -177,7 +189,7 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
             text.clear();
             if (view.failure() != null) {
                 text.addPara(failureHeadline(view.failure()));
-                text.addPara(failureRemedy(view.failure()));
+                text.addPara(failureRemedy(view.failure(), view.retrying()));
                 if (!view.detail().isEmpty()) {
                     text.addPara(view.detail());
                 }
@@ -229,10 +241,13 @@ public final class CoopConnectingDialog implements InteractionDialogPlugin, Coop
         };
     }
 
-    static String failureRemedy(Failure failure) {
+    static String failureRemedy(Failure failure, boolean retrying) {
         return switch (failure) {
             case VERSION_MISMATCH -> "Match the host's game version and mod list, then reconnect.";
-            case HOST_REFUSED -> "The host's own words are below. Nothing here retries on its own.";
+            case HOST_REFUSED -> retrying
+                    ? "The host's own words are below. This keeps retrying every 5 seconds; Cancel to stop."
+                    : "The host's own words are below. Nothing here retries on its own -"
+                            + " fix it and relaunch.";
             case TIMED_OUT -> "Nothing arrived in " + (CONNECT_TIMEOUT_MILLIS / 1000L)
                     + " seconds. Check that the host is still on the lobby screen, then try again.";
         };

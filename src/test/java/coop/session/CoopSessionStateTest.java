@@ -10,6 +10,7 @@ import java.util.Queue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopSessionStateTest {
@@ -303,5 +304,86 @@ class CoopSessionStateTest {
         public String get() {
             return ids.remove();
         }
+    }
+
+    /**
+     * ui-session-1: a retryable reject drained before the drop leaves REJECTED behind, and the rewind
+     * out of it means guestRearmLobby - the only other clear - never runs again. The reason then
+     * survived into the next accepted round, where CoopNetPump reads it as a live HOST_REFUSED.
+     */
+    @Test
+    void aDropClearsARetryableRejectSoTheNextRoundStartsClean() {
+        CoopSessionState state = new CoopSessionState(() -> "guest-player");
+        state.startGuest("Guest");
+        state.guestRejectLobby("Lobby already has a guest");
+        assertEquals(CoopLobbyState.REJECTED, state.connectionState());
+
+        state.onChannelDisconnected();
+
+        assertEquals(CoopLobbyState.GUEST_CONNECTING, state.connectionState());
+        assertNull(state.rejectReason());
+        assertFalse(state.guestRearmLobby(), "the rewind already happened; nothing left to rearm");
+
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+        assertEquals(CoopLobbyState.GUEST_CONNECTED, state.connectionState());
+        assertNull(state.rejectReason());
+    }
+
+    /** A terminal reject is still the only on-screen explanation, so the drop leaves it standing. */
+    @Test
+    void aTerminalRejectKeepsItsReasonAcrossTheDrop() {
+        CoopSessionState state = new CoopSessionState(() -> "guest-player");
+        state.startGuest("Guest");
+        state.guestRejectLobby("Wrong lobby password", true);
+
+        state.onChannelDisconnected();
+
+        assertEquals(CoopLobbyState.REJECTED, state.connectionState());
+        assertEquals("Wrong lobby password", state.rejectReason());
+    }
+
+    /** An accepted round can never carry a previous round's refusal. */
+    @Test
+    void anAcceptedLobbyRoundClearsAnyLeftoverReason() {
+        CoopSessionState state = new CoopSessionState(() -> "guest-player");
+        state.startGuest("Guest");
+        state.guestRejectLobby("Lobby already has a guest");
+        state.guestRearmLobby();
+        state.rejectHandshake("mod list mismatch");
+        state.onChannelDisconnected();
+
+        state.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
+
+        assertNull(state.rejectReason());
+        assertNull(state.handshakeRejectReason());
+    }
+
+    /**
+     * net-3: the pump hands in the id this save has used since its first coop launch, so the same
+     * human is one player across reloads instead of a new stats column per launch.
+     */
+    @Test
+    void aStableLocalPlayerIdReplacesThePerProcessOne() {
+        CoopSessionState state = new CoopSessionState(() -> "minted-per-process");
+        state.startHost("Host");
+        assertEquals("minted-per-process", state.localPlayerId());
+
+        state.adoptLocalPlayerId("  from-the-save  ");
+        assertEquals("from-the-save", state.localPlayerId());
+
+        // Blank and no-op adoptions leave it alone rather than clearing identity.
+        state.adoptLocalPlayerId("");
+        state.adoptLocalPlayerId(null);
+        assertEquals("from-the-save", state.localPlayerId());
+    }
+
+    @Test
+    void aLocalPlayerIdCannotChangeUnderALiveSession() {
+        CoopSessionState state = new CoopSessionState(() -> "minted-per-process");
+        state.startHost("Host");
+        state.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+
+        assertThrows(IllegalStateException.class, () -> state.adoptLocalPlayerId("too-late"));
+        assertEquals("minted-per-process", state.localPlayerId());
     }
 }

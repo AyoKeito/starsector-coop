@@ -22,6 +22,13 @@ public final class CoopSeedSync {
      * for both.
      */
     public static final String PERSISTENT_CAMPAIGN_ID = "coop.campaignId";
+    /**
+     * This save's own player id, minted on the first coop launch and reused by every later one.
+     * {@code CoopSessionState} otherwise mints a fresh {@code UUID} per process, which makes the same
+     * human a different player on every reload — and everything keyed by player id that rides the
+     * save (the Phase 21 stats columns above all) then gains a duplicate entry per launch.
+     */
+    public static final String PERSISTENT_LOCAL_PLAYER_ID = "coop.localPlayerId";
 
     private CoopSeedSync() {
     }
@@ -154,6 +161,39 @@ public final class CoopSeedSync {
             CoopLog.info(CoopSeedSync.class, "Coop campaign id stored campaignId=" + normalized);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopSeedSync.class, "Unable to store coop campaign id", ex);
+        }
+    }
+
+    /** This save's stable local player id, or empty when it has never hosted or joined. */
+    public static String currentLocalPlayerId() {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return "";
+            }
+            Object id = sector.getPersistentData().get(PERSISTENT_LOCAL_PLAYER_ID);
+            return id == null ? "" : String.valueOf(id).trim();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSeedSync.class, "Unable to read coop local player id", ex);
+            return "";
+        }
+    }
+
+    /** Writes the local player id on the first coop launch of this save; later launches reuse it. */
+    public static void storeLocalPlayerId(String playerId) {
+        String normalized = playerId == null ? "" : playerId.trim();
+        if (normalized.isEmpty()) {
+            return;
+        }
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null) {
+                return;
+            }
+            sector.getPersistentData().put(PERSISTENT_LOCAL_PLAYER_ID, normalized);
+            CoopLog.info(CoopSeedSync.class, "Coop local player id stored playerId=" + normalized);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSeedSync.class, "Unable to store coop local player id", ex);
         }
     }
 
