@@ -62,6 +62,10 @@ public record CoopInvite(String host, int port, String seed, String password, St
         if (cleanHost.isEmpty()) {
             throw new IllegalArgumentException("an invite needs a host address");
         }
+        String hostProblem = hostProblem(cleanHost);
+        if (hostProblem != null) {
+            throw new IllegalArgumentException(hostProblem);
+        }
         if (port < 1 || port > 65535) {
             throw new IllegalArgumentException("port must be in range 1..65535");
         }
@@ -226,6 +230,38 @@ public record CoopInvite(String host, int port, String seed, String password, St
 
     private static Parsed fail(String reason) {
         return new Parsed(null, reason);
+    }
+
+    /**
+     * Why {@code host} cannot go into an invite, or {@code null} when it can. Everything rejected
+     * here would come out of {@link #format} as a line the guest's {@link #parse} refuses, naming a
+     * part of the invite rather than the address the host actually typed - so the host is told about
+     * it while they are still looking at the field, instead of their partner being told minutes
+     * later.
+     */
+    static String hostProblem(String host) {
+        for (int i = 0; i < host.length(); i++) {
+            char character = host.charAt(i);
+            if (Character.isWhitespace(character)) {
+                return "an address cannot contain a space; \"" + host + "\" has one in the middle";
+            }
+            if (character == '/' || character == '?' || character == '#' || character == '&') {
+                return "an address cannot contain \"" + character + "\"; \"" + host + "\" looks like"
+                        + " a URL rather than an address. Use just the host, as in 203.0.113.9.";
+            }
+        }
+        boolean bracketed = host.charAt(0) == '[';
+        int open = host.indexOf('[', bracketed ? 1 : 0);
+        int close = host.indexOf(']');
+        if (bracketed) {
+            if (close != host.length() - 1 || open >= 0) {
+                return "an IPv6 address has to be written as [2001:db8::1], not \"" + host + "\"";
+            }
+        } else if (open >= 0 || close >= 0) {
+            return "an address cannot contain \"[\" or \"]\" unless it is an IPv6 address in"
+                    + " brackets, as in [2001:db8::1]";
+        }
+        return null;
     }
 
     /** Wraps a bare IPv6 literal in brackets; leaves everything else alone. */

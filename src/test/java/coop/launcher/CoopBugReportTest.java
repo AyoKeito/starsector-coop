@@ -150,6 +150,27 @@ class CoopBugReportTest {
                 result.notes().toString());
     }
 
+    /**
+     * A settings file that is there but cannot be read is not a malformed one: packing it produces
+     * an empty entry under a note telling the player to check it for a password by hand.
+     */
+    @Test
+    void aSettingsFileThatCannotBeReadIsListedAsMissingRatherThanPackedEmpty() throws IOException {
+        // Bytes that are not valid UTF-8, which is what an unreadable file looks like from here.
+        Files.write(layout.coopOptions().toPath(), new byte[]{'{', (byte) 0xFF, (byte) 0xFE, '}'});
+
+        CoopBugReport.Result result = write(false);
+
+        assertTrue(result.missing().stream()
+                        .anyMatch(name -> name.contains("coop_options.json.data")
+                                && name.contains("unreadable")),
+                result.missing().toString());
+        assertFalse(result.notes().stream().anyMatch(note -> note.contains("packed exactly as it is")),
+                result.notes().toString());
+        assertFalse(entries(result.zip()).contains("saves/common/coop_options.json.data"),
+                entries(result.zip()).toString());
+    }
+
     @Test
     void theVmparamsPasswordTokenIsRemovedAndTheRestOfTheLineSurvives() throws IOException {
         CoopBugReport.Result result = write(false);

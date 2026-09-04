@@ -103,6 +103,33 @@ class CoopLauncherProbeTest {
         }
     }
 
+    /**
+     * close() runs on the event dispatch thread, from LAUNCH among others. A half-open probe that
+     * says nothing must not park the window: closing the ServerSocket leaves the accepted socket
+     * alone, so the serving thread would sit in its five-second read while close() waited out its
+     * two-second join.
+     */
+    @Test
+    void closingReturnsAtOnceWhileAProbeIsBeingServed() throws Exception {
+        CoopLauncherProbe.HostListener listener =
+                CoopLauncherProbe.HostListener.open(0, "0.1.0-test", LOOPBACK);
+        try (Socket silent = new Socket()) {
+            silent.connect(new InetSocketAddress(LOOPBACK, listener.port()), 5000);
+            // Reading the banner proves the listener accepted and is now waiting for a line that
+            // this test never sends.
+            silent.setSoTimeout(5000);
+            assertTrue(silent.getInputStream().read() >= 0, "no banner arrived");
+
+            long started = System.nanoTime();
+            listener.close();
+            long millis = (System.nanoTime() - started) / 1_000_000L;
+
+            assertTrue(millis < 1000L, "close() blocked the caller for " + millis + " ms");
+        } finally {
+            listener.close();
+        }
+    }
+
     @Test
     void aClosedPortIsRefusedWithItsOwnMessage() throws IOException {
         int port;

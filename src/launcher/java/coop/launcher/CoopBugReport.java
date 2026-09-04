@@ -506,6 +506,12 @@ public final class CoopBugReport {
             return;
         }
         String text = CoopInstallCheck.readTextOrNull(options);
+        if (text == null) {
+            // There but unreadable - locked by another process, or no permission. Packing it would
+            // put an empty entry in the archive under a note saying it was packed verbatim.
+            missing.add(entry + " (unreadable)");
+            return;
+        }
         if (!parsesAsJson(text)) {
             notes.add(entry + " does not parse as JSON, so it was packed exactly as it is. Check it"
                     + " by hand for a password before you post the archive.");

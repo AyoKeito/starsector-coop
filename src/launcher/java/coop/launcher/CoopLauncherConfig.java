@@ -201,6 +201,40 @@ public final class CoopLauncherConfig {
             }
         }
 
+        return renderFile(result);
+    }
+
+    /**
+     * Drops the one-shot adopt-campaign consent from the file, if it is in there, leaving every
+     * other key untouched.
+     *
+     * <p>The launcher starts {@code starsector.exe}, not a JVM, so this file is its only channel to
+     * the game - and the mod republishes every key in it as a system property at every application
+     * load. A tick that meant "adopt the host's campaign this once" would otherwise keep meaning it,
+     * including on a start made by double-clicking the game rather than by pressing Launch.
+     *
+     * @return true when the file was rewritten
+     * @throws IOException when the file could not be written
+     */
+    public static boolean clearAdoptCampaignConsent(File file) throws IOException {
+        Objects.requireNonNull(file, "file");
+        if (!file.isFile()) {
+            return false;
+        }
+        CoopLauncherConfig current = read(file);
+        // Same rule as write(): a file that will not parse is never rewritten, because rewriting it
+        // would throw away every setting this launcher cannot see.
+        if (current.readError != null || !current.existing.containsKey(ADOPT_CAMPAIGN_ID)) {
+            return false;
+        }
+        Map<String, Object> remaining = new LinkedHashMap<>(current.existing);
+        remaining.remove(ADOPT_CAMPAIGN_ID);
+        Files.writeString(file.toPath(), renderFile(remaining), StandardCharsets.UTF_8);
+        return true;
+    }
+
+    /** The file text for a set of values: owned keys in their fixed order, everything else sorted. */
+    private static String renderFile(Map<String, Object> result) {
         List<String> ordered = new ArrayList<>();
         for (String key : OWNED_ORDER) {
             if (result.containsKey(key)) {

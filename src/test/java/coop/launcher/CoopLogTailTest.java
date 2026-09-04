@@ -138,6 +138,59 @@ class CoopLogTailTest {
         }
     }
 
+    /**
+     * The game writes its log in the platform charset, so a byte that is not valid UTF-8 is normal.
+     * Advancing the file position by the re-encoded length of the decoded text over-ran the end of
+     * the file, which the tail then read as "the game truncated it" and replayed forever.
+     */
+    @Test
+    void aByteThatIsNotValidUtf8DoesNotSendTheTailIntoAReplayLoop(@TempDir Path temp)
+            throws Exception {
+        Path log = temp.resolve("starsector.log");
+        Files.write(log, new byte[0]);
+        List<String> seen = new CopyOnWriteArrayList<>();
+
+        try (CoopLogTail tail = CoopLogTail.start(log.toFile(), seen::add)) {
+            // 0xE9 is "e with an acute accent" in Cp1252, the charset log4j 1.2.9 writes in here.
+            byte[] accented = ("0 [main] INFO  com.fs.starfarer.X  - a ship named Café\n"
+                    + COOP_WARN + "\n").getBytes(StandardCharsets.ISO_8859_1);
+            appendBytes(log, accented);
+            awaitContains(seen, COOP_WARN);
+
+            // Several poll intervals: a desynchronised cursor replays the whole file every 0 ms.
+            Thread.sleep(1_500L);
+            assertEquals(1, count(seen, COOP_WARN), "the tail replayed the file: " + seen.size()
+                    + " lines forwarded");
+        }
+    }
+
+    /**
+     * log4j rolls the log by renaming it. Windows refuses the rename while another process holds the
+     * file without FILE_SHARE_DELETE, and log4j 1.2.9 answers a refused rename by reopening with
+     * append=false - truncating the whole session's log.
+     */
+    @Test
+    void theGameCanRollTheLogWhileTheTailIsOpen(@TempDir Path temp) throws Exception {
+        Path log = temp.resolve("starsector.log");
+        Files.writeString(log, "", StandardCharsets.UTF_8);
+        List<String> seen = new CopyOnWriteArrayList<>();
+
+        try (CoopLogTail tail = CoopLogTail.start(log.toFile(), seen::add)) {
+            // A log rolls because it got big: the file that is renamed away is far longer than the
+            // one that replaces it, which is what tells the tail to start over.
+            append(log, "0 [main] INFO  com.fs.starfarer.X  - " + "filler ".repeat(200) + "\n");
+            append(log, COOP_WARN + "\n");
+            awaitContains(seen, COOP_WARN);
+
+            Files.move(log, temp.resolve("starsector.log.1"),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+            // The rolled-to file is shorter than where the tail was, which is its cue to start over.
+            append(log, DOCTOR_MARKER_LINE + "\n");
+            awaitContains(seen, DOCTOR_MARKER_LINE);
+        }
+    }
+
     /** The tail must not hold the file in a way that stops the writer, which is the game. */
     @Test
     void theWriterCanKeepWritingWhileTheTailIsOpen(@TempDir Path temp) throws Exception {
@@ -151,6 +204,22 @@ class CoopLogTailTest {
             writer.write((COOP_WARN + "\n").getBytes(StandardCharsets.UTF_8));
             awaitContains(seen, COOP_WARN);
         }
+    }
+
+    private static int count(List<String> seen, String line) {
+        int found = 0;
+        for (String candidate : seen) {
+            if (line.equals(candidate)) {
+                found++;
+            }
+        }
+        return found;
+    }
+
+    private static void appendBytes(Path file, byte[] bytes) throws IOException {
+        Files.write(file, bytes,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND);
     }
 
     private static void append(Path file, String text) throws IOException {

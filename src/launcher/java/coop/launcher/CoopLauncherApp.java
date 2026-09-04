@@ -174,8 +174,12 @@ public final class CoopLauncherApp {
     private JButton launchButton;
     private JLabel footerHint;
     private boolean gameRunning;
-    /** The start-up address lookup runs once per launcher run, and only into an empty field. */
-    private boolean addressLookedUp;
+    /**
+     * Bumped by anything that takes the port away from a connection check in flight: a newer check,
+     * a role switch, LAUNCH, the window closing. The result of an older check must not open the
+     * launcher's listener afterwards.
+     */
+    private int checkGeneration;
     private JButton advancedToggle;
     private JButton logToggle;
     private JPanel drawer;
@@ -226,11 +230,19 @@ public final class CoopLauncherApp {
         } else {
             adoptLayout(layout);
         }
+        if (layout == null) {
+            // Nothing was adopted, so prefill() - the only thing that picks a role - never ran.
+            // Without this neither segment is selected: the window shows the host form while the
+            // Connection button runs the guest path, and LAUNCH stays enabled with no reason in the
+            // footer.
+            hostSegment.setSelected(true);
+            guestSegment.setSelected(false);
+            onRoleChanged();
+        }
         startUpdateCheck();
         if (hostSegment.isSelected() && publicAddressField.getText().trim().isEmpty()
                 && System.getenv("COOP_LAUNCHER_PREVIEW") == null) {
-            addressLookedUp = true;
-            lookUpPublicAddress(null);
+            lookUpPublicAddress(null, true);
         }
         applyPreview();
         frame.setVisible(true);
@@ -846,6 +858,7 @@ public final class CoopLauncherApp {
         CoopLauncherLogging.configure(newLayout.launcherLog());
         LOG.info("Using install " + newLayout);
         append("Install: " + newLayout.installRoot());
+        clearAdoptConsent(newLayout, "a previous launch left it behind");
         this.config = CoopLauncherConfig.read(newLayout.coopOptions());
         if (config.readError() != null) {
             LOG.warn("Settings file unreadable: " + config.readError());
@@ -925,6 +938,7 @@ public final class CoopLauncherApp {
                 : "Reaches the host's launcher. Ask your host to open theirs and press Check first.");
         setChips(List.of());
         note("");
+        cancelConnectionCheck("the role changed");
         closeListener("the role changed");
         if (host) {
             maybeGenerateHostPassword();
@@ -1263,7 +1277,7 @@ public final class CoopLauncherApp {
         String address = publicAddressField.getText().trim();
         if (address.isEmpty()) {
             append("Looking up your public address first.");
-            lookUpPublicAddress(this::finishCopyInvite);
+            lookUpPublicAddress(this::finishCopyInvite, true);
             return;
         }
         finishCopyInvite();
@@ -1347,13 +1361,38 @@ public final class CoopLauncherApp {
     }
 
     private void lookUpPublicAddress(Runnable then) {
+        lookUpPublicAddress(then, false);
+    }
+
+    /**
+     * Looks the public address up on the worker, which takes up to ten seconds on a slow network.
+     *
+     * @param automatic true for a lookup the launcher started by itself; those give way to whatever
+     *                  the player typed while the answer was in flight, where an explicit "Look up"
+     *                  press means "overwrite what is in the field"
+     */
+    private void lookUpPublicAddress(Runnable then, boolean automatic) {
         LOG.info("Public address lookup started");
         append("Looking up your public address.");
         note("Looking up your public address.");
+        String textWhenStarted = publicAddressField.getText();
         background.submit(() -> {
             CoopPublicAddress.Lookup result = CoopPublicAddress.lookup();
             SwingUtilities.invokeLater(() -> {
                 if (result.ok()) {
+                    if (!shouldApplyLookedUpAddress(automatic, textWhenStarted,
+                            publicAddressField.getText())) {
+                        LOG.info("Public address lookup returned " + result.address()
+                                + "; keeping the address typed while it ran");
+                        append("Your public address is " + result.address() + ", but you typed "
+                                + publicAddressField.getText().trim()
+                                + " while the lookup ran, so that is what the invite uses.");
+                        note("Using the address you typed, not the public one.");
+                        if (then != null) {
+                            then.run();
+                        }
+                        return;
+                    }
                     publicAddressField.setText(result.address());
                     LOG.info("Public address lookup returned " + result.address());
                     append("Your public address is " + result.address()
@@ -1373,12 +1412,20 @@ public final class CoopLauncherApp {
     }
 
     private void checkMyConnection() {
+        String blocked = connectionCheckBlockedReason(gameRunning);
+        if (blocked != null) {
+            LOG.warn("Check my connection refused: " + blocked);
+            fail(blocked);
+            return;
+        }
         Integer port = parsePort(hostPortField.getText(), "port");
         if (port == null) {
             return;
         }
         LOG.info("Check my connection pressed for port " + port);
         connectionButton.setEnabled(false);
+        cancelConnectionCheck("a new connection check started");
+        int generation = checkGeneration;
         closeListener("a new connection check started");
         append("Checking port " + port + ". This takes a few seconds.");
         Chip working = new Chip("asking the router", CoopTheme.INFO);
@@ -1423,9 +1470,17 @@ public final class CoopLauncherApp {
                 mapper.shutdown();
                 SwingUtilities.invokeLater(() -> {
                     append("Released the router mapping so the game can make its own at startup.");
+                    connectionButton.setEnabled(true);
+                    if (!checkResultStillApplies(generation, checkGeneration, gameRunning,
+                            hostSegment.isSelected())) {
+                        // LAUNCH, a role switch or a newer check happened while the router was
+                        // being asked. Binding the port now would take it from whoever owns it.
+                        LOG.info("Connection check " + generation + " is no longer current; not"
+                                + " opening the launcher listener on port " + port);
+                        return;
+                    }
                     boolean listening = openListener(port);
                     showHostChips(port, result, listening);
-                    connectionButton.setEnabled(true);
                 });
             });
         });
@@ -1720,6 +1775,7 @@ public final class CoopLauncherApp {
                 + " with keys " + owned.keySet());
         append("Settings saved to " + layout.coopOptions() + ".");
 
+        cancelConnectionCheck("the game is starting");
         closeListener("the game is starting");
         try {
             gameProcess = CoopGameProcess.launch(layout);
@@ -1735,13 +1791,19 @@ public final class CoopLauncherApp {
         launchButton.setText("RUNNING");
         gameRunning = true;
         updateLaunchGate();
-        gameProcess.onExit().thenAccept(process -> SwingUtilities.invokeLater(() -> {
-            LOG.info("starsector.exe exited with code " + process.exitValue());
-            append("Starsector exited (code " + process.exitValue() + ").");
-            launchButton.setText("LAUNCH");
-            gameRunning = false;
-            updateLaunchGate();
-        }));
+        CoopInstallLayout launched = layout;
+        gameProcess.onExit().thenAccept(process -> {
+            // Off the event dispatch thread, and before the UI catches up: the tick meant "this
+            // launch", so the consent goes as soon as the launch that consumed it is over.
+            clearAdoptConsent(launched, "the launch that used it has ended");
+            SwingUtilities.invokeLater(() -> {
+                LOG.info("starsector.exe exited with code " + process.exitValue());
+                append("Starsector exited (code " + process.exitValue() + ").");
+                launchButton.setText("LAUNCH");
+                gameRunning = false;
+                updateLaunchGate();
+            });
+        });
         setDrawerVisible(true);
         startLogTail();
     }
@@ -1795,11 +1857,8 @@ public final class CoopLauncherApp {
 
     private void shutdown() {
         LOG.info("Launcher window closing");
+        cancelConnectionCheck("the launcher is closing");
         closeListener("the launcher is closing");
-        if (checkTimer != null) {
-            checkTimer.stop();
-            checkTimer = null;
-        }
         if (logTail != null) {
             logTail.close();
             logTail = null;
@@ -1810,6 +1869,80 @@ public final class CoopLauncherApp {
     }
 
     // ---- helpers --------------------------------------------------------------------------------
+
+    /**
+     * Takes the one-shot "start over inside the host's campaign" consent back out of the settings
+     * file. The checkbox is never prefilled, but the key it writes is read by the game at every
+     * application load, so a launch that consumed it has to clear it again - otherwise the next
+     * start, including one made by double-clicking starsector.exe, adopts the host's campaign with
+     * nobody consenting to it.
+     */
+    private void clearAdoptConsent(CoopInstallLayout target, String reason) {
+        if (target == null) {
+            return;
+        }
+        try {
+            if (CoopLauncherConfig.clearAdoptCampaignConsent(target.coopOptions())) {
+                LOG.info("Cleared " + CoopLauncherConfig.ADOPT_CAMPAIGN_ID + " from "
+                        + target.coopOptions() + " because " + reason);
+            }
+        } catch (Exception ex) {
+            LOG.warn("Could not clear " + CoopLauncherConfig.ADOPT_CAMPAIGN_ID + " from "
+                    + target.coopOptions(), ex);
+        }
+    }
+
+    /**
+     * Stops a connection check in flight and makes sure a result already on its way back cannot
+     * open the listener. Everything that takes the co-op port away from a check calls this: LAUNCH,
+     * a role switch, a newer check, the window closing.
+     */
+    private void cancelConnectionCheck(String reason) {
+        checkGeneration++;
+        if (checkTimer != null) {
+            LOG.info("Stopping the connection check because " + reason);
+            checkTimer.stop();
+            checkTimer = null;
+        }
+    }
+
+    /**
+     * True when a finished connection check may still open the launcher's listener on the co-op
+     * port. The check runs for up to twenty seconds and nothing disables LAUNCH while it does, so
+     * by the time the router answers the port can belong to the game - and a listener bound then
+     * either fails the game's own bind or answers the guest with a launcher banner.
+     */
+    static boolean checkResultStillApplies(int generation, int currentGeneration,
+                                           boolean gameRunning, boolean hostSelected) {
+        return generation == currentGeneration && !gameRunning && hostSelected;
+    }
+
+    /**
+     * Why a host connection check must not start, or {@code null} when it may. The check maps the
+     * co-op port and then releases the mapping, which is the same mapping a running game holds: run
+     * mid-session it would delete the forward the guest's traffic is coming through.
+     */
+    static String connectionCheckBlockedReason(boolean gameRunning) {
+        return gameRunning
+                ? "Starsector is running and owns the port. Checking the connection now would delete"
+                        + " the router mapping the session is using. Close the game first."
+                : null;
+    }
+
+    /**
+     * True when a finished public-address lookup may write its answer into the field. An automatic
+     * lookup takes up to ten seconds, and the player types a LAN or VPN address into that field
+     * while it runs; overwriting it changed the invite under a host who had already copied one.
+     */
+    static boolean shouldApplyLookedUpAddress(boolean automatic, String textWhenStarted,
+                                              String textNow) {
+        if (!automatic) {
+            return true;
+        }
+        String now = textNow == null ? "" : textNow.trim();
+        String before = textWhenStarted == null ? "" : textWhenStarted.trim();
+        return now.isEmpty() || now.equals(before);
+    }
 
     private void closeListener(String reason) {
         if (listener == null) {

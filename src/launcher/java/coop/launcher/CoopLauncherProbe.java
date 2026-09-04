@@ -101,6 +101,13 @@ public final class CoopLauncherProbe {
         private final Thread tcpThread;
         private final Thread udpThread;
         private final AtomicBoolean closed = new AtomicBoolean(false);
+        /**
+         * The probe currently being served, if any. Closing the {@link ServerSocket} does not touch
+         * a socket {@code accept()} already handed out, so without this a caller of {@link #close()}
+         * waits out the join while the reader sits in its five-second timeout - and every caller is
+         * on the event dispatch thread.
+         */
+        private volatile Socket accepted;
 
         private HostListener(ServerSocket tcp, DatagramSocket udp, String modVersion) {
             this.tcp = tcp;
@@ -171,6 +178,10 @@ public final class CoopLauncherProbe {
             }
             closeQuietly(tcp);
             closeQuietly(udp);
+            Socket serving = accepted;
+            if (serving != null) {
+                closeQuietly(serving);
+            }
             join(tcpThread);
             join(udpThread);
         }
@@ -184,6 +195,7 @@ public final class CoopLauncherProbe {
                     return;
                 }
                 try (Socket client = socket) {
+                    accepted = client;
                     client.setSoTimeout(LISTENER_IDLE_TIMEOUT_MILLIS);
                     OutputStream out = client.getOutputStream();
                     out.write((BANNER_PREFIX + modVersion + "\n").getBytes(StandardCharsets.UTF_8));
@@ -199,6 +211,8 @@ public final class CoopLauncherProbe {
                 } catch (IOException ex) {
                     // A probe that hangs up mid-exchange is not an error worth surfacing; the guest
                     // is the side that reports on this conversation.
+                } finally {
+                    accepted = null;
                 }
             }
         }

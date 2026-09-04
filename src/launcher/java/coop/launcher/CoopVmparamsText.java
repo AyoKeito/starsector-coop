@@ -51,17 +51,20 @@ public final class CoopVmparamsText {
         return text.substring(index + CLASSPATH_MARKER.length());
     }
 
+    /** File name of the forked-classes jar, which is what an entry is recognised by. */
+    private static final String FORKS_JAR = "coop-forks.jar";
+
     /**
-     * True when the classpath value starts with the forks entry. Forward slashes and letter case are
+     * True when the first classpath entry is the forks jar. Forward slashes and letter case are
      * tolerated - the JVM accepts both on Windows, so refusing them would report a working install
-     * as broken.
+     * as broken - and so is any path that leads to the jar: an absolute
+     * {@code K:\Starsector\mods\coop\jars\coop-forks.jar} loads exactly the same classes as the
+     * relative spelling INSTALL.md gives, and reporting it as missing blocked Launch on a working
+     * install.
      */
     public static boolean hasForksFirstOnClasspath(String text) {
-        String value = classpathValue(text);
-        if (value == null) {
-            return false;
-        }
-        return normalise(value).startsWith(normalise(FORKS_ENTRY));
+        List<String> entries = classpathEntries(text);
+        return !entries.isEmpty() && isForksEntry(entries.get(0));
     }
 
     /**
@@ -70,13 +73,34 @@ public final class CoopVmparamsText {
      * absent.
      */
     public static boolean hasForksLaterOnClasspath(String text) {
+        List<String> entries = classpathEntries(text);
+        for (int i = 1; i < entries.size(); i++) {
+            if (isForksEntry(entries.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The {@code -classpath} value split into entries. The last one still carries the main class
+     * after a space, which no caller here looks at.
+     */
+    private static List<String> classpathEntries(String text) {
         String value = classpathValue(text);
         if (value == null) {
-            return false;
+            return List.of();
         }
-        String normalised = normalise(value);
-        String entry = normalise(FORKS_ENTRY);
-        return normalised.contains(entry) && !normalised.startsWith(entry);
+        return List.of(value.split(";", -1));
+    }
+
+    /** True when one classpath entry, however it is spelled, points at the forks jar. */
+    private static boolean isForksEntry(String entry) {
+        String normalised = normalise(entry).trim();
+        if (normalised.startsWith("\"") && normalised.endsWith("\"") && normalised.length() > 1) {
+            normalised = normalised.substring(1, normalised.length() - 1);
+        }
+        return normalised.equals(FORKS_JAR) || normalised.endsWith("\\" + FORKS_JAR);
     }
 
     /**

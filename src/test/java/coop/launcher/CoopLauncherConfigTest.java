@@ -198,6 +198,58 @@ class CoopLauncherConfigTest {
         assertEquals("", reread.value("coop.connectHost"));
     }
 
+    /**
+     * The adopt-campaign tick is consent for one launch. The mod publishes every key in this file
+     * as a system property at every application load, so a key left behind would keep consenting -
+     * including on a start made by double-clicking the game.
+     */
+    @Test
+    void theAdoptCampaignConsentIsClearedAndEverythingElseSurvives(@TempDir Path temp)
+            throws IOException {
+        File file = temp.resolve("coop_options.json.data").toFile();
+        CoopLauncherConfig.read(file).write(file, false, owned(
+                CoopLauncherConfig.CONNECT_HOST, "203.0.113.9",
+                CoopLauncherConfig.CONNECT_PORT, "7777",
+                CoopLauncherConfig.PASSWORD, "hunter2",
+                CoopLauncherConfig.ADOPT_CAMPAIGN_ID, "true"));
+        assertEquals("true", CoopLauncherConfig.read(file).value("coop.adoptCampaignId"));
+
+        assertTrue(CoopLauncherConfig.clearAdoptCampaignConsent(file));
+
+        CoopLauncherConfig reread = CoopLauncherConfig.read(file);
+        assertNull(reread.readError());
+        assertEquals("", reread.value("coop.adoptCampaignId"));
+        assertFalse(reread.keys().contains("coop.adoptCampaignId"), reread.keys().toString());
+        assertEquals("203.0.113.9", reread.value("coop.connectHost"));
+        assertEquals("7777", reread.value("coop.connectPort"));
+        assertEquals("hunter2", reread.value("coop.password"));
+    }
+
+    @Test
+    void clearingTheConsentTouchesNothingWhenItIsNotThere(@TempDir Path temp) throws IOException {
+        File file = temp.resolve("coop_options.json.data").toFile();
+        CoopLauncherConfig.read(file).write(file, true, owned(CoopLauncherConfig.HOST_PORT, "7777"));
+        String before = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+
+        assertFalse(CoopLauncherConfig.clearAdoptCampaignConsent(file));
+        assertFalse(CoopLauncherConfig.clearAdoptCampaignConsent(
+                temp.resolve("not-there.json.data").toFile()));
+
+        assertEquals(before, Files.readString(file.toPath(), StandardCharsets.UTF_8));
+    }
+
+    /** Same rule as write(): a file that will not parse is never rewritten. */
+    @Test
+    void anUnreadableFileIsLeftAloneRatherThanRewrittenWithoutTheConsent(@TempDir Path temp)
+            throws IOException {
+        File file = temp.resolve("coop_options.json.data").toFile();
+        String broken = "# hand-edited\ncoop.adoptCampaignId=true\n";
+        Files.writeString(file.toPath(), broken, StandardCharsets.UTF_8);
+
+        assertFalse(CoopLauncherConfig.clearAdoptCampaignConsent(file));
+        assertEquals(broken, Files.readString(file.toPath(), StandardCharsets.UTF_8));
+    }
+
     @Test
     void awkwardValuesAreEscapedRatherThanBreakingTheFile(@TempDir Path temp) throws IOException {
         File file = temp.resolve("coop_options.json.data").toFile();

@@ -77,6 +77,39 @@ class CoopVmparamsTextTest {
         assertTrue(CoopVmparamsText.hasForksLaterOnClasspath(behind));
     }
 
+    /**
+     * A player who followed a forum post rather than INSTALL.md gets an absolute path. The JVM
+     * loads exactly the same jar from it, so the launcher must not call the install broken and
+     * refuse to launch.
+     */
+    @Test
+    void anAbsolutePathToTheForksJarCountsAsMuchAsTheRelativeOne() {
+        String absolute = FLAGS_TAIL + CoopVmparamsText.CLASSPATH_MARKER
+                + "K:\\Starsector\\mods\\coop\\jars\\coop-forks.jar;" + STOCK_CLASSPATH;
+
+        assertTrue(CoopVmparamsText.hasForksFirstOnClasspath(absolute));
+        assertFalse(CoopVmparamsText.hasForksLaterOnClasspath(absolute));
+    }
+
+    @Test
+    void anAbsolutePathBehindAnotherJarIsStillReportedAsNotFirst() {
+        String behind = FLAGS_TAIL + CoopVmparamsText.CLASSPATH_MARKER
+                + "janino.jar;K:\\Starsector\\mods\\coop\\jars\\coop-forks.jar;" + STOCK_CLASSPATH;
+
+        assertFalse(CoopVmparamsText.hasForksFirstOnClasspath(behind));
+        assertTrue(CoopVmparamsText.hasForksLaterOnClasspath(behind));
+    }
+
+    /** A jar whose name merely ends in the same letters is a different jar. */
+    @Test
+    void aSimilarlyNamedJarIsNotTheForksJar() {
+        String lookalike = FLAGS_TAIL + CoopVmparamsText.CLASSPATH_MARKER
+                + "..\\mods\\coop\\jars\\not-coop-forks.jar;" + STOCK_CLASSPATH;
+
+        assertFalse(CoopVmparamsText.hasForksFirstOnClasspath(lookalike));
+        assertFalse(CoopVmparamsText.hasForksLaterOnClasspath(lookalike));
+    }
+
     @Test
     void forwardSlashesAndOddCasingStillCount() {
         String slashes = FLAGS_TAIL + CoopVmparamsText.CLASSPATH_MARKER

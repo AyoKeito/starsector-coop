@@ -193,6 +193,42 @@ class CoopInviteTest {
         assertThrows(() -> CoopInvite.format("host", 70000, "", ""));
     }
 
+    /**
+     * What a host types into "Your address" goes straight into the invite. Anything format() lets
+     * through that parse() then refuses is a broken line the host sends and the guest has to
+     * diagnose, so format() refuses it first.
+     */
+    @Test
+    void formattingRefusesAnAddressTheGuestCouldNotParse() {
+        for (String host : new String[]{
+                "http://203.0.113.9",
+                "203.0.113.9/",
+                "1.2.3.4?x",
+                "1.2.3.4#frag",
+                "1.2.3.4&y",
+                "203.0.113.9 9",
+                "[2001:db8::1",
+                "2001:db8::1]"}) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> CoopInvite.format(host, 7777, "MN-42", "pw"), "host: " + host);
+        }
+    }
+
+    /** Every address format() does accept has to come back out of parse() unchanged. */
+    @Test
+    void everyAcceptedAddressRoundTrips() {
+        for (String host : new String[]{
+                "203.0.113.9",
+                "host.example",
+                "2001:db8::1",
+                "[2001:db8::1]",
+                "fe80::1%eth0"}) {
+            String text = CoopInvite.format(host, 7777, "MN-42", "pw");
+            CoopInvite.Parsed parsed = CoopInvite.parse(text);
+            assertTrue(parsed.ok(), host + " -> " + text + " -> " + parsed.error());
+        }
+    }
+
     @Test
     void toStringNeverLeaksThePassword() {
         String text = new CoopInvite("h", 1, "MN-1", "hunter2").toString();
