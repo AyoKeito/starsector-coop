@@ -138,16 +138,128 @@ class CoopBugReportTest {
         assertTrue(entryText(result.zip(), "report.txt").contains("coop.password was blanked"));
     }
 
+    /**
+     * The leak this file used to ship. A settings file that will not parse cannot be blanked, and
+     * the password in it is stored in plain text, so packing it verbatim under a note put the
+     * password in an archive the player is about to post in public. It is left out instead.
+     */
     @Test
-    void aSettingsFileThatDoesNotParseIsPackedVerbatimAndSaidSo() throws IOException {
+    void aSettingsFileThatDoesNotParseIsLeftOutOfTheArchiveEntirely() throws IOException {
         write(layout.coopOptions(), "# a hand-edited file with a comment\ncoop.password=hunter2");
 
         CoopBugReport.Result result = write(false);
 
-        assertEquals("# a hand-edited file with a comment\ncoop.password=hunter2",
-                entryText(result.zip(), "saves/common/coop_options.json.data"));
-        assertTrue(result.notes().stream().anyMatch(note -> note.contains("does not parse as JSON")),
+        assertFalse(entries(result.zip()).contains("saves/common/coop_options.json.data"),
+                entries(result.zip()).toString());
+        assertTrue(result.notes().stream().anyMatch(note -> note.contains("was LEFT OUT")
+                        && note.contains("does not parse as JSON")),
                 result.notes().toString());
+        String report = entryText(result.zip(), "report.txt");
+        assertTrue(report.contains("was LEFT OUT"), report);
+        assertFalse(report.contains("hunter2"), "the report must not quote the file back: " + report);
+    }
+
+    /** A settings file with no password key at all has nothing to hide and is packed as it is. */
+    @Test
+    void aSettingsFileWithNoPasswordIsPackedUntouched() throws IOException {
+        write(layout.coopOptions(), "{\"coop.hostPort\":7777}");
+
+        CoopBugReport.Result result = write(false);
+
+        assertEquals("{\"coop.hostPort\":7777}",
+                entryText(result.zip(), "saves/common/coop_options.json.data"));
+        assertTrue(result.notes().stream().noneMatch(note -> note.contains("coop_options")),
+                result.notes().toString());
+    }
+
+    /**
+     * A password with a space in it is quoted in {@code vmparams}, and the old whitespace-delimited
+     * scrub stopped at the space: {@code words"} stayed on the line, which is the second half of
+     * the password sitting in an archive under a note claiming it had been removed.
+     */
+    @Test
+    void aQuotedPasswordWithSpacesIsRemovedWholeInBothQuoteStyles() throws IOException {
+        write(layout.coopOptions(), "{\"coop.password\":\"two words\",\"coop.hostPort\":7777}");
+        write(layout.vmparams(),
+                "java.exe -Xms8192m -Dcoop.password=\"two words\" -Dcoop.role=host"
+                        + " -classpath ..\\mods\\coop\\jars\\coop-forks.jar;janino.jar"
+                        + " com.fs.starfarer.StarfarerLauncher");
+
+        CoopBugReport.Result result = write(false);
+
+        String packed = entryText(result.zip(), "vmparams");
+        assertFalse(packed.contains("two words"), packed);
+        assertFalse(packed.contains("words"), "not even the tail of the value: " + packed);
+        assertFalse(packed.contains("coop.password"), packed);
+        assertTrue(packed.contains("-Dcoop.role=host"), packed);
+
+        CoopBugReport.VmparamsScrub single = CoopBugReport.scrubVmparams(
+                "a -Dcoop.password='two words' b");
+        assertEquals(1, single.removed());
+        assertEquals("a b", single.text());
+    }
+
+    /**
+     * The cross-check. The same secret pasted into some other property is not a token this class
+     * knows how to remove, so the file is left out rather than packed with the password in it.
+     */
+    @Test
+    void aVmparamsHoldingThePasswordUnderAnotherNameIsLeftOut() throws IOException {
+        write(layout.vmparams(),
+                "java.exe -Xms8192m -Dcoop.password=hunter2 -Dcoop.playerName=hunter2"
+                        + " -classpath janino.jar com.fs.starfarer.StarfarerLauncher");
+
+        CoopBugReport.Result result = write(false);
+
+        assertFalse(entries(result.zip()).contains("vmparams"), entries(result.zip()).toString());
+        assertTrue(result.notes().stream().anyMatch(note -> note.contains("vmparams was LEFT OUT")
+                        && note.contains("still appears in it")),
+                result.notes().toString());
+        assertFalse(entryText(result.zip(), "report.txt").contains("hunter2"));
+    }
+
+    /** A spelling the scrub does not know leaves the key behind, and that is enough to omit. */
+    @Test
+    void aVmparamsStillNamingCoopPasswordAfterTheScrubIsLeftOut() throws IOException {
+        write(layout.coopOptions(), "{\"coop.hostPort\":7777}");
+        write(layout.vmparams(),
+                "java.exe -Dcoop.passwordFile=C:\\secrets\\pw.txt"
+                        + " -classpath janino.jar com.fs.starfarer.StarfarerLauncher");
+
+        CoopBugReport.Result result = write(false);
+
+        assertFalse(entries(result.zip()).contains("vmparams"), entries(result.zip()).toString());
+        assertTrue(result.notes().stream().anyMatch(note -> note.contains("vmparams was LEFT OUT")),
+                result.notes().toString());
+    }
+
+    /**
+     * Packing a blanked settings file is not "the rewrite did not throw": the copy is re-parsed and
+     * asserted to hold no password. Nothing outside this class can produce a rewrite that fails
+     * that, which is the point - the guard is what keeps a future one from being packed in silence.
+     */
+    @Test
+    void aBlankedCopyIsOnlyAcceptedWhenItProvablyHasNoPasswordLeft() {
+        assertTrue(CoopBugReport.passwordIsBlanked("{\"coop.password\":\"\"}"));
+        assertTrue(CoopBugReport.passwordIsBlanked("{\"coop.hostPort\":7777}"));
+        assertFalse(CoopBugReport.passwordIsBlanked("{\"coop.password\":\"hunter2\"}"));
+        assertFalse(CoopBugReport.passwordIsBlanked("not json at all"));
+        assertFalse(CoopBugReport.passwordIsBlanked(null));
+    }
+
+    @Test
+    void theLeakCheckAnswersWithTheReasonAndPassesACleanLine() {
+        assertNull(CoopBugReport.vmparamsLeak("java.exe -Xms8192m -classpath janino.jar", "hunter2"));
+        assertNotNull(CoopBugReport.vmparamsLeak("java.exe -Dcoop.password=x", ""));
+        assertNotNull(CoopBugReport.vmparamsLeak("java.exe -Dcoop.playerName=hunter2", "hunter2"));
+        assertNull(CoopBugReport.vmparamsLeak("java.exe -Dcoop.playerName=hunter2", ""));
+    }
+
+    @Test
+    void aParseErrorIsReportedForTheNoteAndNullForGoodJson() {
+        assertNull(CoopBugReport.jsonParseError("{\"coop.hostPort\":7777}"));
+        assertNotNull(CoopBugReport.jsonParseError("# not json"));
+        assertNotNull(CoopBugReport.jsonParseError(null));
     }
 
     /**
@@ -216,15 +328,16 @@ class CoopBugReportTest {
 
     /**
      * Blanking answers {@code null} both when there was no password and when the rewrite failed.
-     * Only one of those is safe to pack in silence, and the password is stored in plain text.
+     * Only one of those is safe to pack in silence, and the password is stored in plain text, so
+     * what the file actually holds is read separately.
      */
     @Test
     void aFileWithNothingToBlankIsToldApartFromOneThatHasAPassword() {
-        assertTrue(CoopBugReport.hasPassword("{\"coop.password\":\"hunter2\"}"));
-        assertFalse(CoopBugReport.hasPassword("{\"coop.password\":\"\"}"));
-        assertFalse(CoopBugReport.hasPassword("{\"coop.hostPort\":7777}"));
-        assertFalse(CoopBugReport.hasPassword("not json at all"));
-        assertFalse(CoopBugReport.hasPassword(null));
+        assertEquals("hunter2", CoopBugReport.passwordIn("{\"coop.password\":\"hunter2\"}"));
+        assertEquals("", CoopBugReport.passwordIn("{\"coop.password\":\"\"}"));
+        assertEquals("", CoopBugReport.passwordIn("{\"coop.hostPort\":7777}"));
+        assertEquals("", CoopBugReport.passwordIn("not json at all"));
+        assertEquals("", CoopBugReport.passwordIn(null));
     }
 
     // ---- the save guard -------------------------------------------------------------------------

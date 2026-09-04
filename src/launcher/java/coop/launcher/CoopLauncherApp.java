@@ -2442,10 +2442,11 @@ public final class CoopLauncherApp {
      * What the status pane says about a finished bug report, in order.
      *
      * <p>The notes are the point. Every one of them is about what did or did not get taken out of
-     * the archive - a settings file that would not parse is packed with the password still in it -
-     * and until now they only went into {@code report.txt} inside the zip, which is the wrong side
-     * of the door: the player is about to post that zip on a public forum, so the warning has to
-     * reach them before they do, not after somebody downloads it.
+     * the archive - a settings file that would not parse is left out of it entirely, because the
+     * password in it could not be blanked - and until now they only went into {@code report.txt}
+     * inside the zip, which is the wrong side of the door: the player is about to post that zip on
+     * a public forum, so the news that a file they expected is missing has to reach them before
+     * they do, not after somebody asks for it.
      */
     static List<String> bugReportStatusLines(CoopBugReport.Result result) {
         List<String> lines = new ArrayList<>();

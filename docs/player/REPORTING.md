@@ -19,8 +19,8 @@ What is in the zip:
 |---|---|
 | `starsector.log` and `starsector.log.1` | The game's own log, plus the rolled-over half if the session ran long enough to fill one. |
 | `coop-launcher.log` | What the launcher did: the install check, the port mapper, the probe, the settings it wrote. |
-| `coop_options.json.data` | Your settings. `coop.password` is blanked. |
-| `vmparams` | The classpath edit and any `-Dcoop.*` left on the line. A `-Dcoop.password=` entry is removed. |
+| `coop_options.json.data` | Your settings, with `coop.password` blanked. Packed only when the blanked copy is verified; if the file cannot be parsed or the password cannot be removed, the file is left out of the zip and `report.txt` says so. |
+| `vmparams` | The classpath edit and any `-Dcoop.*` left on the line, with any `-Dcoop.password=` entry removed (quoted values included). Packed only when the result provably carries neither `coop.password` nor your password; otherwise it is left out and `report.txt` says so. |
 | `mod_info.json` and `enabled_mods.json` | Your mod version and your mod list. A refused handshake is almost always one of those two. |
 | Your newest save | It carries the campaign id, the seed and the co-op state. Untick **Include my newest save** to leave it out, and it is skipped by itself if the game is still writing it. |
 | `report.txt` | Versions, which role you launched as, the last `[COOP-DOCTOR]` line, the last `Coop connection doctor:` block, and a list of what got packed. |

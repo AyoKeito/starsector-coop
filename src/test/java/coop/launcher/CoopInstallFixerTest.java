@@ -321,7 +321,7 @@ class CoopInstallFixerTest {
         CoopInstallCheck.Inputs inputs = new CoopInstallCheck.Inputs(
                 root.getPath(), true, true, true, true, true, STOCK, "{\"enabledMods\": []}",
                 "0.1.0", "0.1.0", null, "0.98a-RC8", "0.98a-RC8", false,
-                "commit-a", "0.1.0", "commit-a", true, "", "");
+                "commit-a", "0.1.0", "commit-a", true, "", true, "", "");
         int vmparams = 0;
         int enabledMods = 0;
         for (CoopInstallCheck.Row row : CoopInstallCheck.rows(inputs)) {
@@ -340,7 +340,7 @@ class CoopInstallFixerTest {
         CoopInstallCheck.Inputs inputs = new CoopInstallCheck.Inputs(
                 root.getPath(), true, true, true, true, true, PATCHED, "{\"enabledMods\":[\"coop\"]}",
                 "0.1.0", "0.1.0", null, "0.98a-RC8", "0.98a-RC8", false,
-                "commit-a", "0.1.0", "commit-a", true, "", "");
+                "commit-a", "0.1.0", "commit-a", true, "", true, "", "");
         for (CoopInstallCheck.Row row : CoopInstallCheck.rows(inputs)) {
             assertNull(row.fixable(), row.toString());
         }

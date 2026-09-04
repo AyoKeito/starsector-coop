@@ -37,6 +37,15 @@ import org.json.JSONObject;
  * else - the logs above all - is packed byte for byte; a report that has been tidied up is a report
  * that no longer shows the bug.
  *
+ * <p><b>Those two files fail closed.</b> Either the edit is proven to have worked - the blanked
+ * settings file is re-parsed and asserted to hold no password, the scrubbed {@code vmparams} is
+ * asserted to contain neither the string {@code coop.password} nor the value the settings file held
+ * - or the file is left out of the archive entirely and a note says why. The earlier behaviour was
+ * to pack such a file verbatim under a note telling the player to check it by hand, which is a
+ * plain-text password sitting in an archive that is about to be posted on a public forum, guarded
+ * by nothing but a line of {@code report.txt} the player has to read first. A missing settings file
+ * costs a support answer; a leaked password costs the session.
+ *
  * <p>The archive still carries the host's public address, which is in the connection doctor block by
  * design. That is said out loud in the status pane rather than scrubbed: the address is the single
  * most useful line in a connectivity report.
@@ -61,14 +70,26 @@ public final class CoopBugReport {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     /**
-     * A {@code -Dcoop.password=...} token plus the spaces in front of it. Whitespace-delimited on
-     * purpose: vmparams is one long line of tokens and the value never contains a space, so this is
-     * the whole token and nothing next to it. The leading {@code [ \t]*} keeps the line from ending
-     * up with a double space; it deliberately does not match a newline, so a token at the start of a
+     * A {@code -Dcoop.password=...} token plus the spaces in front of it, in all three spellings a
+     * player can end up with: {@code ="two words"}, {@code ='two words'} and a bare
+     * whitespace-delimited value.
+     *
+     * <p>The two quoted forms are the reason this is not just {@code \S*}. The launcher never writes
+     * this property itself - it puts the password in {@code saves/common/coop_options.json.data} -
+     * so every one in a {@code vmparams} was typed or pasted by a person, and a person with a
+     * password that has a space in it quotes it. Against the old whitespace-delimited pattern
+     * {@code -Dcoop.password="two words"} left {@code words"} on the line: the second half of the
+     * password, packed into an archive under a note claiming the password had been removed.
+     *
+     * <p>Each quoted alternative stops at a line break as well as at its closing quote, so an
+     * unterminated quote deletes one token rather than the whole rest of the file. The alternation
+     * is ordered: the quoted forms are tried before the bare one, which would otherwise match only
+     * the first word of a quoted value. The leading {@code [ \t]*} keeps the line from ending up
+     * with a double space; it deliberately does not match a newline, so a token at the start of a
      * line cannot swallow the break above it.
      */
-    private static final Pattern VMPARAMS_PASSWORD =
-            Pattern.compile("[ \\t]*-Dcoop\\.password=\\S*");
+    private static final Pattern VMPARAMS_PASSWORD = Pattern.compile(
+            "[ \\t]*-Dcoop\\.password=(?:\"[^\"\\r\\n]*\"?|'[^'\\r\\n]*'?|\\S*)");
 
     /** What a finished report contains, for the status pane and for the tests. */
     public record Result(File zip,
@@ -124,8 +145,10 @@ public final class CoopBugReport {
         plainFile(planned, missing, modFolder + "mod_info.json", layout.modInfo());
         plainFile(planned, missing, "mods/enabled_mods.json", layout.enabledMods());
 
-        packOptions(planned, missing, notes, layout.coopOptions());
-        packVmparams(planned, missing, notes, layout.vmparams());
+        // Ordered: the settings file is the only place the launcher stores the password, so reading
+        // it first is what lets the vmparams scrub prove that same string is not still on the line.
+        String optionsPassword = packOptions(planned, missing, notes, layout.coopOptions());
+        packVmparams(planned, missing, notes, layout.vmparams(), optionsPassword);
 
         boolean saveInFlight = false;
         File save = includeSave ? newestSave(layout.saves()) : null;
@@ -200,20 +223,59 @@ public final class CoopBugReport {
      * precisely the settings file a bug report is about, and rewriting it would hide the bug.
      */
     /**
-     * True when {@code json} holds a password worth worrying about. Only used to tell a settings
-     * file with nothing to blank apart from one whose blanking failed, which are the same
-     * {@code null} out of {@link #blankPassword}.
+     * The {@code coop.password} value in a settings file, or {@code ""} when there is none and when
+     * the text does not parse. The value itself is needed twice: to decide whether a file that
+     * could not be blanked is dangerous, and to prove afterwards that the same string is not still
+     * sitting in the packed {@code vmparams} in some spelling this class did not think of.
+     *
+     * <p>Never logged and never put in a note. It only ever gets compared against.
      */
-    static boolean hasPassword(String json) {
+    static String passwordIn(String json) {
         if (json == null) {
-            return false;
+            return "";
         }
         try {
             JSONObject parsed = new JSONObject(json);
-            return !parsed.optString(CoopLauncherConfig.PASSWORD, "").isEmpty();
+            return parsed.optString(CoopLauncherConfig.PASSWORD, "");
         } catch (Exception ex) {
             // org.json in starsector-core throws a checked JSONException, so this has to be broad.
+            return "";
+        }
+    }
+
+    /**
+     * True when a rewritten settings file is provably safe to pack: it parses, and the password key
+     * is either gone or empty. Proof rather than trust - {@link #blankPassword} builds its answer
+     * through org.json, and a settings file is the one file in the archive whose contents are a
+     * secret, so "the rewrite did not throw" is not enough to post it in public on.
+     */
+    static boolean passwordIsBlanked(String blankedJson) {
+        if (blankedJson == null) {
             return false;
+        }
+        try {
+            JSONObject parsed = new JSONObject(blankedJson);
+            return parsed.optString(CoopLauncherConfig.PASSWORD, "").isEmpty();
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    /**
+     * Why a settings file does not parse, for the note that says it was left out, or {@code null}
+     * when it parses fine. The parser's own message names the character it gave up at, which is the
+     * one thing that lets a player find the typo in a file the archive no longer carries.
+     */
+    static String jsonParseError(String json) {
+        if (json == null) {
+            return "no text";
+        }
+        try {
+            new JSONObject(json);
+            return null;
+        } catch (Exception ex) {
+            String message = ex.getMessage();
+            return message == null || message.isEmpty() ? ex.getClass().getSimpleName() : message;
         }
     }
 
@@ -231,19 +293,6 @@ public final class CoopBugReport {
         } catch (Exception ex) {
             // org.json in starsector-core throws a checked JSONException, so this has to be broad.
             return null;
-        }
-    }
-
-    /** True when the text parses as JSON at all, whatever keys it holds. */
-    static boolean parsesAsJson(String json) {
-        if (json == null) {
-            return false;
-        }
-        try {
-            new JSONObject(json);
-            return true;
-        } catch (Exception ex) {
-            return false;
         }
     }
 
@@ -266,6 +315,37 @@ public final class CoopBugReport {
         }
         out.append(text, last, text.length());
         return new VmparamsScrub(out.toString(), removed);
+    }
+
+    /**
+     * Why a scrubbed {@code vmparams} must not be packed, or {@code null} when it is clean.
+     *
+     * <p>Two checks, both deliberately blunt. The string {@code coop.password} must not survive at
+     * all: whatever spelling put it there is one {@link #VMPARAMS_PASSWORD} did not remove, and a
+     * pattern that did not match is exactly the case where the value is still on the line. And the
+     * password the settings file holds must not appear anywhere in the text, whatever it is attached
+     * to - the same secret pasted into a second property, a launch script path, a comment.
+     *
+     * <p>The second check can fire on a password that happens to be a substring of something
+     * innocent ({@code 2048}, say, against {@code -Xmx2048m}). That costs a {@code vmparams} in one
+     * bug report; the other way round costs a password in a public thread, so the false positive is
+     * the side to be wrong on.
+     *
+     * @param scrubbed the text as it would be packed
+     * @param password the settings file's password, or {@code ""} when none is known
+     */
+    static String vmparamsLeak(String scrubbed, String password) {
+        if (scrubbed == null) {
+            return "there was nothing to pack";
+        }
+        if (scrubbed.contains("coop.password")) {
+            return "coop.password is still on the line after the scrub, in a spelling the launcher"
+                    + " does not know how to remove";
+        }
+        if (password != null && !password.isEmpty() && scrubbed.contains(password)) {
+            return "the password from your settings file still appears in it";
+        }
+        return null;
     }
 
     // ---- saves ---------------------------------------------------------------------------------
@@ -491,7 +571,7 @@ public final class CoopBugReport {
             }
         }
 
-        text.append("\r\nWhat was taken out\r\n");
+        text.append("\r\nWhat was taken out, and what was left out\r\n");
         if (notes.isEmpty()) {
             text.append("  nothing; there was no password in any packed file\r\n");
         } else {
@@ -500,6 +580,9 @@ public final class CoopBugReport {
             }
         }
 
+        text.append("\r\nNo file in this archive carries your lobby password. The settings file and"
+                + " vmparams are packed only when the password was provably removed from them, and"
+                + " left out with a line above when it could not be.\r\n");
         text.append("\r\nThis archive still holds your public address, which is in the doctor block"
                 + " on purpose. Both players should attach their own zip.\r\n");
         return text.toString();
@@ -525,45 +608,72 @@ public final class CoopBugReport {
         }
     }
 
-    private static void packOptions(List<Planned> planned, List<String> missing, List<String> notes,
-                                    File options) {
+    /**
+     * Packs the settings file, or leaves it out when the password in it cannot be proven gone.
+     *
+     * @return the password the file holds, for {@link #packVmparams} to check its own text against,
+     *         or {@code ""} when the file has none or could not be read at all
+     */
+    private static String packOptions(List<Planned> planned, List<String> missing,
+                                      List<String> notes, File options) {
         String entry = "saves/common/coop_options.json.data";
         if (options == null || !options.isFile()) {
             missing.add(entry);
-            return;
+            return "";
         }
         String text = CoopInstallCheck.readTextOrNull(options);
         if (text == null) {
             // There but unreadable - locked by another process, or no permission. Packing it would
             // put an empty entry in the archive under a note saying it was packed verbatim.
             missing.add(entry + " (unreadable)");
-            return;
+            return "";
         }
-        if (!parsesAsJson(text)) {
-            notes.add(entry + " does not parse as JSON, so it was packed exactly as it is. Check it"
-                    + " by hand for a password before you post the archive.");
-            planned.add(new Planned(entry, options, null));
-            return;
+        String parseError = jsonParseError(text);
+        if (parseError != null) {
+            // The file the report is about, and the file that cannot be scrubbed, are the same one.
+            // It is left out: this launcher cannot read what is in it, so it cannot promise the
+            // password is not, and the whole point of a settings file is that it stores one.
+            notes.add(entry + " was LEFT OUT of the archive: it does not parse as JSON ("
+                    + parseError + "), so coop.password could not be removed from it. If the"
+                    + " settings matter to your report, take the password out by hand and attach"
+                    + " the file yourself.");
+            return "";
         }
+        String password = passwordIn(text);
         String blanked = blankPassword(text);
         if (blanked == null) {
-            // Two ways to get here, and only one of them is harmless: the file has no password in
-            // it, or the rewrite failed on a file that does. The second must not be packed under
-            // silence, because the password is stored in plain text.
-            if (hasPassword(text)) {
-                notes.add("coop.password could NOT be blanked in the packed copy of " + entry
-                        + ", so it was packed exactly as it is. Take the password out by hand"
-                        + " before you post the archive.");
+            // Two ways to get here, and only one of them is harmless: the file has no password key
+            // at all, or the rewrite failed on a file that does. The second is not packed, because
+            // the password is stored there in plain text.
+            if (password.isEmpty()) {
+                planned.add(new Planned(entry, options, null));
+                return "";
             }
-            planned.add(new Planned(entry, options, null));
-            return;
+            notes.add(entry + " was LEFT OUT of the archive: coop.password could not be blanked in"
+                    + " it. Take the password out by hand and attach the file yourself if you need"
+                    + " it in the report.");
+            return password;
+        }
+        if (!passwordIsBlanked(blanked)) {
+            notes.add(entry + " was LEFT OUT of the archive: the blanked copy still had a"
+                    + " coop.password in it, which should be impossible - do not post the original"
+                    + " without taking the password out first.");
+            return password;
         }
         notes.add("coop.password was blanked in the packed copy of " + entry + ".");
         planned.add(new Planned(entry, null, blanked.getBytes(StandardCharsets.UTF_8)));
+        return password;
     }
 
+    /**
+     * Packs {@code vmparams} with every {@code -Dcoop.password} token removed, or leaves it out when
+     * the scrubbed text cannot be proven clean.
+     *
+     * @param optionsPassword the settings file's password, so a copy of it under some other name on
+     *                        this line is caught too; {@code ""} when none is known
+     */
     private static void packVmparams(List<Planned> planned, List<String> missing, List<String> notes,
-                                     File vmparams) {
+                                     File vmparams, String optionsPassword) {
         String entry = "vmparams";
         if (vmparams == null || !vmparams.isFile()) {
             missing.add(entry);
@@ -575,6 +685,12 @@ public final class CoopBugReport {
             return;
         }
         VmparamsScrub scrub = scrubVmparams(text);
+        String leak = vmparamsLeak(scrub.text(), optionsPassword);
+        if (leak != null) {
+            notes.add("vmparams was LEFT OUT of the archive: " + leak + ". Post the classpath line"
+                    + " by hand with the secret taken out if the report needs it.");
+            return;
+        }
         if (scrub.removed() == 0) {
             planned.add(new Planned(entry, vmparams, null));
             return;
