@@ -131,6 +131,35 @@ class CoopUpnpSoapTest {
         assertEquals("", CoopUpnpSoap.errorDescription("<x/>"));
     }
 
+    /**
+     * net-31, SOAP side: the scan searched a lower-cased copy and applied those offsets to the
+     * original. {@code "İ".toLowerCase(ROOT)} is two chars, so every index past such a character was
+     * shifted and the fault below reported no error code at all — the mapper would have treated a
+     * 718 conflict as an unexplained failure instead of checking who owns the port.
+     */
+    @Test
+    void net31_aFaultCarryingALengthChangingCharacterStillParses() {
+        String body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+                + "<s:Body><s:Fault><faultcode>s:Client</faultcode>"
+                + "<faultstring>İstek reddedildi</faultstring>"
+                + "<detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\">"
+                + "<errorCode>718</errorCode><errorDescription>ConflictInMappingEntry</errorDescription>"
+                + "</UPnPError></detail></s:Fault></s:Body></s:Envelope>";
+
+        assertEquals(CoopUpnpSoap.ERROR_CONFLICT_IN_MAPPING_ENTRY, CoopUpnpSoap.errorCode(body));
+        assertEquals("ConflictInMappingEntry", CoopUpnpSoap.errorDescription(body));
+    }
+
+    @Test
+    void net31_anIpResponseAfterALengthChangingCharacterStillParses() {
+        String body = "<s:Envelope><s:Body><u:GetExternalIPAddressResponse xmlns:u=\"" + SERVICE + "\">"
+                + "<NewNote>İnternet</NewNote>"
+                + "<NewExternalIPAddress>203.0.113.7</NewExternalIPAddress>"
+                + "</u:GetExternalIPAddressResponse></s:Body></s:Envelope>";
+
+        assertEquals("203.0.113.7", CoopUpnpSoap.externalIpAddress(body));
+    }
+
     @Test
     void escapesXmlSpecialCharactersInTheMappingDescription() {
         String body = CoopUpnpSoap.addPortMappingBody(SERVICE, "TCP", 1, 1, "10.0.0.2", "a<b>&\"c\"", 60);
