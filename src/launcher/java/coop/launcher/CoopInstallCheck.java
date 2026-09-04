@@ -17,9 +17,10 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * The install rows the launcher shows. Report only: nothing here writes {@code vmparams} or
- * {@code enabled_mods.json}. Both are files the player and the Starsector installer own, and an
- * automatic edit that goes wrong leaves an install that will not start.
+ * The install rows the launcher shows. Nothing here writes anything: a row that can be put right
+ * automatically carries a {@link CoopInstallFixer.Target} and the window hangs a Fix button off it,
+ * which is where the writing happens. Keeping the verdict and the edit in separate classes is what
+ * lets the whole verdict half stay a pure function.
  *
  * <p>The decision half ({@link #rows(Inputs)}) is a pure function over already-read text so it can be
  * unit-tested against a stock vmparams, a patched one and a stale-{@code -D} one without touching a
@@ -42,17 +43,27 @@ public final class CoopInstallCheck {
     /**
      * One line in the install panel.
      *
-     * @param label  what was checked
-     * @param status the verdict
-     * @param detail what was found
-     * @param fix    what to do about it, empty when there is nothing to do
+     * @param label   what was checked
+     * @param status  the verdict
+     * @param detail  what was found
+     * @param fix     what to do about it, empty when there is nothing to do
+     * @param fixable which file the launcher can put right itself, or {@code null} for the rows a
+     *                player has to deal with. A row is marked fixable when the shape of the problem
+     *                is one {@link CoopInstallFixer} handles; the fixer still gets the last word
+     *                and refuses with the manual text when the file on disk turns out not to be.
      */
-    public record Row(String label, Status status, String detail, String fix) {
+    public record Row(String label, Status status, String detail, String fix,
+                      CoopInstallFixer.Target fixable) {
         public Row {
             Objects.requireNonNull(label, "label");
             Objects.requireNonNull(status, "status");
             Objects.requireNonNull(detail, "detail");
             fix = fix == null ? "" : fix;
+        }
+
+        /** A row nothing can be pressed on. */
+        public Row(String label, Status status, String detail, String fix) {
+            this(label, status, detail, fix, null);
         }
 
         @Override
@@ -198,10 +209,19 @@ public final class CoopInstallCheck {
         if (CoopVmparamsText.hasForksLaterOnClasspath(vmparamsText)) {
             return new Row(label, Status.FAIL,
                     "the entry is on the classpath but not at the front, so it does nothing",
-                    CoopVmparamsText.forksFixText());
+                    byButtonOr(CoopVmparamsText.forksFixText()), CoopInstallFixer.Target.VMPARAMS);
         }
         return new Row(label, Status.FAIL, "the entry is not on the classpath",
-                CoopVmparamsText.forksFixText());
+                byButtonOr(CoopVmparamsText.forksFixText()), CoopInstallFixer.Target.VMPARAMS);
+    }
+
+    /**
+     * The fix text for a row that carries a Fix button: the button first, the manual edit after it.
+     * Both stay on the row on purpose - the button cannot help a player whose install refuses the
+     * write, and the manual instructions are the thing they fall back to.
+     */
+    private static String byButtonOr(String manual) {
+        return "Press Fix and the launcher does it for you. By hand: " + manual;
     }
 
     private static Row stalePropertyRow(String vmparamsText) {
@@ -227,7 +247,8 @@ public final class CoopInstallCheck {
         String label = "co-op enabled in mods\\enabled_mods.json";
         if (enabledModsText == null) {
             return new Row(label, Status.FAIL, "enabled_mods.json is missing or unreadable",
-                    "Start the Starsector launcher once, click MODS and tick Starsector Coop V1.");
+                    byButtonOr(CoopInstallFixer.enabledModsFixText()),
+                    CoopInstallFixer.Target.ENABLED_MODS);
         }
         Boolean enabled = enabledModsContains(enabledModsText, CoopInstallLayout.MOD_ID);
         if (enabled == null) {
@@ -238,7 +259,8 @@ public final class CoopInstallCheck {
             return new Row(label, Status.OK, "yes", "");
         }
         return new Row(label, Status.FAIL, "\"coop\" is not in the enabled list",
-                "Start the Starsector launcher once, click MODS and tick Starsector Coop V1.");
+                byButtonOr(CoopInstallFixer.enabledModsFixText()),
+                CoopInstallFixer.Target.ENABLED_MODS);
     }
 
     private static Row versionRow(String modInfoVersion, String jarVersion) {

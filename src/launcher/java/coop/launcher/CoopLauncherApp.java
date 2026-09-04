@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.swing.BorderFactory;
@@ -67,8 +68,10 @@ import coop.net.CoopPortMapper;
  * <p>It invents no configuration of its own. Every field is a key that already resolves through
  * {@code CoopOptionsStore}, and pressing Launch writes them to
  * {@code saves/common/coop_options.json.data} and starts {@code starsector.exe}. The two things the
- * mod cannot reach - the {@code coop-forks.jar} classpath entry in {@code vmparams} and the mod tick
- * in {@code enabled_mods.json} - are reported with the exact fix and never edited.
+ * mod itself cannot reach - the {@code coop-forks.jar} classpath entry in {@code vmparams} and the
+ * mod tick in {@code enabled_mods.json} - get a <b>Fix</b> button on their install row that applies
+ * the edit ({@link CoopInstallFixer}), with the manual instructions kept on the row and in
+ * {@code INSTALL.md} for the installs where the write is refused.
  *
  * <p>Engine-free by construction: this source set is compiled without {@code starfarer.api.jar} on
  * the classpath. The mod classes it does reuse ({@link CoopPortMapper},
@@ -207,17 +210,34 @@ public final class CoopLauncherApp {
     private Process gameProcess;
     private javax.swing.Timer checkTimer;
 
+    /**
+     * Command-line flag the elevated copy of the launcher is started with. It means "apply the
+     * install fixes as soon as the window is up, then carry on as a normal launcher": the
+     * unelevated copy that asked for administrator rights has already exited, so there is nobody
+     * left to press the button a second time.
+     */
+    static final String APPLY_FIX_FLAG = "--apply-install-fix";
+
     public static void main(String[] args) {
         CoopInstallLayout discovered = CoopInstallLayout.discover();
         File logFile = discovered == null
                 ? new File("coop-launcher.log")
                 : discovered.launcherLog();
         CoopLauncherLogging.configure(logFile);
-        LOG.info("Coop launcher starting; layout " + (discovered == null ? "not found" : discovered));
-        SwingUtilities.invokeLater(() -> new CoopLauncherApp().start(discovered));
+        boolean applyFix = List.of(args).contains(APPLY_FIX_FLAG);
+        LOG.info("Coop launcher starting; layout " + (discovered == null ? "not found" : discovered)
+                + (applyFix ? "; asked to apply the install fixes" : ""));
+        SwingUtilities.invokeLater(() -> new CoopLauncherApp().start(discovered, applyFix));
     }
 
-    private void start(CoopInstallLayout discovered) {
+    /**
+     * True in the copy started by {@link #offerElevatedRelaunch}. It stops that copy from asking for
+     * administrator rights again when the write fails for some reason other than permissions.
+     */
+    private boolean alreadyElevated;
+
+    private void start(CoopInstallLayout discovered, boolean applyFix) {
+        this.alreadyElevated = applyFix;
         CoopTheme.install();
         this.layout = discovered;
         this.launcherVersion = CoopInstallCheck.launcherVersion();
@@ -238,6 +258,13 @@ public final class CoopLauncherApp {
             hostSegment.setSelected(true);
             guestSegment.setSelected(false);
             onRoleChanged();
+        }
+        if (applyFix && layout != null) {
+            // Started with administrator rights by an unelevated copy that could not write the
+            // files. Both targets are safe to run: the fixer writes nothing when a file is already
+            // right, so the one that was not broken reports "nothing to change".
+            applyInstallFix(List.of(CoopInstallFixer.Target.VMPARAMS,
+                    CoopInstallFixer.Target.ENABLED_MODS), "the elevated relaunch");
         }
         startUpdateCheck();
         if (hostSegment.isSelected() && publicAddressField.getText().trim().isEmpty()
@@ -1194,6 +1221,13 @@ public final class CoopLauncherApp {
                     LOG.info("Opening the release page " + updateUrl);
                     openUrl(updateUrl);
                 });
+            } else if (row.fixable() != null) {
+                CoopInstallFixer.Target target = row.fixable();
+                String label = row.label();
+                trailing = CoopTheme.inline("Fix");
+                trailing.setToolTipText("Let the launcher make this edit for you. vmparams is backed"
+                        + " up to vmparams.backup first.");
+                trailing.addActionListener(event -> applyInstallFix(List.of(target), label));
             }
             rowsPanel.add(renderRow(row, trailing));
         }
@@ -1253,6 +1287,180 @@ public final class CoopLauncherApp {
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, panel.getPreferredSize().height));
         return panel;
+    }
+
+    // ---- fixing the install ---------------------------------------------------------------------
+
+    /**
+     * Runs one or more install fixes off the event dispatch thread and re-checks the install when
+     * they land. Every verdict, including "nothing to change", goes into the log drawer: a button
+     * that changes a red row to green without saying what it did to a file the player did not know
+     * they had is worse than no button.
+     */
+    private void applyInstallFix(List<CoopInstallFixer.Target> targets, String what) {
+        if (layout == null) {
+            append("Point the launcher at your Starsector install first.");
+            return;
+        }
+        LOG.info("Install fix requested for " + what + " " + targets);
+        append("Fixing: " + what + ".");
+        setDrawerVisible(true);
+        CoopInstallLayout install = layout;
+        List<CoopInstallFixer.Target> wanted = List.copyOf(targets);
+        background.submit(() -> {
+            List<CoopInstallFixer.Result> results = new ArrayList<>();
+            for (CoopInstallFixer.Target one : wanted) {
+                try {
+                    results.add(CoopInstallFixer.apply(install, one));
+                } catch (Exception ex) {
+                    LOG.error("The install fix for " + one + " threw", ex);
+                    results.add(new CoopInstallFixer.Result(false, false,
+                            "The fix for " + one + " failed: " + ex));
+                }
+            }
+            SwingUtilities.invokeLater(() -> finishInstallFix(results));
+        });
+    }
+
+    /** The event-dispatch-thread half of {@link #applyInstallFix}. */
+    private void finishInstallFix(List<CoopInstallFixer.Result> results) {
+        boolean denied = false;
+        for (CoopInstallFixer.Result result : results) {
+            LOG.info("Install fix: changed=" + result.changed() + " accessDenied="
+                    + result.accessDenied() + " " + result.message());
+            append(result.message());
+            denied = denied || result.accessDenied();
+        }
+        refreshInstallRows();
+        if (denied) {
+            offerElevatedRelaunch();
+        }
+    }
+
+    /**
+     * The install is somewhere this launcher may not write - almost always {@code Program Files},
+     * where Windows hands an unelevated process a read-only view of the folder. Offers to start the
+     * same launcher again with administrator rights and let that copy make the edit.
+     */
+    private void offerElevatedRelaunch() {
+        if (layout == null) {
+            return;
+        }
+        if (alreadyElevated) {
+            // This copy is the elevated one and the write still failed, so a second UAC prompt
+            // would only produce a third launcher window with the same answer.
+            LOG.warn("The elevated copy could not write either; not asking again");
+            append("Even with administrator rights Windows refused the write. Something else owns"
+                    + " those files - an antivirus, a read-only flag, or a folder the game was"
+                    + " installed into by another account.");
+            appendManualFix();
+            return;
+        }
+        int answer = JOptionPane.showConfirmDialog(frame,
+                "Windows would not let the launcher write into your Starsector folder.\n\n"
+                        + "That is what happens when the game is installed under Program Files. The"
+                        + " launcher can start itself again with administrator rights and make the"
+                        + " edit from there.\n\n"
+                        + "Restart the launcher as administrator?",
+                "Starsector Coop", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (answer != JOptionPane.YES_OPTION) {
+            LOG.info("The elevated relaunch was declined in the dialog");
+            append("Left the files alone. To do it by hand:");
+            appendManualFix();
+            return;
+        }
+        List<String> command = elevatedRelaunchCommand(System.getProperty("java.home"),
+                System.getProperty("java.class.path"), layout.installRoot().getPath());
+        LOG.info("Asking Windows for administrator rights: " + command);
+        append("Asking Windows for administrator rights. Approve the prompt; a second launcher"
+                + " window opens and this one closes.");
+        background.submit(() -> {
+            String failure = elevatedRelaunchFailure(command);
+            SwingUtilities.invokeLater(() -> {
+                if (failure == null) {
+                    LOG.info("The elevated launcher started; closing this one");
+                    shutdown();
+                    return;
+                }
+                LOG.warn("The elevated relaunch did not happen: " + failure);
+                append("The launcher did not restart with administrator rights: " + failure + ".");
+                appendManualFix();
+                fail("The launcher could not get administrator rights, so the edit was not made."
+                        + " The exact steps are in the log below and in docs/player/INSTALL.md"
+                        + " section 3; press Guide to open it.");
+            });
+        });
+    }
+
+    /** Puts the manual instructions for every outstanding fixable row into the log drawer. */
+    private void appendManualFix() {
+        for (CoopInstallCheck.Row row : installRows) {
+            if (row.fixable() != null && row.status() != CoopInstallCheck.Status.OK) {
+                append("  " + row.label() + ": " + row.fix());
+            }
+        }
+        append("Both edits are written out in docs/player/INSTALL.md, sections 3 and 4. Press Guide"
+                + " to open it.");
+        setDrawerVisible(true);
+    }
+
+    /**
+     * The command that starts this same launcher elevated. Reconstructed from the running JVM
+     * rather than hardcoded, so it follows the install the player actually started from.
+     *
+     * <p><b>Why {@code [char]34} instead of a double quote.</b> The whole {@code -Command} value
+     * travels as one argument through {@code ProcessBuilder}, which wraps an argument containing
+     * spaces in double quotes of its own and does not escape the ones already inside it - the
+     * classpath's quotes would be eaten and an install under {@code Program Files} would arrive as
+     * two arguments. Building the quotes on the PowerShell side keeps every double quote out of the
+     * Java argument. Single quotes are doubled, which is PowerShell's own escape.
+     */
+    static List<String> elevatedRelaunchCommand(String javaHome, String classPath,
+                                                String workingDirectory) {
+        String javaw = javaHome + File.separator + "bin" + File.separator + "javaw.exe";
+        String arguments = "('-cp ' + [char]34 + " + psQuote(classPath) + " + [char]34 + ' "
+                + CoopLauncherApp.class.getName() + " " + APPLY_FIX_FLAG + "')";
+        String command = "Start-Process -FilePath " + psQuote(javaw)
+                + " -ArgumentList " + arguments
+                + " -WorkingDirectory " + psQuote(workingDirectory)
+                + " -Verb RunAs -ErrorAction Stop";
+        return List.of("powershell", "-NoProfile", "-Command", command);
+    }
+
+    /** A PowerShell single-quoted literal. The only escape inside one is a doubled quote. */
+    private static String psQuote(String value) {
+        return "'" + (value == null ? "" : value.replace("'", "''")) + "'";
+    }
+
+    /**
+     * Runs the elevated relaunch and says why it did not happen, or {@code null} when it did.
+     *
+     * <p>Deliberately thin: none of this can be unit-tested, because the answer comes from a UAC
+     * prompt. {@code -ErrorAction Stop} is what turns a declined prompt into a non-zero exit -
+     * without it {@code Start-Process}'s failure is a non-terminating error and PowerShell still
+     * exits 0.
+     */
+    private static String elevatedRelaunchFailure(List<String> command) {
+        try {
+            Process process = new ProcessBuilder(command)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!process.waitFor(3, TimeUnit.MINUTES)) {
+                process.destroy();
+                return "the Windows prompt was never answered";
+            }
+            int exit = process.exitValue();
+            if (exit == 0) {
+                return null;
+            }
+            return "PowerShell exited " + exit + ", which is what a refused prompt looks like";
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            return "the wait was interrupted";
+        } catch (Exception ex) {
+            return String.valueOf(ex);
+        }
     }
 
     private void setChips(List<Chip> chips) {

@@ -7,9 +7,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Pure inspection of a {@code vmparams} file's text. Nothing here reads or writes a file: the
- * launcher reports what it finds and never edits {@code vmparams}, because that file belongs to the
- * player and to the Starsector installer.
+ * Pure inspection of a {@code vmparams} file's text. Nothing here reads or writes a file; the edit
+ * itself lives in {@link CoopInstallFixer}, which reuses this class's idea of what a forks entry
+ * looks like so that what the check accepts and what the fix produces cannot drift apart.
  *
  * <p>Two questions matter. First, whether {@code coop-forks.jar} sits at the front of the JVM
  * {@code -classpath}: the forked engine classes only win over the originals if the system
@@ -95,7 +95,7 @@ public final class CoopVmparamsText {
     }
 
     /** True when one classpath entry, however it is spelled, points at the forks jar. */
-    private static boolean isForksEntry(String entry) {
+    static boolean isForksEntry(String entry) {
         String normalised = normalise(entry).trim();
         if (normalised.startsWith("\"") && normalised.endsWith("\"") && normalised.length() > 1) {
             normalised = normalised.substring(1, normalised.length() - 1);
