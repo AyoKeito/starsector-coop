@@ -8,6 +8,7 @@ import { DEFAULT_IGNORE_KEYS, diffJson } from './diff.js';
 export const QUERY_VERBS = [
   'status',
   'fleets',
+  'cargo',
   'market',
   'markets',
   'barpool',
@@ -24,6 +25,7 @@ export const ACTION_VERBS = [
   'ability',
   'setcr',
   'give',
+  'addship',
   'objective',
   'surveyset',
   'expedition'

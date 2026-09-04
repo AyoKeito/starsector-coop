@@ -1,9 +1,11 @@
 package coop.debug;
 
+import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
@@ -16,6 +18,7 @@ import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.fleet.FleetMemberType;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.econ.impl.Cryorevival;
@@ -46,6 +49,7 @@ import coop.net.CoopConnectionRole;
 import coop.net.CoopNetPump;
 import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
+import coop.util.CoopLog;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -96,6 +100,12 @@ public final class CoopAgentCommands {
 
     /** Cap on a single response line, mostly so a runaway dump cannot wedge the socket. */
     static final int MAX_MEMBER_DUMP = 500;
+
+    /**
+     * Ships one {@code addship} call may add. Twenty is well past any setup a smoke run needs and
+     * short of the "paste the wrong number and rebuild the sector's economy" range.
+     */
+    static final int MAX_ADDED_SHIPS = 20;
 
     /**
      * Everything a handler is allowed to reach the game through. Small on purpose: a unit test fakes
@@ -197,6 +207,7 @@ public final class CoopAgentCommands {
         Map<String, Handler> map = new LinkedHashMap<>();
         map.put("status", CoopAgentCommands::status);
         map.put("fleets", CoopAgentCommands::fleets);
+        map.put("cargo", CoopAgentCommands::cargo);
         map.put("market", CoopAgentCommands::market);
         map.put("markets", CoopAgentCommands::markets);
         map.put("barpool", CoopAgentCommands::barpool);
@@ -209,6 +220,7 @@ public final class CoopAgentCommands {
         map.put("ability", CoopAgentCommands::ability);
         map.put("setcr", CoopAgentCommands::setcr);
         map.put("give", CoopAgentCommands::give);
+        map.put("addship", CoopAgentCommands::addship);
         map.put("objective", CoopAgentCommands::objective);
         map.put("surveyset", CoopAgentCommands::surveyset);
         map.put("expedition", CoopAgentCommands::expedition);
@@ -426,6 +438,70 @@ public final class CoopAgentCommands {
             }
         }
         return nullSafe(fleet.getId());
+    }
+
+    /**
+     * The local player fleet's logistics state: what it is carrying, what it can carry, and whether
+     * it is over any of the three limits.
+     *
+     * <p>Exists because {@code fleets} reports ships and CR and nothing else, so "top up supplies
+     * before the drill" had to be done blind with {@code give} (found in the Phase 20 QA matrix,
+     * 2026-09-02). Every number is the engine's own: {@code CargoAPI} has three independent
+     * capacities — cargo space, fuel and personnel — and vanilla's own {@code $cargoRoom} /
+     * {@code $fuelRoom} / {@code $crewRoom} memory keys are exactly the {@code capacity - used}
+     * subtractions reported here as {@code free}.
+     *
+     * <p>There is no engine "overloaded" flag to read: over-capacity is a per-dimension comparison the
+     * UI paints red and the burn/upkeep maths reads off the same subtraction. {@code overloaded} is
+     * therefore true when any of the three is over, and {@code over} names which — a bare boolean
+     * would leave the caller re-deriving the interesting half.
+     */
+    static JSONObject cargo(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CampaignFleetAPI player = requirePlayerFleet(sector);
+        CargoAPI cargo = player.getCargo();
+        if (cargo == null) {
+            throw new IllegalStateException("player fleet has no cargo");
+        }
+        // Derived and cached by the engine; recomputed here so a dump taken right after a `give`
+        // reports the space that stack actually takes rather than the value from before it landed.
+        try {
+            cargo.updateSpaceUsed();
+        } catch (RuntimeException | LinkageError ignored) {
+            // Best-effort refresh only. A stale read is worth reporting; a failed verb is not.
+        }
+
+        JSONObject out = new JSONObject();
+        // Named engineId like every other per-instance id in these dumps, so the MCP diff drops it
+        // by default: the two players own different fleets and that id can never match.
+        out.put("engineId", nullSafe(player.getId()));
+        out.put("supplies", round(cargo.getSupplies()));
+        out.put("fuel", round(cargo.getFuel()));
+        out.put("crew", cargo.getCrew());
+        out.put("marines", cargo.getMarines());
+        out.put("credits", cargo.getCredits() == null ? 0d : round(cargo.getCredits().get()));
+
+        JSONArray over = new JSONArray();
+        out.put("cargoSpace", capacityBlock(cargo.getMaxCapacity(), cargo.getSpaceUsed(), "cargoSpace", over));
+        out.put("fuelSpace", capacityBlock(cargo.getMaxFuel(), cargo.getFuel(), "fuelSpace", over));
+        out.put("personnel",
+                capacityBlock(cargo.getMaxPersonnel(), cargo.getTotalPersonnel(), "personnel", over));
+        out.put("overloaded", over.length() > 0);
+        out.put("over", over);
+        return out;
+    }
+
+    /** One capacity dimension, plus a note in {@code over} when it is past its limit. */
+    private static JSONObject capacityBlock(float capacity, float used, String name, JSONArray over)
+            throws JSONException {
+        JSONObject block = new JSONObject();
+        block.put("capacity", round(capacity));
+        block.put("used", round(used));
+        block.put("free", round(capacity - used));
+        if (used > capacity) {
+            over.put(name);
+        }
+        return block;
     }
 
     static JSONObject market(JSONObject args, Context context) throws JSONException {
@@ -1771,6 +1847,114 @@ public final class CoopAgentCommands {
             out.put("creditsTotal", round(cargo.getCredits().get()));
         }
         return out;
+    }
+
+    /**
+     * Adds {@code count} copies of {@code variantId} to the local player fleet, combat-ready.
+     *
+     * <p>Setup verb, and the counterpart to {@code give}: a single-ship test fleet overloads at 200
+     * supplies and there was no way to add a freighter without restarting the instance (Phase 20 QA
+     * matrix, 2026-09-02). Creation goes through {@code Global.getFactory().createFleetMember}, the
+     * same call {@code CoopFleetMirror} builds mirror rosters with, so the member is a real one and
+     * every downstream listener sees a normal roster change.
+     *
+     * <p><b>The variant is validated first, and that is not belt-and-braces.</b>
+     * {@code createFleetMember} does not reject an unknown id — it substitutes a placeholder hull and
+     * returns successfully (see {@code CoopFleetSnapshot.Member}), so a typo would otherwise add N
+     * silent wrong ships. {@code CoopFleetSnapshotFactory.variantExists} is the same spec-store check
+     * the wire path uses.
+     *
+     * <p>The fleet hash is captured either side of the change and logged, because that hash is what
+     * makes the replicator resend the roster: a caller reading the log can tell an added ship that
+     * will replicate from one that somehow did not move it.
+     */
+    static JSONObject addship(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CampaignFleetAPI player = requirePlayerFleet(sector);
+        String variantId = requiredString(args, "variantId");
+        int count = optionalInt(args, "count", 1);
+        if (count < 1) {
+            throw new IllegalArgumentException("count must be at least 1, got " + count);
+        }
+        if (count > MAX_ADDED_SHIPS) {
+            throw new IllegalArgumentException("count " + count + " is over the " + MAX_ADDED_SHIPS
+                    + "-ship cap for one call; this is a setup verb, not a fleet builder");
+        }
+        if (!CoopFleetSnapshotFactory.variantExists(variantId)) {
+            throw new IllegalArgumentException("unknown variant " + variantId
+                    + "; the fleet factory would substitute a placeholder hull rather than refuse it");
+        }
+        FleetDataAPI data = player.getFleetData();
+        if (data == null) {
+            throw new IllegalStateException("player fleet has no fleet data");
+        }
+
+        String hashBefore = fleetHash(player);
+        JSONArray added = new JSONArray();
+        for (int i = 0; i < count; i++) {
+            FleetMemberAPI member = Global.getFactory().createFleetMember(FleetMemberType.SHIP, variantId);
+            if (member == null) {
+                throw new IllegalStateException("the fleet factory returned no member for " + variantId
+                        + " after adding " + added.length());
+            }
+            data.addFleetMember(member);
+            readyForService(member);
+
+            JSONObject entry = new JSONObject();
+            entry.put("memberId", nullSafe(member.getId()));
+            entry.put("variantId", nullSafe(member.getSpecId()));
+            entry.put("hullId", nullSafe(member.getHullId()));
+            entry.put("cr", member.getRepairTracker() == null
+                    ? 0d : round(member.getRepairTracker().getCR()));
+            added.put(entry);
+        }
+        data.setSyncNeeded();
+        String hashAfter = fleetHash(player);
+
+        CoopLog.info(CoopAgentCommands.class, "Coop agent bridge addship: +" + added.length() + " "
+                + variantId + "; fleet hash " + hashBefore + " -> " + hashAfter
+                + (hashBefore.equals(hashAfter)
+                        ? " (UNCHANGED — no roster resend will follow)"
+                        : " (changed; the roster resend follows on the next snapshot)"));
+
+        JSONObject out = new JSONObject();
+        out.put("variantId", variantId);
+        out.put("requested", count);
+        out.put("added", added.length());
+        out.put("members", added);
+        out.put("fleetSize", data.getMembersListCopy() == null ? 0 : data.getMembersListCopy().size());
+        out.put("fleetHashBefore", hashBefore);
+        out.put("fleetHashAfter", hashAfter);
+        out.put("fleetHashChanged", !hashBefore.equals(hashAfter));
+        return out;
+    }
+
+    /**
+     * Full CR and no damage, so an added ship is usable the frame it appears. The existing dev fleets
+     * a smoke run starts from are in that state, and a ship that arrived mothballed or at base CR
+     * would quietly change what the check downstream is measuring.
+     */
+    private static void readyForService(FleetMemberAPI member) {
+        RepairTrackerAPI repair = member.getRepairTracker();
+        if (repair != null) {
+            repair.setMothballed(false);
+            repair.setCR(repair.getMaxCR());
+        }
+        if (member.getStatus() != null) {
+            member.getStatus().repairFully();
+        }
+    }
+
+    /**
+     * The same hash the replication path keys a roster resend on. Best-effort: a capture failure
+     * costs the log line its before/after pair, not the caller its verb.
+     */
+    private static String fleetHash(CampaignFleetAPI fleet) {
+        try {
+            return CoopFleetSnapshot.computeFleetHash(CoopFleetSnapshotFactory.captureMembers(fleet));
+        } catch (RuntimeException | LinkageError ex) {
+            return "";
+        }
     }
 
     static JSONObject objective(JSONObject args, Context context) throws JSONException {

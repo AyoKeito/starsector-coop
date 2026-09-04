@@ -19,6 +19,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 
 The bridge answers once a campaign is loaded. It does not need an active co-op session, so `ss_status` works on a single instance sitting in its own game.
 
+Each instance's bridge serves up to **four clients at once**, so a scripted helper can hold a connection alongside this server; the fifth is closed on connect and the refusal is logged. Every client gets its own request framing and response queue, and the four-commands-per-frame dispatch budget is shared out one request per client per pass, so a client sending a burst cannot starve another.
+
 ## Install
 
 ```powershell
@@ -105,6 +107,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | --- | --- | --- |
 | `status` | none | same payload as `ss_status` |
 | `fleets` | `{locationId?}` | per fleet: ids, name, faction, position, velocity, transponder, action text, members |
+| `cargo` | none | the local player fleet's load: supplies, fuel, crew, marines, credits, the three capacities with used/free, and `overloaded` |
 | `market` | `{marketId}` | full stock including ship details, specials, hireables |
 | `markets` | none | every market in the economy: `marketId`, `name`, `factionId`, `size`, `locationId` |
 | `barpool` | none | ordered offer list plus the bar's render order |
@@ -118,6 +121,18 @@ ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
 ```
 
 `markets` is an index, not a dock visit: it enumerates and stocks nothing. Use it to find the `marketId` that `market` wants. `survey` takes the same system id every other verb emits as a `locationId` (`system_16cf` and the like), not the display name.
+
+`cargo` reports the local player fleet only, and each instance answers for its own — `ss_diff(what: "cargo")` compares two different fleets, so a difference there is normal, not a desync. The three capacities are independent: `cargoSpace`, `fuelSpace` and `personnel`, each with `capacity`, `used` and `free`, where `free` is the same `capacity - used` subtraction vanilla exposes as `$cargoRoom`, `$fuelRoom` and `$crewRoom` and goes negative when the fleet is over. `overloaded` is true when any of the three is over its limit and `over` names which, so "the fleet is overloaded" and "the fleet is overloaded on fuel" are one call apart. `personnel` counts everyone aboard, so it is larger than `crew` on a fleet carrying marines.
+
+```
+ss_dump(instance: "host", what: "cargo")
+
+{ "engineId": "fleet_1", "supplies": 12, "fuel": 90, "crew": 40, "marines": 12, "credits": 250000,
+  "cargoSpace": { "capacity": 200, "used": 260, "free": -60 },
+  "fuelSpace": { "capacity": 300, "used": 90, "free": 210 },
+  "personnel": { "capacity": 200, "used": 52, "free": 148 },
+  "overloaded": true, "over": ["cargoSpace"] }
+```
 
 `colonizable` answers "where do I put a colony" without searching the map, which is what the Phase 24 smoke needs before it can use `teleport`, `surveyset` and `give`. `limit` defaults to 10 and must be 1..200; `maxLy` is a range filter in light years, and 0 or absent means no filter. `candidateCount` is every planet that passed the filters, `count` is how many survived `maxLy`, `neutralOnly` and `limit` — so "none within 8 LY" and "none anywhere" read differently.
 
@@ -227,6 +242,7 @@ One state-changing verb against one instance.
 | `ability` | `{abilityId}` or `{abilityId, on: true}` / `{abilityId, on: false}` |
 | `setcr` | `{value, memberIndex}` or `{value, memberIndex: "all"}` |
 | `give` | `{commodityId?, qty?, credits?}` |
+| `addship` | `{variantId, count?}` — count defaults to 1, capped at 20 |
 | `objective` | `{entityId, factionId}` |
 | `surveyset` | `{planetId, level}` |
 | `expedition` | `{}` or `{factionId}` — host only |
@@ -247,6 +263,18 @@ ss_act(instance: "host", verb: "teleport", args: { "entityId": "ancyra" })
 **A teleport that crosses locations is a real jump, and it takes game time.** Moving a fleet between systems by re-parenting it leaves it unable to fly — the engine hands player input only to the location it considers current, so a fleet dropped into a system the engine has not switched to receives none. The location switch is one of the things `doHyperspaceTransition` does, so a cross-location teleport calls that instead, and `transition` says which path ran: `"jump"` for the engine transition, `"local"` for a same-location placement, which is unchanged and still immediate. `pending: true` means the fleet is still on its way and the reported `x`/`y` are its destination. The transition is an ordinary frame script and **does not advance while the game is paused**, so after a cross-location teleport let the clock run — `ss_advance_days(days: 0.5)` is more than enough — before expecting `ss_status` to report the new location. A second teleport issued mid-jump is refused by name rather than silently ignored.
 
 `ability` goes through the same engine path the toolbar button uses, down to `reportPlayerActivatedAbility`, so the mod's listener fires and the host sees `ABILITY_ACTIVATE`. With no `on` argument it is one press of the button, whatever state the ability was in, which is what a one-shot like the distress call wants. Add `on` to make it a level instead: `on: true` activates only if the ability is off, `on: false` deactivates only if it is on, and either is a no-op otherwise. Without it a toggle like the transponder could only ever be re-armed, never turned off. `surveyset` does not: it sets the survey level at the engine level, which is faithful to what the replication poll watches but skips the survey dialog. Check the dialog path by hand.
+
+`addship` is the counterpart to `give`: `give` moves commodities and credits, `addship` adds ships. A one-ship test fleet overloads at 200 supplies and there was no other way to add a freighter without restarting the instance. Ships are created through the engine's fleet factory, added to the local player fleet and set to full CR and no damage, so they are usable the moment they appear. `count` defaults to 1 and is capped at 20.
+
+An unknown `variantId` is refused by name. That check is not politeness: `createFleetMember` does not reject an unknown id, it substitutes a placeholder hull and returns successfully, so without the check a typo would quietly add the wrong ships. The response carries the fleet hash before and after with `fleetHashChanged`, which is what the replicator keys a roster resend on; the same before/after pair goes into `starsector.log`, so a ship that was added but did not move the hash is visible rather than mysterious.
+
+```
+ss_act(instance: "host", verb: "addship", args: { "variantId": "tarsus_Standard", "count": 2 })
+
+{ "variantId": "tarsus_Standard", "requested": 2, "added": 2, "fleetSize": 3,
+  "members": [ { "memberId": "...", "variantId": "tarsus_Standard", "hullId": "tarsus", "cr": 0.7 }, ... ],
+  "fleetHashBefore": "9f0c...", "fleetHashAfter": "1ab7...", "fleetHashChanged": true }
+```
 
 `expedition` exists so the Phase 24 expedition-warning check does not have to sit through months of game time waiting for one. It calls `PunitiveExpeditionManager.createExpedition`, the same public method the manager calls itself once a faction's anger passes its threshold, and the `PunitiveExpeditionIntel` that comes out registers with the intel manager the way an organic one does. The only guard it skips is `punExMaxConcurrent`. With no `factionId` it picks the first faction that has a live reason, preferring one with an `ANTI_FREE_PORT` reason so a repeated run picks the same faction; factions already running an expedition are skipped, because the manager holds one intel handle per faction.
 

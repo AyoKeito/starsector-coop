@@ -501,6 +501,58 @@ test('the host-only pause breakdown reads as missing on the guest, not as a valu
   assert.equal(byPath['$.localPlayerId'].host, 'p-host');
 });
 
+const CARGO = {
+  engineId: 'fleet_host_1',
+  supplies: 120,
+  fuel: 90,
+  crew: 40,
+  marines: 12,
+  credits: 250000,
+  cargoSpace: { capacity: 200, used: 150, free: 50 },
+  fuelSpace: { capacity: 300, used: 90, free: 210 },
+  personnel: { capacity: 200, used: 52, free: 148 },
+  overloaded: false,
+  over: []
+};
+
+test('cargo is a query verb, dumped whole and diffed like any other', async (t) => {
+  const hostBridge = new MockBridge(() => ({ ok: true, data: CARGO }));
+  // Same load, different engine id for the fleet: that id is per-instance and must not diff.
+  const guestBridge = new MockBridge(() => ({ ok: true, data: { ...CARGO, engineId: 'fleet_guest_7' } }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssDump(bridges, 'host', 'cargo'), CARGO);
+  assert.deepEqual(hostBridge.requests[0].args, {}, 'cargo takes no arguments');
+
+  const equal = await ssDiff(bridges, 'cargo');
+  assert.equal(equal.equal, true, 'engineId is dropped by the default ignore list');
+
+  await assert.rejects(() => ssAct(bridges, 'host', 'cargo', {}), /unknown action verb "cargo"/);
+});
+
+test('a cargo divergence is reported per field, including the overload flag', () => {
+  const result = diffJson(CARGO, {
+    ...CARGO,
+    supplies: 4,
+    cargoSpace: { capacity: 200, used: 260, free: -60 },
+    overloaded: true,
+    over: ['cargoSpace']
+  });
+
+  const byPath = Object.fromEntries(result.differences.map((d) => [d.path, d]));
+  assert.deepEqual(byPath['$.supplies'], { path: '$.supplies', host: 120, guest: 4 });
+  assert.deepEqual(byPath['$.cargoSpace.free'], { path: '$.cargoSpace.free', host: 50, guest: -60 });
+  assert.deepEqual(byPath['$.overloaded'], { path: '$.overloaded', host: false, guest: true });
+  assert.equal(byPath['$.over[0]'].missing, 'host', 'an empty over list on one side reads as missing');
+});
+
 test('markets is a query verb, diffed by marketId', async (t) => {
   const hostBridge = new MockBridge(() => ({ ok: true, data: MARKETS }));
   const guestBridge = new MockBridge(() => ({
@@ -906,6 +958,49 @@ test('expedition is an action verb, passed through with its optional factionId',
   // The host-only refusal is the mod's to make; the server must relay it rather than pre-judge it.
   await assert.rejects(() => ssAct(bridges, 'guest', 'expedition', {}), /host-only.*suppressed/s);
   await assert.rejects(() => ssDump(bridges, 'host', 'expedition', {}), /unknown query verb "expedition"/);
+});
+
+test('addship is an action verb, relaying the count and the refusals the mod makes', async (t) => {
+  const added = {
+    variantId: 'shuttle_Hauler',
+    requested: 2,
+    added: 2,
+    members: [
+      { memberId: 'member-1', variantId: 'shuttle_Hauler', hullId: 'shuttle', cr: 0.7 },
+      { memberId: 'member-2', variantId: 'shuttle_Hauler', hullId: 'shuttle', cr: 0.7 }
+    ],
+    fleetSize: 3,
+    fleetHashBefore: 'aaaa',
+    fleetHashAfter: 'bbbb',
+    fleetHashChanged: true
+  };
+  const hostBridge = new MockBridge((request) => {
+    if (request.cmd !== 'addship') return { ok: false, error: 'IllegalArgumentException: unknown command' };
+    if (request.args.variantId === 'shuttle_Hauler') return { ok: true, data: added };
+    return {
+      ok: false,
+      error: `IllegalArgumentException: unknown variant ${request.args.variantId}; the fleet factory would substitute a placeholder hull rather than refuse it`
+    };
+  });
+  await hostBridge.start();
+  const bridges = bridgesFor(hostBridge.port, await freePort());
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+  });
+
+  assert.deepEqual(await ssAct(bridges, 'host', 'addship', { variantId: 'shuttle_Hauler', count: 2 }), added);
+  assert.deepEqual(hostBridge.requests[0].args, { variantId: 'shuttle_Hauler', count: 2 });
+
+  await ssAct(bridges, 'host', 'addship', { variantId: 'shuttle_Hauler' });
+  assert.deepEqual(hostBridge.requests[1].args, { variantId: 'shuttle_Hauler' }, 'count is optional');
+
+  // Variant validation is the mod's: the server relays the refusal rather than keeping a ship list.
+  await assert.rejects(
+    () => ssAct(bridges, 'host', 'addship', { variantId: 'shuttle_Hauller' }),
+    /unknown variant shuttle_Hauller/
+  );
+  await assert.rejects(() => ssDump(bridges, 'host', 'addship', {}), /unknown query verb "addship"/);
 });
 
 test('refuses the non-verbs with the reason, and unknown verbs with the verb list', async () => {

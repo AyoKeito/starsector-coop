@@ -179,7 +179,7 @@ Guest log: outbound PING and inbound PONG
 
 ## Agent Bridge And Starsector MCP (Phase 30)
 
-`coop.debug.CoopAgentBridge` is a dormant localhost TCP listener for driving smoke checks from an agent instead of from two pairs of eyes. It is gated on `-Dcoop.debug.bridge=<port>`: with the property absent, unparsable, or `0`, no socket is opened and nothing is logged. It binds 127.0.0.1 only, accepts one client, and services a few commands per frame on the campaign thread.
+`coop.debug.CoopAgentBridge` is a dormant localhost TCP listener for driving smoke checks from an agent instead of from two pairs of eyes. It is gated on `-Dcoop.debug.bridge=<port>`: with the property absent, unparsable, or `0`, no socket is opened and nothing is logged. It binds 127.0.0.1 only, accepts up to four clients at once, and services a few commands per frame on the campaign thread.
 
 Add the switch to either launch script:
 
@@ -195,18 +195,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 
 The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind.
 
-Seventeen verbs: `status`, `fleets`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `landmarks` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `objective`, `surveyset`, `expedition` act. Six of them carry shapes worth knowing before you diff two dumps:
+Nineteen verbs: `status`, `fleets`, `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `landmarks` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition` act. Seven of them carry shapes worth knowing before you diff two dumps:
 
 | verb | shape |
 | --- | --- |
 | `status` | adds `pause`: `blockingScreenOpen` on both roles, plus `hostIntent` / `guestIntent` / `guestKeyIntent` / `guestScreenIntent` / `eitherInCombat` / `effective` on the host. When an advance stalls, that block says which term of the coordinator's OR is holding the clock. |
 | `fleets` | a player fleet and its mirror on the other client are both keyed `coopFleetId: "player:<playerId>"`, so one logical fleet is one row on both instances. The local engine id stays in `engineId`. |
+| `cargo` | the local player fleet's load and its three independent limits — `cargoSpace`, `fuelSpace`, `personnel`, each `capacity` / `used` / `free`, where `free` is vanilla's own `$cargoRoom`-style subtraction and goes negative when the fleet is over. `overloaded` is the OR of the three and `over` names which. Each instance answers for its own fleet, so a `cargo` diff is two different fleets, not a desync check. |
 | `visibility` | `lines` is the probe's text dump; `view` is the same computation as a `coopFleetId` to visibility-level map, guest-actual against host-estimate, so the two sides' maps are directly comparable. |
 | `markets` | enumeration only (`marketId`, `name`, `factionId`, `size`, `locationId`). It does not stock anything — that is `market`'s documented host-side dock equivalence. |
 | `colonizable` | the uncolonized planets nearest the local player fleet, `limit` (default 10), `maxLy` and `neutralOnly` optional. Rows carry the planet's location-local `x`/`y` — hand `teleport` those with the `systemId`, or hand it the `planetId` as its `entityId`; planets orbit, so deriving the pair from the orbit definition is work with a wrong answer at the end of it. `marketsInSystem` counts economy markets in the planet's system and `neutralOnly` keeps only the 0 rows, which is "somewhere no faction is sitting" without a cross-reference against `markets`. `distanceLy` is 0 inside the fleet's own system and `distanceSu` is 0 outside it, so the pair sorts "here first, then nearest". The filter is vanilla's, and its authority is the core UI class `PlanetSurveyPanel` rather than `rules.csv` — two of the four location gates (`system_abyssal`, deep space) exist in no rule and in no API source. Survey level and unexplored ruins are reported rather than filtered: both block vanilla's colonize button, and both are things the run clears itself. |
 | `landmarks` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, filterable with `kinds`. Not all one-per-sector — a stock sector has 15-20 gates and more stable locations, which is what `kinds` and the default limit of 25 are for. The two colony-relevance ranges are read live off `ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS` and `Cryorevival.MAX_BONUS_DIST_LY` rather than copied, and are omitted rather than guessed if the read fails; vanilla measures them from the colony, not the fleet, so the row's `distanceLy` is not the distance the game tests. There is no `occupied` field on a stable location because vanilla deletes the entity when you build on it, so one that still exists is free. |
 
 `ability` takes an optional `on`: absent is the plain toolbar press, `on: true` / `on: false` is an idempotent level for toggles like the transponder, which `activate()` alone can only re-arm.
+
+`addship{variantId, count?}` adds combat-ready ships to the local player fleet through the engine's fleet factory — `give`'s counterpart, and the way out of a one-ship test fleet that overloads at 200 supplies. The variant is validated against the spec store first, because `createFleetMember` substitutes a placeholder hull for an unknown id instead of refusing it. `count` defaults to 1 and is capped at 20. The fleet hash goes to the log before and after, since that hash is what makes the replicator resend the roster.
 
 The agent side is `tools/starsector-mcp`, a Node stdio MCP server that wraps both ports into `ss_status`, `ss_dump`, `ss_diff`, `ss_act` and `ss_advance_days`. All state comparison lives there; the bridge only serializes. `ss_diff` excludes `role`, `engineId` and `lines` by default (per-instance by nature, and the diff drowns in them otherwise); its `ignore` argument replaces that list. Setup, the `.mcp.json` registration block, the port env overrides and a worked example per tool are in `tools/starsector-mcp/README.md`. It is not part of the mod jar and ships no runtime dependency into the game.
 

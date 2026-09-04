@@ -50,6 +50,8 @@ const TOOLS = [
     description:
       `Run one read-only bridge verb against one instance and return its JSON. Verbs: ${QUERY_VERBS.join(', ')}. ` +
       'Args by verb: fleets{locationId?}, market{marketId}, survey{systemId|"all"}, visibility{fleetId?}, ' +
+      'cargo (no args: supplies, fuel, crew, marines and credits on the local player fleet, the three ' +
+      'capacities with used/free, and an overloaded flag naming which limit is past), ' +
       'colonizable{limit?, maxLy?, neutralOnly?} (uncolonized planets nearest the local player fleet; ' +
       'neutralOnly keeps only systems with no economy market, i.e. no faction presence), ' +
       'landmarks{kinds?, limit?, maxLy?} (hypershunts, cryosleepers, gates, stable locations, ' +
@@ -101,7 +103,9 @@ const TOOLS = [
       'and a teleport that crosses locations runs the engine jump transition, so it completes over ' +
       'the next few seconds of game time rather than instantly), pause{on|off}, ability{abilityId}, ' +
       'setcr{value, memberIndex|"all"}, ' +
-      'give{commodityId?, qty?, credits?}, objective{entityId, factionId}, surveyset{planetId, level}, ' +
+      'give{commodityId?, qty?, credits?}, addship{variantId, count?} (adds combat-ready ships to the ' +
+      'local player fleet; an unknown variant is refused by name and count is capped at 20), ' +
+      'objective{entityId, factionId}, surveyset{planetId, level}, ' +
       'expedition{factionId?} (host only: forces a punitive expedition against a player colony). ' +
       'Market buy/sell, officer hire, bar-offer accept and market open/close are deliberately absent.',
     inputSchema: {

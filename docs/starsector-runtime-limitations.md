@@ -475,12 +475,22 @@ session does. It is not a defect and there is no fix from inside the mod: the en
 window it does not have. Rule for two-windows-one-PC sessions, and it is worth telling testers:
 keep both windows restored and visible.
 
-### The agent bridge serves one client at a time
+### The agent bridge serves four clients at a time
 
-`-Dcoop.debug.bridge` opens a socket that accepts a single connection. A second client gets
-`ECONNRESET` while the first holds the line, which is how a scripted supply drip was refused once a
-minute through profile (e) of the QA matrix while the MCP server was attached. Either accept N
-clients or add an in-game scheduler verb; filed as a Phase 30 follow-up.
+`-Dcoop.debug.bridge` opens a socket that accepts up to four connections at once. The fifth is closed
+on connect and the refusal is logged; the four already connected are untouched, because the client
+being served is the one with work in flight.
+
+It used to accept exactly one, which is how a scripted supply drip got `ECONNRESET` once a minute
+through profile (e) of the QA matrix while the MCP server held the line. Each client now carries its
+own framing buffer, request queue and write queue, and the four-commands-per-frame dispatch budget is
+spent one request per client per pass, so the cap on campaign-thread time per frame is unchanged and
+a client sending a burst cannot starve another.
+
+The cap is a real limit, not a formality: every slot costs a 256 KB framing buffer for the life of the
+connection, and all of it — accept, read, dispatch, write — runs on the campaign thread inside
+`advance()`. Four is sized for one MCP server plus a helper or two, which is the load this tooling
+was built for.
 
 ### The mod cannot release its UPnP port mapping when the process exits
 

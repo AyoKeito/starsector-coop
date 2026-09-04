@@ -194,9 +194,9 @@ class CoopAgentCommandsTest {
     @Test
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
-                java.util.Set.of("ability", "barpool", "colonizable", "expedition", "fleets", "give",
-                        "landmarks", "market", "markets", "objective", "pause", "setcr", "status",
-                        "survey", "surveyset", "teleport", "visibility"),
+                java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "expedition",
+                        "fleets", "give", "landmarks", "market", "markets", "objective", "pause",
+                        "setcr", "status", "survey", "surveyset", "teleport", "visibility"),
                 new CoopAgentCommands().verbs());
     }
 
@@ -235,6 +235,33 @@ class CoopAgentCommandsTest {
 
         JSONObject response = new JSONObject(
                 commands.dispatch("{\"id\":13,\"cmd\":\"landmarks\"}", EMPTY_CONTEXT));
+
+        assertFalse(response.getBoolean("ok"));
+        assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
+                "the verb must be wired; without a sector it refuses for the same reason every"
+                        + " other verb does");
+    }
+
+    @Test
+    void cargoIsRegisteredAndFailsOnTheCampaignCheckRatherThanAsAnUnknownVerb() throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+
+        JSONObject response = new JSONObject(
+                commands.dispatch("{\"id\":14,\"cmd\":\"cargo\"}", EMPTY_CONTEXT));
+
+        assertFalse(response.getBoolean("ok"));
+        assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
+                "the verb must be wired; without a sector it refuses for the same reason every"
+                        + " other verb does");
+    }
+
+    @Test
+    void addshipIsRegisteredAndFailsOnTheCampaignCheckRatherThanAsAnUnknownVerb() throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+
+        JSONObject response = new JSONObject(
+                commands.dispatch("{\"id\":15,\"cmd\":\"addship\",\"args\":{\"variantId\":\"wolf_Assault\"}}",
+                        EMPTY_CONTEXT));
 
         assertFalse(response.getBoolean("ok"));
         assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),

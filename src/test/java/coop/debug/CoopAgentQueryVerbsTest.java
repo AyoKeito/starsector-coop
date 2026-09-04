@@ -14,6 +14,7 @@ import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
+import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.fleet.CoopLocations;
 import coop.net.CoopConnectionRole;
 import coop.time.CoopSharedPauseCoordinator;
@@ -73,6 +74,9 @@ class CoopAgentQueryVerbsTest {
     @AfterEach
     void clearSettings() {
         Global.setSettings(null);
+        // addship is the only verb that reaches for the factory; leaving a fake installed would let
+        // an unrelated test create ships out of one.
+        Global.setFactory(null);
     }
 
     // ---- survey: an id the "all" dump emits must resolve --------------------------------------
@@ -1538,6 +1542,238 @@ class CoopAgentQueryVerbsTest {
         JSONObject args = new JSONObject();
         args.put(key, value);
         return args;
+    }
+
+    // ---- cargo: the logistics read the QA matrix had to work blind without ----------------------
+
+    @Test
+    void cargoReportsEveryLoadAndLimitTheEngineTracks() throws JSONException {
+        CampaignFleetAPI player = fleetWithCargo(cargoOf(120f, 90f, 40, 12, 250_000f,
+                200f, 150f, 300f, 200f, 52));
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> player));
+
+        JSONObject data = CoopAgentCommands.cargo(new JSONObject(), contextFor(sector, null));
+
+        assertEquals("player-fleet", data.getString("engineId"),
+                "named engineId so the structural diff drops it: the two players own different fleets");
+        assertEquals(120d, data.getDouble("supplies"));
+        assertEquals(90d, data.getDouble("fuel"));
+        assertEquals(40, data.getInt("crew"));
+        assertEquals(12, data.getInt("marines"));
+        assertEquals(250_000d, data.getDouble("credits"));
+
+        assertEquals(200d, data.getJSONObject("cargoSpace").getDouble("capacity"));
+        assertEquals(150d, data.getJSONObject("cargoSpace").getDouble("used"));
+        assertEquals(50d, data.getJSONObject("cargoSpace").getDouble("free"),
+                "free is vanilla's own $cargoRoom subtraction, not a second opinion");
+        assertEquals(300d, data.getJSONObject("fuelSpace").getDouble("capacity"));
+        assertEquals(90d, data.getJSONObject("fuelSpace").getDouble("used"));
+        assertEquals(200d, data.getJSONObject("personnel").getDouble("capacity"));
+        assertEquals(52d, data.getJSONObject("personnel").getDouble("used"),
+                "personnel is crew plus marines plus anything else aboard, so it is read whole");
+
+        assertFalse(data.getBoolean("overloaded"));
+        assertEquals(0, data.getJSONArray("over").length());
+    }
+
+    @Test
+    void cargoNamesEveryDimensionThatIsOverItsLimit() throws JSONException {
+        // Cargo and personnel over, fuel comfortably inside: the flag must not hide which is which.
+        CampaignFleetAPI player = fleetWithCargo(cargoOf(400f, 20f, 200, 60, 0f,
+                200f, 260f, 300f, 200f, 260));
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> player));
+
+        JSONObject data = CoopAgentCommands.cargo(new JSONObject(), contextFor(sector, null));
+
+        assertTrue(data.getBoolean("overloaded"));
+        assertEquals(List.of("cargoSpace", "personnel"), stringsOf(data.getJSONArray("over")));
+        assertEquals(-60d, data.getJSONObject("cargoSpace").getDouble("free"),
+                "over capacity reads as negative room, the way the engine's own subtraction does");
+        assertEquals(280d, data.getJSONObject("fuelSpace").getDouble("free"));
+    }
+
+    @Test
+    void cargoRefusesWhenThereIsNoPlayerFleetRatherThanReportingZeroes() {
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> null));
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.cargo(new JSONObject(), contextFor(sector, null)));
+        assertEquals("no player fleet", failure.getMessage());
+    }
+
+    // ---- addship: the setup verb `give` could not cover -----------------------------------------
+
+    @Test
+    void addshipCreatesReadyMembersAndReportsTheFleetHashChange() throws JSONException {
+        List<FleetMemberAPI> roster = new ArrayList<>();
+        List<Boolean> repaired = new ArrayList<>();
+        CampaignFleetAPI player = fleetWithRoster(roster);
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> player));
+        installFactory(roster, repaired);
+        installSettingsKnowing("shuttle_Hauler");
+
+        JSONObject args = new JSONObject();
+        args.put("variantId", "shuttle_Hauler");
+        args.put("count", 2);
+        JSONObject data = CoopAgentCommands.addship(args, contextFor(sector, null));
+
+        assertEquals(2, data.getInt("added"));
+        assertEquals(2, data.getInt("requested"));
+        assertEquals(2, data.getInt("fleetSize"));
+        assertEquals(2, roster.size(), "the members must land in the fleet's own data, not a copy");
+        assertEquals(List.of(true, true), repaired, "an added ship must arrive combat-ready");
+        assertEquals(0.7d, data.getJSONArray("members").getJSONObject(0).getDouble("cr"),
+                "CR is set to the member's max, not left at the factory default");
+        assertEquals("shuttle_Hauler",
+                data.getJSONArray("members").getJSONObject(1).getString("variantId"));
+
+        assertTrue(data.getBoolean("fleetHashChanged"));
+        assertFalse(data.getString("fleetHashBefore").isEmpty());
+        assertFalse(data.getString("fleetHashAfter").equals(data.getString("fleetHashBefore")),
+                "the hash is what makes the replicator resend the roster; an unchanged one is the bug");
+    }
+
+    @Test
+    void addshipDefaultsToOneShip() throws JSONException {
+        List<FleetMemberAPI> roster = new ArrayList<>();
+        CampaignFleetAPI player = fleetWithRoster(roster);
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> player));
+        installFactory(roster, new ArrayList<>());
+        installSettingsKnowing("wolf_Assault");
+
+        JSONObject args = new JSONObject();
+        args.put("variantId", "wolf_Assault");
+        JSONObject data = CoopAgentCommands.addship(args, contextFor(sector, null));
+
+        assertEquals(1, data.getInt("added"));
+        assertEquals(1, roster.size());
+    }
+
+    @Test
+    void addshipRefusesAnUnknownVariantByNameAndAddsNothing() {
+        List<FleetMemberAPI> roster = new ArrayList<>();
+        CampaignFleetAPI player = fleetWithRoster(roster);
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> player));
+        installFactory(roster, new ArrayList<>());
+        installSettingsKnowing("wolf_Assault");
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () -> {
+            JSONObject args = new JSONObject();
+            args.put("variantId", "wolf_Asault");
+            CoopAgentCommands.addship(args, contextFor(sector, null));
+        });
+
+        // The factory substitutes a placeholder hull for an unknown id instead of refusing it, so
+        // without this check a typo would quietly add the wrong ship.
+        assertTrue(failure.getMessage().startsWith("unknown variant wolf_Asault"), failure.getMessage());
+        assertEquals(0, roster.size());
+    }
+
+    @Test
+    void addshipRefusesACountOutsideTheAllowedRange() {
+        List<FleetMemberAPI> roster = new ArrayList<>();
+        CampaignFleetAPI player = fleetWithRoster(roster);
+        SectorAPI sector = proxy(SectorAPI.class, answers("getPlayerFleet", args -> player));
+        installFactory(roster, new ArrayList<>());
+        installSettingsKnowing("wolf_Assault");
+
+        for (int count : new int[]{0, -3, CoopAgentCommands.MAX_ADDED_SHIPS + 1}) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                JSONObject args = new JSONObject();
+                args.put("variantId", "wolf_Assault");
+                args.put("count", count);
+                CoopAgentCommands.addship(args, contextFor(sector, null));
+            }, "count " + count + " must be refused");
+        }
+        assertEquals(0, roster.size());
+    }
+
+    // ---- cargo / addship fakes ------------------------------------------------------------------
+
+    private static List<String> stringsOf(JSONArray array) throws JSONException {
+        List<String> values = new ArrayList<>();
+        for (int i = 0; i < array.length(); i++) {
+            values.add(array.getString(i));
+        }
+        return values;
+    }
+
+    private static CampaignFleetAPI fleetWithCargo(com.fs.starfarer.api.campaign.CargoAPI cargo) {
+        return proxy(CampaignFleetAPI.class, answers(
+                "getId", args -> "player-fleet",
+                "getCargo", args -> cargo));
+    }
+
+    private static com.fs.starfarer.api.campaign.CargoAPI cargoOf(
+            float supplies, float fuel, int crew, int marines, float credits,
+            float maxCapacity, float spaceUsed, float maxFuel, float maxPersonnel, int totalPersonnel) {
+        Map<String, Answer> map = answers();
+        map.put("getSupplies", args -> supplies);
+        map.put("getFuel", args -> fuel);
+        map.put("getCrew", args -> crew);
+        map.put("getMarines", args -> marines);
+        map.put("getCredits", args -> new com.fs.starfarer.api.util.MutableValue(credits));
+        map.put("getMaxCapacity", args -> maxCapacity);
+        map.put("getSpaceUsed", args -> spaceUsed);
+        map.put("getMaxFuel", args -> maxFuel);
+        map.put("getMaxPersonnel", args -> maxPersonnel);
+        map.put("getTotalPersonnel", args -> totalPersonnel);
+        return proxy(com.fs.starfarer.api.campaign.CargoAPI.class, map);
+    }
+
+    private static CampaignFleetAPI fleetWithRoster(List<FleetMemberAPI> roster) {
+        com.fs.starfarer.api.campaign.FleetDataAPI data =
+                proxy(com.fs.starfarer.api.campaign.FleetDataAPI.class, answers(
+                        "getMembersListCopy", args -> new ArrayList<>(roster),
+                        "addFleetMember", args -> {
+                            roster.add((FleetMemberAPI) args[0]);
+                            return null;
+                        }));
+        return proxy(CampaignFleetAPI.class, answers(
+                "getId", args -> "player-fleet",
+                "getName", args -> "Player Fleet",
+                "getFleetData", args -> data));
+    }
+
+    /** A factory that hands back a distinct, readable member each call, ids numbered from the roster. */
+    private void installFactory(List<FleetMemberAPI> roster,
+                                List<Boolean> repaired) {
+        Global.setFactory(proxy(com.fs.starfarer.api.FactoryAPI.class, answers(
+                "createFleetMember", args -> fakeMember(
+                        "member-" + (roster.size() + 1), String.valueOf(args[1]), repaired))));
+    }
+
+    private static FleetMemberAPI fakeMember(
+            String memberId, String variantId, List<Boolean> repaired) {
+        float[] cr = {0f};
+        com.fs.starfarer.api.fleet.RepairTrackerAPI repair =
+                proxy(com.fs.starfarer.api.fleet.RepairTrackerAPI.class, answers(
+                        "getMaxCR", args -> 0.7f,
+                        "getCR", args -> cr[0],
+                        "setCR", args -> {
+                            cr[0] = (Float) args[0];
+                            return null;
+                        }));
+        com.fs.starfarer.api.fleet.FleetMemberStatusAPI status =
+                proxy(com.fs.starfarer.api.fleet.FleetMemberStatusAPI.class, answers(
+                        "getHullFraction", args -> 1f,
+                        "repairFully", args -> {
+                            repaired.add(true);
+                            return null;
+                        }));
+        return proxy(FleetMemberAPI.class, answers(
+                "getId", args -> memberId,
+                "getSpecId", args -> variantId,
+                "getHullId", args -> "shuttle",
+                "getRepairTracker", args -> repair,
+                "getStatus", args -> status));
+    }
+
+    /** Settings that know exactly one variant id, which is what makes the refusal test meaningful. */
+    private void installSettingsKnowing(String variantId) {
+        Global.setSettings(proxy(SettingsAPI.class, answers(
+                "getFloat", args -> 2000f,
+                "doesVariantExist", args -> variantId.equals(args[0]))));
     }
 
     // ---- Proxy plumbing -------------------------------------------------------------------------------

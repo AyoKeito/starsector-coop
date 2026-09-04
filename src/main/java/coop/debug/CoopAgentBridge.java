@@ -33,34 +33,52 @@ import java.util.Objects;
  * the session down.
  *
  * <p><b>Campaign thread only.</b> No threads and no {@code Selector}: the listening
- * {@link ServerSocketChannel} and the single client {@link SocketChannel} are both non-blocking, and
- * accept / read / dispatch / write all happen inside {@link #advance(float)}. That is the same shape
+ * {@link ServerSocketChannel} and every client {@link SocketChannel} are non-blocking, and accept /
+ * read / dispatch / write all happen inside {@link #advance(float)}. That is the same shape
  * {@code CoopNetService} uses, for the same reason — Starsector can kill a mod-created thread without
  * surfacing it in the log, and the script sandbox refuses to load the stream and reflection packages
  * outright. Framing is hand-rolled newline-delimited UTF-8 over {@link ByteBuffer}, again mirroring
  * the coop TCP pump.
  *
  * <p><b>Bounded per frame.</b> At most {@value #MAX_COMMANDS_PER_FRAME} commands are dispatched per
- * frame; anything else the client sent stays buffered for the next one. Each command is a synchronous
- * call inside {@code CoopAgentCommands.dispatch}, which converts every failure — malformed JSON, an
- * unknown verb, a throwing handler — into an {@code ok:false} line. The connection survives; so does
- * the game.
+ * frame <em>across all clients</em>; anything else stays buffered for the next one. The budget is
+ * spent round-robin, one request per client per pass, so a client spraying requests cannot starve the
+ * others. Each command is a synchronous call inside {@code CoopAgentCommands.dispatch}, which converts
+ * every failure — malformed JSON, an unknown verb, a throwing handler — into an {@code ok:false} line.
+ * The connection survives; so does the game.
  *
- * <p><b>One client.</b> A second connection while one is live is closed immediately. A disconnect
- * tears the client state down and the listener accepts a fresh one on the next frame.
+ * <p><b>Up to {@value #MAX_CLIENTS} clients.</b> The bridge used to serve exactly one, and the second
+ * connection (a scripted supply drip during the 2026-09-02 QA run, while the MCP server held the line)
+ * got {@code ECONNRESET}. It now accepts a small fixed number and refuses the one past the cap by
+ * closing it immediately — refusal rather than eviction, because the client already being served is
+ * the one with work in flight. Every client carries its own framing state, request queue and write
+ * queue; a disconnect, a half-close or a write failure on one costs that client only.
  */
 public final class CoopAgentBridge implements EveryFrameScript {
 
     /** Set to the port the bridge should listen on. Anything unparsable means dormant. */
     public static final String PORT_PROPERTY = "coop.debug.bridge";
 
-    /** Dispatch budget per frame. Excess input stays buffered rather than being dropped. */
+    /** Dispatch budget per frame, shared by every client. Excess input stays buffered. */
     static final int MAX_COMMANDS_PER_FRAME = 4;
+
+    /**
+     * How many clients may be connected at once. Four, because the realistic load is one MCP server
+     * plus one or two scripted helpers, and every extra slot costs a {@value #MAX_REQUEST_BYTES}-byte
+     * framing buffer for the life of the connection.
+     */
+    static final int MAX_CLIENTS = 4;
 
     /** Sanity cap on one request line. Corruption protection, not a protocol limit. */
     static final int MAX_REQUEST_BYTES = 256 * 1024;
 
     private static final int READ_BUFFER_BYTES = 8 * 1024;
+
+    /**
+     * Accept attempts per frame. The backlog is drained rather than trickled one connection per frame,
+     * but the loop is still bounded so a connect storm cannot hold the campaign thread.
+     */
+    private static final int MAX_ACCEPTS_PER_FRAME = MAX_CLIENTS + 4;
 
     /**
      * The installed bridge, so a game reload can close the previous one's listener before the new one
@@ -75,18 +93,15 @@ public final class CoopAgentBridge implements EveryFrameScript {
     private final CoopAgentCommands commands;
     private final CoopAgentCommands.Context context;
 
+    /**
+     * Scratch only, and safe to share: a read pass fills it, drains it into one client's framing
+     * buffer and clears it again, all inside a single synchronous call.
+     */
     private final ByteBuffer readBuffer = ByteBuffer.allocate(READ_BUFFER_BYTES);
-    private final byte[] requestFrame = new byte[MAX_REQUEST_BYTES];
-    private final ArrayDeque<String> pendingRequests = new ArrayDeque<>();
-    private final ArrayDeque<String> pendingResponses = new ArrayDeque<>();
+
+    private final List<ClientSession> clients = new ArrayList<>(MAX_CLIENTS);
 
     private ServerSocketChannel listener;
-    private SocketChannel client;
-    private ByteBuffer pendingWrite;
-    private int requestFrameLength;
-    /** The peer sent EOF; the client is kept only until what it already framed has been answered. */
-    private boolean peerClosed;
-    private boolean discardingOversized;
     private boolean listenerFailed;
     private boolean stopped;
 
@@ -94,6 +109,29 @@ public final class CoopAgentBridge implements EveryFrameScript {
         this.port = port;
         this.commands = Objects.requireNonNull(commands, "commands");
         this.context = Objects.requireNonNull(context, "context");
+    }
+
+    /** Everything one connection owns. Nothing here is shared, which is what makes N clients safe. */
+    private static final class ClientSession {
+        /** {@code null} only for the test seam that buffers requests without a socket. */
+        private final SocketChannel channel;
+        private final byte[] requestFrame = new byte[MAX_REQUEST_BYTES];
+        private final ArrayDeque<String> pendingRequests = new ArrayDeque<>();
+        private final ArrayDeque<String> pendingResponses = new ArrayDeque<>();
+
+        private ByteBuffer pendingWrite;
+        private int requestFrameLength;
+        /** The peer sent EOF; the client is kept only until what it already framed has been answered. */
+        private boolean peerClosed;
+        private boolean discardingOversized;
+
+        private ClientSession(SocketChannel channel) {
+            this.channel = channel;
+        }
+
+        private boolean idle() {
+            return pendingRequests.isEmpty() && pendingResponses.isEmpty() && pendingWrite == null;
+        }
     }
 
     // ---- Gating + install -----------------------------------------------------------------------
@@ -161,7 +199,8 @@ public final class CoopAgentBridge implements EveryFrameScript {
         sector.addTransientScript(bridge);
         active = bridge;
         CoopLog.info(CoopAgentBridge.class, "Coop agent bridge armed on 127.0.0.1:" + bridge.port
-                + " (" + PORT_PROPERTY + "); dev tooling, read/diff/setup verbs only");
+                + " (" + PORT_PROPERTY + "); dev tooling, read/diff/setup verbs only, up to "
+                + MAX_CLIENTS + " clients");
     }
 
     /** Closes the previously installed bridge, if any. Safe to call when there is none. */
@@ -196,10 +235,11 @@ public final class CoopAgentBridge implements EveryFrameScript {
             pump();
         } catch (RuntimeException | LinkageError ex) {
             // An exception escaping advance() kills the script for the rest of the session. A dev
-            // tool must never be the reason a session loses a frame hook, so the client is dropped
-            // and the listener stays up for the next connection.
-            CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge frame failed; dropping client", ex);
-            closeClient();
+            // tool must never be the reason a session loses a frame hook. Every per-client step has
+            // its own catch, so anything reaching here is not attributable to one connection: drop
+            // them all and keep the listener up for the next one.
+            CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge frame failed; dropping clients", ex);
+            closeAllClients();
         }
     }
 
@@ -207,7 +247,7 @@ public final class CoopAgentBridge implements EveryFrameScript {
         if (!ensureListener()) {
             return;
         }
-        acceptClient();
+        acceptClients();
         readRequests();
         dispatchBuffered();
         flushResponses();
@@ -215,25 +255,23 @@ public final class CoopAgentBridge implements EveryFrameScript {
     }
 
     /**
-     * Finishes a half-closed client: the peer sent EOF, so nothing more will be read, but whatever it
-     * framed before closing is still owed an answer. Closes as soon as the last of it has been
-     * written (the dispatch budget can spread that over several frames).
+     * Finishes half-closed clients: the peer sent EOF, so nothing more will be read, but whatever it
+     * framed before closing is still owed an answer. Each closes as soon as the last of it has been
+     * written (the shared dispatch budget can spread that over several frames).
      */
     private void closeAfterPeerHalfClose() {
-        if (!peerClosed || client == null) {
-            return;
+        for (ClientSession session : snapshot()) {
+            if (session.peerClosed && session.idle()) {
+                CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client disconnected");
+                closeClient(session);
+            }
         }
-        if (!pendingRequests.isEmpty() || !pendingResponses.isEmpty() || pendingWrite != null) {
-            return;
-        }
-        CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client disconnected");
-        closeClient();
     }
 
-    /** Releases both channels. Idempotent; the bridge stays inert afterwards. */
+    /** Releases every channel. Idempotent; the bridge stays inert afterwards. */
     public void shutdown() {
         stopped = true;
-        closeClient();
+        closeAllClients();
         closeChannel(listener);
         listener = null;
         CoopLog.info(CoopAgentBridge.class, "Coop agent bridge closed on port " + port);
@@ -254,7 +292,7 @@ public final class CoopAgentBridge implements EveryFrameScript {
             channel.socket().setReuseAddress(true);
             // Loopback only, always. This is an unauthenticated command channel into a running game;
             // it has no business being reachable from anywhere but this machine.
-            channel.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 1);
+            channel.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), MAX_CLIENTS);
             listener = channel;
             CoopLog.info(CoopAgentBridge.class, "Coop agent bridge listening on 127.0.0.1:" + port);
             return true;
@@ -266,31 +304,47 @@ public final class CoopAgentBridge implements EveryFrameScript {
         }
     }
 
-    private void acceptClient() {
-        try {
-            SocketChannel accepted = listener.accept();
+    private void acceptClients() {
+        for (int attempt = 0; attempt < MAX_ACCEPTS_PER_FRAME; attempt++) {
+            SocketChannel accepted;
+            try {
+                accepted = listener.accept();
+            } catch (Exception ex) {
+                CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge accept failed", ex);
+                return;
+            }
             if (accepted == null) {
                 return;
             }
-            if (client != null) {
-                // One client at a time (the MCP server holds exactly one connection per instance).
+            if (clients.size() >= MAX_CLIENTS) {
+                // Refuse the newcomer rather than evict a client that already has work in flight.
                 closeChannel(accepted);
-                CoopLog.warn(CoopAgentBridge.class,
-                        "Coop agent bridge refused a second client on port " + port);
-                return;
+                CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge refused a client on port "
+                        + port + "; " + MAX_CLIENTS + " already connected");
+                continue;
             }
-            accepted.configureBlocking(false);
-            accepted.socket().setTcpNoDelay(true);
-            client = accepted;
-            resetFraming();
-            CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client connected on port " + port);
-        } catch (Exception ex) {
-            CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge accept failed", ex);
+            try {
+                accepted.configureBlocking(false);
+                accepted.socket().setTcpNoDelay(true);
+            } catch (Exception ex) {
+                CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge could not configure a client", ex);
+                closeChannel(accepted);
+                continue;
+            }
+            clients.add(new ClientSession(accepted));
+            CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client connected on port " + port
+                    + " (" + clients.size() + "/" + MAX_CLIENTS + ")");
         }
     }
 
     private void readRequests() {
-        SocketChannel channel = client;
+        for (ClientSession session : snapshot()) {
+            readRequests(session);
+        }
+    }
+
+    private void readRequests(ClientSession session) {
+        SocketChannel channel = session.channel;
         if (channel == null || !channel.isOpen() || !channel.isConnected()) {
             return;
         }
@@ -300,7 +354,7 @@ public final class CoopAgentBridge implements EveryFrameScript {
             while (read > 0) {
                 readBuffer.flip();
                 while (readBuffer.hasRemaining()) {
-                    appendRequestByte(readBuffer.get());
+                    appendRequestByte(session, readBuffer.get());
                 }
                 readBuffer.clear();
                 read = channel.read(readBuffer);
@@ -311,109 +365,132 @@ public final class CoopAgentBridge implements EveryFrameScript {
                 // client down here threw that request away before dispatch and the caller saw an
                 // empty close it could not tell from a crash. The teardown is deferred to
                 // closeAfterPeerHalfClose(), which runs once everything queued has been answered.
-                peerClosed = true;
-                if (pendingRequests.isEmpty() && pendingResponses.isEmpty() && pendingWrite == null) {
+                session.peerClosed = true;
+                if (session.idle()) {
                     CoopLog.info(CoopAgentBridge.class, "Coop agent bridge client disconnected");
-                    closeClient();
+                    closeClient(session);
                 }
             }
         } catch (Exception ex) {
             CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge read failed; dropping client", ex);
-            closeClient();
+            closeClient(session);
         }
     }
 
-    private void appendRequestByte(byte value) {
+    private void appendRequestByte(ClientSession session, byte value) {
         int unsigned = value & 0xff;
         if (unsigned == '\n') {
-            if (discardingOversized) {
-                requestFrameLength = 0;
-                discardingOversized = false;
+            if (session.discardingOversized) {
+                session.requestFrameLength = 0;
+                session.discardingOversized = false;
                 return;
             }
-            String line = new String(requestFrame, 0, requestFrameLength, StandardCharsets.UTF_8).trim();
-            requestFrameLength = 0;
+            String line = new String(session.requestFrame, 0, session.requestFrameLength,
+                    StandardCharsets.UTF_8).trim();
+            session.requestFrameLength = 0;
             if (!line.isEmpty()) {
-                pendingRequests.add(line);
+                session.pendingRequests.add(line);
             }
             return;
         }
-        if (unsigned == '\r' || discardingOversized) {
+        if (unsigned == '\r' || session.discardingOversized) {
             return;
         }
-        if (requestFrameLength >= MAX_REQUEST_BYTES) {
+        if (session.requestFrameLength >= MAX_REQUEST_BYTES) {
             CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge discarding oversized request line");
-            requestFrameLength = 0;
-            discardingOversized = true;
+            session.requestFrameLength = 0;
+            session.discardingOversized = true;
             return;
         }
-        requestFrame[requestFrameLength] = (byte) unsigned;
-        requestFrameLength++;
+        session.requestFrame[session.requestFrameLength] = (byte) unsigned;
+        session.requestFrameLength++;
     }
 
     /**
-     * Runs at most {@value #MAX_COMMANDS_PER_FRAME} buffered commands and queues their responses.
-     * Whatever is left stays in the queue for the next frame — the cap bounds how much campaign-thread
-     * time one frame can spend answering, and dropping the excess would silently lose a request the
-     * caller is still waiting on.
+     * Runs at most {@value #MAX_COMMANDS_PER_FRAME} buffered commands across every client and queues
+     * their responses. Whatever is left stays queued for the next frame — the cap bounds how much
+     * campaign-thread time one frame can spend answering, and dropping the excess would silently lose
+     * a request the caller is still waiting on.
+     *
+     * <p>The budget is global and spent one request per client per pass: with a single client that is
+     * the old behaviour exactly, and with several it means a client sending a burst cannot spend the
+     * whole frame's budget while another waits.
      *
      * @return how many commands were dispatched this call
      */
     int dispatchBuffered() {
         int dispatched = 0;
-        while (dispatched < MAX_COMMANDS_PER_FRAME) {
-            String request = pendingRequests.poll();
-            if (request == null) {
-                break;
+        boolean progress = true;
+        while (dispatched < MAX_COMMANDS_PER_FRAME && progress) {
+            progress = false;
+            for (ClientSession session : snapshot()) {
+                if (dispatched >= MAX_COMMANDS_PER_FRAME) {
+                    break;
+                }
+                String request = session.pendingRequests.poll();
+                if (request == null) {
+                    continue;
+                }
+                dispatched++;
+                progress = true;
+                session.pendingResponses.add(commands.dispatch(request, context));
             }
-            dispatched++;
-            pendingResponses.add(commands.dispatch(request, context));
         }
         return dispatched;
     }
 
     private void flushResponses() {
-        SocketChannel channel = client;
+        for (ClientSession session : snapshot()) {
+            flushResponses(session);
+        }
+    }
+
+    private void flushResponses(ClientSession session) {
+        SocketChannel channel = session.channel;
         if (channel == null || !channel.isOpen() || !channel.isConnected()) {
             return;
         }
         try {
             while (true) {
-                if (pendingWrite == null) {
-                    String next = pendingResponses.poll();
+                if (session.pendingWrite == null) {
+                    String next = session.pendingResponses.poll();
                     if (next == null) {
                         return;
                     }
-                    pendingWrite = ByteBuffer.wrap((next + "\n").getBytes(StandardCharsets.UTF_8));
+                    session.pendingWrite =
+                            ByteBuffer.wrap((next + "\n").getBytes(StandardCharsets.UTF_8));
                 }
-                while (pendingWrite.hasRemaining()) {
-                    if (channel.write(pendingWrite) == 0) {
+                while (session.pendingWrite.hasRemaining()) {
+                    if (channel.write(session.pendingWrite) == 0) {
                         // Socket buffer full: resume this exact response next frame.
                         return;
                     }
                 }
-                pendingWrite = null;
+                session.pendingWrite = null;
             }
         } catch (Exception ex) {
             CoopLog.warn(CoopAgentBridge.class, "Coop agent bridge write failed; dropping client", ex);
-            closeClient();
+            closeClient(session);
         }
     }
 
-    private void closeClient() {
-        SocketChannel channel = client;
-        client = null;
-        peerClosed = false;
-        pendingWrite = null;
-        pendingRequests.clear();
-        pendingResponses.clear();
-        resetFraming();
-        closeChannel(channel);
+    private void closeClient(ClientSession session) {
+        clients.remove(session);
+        session.pendingWrite = null;
+        session.pendingRequests.clear();
+        session.pendingResponses.clear();
+        closeChannel(session.channel);
     }
 
-    private void resetFraming() {
-        requestFrameLength = 0;
-        discardingOversized = false;
+    private void closeAllClients() {
+        for (ClientSession session : snapshot()) {
+            closeClient(session);
+        }
+    }
+
+    /** Iteration copy: every per-client step may close its own session out of the live list. */
+    private List<ClientSession> snapshot() {
+        return new ArrayList<>(clients);
     }
 
     private static void closeChannel(Channel channel) {
@@ -480,24 +557,57 @@ public final class CoopAgentBridge implements EveryFrameScript {
         return listener != null && listener.isOpen();
     }
 
+    /** How many clients are connected right now. */
+    int clientCountForTesting() {
+        return clients.size();
+    }
+
     /** Drives one frame's worth of socket + dispatch work without the engine. */
     void advanceForTesting() {
         advance(1f / 60f);
     }
 
-    /** Buffers a request line as if it had arrived framed on the socket. */
+    /**
+     * Buffers a request line as if it had arrived framed on the socket, on a socketless session.
+     * {@code clientIndex} picks which one, so the round-robin budget can be tested without four real
+     * connections; sessions are created on demand up to the cap.
+     */
+    void enqueueRequestForTesting(int clientIndex, String line) {
+        while (clients.size() <= clientIndex) {
+            if (clients.size() >= MAX_CLIENTS) {
+                throw new IllegalArgumentException("clientIndex " + clientIndex + " is past the "
+                        + MAX_CLIENTS + "-client cap");
+            }
+            clients.add(new ClientSession(null));
+        }
+        clients.get(clientIndex).pendingRequests.add(line);
+    }
+
+    /** Buffers a request line on the first socketless session. */
     void enqueueRequestForTesting(String line) {
-        pendingRequests.add(line);
+        enqueueRequestForTesting(0, line);
+    }
+
+    /** Requests still buffered on one client, so fairness can be asserted per connection. */
+    int pendingRequestCountForTesting(int clientIndex) {
+        return clientIndex < clients.size() ? clients.get(clientIndex).pendingRequests.size() : 0;
     }
 
     int pendingRequestCountForTesting() {
-        return pendingRequests.size();
+        int total = 0;
+        for (ClientSession session : clients) {
+            total += session.pendingRequests.size();
+        }
+        return total;
     }
 
-    /** Takes the responses queued so far, in order. */
+    /** Takes the responses queued so far on every client, client by client. */
     List<String> drainResponsesForTesting() {
-        List<String> drained = new ArrayList<>(pendingResponses);
-        pendingResponses.clear();
+        List<String> drained = new ArrayList<>();
+        for (ClientSession session : clients) {
+            drained.addAll(session.pendingResponses);
+            session.pendingResponses.clear();
+        }
         return drained;
     }
 }

@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -283,31 +284,137 @@ class CoopAgentBridgeTest {
         }
     }
 
+    // ---- Several clients at once ---------------------------------------------------------------
+
+    /**
+     * The gap this closes: the bridge used to serve exactly one connection, so the scripted supply
+     * drip in the 2026-09-02 QA run got {@code ECONNRESET} for as long as the MCP server held the
+     * line. Interleaved requests must come back on the connection that asked, not the newest one.
+     */
     @Test
-    void aSecondClientIsRefusedWhileOneIsAlreadyConnected() throws IOException, JSONException {
+    void everyClientUpToTheCapIsServedOnItsOwnConnection() throws IOException, JSONException {
         int port = reserveLocalPort();
         CoopAgentBridge bridge = new CoopAgentBridge(port, echoRegistry(), EMPTY_CONTEXT);
 
-        SocketChannel first = null;
-        SocketChannel second = null;
+        List<SocketChannel> clients = new ArrayList<>();
         try {
             bridge.advanceForTesting();
-            first = connect(port);
+            for (int i = 0; i < CoopAgentBridge.MAX_CLIENTS; i++) {
+                clients.add(connect(port));
+            }
+            bridge.advanceForTesting();
+            assertEquals(CoopAgentBridge.MAX_CLIENTS, bridge.clientCountForTesting());
+
+            // Every client asks before any of them reads, so the answers have to be routed.
+            for (int i = 0; i < clients.size(); i++) {
+                write(clients.get(i), "{\"id\":" + (100 + i) + ",\"cmd\":\"echo\",\"args\":{\"what\":\"c"
+                        + i + "\"}}");
+            }
+            for (int i = 0; i < clients.size(); i++) {
+                JSONObject response = new JSONObject(readLine(clients.get(i), bridge));
+                assertEquals(100 + i, response.getInt("id"));
+                assertEquals("c" + i, response.getJSONObject("data").getString("seen"),
+                        "each client must get its own answer, not another client's");
+            }
+        } finally {
+            for (SocketChannel client : clients) {
+                close(client);
+            }
+            bridge.shutdown();
+        }
+    }
+
+    @Test
+    void theClientPastTheCapIsRefusedAndTheOnesAlreadyConnectedAreUndisturbed()
+            throws IOException, JSONException {
+        int port = reserveLocalPort();
+        CoopAgentBridge bridge = new CoopAgentBridge(port, echoRegistry(), EMPTY_CONTEXT);
+
+        List<SocketChannel> clients = new ArrayList<>();
+        SocketChannel extra = null;
+        try {
+            bridge.advanceForTesting();
+            for (int i = 0; i < CoopAgentBridge.MAX_CLIENTS; i++) {
+                clients.add(connect(port));
+            }
             bridge.advanceForTesting();
 
-            second = connect(port);
+            extra = connect(port);
             bridge.advanceForTesting();
             bridge.advanceForTesting();
+            assertEquals(CoopAgentBridge.MAX_CLIENTS, bridge.clientCountForTesting(),
+                    "the newcomer is refused rather than evicting a client with work in flight");
 
-            // The first connection is untouched by the refusal.
+            SocketChannel first = clients.get(0);
             write(first, "{\"id\":3,\"cmd\":\"echo\",\"args\":{\"what\":\"mine\"}}");
             JSONObject response = new JSONObject(readLine(first, bridge));
             assertEquals("mine", response.getJSONObject("data").getString("seen"));
         } finally {
-            close(first);
-            close(second);
+            for (SocketChannel client : clients) {
+                close(client);
+            }
+            close(extra);
             bridge.shutdown();
         }
+    }
+
+    @Test
+    void aClientLeavingFreesItsSlotAndCostsTheOthersNothing() throws IOException, JSONException {
+        int port = reserveLocalPort();
+        CoopAgentBridge bridge = new CoopAgentBridge(port, echoRegistry(), EMPTY_CONTEXT);
+
+        SocketChannel keeper = null;
+        SocketChannel leaver = null;
+        SocketChannel replacement = null;
+        try {
+            bridge.advanceForTesting();
+            keeper = connect(port);
+            leaver = connect(port);
+            bridge.advanceForTesting();
+            assertEquals(2, bridge.clientCountForTesting());
+
+            // The half-close path: the request and the EOF land in the same read pass, and the
+            // answer is still owed before the slot goes back.
+            write(leaver, "{\"id\":1,\"cmd\":\"echo\",\"args\":{\"what\":\"last words\"}}");
+            leaver.shutdownOutput();
+            assertEquals("last words",
+                    new JSONObject(readLine(leaver, bridge)).getJSONObject("data").getString("seen"));
+            close(leaver);
+            bridge.advanceForTesting();
+            bridge.advanceForTesting();
+            assertEquals(1, bridge.clientCountForTesting(), "the departed client must free its slot");
+
+            write(keeper, "{\"id\":2,\"cmd\":\"echo\",\"args\":{\"what\":\"still here\"}}");
+            assertEquals("still here",
+                    new JSONObject(readLine(keeper, bridge)).getJSONObject("data").getString("seen"));
+
+            replacement = connect(port);
+            bridge.advanceForTesting();
+            write(replacement, "{\"id\":3,\"cmd\":\"echo\",\"args\":{\"what\":\"new\"}}");
+            assertEquals("new",
+                    new JSONObject(readLine(replacement, bridge)).getJSONObject("data").getString("seen"));
+        } finally {
+            close(keeper);
+            close(leaver);
+            close(replacement);
+            bridge.shutdown();
+        }
+    }
+
+    @Test
+    void theFrameBudgetIsGlobalAndSpentRoundRobinSoOneClientCannotStarveAnother() {
+        CoopAgentBridge bridge = bridgeWithCountingRegistry(new int[1]);
+        // Client 0 sprays; client 1 asks once.
+        for (int i = 0; i < 6; i++) {
+            bridge.enqueueRequestForTesting(0, "{\"id\":" + i + ",\"cmd\":\"count\"}");
+        }
+        bridge.enqueueRequestForTesting(1, "{\"id\":99,\"cmd\":\"count\"}");
+
+        assertEquals(CoopAgentBridge.MAX_COMMANDS_PER_FRAME, bridge.dispatchBuffered(),
+                "the cap is per frame across all clients, not per client");
+        assertEquals(3, bridge.pendingRequestCountForTesting());
+        assertEquals(0, bridge.pendingRequestCountForTesting(1),
+                "the quiet client's single request must be answered in the same frame");
     }
 
     @Test
@@ -425,7 +532,7 @@ class CoopAgentBridgeTest {
             bridge.advanceForTesting();
             write(second, "{\"id\":10,\"cmd\":\"echo\",\"args\":{\"what\":\"next\"}}");
             assertEquals(10, new JSONObject(readLine(second, bridge)).getInt("id"),
-                    "the half-closed client must not hold the single slot forever");
+                    "the half-closed client must not hold its slot forever");
             close(second);
         } finally {
             close(client);
@@ -461,12 +568,13 @@ class CoopAgentBridgeTest {
     /** Drives the bridge's frame loop until a whole response line is readable, or gives up loudly. */
     private String readLine(SocketChannel channel, CoopAgentBridge bridge) throws IOException {
         long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        StringBuilder buffered = pending.computeIfAbsent(channel, key -> new StringBuilder());
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         while (System.currentTimeMillis() < deadline) {
-            int index = pending.indexOf('\n');
+            int index = buffered.indexOf("\n");
             if (index >= 0) {
-                String line = pending.substring(0, index);
-                pending = pending.substring(index + 1);
+                String line = buffered.substring(0, index);
+                buffered.delete(0, index + 1);
                 return line;
             }
             bridge.advanceForTesting();
@@ -476,14 +584,17 @@ class CoopAgentBridgeTest {
                 buffer.flip();
                 byte[] bytes = new byte[buffer.remaining()];
                 buffer.get(bytes);
-                pending += new String(bytes, StandardCharsets.UTF_8);
+                buffered.append(new String(bytes, StandardCharsets.UTF_8));
             }
         }
-        throw new AssertionError("timed out waiting for a bridge response line; buffered='" + pending + "'");
+        throw new AssertionError("timed out waiting for a bridge response line; buffered='" + buffered + "'");
     }
 
-    /** Leftover bytes between {@link #readLine} calls; a response can arrive batched with the next. */
-    private String pending = "";
+    /**
+     * Leftover bytes between {@link #readLine} calls, per connection — a response can arrive batched
+     * with the next one, and with several clients open the streams must not be pooled.
+     */
+    private final Map<SocketChannel, StringBuilder> pending = new IdentityHashMap<>();
 
     private static void close(SocketChannel channel) {
         if (channel == null) {
