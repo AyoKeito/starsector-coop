@@ -71,10 +71,11 @@ import java.util.function.LongSupplier;
  *       {@link #PRE_SESSION_INVALID_FRAME_LIMIT} undecodable frames before it is dropped. After the
  *       handshake the tolerant decoder's old behaviour stands: a proven session is allowed to
  *       resynchronise.</li>
- *   <li><b>Per-poll ceilings.</b> At most {@link #MAX_DATAGRAMS_PER_POLL} datagrams and
- *       {@link #MAX_FRAMES_PER_POLL} frames are ingested per poll; the rest waits in the kernel
- *       buffer. Nothing is measured or dropped — the only goal is that a flood cannot starve the
- *       campaign frame.</li>
+ *   <li><b>Ingest ceilings.</b> At most {@link #MAX_DATAGRAMS_PER_POLL} datagrams per poll, and at
+ *       most {@link #MAX_FRAMES_PER_POLL} frames and {@link #MAX_INBOUND_BYTES_PER_FRAME} bytes per
+ *       <em>campaign frame</em> (see {@link #beginFrame()}); the rest waits in the kernel buffer.
+ *       Nothing is measured or dropped — the only goal is that a flood cannot starve the campaign
+ *       frame.</li>
  * </ul>
  *
  * <p><b>Keepalive and ICMP.</b> When a send target exists and the stream has been quiet for
@@ -239,6 +240,17 @@ public class CoopNetService {
     static final int MAX_DATAGRAMS_PER_POLL = 256;
     static final int MAX_FRAMES_PER_POLL = 256;
     /**
+     * Bytes this process will read off TCP sockets in one campaign frame (net-fix-3).
+     *
+     * <p>The frame ceiling above counts <em>frames</em>, and a stream with no newline in it produces
+     * none: before this, a peer could hand the campaign thread an unbounded number of 8 KB reads per
+     * frame and never trip a single counter. 512 KB is two orders of magnitude past what a busy
+     * session actually moves per frame (the largest single message this build produces is a
+     * ~256 KB NPC_FLEET_SET, and one of those is several frames of traffic), and what is left over
+     * waits in the kernel buffer exactly as it does at the frame ceiling.
+     */
+    static final int MAX_INBOUND_BYTES_PER_FRAME = 512 * 1024;
+    /**
      * Cap on remembered attempt records. A spray from rotating source addresses must not be able to
      * grow a map inside the campaign process; the oldest entry is evicted, which at worst forgives an
      * address that stopped knocking long enough for 256 others to knock.
@@ -252,10 +264,6 @@ public class CoopNetService {
      * because the largest UDP payload that exists is 65,507 bytes.
      */
     static final int MAX_INBOUND_DATAGRAM_BYTES = 4 * 1024;
-
-    /** Allocated once: the frame framer takes a callback and this one carries no per-peer state. */
-    private static final Runnable OVERSIZED_FRAME_WARNING =
-            () -> CoopLog.warn(CoopNetService.class, "Coop TCP received oversized frame");
 
     private final Queue<CoopMessages.Message> inbound = new ConcurrentLinkedQueue<>();
     // High-frequency state datagrams (UDP). Kept separate from the reliable TCP control queues.
@@ -366,8 +374,18 @@ public class CoopNetService {
     private long connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
     /** Set by {@link #stopReconnecting(String)}: the guest connect loop is over for this launch. */
     private boolean guestConnectStopped;
-    /** Frames ingested so far in the current {@link #pollNetworkLocked()}; see {@link #MAX_FRAMES_PER_POLL}. */
+    /** Frames ingested so far in the current campaign frame; see {@link #MAX_FRAMES_PER_POLL}. */
     private int framesThisPoll;
+    /**
+     * Bytes read off TCP sockets so far in the current campaign frame; see
+     * {@link #MAX_INBOUND_BYTES_PER_FRAME}.
+     */
+    private long inboundBytesThisFrame;
+    /**
+     * "May a message of this type be written to the peer right now?", or null for "anything may".
+     * See {@link #setOutboundWriteGate}.
+     */
+    private volatile java.util.function.Predicate<CoopMessages.Type> outboundWriteGate;
 
     public CoopNetService() {
         this(System::currentTimeMillis);
@@ -394,11 +412,64 @@ public class CoopNetService {
         return peers.size();
     }
 
-    /** Test seam: frames ingested by the most recent poll, for the per-poll ceiling. */
+    /** Test seam: frames ingested so far in the current campaign frame. */
     int framesInLastPoll() {
         synchronized (lifecycleLock) {
             return framesThisPoll;
         }
+    }
+
+    /**
+     * Test seam: one peer slot, so a test can plant the half-written frame a full kernel send buffer
+     * produces without having to arrange a real one.
+     */
+    CoopPeerLink peerForTest(int slot) {
+        synchronized (lifecycleLock) {
+            return peers.get(slot);
+        }
+    }
+
+    /** Test seam: bytes read off TCP sockets so far in the current campaign frame. */
+    long inboundBytesInLastFrame() {
+        synchronized (lifecycleLock) {
+            return inboundBytesThisFrame;
+        }
+    }
+
+    /**
+     * Opens a campaign frame: the inbound frame and byte budgets below are what one <em>frame</em>
+     * may spend, not what one poll may (net-fix-3).
+     *
+     * <p>Why this is not folded into {@link #flushOutbound()}: the pump calls that from nine places
+     * per frame - the pre/post drains, the battle bridge, the terminal-stop linger - so a reset
+     * living there would hand a flooding peer nine budgets per frame instead of one. The budget was
+     * already effectively per-batch before this, because {@link #pollInbound()} re-polls whenever the
+     * queue runs dry and the pump's drain loops until it returns null.
+     *
+     * <p>Safe to call when nothing is connected, and safe never to call: a caller that never opens a
+     * frame simply spends one budget for its whole life, which is the conservative direction.
+     */
+    public void beginFrame() {
+        synchronized (lifecycleLock) {
+            framesThisPoll = 0;
+            inboundBytesThisFrame = 0L;
+        }
+    }
+
+    /**
+     * Injection seam for the outbound half of the pump's reconnect-grace whitelist (net-fix-1).
+     *
+     * <p>The pump passes {@code type -> peerProvenForOutbound() || allowedDuringReconnectGrace(type)}.
+     * While a grace window is open the socket in the peer slot may belong to anybody, and the
+     * receiver drops everything but the resume vocabulary anyway - so writing ordinary semantic
+     * traffic onto it does not deliver it, it <em>destroys</em> it. Refused messages stay queued in
+     * order and go out once the resume completes; the resume request itself travels through this same
+     * queue, which is why the gate is per message rather than per peer.
+     *
+     * @param gate null restores "write everything", which is the state before a pump installs one
+     */
+    public void setOutboundWriteGate(java.util.function.Predicate<CoopMessages.Type> gate) {
+        this.outboundWriteGate = gate;
     }
 
     /**
@@ -1047,7 +1118,9 @@ public class CoopNetService {
     }
 
     private void pollNetworkLocked() {
-        framesThisPoll = 0;
+        // Deliberately no budget reset here: the frame and byte budgets are per campaign frame and
+        // are reset by beginFrame(). Resetting per poll made them per drain batch, which is not a
+        // bound at all - see beginFrame().
         try {
             acceptHostConnectionLocked();
             progressGuestConnectionLocked();
@@ -1913,7 +1986,7 @@ public class CoopNetService {
 
         // Hoisted out of the byte loop: these used to be two allocations per received byte.
         java.util.function.Consumer<String> frameSink = frame -> handleFrame(peer, frame);
-        Runnable oversized = OVERSIZED_FRAME_WARNING;
+        Runnable oversized = () -> noteOversizedFrameLocked(peer);
 
         try {
             // Bytes a previous poll could not frame within its ceiling come first, in stream order.
@@ -1925,13 +1998,14 @@ public class CoopNetService {
                     return;
                 }
             }
-            if (framesThisPoll >= MAX_FRAMES_PER_POLL) {
+            if (framesThisPoll >= MAX_FRAMES_PER_POLL || inboundBytesThisFrame >= MAX_INBOUND_BYTES_PER_FRAME) {
                 return;
             }
 
             readBuffer.clear();
             int read = channel.read(readBuffer);
             if (read > 0) {
+                inboundBytesThisFrame += read;
                 peer.noteInboundBytes(clockMillis.getAsLong());
             }
             while (read > 0) {
@@ -1949,10 +2023,18 @@ public class CoopNetService {
                 }
                 readBuffer.clear();
                 if (framesThisPoll >= MAX_FRAMES_PER_POLL) {
-                    // The rest waits in the kernel buffer; a flood cannot make one poll unbounded.
+                    // The rest waits in the kernel buffer; a flood cannot make one frame unbounded.
+                    return;
+                }
+                if (inboundBytesThisFrame >= MAX_INBOUND_BYTES_PER_FRAME) {
+                    // Same rule for a stream that produces no frames at all (net-fix-3): a sender
+                    // that never writes a newline must still run out of budget.
                     return;
                 }
                 read = channel.read(readBuffer);
+                if (read > 0) {
+                    inboundBytesThisFrame += read;
+                }
             }
 
             if (read < 0) {
@@ -2007,12 +2089,36 @@ public class CoopNetService {
         inbound.add(message);
     }
 
+    /**
+     * A frame that ran past {@link #MAX_FRAME_BYTES} without a terminator (net-fix-3).
+     *
+     * <p>Routed through {@link #noteBadFrameLocked} rather than logged and forgotten: it is exactly
+     * as undecodable as a garbage frame, and a pre-session peer that never sends a newline was
+     * otherwise free to keep the slot for as long as it liked, taking no strikes and writing one log
+     * line per megabyte. A peer that has proved a session still gets the tolerant behaviour - strikes
+     * are only acted on before the handshake completes.
+     */
+    private void noteOversizedFrameLocked(CoopPeerLink peer) {
+        boolean first = peer.shouldWarnOversizedFrame();
+        if (first) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP received an oversized frame on peer slot "
+                    + peer.slot() + " (cap " + MAX_FRAME_BYTES
+                    + " bytes; further ones on this connection are counted, not logged)");
+        }
+        noteBadFrameLocked(peer, "an oversized frame", null, !first);
+    }
+
     /** One strike for a frame that carried nothing usable, and the pre-session drop rule behind it. */
     private void noteBadFrameLocked(CoopPeerLink peer, String what, RuntimeException ex) {
+        noteBadFrameLocked(peer, what, ex, false);
+    }
+
+    private void noteBadFrameLocked(CoopPeerLink peer, String what, RuntimeException ex,
+                                    boolean alreadyLogged) {
         invalidFrames++;
         int strikes = peer.noteInvalidFrame();
         // First strike only: a garbage flood must show up in the counters, not in the log.
-        if (strikes == 1) {
+        if (strikes == 1 && !alreadyLogged) {
             CoopLog.warn(CoopNetService.class, "Coop TCP received " + what + " on peer slot "
                     + peer.slot() + " (further ones are counted, not logged)", ex);
         }
@@ -2033,14 +2139,25 @@ public class CoopNetService {
             return;
         }
 
+        java.util.function.Predicate<CoopMessages.Type> gate = outboundWriteGate;
+        CoopMessages.Message inFlight = null;
         try {
             if (peer.pendingWrite() != null && !writePendingLocked(peer, channel)) {
                 return;
             }
-            peer.setPendingWrite(null);
+            peer.clearPendingWrite();
 
-            CoopMessages.Message message;
-            while ((message = peer.outbound().poll()) != null) {
+            // A cursor, not poll(): a message the gate refuses stays exactly where it is, in order,
+            // and the scan continues past it. Only whitelisted traffic overtakes it, which is the
+            // whole point of the gate (see setOutboundWriteGate).
+            java.util.ListIterator<CoopMessages.Message> cursor = peer.outbound().listIterator();
+            while (cursor.hasNext()) {
+                CoopMessages.Message message = cursor.next();
+                if (gate != null && !gate.test(message.type())) {
+                    continue;
+                }
+                cursor.remove();
+                inFlight = message;
                 byte[] frame = (CoopMessages.encode(message) + "\n").getBytes(StandardCharsets.UTF_8);
                 if (frame.length > MAX_FRAME_BYTES) {
                     // The receiver's inbound cap would discard it anyway; dropping here keeps the
@@ -2048,6 +2165,7 @@ public class CoopNetService {
                     CoopLog.warn(CoopNetService.class, "Coop TCP dropping oversized outbound "
                             + message.type() + " frame (" + frame.length + " bytes, cap "
                             + MAX_FRAME_BYTES + ")");
+                    inFlight = null;
                     continue;
                 }
                 if (frame.length > WARN_FRAME_BYTES && largeFrameWarned.add(message.type())) {
@@ -2056,14 +2174,23 @@ public class CoopNetService {
                             + WARN_FRAME_BYTES + ", hard cap " + MAX_FRAME_BYTES
                             + "); consider shrinking this message before it hits the cap");
                 }
-                peer.setPendingWrite(ByteBuffer.wrap(frame));
+                peer.setPendingWrite(ByteBuffer.wrap(frame), message);
                 if (!writePendingLocked(peer, channel)) {
+                    // Parked, not lost: CoopPeerLink.detach puts the message back at the head of the
+                    // queue if the socket dies before the rest of the frame goes out.
                     return;
                 }
-                peer.setPendingWrite(null);
+                peer.clearPendingWrite();
+                inFlight = null;
             }
         } catch (Exception ex) {
             CoopLog.warn(CoopNetService.class, "Coop TCP failed to flush outbound messages", ex);
+            // net-fix-1: the message was already off the queue when encode() or write() threw. If it
+            // never reached pendingWrite, closeLinkLocked's detach has nothing to put back, so this
+            // is the only copy of it left.
+            if (inFlight != null && peer.pendingWriteMessage() == null) {
+                peer.requeueAtHeadForResend(inFlight);
+            }
             closeLinkLocked(peer);
         }
     }
@@ -2138,6 +2265,7 @@ public class CoopNetService {
         connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
         guestConnectStopped = false;
         framesThisPoll = 0;
+        inboundBytesThisFrame = 0L;
         role = CoopConnectionRole.NONE;
     }
 

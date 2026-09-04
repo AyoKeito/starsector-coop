@@ -1204,6 +1204,9 @@ class CoopNetServiceTest {
             List<CoopMessages.Message> drained = new ArrayList<>();
             AtomicLong firstPollFrames = new AtomicLong(-1L);
             waitUntil(() -> {
+                // net-fix-3: the budget is per campaign frame now, so the loop has to open one.
+                guest.beginFrame();
+                host.beginFrame();
                 guest.flushOutbound();
                 host.flushOutbound();
                 if (firstPollFrames.get() < 0 && host.framesInLastPoll() > 0) {
@@ -1582,6 +1585,8 @@ class CoopNetServiceTest {
 
                 AtomicLong firstPollFrames = new AtomicLong(-1L);
                 waitUntil(() -> {
+                    // net-fix-3: one campaign frame per iteration; the budget is opened by beginFrame.
+                    host.beginFrame();
                     host.flushOutbound();
                     if (firstPollFrames.get() < 0 && host.framesInLastPoll() > 0) {
                         firstPollFrames.set(host.framesInLastPoll());
@@ -2043,6 +2048,295 @@ class CoopNetServiceTest {
                 }
             }
             throw new AssertionError("Host never answered or closed the knocking connection");
+        }
+    }
+
+    // ---- net-fix-1: nothing reliable is lost by a socket dying mid-write -------------------------
+
+    /**
+     * The message {@code flushOutboundLocked} had already polled off the queue lived in exactly one
+     * place — the peer's {@code pendingWrite} — and {@code detach()} nulled it. So a semantic event
+     * caught by a NAT drop between "polled" and "fully written" was gone from both machines, with the
+     * reconnect grace happily resuming the session on top of the hole.
+     */
+    @Test
+    void aHalfWrittenMessageIsResentFirstOnTheNextConnectionAndExactlyOnce() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService first = new CoopNetService();
+        CoopNetService second = new CoopNetService();
+        try {
+            host.startHost(port);
+            first.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, first), "host and the first guest connected");
+
+            // Exactly the state a full kernel send buffer leaves behind.
+            CoopMessages.Message inFlight = new CoopMessages.Message(
+                    CoopMessages.Type.MARKET_TXN, SESSION_ID, 41L, 1000L, "{}");
+            host.peerForTest(0).setPendingWrite(
+                    ByteBuffer.wrap("half-a-frame".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                    inFlight);
+
+            first.shutdown();
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                return !host.isConnected();
+            }, "the host noticed the first guest go away");
+
+            second.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, second), "the replacement guest connected");
+
+            List<CoopMessages.Message> drained = new ArrayList<>();
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                second.beginFrame();
+                second.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = second.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return !drained.isEmpty();
+            }, "the replacement connection carried the interrupted message");
+
+            assertEquals(1, drained.size(), "the resend must be a resend, not a duplicate storm");
+            assertEquals(CoopMessages.Type.MARKET_TXN, drained.get(0).type());
+            assertEquals(41L, drained.get(0).seq());
+        } finally {
+            second.shutdown();
+            first.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * net-fix-1, outbound half of the reconnect-grace whitelist. Semantic traffic written onto a
+     * socket during a grace window is not delivered — the receiver's own whitelist drops it — so it
+     * has to stay queued until the resume completes, in order, while the resume exchange itself
+     * travels through the same queue.
+     */
+    @Test
+    void theOutboundGateHoldsSemanticTrafficInOrderUntilThePeerIsProven() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        java.util.concurrent.atomic.AtomicBoolean proven =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+            host.setOutboundWriteGate(type -> proven.get()
+                    || type == CoopMessages.Type.SESSION_RESUME_ACCEPT);
+
+            host.send(new CoopMessages.Message(
+                    CoopMessages.Type.MARKET_TXN, SESSION_ID, 1L, 1000L, "{}"));
+            host.send(CoopMessages.sessionResumeAccept(SESSION_ID, 2L, 1000L));
+            host.send(new CoopMessages.Message(
+                    CoopMessages.Type.WORLD_DELTA, SESSION_ID, 3L, 1000L, "{}"));
+
+            List<CoopMessages.Message> drained = new ArrayList<>();
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                guest.beginFrame();
+                guest.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = guest.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return !drained.isEmpty();
+            }, "the whitelisted resume accept crossed");
+
+            assertEquals(1, drained.size(), "only the whitelisted type may be written");
+            assertEquals(CoopMessages.Type.SESSION_RESUME_ACCEPT, drained.get(0).type());
+            assertEquals(2, host.outboundQueueDepth(), "the rest are queued, not dropped");
+
+            proven.set(true);
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                guest.beginFrame();
+                guest.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = guest.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return drained.size() == 3;
+            }, "the backlog flushed once the peer was proven");
+
+            assertEquals(List.of(2L, 1L, 3L), List.of(drained.get(0).seq(), drained.get(1).seq(),
+                            drained.get(2).seq()),
+                    "the whitelisted message overtakes; the held ones keep their order");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    // ---- net-fix-3: the inbound budgets are per campaign frame -----------------------------------
+
+    /**
+     * The frame ceiling was reset at the top of every {@code pollNetworkLocked}, and both
+     * {@code pollInbound()} and {@code pollDatagram()} re-poll whenever their queue runs dry — so the
+     * pump's drain loop, which runs until {@code pollInbound()} returns null, renewed the budget for
+     * as long as a sender kept feeding it. Per frame it is a bound; per batch it is not.
+     */
+    @Test
+    void oneCampaignFrameIngestsAtMostTheFrameCeilingHoweverOftenTheDrainPolls() throws Exception {
+        int burst = CoopNetService.MAX_FRAMES_PER_POLL * 3;
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            for (int i = 0; i < burst; i++) {
+                guest.send(CoopMessages.ping(null, guest.nextSeq(), 1000L + i));
+            }
+
+            List<CoopMessages.Message> drained = new ArrayList<>();
+            host.beginFrame();
+            waitUntil(() -> {
+                guest.beginFrame();
+                guest.flushOutbound();
+                // No beginFrame for the host: this whole loop stands for one campaign frame, and the
+                // drain inside it is the pump's "until pollInbound returns null".
+                host.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = host.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return host.framesInLastPoll() >= CoopNetService.MAX_FRAMES_PER_POLL;
+            }, "the host reached its per-frame ceiling");
+
+            assertEquals(CoopNetService.MAX_FRAMES_PER_POLL, host.framesInLastPoll(),
+                    "one frame must stop at the ceiling however many times it polls");
+            assertTrue(drained.size() <= CoopNetService.MAX_FRAMES_PER_POLL,
+                    "one frame ingested " + drained.size() + " frames, past the "
+                            + CoopNetService.MAX_FRAMES_PER_POLL + " ceiling");
+
+            waitUntil(() -> {
+                guest.beginFrame();
+                guest.flushOutbound();
+                host.beginFrame();
+                host.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = host.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return drained.size() == burst;
+            }, "the rest arrived on later frames");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * A stream with no newline in it produces no frames, so the frame ceiling never saw it: a peer
+     * could hand the campaign thread an unbounded number of 8 KB reads per frame and trip no counter
+     * at all. The byte budget is the bound that does not depend on the sender's framing.
+     */
+    @Test
+    void oneCampaignFrameReadsAtMostTheInboundByteBudget() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        try {
+            host.startHost(port);
+            // A proved session, so the strike rule cannot end the connection under the measurement.
+            host.setExpectedSessionToken(TOKEN);
+            try (java.net.Socket peer = new java.net.Socket()) {
+                peer.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                waitUntil(() -> {
+                    host.beginFrame();
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host adopted the peer");
+
+                Thread writer = new Thread(() -> {
+                    byte[] chunk = new byte[64 * 1024];
+                    java.util.Arrays.fill(chunk, (byte) 'x');
+                    try {
+                        for (int i = 0; i < 24; i++) {
+                            peer.getOutputStream().write(chunk);
+                        }
+                    } catch (IOException ignored) {
+                        // The test closes the socket under it; that is the end of the flood.
+                    }
+                });
+                writer.setDaemon(true);
+                writer.start();
+
+                host.beginFrame();
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.inboundBytesInLastFrame()
+                            >= CoopNetService.MAX_INBOUND_BYTES_PER_FRAME;
+                }, "the frame reached its byte budget");
+
+                assertTrue(host.inboundBytesInLastFrame()
+                                <= CoopNetService.MAX_INBOUND_BYTES_PER_FRAME + 8 * 1024,
+                        "one frame read " + host.inboundBytesInLastFrame()
+                                + " bytes, past the " + CoopNetService.MAX_INBOUND_BYTES_PER_FRAME
+                                + " budget");
+                host.beginFrame();
+                assertEquals(0L, host.inboundBytesInLastFrame(), "the next frame starts fresh");
+            }
+        } finally {
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The oversized-frame path used to log a line and forget: no strike, so a pre-session stranger
+     * that never sent a newline held the host's one peer slot for free and wrote the log once per
+     * megabyte while it did.
+     */
+    @Test
+    void aNewlineFreeStreamTakesStrikesInsteadOfHoldingTheSlotForFree() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        try {
+            host.startHost(port);
+            // Deliberately no session token: this is the stranger case the strike rule is for.
+            try (java.net.Socket peer = new java.net.Socket()) {
+                peer.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
+                waitUntil(() -> {
+                    host.beginFrame();
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host adopted the peer");
+
+                Thread writer = new Thread(() -> {
+                    byte[] chunk = new byte[64 * 1024];
+                    java.util.Arrays.fill(chunk, (byte) 'x');
+                    try {
+                        // Past MAX_FRAME_BYTES with no terminator anywhere in it.
+                        for (int i = 0; i < 20; i++) {
+                            peer.getOutputStream().write(chunk);
+                        }
+                    } catch (IOException ignored) {
+                        // Expected once the host drops the connection.
+                    }
+                });
+                writer.setDaemon(true);
+                writer.start();
+
+                waitUntil(() -> {
+                    host.beginFrame();
+                    host.flushOutbound();
+                    return host.datagramStats().invalidFrames() >= 1;
+                }, "the oversized frame counted as a strike");
+
+                assertTrue(host.datagramStats().invalidFrames() >= 1,
+                        "an oversized frame is as undecodable as a garbage one and must be counted");
+            }
+        } finally {
+            host.shutdown();
         }
     }
 }

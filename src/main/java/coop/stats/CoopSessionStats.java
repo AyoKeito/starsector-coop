@@ -60,6 +60,16 @@ public class CoopSessionStats {
     /** Ship losses kept in the ledger; older entries fall off the front. */
     public static final int LEDGER_LIMIT = 20;
 
+    /**
+     * Hardest bound on the number of player columns (net-fix-4, defence in depth).
+     *
+     * <p>Columns are minted on demand by {@link #player(String)} from an id that arrives over the
+     * wire, and the lookup behind them is a linear scan of an unbounded list. The pump's own gates
+     * are what should keep a stranger's id from ever reaching here; this is what stops the damage at
+     * a fixed size if one ever does. Eight is four times the co-op capacity this build ships.
+     */
+    public static final int MAX_PLAYER_COLUMNS = 8;
+
     private ArrayList<String> playerOrder;
     private ArrayList<String> playerNames;
     private ArrayList<PlayerStats> playerStats;
@@ -95,6 +105,13 @@ public class CoopSessionStats {
         }
         int index = playerOrder().indexOf(id);
         if (index < 0) {
+            if (playerOrder().size() >= MAX_PLAYER_COLUMNS) {
+                coop.util.CoopLog.warn(CoopSessionStats.class, "Coop refusing a "
+                        + (MAX_PLAYER_COLUMNS + 1) + "th session-stats player column for playerId="
+                        + id + " (cap " + MAX_PLAYER_COLUMNS + "); something is announcing players"
+                        + " that are not in this session");
+                return;
+            }
             playerOrder().add(id);
             playerNames().add(normalize(name));
             playerStats().add(new PlayerStats(id));
@@ -137,7 +154,15 @@ public class CoopSessionStats {
             return playerStats().get(index);
         }
         notePlayer(id, "");
-        return playerStats().get(playerOrder().indexOf(id));
+        int created = playerOrder().indexOf(id);
+        if (created < 0) {
+            // The column cap refused it (or the id was blank). Loudly, not with a throwaway object
+            // whose counters go nowhere: every caller here is inside a guarded handler, and a
+            // silently discarded tally is exactly the kind of bug this project does not want.
+            throw new IllegalStateException("no session-stats column for playerId=" + id
+                    + " (cap " + MAX_PLAYER_COLUMNS + ", blank ids are refused)");
+        }
+        return playerStats().get(created);
     }
 
     /** True when nothing has been recorded at all — the "no session statistics yet" case. */

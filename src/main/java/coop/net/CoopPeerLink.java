@@ -52,6 +52,13 @@ public final class CoopPeerLink {
 
     private SocketChannel channel;
     private ByteBuffer pendingWrite;
+    /**
+     * The message {@link #pendingWrite} is the encoded form of, kept alongside the buffer so a frame
+     * the kernel only took part of is not lost when the socket dies under it (net-fix-1). Without it
+     * {@link #detach()} threw away the only copy of a semantic event — a MARKET_TXN, a COLONY_FOUNDED
+     * — that the queue had already given up.
+     */
+    private CoopMessages.Message pendingWriteMessage;
     private int inboundFrameLength;
     private boolean discardingOversizedFrame;
     private long lastInboundFrameAtMillis;
@@ -102,6 +109,11 @@ public final class CoopPeerLink {
     private boolean candidateTimeoutLogged;
     private boolean queueDepthWarned;
     private boolean datagramSendFailureLogged;
+    /**
+     * One oversized-frame line per connection. It used to be one per megabyte of garbage, which is a
+     * log-writing primitive handed to whoever opens the socket (net-fix-3).
+     */
+    private boolean oversizedFrameWarned;
 
     /**
      * Undecodable frames seen on this connection. Only ever acted on before the handshake completes
@@ -138,7 +150,7 @@ public final class CoopPeerLink {
     void attach(SocketChannel channel, InetAddress pinnedPeerAddress, long nowMillis,
                 boolean clearValidatedUdpAddress) {
         this.channel = channel;
-        this.pendingWrite = null;
+        requeuePendingWriteForResend();
         this.inboundFrameLength = 0;
         this.discardingOversizedFrame = false;
         this.lastInboundFrameAtMillis = nowMillis;
@@ -154,6 +166,7 @@ public final class CoopPeerLink {
         // it - which is the run where the evidence was needed.
         this.queueDepthWarned = false;
         this.datagramSendFailureLogged = false;
+        this.oversizedFrameWarned = false;
         forgetCandidate();
         dropConnectionScopedOutbound();
         if (clearValidatedUdpAddress) {
@@ -177,13 +190,19 @@ public final class CoopPeerLink {
     }
 
     /**
-     * Forgets the channel and its half-written frame; the queues survive, as they always have, and so
-     * do {@link #pinnedPeerAddress} and {@link #senderId} — a detached slot stays pinned to the peer
+     * Forgets the channel; the queues survive, as they always have, and so do
+     * {@link #pinnedPeerAddress} and {@link #senderId} — a detached slot stays pinned to the peer
      * that last held it until {@link #attach} re-pins it. Only {@link #reset} forgets the peer.
+     *
+     * <p>The half-written frame does <em>not</em> simply vanish with the channel: whatever message it
+     * was carrying goes back to the head of {@link #outbound} unless it was connection-scoped, so the
+     * next socket sends it first. Re-sending the whole frame rather than its unwritten tail is
+     * correct because {@link #attach} resets the receiver's framer — the partial bytes on the dead
+     * socket were never a frame to anyone.
      */
     void detach() {
         this.channel = null;
-        this.pendingWrite = null;
+        requeuePendingWriteForResend();
         this.inboundFrameLength = 0;
         this.discardingOversizedFrame = false;
         this.deferredInbound = null;
@@ -251,8 +270,41 @@ public final class CoopPeerLink {
         return pendingWrite;
     }
 
-    void setPendingWrite(ByteBuffer pendingWrite) {
+    /** The message {@link #pendingWrite} encodes, or null when no frame is half-written. */
+    CoopMessages.Message pendingWriteMessage() {
+        return pendingWriteMessage;
+    }
+
+    /** Parks a frame the socket did not take in full, together with the message it came from. */
+    void setPendingWrite(ByteBuffer pendingWrite, CoopMessages.Message message) {
         this.pendingWrite = pendingWrite;
+        this.pendingWriteMessage = message;
+    }
+
+    /** The frame went out whole; nothing is owed a resend. */
+    void clearPendingWrite() {
+        this.pendingWrite = null;
+        this.pendingWriteMessage = null;
+    }
+
+    /**
+     * Puts a message the flush had already polled off the queue back at its head, so the next socket
+     * sends it before anything queued behind it. Connection-scoped control is dropped instead, for
+     * the reason on {@link #dropConnectionScopedOutbound()}.
+     */
+    void requeueAtHeadForResend(CoopMessages.Message message) {
+        if (message == null || CoopNetService.isConnectionScopedControl(message.type())) {
+            return;
+        }
+        outbound.addFirst(message);
+    }
+
+    /** {@link #requeueAtHeadForResend} for the half-written frame, and forgets it either way. */
+    private void requeuePendingWriteForResend() {
+        CoopMessages.Message message = pendingWriteMessage;
+        this.pendingWrite = null;
+        this.pendingWriteMessage = null;
+        requeueAtHeadForResend(message);
     }
 
     // ---- inbound frame assembly -------------------------------------------------------------------
@@ -289,6 +341,15 @@ public final class CoopPeerLink {
 
         inboundFrame[inboundFrameLength] = (byte) unsigned;
         inboundFrameLength++;
+    }
+
+    /** One oversized-frame warning per connection; the rest are counted as strikes only. */
+    boolean shouldWarnOversizedFrame() {
+        if (oversizedFrameWarned) {
+            return false;
+        }
+        oversizedFrameWarned = true;
+        return true;
     }
 
     /** @return the running total after counting this one, so the caller can apply its strike rule. */
@@ -537,6 +598,7 @@ public final class CoopPeerLink {
     void reset() {
         channel = null;
         pendingWrite = null;
+        pendingWriteMessage = null;
         inboundFrameLength = 0;
         discardingOversizedFrame = false;
         deferredInbound = null;
@@ -552,6 +614,7 @@ public final class CoopPeerLink {
         candidateTimeoutLogged = false;
         queueDepthWarned = false;
         datagramSendFailureLogged = false;
+        oversizedFrameWarned = false;
         invalidFrames = 0;
         outbound.clear();
         outboundDatagrams.clear();

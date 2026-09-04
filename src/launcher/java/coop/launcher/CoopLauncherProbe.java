@@ -56,6 +56,19 @@ public final class CoopLauncherProbe {
     private static final int UDP_TIMEOUT_MILLIS = 2000;
     private static final int LISTENER_IDLE_TIMEOUT_MILLIS = 5000;
     private static final int MAX_DATAGRAM_BYTES = 512;
+    /**
+     * Longest request line the listener will read (net-fix-3). The only line it ever expects is
+     * {@code PROBE <32 hex chars>}; {@code readLine()} on the other hand buffers until a newline
+     * arrives, so a client that opened the socket and sent megabytes without one grew the launcher's
+     * heap for as long as it kept going.
+     */
+    static final int MAX_REQUEST_BYTES = 512;
+    /**
+     * Wall-clock ceiling on one served connection, measured from accept. {@code setSoTimeout} only
+     * bounds <em>idle</em> time, so a client that sent one byte every four seconds held the serial
+     * accept loop - and therefore the whole reachability check - open indefinitely.
+     */
+    static final long CONNECTION_DEADLINE_MILLIS = 5000L;
 
     private static final SecureRandom NONCES = new SecureRandom();
 
@@ -196,13 +209,12 @@ public final class CoopLauncherProbe {
                 }
                 try (Socket client = socket) {
                     accepted = client;
+                    long deadline = System.currentTimeMillis() + CONNECTION_DEADLINE_MILLIS;
                     client.setSoTimeout(LISTENER_IDLE_TIMEOUT_MILLIS);
                     OutputStream out = client.getOutputStream();
                     out.write((BANNER_PREFIX + modVersion + "\n").getBytes(StandardCharsets.UTF_8));
                     out.flush();
-                    BufferedReader reader = new BufferedReader(new InputStreamReader(
-                            client.getInputStream(), StandardCharsets.UTF_8));
-                    String line = reader.readLine();
+                    String line = readBoundedLine(client, deadline);
                     if (line != null && line.startsWith(PROBE_PREFIX)) {
                         String nonce = line.substring(PROBE_PREFIX.length()).trim();
                         out.write((PROBE_OK_PREFIX + nonce + "\n").getBytes(StandardCharsets.UTF_8));
@@ -214,6 +226,43 @@ public final class CoopLauncherProbe {
                 } finally {
                     accepted = null;
                 }
+            }
+        }
+
+        /**
+         * One request line, capped at {@link #MAX_REQUEST_BYTES} and at {@code deadline}. Returns
+         * null when the client hung up, overran the cap, or ran out of wall clock - all three are
+         * "this is not a probe", and the caller's answer to that is to close the socket.
+         */
+        private String readBoundedLine(Socket client, long deadline) throws IOException {
+            java.io.InputStream in = client.getInputStream();
+            StringBuilder line = new StringBuilder(MAX_REQUEST_BYTES);
+            while (true) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0L) {
+                    return null;
+                }
+                // Re-armed every byte so the idle timeout can never outlast the absolute deadline.
+                client.setSoTimeout((int) Math.min(LISTENER_IDLE_TIMEOUT_MILLIS, remaining));
+                int value;
+                try {
+                    value = in.read();
+                } catch (SocketTimeoutException ex) {
+                    return null;
+                }
+                if (value < 0) {
+                    return line.length() == 0 ? null : line.toString();
+                }
+                if (value == '\n') {
+                    return line.toString();
+                }
+                if (value == '\r') {
+                    continue;
+                }
+                if (line.length() >= MAX_REQUEST_BYTES) {
+                    return null;
+                }
+                line.append((char) value);
             }
         }
 
