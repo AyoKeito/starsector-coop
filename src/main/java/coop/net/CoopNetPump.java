@@ -6913,10 +6913,10 @@ public class CoopNetPump implements EveryFrameScript {
                 && delayedInteractionClaims.peekFirst().releaseAtMillis() <= now) {
             DelayedInteractionClaim due = delayedInteractionClaims.pollFirst();
             try {
-                if (due.message().type() == CoopMessages.Type.PAUSE_INTENT) {
-                    applyPauseIntent(due.message());
-                } else {
-                    arbitrateInteractionClaim(due.message());
+                switch (due.message().type()) {
+                    case PAUSE_INTENT -> applyPauseIntent(due.message());
+                    case INTERACTION_RELEASE -> applyInteractionRelease(due.message());
+                    default -> arbitrateInteractionClaim(due.message());
                 }
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopNetPump.class, "Coop dropped delayed " + due.message().type()
@@ -7001,6 +7001,19 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     private void handleInteractionRelease(CoopMessages.Message message) {
+        // The debug latency lever delays the guest's CLAIM; a RELEASE that overtook it would be
+        // applied to nothing and the delayed claim would then take the entity for good (audit
+        // 2026-09-04 #8). Same queue, same relative order a real link would deliver.
+        if (service.role() == CoopConnectionRole.HOST) {
+            int delayMillis = CoopDebug.interactionClaimDelayMillis();
+            if (delayMillis > 0 && queueDelayedGuestMessage(message, delayMillis)) {
+                return;
+            }
+        }
+        applyInteractionRelease(message);
+    }
+
+    private void applyInteractionRelease(CoopMessages.Message message) {
         CoopMessages.Payload payload = CoopMessages.payload(message);
         String entityId = payload.requiredString("entityId");
         String playerId = payload.requiredString("playerId");
