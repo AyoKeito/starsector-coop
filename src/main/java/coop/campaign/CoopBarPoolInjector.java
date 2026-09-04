@@ -88,8 +88,8 @@ public final class CoopBarPoolInjector {
      * Apply a host pool snapshot to the live sector. Returns null when nothing was done (not a bar
      * snapshot, no engine pool, or byte-identical to the last applied one).
      */
-    public Rebuild apply(List<CoopMissionBoardSync.Entry> entries, String localPlayerId) {
-        List<CoopMissionBoardSync.Entry> offers = injectable(entries, localPlayerId);
+    public Rebuild apply(List<CoopMissionBoardSync.Entry> entries) {
+        List<CoopMissionBoardSync.Entry> offers = injectable(entries);
         String signature = CoopBarPoolCapture.signature(offers);
         if (signature.equals(lastAppliedSignature)) {
             return null;
@@ -146,17 +146,21 @@ public final class CoopBarPoolInjector {
 
     /**
      * The snapshot entries this client should actually put in its pool, in snapshot order: bar
-     * entries only, never an intel-backed class (defensive — the host does not send those), never an
-     * offer the other player already holds, and at most one per id because the engine guarantees one
-     * active event per creator id.
+     * entries only, never an intel-backed class (defensive — the host does not send those), never a
+     * claimed offer, and at most one per id because the engine guarantees one active event per
+     * creator id.
+     *
+     * <p>Claimed means gone, whoever holds it. The partner's claims obviously must not be shown; our
+     * own must not be re-shown either, because a claim is only ever raised <em>because</em> the local
+     * player accepted the offer, and the acceptance already removed it from this pool. Letting the
+     * holder's own claim through (which it did until 2026-09-04) meant the next snapshot re-injected
+     * a mission this client had just accepted, and it could be accepted a second time.
      */
-    static List<CoopMissionBoardSync.Entry> injectable(List<CoopMissionBoardSync.Entry> entries,
-                                                       String localPlayerId) {
+    static List<CoopMissionBoardSync.Entry> injectable(List<CoopMissionBoardSync.Entry> entries) {
         List<CoopMissionBoardSync.Entry> offers = new ArrayList<>();
         if (entries == null) {
             return offers;
         }
-        String player = localPlayerId == null ? "" : localPlayerId.trim();
         Set<String> seen = new HashSet<>();
         for (CoopMissionBoardSync.Entry entry : entries) {
             if (entry == null || entry.sourceType() != CoopMissionBoardSync.SourceType.BAR) {
@@ -165,7 +169,7 @@ public final class CoopBarPoolInjector {
             if (CoopBarPoolCapture.isIntelBacked(entry.eventKind())) {
                 continue;
             }
-            if (entry.isClaimed() && !entry.acceptedByPlayerId().equals(player)) {
+            if (entry.isClaimed()) {
                 continue;
             }
             if (seen.add(entry.missionId())) {

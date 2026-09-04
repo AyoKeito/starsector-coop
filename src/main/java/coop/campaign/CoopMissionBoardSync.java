@@ -102,6 +102,14 @@ public final class CoopMissionBoardSync {
         // claim on a mission no longer in it is dead bookkeeping; leaving it meant orphan claims
         // accumulated for the whole session. Host and guest run the same purge.
         claimsByMissionId.keySet().removeIf(missionId -> !poolByMissionId.containsKey(missionId));
+        // Re-stamp the surviving claims onto the fresh entries. Captured entries always arrive with
+        // acceptedByPlayerId blank (the host reads identity and seed off the engine, not the claim
+        // ledger), so without this every snapshot un-claimed everything it re-sent: visibleEntriesFor
+        // let a taken offer through again and the guest re-injected a mission its partner had already
+        // accepted. The claim ledger is the authority, not the entry field.
+        for (CoopMissionClaim claim : claimsByMissionId.values()) {
+            markEntryClaimed(claim.missionId(), claim.acceptedByPlayerId());
+        }
     }
 
     public synchronized List<Entry> pool() {

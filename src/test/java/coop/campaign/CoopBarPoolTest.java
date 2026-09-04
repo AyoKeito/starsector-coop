@@ -182,17 +182,21 @@ class CoopBarPoolTest {
     // ---- Guest injectable filter ---------------------------------------------------------------
 
     @Test
-    void injectableKeepsBarEntriesInOrderAndDropsTheOtherPlayersClaims() {
+    void injectableKeepsBarEntriesInOrderAndDropsEveryClaim() {
+        // A claim is only ever raised because someone accepted the offer, so a claimed entry is a
+        // consumed entry no matter who holds it: the partner's must not be shown, and our own must
+        // not be re-injected (the acceptance already took it out of this pool).
         List<CoopMissionBoardSync.Entry> entries = List.of(
                 offer("a", 1L),
                 offer("b", 2L).withAcceptedBy("host"),
                 offer("c", 3L).withAcceptedBy("guest"),
+                offer("d", 4L),
                 new CoopMissionBoardSync.Entry("m", CoopMissionBoardSync.SourceType.CONTACT,
                         "contact-1", "", "", "", "", 0L, 0L, ""));
 
-        List<CoopMissionBoardSync.Entry> injectable = CoopBarPoolInjector.injectable(entries, "guest");
+        List<CoopMissionBoardSync.Entry> injectable = CoopBarPoolInjector.injectable(entries);
 
-        assertEquals(List.of("a", "c"), injectable.stream().map(CoopMissionBoardSync.Entry::missionId).toList());
+        assertEquals(List.of("a", "d"), injectable.stream().map(CoopMissionBoardSync.Entry::missionId).toList());
     }
 
     @Test
@@ -202,18 +206,18 @@ class CoopBarPoolTest {
                 offer("a", 2L),
                 offer("a", 3L));
 
-        List<CoopMissionBoardSync.Entry> injectable = CoopBarPoolInjector.injectable(entries, "guest");
+        List<CoopMissionBoardSync.Entry> injectable = CoopBarPoolInjector.injectable(entries);
 
         assertEquals(1, injectable.size());
         assertEquals(2L, injectable.get(0).contentSeed(), "the first occurrence of an id wins");
     }
 
     @Test
-    void injectableToleratesNoLocalPlayerId() {
+    void injectableToleratesANullSnapshot() {
         List<CoopMissionBoardSync.Entry> entries = List.of(offer("a", 1L), offer("b", 2L).withAcceptedBy("host"));
 
-        assertEquals(1, CoopBarPoolInjector.injectable(entries, null).size());
-        assertEquals(0, CoopBarPoolInjector.injectable(null, "guest").size());
+        assertEquals(1, CoopBarPoolInjector.injectable(entries).size());
+        assertEquals(0, CoopBarPoolInjector.injectable(null).size());
     }
 
     // ---- Suppressor ----------------------------------------------------------------------------

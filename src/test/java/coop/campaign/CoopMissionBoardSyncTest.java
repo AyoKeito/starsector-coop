@@ -74,6 +74,35 @@ class CoopMissionBoardSyncTest {
     }
 
     @Test
+    void aFreshSnapshotKeepsTheClaimsItStillCovers() {
+        // Captured entries always arrive with acceptedByPlayerId blank - the host reads identity and
+        // seed off the engine, not the claim ledger. Before 2026-09-04 the replace wiped the mark,
+        // so every rebroadcast un-took a taken offer and the guest re-injected it.
+        CoopMissionBoardSync sync = new CoopMissionBoardSync();
+        sync.applySnapshot(List.of(entry("m1", ""), entry("m2", "")));
+        sync.arbitrate("m1", "host");
+
+        sync.applySnapshot(List.of(entry("m1", ""), entry("m2", "")));
+
+        assertEquals("host", sync.claimHolder("m1"));
+        assertEquals("host", sync.entry("m1").acceptedByPlayerId(),
+                "the claim ledger is the authority, not the captured field");
+        assertEquals(1, sync.visibleEntriesFor("guest").size());
+    }
+
+    @Test
+    void aSnapshotThatDropsAnOfferDropsItsClaimToo() {
+        CoopMissionBoardSync sync = new CoopMissionBoardSync();
+        sync.applySnapshot(List.of(entry("m1", "")));
+        sync.arbitrate("m1", "host");
+
+        sync.applySnapshot(List.of(entry("m2", "")));
+
+        assertNull(sync.claimHolder("m1"), "an offer no longer in the pool is dead bookkeeping");
+        assertFalse(sync.isClaimed("m1"));
+    }
+
+    @Test
     void applyAcceptedRecordsHostDecisionOnGuest() {
         CoopMissionBoardSync guest = new CoopMissionBoardSync();
         guest.applySnapshot(List.of(entry("m1", "")));
