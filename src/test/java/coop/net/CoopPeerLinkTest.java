@@ -165,7 +165,7 @@ class CoopPeerLinkTest {
 
         assertTrue(link.acceptsSource(address("203.0.113.9", 1)), "no TCP peer pinned yet");
 
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
 
         assertTrue(link.acceptsSource(address("127.0.0.1", 65_000)),
                 "the peer's UDP port legitimately differs from its TCP port");
@@ -179,13 +179,13 @@ class CoopPeerLinkTest {
         CoopPeerLink link = link();
         link.enqueue(snapshot(1L));
         link.enqueueDatagram("queued-datagram");
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.learnSenderId("guest-a");
         link.noteInvalidFrame();
         link.noteInvalidFrame();
         feed(link, "half-a-frame-with-no-newline");
 
-        link.attach(null, InetAddress.getByName("127.0.0.2"), 5_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.2"), 5_000L, false, 2L);
 
         assertNull(link.senderId(), "a new connection is a new identity until it stamps a message");
         assertEquals(0, link.invalidFrames(), "strikes belong to the connection that earned them");
@@ -206,14 +206,14 @@ class CoopPeerLinkTest {
     @Test
     void aLobbyRoundQueuedForTheDeadConnectionDoesNotGreetTheNextOne() throws Exception {
         CoopPeerLink link = link();
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.enqueue(CoopMessages.lobbyReject(1L, 0L, "lobby already has a guest"));
         link.enqueue(CoopMessages.handshakeResultReject(2L, 0L, "mods differ"));
         link.enqueue(CoopMessages.sessionResumeReject(SESSION, 3L, 0L, "no such session"));
         link.enqueue(snapshot(1L));
         link.detach();
 
-        link.attach(null, InetAddress.getByName("127.0.0.2"), 5_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.2"), 5_000L, false, 2L);
 
         assertEquals(1, link.outboundDepth(),
                 "the previous connection's lobby round must not be replayed at the next peer");
@@ -229,7 +229,7 @@ class CoopPeerLinkTest {
     @Test
     void detachKeepsThePinAndTheLearnedIdentityUntilTheSlotIsReused() throws Exception {
         CoopPeerLink link = link();
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.learnSenderId("guest-a");
 
         link.detach();
@@ -244,13 +244,13 @@ class CoopPeerLinkTest {
     void aHostReAttachDropsTheValidatedUdpAddressAndAGuestReAttachKeepsIt() throws Exception {
         CoopPeerLink host = link();
         host.setValidatedUdpAddress(address("127.0.0.1", 1));
-        host.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, true);
+        host.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, true, 1L);
         assertNull(host.validatedUdpAddress(),
                 "a reconnecting guest behind NAT almost always comes back on a different port");
 
         CoopPeerLink guest = link();
         guest.setValidatedUdpAddress(address("127.0.0.1", 1));
-        guest.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        guest.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         assertEquals(address("127.0.0.1", 1), guest.validatedUdpAddress(),
                 "the guest's target is configured, not learned");
     }
@@ -258,7 +258,7 @@ class CoopPeerLinkTest {
     @Test
     void resetClearsEverythingIncludingTheQueues() throws Exception {
         CoopPeerLink link = link();
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.learnSenderId("guest-a");
         link.enqueue(snapshot(1L));
         link.enqueueDatagram("stale");
@@ -284,7 +284,7 @@ class CoopPeerLinkTest {
     @Test
     void aHalfWrittenSemanticMessageGoesBackToTheHeadOfTheQueueWhenTheSocketDies() throws Exception {
         CoopPeerLink link = link();
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.enqueue(snapshot(9L));
         CoopMessages.Message inFlight = semantic(7L);
         link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1, 2, 3}), inFlight);
@@ -306,7 +306,7 @@ class CoopPeerLinkTest {
     @Test
     void aHalfWrittenConnectionScopedVerdictIsNotResent() throws Exception {
         CoopPeerLink link = link();
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1, 2, 3}),
                 CoopMessages.handshakeResultReject(4L, 0L, "mods differ"));
 
@@ -320,7 +320,7 @@ class CoopPeerLinkTest {
     @Test
     void aFullyWrittenFrameIsNotResentOnTheNextConnection() throws Exception {
         CoopPeerLink link = link();
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
         link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1}), semantic(7L));
         link.clearPendingWrite();
 
@@ -347,7 +347,7 @@ class CoopPeerLinkTest {
         assertTrue(link.shouldWarnDatagramSendFailure());
         assertFalse(link.shouldWarnDatagramSendFailure());
 
-        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
 
         assertTrue(link.shouldWarnForeignSource(), "a fresh connection deserves its own warning");
         assertTrue(link.shouldLogCandidateTimeout());

@@ -273,6 +273,21 @@ public class CoopNetPump implements EveryFrameScript {
     /** B2/C1: the transport's attach counter as of the last frame. */
     private long lastConnectionGeneration;
     private boolean connectionGenerationInitialized;
+    /**
+     * The generation {@link #consumeConnectionReplaced()} saw replaced this frame, or
+     * {@link #NO_CONNECTION_GENERATION} when nothing was. Set only for the frame it happens on.
+     */
+    private long replacedConnectionGeneration = NO_CONNECTION_GENERATION;
+    /**
+     * The connection that carried the live session up to the most recent drop edge (net-fix-5), or
+     * {@link #NO_CONNECTION_GENERATION}. A message stamped with this generation is the departing
+     * partner's last word; a message stamped with anything else came from whoever holds the slot now,
+     * which during a reconnect grace window is a socket that has proved nothing.
+     *
+     * <p>Never cleared once set, and it does not need to be: generations are monotonic, so a value
+     * belonging to a dead socket can never match a live one again.
+     */
+    private long preDropConnectionGeneration = NO_CONNECTION_GENERATION;
     /** B5: the port mapper result version last published to the log and the intel page. */
     private long lastPublishedPortMapperVersion = -1L;
     /** C6: next frame a FLEET_ROSTER_REQUEST may go out. */
@@ -378,9 +393,21 @@ public class CoopNetPump implements EveryFrameScript {
     private final coop.session.CoopLobbyRoster lobbyRoster = new coop.session.CoopLobbyRoster();
     /** Inbound messages the pre-drain pulled off the transport but left for {@link #drainInbound()}. */
     private final java.util.ArrayDeque<DeferredInbound> deferredInbound = new java.util.ArrayDeque<>();
+    /**
+     * "No connection generation". Deliberately not 0: the transport's counter starts there, and a
+     * sentinel a real value can equal is a comparison that silently passes.
+     */
+    private static final long NO_CONNECTION_GENERATION = Long.MIN_VALUE;
     /** net-fix-2 counters: pre-drop messages the grace window let through, and ones it discarded. */
     private long preDropMessagesApplied;
     private long preDropMessagesDiscarded;
+    /**
+     * net-fix-7: every snapshot type this pump has forced a producer to re-send after the transport's
+     * queue cap discarded one. Bounded by the number of message types, and read by tests — the forced
+     * resend itself is a hash reset inside a producer and has no other observable edge.
+     */
+    private final java.util.EnumSet<CoopMessages.Type> overflowSnapshotResendsForced =
+            java.util.EnumSet.noneOf(CoopMessages.Type.class);
     private final coop.ui.CoopDialogController lobbyDialogs =
             new coop.ui.CoopDialogController("lobby", this::nowMillis);
     private final coop.ui.CoopDialogController connectingDialogs =
@@ -855,6 +882,11 @@ public class CoopNetPump implements EveryFrameScript {
     /** Test read: pre-drop messages the drop edge had already invalidated. */
     long preDropMessagesDiscardedForTest() {
         return preDropMessagesDiscarded;
+    }
+
+    /** Test read: snapshot types re-sent after a queue-cap drop; see {@link #resendSnapshotsDroppedByQueueOverflow}. */
+    java.util.Set<CoopMessages.Type> overflowSnapshotResendsForcedForTest() {
+        return java.util.Collections.unmodifiableSet(overflowSnapshotResendsForced);
     }
 
     // ---- Phase 30 agent-bridge accessors (dev tooling) -----------------------------------------
@@ -3057,6 +3089,9 @@ public class CoopNetPump implements EveryFrameScript {
         maybeStartFromMemoryFlags();
         t = profiler.split(SECTION_CFG_MEMORY_FLAGS, t);
         service.flushOutbound();
+        // net-fix-7: before the producers below tick, so a snapshot the queue cap threw away is
+        // re-sent on this frame rather than the next one.
+        resendSnapshotsDroppedByQueueOverflow();
         t = profiler.split(SECTION_FLUSH_OUTBOUND_PRE, t);
         detectPeerDisconnect();
         // Before the inbound drain: the session edge resets the link measurements, and a LINK_STATUS
@@ -3603,6 +3638,19 @@ public class CoopNetPump implements EveryFrameScript {
                         + " disconnect (connection generation " + lastConnectionGeneration
                         + "); treating it as a drop edge");
             }
+            // net-fix-5: name the connection that just died, BEFORE anything drains the queue. That
+            // generation is the only thing that distinguishes the departing partner's last campaign
+            // deltas from the opening frames of whatever socket took the slot - which on the
+            // half-open replacement path is a peer that has authenticated nothing, and whose frames
+            // land in the same drain as the dead connection's tail.
+            //
+            // A drop that happens while a grace window is ALREADY open names nothing: the socket that
+            // just died never resumed the session (a resume closes the window), so it was never the
+            // proven one and its tail earns no exemption. Red-team B1 already treats that case as
+            // hygiene only.
+            preDropConnectionGeneration = reconnect.active()
+                    ? NO_CONNECTION_GENERATION
+                    : (replaced ? replacedConnectionGeneration : lastConnectionGeneration);
             // The peer's reason before the drop's consequences; see drainTerminalRejectsBeforeDrop.
             // A reject dispatched here has already ended the session by the time the flags below are
             // read, which is exactly what makes them read it as a refused join rather than a blip.
@@ -3738,9 +3786,14 @@ public class CoopNetPump implements EveryFrameScript {
      * <p>Reading it here, before {@link #drainInbound()}, is what makes the ordering work: the drop
      * edge opens the window, and the resume request already sitting in the inbound queue resolves it
      * on the same frame.
+     *
+     * <p>It also records which generation went away ({@link #replacedConnectionGeneration}), because
+     * "the socket changed" and "which socket the messages in the queue came from" are different
+     * questions and the drop edge below has to answer the second one (net-fix-5).
      */
     private boolean consumeConnectionReplaced() {
         long generation = service.connectionGeneration();
+        replacedConnectionGeneration = NO_CONNECTION_GENERATION;
         if (!connectionGenerationInitialized) {
             connectionGenerationInitialized = true;
             lastConnectionGeneration = generation;
@@ -3749,8 +3802,71 @@ public class CoopNetPump implements EveryFrameScript {
         if (generation == lastConnectionGeneration) {
             return false;
         }
+        replacedConnectionGeneration = lastConnectionGeneration;
         lastConnectionGeneration = generation;
         return true;
+    }
+
+    /**
+     * Whether an inbound message stamped {@code generation} came over the connection that carried the
+     * live session up to the most recent drop edge; see {@link #preDropConnectionGeneration}.
+     *
+     * <p>This replaced a positional rule — "everything drained before the edge is the partner's,
+     * everything after it is a stranger's" — which is not something the drain can observe. One
+     * {@code pollNetworkLocked} closes a stale link and accepts its replacement, so the pre-drain
+     * loop routinely pulls the dead socket's tail and the replacement's opening frames out of the
+     * same queue, and it used to tag both as proven. That let a {@code WORLD_DELTA} or a
+     * {@code MARKET_TXN} from an unauthenticated socket bypass the grace whitelist and mutate the
+     * host's campaign before any password or resume proof.
+     */
+    private boolean isPreDropProven(long generation) {
+        return preDropConnectionGeneration != NO_CONNECTION_GENERATION
+                && generation == preDropConnectionGeneration;
+    }
+
+    /**
+     * Re-sends the snapshots the transport's outbound queue cap discarded (net-fix-7).
+     *
+     * <p>The cap drops the oldest coalescable message when a peer's socket has stopped draining, on
+     * the reasoning that a superseded snapshot is the one thing whose loss changes nothing. That is
+     * only true if the producer sends another one — and two of them will not. {@code NPC_FLEET_SET}
+     * is suppressed while the roster's content hash is unchanged, and the bar pool's
+     * {@code MISSION_POOL_SNAPSHOT} the same way, so a dropped copy stayed dropped until the roster
+     * actually changed or the link reconnected. On the guest that reads as NPC fleets that are there
+     * and should not be, or gone and should not be, for as long as the sector stays quiet.
+     *
+     * <p>The other coalescable types are genuinely periodic and heal themselves:
+     * {@code TIME_SNAPSHOT}, {@code LINK_STATUS} and {@code STATE_DATAGRAM} are re-sent every few
+     * frames. {@code PLAYER_REP_SNAPSHOT} is on a 30 s timer rather than a hash, which heals but
+     * slowly, so it is pulled forward here too rather than left to drift for half a minute.
+     */
+    private void resendSnapshotsDroppedByQueueOverflow() {
+        java.util.Set<CoopMessages.Type> dropped = service.drainOverflowDroppedSnapshotTypes();
+        if (dropped.isEmpty()) {
+            return;
+        }
+        for (CoopMessages.Type type : dropped) {
+            switch (type) {
+                case NPC_FLEET_SET -> {
+                    npcFleetReplicator.forceResendSet();
+                    overflowSnapshotResendsForced.add(type);
+                }
+                case MISSION_POOL_SNAPSHOT -> {
+                    campaignReplicator.forceResendMissionPool();
+                    overflowSnapshotResendsForced.add(type);
+                }
+                case PLAYER_REP_SNAPSHOT -> {
+                    campaignReplicator.forceResendPlayerRepSnapshot();
+                    overflowSnapshotResendsForced.add(type);
+                }
+                default -> {
+                    // TIME_SNAPSHOT, LINK_STATUS, STATE_DATAGRAM: the next tick sends another.
+                }
+            }
+        }
+        CoopLog.warn(CoopNetPump.class, "Coop outbound queue overflow discarded snapshot types "
+                + dropped + "; forcing a resend of the ones whose producer suppresses unchanged"
+                + " content, because for those the discarded copy was the only one");
     }
 
     // ---- Phase 20.2: in-session reconnect grace ---------------------------------------------------
@@ -4252,25 +4368,28 @@ public class CoopNetPump implements EveryFrameScript {
      * against a session the reject has already ended.
      */
     private void drainTerminalRejectsBeforeDrop() {
-        CoopMessages.Message message;
-        while ((message = service.pollInbound()) != null) {
-            if (isTerminalRejectType(message.type())) {
-                dispatchOneInbound(message, true);
+        CoopNetService.Inbound entry;
+        while ((entry = service.pollInboundEntry()) != null) {
+            if (isTerminalRejectType(entry.message().type())) {
+                dispatchOneInbound(entry.message(), isPreDropProven(entry.connectionGeneration()));
             } else {
-                // net-fix-2: tagged proven. These bytes came off the socket that WAS the partner,
-                // before the drop edge existed; the grace whitelist a few lines later exists to
-                // filter whoever holds the slot AFTER it, and must not swallow the departing
-                // partner's last campaign deltas.
-                deferredInbound.add(new DeferredInbound(message, true));
+                // net-fix-2/net-fix-5: parked with the generation of the socket that produced it, not
+                // with a blanket "proven". Bytes off the connection that WAS the partner have to
+                // survive the grace whitelist a few lines later - it exists to filter whoever holds
+                // the slot AFTER the edge - but this same loop also drains frames from a replacement
+                // socket that attached inside the very poll that killed the old one, and those are
+                // exactly what the whitelist is for. Only the stamp tells them apart.
+                deferredInbound.add(new DeferredInbound(entry.message(), entry.connectionGeneration()));
             }
         }
     }
 
     /**
-     * An inbound message plus whether it arrived over the proven pre-drop connection; see
-     * {@link #drainTerminalRejectsBeforeDrop()} and {@link #survivesTheDropEdge}.
+     * An inbound message plus the connection generation it was framed off; see
+     * {@link #drainTerminalRejectsBeforeDrop()}, {@link #isPreDropProven(long)} and
+     * {@link #survivesTheDropEdge}.
      */
-    private record DeferredInbound(CoopMessages.Message message, boolean preDropProven) {
+    private record DeferredInbound(CoopMessages.Message message, long connectionGeneration) {
     }
 
     /**
@@ -4296,7 +4415,7 @@ public class CoopNetPump implements EveryFrameScript {
     private void drainInbound() {
         DeferredInbound next;
         while ((next = nextInbound()) != null) {
-            dispatchOneInbound(next.message(), next.preDropProven());
+            dispatchOneInbound(next.message(), isPreDropProven(next.connectionGeneration()));
         }
     }
 
@@ -4306,9 +4425,12 @@ public class CoopNetPump implements EveryFrameScript {
         if (deferred != null) {
             return deferred;
         }
-        CoopMessages.Message message = service.pollInbound();
-        // Anything read from the socket now arrived AFTER the drop edge, from whoever holds the slot.
-        return message == null ? null : new DeferredInbound(message, false);
+        CoopNetService.Inbound entry = service.pollInboundEntry();
+        // net-fix-5: judged by which socket produced it, not by when this loop happened to read it.
+        // "Anything read now arrived after the drop edge" was the old assumption, and it is false in
+        // both directions: the dead connection's tail can still be sitting in the queue here, and a
+        // replacement socket's frames can already have been read before the edge was even noticed.
+        return entry == null ? null : new DeferredInbound(entry.message(), entry.connectionGeneration());
     }
 
     private void dispatchOneInbound(CoopMessages.Message message, boolean preDropProven) {
