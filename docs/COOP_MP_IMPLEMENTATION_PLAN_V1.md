@@ -1000,7 +1000,7 @@ Implement Phase 12 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Replicate the v1 camp
 
 - [x] **Host-authored special bar-event pool:** beyond bar *missions*, the special bar *events* (one-time unique ship/blueprint/AI-core offers, rumor tip-offs, special recruitment — from `BarEventManager`) are host-owned. Extend `MISSION_POOL_SNAPSHOT`/the pool sync so the guest renders the host's bar-event list and one-time offers are first-come-claimed (so both players cannot take the same offer). The purchased item lands in the claiming player's own cargo; any world effect (a revealed location, a consumed offer) goes through `WORLD_DELTA`. (Bar events ride the same `MISSION_POOL_SNAPSHOT`/claim path via `SourceType.BAR`; the consumed-offer world effect uses `WORLD_DELTA`. Concrete `BarEventManager` enumeration is the in-game extension point noted above.)
 - [x] **Story-point & misc dialog world-mutations:** per-player SP effects (skills, bonus XP, establish-contact) stay local. The rare dialog options that mutate *shared* world state (spend SP to make a fleet leave, spawn/grant a world item, etc.) report through the same `WORLD_DELTA` guest→host path; the host integrates and rebroadcasts. Do **not** enumerate every `CommandPlugin` — rely on the host self-healing backstop (Design Alignment Notes) for anything not explicitly wired. (`WORLD_DELTA` `kind=PARLEY` carries these; no `CommandPlugin` enumeration.)
-- [x] **Stable-location construction:** building a comm relay / nav buoy / sensor array is a shared-world structure — the building client sends a `WORLD_DELTA` (`kind=CONSTRUCT`, location, structure type), the host places it in authoritative world state and rebroadcasts so it exists for both; resource/credit cost is per-player. Low-frequency; reuses the `WORLD_DELTA` path. (`kind=CONSTRUCT`; a non-consuming delta is applied without consuming an entity id.)
+- [x] **Stable-location construction:** building a comm relay / nav buoy / sensor array is a shared-world structure — the building client sends a `WORLD_DELTA` (`kind=CONSTRUCT`, location, structure type), the host places it in authoritative world state and rebroadcasts so it exists for both; resource/credit cost is per-player. Low-frequency; reuses the `WORLD_DELTA` path. (`kind=CONSTRUCT`; a non-consuming delta is applied without consuming an entity id.) *(**Ticked in error until 2026-09-04:** only the `CONSTRUCT` enum constant and its ledger key ever existed. Nothing captured a construction and nothing applied one, so a comm relay built by either player existed on that client alone, and a stable location consumed by the build stayed on the other. Built 2026-09-04 (`ac837b9`) on `SPAWN` rather than `CONSTRUCT`, which stays a reserved unused constant: the salvage watcher's per-entity pass gained an add half (`isConstructionShape` = `(objective && makeshift) || stable_location`), `CoopWorldEntitySpawn` carries `factionId`, `consumedEntityId` and an `Orbit(focusId, angle, radius, period)`, and disassembly ships a `SPAWN` of the stable location plus a `CONSUME` of the objective. Details in the 2026-09-04 fix pass at the end of this document.)*
 
 - [x] Add an event replay guard so applying host events does not rebroadcast them. (`CoopCampaignReplicator.ReplayGuard`, re-entrant depth counter; every engine-apply path wraps `begin()/end()` and every host-capture path skips while `isReplaying()`.)
 - [x] Add tests for replay guard, final-value rep convergence, guest baseline rep 0 before host deltas, first-come mission claim acceptance, rejected duplicate claim, host market-contents render + `MARKET_TXN` apply, idempotent `WORLD_DELTA` (no double-loot), `FACTION_REL_DELTA` convergence, and world-affecting vs local ability classification. (`CoopRepDeltaTest`, `CoopFactionRelationsTest`, `CoopMissionBoardSyncTest`, `CoopMarketSyncTest`, `CoopWorldDeltaTest`, `CoopAbilityArbiterTest` — 30 tests, all green; every new message type also round-trips. Full `gradlew clean test build` → `BUILD SUCCESSFUL`.)
@@ -1315,7 +1315,7 @@ Full pass over `CoreLifecyclePluginImpl.addScriptsIfNeeded()` (API source, lines
 
 - `DECIV(marketId)` — host market decivilized; guest applies the same condition change/market removal. Rare (months-to-years cadence), tiny payload, and required by the Phase 6b mutability contract.
 - `OBJECTIVE_OWNERSHIP(objectiveEntityId, factionId)` — comm relay / nav buoy / sensor array ownership flips from the host's war sim. Gen-time entity ids match across clients.
-- `GATE_ACTIVATED(gateEntityId)` — story gate activation flag (gates are gen-time entities). Without it the guest sees inactive gates after the host activates them.
+- `GATE_ACTIVATED(gateEntityId)` — story gate activation flag (gates are gen-time entities). Without it the guest sees inactive gates after the host activates them. *(**Amended 2026-09-04 (`ac837b9`):** no longer host → guest only. `$canScanGates` (`GateEntityPlugin.CAN_SCAN_GATES`) rides as a fourth field and `collectGateStates`/`diffGateStates` now run on both roles, so a guest's scan flips the host and is rebroadcast; the applier calls `GateEntityPlugin.addGateScanned()` when it flips a scanned flag. Until then the guest had no "Scan the Gate" option at all — the story flag was never on the wire — so it could use gates the host had scanned but could not extend the network.)*
 
 These are the **only** skeleton mutations the inventory found beyond what Phases 9/12 already replicate; orbital junk/asteroid regen on load is transient-cosmetic, and `Limbo`/`GateHaulerLocation`/`NamelessRock`/`TTBlackSite` generation is gen-time (verified `StarSystemGenerator.random` usage; `TTBlackSite`'s two `Math.random()` orbit params are cosmetic-only).
 
@@ -2348,7 +2348,7 @@ Implement Phase 22 from COOP_MP_IMPLEMENTATION_PLAN_V1.md (post-V1; requires Pha
 1. **Colony lifecycle replication (the new core).** Colonization is a player action resolved locally by whoever performs it (vanilla dialog, marines, rolls — consistent with "replicate outcomes, not RNG"); the colonization listener fires and ships a `COLONY_FOUNDED` delta (planet id, market seed data: size, conditions, starting industries, submarkets). The host canonicalizes and rebroadcasts; the receiving engine builds the same market via the public API recipe and `setPlayerOwned(true)`. Abandonment ships the inverse delta. After creation, the colony is just another market — Phase 12/12c snapshot-on-open + transaction deltas already govern its contents.
 2. **Colony management (industries).** The guest opens the mirrored player-owned market and the engine gives it the full vanilla colony UI locally — no custom UI needed. Mutations (industry add/remove/upgrade, construction queue, AI cores, improvements, free port, governor settings) are captured by **diff-on-close** (`ColonyInteractionListener.reportPlayerClosedMarket`: compare against the open-time snapshot) → `COLONY_MGMT` delta → host applies to the canonical market → rebroadcast. **Concurrency is already solved:** the Phase 10 interaction gate arbitrates one-player-per-entity dialogs, so two players cannot be inside the same colony screen at once — no concurrent-edit conflicts by construction. *(**False as written, corrected 2026-09-04:** the gate keys on the entity a dialog opened, and the colony screen reached from the command tab opens no dialog, so both players could edit the same colony and the later absolute report silently dropped the other's edit. The `OUTPOSTS` tab now claims the synthetic id `coop:colony-management` through the same gate; the second player in is bounced to the INTEL tab. No engine call says which colony that tab is showing, so the claim covers the whole editor.)*
 3. **Income and spoils.** Monthly colony income lands on the host engine (`reportEconomyMonthEnd`). Split via `CoopRewardSplitter` policy (**50/50, decided 2026-06-10** — the class is created by this phase; same `coop.lootSplit` family Phase 22 extends later); the guest gets a monthly report line (feed message or session intel). Colony storage/local-resources submarkets are shared *claimable* content per the Phase 12c boundary — both players see and use the same storage.
-4. **Player raids and bombardments on NPC colonies.** The acting player resolves the raid locally against the snapshot-fresh mirrored market (marine choices, target picks, rolls — all local); the hostile-act listeners capture the complete outcome → `RAID_RESULT` delta (commodities removed, industry + disruption days, stability hit, rep deltas via the existing `REP_DELTA` channel). Loot is per-player like salvage. Saturation-bombardment deciv flows through the existing `DECIV` skeleton delta unchanged. Host applies to the canonical market and rebroadcasts.
+4. **Player raids and bombardments on NPC colonies.** The acting player resolves the raid locally against the snapshot-fresh mirrored market (marine choices, target picks, rolls — all local); the hostile-act listeners capture the complete outcome → `RAID_RESULT` delta (commodities removed, industry + disruption days, stability hit, rep deltas via the existing `REP_DELTA` channel). Loot is per-player like salvage. Saturation-bombardment deciv flows through the existing `DECIV` skeleton delta unchanged. Host applies to the canonical market and rebroadcasts. *(**True only for a host bombardment; corrected 2026-09-04 (`ac837b9`):** the `DECIV` comes from the host's own `ColonyDecivListener`, which a guest bombardment never fires. The guest sent `RAID_RESULT` alone and the applier assumed a `DECIV` had already arrived, so the host kept the colony while the guest deleted it and the next reconnect was rejected at the fingerprint. `handleRaidResult` now calls the extracted `CoopCampaignReplicator.decivilizeMarket(marketId, fullDestroy, source)` itself when `outcome.decivilized()`, outside the replay guard so the host's listener broadcasts the normal `DECIV` onward.)*
 5. **NPC threats against the players' colonies.** Expeditions/raids targeting player colonies simulate host-side only (suppressor holds guest-side; `PlayerRelatedPirateBaseManager` suppression is already specced in Phase 13). Their fleets replicate via Phase 9; defense battles ride Phase 14 (and Phase 22 if built). Gap to close here: the *warning intel* (expedition countdown) is host-local — **decided 2026-06-10: mirror it as a coop-owned intel item** (`CoopExpeditionWarningIntel` + `EXPEDITION_WARNING`, see the settled decision points below) so the guest gets a real countdown entry, not just a feed line.
 
 **Decision points — SETTLED (user decisions, 2026-06-10 review pass):**
@@ -2912,6 +2912,8 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 
 *As built, 2026-09-04 (user decisions, final): the launcher names the save to load. The gap the invite left open was that a Starsector save folder is named after the character and the game's load screen lists it by character and date, so a player with two co-op campaigns had to guess which save an invite was for and found out at the seed lock minutes later. `2faeb2b` gave the mod the index (`saves/common/coop_saves.json.data`) and the in-game guard (`coop.save.CoopCampaignGuard` on `coop.expectedCampaignId`); this is the launcher half of the same feature. **`coop.launcher.CoopSaveIndexReader`** reads the index, stops on a `version` above 1 rather than guessing, and joins every row to what is on disk: a row whose folder the engine has pruned (autosaves are kept 3 deep) is dropped, a surviving row has its folder's `descriptor.xml` parsed and the descriptor wins every display field it has an answer for, and a row the mod could not name a folder for is matched by `characterName` plus `gameDateTimestamp` against those same descriptors. The XML is read with the JDK's DOM, doctype declarations refused, and only the root element's own children consulted, because the real `descriptor.xml` nests a whole `enabledMods` tree inside itself. **`coop.launcher.CoopCampaignPicker`** is the pure model behind the host card's **Campaign** drop-down (New campaign first carrying the seed, then one entry per campaign with a surviving save, newest first, labelled `<character>, level N, <in-game date>, saved <local time>`; campaigns this install only ever guested in are left out of the host list but still resolve for a guest's rejoin) and behind the one advice line under each card: `Load the save "<name>", level N, saved <local time> (folder <dir>)`, `No co-op save for this campaign on this machine: start a New Game with the seed above`, or `Start a New Game with the seed above`. A missing, unreadable or newer-versioned index says so on that same line and never blocks LAUNCH. Picking an existing campaign greys the seed, its Generate button, the sector size and the star age. The invite gained an optional **`cid`** parameter, last in the query, and a parse that reads a missing one as "no campaign named", so every invite from the previous release still works. Refresh points: install adoption, `windowGainedFocus`, and game exit, run on the existing worker with the same generation-counter guard the connection check uses, because a save folder on a sleeping drive would otherwise freeze the window. At Launch the picked or invited id is written as `coop.expectedCampaignId` through the same `owned` map as the other one-shot keys, blank for a new campaign (which removes the key). Tests: `CoopSaveIndexReaderTest` (19), `CoopCampaignPickerTest` (18), 6 invite cases, 1 config case; 2678 → 2722 green.*
 
+*Open (2026-09-04): the picker carries each campaign's seed and not its world settings.* `CoopCampaignPicker.Entry` gained `seedString` in the 2026-09-04 fix pass, so picking a saved campaign fills the seed field and the invite from that campaign; sector size and star age are not recorded anywhere. Both exist only while the sector is generated, and neither the save nor `coop_saves.json.data` stores them, so a guest who has to regenerate a campaign still matches those two by hand off the host's launcher. The fix is to write them into the save index at generation time, which needs an index version bump and the reader's `version > 1` refusal relaxed to a migration.
+
 **Design (user direction 2026-09-03, "modern concise, dark only, in the spirit of TriOS"; done by the orchestrator, not a worker):** the first build's system-look window had zero-width fields and no hierarchy (screenshot `tmp_ff_analysis/phase31/design/current.png`). Redesign on **FlatLaf 3.6** (Apache-2.0, fetched by Gradle into `jars/flatlaf.jar`, on the `.cmd` classpath, attributed in `LICENSE` + `jars/FLATLAF-LICENSE.txt`) with the palette and factories in `coop.launcher.CoopTheme`: background `#111820`, card `#1a232d` with a `#283442` border and 14 px arc, field `#0e141b`, text `#e6edf3`, muted `#8b98a8`, one cyan accent `#4fd1e8` for the primary action and the selected role, status colours OK `#3ecf8e` / WARN `#f4a63a` / FAIL `#f0584f` / INFO `#7b8794`. Layout: header (title, version, update chip, Host/Guest segmented switch) → cards **Session** (two-column form; host: Port, Password with reveal, Seed + inline Generate, Your address + inline Look up, live read-only invite line + inline Copy; guest: invite field + inline Paste that fills the rest on change, then address/port/password/seed) → **Connection** (one role-dependent button + capsule result chips + a wrapping next-step sentence) → **Advanced** (hidden until the footer button) → **Install** (summary chip, Refresh/Folder/Guide, non-OK rows only with a Show-all toggle) → footer (LAUNCH pill, hint, Advanced, Log) → **Log drawer** (Save a bug report + Include newest save, Open log folder, Clear, timestamped lines + the starsector.log tail; opens by itself after Launch and after a connection check). Engineering facts that made it work: the cards column is a `Scrollable` panel that tracks the viewport width (otherwise GridBag lays out to content width and overflows), text fields get `setColumns(8)` so the two columns split by weight not content, chip rows use a wrapping FlowLayout, capsule arc = component height (a fixed 999 arc drew ellipses), the role panels are swapped in a BorderLayout rather than a CardLayout (CardLayout sizes to the taller form and left a blank band), notes are read-only wrapping `JTextArea`s, and the default height is clamped to the screen (860 logical px overflows a 1080p display at 150 % scaling). `COOP_LAUNCHER_PREVIEW=host|guest|install` stages the window for screenshots (dev only, nothing written, no socket). Capture tool: `tmp_ff_analysis/phase31/design/shot.ps1` (DPI-aware `PrintWindow`).
 
 **Layout revision (user, 2026-09-03, same day):** sector size and star age moved from Advanced into the Session card with real defaults (`normal`, `mixed`) and **ride in the invite** (`&size=…&age=…`), so the guest's read-only fields fill from the host's choice instead of being matched by hand. "shipped default" entries removed everywhere: every combo and spinner shows the registry default (`auto`, `TR`, `60`) and the file gets explicit values. **Every `-Dcoop` flag the project added now lives in Advanced**: agent bridge port, wiretap sample, interaction delay, and a Developer flags group (diagnostics, datagram wiretap, frame profiler, full-fidelity guest system, disable shared fast-forward, disable clock reconciler, start over inside the host's campaign). Mechanism: `CoopOptionsStore.ONE_SHOT_KEYS` is now the whole `dOnly` set, `launcherOverrides()` lists the ones present in the user file, and `CoopModPlugin.onApplicationLoad` republishes each as a system property unless a real `-D` exists (log line `Coop published the settings-file flag -D<key>=<value>`); the owners keep reading `System.getProperty` unchanged. The launcher writes a flag only when it differs from the default; the adopt-campaign box is never prefilled (one-shot consent). Tests 2415 green.
@@ -3061,6 +3063,129 @@ Live-smoke watch items, for the next two-instance session:
   entry after a crash. Expect a conflict report and a port change, not an eviction.
 - The host now learns the guest's id, so `sendTo` unicasts for the first time: the N-ready routing
   paths are exercised in a two-player session.
+
+## Second fix pass (2026-09-04)
+
+Twelve findings the first campaign left open, plus one feature the audit turned up as missing
+entirely, taken in three worktree branches and merged into `main` at `755b587`: `78c415b` launcher,
+`620b673` net, `ac837b9` campaign. Suite 2787 green, no failures, one pre-existing skip. Everything
+below is unit-verified; the five items at the end have not been in front of a running game.
+
+**Net (`coop.net`, `coop.stats`, the launcher probe):**
+
+- **Reliable messages were lost on every reconnect (P1).** `CoopPeerLink` now keeps the `Message`
+  beside its `pendingWrite` buffer, so `detach()`/`attach()` requeue a half-written,
+  non-connection-scoped message at the head of `outbound`, and `flushOutboundLocked`'s catch requeues
+  rather than drops. The gate that used to discard the rest is now a filter:
+  `CoopNetService.setOutboundWriteGate(Predicate<Type>)`, filled by the pump with
+  `peerProvenForOutbound() || allowedDuringReconnectGrace(type)`, and the flush walks the queue
+  through a `ListIterator` so a refused message keeps its place instead of going to the back. Before
+  this, one drop cost one message out of `pendingWrite` outright and flushed the survivors ahead of
+  `SESSION_RESUME_REQUEST`, where the receiver's own grace filter threw them away: the guest-to-host
+  events (`MARKET_TXN`, `COLONY_*`, `WORLD_DELTA` consume, `MISSION_CLAIM_REQUEST`,
+  `GUEST_REP_DELTA`) had no path that ever healed them.
+- **The resume edge accepted an accept it had no connection for, and discarded what it had parked
+  (P2).** `handleSessionResumeAccept` requires `service.isConnected()` (`Coop ignoring
+  SESSION_RESUME_ACCEPT`). Messages parked before the drop by `drainTerminalRejectsBeforeDrop` are
+  wrapped as `DeferredInbound(message, preDropProven)`, and a fully enumerated
+  `survivesTheDropEdge(Type)` lets pre-drop campaign deltas, events and snapshots back through the
+  grace filter while discarding `INTERACTION_*`, `DIALOG_BEGIN`, the lobby/handshake/seed-lock/resume
+  family, `READY_STATE`, `FLEET_ROSTER_REQUEST`, `LINK_STATUS` and `PING`/`PONG`/probes. Markers:
+  `Coop applying pre-drop type=`, `Coop discarding pre-drop type=`.
+- **The receive budget reset on the wrong event (P3).** It is per game frame now:
+  `CoopNetService.beginFrame()` is called once at the top of `advanceFrame()`, because the pump calls
+  `flushOutbound` from nine sites and resetting there handed a sender nine budgets per frame.
+  `MAX_INBOUND_BYTES_PER_FRAME` is 512 KB, an oversized frame takes a strike through
+  `noteBadFrameLocked`, and the oversized warn fires once per link. `CoopLauncherProbe.runTcp` reads
+  at most 512 bytes against an absolute 5 s deadline.
+- **`SHIP_LOST` and `SESSION_STATS` were ungated (P2/P3).** `handleShipLost` requires HOST,
+  `isGameplaySessionActive()` and a `playerId` in `{localPlayerId, remotePlayerId}`;
+  `handleSessionStats` gained the session gate; `CoopSessionStats.MAX_PLAYER_COLUMNS` is 8 and
+  `player()` throws past the cap. The 2026-09-03 audit refuted this as **net-54** by reasoning about
+  honest peers, which is the wrong frame: the host listener accepts `SHIP_LOST` from any TCP client
+  that connects, before authentication.
+- **Adoption consent was not one-shot, pump half.** `adoptCampaignIdConsumer` (default
+  `System.clearProperty`) is consumed only inside the two adoption branches of
+  `checkOrAdoptCampaignId`, so a second save loaded in the same process no longer re-adopts on the
+  strength of the first save's consent.
+
+**Campaign (`coop.campaign`, `coop.colony`):**
+
+- **A guest's saturation bombardment left the two engines with different colonies (P1).**
+  `CoopCampaignReplicator.decivilizeMarket(marketId, fullDestroy, source)` is extracted out of
+  `applyDecivToEngine` and called from `handleRaidResult` when `outcome.decivilized()`, outside the
+  replay guard so the host's own `ColonyDecivListener` broadcasts the normal `DECIV` onward;
+  `decideDeciv` keeps it idempotent, and the guest logs a benign `via DECIV skipped:
+  SKIP_UNKNOWN_MARKET` when that echo comes back. The old path assumed a `DECIV` had arrived first,
+  which from a guest it never did: the host kept the colony, the guest deleted it, and the next
+  reconnect was hard-rejected at the sector fingerprint. Phase 24's item 4 is amended in place.
+- **`DECIV` is host-only on the wire now (P3).** `CoopWorldDelta.Kind.hostOnly()` is that one kind,
+  refused at the top of `handleWorldDelta` on the host (`Coop refused host-only WORLD_DELTA DECIV
+  entity=`). Defence in depth: no honest guest ever sent one, and after the fix above the guest has
+  no reason to.
+- **The guest can scan gates** (feature, not a fix). `$canScanGates`
+  (`GateEntityPlugin.CAN_SCAN_GATES`) rides `GATE_ACTIVATED` as a fourth field, `collectGateStates`
+  and `diffGateStates` run on both roles so a guest's scan flips the host and is rebroadcast, and the
+  applier calls `GateEntityPlugin.addGateScanned()` when it flips a scanned flag. The guest had no
+  "Scan the Gate" option before, so a pair could use whatever gates the host had scanned and could
+  not extend the network from the guest's side of the sector. Phase 13's subtype list is amended in
+  place.
+- **Stable-location construction was never built (P1).** The plan ticked it in 2026-06-10 on the
+  strength of a `CONSTRUCT` enum constant that nothing produced and nothing consumed; that line is
+  amended in place. It replicates through `SPAWN` instead. `CoopWorldEntitySpawn` gained
+  `factionId`, `consumedEntityId` and `Orbit(focusId, angle, radius, period)`; the salvage watcher's
+  per-entity pass gained an add half (`isConstructionShape` = `(objective && makeshift) ||
+  stable_location`) and reads the consumed stable location out of vanilla's
+  `$originalStableLocation`; apply resolves the orbit focus by id and falls back to a fixed position
+  when the focus is unknown. `collectObjectiveOwners` keys on the coop id, so ownership flips on
+  player-built objectives replicate and the `OBJECTIVE_OWNERSHIP for unknown entity` warn stops.
+  Disassembly is a `SPAWN` of the stable location plus a `CONSUME` of the objective, with no
+  suppression of the `CONSUME`: both deltas are idempotent and order-independent, so the pair
+  converges whichever arrives first. `CoopSectorFingerprint` covers markets only, so none of this
+  moves the fingerprint.
+- **The interdiction pulse charged the guest twice (P2).** The host-side manual rep hit is deleted
+  (`applyInterdictionRepHit`, `shouldTakeInterdictionRepHit`, `isVisibleToPlayerFleet`): the guest's
+  own vanilla pulse already charges at pulse time and the standing reaches the host through
+  `GUEST_REP_DELTA`. `docs/starsector-runtime-limitations.md` carries the residues from this and the
+  two items above (rewritten interdiction paragraph, new section "Gate Scanning and Stable-Location
+  Construction: Accepted Residues"); not repeated here.
+
+**Launcher (`src/launcher`, `coop.handshake`, `build.gradle`):**
+
+- **Picking a saved campaign kept the draft seed (P2).** `CoopCampaignPicker.Entry` carries
+  `seedString`, so the pick writes that campaign's seed into the seed field and the invite and the
+  launch settings use it; re-selecting New restores the draft seed. Sector size and star age stay
+  unrecorded, which is the open item under Phase 31.
+- **Adopt consent survived a failed launch, launcher half.** The launch-throw path clears it through
+  the static `CoopLauncherApp.clearAdoptConsent(File, String)`.
+- **Nothing compared `coop-forks.jar` with `coop.jar` (P1).** They ship together and are built
+  together, but a player who replaces one and not the other gets a classpath shadow from a different
+  build with no complaint from anything. New install row `coop-forks.jar matches coop.jar`, FAIL on
+  differing `Coop-Git-Commit`; separately the classpath entry is resolved against `starsector-core`
+  and compared with the canonical forks jar (WARN, no Fix button). The generated
+  `coop.build.CoopForksBuildInfo` lives only in `coop-forks.jar` and exposes **methods, not
+  constants**, because javac inlines constants into `coop.jar` at compile time and the two would then
+  agree by construction. The handshake manifest gained `coopForksBuild` (version/commit, `absent`
+  when the class is missing, `not-reported` from a peer built before this), compared in
+  `CoopHandshakeDiff`.
+- **Bug-report scrub notes stayed in the log (P3).** They reach the launcher status pane now, and the
+  `blankPassword` null case is disambiguated through `hasPassword()`.
+
+**Not yet in front of a running game.** Fixes 1, 2, 6 and 7 and guest gate scanning are
+unit-verified only. For the next two-instance session:
+
+1. Cut the guest's link while a guest-to-host event is in flight (a market purchase, a colony edit, a
+   salvage consume) and confirm the event lands after the resume: `Coop applying pre-drop type=` on
+   the receiver, the purchase visible on the host, no `Coop discarding pre-drop` for a campaign type.
+2. Saturation-bombard an NPC colony from the guest. Both engines must lose the colony, and the next
+   reconnect must pass the fingerprint check rather than hard-rejecting.
+3. Build a comm relay on the guest and disassemble one on the host: the entity appears and disappears
+   on both, the stable location comes back on both, and no `OBJECTIVE_OWNERSHIP for unknown entity`
+   warn fires afterwards.
+4. Scan a gate from the guest: the "Scan the Gate" option exists, the host's copy flips to scanned,
+   and the guest can use that gate afterwards.
+5. Mismatch the two jars on purpose (an old `coop-forks.jar` beside a fresh `coop.jar`) and confirm
+   the new install row goes red and the handshake reports `coopForksBuild`.
 
 ## Maybe (Post-V1 Ideas — Not Committed)
 
