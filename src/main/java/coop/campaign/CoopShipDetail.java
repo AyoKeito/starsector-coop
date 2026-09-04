@@ -8,6 +8,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Everything that makes one market ship listing <em>that</em> ship rather than a pristine copy of its
  * base variant (Phase 12c gaps 2a + 2b).
@@ -271,11 +273,4 @@ public record CoopShipDetail(String memberId,
         return String.format(Locale.ROOT, "%.4f", value);
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

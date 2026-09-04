@@ -6,6 +6,8 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
 
+import static coop.util.CoopText.requireText;
+
 public class CoopSessionState {
     private final Supplier<String> idSupplier;
 
@@ -443,11 +445,4 @@ public class CoopSessionState {
         return value.trim();
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

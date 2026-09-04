@@ -169,3 +169,56 @@ function Assert-CoopSeedString {
             " (max $([long]::MaxValue)).")
     }
 }
+
+<#
+.SYNOPSIS
+Patches a test profile's vmparams with coop JVM properties, prepending coop-forks.jar to the
+classpath along the way.
+
+.DESCRIPTION
+Shared by launch-host.ps1 and launch-guest.ps1, which each pass the same $ProfileRoot layout
+(a starsector.exe test profile with a vmparams file at its root).
+#>
+function Set-CoopVmParams {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProfileRoot,
+        [Parameter(Mandatory = $true)][string[]] $JvmProperties
+    )
+
+    $vmparams = Join-Path $ProfileRoot 'vmparams'
+    $backup = Join-Path $ProfileRoot 'vmparams.coop-test-base'
+    if (-not (Test-Path -LiteralPath $vmparams)) {
+        throw "Missing vmparams under $ProfileRoot"
+    }
+    if (-not (Test-Path -LiteralPath $backup)) {
+        Copy-Item -LiteralPath $vmparams -Destination $backup -Force
+    }
+
+    $content = Get-Content -LiteralPath $vmparams -Raw
+    # Strip EVERY coop property, not an enumerated list: script-managed ones are re-added below and
+    # -ExtraJvmProps levers are launch-scoped by design. The enumerated list let a previous run's
+    # lever (e.g. -Dcoop.debug.interactionDelayMs) silently persist into later sessions — found live
+    # 2026-08-24 when a leftover 1500 ms delay queue showed up as pause lag in the Phase 29 smoke test.
+    $content = $content -replace '\s-Dcoop\.\S+', ''
+    # Remove any prior coop-forks classpath entry so re-patching stays idempotent.
+    $content = $content -replace '\.\.\\mods\\coop\\jars\\coop-forks\.jar;', ''
+
+    $classpathMarker = ' -classpath '
+    $index = $content.IndexOf($classpathMarker, [System.StringComparison]::Ordinal)
+    if ($index -lt 0) {
+        throw "Could not find -classpath in $vmparams"
+    }
+
+    # Prepend coop-forks.jar to the FRONT of the classpath so the JVM system classloader resolves
+    # our forked engine classes (e.g. com.fs.starfarer.api.util.Misc) ahead of starfarer.api.jar.
+    # Path is relative to the JVM working directory (starsector-core); '..' -> install root.
+    $forksEntry = '..\mods\coop\jars\coop-forks.jar;'
+    $cpValueStart = $index + $classpathMarker.Length
+    $content = $content.Substring(0, $cpValueStart) + $forksEntry + $content.Substring($cpValueStart)
+
+    # Insert coop JVM properties just before -classpath.
+    $index = $content.IndexOf($classpathMarker, [System.StringComparison]::Ordinal)
+    $insertion = ' ' + ($JvmProperties -join ' ')
+    $content = $content.Substring(0, $index) + $insertion + $content.Substring($index)
+    Set-Content -LiteralPath $vmparams -Value $content -NoNewline -Encoding ASCII
+}

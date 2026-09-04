@@ -13,8 +13,9 @@ script will not produce an archive that the handshake would reject at connect ti
 
   * a dirty working tree, because the commit baked into the jar reads "<hash>-dirty" and no clean
     build of the same commit reports that string;
-  * mod_info.json and build.gradle disagreeing on version, because the handshake compares both
-    (mod_info.json via ModSpecAPI.getVersion, build.gradle via coop.build.CoopBuildInfo.VERSION);
+  * build.gradle no longer reading its version from mod_info.json, because the handshake compares
+    both (mod_info.json via ModSpecAPI.getVersion, build.gradle via coop.build.CoopBuildInfo.VERSION)
+    and mod_info.json is the single source both are supposed to agree with;
   * coop.version's modVersion disagreeing with them, because that is the number Version Checker
     reports to every player as the current release;
   * jar manifests whose Coop-Git-Commit is not HEAD, which is what a build made before the
@@ -87,17 +88,26 @@ function Get-CoopModInfoVersion {
 
 <#
 .SYNOPSIS
-The version string in build.gradle's "version = '...'" line.
+Confirms build.gradle still reads its version from mod_info.json rather than a hardcoded literal.
+
+.DESCRIPTION
+build.gradle has no version string of its own to compare against mod_info.json's - it evaluates
+`project.version` by parsing mod_info.json at build time, so the two can never disagree. What can
+still happen is someone reverting that line to a hardcoded literal, which would silently reintroduce
+the drift this check used to catch. Fail loudly if the sourcing line is gone instead.
 #>
-function Get-CoopGradleVersion {
+function Assert-CoopGradleReadsModInfoVersion {
     param([Parameter(Mandatory = $true)][string] $Path)
 
     $text = Get-Content -LiteralPath $Path -Raw
-    $match = [regex]::Match($text, "(?m)^\s*version\s*=\s*'([^']+)'\s*$")
+    $match = [regex]::Match($text,
+        "(?m)^\s*version\s*=\s*new groovy\.json\.JsonSlurper\(\)\.parse\(file\('mod_info\.json'\)\)\.version(\.toString\(\))?\s*$")
     if (-not $match.Success) {
-        throw ("Could not find a `"version = '...'`" line in $Path.")
+        throw ("build.gradle no longer reads its version from mod_info.json (expected a" +
+            " `"version = new groovy.json.JsonSlurper().parse(file('mod_info.json')).version`" line" +
+            " in $Path). mod_info.json is the single source of truth for the mod version - if" +
+            " build.gradle needs its own literal again, this check needs updating alongside it.")
     }
-    return $match.Groups[1].Value
 }
 
 <#
@@ -198,12 +208,7 @@ foreach ($required in @($modInfoPath, $buildGradlePath, $versionFilePath)) {
 }
 
 $modInfoVersion = Get-CoopModInfoVersion -Path $modInfoPath
-$gradleVersion = Get-CoopGradleVersion -Path $buildGradlePath
-if ($modInfoVersion -cne $gradleVersion) {
-    throw ("Version mismatch: mod_info.json says '$modInfoVersion', build.gradle says" +
-        " '$gradleVersion'. The handshake compares both, so a session with mismatched files is" +
-        " rejected. Make them the same string (release checklist step 1).")
-}
+Assert-CoopGradleReadsModInfoVersion -Path $buildGradlePath
 $versionFileVersion = Get-CoopVersionFileVersion -Path $versionFilePath
 if ($modInfoVersion -cne $versionFileVersion) {
     throw ("Version mismatch: mod_info.json says '$modInfoVersion', coop.version's modVersion says" +

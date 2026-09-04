@@ -286,25 +286,26 @@ Four things are deliberately not bridge verbs: market buy/sell, officer hire, ba
 
 ## Release Checklist
 
-**The handshake compares two version strings, and they live in two files.** `CoopHandshakeManifest`
-captures `coopBuildVersion` from `coop.build.CoopBuildInfo.VERSION`, which `generateCoopBuildInfo`
-writes from `build.gradle`'s `version` property; separately, the engine's `ModSpecAPI.getVersion()`
-supplies the `version` field of the `coop` entry in `enabledMods`, and that one comes from
-`mod_info.json`, alongside a SHA-256 of the whole `mod_info.json` text taken through
-`SettingsAPI.loadText`. `CoopHandshakeDiff.compare` checks all three, and any single difference
-rejects the session. So a release bump is two edits that have to agree: `mod_info.json`'s `version`
-and `build.gradle`'s `version`. `coopGitCommit` is compared too and comes from
-`git rev-parse --short=12 HEAD`, which has a consequence worth stating plainly: two people who each
-build the mod from their own checkout will be refused even at an identical version. A build from a
-modified working tree reports `<hash>-dirty`, so it will not match a clean build of the same commit
-either; `dev-uncommitted` is now only what a checkout with no git metadata at all reports. A release
-is one built artifact that both players install, not a version number both players reproduce.
+**The handshake compares two version strings, and `mod_info.json` is the only place either is
+typed by hand.** `CoopHandshakeManifest` captures `coopBuildVersion` from
+`coop.build.CoopBuildInfo.VERSION`, which `generateCoopBuildInfo` writes from `build.gradle`'s
+`version` property; `build.gradle` sets that property by parsing `mod_info.json`'s `version` field at
+build time, so it can't drift from it. Separately, the engine's `ModSpecAPI.getVersion()` supplies
+the `version` field of the `coop` entry in `enabledMods`, and that one comes from `mod_info.json`
+directly, alongside a SHA-256 of the whole `mod_info.json` text taken through `SettingsAPI.loadText`.
+`CoopHandshakeDiff.compare` checks all three, and any single difference rejects the session.
+`coopGitCommit` is compared too and comes from `git rev-parse --short=12 HEAD`, which has a
+consequence worth stating plainly: two people who each build the mod from their own checkout will be
+refused even at an identical version. A build from a modified working tree reports `<hash>-dirty`, so
+it will not match a clean build of the same commit either; `dev-uncommitted` is now only what a
+checkout with no git metadata at all reports. A release is one built artifact that both players
+install, not a version number both players reproduce.
 
 Steps:
 
-1. Bump `version` in `mod_info.json` and in `build.gradle`. Same string. Bump `modVersion`'s
-   `major`/`minor`/`patch` in `coop.version` to match, so Version Checker reports the release
-   players actually have.
+1. Bump `version` in `mod_info.json`. `build.gradle` reads it automatically, so there is nothing to
+   edit there. Bump `modVersion`'s `major`/`minor`/`patch` in `coop.version` to match, so Version
+   Checker reports the release players actually have.
 2. Update `CHANGELOG.md` and anything in `docs/player/` the release changes.
    `LICENSE` (CC BY-NC 4.0 with the Fractal Softworks exception) ships in the release archive; any
    code vendored since the last release needs its own notice next to it and a line in `LICENSE`'s
@@ -317,9 +318,10 @@ Steps:
 5. `scripts\deploy-to-test-clients.ps1`, then a two-client session: handshake accepted, both status
    lines read `session active`, and the host log's connection-doctor block names a tier.
 6. `scripts\package-release.ps1` writes `dist\coop-<version>.zip`. It runs step 4's build itself
-   unless you pass `-SkipBuild`, and it refuses to package a dirty tree, a `mod_info.json`,
-   `build.gradle` or `coop.version` that disagree on the version, jars whose baked-in commit is not
-   `HEAD`, or a broken classloader split. What it ships:
+   unless you pass `-SkipBuild`, and it refuses to package a dirty tree, a `build.gradle` that no
+   longer reads its version from `mod_info.json`, a `coop.version` that disagrees with
+   `mod_info.json`'s version, jars whose baked-in commit is not `HEAD`, or a broken classloader
+   split. What it ships:
    `mod_info.json`, `jars\`, `data\`, `Coop Launcher.cmd`, `coop.version`, `LICENSE`,
    `CHANGELOG.md`, `docs\player\`. Not `build\`, not `src\`, not `forks\`, not `tools\`, not
    `tmp_ff_analysis`. The archive unpacks to a folder named `coop`, because the handshake compares

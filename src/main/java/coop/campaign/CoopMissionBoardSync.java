@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Host-authoritative shared mission/bar/contact/bounty pool and its first-come claims (Phase 12).
  *
@@ -235,14 +237,6 @@ public final class CoopMissionBoardSync {
                     Long.parseLong(f.get(8).trim()), f.get(9)));
         }
         return entries;
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     /** Outcome of {@link #arbitrate(String, String)}. */

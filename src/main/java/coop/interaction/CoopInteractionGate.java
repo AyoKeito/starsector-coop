@@ -4,6 +4,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Host-authoritative arbiter for shared campaign interactions (Phase 9, COOP_MP_DESIGN.md 8.5).
  *
@@ -103,14 +105,6 @@ public final class CoopInteractionGate {
 
     public synchronized boolean isBlockedFor(String localPlayerId) {
         return blockingClaimFor(localPlayerId) != null;
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     /** Outcome of {@link CoopInteractionGate#arbitrate}. */

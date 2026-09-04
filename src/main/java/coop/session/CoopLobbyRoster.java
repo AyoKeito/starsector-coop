@@ -2,7 +2,8 @@ package coop.session;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
+
+import static coop.util.CoopText.requireText;
 
 /**
  * Host-authoritative model of who is in the Phase 21 lobby and how far along they are. Pure Java: no
@@ -556,11 +557,4 @@ public final class CoopLobbyRoster {
         return value.trim();
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

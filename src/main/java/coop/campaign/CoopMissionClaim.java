@@ -1,6 +1,6 @@
 package coop.campaign;
 
-import java.util.Objects;
+import static coop.util.CoopText.requireText;
 
 /**
  * A first-come claim on a shared mission/bar/contact/bounty entry (Phase 12).
@@ -15,11 +15,4 @@ public record CoopMissionClaim(String missionId, String acceptedByPlayerId, long
         acceptedByPlayerId = requireText(acceptedByPlayerId, "acceptedByPlayerId");
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }
