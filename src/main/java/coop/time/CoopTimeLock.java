@@ -181,14 +181,15 @@ public class CoopTimeLock {
         if (message.type() != CoopMessages.Type.TIME_SNAPSHOT) {
             throw new IllegalArgumentException("Expected TIME_SNAPSHOT, got " + message.type());
         }
+        CoopMessages.Payload payload = CoopMessages.payload(message);
         return new TimeSnapshot(
-                Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "paused")),
-                Boolean.parseBoolean(CoopMessages.requiredPayloadString(message, "fastForward")),
-                CoopMessages.requiredPayloadLong(message, "timestampMillis"),
-                CoopMessages.requiredPayloadLong(message, "campaignDay"),
-                CoopMessages.requiredPayloadLong(message, "sentAtMillis"),
+                Boolean.parseBoolean(payload.requiredString("paused")),
+                Boolean.parseBoolean(payload.requiredString("fastForward")),
+                payload.requiredLong("timestampMillis"),
+                payload.requiredLong("campaignDay"),
+                payload.requiredLong("sentAtMillis"),
                 // Optional on purpose: a peer built before the field existed still parses, as "nobody".
-                CoopMessages.optionalPayloadString(message, "pausedBy", ""));
+                payload.optionalString("pausedBy", ""));
     }
 
     private SectorAPI requireSector() {

@@ -1,6 +1,7 @@
 package coop.stats;
 
 import coop.campaign.CoopDelimited;
+import coop.net.CoopJson;
 import coop.net.CoopMessages;
 
 import java.util.List;
@@ -13,10 +14,10 @@ import java.util.Objects;
  *
  * <h2>Why the payload looks like this</h2>
  *
- * <p><b>The envelope parser is flat.</b> {@code CoopMessages.Parser} (CoopMessages.java:1431-1560)
- * understands objects whose values are strings, {@code null}, or longs — no arrays, no nested
- * objects, no booleans, no floating point. So the team-level gauges ride as flat JSON fields (floats
- * as quoted strings, exactly as {@code marketTxn}'s {@code unitPrice} does at CoopMessages.java:682)
+ * <p><b>The envelope's value model is flat.</b> {@link coop.net.CoopJson} understands numbers only
+ * as integral longs and has no booleans at all, and the wire keeps its payloads one level deep. So
+ * the team-level gauges ride as flat JSON fields (floats as quoted strings, exactly as
+ * {@code marketTxn}'s {@code unitPrice} does)
  * and everything list-shaped rides inside one {@code body} string encoded with
  * {@link CoopDelimited}, the same arrangement {@link coop.combat.CoopBattleResult} and
  * {@code CoopMarketSync} already use.
@@ -35,11 +36,10 @@ import java.util.Objects;
  * body follows.
  *
  * <p><b>Decoding borrows the envelope's parser instead of copying it.</b> {@code decodePayload}
- * takes a {@code Message}, and {@code CoopMessages.escapeJson} and the parser itself are private, so
- * {@link #decodePayload(String)} wraps the JSON in a throwaway {@code Message} to reach the one
- * parser both sides of the wire already agree on. A second copy of a JSON parser in the tree is a
- * second thing to keep in step; the escape function has to be duplicated (twenty lines, no state)
- * because there is no way to reach it at all.
+ * takes a {@code Message}, so {@link #decodePayload(String)} wraps the JSON in a throwaway
+ * {@code Message} to reach the one parser both sides of the wire already agree on. This class used
+ * to carry its own copy of the escaper for the same reason, back when the original was private;
+ * both halves now come from {@link coop.net.CoopJson}, so there is nothing left to keep in step.
  */
 public final class CoopSessionStatsCodec {
 
@@ -254,32 +254,11 @@ public final class CoopSessionStatsCodec {
     }
 
     /**
-     * Local copy of the envelope's string escape, because {@code CoopMessages.escapeJson} is private
-     * and this class is not allowed to edit that file. Identical rules, so the two sides of the wire
-     * agree byte for byte.
+     * The one escaper, shared with the envelope and the handshake manifest. This used to be a
+     * hand-kept third copy; it is an alias now, so "identical rules on both sides of the wire" is a
+     * fact about the code rather than a promise in a comment.
      */
     static String escapeJson(String value) {
-        String text = value == null ? "" : value;
-        StringBuilder escaped = new StringBuilder(text.length() + 8);
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            switch (c) {
-                case '"' -> escaped.append("\\\"");
-                case '\\' -> escaped.append("\\\\");
-                case '\b' -> escaped.append("\\b");
-                case '\f' -> escaped.append("\\f");
-                case '\n' -> escaped.append("\\n");
-                case '\r' -> escaped.append("\\r");
-                case '\t' -> escaped.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        escaped.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        escaped.append(c);
-                    }
-                }
-            }
-        }
-        return escaped.toString();
+        return CoopJson.escape(value);
     }
 }
