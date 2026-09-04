@@ -61,6 +61,18 @@ public final class CoopUpnpSoap {
         return envelope("DeletePortMapping", serviceType, arguments);
     }
 
+    /**
+     * Asks who owns an external port. The mapper runs this before acting on a 718, so a conflict is
+     * never resolved by deleting a mapping some other machine on the LAN is relying on.
+     */
+    public static String getSpecificPortMappingEntryBody(String serviceType, String protocol, int externalPort) {
+        Objects.requireNonNull(serviceType, "serviceType");
+        String arguments = "<NewRemoteHost></NewRemoteHost>"
+                + "<NewExternalPort>" + externalPort + "</NewExternalPort>"
+                + "<NewProtocol>" + requireProtocol(protocol) + "</NewProtocol>";
+        return envelope("GetSpecificPortMappingEntry", serviceType, arguments);
+    }
+
     /** Full HTTP request bytes for a SOAP action against an absolute control URL. */
     public static byte[] httpRequest(String controlUrl, String serviceType, String action, String body) {
         Objects.requireNonNull(action, "action");
@@ -97,6 +109,16 @@ public final class CoopUpnpSoap {
     /** {@code NewExternalIPAddress} from a {@code GetExternalIPAddress} response, or {@code null}. */
     public static String externalIpAddress(String responseBody) {
         return element(responseBody, "NewExternalIPAddress");
+    }
+
+    /** {@code NewInternalClient} of an existing mapping, or {@code null} when the body has none. */
+    public static String internalClient(String responseBody) {
+        return element(responseBody, "NewInternalClient");
+    }
+
+    /** {@code NewPortMappingDescription} of an existing mapping, or {@code null}. */
+    public static String portMappingDescription(String responseBody) {
+        return element(responseBody, "NewPortMappingDescription");
     }
 
     /** UPnP {@code errorCode} from a fault body, or {@code -1} when the body carries no fault. */

@@ -350,10 +350,17 @@ public final class CoopHttpMessages {
                 // Trailer section ends at the next blank line; treat the chunk line as sufficient.
                 return Math.min(cursor, length);
             }
+            // Subtract rather than add (red-team net-6): the chunk size is attacker-chosen and
+            // 0x7FFFFFFF + cursor wraps negative, after which indexOfLf clamps the scan back to the
+            // start of the buffer and this loop repeats the same two lines forever -- on the campaign
+            // thread. length - cursor cannot overflow, so the comparison is safe for any size.
+            if (size > length - cursor) {
+                return -1; // The chunk body has not arrived yet (or the size is a lie).
+            }
             cursor += size;
             // Skip the CRLF that follows chunk data.
-            int afterData = indexOfLf(data, Math.min(cursor, length), length);
-            if (afterData < 0 || cursor > length) {
+            int afterData = indexOfLf(data, cursor, length);
+            if (afterData < 0) {
                 return -1;
             }
             cursor = afterData + 1;

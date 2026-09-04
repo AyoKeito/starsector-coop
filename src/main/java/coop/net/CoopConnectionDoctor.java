@@ -87,7 +87,7 @@ public final class CoopConnectionDoctor {
         line(report, "port mapping", describeMapping(result));
         line(report, "CGNAT", describeCgnat(result));
         line(report, "tier reached", describeTier(tier, result));
-        line(report, "share with guest", mapped && !result.cgnat()
+        line(report, "share with guest", mapped && !result.cgnat() && !result.externalEndpoint().isEmpty()
                 ? result.externalEndpoint()
                 : shareFallback(addresses, port));
         line(report, "next step", nextStep(tier, result, addresses, port));
@@ -186,7 +186,9 @@ public final class CoopConnectionDoctor {
             String gateway = result.gatewayAddress().isEmpty() ? "" : " via " + result.gatewayAddress();
             String name = result.gatewayName().isEmpty() ? "" : " \"" + result.gatewayName() + "\"";
             return CoopPortMapper.describeTier(result.tier()) + gateway + name
-                    + " - external " + result.externalEndpoint();
+                    + (result.externalEndpoint().isEmpty()
+                    ? " - external address unknown"
+                    : " - external " + result.externalEndpoint());
         }
         if (!result.finished()) {
             return "still negotiating with the router";

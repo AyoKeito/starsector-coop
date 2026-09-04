@@ -71,17 +71,17 @@ public final class CoopUpnpDescriptor {
     }
 
     private static Service findWanService(String xml, String base) {
-        String lower = xml.toLowerCase(Locale.ROOT);
         int cursor = 0;
-        while (cursor < lower.length()) {
-            int hit = min(lower.indexOf("wanipconnection", cursor), lower.indexOf("wanpppconnection", cursor));
+        while (cursor < xml.length()) {
+            int hit = min(indexOfIgnoreCase(xml, "wanipconnection", cursor),
+                    indexOfIgnoreCase(xml, "wanpppconnection", cursor));
             if (hit < 0) {
                 return null;
             }
             // Bound the scan to the <service> element that mentions it, so a stray mention in a URL
             // or an SCPD path cannot pair one service's type with another's control URL.
-            int serviceStart = lower.lastIndexOf("<service>", hit);
-            int serviceEnd = lower.indexOf("</service>", hit);
+            int serviceStart = lastServiceOpenTag(xml, hit);
+            int serviceEnd = nextServiceCloseTag(xml, hit);
             if (serviceStart >= 0 && serviceEnd > serviceStart) {
                 String block = xml.substring(serviceStart, serviceEnd);
                 String serviceType = elementValue(block, "serviceType", 0);
@@ -123,30 +123,115 @@ public final class CoopUpnpDescriptor {
         return origin + directory + ref;
     }
 
-    /** Text of the first {@code <name>} element at or after {@code from}; namespace prefixes tolerated. */
+    /**
+     * Text of the first {@code <name>} element at or after {@code from}; namespace prefixes tolerated,
+     * so {@code <dev:friendlyName>} matches {@code friendlyName}.
+     *
+     * <p>Every index here is an index into {@code xml} itself. The scan used to search a lower-cased
+     * copy and apply those offsets to the original (red-team net-31), which silently misaligns as soon
+     * as lower-casing changes the string's length — {@code "İ"} folds to two chars — and then extracts
+     * a value with a fragment of the closing tag glued on, or misses the element entirely.
+     */
     private static String elementValue(String xml, String name, int from) {
-        String lower = xml.toLowerCase(Locale.ROOT);
-        String needle = "<" + name.toLowerCase(Locale.ROOT);
-        int open = lower.indexOf(needle, Math.max(0, from));
-        while (open >= 0) {
+        int cursor = Math.max(0, from);
+        while (true) {
+            int open = xml.indexOf('<', cursor);
+            if (open < 0) {
+                return null;
+            }
             int tagEnd = xml.indexOf('>', open);
             if (tagEnd < 0) {
                 return null;
             }
-            if (open + needle.length() >= xml.length()) {
-                return null;
-            }
-            char after = xml.charAt(open + needle.length());
-            if (after == '>' || after == ' ' || after == '\t' || after == '\r' || after == '\n') {
-                int close = lower.indexOf("</" + name.toLowerCase(Locale.ROOT), tagEnd);
-                if (close < 0) {
-                    return null;
+            String tag = xml.substring(open + 1, tagEnd).trim();
+            if (isOpeningTagFor(tag, name)) {
+                if (tag.endsWith("/")) {
+                    return ""; // <friendlyName/>: present but empty.
                 }
-                return xml.substring(tagEnd + 1, close).trim();
+                int close = closeTagIndex(xml, tagEnd + 1, name);
+                return close < 0 ? null : xml.substring(tagEnd + 1, close).trim();
             }
-            open = lower.indexOf(needle, open + 1);
+            cursor = tagEnd + 1;
         }
-        return null;
+    }
+
+    /** Index of the matching {@code </name>} at or after {@code from}, or {@code -1}. */
+    private static int closeTagIndex(String xml, int from, String name) {
+        int cursor = from;
+        while (true) {
+            cursor = xml.indexOf("</", cursor);
+            if (cursor < 0) {
+                return -1;
+            }
+            int tagEnd = xml.indexOf('>', cursor);
+            if (tagEnd < 0) {
+                return -1;
+            }
+            if (bareName(xml.substring(cursor + 2, tagEnd).trim()).equalsIgnoreCase(name)) {
+                return cursor;
+            }
+            cursor = tagEnd + 1;
+        }
+    }
+
+    /** Start of the last {@code <service>} opening tag before {@code limit}, or {@code -1}. */
+    private static int lastServiceOpenTag(String xml, int limit) {
+        int best = -1;
+        int cursor = 0;
+        while (true) {
+            int open = xml.indexOf('<', cursor);
+            if (open < 0 || open >= limit) {
+                return best;
+            }
+            int tagEnd = xml.indexOf('>', open);
+            if (tagEnd < 0) {
+                return best;
+            }
+            if (isOpeningTagFor(xml.substring(open + 1, tagEnd).trim(), "service")) {
+                best = open;
+            }
+            cursor = tagEnd + 1;
+        }
+    }
+
+    /** Index of the first {@code </service>} at or after {@code from}, or {@code -1}. */
+    private static int nextServiceCloseTag(String xml, int from) {
+        return closeTagIndex(xml, from, "service");
+    }
+
+    /** True for an opening (not closing, not declaration) tag whose local name is {@code name}. */
+    private static boolean isOpeningTagFor(String tag, String name) {
+        if (tag.isEmpty() || tag.charAt(0) == '/' || tag.charAt(0) == '?' || tag.charAt(0) == '!') {
+            return false;
+        }
+        return bareName(tag).equalsIgnoreCase(name);
+    }
+
+    /** Strips a namespace prefix, attributes and any self-closing slash from a tag body. */
+    private static String bareName(String tag) {
+        String name = tag.endsWith("/") ? tag.substring(0, tag.length() - 1).trim() : tag;
+        int cut = name.length();
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                cut = i;
+                break;
+            }
+        }
+        name = name.substring(0, cut);
+        int colon = name.indexOf(':');
+        return colon < 0 ? name : name.substring(colon + 1);
+    }
+
+    /** Length-preserving case-insensitive search, so the index means the same in both cases. */
+    private static int indexOfIgnoreCase(String haystack, String needle, int from) {
+        int last = haystack.length() - needle.length();
+        for (int i = Math.max(0, from); i <= last; i++) {
+            if (haystack.regionMatches(true, i, needle, 0, needle.length())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static int min(int a, int b) {

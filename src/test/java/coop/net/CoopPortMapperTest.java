@@ -2,6 +2,13 @@ package coop.net;
 
 import org.junit.jupiter.api.Test;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.UnresolvedAddressException;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -187,5 +194,68 @@ class CoopPortMapperTest {
         // repaired the mapping was never reported and both surfaces kept showing minute one.
         assertTrue(changes > 0, "the mapper's verdict changed at least once on the way to giving up");
         assertEquals(start, mapper.resultVersion());
+    }
+
+    /**
+     * net-11: a router whose WAN link is down answers GetExternalIPAddress with 0.0.0.0. That is not
+     * an address anyone can connect to, and the doctor used to print "no - 0.0.0.0 is a public
+     * address" under it.
+     */
+    @Test
+    void net11_theUnspecifiedAddressIsNeitherPublicNorAnAnswer() {
+        assertTrue(CoopPortMapper.isUnroutableExternalAddress("0.0.0.0"));
+        assertTrue(CoopPortMapper.isUnroutableExternalAddress("0.1.2.3"));
+
+        assertTrue(CoopPortMapper.isUnknownExternalAddress(null));
+        assertTrue(CoopPortMapper.isUnknownExternalAddress(""));
+        assertTrue(CoopPortMapper.isUnknownExternalAddress("  0.0.0.0 "));
+        assertTrue(CoopPortMapper.isUnknownExternalAddress("0.255.255.255"));
+        assertFalse(CoopPortMapper.isUnknownExternalAddress("203.0.113.7"));
+        assertFalse(CoopPortMapper.isUnknownExternalAddress("10.0.0.1"));
+    }
+
+    /**
+     * net-14: the LAN address drove both the SSDP multicast pin and the NAT-PMP gateway guess, and
+     * was taken from whatever interface enumerated first — routinely a VirtualBox or Hyper-V switch
+     * with no router behind it. It is now the source address the routing table would actually use.
+     */
+    @Test
+    void net14_theLanAddressComesFromTheRoutingTableAndIsAlwaysOneOfOurs() throws Exception {
+        assertEquals("127.0.0.1", CoopPortMapper.routedLocalIpv4("127.0.0.1"),
+                "a UDP connect to loopback must report the loopback source address");
+
+        String lan = CoopPortMapper.localLanIpv4();
+        assertFalse(lan.startsWith("127."), "the LAN address must never be loopback, got " + lan);
+        if (!lan.isEmpty()) {
+            assertTrue(isLocalInterfaceAddress(lan), lan + " must be an address this machine holds");
+        }
+    }
+
+    /**
+     * net-30: the exchange assigned the channel to a final field and only then connected, so a
+     * connect() that throws left an open socket nothing could ever close — one per renewal attempt.
+     */
+    @Test
+    void net30_aConnectThatThrowsClosesTheChannelInsteadOfLeakingIt() throws Exception {
+        SocketChannel channel = SocketChannel.open();
+        try {
+            assertThrows(UnresolvedAddressException.class, () -> CoopPortMapper.connectNonBlocking(
+                    channel, InetSocketAddress.createUnresolved("router.invalid", 80)));
+            assertFalse(channel.isOpen(), "the channel must be closed when connect() throws");
+        } finally {
+            channel.close();
+        }
+    }
+
+    private static boolean isLocalInterfaceAddress(String address) throws Exception {
+        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+        for (NetworkInterface nic : Collections.list(interfaces)) {
+            for (InetAddress candidate : Collections.list(nic.getInetAddresses())) {
+                if (candidate.getHostAddress().equals(address)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

@@ -1491,7 +1491,12 @@ public final class CoopLauncherApp {
         List<Chip> chips = new ArrayList<>();
         if (result.mapped()) {
             chips.add(new Chip(tierName(result.tier()) + " mapped", CoopTheme.OK));
-            chips.add(new Chip(result.externalEndpoint(), result.cgnat() ? CoopTheme.WARN
+            // The router can map the port and still report no external address of its own (a
+            // bridged box, a WAN link that is down), in which case there is no endpoint to show.
+            chips.add(new Chip(result.externalEndpoint().isEmpty()
+                    ? "external address unknown"
+                    : result.externalEndpoint(),
+                    result.cgnat() || result.externalEndpoint().isEmpty() ? CoopTheme.WARN
                     : CoopTheme.OK));
             if (result.cgnat()) {
                 chips.add(new Chip("carrier-grade NAT", CoopTheme.WARN));
@@ -1505,7 +1510,10 @@ public final class CoopLauncherApp {
             chips.add(new Chip("listening on " + port, CoopTheme.OK));
         }
         setChips(chips);
-        if (result.mapped() && !result.cgnat()) {
+        if (result.mapped() && result.externalEndpoint().isEmpty()) {
+            note("Your router mapped port " + port + ", but it reports no outside address of its own"
+                    + " (its WAN link may be down). There is nothing to share yet; details in the log.");
+        } else if (result.mapped() && !result.cgnat()) {
             note("Your router opened " + result.externalEndpoint() + ". Copy the invite and ask your"
                     + " partner to press Test connection. The full doctor block is in the log.");
         } else if (result.cgnat()) {

@@ -107,7 +107,20 @@ public final class CoopPortMapper {
     private static final long NATPMP_ATTEMPT_INTERVAL_MILLIS = 750L;
     private static final int NATPMP_ATTEMPTS = 3;
     private static final long SHUTDOWN_BUDGET_MILLIS = 1200L;
-    private static final int SHUTDOWN_TICK_GUARD = 200_000;
+    /** Real time the shutdown loop spins on a clock that never moves before it gives up. */
+    private static final long SHUTDOWN_FROZEN_CLOCK_MILLIS = 50L;
+    /**
+     * Ceiling on one HTTP response. A device descriptor is a few KB and a SOAP reply is smaller; the
+     * responder is an unauthenticated LAN device, so an unbounded read is an unbounded allocation on
+     * the campaign thread (red-team net-50).
+     */
+    private static final int MAX_RESPONSE_BYTES = 256 * 1024;
+    /**
+     * Destination the LAN-address probe pretends to talk to. Nothing is sent — connecting a UDP
+     * socket only makes the OS pick the source address it would route from, which is the one on the
+     * interface that reaches the default gateway.
+     */
+    private static final String ROUTE_PROBE_TARGET = "1.1.1.1";
 
     private enum Stage {
         DISABLED,
@@ -115,6 +128,7 @@ public final class CoopPortMapper {
         DESCRIPTOR,
         SOAP_EXTERNAL_IP,
         SOAP_ADD,
+        SOAP_QUERY_CONFLICT,
         SOAP_DELETE_CONFLICT,
         NATPMP_EXTERNAL,
         NATPMP_MAP,
@@ -174,6 +188,8 @@ public final class CoopPortMapper {
     /** Full passes of the state machine the last {@link #shutdown()} spent; the B8 evidence. */
     private int shutdownTicks;
     private final Deque<String> releaseQueue = new ArrayDeque<>();
+    /** Protocol whose UPnP release is in flight, so a failure clears the right flag. */
+    private String releasingProtocol = "";
 
     /**
      * Test seam: run the state machine without opening any socket. Discovery then always times out,
@@ -181,6 +197,13 @@ public final class CoopPortMapper {
      * the one path that is impossible to reproduce against a real LAN.
      */
     private boolean offline;
+
+    /**
+     * Test seam: make every {@link #beginExchange} fail the way an unroutable control URL does. The
+     * only way to reproduce a router that stops being reachable mid-session — a laptop changing
+     * networks, a VPN coming up — which is the state in which a shutdown used to park the machine.
+     */
+    private boolean brokenExchanges;
 
     private CoopPortMapper(int port, LongSupplier clock, boolean enabled) {
         this.port = port;
@@ -231,6 +254,11 @@ public final class CoopPortMapper {
         return mapper;
     }
 
+    /** See {@link #brokenExchanges}. Package-private on purpose: this is a test seam, not an API. */
+    void breakExchanges() {
+        brokenExchanges = true;
+    }
+
     /** UPnP {@code friendlyName} of the gateway, {@code ""} when unknown. */
     public String gatewayFriendlyName() {
         return gatewayFriendlyName;
@@ -277,6 +305,7 @@ public final class CoopPortMapper {
                 case DESCRIPTOR -> tickDescriptor(nowMillis);
                 case SOAP_EXTERNAL_IP -> tickExternalIp(nowMillis);
                 case SOAP_ADD -> tickAddPortMapping(nowMillis);
+                case SOAP_QUERY_CONFLICT -> tickQueryConflict(nowMillis);
                 case SOAP_DELETE_CONFLICT -> tickDeleteConflict(nowMillis);
                 case NATPMP_EXTERNAL -> tickNatPmpExternal(nowMillis);
                 case NATPMP_MAP -> tickNatPmpMap(nowMillis);
@@ -308,40 +337,28 @@ public final class CoopPortMapper {
                 return;
             }
             closeExchange();
-            releaseQueue.clear();
-            if (tier == Tier.UPNP && (upnpTcpMapped || upnpUdpMapped) && !controlUrl.isEmpty()) {
-                if (upnpTcpMapped) {
-                    releaseQueue.add("TCP");
-                }
-                if (upnpUdpMapped) {
-                    releaseQueue.add("UDP");
-                }
-                stage = Stage.RELEASE_UPNP;
-            } else if (tier == Tier.NAT_PMP && (natPmpUdpMapped || natPmpTcpMapped)) {
-                if (natPmpUdpMapped) {
-                    releaseQueue.add("UDP");
-                }
-                if (natPmpTcpMapped) {
-                    releaseQueue.add("TCP");
-                }
-                natPmpAttempts = 0;
-                natPmpLastSendMillis = 0L;
-                stage = Stage.RELEASE_NATPMP;
-            } else {
-                stage = Stage.CLOSED;
-            }
+            // A renewal in flight is over: without this, a release that throws lands in failMapping,
+            // which sees renewing and parks the machine back in ACTIVE — where the loop below reads
+            // "still working" and spins to its deadline without ever sending the rest of the
+            // releases (red-team net-27).
+            renewing = false;
+            beginNextRelease();
 
             // Red-team B8: the state machine is driven by wall-clock comparisons, so ticking it twice
             // inside one millisecond re-runs every timeout check against a clock that has not moved
-            // and cannot change the outcome. The old loop did exactly that: its 200,000-iteration
-            // guard was reached in a few milliseconds of spinning, so it burned 200,000 full passes of
-            // the machine and then gave up long before the 1.2 s budget it was written to spend. Now
-            // at most one tick per millisecond runs (~1200 in the budget), and the guard counts only
-            // *consecutive* passes where the clock did not move - which is the injected-fixed-clock
-            // case, and the only way this loop can fail to terminate on its own.
+            // and cannot change the outcome. The old loop did exactly that: it burned 200,000 full
+            // passes of the machine and then gave up long before the 1.2 s budget it was written to
+            // spend. Now at most one tick per millisecond runs (~1200 in the budget).
+            //
+            // The "clock is frozen, stop spinning" guard is measured with nanoTime rather than in
+            // spins: a spin count is a measure of CPU speed, not of time, and on a Windows clock with
+            // 15.6 ms granularity 200,000 clock reads fit inside a single tick of it — so the guard
+            // fired between two legitimate ticks and abandoned the release half-sent. nanoTime is
+            // independent of the injected clock, which is exactly what is needed to tell "this clock
+            // does not move" (a test's fixed clock) from "this clock is coarse" (Windows).
             long deadline = clock.getAsLong() + SHUTDOWN_BUDGET_MILLIS;
             long lastTickMillis = Long.MIN_VALUE;
-            int frozenSpins = 0;
+            long lastAdvanceNanos = System.nanoTime();
             shutdownTicks = 0;
             while (stage != Stage.CLOSED && stage != Stage.FAILED) {
                 long now = clock.getAsLong();
@@ -349,12 +366,13 @@ public final class CoopPortMapper {
                     break;
                 }
                 if (now == lastTickMillis) {
-                    if (++frozenSpins > SHUTDOWN_TICK_GUARD) {
+                    if (System.nanoTime() - lastAdvanceNanos
+                            > SHUTDOWN_FROZEN_CLOCK_MILLIS * 1_000_000L) {
                         break;
                     }
                     continue;
                 }
-                frozenSpins = 0;
+                lastAdvanceNanos = System.nanoTime();
                 lastTickMillis = now;
                 shutdownTicks++;
                 tick(now);
@@ -451,7 +469,7 @@ public final class CoopPortMapper {
      */
     private void selectMulticastInterface(DatagramChannel channel) {
         try {
-            String local = firstSiteLocalIpv4();
+            String local = localLanIpv4();
             if (local.isEmpty()) {
                 return;
             }
@@ -481,7 +499,17 @@ public final class CoopPortMapper {
             return;
         }
         internalClient = exchange.localAddress();
-        CoopUpnpDescriptor.Descriptor descriptor = CoopUpnpDescriptor.parse(response.body(), descriptorUrl);
+        CoopUpnpDescriptor.Descriptor descriptor;
+        try {
+            descriptor = CoopUpnpDescriptor.parse(response.body(), descriptorUrl);
+        } catch (IllegalArgumentException ex) {
+            // A URLBase or controlURL that is not an http:// IP literal (a name host, an https URL).
+            // That is a dead end for UPnP like any other, and NAT-PMP deserves its turn: letting the
+            // exception escape into tick()'s catch skipped the fallback entirely (red-team net-24).
+            closeExchange();
+            beginNatPmp(now, "UPnP descriptor unusable: " + describe(ex));
+            return;
+        }
         gatewayFriendlyName = descriptor.friendlyName();
         gatewayModelName = descriptor.modelName();
         gatewayName = descriptor.displayName();
@@ -496,10 +524,15 @@ public final class CoopPortMapper {
         CoopLog.info(CoopPortMapper.class, "Coop port mapper: gateway " + quoted(gatewayName)
                 + " service " + serviceType + " control " + controlUrl);
 
-        beginExchange(Stage.SOAP_EXTERNAL_IP, controlUrl,
-                CoopUpnpSoap.httpRequest(controlUrl, serviceType, "GetExternalIPAddress",
-                        CoopUpnpSoap.getExternalIpAddressBody(serviceType)),
-                now);
+        byte[] request;
+        try {
+            request = CoopUpnpSoap.httpRequest(controlUrl, serviceType, "GetExternalIPAddress",
+                    CoopUpnpSoap.getExternalIpAddressBody(serviceType));
+        } catch (IllegalArgumentException ex) {
+            beginNatPmp(now, "UPnP control URL unusable: " + describe(ex));
+            return;
+        }
+        beginExchange(Stage.SOAP_EXTERNAL_IP, controlUrl, request, now);
     }
 
     private void tickExternalIp(long now) {
@@ -514,7 +547,16 @@ public final class CoopPortMapper {
             CoopHttpMessages.Response response = exchange.response();
             String address = CoopUpnpSoap.externalIpAddress(response.body());
             if (response.statusCode() == 200 && address != null && !address.isEmpty()) {
-                externalAddress = address;
+                if (isUnknownExternalAddress(address)) {
+                    // What miniupnpd answers while the WAN link is down or the box is bridged. It is
+                    // not an address; sharing it hands the guest an endpoint that cannot work, and
+                    // "CGNAT: no, 0.0.0.0 is a public address" is a lie on top (red-team net-11).
+                    CoopLog.warn(CoopPortMapper.class, "Coop port mapper: the router reports external"
+                            + " address " + address + " -- its WAN link is probably down; mapping"
+                            + " anyway, but there is no endpoint to share");
+                } else {
+                    externalAddress = address;
+                }
             } else {
                 CoopLog.warn(CoopPortMapper.class, "Coop port mapper: GetExternalIPAddress returned HTTP "
                         + response.statusCode() + " " + soapErrorText(response.body()));
@@ -572,13 +614,16 @@ public final class CoopPortMapper {
         }
         if (errorCode == CoopUpnpSoap.ERROR_CONFLICT_IN_MAPPING_ENTRY && !conflictRetried) {
             // 718: something already owns that external port — most often our own mapping from a
-            // crashed session, whose lease has not expired. Delete it, then add ours again.
+            // crashed session, whose lease has not expired. Ask the router whose it is first: the
+            // delete is keyed on the external port alone, so doing it blind evicts whichever machine
+            // on the LAN holds the port, and two coop hosts then steal it from each other on every
+            // renewal (red-team net-18).
             conflictRetried = true;
             CoopLog.info(CoopPortMapper.class, "Coop port mapper: external port " + port + "/" + addProtocol
-                    + " already mapped; deleting the stale entry and retrying");
-            beginExchange(Stage.SOAP_DELETE_CONFLICT, controlUrl,
-                    CoopUpnpSoap.httpRequest(controlUrl, serviceType, "DeletePortMapping",
-                            CoopUpnpSoap.deletePortMappingBody(serviceType, addProtocol, port)),
+                    + " already mapped; asking the router who owns it");
+            beginExchange(Stage.SOAP_QUERY_CONFLICT, controlUrl,
+                    CoopUpnpSoap.httpRequest(controlUrl, serviceType, "GetSpecificPortMappingEntry",
+                            CoopUpnpSoap.getSpecificPortMappingEntryBody(serviceType, addProtocol, port)),
                     now);
             return;
         }
@@ -586,6 +631,47 @@ public final class CoopPortMapper {
         String reason = "UPnP AddPortMapping " + addProtocol + " refused: HTTP " + response.statusCode()
                 + " " + soapErrorText(response.body());
         finishMappingFailure(now, reason);
+    }
+
+    /**
+     * Reads the {@code GetSpecificPortMappingEntry} answer and decides whether the entry blocking us
+     * is ours to delete. Ownership is the internal client the router reports, not the description:
+     * a second coop host on the same LAN writes the same description, and that is precisely the case
+     * that must not end in a delete.
+     */
+    private void tickQueryConflict(long now) {
+        exchange.tick(now);
+        if (!exchange.isSettled()) {
+            return;
+        }
+        String owner = "";
+        String description = "";
+        boolean answered = false;
+        if (!exchange.isFailed()) {
+            CoopHttpMessages.Response response = exchange.response();
+            if (response.statusCode() == 200) {
+                answered = true;
+                owner = orEmpty(CoopUpnpSoap.internalClient(response.body()));
+                description = orEmpty(CoopUpnpSoap.portMappingDescription(response.body()));
+            }
+        }
+        closeExchange();
+
+        if (answered && !owner.isEmpty() && owner.equals(internalClient)) {
+            CoopLog.info(CoopPortMapper.class, "Coop port mapper: external port " + port + "/" + addProtocol
+                    + " is our own stale entry; deleting it and retrying");
+            beginExchange(Stage.SOAP_DELETE_CONFLICT, controlUrl,
+                    CoopUpnpSoap.httpRequest(controlUrl, serviceType, "DeletePortMapping",
+                            CoopUpnpSoap.deletePortMappingBody(serviceType, addProtocol, port)),
+                    now);
+            return;
+        }
+        String held = owner.isEmpty()
+                ? (answered ? "another device" : "another device (the router would not say which)")
+                : owner + (description.isEmpty() ? "" : " " + quoted(description));
+        finishMappingFailure(now, "UPnP external port " + port + "/" + addProtocol
+                + " is already mapped to " + held + "; set " + CoopNetStartupConfig.HOST_PORT_PROPERTY
+                + " to a free port");
     }
 
     private void tickDeleteConflict(long now) {
@@ -645,7 +731,7 @@ public final class CoopPortMapper {
             failureText = upnpFailure;
             CoopLog.warn(CoopPortMapper.class, "Coop port mapper: " + upnpFailure);
         }
-        natPmpGateway = gatewayAddress.isEmpty() ? guessDefaultGateway(firstSiteLocalIpv4()) : gatewayAddress;
+        natPmpGateway = gatewayAddress.isEmpty() ? guessDefaultGateway(localLanIpv4()) : gatewayAddress;
         if (natPmpGateway.isEmpty()) {
             fail(combineFailure(failureText, "no gateway address to try NAT-PMP against"));
             return;
@@ -680,7 +766,13 @@ public final class CoopPortMapper {
                     + CoopNatPmpMessages.describeResult(response.resultCode())));
             return;
         }
-        externalAddress = response.address();
+        if (isUnknownExternalAddress(response.address())) {
+            CoopLog.warn(CoopPortMapper.class, "Coop port mapper: NAT-PMP reports external address "
+                    + response.address() + " -- the gateway has no WAN address; mapping anyway, but"
+                    + " there is no endpoint to share");
+        } else {
+            externalAddress = response.address();
+        }
         natPmpAttempts = 0;
         natPmpLastSendMillis = 0L;
         natPmpMappingUdp = true;
@@ -797,13 +889,67 @@ public final class CoopPortMapper {
         }
     }
 
+    /**
+     * Picks the next release stage from the per-protocol mapped flags. Keyed on those and not on
+     * {@link #tier}, which is only set once <em>both</em> protocols went in: a TCP mapping that
+     * succeeded before the UDP one was refused used to be left in the router forever, and forever is
+     * literal when the 725 path made it a permanent lease (red-team net-25). Chained, because a UPnP
+     * attempt that half-succeeded and then fell through to NAT-PMP leaves entries in both protocols.
+     */
+    private void beginNextRelease() {
+        releaseQueue.clear();
+        releasingProtocol = "";
+        if ((upnpTcpMapped || upnpUdpMapped) && !controlUrl.isEmpty() && !serviceType.isEmpty()) {
+            if (upnpTcpMapped) {
+                releaseQueue.add("TCP");
+            }
+            if (upnpUdpMapped) {
+                releaseQueue.add("UDP");
+            }
+            stage = Stage.RELEASE_UPNP;
+            return;
+        }
+        if ((natPmpUdpMapped || natPmpTcpMapped) && !natPmpGateway.isEmpty()) {
+            if (natPmpUdpMapped) {
+                releaseQueue.add("UDP");
+            }
+            if (natPmpTcpMapped) {
+                releaseQueue.add("TCP");
+            }
+            natPmpAttempts = 0;
+            natPmpLastSendMillis = 0L;
+            stage = Stage.RELEASE_NATPMP;
+            return;
+        }
+        stage = Stage.CLOSED;
+    }
+
+    /** Marks a protocol as no longer ours to release, whether the release worked or not. */
+    private void markReleased(boolean upnp, String protocol) {
+        if (upnp) {
+            if (protocol.equals("TCP")) {
+                upnpTcpMapped = false;
+            } else {
+                upnpUdpMapped = false;
+            }
+        } else if (protocol.equals("TCP")) {
+            natPmpTcpMapped = false;
+        } else {
+            natPmpUdpMapped = false;
+        }
+    }
+
     private void tickReleaseUpnp(long now) {
         if (exchange == null) {
             String protocol = releaseQueue.poll();
             if (protocol == null) {
-                stage = Stage.CLOSED;
+                beginNextRelease();
                 return;
             }
+            // Cleared before the call, not after: a release is best effort, and a second attempt at
+            // one the router already refused would only spend the shutdown budget.
+            markReleased(true, protocol);
+            releasingProtocol = protocol;
             beginExchange(Stage.RELEASE_UPNP, controlUrl,
                     CoopUpnpSoap.httpRequest(controlUrl, serviceType, "DeletePortMapping",
                             CoopUpnpSoap.deletePortMappingBody(serviceType, protocol, port)),
@@ -812,32 +958,42 @@ public final class CoopPortMapper {
         }
         exchange.tick(now);
         if (exchange.isSettled()) {
+            releasingProtocol = "";
             closeExchange();
+            if (releaseQueue.isEmpty()) {
+                beginNextRelease();
+            }
         }
     }
 
     private void tickReleaseNatPmp(long now) throws Exception {
         String protocol = releaseQueue.peek();
         if (protocol == null) {
-            stage = Stage.CLOSED;
+            beginNextRelease();
             return;
         }
         openNatPmpChannel();
         byte[] request = CoopNatPmpMessages.releaseRequest(protocol.equals("UDP"), port);
         if (!sendNatPmpIfDue(now, request)) {
             // Best effort only: an unreleased NAT-PMP mapping expires with its lifetime.
-            releaseQueue.poll();
-            natPmpAttempts = 0;
-            natPmpLastSendMillis = 0L;
+            finishNatPmpRelease(protocol);
             return;
         }
         byte[] datagram = receiveNatPmp();
         if (datagram == null) {
             return;
         }
+        finishNatPmpRelease(protocol);
+    }
+
+    private void finishNatPmpRelease(String protocol) {
         releaseQueue.poll();
+        markReleased(false, protocol);
         natPmpAttempts = 0;
         natPmpLastSendMillis = 0L;
+        if (releaseQueue.isEmpty()) {
+            beginNextRelease();
+        }
     }
 
     // ---------------------------------------------------------------- helpers
@@ -845,6 +1001,9 @@ public final class CoopPortMapper {
     private void beginExchange(Stage nextStage, String url, byte[] request, long now) {
         try {
             closeExchange();
+            if (brokenExchanges) {
+                throw new java.net.ConnectException("test seam: the control URL is unreachable");
+            }
             exchange = new HttpExchange(url, request, now, HTTP_TIMEOUT_MILLIS);
             stage = nextStage;
             stageStartMillis = now;
@@ -864,6 +1023,24 @@ public final class CoopPortMapper {
 
     /** Mapping attempt failed: during a renewal the old mapping stands, otherwise this is the end. */
     private void failMapping(long now, String reason) {
+        if (stage == Stage.RELEASE_UPNP || stage == Stage.RELEASE_NATPMP) {
+            // Shutting down. A release that cannot even be sent is not a mapping failure and must
+            // not re-enter ACTIVE or FAILED: both leave the remaining releases unsent, and ACTIVE
+            // also spins the shutdown loop to its deadline (red-team net-27).
+            CoopLog.warn(CoopPortMapper.class, "Coop port mapper: release of " + port + "/"
+                    + (releasingProtocol.isEmpty() ? "?" : releasingProtocol) + " failed (" + reason
+                    + "); the router lease expires on its own");
+            closeExchange();
+            if (stage == Stage.RELEASE_NATPMP) {
+                String protocol = releaseQueue.poll();
+                if (protocol != null) {
+                    markReleased(false, protocol);
+                }
+            }
+            releasingProtocol = "";
+            beginNextRelease();
+            return;
+        }
         if (renewing) {
             renewing = false;
             stage = Stage.ACTIVE;
@@ -922,6 +1099,34 @@ public final class CoopPortMapper {
         return "UPnPError " + code + (description.isEmpty() ? "" : " " + description);
     }
 
+    private static String orEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    /**
+     * True for the "I do not have one" answers a gateway gives for its external address: the
+     * unspecified address, or anything else in {@code 0.0.0.0/8}. Storing one of these publishes an
+     * endpoint that cannot work and reports it as a public address (red-team net-11).
+     */
+    static boolean isUnknownExternalAddress(String address) {
+        if (address == null) {
+            return true;
+        }
+        String trimmed = address.trim();
+        if (trimmed.isEmpty()) {
+            return true;
+        }
+        int firstDot = trimmed.indexOf('.');
+        if (firstDot <= 0) {
+            return false;
+        }
+        try {
+            return Integer.parseInt(trimmed.substring(0, firstDot)) == 0;
+        } catch (NumberFormatException ex) {
+            return false;
+        }
+    }
+
     private static String quoted(String value) {
         return "\"" + value + "\"";
     }
@@ -929,6 +1134,21 @@ public final class CoopPortMapper {
     private static String describe(Throwable throwable) {
         String message = throwable.getMessage();
         return throwable.getClass().getSimpleName() + (message == null || message.isEmpty() ? "" : ": " + message);
+    }
+
+    /**
+     * Starts a non-blocking connect, closing the channel if that throws instead of leaking the
+     * descriptor. Package-private so the failure branch can be tested with an unresolved address,
+     * which every platform rejects the same way.
+     */
+    static void connectNonBlocking(SocketChannel channel, InetSocketAddress target) throws Exception {
+        try {
+            channel.configureBlocking(false);
+            channel.connect(target);
+        } catch (Exception ex) {
+            closeQuietly(channel);
+            throw ex;
+        }
     }
 
     private static void closeQuietly(java.nio.channels.Channel channel) {
@@ -970,7 +1190,8 @@ public final class CoopPortMapper {
                 return false;
             }
         }
-        if (octets[0] == 10 || octets[0] == 127) {
+        if (octets[0] == 0 || octets[0] == 10 || octets[0] == 127) {
+            // 0.0.0.0/8 is "this network": a router that answers with one has no WAN address at all.
             return true;
         }
         if (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) {
@@ -1003,6 +1224,48 @@ public final class CoopPortMapper {
             return "";
         }
         return parts[0] + "." + parts[1] + "." + parts[2] + ".1";
+    }
+
+    /**
+     * The machine's LAN IPv4 address: the source address the OS would use to reach the Internet.
+     *
+     * <p>{@link #firstSiteLocalIpv4()} takes whatever interface enumerates first, which on a Windows
+     * box with VirtualBox, Hyper-V/WSL or a VPN adapter is routinely a virtual switch with no router
+     * behind it (red-team net-14). SSDP then goes into that dead switch and the NAT-PMP fallback
+     * targets {@code x.y.z.1} of the virtual subnet — the machine itself, on a host-only network.
+     * Asking the routing table directly is not possible here (no process execution, no file access),
+     * but connecting a UDP socket asks the same table without sending a byte.
+     *
+     * <p>Enumeration order stays as the fallback for a machine with no route to the Internet at all.
+     */
+    static String localLanIpv4() {
+        String routed = routedLocalIpv4(ROUTE_PROBE_TARGET);
+        if (!routed.isEmpty() && !routed.startsWith("127.")) {
+            return routed;
+        }
+        return firstSiteLocalIpv4();
+    }
+
+    /**
+     * Source IPv4 address the OS would use to reach {@code target}, or {@code ""} when there is no
+     * route or anything else goes wrong. No packet is sent: a UDP {@code connect} is a routing-table
+     * lookup and a local bind, nothing more.
+     *
+     * @param target IP literal — never a name, because a lookup here would be DNS on the campaign thread
+     */
+    static String routedLocalIpv4(String target) {
+        try (DatagramChannel probe = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            probe.connect(new InetSocketAddress(InetAddress.getByName(target), CoopNatPmpMessages.PORT));
+            SocketAddress local = probe.getLocalAddress();
+            if (local instanceof InetSocketAddress inet
+                    && inet.getAddress() instanceof Inet4Address address
+                    && !address.isAnyLocalAddress()) {
+                return address.getHostAddress();
+            }
+        } catch (Exception ignored) {
+            // No route, no permission, no IPv4: the caller falls back to interface enumeration.
+        }
+        return "";
     }
 
     /** First non-loopback IPv4 address on an up interface, or {@code ""}. */
@@ -1055,9 +1318,13 @@ public final class CoopPortMapper {
             this.timeoutMillis = timeoutMillis;
             this.deadline = nowMillis + timeoutMillis;
             this.out = ByteBuffer.wrap(request);
-            this.channel = SocketChannel.open();
-            this.channel.configureBlocking(false);
-            this.channel.connect(new InetSocketAddress(InetAddress.getByName(parsed.host()), parsed.port()));
+            SocketChannel opened = SocketChannel.open();
+            // Connect through the helper and assign only afterwards: assigning the field first meant
+            // a connect() that throws (no route, wrong address family) discarded a half-built
+            // exchange with the channel still open, and NIO channels have no cleaner (net-30).
+            connectNonBlocking(opened,
+                    new InetSocketAddress(InetAddress.getByName(parsed.host()), parsed.port()));
+            this.channel = opened;
         }
 
         void tick(long now) {
@@ -1095,6 +1362,13 @@ public final class CoopPortMapper {
                         return;
                     }
                     in.flip();
+                    if (accumulatedLength + in.remaining() > MAX_RESPONSE_BYTES) {
+                        // A device that answers the SSDP search with an endless body would otherwise
+                        // grow this buffer at line rate for the whole 6 s timeout, re-scanning it from
+                        // byte 0 on every read, on the campaign thread (red-team net-50).
+                        settle(true, "response larger than " + MAX_RESPONSE_BYTES + " bytes");
+                        return;
+                    }
                     append(in);
                     if (CoopHttpMessages.isComplete(accumulated, accumulatedLength)) {
                         complete();

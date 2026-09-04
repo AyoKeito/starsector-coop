@@ -130,6 +130,68 @@ class CoopUpnpDescriptorTest {
         assertNull(CoopUpnpDescriptor.parse(xml, DESCRIPTOR_URL).service());
     }
 
+    /**
+     * net-22: the class doc has always claimed immunity to the namespace-prefix variation IGD
+     * firmware indulges in, while the scan matched a literal {@code "<name"} and a literal
+     * {@code "<service>"}. A prefixed descriptor was reported as "exposes no WAN connection service"
+     * on a router that maps ports perfectly well.
+     */
+    @Test
+    void net22_readsADescriptorWhoseTagsCarryANamespacePrefix() {
+        String xml = "<?xml version=\"1.0\"?>"
+                + "<dev:root xmlns:dev=\"urn:schemas-upnp-org:device-1-0\"><dev:device>"
+                + "<dev:friendlyName>Prefixed Router</dev:friendlyName>"
+                + "<dev:modelName>PR-1</dev:modelName>"
+                + "<dev:serviceList><dev:service>"
+                + "<dev:serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</dev:serviceType>"
+                + "<dev:controlURL>/ctl/IPConn</dev:controlURL>"
+                + "</dev:service></dev:serviceList></dev:device></dev:root>";
+
+        CoopUpnpDescriptor.Descriptor parsed = CoopUpnpDescriptor.parse(xml, DESCRIPTOR_URL);
+
+        assertEquals("Prefixed Router", parsed.friendlyName());
+        assertEquals("PR-1", parsed.modelName());
+        assertNotNull(parsed.service());
+        assertEquals("urn:schemas-upnp-org:service:WANIPConnection:1", parsed.service().serviceType());
+        assertEquals("http://192.168.1.1:5000/ctl/IPConn", parsed.service().controlUrl());
+    }
+
+    /**
+     * net-31: the scan searched a lower-cased copy and applied those offsets to the original.
+     * {@code "İ".toLowerCase(ROOT)} is two chars, so every index past such a character was shifted:
+     * friendlyName came back with a piece of its closing tag attached and modelName came back empty.
+     */
+    @Test
+    void net31_aNameThatChangesLengthWhenLowerCasedDoesNotShiftTheScanner() {
+        String xml = "<root><device>"
+                + "<friendlyName>İnternet Kutusu</friendlyName>"
+                + "<modelName>TR-1</modelName>"
+                + "<serviceList><service>"
+                + "<serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>"
+                + "<controlURL>/ctl/IPConn</controlURL>"
+                + "</service></serviceList></device></root>";
+
+        CoopUpnpDescriptor.Descriptor parsed = CoopUpnpDescriptor.parse(xml, DESCRIPTOR_URL);
+
+        assertEquals("İnternet Kutusu", parsed.friendlyName());
+        assertEquals("TR-1", parsed.modelName());
+        assertNotNull(parsed.service());
+        assertEquals("http://192.168.1.1:5000/ctl/IPConn", parsed.service().controlUrl());
+    }
+
+    @Test
+    void tagAttributesDoNotHideAnElement() {
+        String xml = "<root><device><friendlyName xml:lang=\"en\">Attr Router</friendlyName>"
+                + "<serviceList><service>"
+                + "<serviceType>urn:schemas-upnp-org:service:WANPPPConnection:1</serviceType>"
+                + "<controlURL>/ppp</controlURL></service></serviceList></device></root>";
+
+        CoopUpnpDescriptor.Descriptor parsed = CoopUpnpDescriptor.parse(xml, DESCRIPTOR_URL);
+
+        assertEquals("Attr Router", parsed.friendlyName());
+        assertNotNull(parsed.service());
+    }
+
     @Test
     void displayNameFallsBackToWhicheverNameThePresentedDescriptorHas() {
         String xml = "<root><device><modelName>TR-9000</modelName><serviceList>"

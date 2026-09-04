@@ -3,10 +3,12 @@ package coop.net;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopHttpMessagesTest {
@@ -158,5 +160,26 @@ class CoopHttpMessagesTest {
     @Test
     void rejectsNonHttpUrl() {
         assertThrows(IllegalArgumentException.class, () -> CoopHttpMessages.parseUrl("ftp://192.168.1.1/x"));
+    }
+
+    /**
+     * net-6: the chunk size comes from whatever answered the SSDP search, and 0x7FFFFFFF used to
+     * overflow the scan cursor negative — after which the LF search clamped back to byte 0 and the
+     * chunk loop repeated the same two lines forever, freezing the campaign thread the mapper ticks
+     * on. Preemptive timeout because the failure mode is a hang, not a wrong answer.
+     */
+    @Test
+    void aChunkSizeThatOverflowsTheCursorIsRejectedInsteadOfLoopingForever() {
+        byte[] data = bytes("HTTP/1.1 200 OK\r\n7FFFFFFF\r\nTransfer-Encoding: chunked\r\n\r\n7FFFFFFF\r\n");
+
+        assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> assertFalse(CoopHttpMessages.isComplete(data, data.length)));
+    }
+
+    @Test
+    void aChunkLongerThanWhatArrivedIsIncompleteRatherThanComplete() {
+        byte[] data = bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nhi\r\n0\r\n\r\n");
+
+        assertFalse(CoopHttpMessages.isComplete(data, data.length));
     }
 }
