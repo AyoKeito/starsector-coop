@@ -31,8 +31,8 @@ import java.util.TreeMap;
  * simply being out of range (correct fog-of-war).
  */
 public final class CoopFleetVisibilityProbe {
-    private static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
-    private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    private static final String PLAYER_MIRROR_TAG = CoopMirrorTags.PLAYER_MIRROR_TAG;
+    private static final String NPC_MIRROR_TAG = CoopMirrorTags.NPC_MIRROR_TAG;
 
     private CoopFleetVisibilityProbe() {
     }

@@ -10,6 +10,7 @@ import com.fs.starfarer.api.combat.CombatEngineAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import coop.fleet.CoopMirrorTags;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -941,7 +942,7 @@ class CoopBattleBridgeTest {
     private static Object fleet(String name, String coopFleetId, List<Object> roster) {
         Map<String, Object> memory = new LinkedHashMap<>();
         if (coopFleetId != null) {
-            memory.put("$coopNpcFleetId", coopFleetId);
+            memory.put(CoopMirrorTags.NPC_MIRROR_TAG, coopFleetId);
         }
         Object mem = Proxy.newProxyInstance(
                 MemoryAPI.class.getClassLoader(),

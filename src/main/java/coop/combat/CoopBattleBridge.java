@@ -15,6 +15,7 @@ import com.fs.starfarer.api.fleet.FleetGoal;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
+import coop.fleet.CoopMirrorTags;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -155,7 +156,7 @@ public final class CoopBattleBridge {
      */
     static final long FREEZE_REFRESH_INTERVAL_MILLIS = 2000L;
 
-    private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    private static final String NPC_MIRROR_TAG = CoopMirrorTags.NPC_MIRROR_TAG;
 
     /**
      * The bridge the in-combat plugin talks to. Static because {@link CoopBattleStatusCombatPlugin}

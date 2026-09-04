@@ -16,6 +16,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.fleet.CoopLocations;
+import coop.fleet.CoopMirrorTags;
 import coop.net.CoopConnectionRole;
 import coop.time.CoopSharedPauseCoordinator;
 import org.json.JSONArray;
@@ -54,8 +55,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class CoopAgentQueryVerbsTest {
 
-    private static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
-    private static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
+    private static final String PLAYER_MIRROR_TAG = CoopMirrorTags.PLAYER_MIRROR_TAG;
+    private static final String NPC_MIRROR_TAG = CoopMirrorTags.NPC_MIRROR_TAG;
 
     @BeforeEach
     @AfterEach
