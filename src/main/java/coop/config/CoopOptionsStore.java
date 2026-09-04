@@ -151,6 +151,18 @@ public final class CoopOptionsStore {
             return false;
         }
 
+        /**
+         * Whether a read can reach the engine at all right now.
+         *
+         * <p>Default true, which is right for every source that answers out of memory. The real
+         * {@code SettingsAPI} source says false before {@code Global.getSettings()} exists, so that
+         * {@link CoopOptionsStore} does not memoise "there is no settings file" from a read that
+         * never happened.
+         */
+        default boolean canReachTheEngine() {
+            return true;
+        }
+
         /** Drops any memoised read so the next call hits the engine again. */
         default void invalidate() {
         }
@@ -270,23 +282,29 @@ public final class CoopOptionsStore {
     }
 
     /**
-     * Phase 31: the value of a <em>one-shot new-game key</em> - {@code coop.newGameSeed},
-     * {@code coop.sectorSize}, {@code coop.sectorAge} - resolved as {@code -D} first and then the
-     * user's own {@code saves/common/coop_options.json.data}.
+     * Phase 31: the value of a {@code dOnly} key - see {@link #ONE_SHOT_KEYS} - resolved as
+     * {@code -D} first and then the user's own {@code saves/common/coop_options.json.data}.
      *
-     * <p><b>Why this exists.</b> Phase 28 classified those three as {@code dOnly}: they are one-shot
-     * gestures, so they are not in the shipped defaults file, they are not on the in-game options
-     * page, and {@link #writeOverrides} refuses them. Phase 31 then added a launcher that cannot set
-     * a {@code -D} at all - it is forbidden from editing {@code vmparams}, and {@code starsector.exe}
-     * reads its JVM flags from nowhere else. The launcher's only channel is the settings file it
-     * writes immediately before starting the game.
+     * <p><b>Why this exists.</b> Phase 28 classified these keys as {@code dOnly}: one-shot new-game
+     * gestures, one-shot consent gestures and debug hatches. None of them is in the shipped defaults
+     * file, none is on the in-game options page, and {@link #writeOverrides} refuses them all. Phase
+     * 31 then added a launcher that cannot set a {@code -D} at all - it is forbidden from editing
+     * {@code vmparams}, and {@code starsector.exe} reads its JVM flags from nowhere else. The
+     * launcher's only channel is the settings file it writes immediately before starting the game.
      *
-     * <p>So this method is the one seam between the two decisions, and it is deliberately narrow:
-     * the launcher-written user file is read, the shipped defaults file is <em>not</em> (a value
-     * there would be a standing setting, which is exactly what Phase 28 refused), and no other key
-     * may be read this way.
+     * <p>So this method is the one seam between the two decisions: the launcher-written user file is
+     * read, the shipped defaults file is <em>not</em> (a value there would be a standing setting,
+     * which is exactly what Phase 28 refused), and no key outside {@link #ONE_SHOT_KEYS} may be read
+     * this way.
      *
-     * @throws IllegalArgumentException when {@code key} is not one of the three
+     * <p><b>The seam is no longer narrow, and that is the point to watch.</b> It began as three
+     * new-game keys; the Phase 31 layout revision put every {@code -D} flag the project has on the
+     * launcher's Advanced card, so the set is now every {@code dOnly} key. What keeps a gesture from
+     * becoming a standing setting is therefore not the width of this seam but
+     * {@link #consumeOneShot}, which strikes a consent key out of the file once it has been published
+     * for the launch that asked for it.
+     *
+     * @throws IllegalArgumentException when {@code key} is not a {@code -D}-only key
      */
     public String rawOneShot(String key) {
         CoopOptionsRegistry.Option option = CoopOptionsRegistry.require(key);
@@ -308,6 +326,37 @@ public final class CoopOptionsStore {
      */
     public Map<String, String> launcherOverrides() {
         return oneShotCommon();
+    }
+
+    /**
+     * Publish-then-forget: removes a one-shot key from the user file, leaving every other entry in it
+     * untouched.
+     *
+     * <p>What makes a gesture a gesture. The launcher's only channel is the settings file, so a
+     * consent box ticked once is written there as an ordinary entry - and only a launcher-driven
+     * launch rewrites that file. Started from the desktop shortcut or a launch script instead, the
+     * game would read the same {@code true} again, which is precisely how a deliberate one-time
+     * override of the seed lock becomes a standing setting. {@code CoopModPlugin} publishes the key
+     * as a system property for the launch that asked for it and then calls this, so the next launch
+     * starts clean whether or not it goes through the launcher.
+     *
+     * <p>Same refusal as {@link #writeOverrides} for an unreadable file: a file that is there but
+     * will not parse is never rewritten, because that would throw away everything in it.
+     *
+     * @return true when the key was in the file and the file was rewritten without it
+     * @throws IllegalArgumentException when {@code key} is not a {@code -D}-only key
+     */
+    public boolean consumeOneShot(String key) {
+        CoopOptionsRegistry.require(key);
+        if (!ONE_SHOT_KEYS.contains(key)) {
+            throw new IllegalArgumentException(key + " is not a -D-only key; use writeOverride(...)");
+        }
+        if (!oneShotCommon().containsKey(key)) {
+            return false;
+        }
+        Map<String, String> removal = new LinkedHashMap<>();
+        removal.put(key, null);
+        return rewriteCommon(removal);
     }
 
     private static Set<String> dOnlyKeys() {
@@ -445,6 +494,18 @@ public final class CoopOptionsStore {
         if (accepted.isEmpty()) {
             return false;
         }
+        return rewriteCommon(accepted);
+    }
+
+    /**
+     * The file half of {@link #writeOverrides} and {@link #consumeOneShot}: rewrite
+     * {@code saves/common/coop_options.json.data} whole with {@code accepted} applied over what is
+     * already in it, carrying every other entry through untouched. A null value drops its key.
+     *
+     * <p>Callers own the refusals that depend on what a key <em>is</em> (policy, {@code -D}-only);
+     * this owns the one that depends on the state of the file.
+     */
+    private boolean rewriteCommon(Map<String, String> accepted) {
         String label = describe(accepted.keySet());
         // Refuse before composing anything. safeCommon() hands back null for "no file" and for
         // "the file is there but will not parse" alike, and rewriting the file from that null would
@@ -545,6 +606,9 @@ public final class CoopOptionsStore {
 
     private synchronized void dropCommonLayer() {
         commonLayer = null;
+        // Same file, same rewrite: leaving this one behind would have the next launcherOverrides()
+        // answer out of a map built before the write.
+        oneShotLayer = null;
         commonFailed = false;
     }
 
@@ -596,9 +660,31 @@ public final class CoopOptionsStore {
 
     private Map<String, String> common() {
         if (commonLayer == null) {
-            commonLayer = flatten(safeCommon(), COMMON_PATH, COMMON_CONSEQUENCE);
+            Map<String, String> layer = flatten(safeCommon(), COMMON_PATH, COMMON_CONSEQUENCE);
+            if (!canReachTheEngine()) {
+                return layer;
+            }
+            commonLayer = layer;
         }
         return commonLayer;
+    }
+
+    /**
+     * Whether a read just now could reach the engine at all. False before {@code Global.getSettings()}
+     * exists, and the three layer memos below check it for the reason the class javadoc gives: an
+     * empty map read with no engine behind it is not the answer "there is no settings file", and
+     * latching it would make the process-wide {@link #system()} store ignore both files for good.
+     *
+     * <p>{@code SettingsJsonSource} is the only source that can fail this way. A source that throws
+     * out of the question has still answered the read, so it counts as reachable and the layer is
+     * memoised exactly as before.
+     */
+    private boolean canReachTheEngine() {
+        try {
+            return source.canReachTheEngine();
+        } catch (Exception | LinkageError ex) {
+            return true;
+        }
     }
 
     /**
@@ -626,14 +712,22 @@ public final class CoopOptionsStore {
                             + " from " + COMMON_PATH + " (" + ex + ")");
                 }
             }
-            oneShotLayer = Collections.unmodifiableMap(values);
+            Map<String, String> layer = Collections.unmodifiableMap(values);
+            if (!canReachTheEngine()) {
+                return layer;
+            }
+            oneShotLayer = layer;
         }
         return oneShotLayer;
     }
 
     private Map<String, String> shipped() {
         if (shippedLayer == null) {
-            shippedLayer = flatten(safeShipped(), SHIPPED_PATH, SHIPPED_CONSEQUENCE);
+            Map<String, String> layer = flatten(safeShipped(), SHIPPED_PATH, SHIPPED_CONSEQUENCE);
+            if (!canReachTheEngine()) {
+                return layer;
+            }
+            shippedLayer = layer;
         }
         return shippedLayer;
     }
@@ -815,6 +909,11 @@ public final class CoopOptionsStore {
                         + " could not be read; " + COMMON_CONSEQUENCE, ex);
             }
             return commonJson;
+        }
+
+        @Override
+        public synchronized boolean canReachTheEngine() {
+            return settings() != null;
         }
 
         @Override

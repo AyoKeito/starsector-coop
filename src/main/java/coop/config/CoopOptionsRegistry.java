@@ -365,11 +365,18 @@ public final class CoopOptionsRegistry {
 
         // -- -D only, forever ------------------------------------------------------------------
         // One-shot consent gestures (the friction IS the feature) and debug escape hatches. They
-        // are listed here so the inventory is complete and the options page can explain them, but
-        // CoopOptionsStore never reads a file for them: a persistent file entry would turn a
-        // deliberate one-time gesture into a standing setting, and would make a debug hatch look
-        // like an ordinary preference. Their defaults below are documentation - the owning class
-        // still reads its own property directly.
+        // are listed here so the inventory is complete and the options page can explain them. They
+        // are never in the shipped defaults and never writable through CoopOptionsStore.writeOverrides:
+        // a standing entry would turn a deliberate one-time gesture into a setting, and would make a
+        // debug hatch look like an ordinary preference.
+        //
+        // Since Phase 31 they ARE read out of the player's own saves/common/coop_options.json.data,
+        // because the launcher cannot set a -D and has no other channel. CoopOptionsStore.rawOneShot
+        // is that seam and CoopModPlugin republishes what it finds as system properties; what keeps a
+        // gesture from becoming a setting is CoopOptionsStore.consumeOneShot, which strikes a consent
+        // key out of the file as soon as it has been published for the launch that asked for it.
+        // Their defaults below are documentation - the owning class still reads its own property
+        // directly.
         options.add(dOnly(ADOPT_CAMPAIGN_ID, Type.BOOL, "false", "Phase 6b",
                 "next new game", ApplyBoundary.NEXT_CONNECTION,
                 "Overrides the seed lock and adopts an in-flight campaign id. One-shot explicit"

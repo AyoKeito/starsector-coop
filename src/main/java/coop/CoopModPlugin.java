@@ -5,6 +5,7 @@ import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopGuestPresence;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorOrphanSweeper;
 import coop.config.CoopOptionsRegistry;
@@ -86,6 +87,52 @@ public class CoopModPlugin extends BaseModPlugin {
             System.setProperty(key, entry.getValue());
             CoopLog.info(CoopModPlugin.class, "Coop published the settings-file flag -D" + key
                     + "=" + entry.getValue() + " for readers that only see system properties");
+        }
+        consumePublishedConsentKeys(overrides.keySet());
+    }
+
+    /**
+     * The {@code dOnly} keys that are a one-time gesture rather than a setting.
+     *
+     * <p>The launcher cannot set a {@code -D}, so a ticked consent box is written into
+     * {@code saves/common/coop_options.json.data} - and only a launcher-driven launch rewrites that
+     * file. Started any other way (the desktop shortcut, {@code launch-guest.ps1}) the game would
+     * inherit the previous launcher session's {@code true} and silently override the Phase 6b seed
+     * lock again, which is the one thing typed consent exists to prevent: adopting an in-flight
+     * campaign id throws the other player's progress away. So the key is published for this launch
+     * like every other flag and then struck from the file. The launcher clears it too - on game exit
+     * and at its own startup - and the two compose: whichever runs first, the next launch starts
+     * clean.
+     */
+    private static final java.util.Set<String> ONE_SHOT_CONSENT_KEYS =
+            java.util.Set.of(CoopOptionsRegistry.ADOPT_CAMPAIGN_ID);
+
+    /** Package-private for the test: the set above must never grow a standing setting. */
+    static java.util.Set<String> oneShotConsentKeys() {
+        return ONE_SHOT_CONSENT_KEYS;
+    }
+
+    /**
+     * Strikes the consent keys just published out of the user file, so they apply to this launch and
+     * no other. Total: a file that cannot be written leaves the flag where it was, which is exactly
+     * today's behaviour, and says so once.
+     */
+    private static void consumePublishedConsentKeys(java.util.Set<String> published) {
+        for (String key : ONE_SHOT_CONSENT_KEYS) {
+            if (!published.contains(key)) {
+                continue;
+            }
+            try {
+                if (coop.config.CoopOptionsStore.system().consumeOneShot(key)) {
+                    CoopLog.info(CoopModPlugin.class, "Coop consumed the one-shot consent flag "
+                            + key + " from " + coop.config.CoopOptionsStore.COMMON_PATH
+                            + ": it is a one-time gesture, so it will not apply to a later launch");
+                }
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopModPlugin.class, "Coop could not clear the one-shot consent flag "
+                        + key + " from " + coop.config.CoopOptionsStore.COMMON_PATH
+                        + "; it would apply again on the next launch", ex);
+            }
         }
     }
 
@@ -169,9 +216,11 @@ public class CoopModPlugin extends BaseModPlugin {
      * exactly the places the Phase 6 audit added the fork for.
      *
      * <p>Runs in {@code onApplicationLoad}, which is long before any new game, and never overwrites
-     * a real {@code -D}: the command line stays the top of the stack.
+     * a real {@code -D}: the command line stays the top of the stack. It is <em>not</em> before every
+     * fork, though - see {@link #rebindTheForkedSharedRandom()} for the one that reads the property
+     * at class-init time and therefore has to be rebound rather than published to.
      */
-    private static void publishSeedForTheForks(String newGameSeed) {
+    static void publishSeedForTheForks(String newGameSeed) {
         if (System.getProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY) != null) {
             return;
         }
@@ -180,10 +229,62 @@ public class CoopModPlugin extends BaseModPlugin {
                 "Coop published the settings-file seed as -D"
                         + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
                         + " so coop-forks.jar (system classloader) can see it");
+        rebindTheForkedSharedRandom();
+    }
+
+    /**
+     * Where the rebound shared {@link java.util.Random} goes. Production writes the forked
+     * {@code Misc.random} field; a test swaps this, because merely touching {@code Misc} outside a
+     * running game runs its {@code Global.getSettings()}-reading static initialiser.
+     */
+    static java.util.function.Consumer<java.util.Random> sharedRandomSink =
+            random -> com.fs.starfarer.api.util.Misc.random = random;
+
+    /**
+     * The one fork the property bridge above cannot reach by setting a property: {@code Misc.random}
+     * is a <em>static field initialiser</em> ({@code = CoopRandom.ofOrDefault("Misc.random")}) that
+     * runs while the engine loads its data, some ten seconds before this plugin exists. A real
+     * {@code -D} from a launch script is there in time; the Phase 31 launcher's settings-file seed is
+     * not, so on a launcher-started game that field was built from "no seed" - a plain
+     * {@code new Random()} - and every gen-time draw off it rolled differently on the two installs
+     * while the log claimed the seed had been published. Rebinding it from the same
+     * {@code CoopRandom} stream the fork would have used closes that, and only on the settings-file
+     * path: {@link #publishSeedForTheForks} returns before this when a real {@code -D} is present,
+     * and there the field is already right.
+     *
+     * <p>A plain public-field write, deliberately: the script classloader refuses
+     * {@code java.lang.reflect}. The {@code [COOP-FORK] Misc fork active} probe line further up the
+     * log was written before the seed existed and still reads {@code coopSession=false} on this path;
+     * this line is the one that says the seed took.
+     */
+    private static void rebindTheForkedSharedRandom() {
+        try {
+            sharedRandomSink.accept(coop.rng.CoopRandom.ofOrDefault("Misc.random"));
+            CoopLog.info(CoopModPlugin.class,
+                    "Coop reseeded the forked Misc.random from the settings-file seed (the"
+                            + " [COOP-FORK] probe line above was logged before the seed existed, so"
+                            + " it reads coopSession=false on this path)");
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopModPlugin.class,
+                    "Coop could not reseed the forked Misc.random, so gen-time RNG stays unseeded"
+                            + " on this client; is coop-forks.jar on the JVM classpath?", ex);
+        }
+    }
+
+    /**
+     * Runs before the sector is generated, which is the only reason this override exists: the
+     * process-wide statics below are read by the forked spawners <em>during</em> procgen, and
+     * {@code onGameLoad} is too late for a new game (the engine calls it after procgen and the
+     * initial time pass).
+     */
+    @Override
+    public void onNewGame() {
+        clearPreviousGameStatics();
     }
 
     @Override
     public void onGameLoad(boolean newGame) {
+        clearPreviousGameStatics();
         if (netService != null) {
             // Graceful session end: loading another game tears this session's transport down, so the
             // partner gets one last checkpoint before the socket closes (the send is flushed inline).
@@ -239,6 +340,23 @@ public class CoopModPlugin extends BaseModPlugin {
         CoopAgentBridge.install(Global.getSector());
         CoopSeedSync.storeCurrentSectorFingerprint();
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
+    }
+
+    /**
+     * Statics that belong to the game that just ended and that no engine hook clears on its own.
+     *
+     * <p>The guest-presence slot is the one that matters: it lives in {@code coop-forks.jar} on the
+     * system classloader, the forked spawners read it every pass, and its only release is a frame
+     * boundary that needs a campaign frame in which the pump did not tick. Quitting to the title
+     * screen produces no such frame, so the previous sector's mirror fleet stayed published - through
+     * the next game's procgen and its first frames - and route fleets materialised around a
+     * hyperspace point belonging to a campaign that no longer exists. The full-fidelity drive is
+     * cleared for the same reason: {@code saveInProgress} is a static that only {@code afterGameSave}
+     * clears, and a failed save must not carry it into the next campaign.
+     */
+    static void clearPreviousGameStatics() {
+        CoopGuestPresence.clearForGameLoad();
+        CoopFullFidelitySystemDriver.reset();
     }
 
     /**
@@ -326,6 +444,24 @@ public class CoopModPlugin extends BaseModPlugin {
      * autosave. This fires on the guest too — the role gate lives in the pump's sender, so a guest's
      * coordinated autosave cannot echo a checkpoint back at the host.
      */
+    /**
+     * The other end of {@link #beforeGameSave()}, and the one the engine takes when the write throws
+     * (out of memory, disk full): {@code afterGameSave} is on the success path only, so without this
+     * a failed save left the three intel pages removed for the rest of the session and the
+     * full-fidelity guest-system drive latched off for the rest of the <em>process</em> - a static
+     * nothing else clears. Everything {@code afterGameSave} does except the checkpoint: no save was
+     * written, so there is nothing to tell the partner to mirror.
+     */
+    @Override
+    public void onGameSaveFailed() {
+        CoopFullFidelitySystemDriver.endSave();
+        CoopSessionIntel.ensureRegistered(Global.getSector());
+        CoopSessionStatsIntel.ensureRegistered(Global.getSector());
+        CoopOptionsPage.ensureRegistered(Global.getSector());
+        CoopLog.warn(CoopModPlugin.class, "The game reported a failed save; the coop intel pages and"
+                + " the full-fidelity guest-system drive have been put back");
+    }
+
     @Override
     public void afterGameSave() {
         CoopFullFidelitySystemDriver.endSave();

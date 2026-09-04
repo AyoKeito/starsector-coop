@@ -362,6 +362,78 @@ class CoopOptionsStoreTest {
         assertEquals("false", store.rawOneShot("coop.adoptCampaignId"));
     }
 
+    @Test
+    void aOneShotConsentKeyIsStruckFromTheFileOnceItHasBeenPublished() {
+        FakeSource source = new FakeSource();
+        source.common = json(Map.of(
+                "coop.adoptCampaignId", "true",
+                "coop.newGameSeed", "MN-42",
+                "coop.hudCorner", "BL"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+        assertEquals("true", store.rawOneShot("coop.adoptCampaignId"));
+
+        assertTrue(store.consumeOneShot("coop.adoptCampaignId"));
+
+        // The launcher's only channel is this file, and only a launcher-driven launch rewrites it:
+        // pre-fix a game started from the desktop shortcut read the previous session's consent again
+        // and adopted an in-flight campaign id without anyone being asked.
+        assertFalse(store.launcherOverrides().containsKey("coop.adoptCampaignId"));
+        assertEquals("false", store.rawOneShot("coop.adoptCampaignId"));
+        // Everything else in the file survives, including the keys this build does not write.
+        assertEquals("MN-42", store.rawOneShot("coop.newGameSeed"));
+        assertEquals("BL", store.raw("coop.hudCorner"));
+        assertFalse(store.consumeOneShot("coop.adoptCampaignId"), "nothing left to consume");
+        assertEquals(1, source.writes, "one rewrite, and none for the second call");
+    }
+
+    @Test
+    void onlyAOneShotKeyMayBeConsumed() {
+        CoopOptionsStore store = new CoopOptionsStore(new FakeSource(), props());
+
+        assertThrows(IllegalArgumentException.class, () -> store.consumeOneShot("coop.hudCorner"));
+    }
+
+    /**
+     * The class javadoc's caching rule: a read attempted before the engine exists is not an answer,
+     * so nothing may be latched from it.
+     */
+    @Test
+    void aReadThatCannotReachTheEngineDoesNotPinAnEmptyFileLayer() {
+        UnreachableSource source = new UnreachableSource();
+        source.common = json(Map.of("coop.hudCorner", "BL"));
+        CoopOptionsStore store = new CoopOptionsStore(source, props());
+
+        assertEquals("TR", store.raw("coop.hudCorner"), "no engine yet, so no file layer");
+
+        source.reachable = true;
+
+        // Pre-fix the first read latched flatten(null) = {} on the store itself - the fix underneath
+        // it was applied to SettingsJsonSource only - so the process-wide system() store ignored both
+        // coop_options.json files for the rest of the run.
+        assertEquals("BL", store.raw("coop.hudCorner"));
+    }
+
+    /** Answers nothing until the engine is up, exactly as {@code SettingsJsonSource} does. */
+    private static final class UnreachableSource implements CoopOptionsStore.JsonSource {
+        private JSONObject common;
+        private boolean reachable;
+
+        @Override
+        public JSONObject shipped() {
+            return null;
+        }
+
+        @Override
+        public JSONObject common() {
+            return reachable ? common : null;
+        }
+
+        @Override
+        public boolean canReachTheEngine() {
+            return reachable;
+        }
+    }
+
     /**
      * The launcher writes the -D-only keys into the user file, so the "entries this build does not
      * use" warning must stop naming them. A key no build knows still counts.

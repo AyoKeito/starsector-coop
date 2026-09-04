@@ -86,7 +86,7 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
         super.advance(amount);
         if (coopLaunch) {
             // Silent unless a value actually changed -- the panel can write back at any time.
-            pin("advance");
+            pin("advance", false);
         }
     }
 
@@ -170,13 +170,22 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
     }
 
     private void pin(String stage) {
+        pin(stage, true);
+    }
+
+    /**
+     * @param announce false for the per-frame caller: re-applying the seed must happen every frame,
+     *                 but saying so in the log every frame is what the "silent" in
+     *                 {@link #advance(float)} was always supposed to mean
+     */
+    private void pin(String stage, boolean announce) {
         if (data == null || choices == null) {
             return;
         }
         try {
             // Seed derivation is CoopSectorProcGen's, reused rather than repeated, so the dialog and
             // procgen can never disagree about what -Dcoop.newGameSeed means.
-            CoopSectorProcGen.applyCoopSeedIfPresent(data);
+            CoopSectorProcGen.applyCoopSeedIfPresent(data, announce);
             data.setSectorSize(choices.sectorSize());
             data.setSectorAge(choices.sectorAge());
 

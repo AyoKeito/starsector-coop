@@ -2,6 +2,9 @@ package coop.seed;
 
 import com.fs.starfarer.api.characters.CharacterCreationData;
 import coop.net.CoopNetStartupConfig;
+import org.apache.log4j.AppenderSkeleton;
+import org.apache.log4j.Logger;
+import org.apache.log4j.spi.LoggingEvent;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -9,7 +12,9 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -68,6 +73,52 @@ class CoopSectorProcGenTest {
 
         assertFalse(calls.containsKey("seed"));
         assertFalse(calls.containsKey("seedString"));
+    }
+
+    /**
+     * config-plugin-3: the New Game dialog re-pins the panel on every frame, and this line went out
+     * with it - thousands of identical INFO lines while a player picked a portrait.
+     */
+    @Test
+    void theQuietOverloadStillAppliesTheSeedButDoesNotLogIt() {
+        System.setProperty(CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY, "MN-1234567890123456789");
+        Map<String, Object> calls = new HashMap<>();
+        CharacterCreationData data = recordingCharacterCreationData(calls);
+        CapturingAppender appender = new CapturingAppender();
+        Logger logger = Logger.getLogger(CoopSectorProcGen.class);
+        logger.addAppender(appender);
+        try {
+            CoopSectorProcGen.applyCoopSeedIfPresent(data, false);
+
+            assertEquals("MN-1234567890123456789", calls.get("seedString"),
+                    "quiet means quiet, not inert: the panel can write its own seed back any frame");
+            assertTrue(appender.messages.isEmpty(), appender.messages.toString());
+
+            CoopSectorProcGen.applyCoopSeedIfPresent(data, true);
+
+            assertEquals(1, appender.messages.size(), "the once-per-new-game callers still say so");
+        } finally {
+            logger.removeAppender(appender);
+        }
+    }
+
+    /** Minimal log4j sink; CoopLog falls back to plain log4j when there is no game. */
+    private static final class CapturingAppender extends AppenderSkeleton {
+        private final List<String> messages = new ArrayList<>();
+
+        @Override
+        protected void append(LoggingEvent event) {
+            messages.add(String.valueOf(event.getMessage()));
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public boolean requiresLayout() {
+            return false;
+        }
     }
 
     @Test

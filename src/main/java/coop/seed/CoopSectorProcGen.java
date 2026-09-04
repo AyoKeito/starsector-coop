@@ -64,6 +64,19 @@ public class CoopSectorProcGen extends SectorProcGen {
      * cannot disagree about what the property means.
      */
     public static void applyCoopSeedIfPresent(CharacterCreationData data) {
+        applyCoopSeedIfPresent(data, true);
+    }
+
+    /**
+     * As {@link #applyCoopSeedIfPresent(CharacterCreationData)}, with the log line suppressed.
+     *
+     * <p>{@code announce=false} is for the one caller that runs every frame: the New Game dialog
+     * re-pins the panel on each {@code advance()} because the panel can write its own values back at
+     * any time, and the line below is identical every time. Left unconditional it wrote roughly one
+     * INFO per frame for as long as a player sat in character creation, burying the seed-lock and
+     * pin lines a smoke run greps for.
+     */
+    public static void applyCoopSeedIfPresent(CharacterCreationData data, boolean announce) {
         if (data == null) {
             return;
         }
@@ -73,6 +86,9 @@ public class CoopSectorProcGen extends SectorProcGen {
         }
         CoopSeedSync.SeedData seed = CoopSeedSync.seedDataFromSeedString(seedString);
         CoopSeedSync.applyToCharacterCreationData(data, seed);
+        if (!announce) {
+            return;
+        }
         CoopLog.info(CoopSectorProcGen.class,
                 "Coop overriding new-game seed from JVM property "
                         + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY

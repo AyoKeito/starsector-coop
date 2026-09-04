@@ -222,6 +222,36 @@ class CoopOptionsPolicyTest {
     }
 
     @Test
+    void aGuestDoesNotStayPendingOnABoundaryItNeverCrosses() {
+        CoopOptionsPolicy host = host();
+        host.ensureSeeded(storeWith(Map.of()));
+        assertTrue(host.set(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS, "120"));
+
+        CoopOptionsPolicy guest = guest();
+        guest.applySnapshot(host.values(), host.version(),
+                CoopOptionsRegistry.RECONNECT_GRACE_SECONDS);
+
+        assertEquals("120", guest.effective(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS));
+        // Nothing on a guest crosses NEXT_DROP, so pre-fix applied stayed at the registry default
+        // forever: hasPendingChanges() was true every frame, CoopNetPump.maybeSendOptionsApplied
+        // never sent the ack, and the host's own options page read "pending" for the whole session.
+        assertEquals("120", guest.applied(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS));
+        assertFalse(guest.hasPendingChanges());
+    }
+
+    @Test
+    void theOneBoundaryAGuestDoesCrossStillWaitsForIt() {
+        CoopOptionsPolicy guest = guest();
+
+        guest.applySnapshot(Map.of(PAUSE, "false"), 5, PAUSE);
+
+        assertEquals("true", guest.applied(PAUSE), "no core tab has opened or closed yet");
+        assertTrue(guest.hasPendingChanges());
+        assertTrue(guest.advanceBoundary(PAUSE));
+        assertFalse(guest.hasPendingChanges());
+    }
+
+    @Test
     void aKeyMissingFromTheSnapshotGoesBackToItsDefault() {
         CoopOptionsPolicy policy = guest();
         policy.applySnapshot(Map.of(PAUSE, "false"), 2, PAUSE);

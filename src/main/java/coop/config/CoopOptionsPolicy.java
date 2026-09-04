@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -475,7 +476,9 @@ public final class CoopOptionsPolicy {
                 effective.put(option.key(), next);
                 changed.add(option.key());
             }
-            if (option.boundary() == CoopOptionsRegistry.ApplyBoundary.IMMEDIATE) {
+            if (!GUEST_CROSSED_BOUNDARIES.contains(option.boundary())) {
+                // Nothing on this client will ever cross this key's boundary, so holding the value
+                // back would not delay an apply - it would only leave the guest permanently pending.
                 applied.put(option.key(), next);
             }
         }
@@ -484,6 +487,31 @@ public final class CoopOptionsPolicy {
         lastChangedKey = changedKey == null ? "" : changedKey;
         return new SnapshotResult(true, version, changed);
     }
+
+    /**
+     * The apply boundaries a guest crosses for itself, and therefore the only ones
+     * {@link #applySnapshot} may leave pending.
+     *
+     * <p>There is exactly one. On a guest an applied value moves either in {@code applySnapshot} or
+     * through a consumer calling {@link #advanceBoundary(String)}, and the guest has a single such
+     * consumer: {@code CoopNetPump.syncGuestSharedPauseIntent} advances
+     * {@link CoopOptionsRegistry#PAUSE_ON_GUEST_SCREENS} the next time no core tab is open. Every
+     * other boundary in the registry is host-side machinery - a connection attempt, a link drop, a
+     * battle result, a month tick, a colony founding - that a guest never reaches.
+     *
+     * <p>Promoting only {@code IMMEDIATE} keys therefore left the guest pending forever on any key
+     * the host had moved off its registry default (a launcher-set {@code reconnectGraceSeconds}, an
+     * {@code incomeSplit} flip). {@code CoopNetPump.maybeSendOptionsApplied} is gated on nothing
+     * being pending, so the {@code OPTIONS_APPLIED} acknowledgement was never sent; and because the
+     * host has a guest to wait for it never fell back to {@code acknowledgeAllApplied} either, so
+     * every later host change - including the one key the guest does advance - sat on the host's
+     * options page reading "pending" for the whole session.
+     *
+     * <p>A phase that gives the guest a real consumer for another boundary adds it here, and the
+     * acknowledgement starts waiting for that one too.
+     */
+    private static final Set<CoopOptionsRegistry.ApplyBoundary> GUEST_CROSSED_BOUNDARIES =
+            java.util.EnumSet.of(CoopOptionsRegistry.ApplyBoundary.NEXT_SCREEN_TOGGLE);
 
     /**
      * Session teardown on a guest: forget the host's rules and go back to registry defaults, so a

@@ -172,6 +172,16 @@ public final class CoopFullFidelitySystemDriver {
     public static void reset() {
         release("session reset");
         swapCount = 0;
+        // A save that failed used to leave this latched for the rest of the process, across campaign
+        // loads, with nothing but a successful save able to clear it. CoopModPlugin.onGameSaveFailed
+        // is the direct fix; clearing it here as well means a stuck flag can never outlive the
+        // campaign that set it.
+        saveInProgress = false;
+    }
+
+    /** True between {@code beforeGameSave} and the save finishing, either way. */
+    public static boolean isSaveInProgress() {
+        return saveInProgress;
     }
 
     /** {@code ModPlugin.beforeGameSave()}: hold off entirely while the save is being written. */

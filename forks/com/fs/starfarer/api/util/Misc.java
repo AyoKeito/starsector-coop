@@ -16,7 +16,15 @@
  * A one-time probe line "[COOP-FORK] Misc fork active" is logged from a static initializer to
  * prove (a) the classpath override loaded this copy and (b) coop.rng.CoopRandom links from the
  * system classloader.
- * Outside a coop session (no -Dcoop.newGameSeed) behaviour is byte-for-byte vanilla.
+ * TIMING, and the one thing to know about the `random` field: both the field and the probe are
+ * bound during core data loading, roughly ten seconds before any mod plugin exists. A -D on the
+ * command line is there in time. The Phase 31 launcher's seed is NOT - it lives in
+ * saves/common/coop_options.json.data and only becomes a system property when
+ * CoopModPlugin.onApplicationLoad republishes it - so on that path this field would be a plain
+ * unseeded new Random() and the probe reads coopSession=false. CoopModPlugin therefore REBINDS
+ * this field right after publishing the property (see rebindTheForkedSharedRandom); the log line
+ * that says the seed took is "Coop reseeded the forked Misc.random", not the probe above it.
+ * Outside a coop session (no seed at all) behaviour is byte-for-byte vanilla.
  * ==========================================================================================
  */
 package com.fs.starfarer.api.util;
@@ -260,6 +268,10 @@ public class Misc {
 	public static float MAX_OFFICER_LEVEL = Global.getSettings().getFloat("officerMaxLevel");
 	
 	// COOP FORK: seed the shared default Random from the coop session seed so both clients agree.
+	// Bound at class init, which is before the launcher's settings-file seed can be published as a
+	// system property: CoopModPlugin rebinds this field once it has been. Kept a plain public field
+	// for exactly that reason - no reflection is needed to write it, which the mod's script
+	// classloader would refuse.
 	public static Random random = coop.rng.CoopRandom.ofOrDefault("Misc.random");
 
 	// COOP FORK: one-time probe proving this forked copy loaded and CoopRandom links from the

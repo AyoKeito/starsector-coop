@@ -23,10 +23,20 @@
  * would change the save shape). With no registered presence every code path below evaluates exactly
  * as vanilla does.
  *
- * Spawn geometry: deliberately NOT edited, because it is already correct once currSpawnLoc is. The
- * spawn point is system-relative (setLocationAndOrders adds the fleet to currSpawnLoc, or to
- * hyperspace with DisposableAggroAssignmentAI flying it to currSpawnLoc), never player-relative, so
- * making the system choice presence-aware puts the fleets around the guest by construction.
+ * Spawn geometry: deliberately NOT edited, and NOT because it is player-independent - it is not.
+ * setLocationAndOrders puts the fleet into currSpawnLoc (or into hyperspace, flying in under
+ * DisposableAggroAssignmentAI), which is system-relative and does follow the presence-aware system
+ * choice. The placement inside that system does not: DisposableAggroAssignmentAI branches on
+ * `fleet.getContainingLocation() == Global.getSector().getCurrentLocation()` - the HOST's location,
+ * always - and only the host-present branch routes through Misc.pickLocationNotNearPlayer. In a
+ * guest-only system the other branch runs and drops the fleet at the guarded entity's radius + 100
+ * units with no distance check against anyone, so a pirate hunter or Pather cell can pop in on top
+ * of a guest parked at that planet or jump point. Vanilla never does that to the host, because that
+ * branch only runs when nobody is there to see it.
+ * ACCEPTED DIVERGENCE, not an oversight: the alternative is editing spawn geometry (forcing the
+ * hyperspace fly-in whenever the presence entity is in currSpawnLoc), which is gameplay logic this
+ * fork is not allowed to touch and which would change ambient spawn behaviour for the host too.
+ * The forks the presence term does edit stay in the system-choice tests below.
  *
  * Known limitation (documented, not a bug): currSpawnLoc is a single field, and the no-new-fields
  * rule forbids a second one. With both players parked in different populated systems only one of the

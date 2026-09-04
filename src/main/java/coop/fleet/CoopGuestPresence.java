@@ -129,6 +129,34 @@ public final class CoopGuestPresence {
         tickedSinceFrameBoundary = false;
     }
 
+    /**
+     * Game load / new game: drop the slot outright, before the next campaign's procgen and first
+     * frames can read it.
+     *
+     * <p>{@link #frameBoundary()} is not enough on its own. It only releases on a campaign frame in
+     * which {@link #tick(SectorAPI, long)} did not run, and quitting to the title screen produces no
+     * campaign frame at all - the pump simply stops, leaving {@link #tickedSinceFrameBoundary} true
+     * and the previous sector's mirror fleet published to the forked spawners. The next game then
+     * generates and starts with a presence entity whose {@code getLocationInHyperspace()} answers
+     * with a dead sector's coordinates.
+     *
+     * <p>Deliberately not gated on {@link #presenceRegistered}: that flag is this class's mirror of
+     * the slot, and the point here is to be right about the slot even when the mirror is not.
+     */
+    public static void clearForGameLoad() {
+        tickedSinceFrameBoundary = false;
+        presenceRegistered = false;
+        presenceReleased = true;
+        if (registryUnavailable) {
+            return;
+        }
+        try {
+            coop.presence.CoopPresenceRegistry.clear();
+        } catch (LinkageError ignored) {
+            registryUnavailable = true;
+        }
+    }
+
     /** Session (re)start: forget the armed system so the next pass logs afresh. */
     public void reset() {
         armedSystemId = "";
