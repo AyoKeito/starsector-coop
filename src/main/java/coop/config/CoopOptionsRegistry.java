@@ -257,6 +257,7 @@ public final class CoopOptionsRegistry {
     // ---- -D only, forever --------------------------------------------------------------------
 
     public static final String ADOPT_CAMPAIGN_ID = "coop.adoptCampaignId";
+    public static final String EXPECTED_CAMPAIGN_ID = "coop.expectedCampaignId";
     public static final String ALLOW_GAME_VERSION_MISMATCH = "coop.allowGameVersionMismatch";
     public static final String NEW_GAME_SEED = "coop.newGameSeed";
     public static final String SECTOR_SIZE = "coop.sectorSize";
@@ -381,6 +382,11 @@ public final class CoopOptionsRegistry {
                 "next new game", ApplyBoundary.NEXT_CONNECTION,
                 "Overrides the seed lock and adopts an in-flight campaign id. One-shot explicit"
                         + " consent: it loses the other player's progress, so it must be typed."));
+        options.add(dOnly(EXPECTED_CAMPAIGN_ID, Type.STRING, "", "Phase 31",
+                "next game load", ApplyBoundary.NEXT_CONNECTION,
+                "The campaign id the invite is for. The mod says so when the save you load belongs"
+                        + " to a different campaign, and names the right one. Warns only, never"
+                        + " blocks. One-shot: a stale id must not nag on an unrelated launch."));
         options.add(dOnly(ALLOW_GAME_VERSION_MISMATCH, Type.BOOL, "false", "Phase 31",
                 "next launch", ApplyBoundary.NEXT_CONNECTION,
                 "Lets the mod run on a Starsector version other than the one it was built for. For"

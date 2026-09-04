@@ -183,7 +183,16 @@ public final class CoopSaveCheckpoint {
                 String reason = pendingReason;
                 autosavePending = false;
                 pendingReason = "";
-                target.autosave();
+                // The save index cannot otherwise tell an autosave from a manual one - the engine
+                // keeps its autosave flag to itself and hands the mod hooks nothing - and this is one
+                // of the two autosaves the mod asks for itself. autosave() runs the whole save inline,
+                // so the scope really does bracket beforeGameSave/afterGameSave.
+                CoopSaveIndex.beginCoopAutosave();
+                try {
+                    target.autosave();
+                } finally {
+                    CoopSaveIndex.endCoopAutosave();
+                }
                 CoopLog.info(CoopSaveCheckpoint.class,
                         "Coop coordinated autosave performed (" + reason + ")");
                 return true;

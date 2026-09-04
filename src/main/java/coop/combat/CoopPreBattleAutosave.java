@@ -94,7 +94,14 @@ public final class CoopPreBattleAutosave {
             }
             String reason = pendingReason;
             pendingReason = null;
-            ui.autosave();
+            // Tells CoopSaveIndex that the row this produces is an autosave; see its
+            // beginCoopAutosave doc for why that cannot be worked out from the hooks themselves.
+            coop.save.CoopSaveIndex.beginCoopAutosave();
+            try {
+                ui.autosave();
+            } finally {
+                coop.save.CoopSaveIndex.endCoopAutosave();
+            }
             lastAutosaveAtMillis = System.currentTimeMillis();
             CoopLog.info(CoopPreBattleAutosave.class, "Coop pre-battle autosave performed: " + reason);
             return true;

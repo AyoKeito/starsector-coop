@@ -50,6 +50,30 @@ It exists for one scenario: a guest who loses their save. A fresh same-seed re-r
 - The store's `clear()` drops only the in-memory copy. It never removes the key from a save — an older snapshot is still the recovery material.
 - A snapshot only appears once a guest has connected and sent one (`GUEST_SNAPSHOT`, every 30 s). A host that saves before that leaves whatever the previous session wrote.
 
+### Files in `saves/common`
+
+Two, both written through `SettingsAPI`'s `...Common` calls, which append `.data` to every name they
+are given. Neither is sector data, so neither costs a save migration or an XStream alias.
+
+| File | Written by | Holds |
+| --- | --- | --- |
+| `coop_options.json.data` | `coop.config.CoopOptionsStore.writeOverrides` and the Phase 31 launcher | the player's option overrides, plus the launcher's one-shot `-D`-only keys |
+| `coop_saves.json.data` | `coop.save.CoopSaveIndex.recordCurrentSave`, from `CoopModPlugin.afterGameSave` | one row per save the mod watched being written: `campaignId`, `saveDirName`, `characterName`, `level`, `gameDateTimestamp`, `gameDate`, `savedAtMillis`, `autosave`, `role`, `seedString` |
+
+The save index is what lets the launcher answer "which save is this invite's campaign in?" — the
+engine's own save list has no campaign id in it. Retention is 8 rows per campaign and 16 campaigns,
+so the file stays three orders of magnitude under the engine's 1 MB write cap. `saveDirName` is read
+inside the hook every time through a `MethodHandle` on `CampaignEngine.getSaveDirName()` and never
+cached: the engine swaps that field to the folder being written for the duration of an autosave or a
+save-into-a-new-slot. Rows are allowed to name folders the engine has since pruned; the reader stats
+them. A row is skipped entirely when the sector has no `coop.campaignId`.
+
+The launcher writes `coop.expectedCampaignId` into `coop_options.json.data` to say which campaign an
+invite is for. `CoopModPlugin.publishLauncherProperties` republishes it as a system property and then
+strikes it out of the file, exactly as it does `coop.adoptCampaignId`; `coop.save.CoopCampaignGuard`
+reads it at `onGameLoad`, and warns without blocking when the loaded save belongs to a different
+campaign.
+
 ## Build, Test, And Package
 
 Use the repeatable build script:

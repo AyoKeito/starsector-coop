@@ -458,7 +458,7 @@ value for them in `data\config\coop_options.json` is skipped with a warning. The
 gestures for starting a campaign rather than standing settings, and your file is the layer the
 launcher hands them over in.
 
-`coop.adoptCampaignId` and the developer flags (`coop.debug.diagnostics`, `coop.debug.wiretap`,
+`coop.adoptCampaignId`, `coop.expectedCampaignId` and the developer flags (`coop.debug.diagnostics`, `coop.debug.wiretap`,
 `coop.debug.wiretapSample`, `coop.debug.frameProfile`, `coop.debug.bridge`,
 `coop.debug.interactionDelayMs`, `coop.fullFidelityGuestSystem`, `coop.ff.disable` and
 `coop.clock.disable`) are the odd ones out: a value for them in `data\config\coop_options.json` is
@@ -528,6 +528,7 @@ The rest:
 | `coop.hudCorner` | `TR` | Where the co-op status line is drawn: `TR`, `TL`, `BR`, `BL`. |
 | `coop.hud.disable` | `false` | `true` removes the status line. |
 | `coop.adoptCampaignId` | `false` | Guest only, and only for the case in the note below. It is consumed by the launch that uses it: the mod strikes it out of the settings file right after reading it, and the launcher clears it again when the game exits and when it next opens. Set it for each launch that needs it. |
+| `coop.expectedCampaignId` | none | The campaign id an invite is for. When the save you load belongs to a different campaign the mod says so and names the right save, then lets you carry on; nothing is blocked. Written by the launcher and consumed by the launch that uses it, the same way `coop.adoptCampaignId` is. |
 | `coop.maxGuests` | `1` | Peer capacity. Anything other than 1 is clamped back to 1 with a warning in the log. |
 
 The launcher's Advanced card sets `coop.portMapping` (Port mapping), `coop.hudCorner` (Link HUD

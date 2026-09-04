@@ -87,6 +87,7 @@ class CoopOptionsRegistryTest {
         }
         assertEquals(Set.of(
                 "coop.adoptCampaignId",
+                "coop.expectedCampaignId",
                 "coop.allowGameVersionMismatch",
                 "coop.newGameSeed",
                 "coop.sectorSize",

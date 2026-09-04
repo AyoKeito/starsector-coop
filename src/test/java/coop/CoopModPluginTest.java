@@ -139,6 +139,10 @@ class CoopModPluginTest {
     void everyConsentKeyThePluginConsumesIsAOneShotKey() {
         assertTrue(CoopModPlugin.oneShotConsentKeys()
                 .contains(coop.config.CoopOptionsRegistry.ADOPT_CAMPAIGN_ID));
+        // The invite's campaign id is consumed for the same reason: left in the file it would warn
+        // about an invite nobody is acting on any more, on every launch, forever.
+        assertTrue(CoopModPlugin.oneShotConsentKeys()
+                .contains(coop.config.CoopOptionsRegistry.EXPECTED_CAMPAIGN_ID));
         for (String key : CoopModPlugin.oneShotConsentKeys()) {
             // Consuming a key that is not -D-only would delete a standing setting out of the user's
             // file; CoopOptionsStore.consumeOneShot refuses one, and this is the same rule stated

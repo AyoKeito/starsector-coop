@@ -20,10 +20,13 @@ import coop.net.CoopStallNotice;
 import coop.ui.CoopSessionIntelFeed;
 import coop.save.CoopGuestSnapshot;
 import coop.save.CoopGuestSnapshotStore;
+import coop.save.CoopCampaignGuard;
 import coop.save.CoopSaveCheckpoint;
+import coop.save.CoopSaveIndex;
 import coop.seed.CoopSeedSync;
 import coop.stats.CoopSessionStats;
 import coop.stats.CoopSessionStatsStore;
+import coop.ui.CoopCampaignNotice;
 import coop.ui.CoopLinkHud;
 import coop.ui.CoopSessionIntel;
 import coop.config.CoopOptionsPolicy;
@@ -103,9 +106,16 @@ public class CoopModPlugin extends BaseModPlugin {
      * like every other flag and then struck from the file. The launcher clears it too - on game exit
      * and at its own startup - and the two compose: whichever runs first, the next launch starts
      * clean.
+     *
+     * <p>{@code coop.expectedCampaignId} is here for the same reason, one step milder: it is the
+     * campaign id an invite is for, and it makes the mod tell a player who loads a different save
+     * that it is the wrong one ({@code coop.save.CoopCampaignGuard}). Left standing in the file it
+     * would keep saying that on every unrelated launch afterwards, about an invite nobody is acting
+     * on any more, which is precisely how a warning turns into something players learn to click past.
      */
     private static final java.util.Set<String> ONE_SHOT_CONSENT_KEYS =
-            java.util.Set.of(CoopOptionsRegistry.ADOPT_CAMPAIGN_ID);
+            java.util.Set.of(CoopOptionsRegistry.ADOPT_CAMPAIGN_ID,
+                    CoopOptionsRegistry.EXPECTED_CAMPAIGN_ID);
 
     /** Package-private for the test: the set above must never grow a standing setting. */
     static java.util.Set<String> oneShotConsentKeys() {
@@ -339,7 +349,32 @@ public class CoopModPlugin extends BaseModPlugin {
         // scan that finds the pump's capture code has something to find on the first bridged frame.
         CoopAgentBridge.install(Global.getSector());
         CoopSeedSync.storeCurrentSectorFingerprint();
+        // Phase 31: "is this the save the invite is for?", answered here rather than at the seed lock
+        // minutes later. Warns and proceeds - the check itself decides nothing, and the seed lock on
+        // connect still has the final say. Last in the method because it is advisory: nothing below
+        // depends on it, and it must not stand between a load and a working session.
+        installExpectedCampaignNotice(newGame);
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
+    }
+
+    /**
+     * Queues the wrong-campaign message when there is one. Total: a guard that cannot read anything
+     * says nothing, and a notice that cannot be queued is already in the log.
+     *
+     * @param newGame the flag {@code onGameLoad} was handed; it picks which of the guard's two
+     *                questions is asked
+     */
+    private static void installExpectedCampaignNotice(boolean newGame) {
+        try {
+            CoopCampaignGuard.Notice notice = CoopCampaignGuard.forGameLoad(newGame);
+            if (notice.silent()) {
+                return;
+            }
+            CoopCampaignNotice.install(Global.getSector(), notice.message());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopModPlugin.class,
+                    "Coop could not check this game against the invite's campaign id", ex);
+        }
     }
 
     /**
@@ -470,6 +505,12 @@ public class CoopModPlugin extends BaseModPlugin {
         CoopSessionIntel.ensureRegistered(Global.getSector());
         CoopSessionStatsIntel.ensureRegistered(Global.getSector());
         CoopOptionsPage.ensureRegistered(Global.getSector());
+        // Phase 31: the row that lets the launcher name this save for a co-op invite. Here rather than
+        // in beforeGameSave because the folder exists by now, and because a save that threw took
+        // onGameSaveFailed instead - no row ever claims a save that did not land. The folder name is
+        // read inside this call and never cached: the engine has swapped CampaignEngine.saveDirName
+        // to the folder being written and restores it as soon as the save routine returns.
+        CoopSaveIndex.recordCurrentSave();
         CoopSaveCheckpoint.notifyLocalGameSaved(CoopSaveCheckpoint.REASON_HOST_SAVE);
     }
 }
