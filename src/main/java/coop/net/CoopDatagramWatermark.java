@@ -35,17 +35,27 @@ import java.util.Objects;
  *
  * <p><b>Bounds (red-team A5/A7).</b> Every key component is attacker-influenced once a packet has
  * passed the session token, so all three are bounded: {@code chunk} by {@link CoopMessages} at parse,
- * the table itself by {@link #MAX_STREAMS} (eldest evicted), and the epoch by {@link #EPOCH_WINDOW} —
- * a section whose epoch is negative, or absurdly far above the mark it would replace, is treated as
- * stale rather than allowed to park the mark near {@link Long#MAX_VALUE} and wedge the stream for the
- * rest of the session.
+ * the tables by {@link #MAX_STREAMS} (eldest evicted), and the epoch by {@link #EPOCH_WINDOW} — a
+ * section whose epoch is negative, or absurdly far above where that sender's stream has got to, is
+ * treated as stale rather than allowed to park the mark near {@link Long#MAX_VALUE} and wedge the
+ * stream for the rest of the session.
  */
 public final class CoopDatagramWatermark {
 
     /**
-     * How far above the current mark an epoch may jump and still be believed. Epochs advance by one
-     * per send, so at 10 Hz this is nearly three hours of stream — no legitimate sender comes near
-     * it, and a single crafted packet can no longer make every later real one look stale.
+     * How far above <em>the sender's stream position</em> an epoch may jump and still be believed.
+     * Epochs advance by one per send, so at the ~20/s this transport mints (two 10 Hz streams sharing
+     * one {@link CoopStreamClock}) this is well over an hour of stream — no legitimate sender comes
+     * near it, and a single crafted packet can no longer make every later real one look stale.
+     *
+     * <p><b>Measured against the sender, not the chunk.</b> One clock feeds every type and every
+     * chunk, so a chunk index that goes quiet — an NPC motion chunk nobody is near for an hour —
+     * falls arbitrarily far behind while the counter keeps advancing. Compared against that chunk's
+     * own mark, its first datagram back looked like the crafted far-future packet this rule exists to
+     * refuse, and since a rejection never moves the mark, every later section on that chunk was
+     * refused the same way: a permanently dead stream, bought by going quiet. The sender's high-water
+     * epoch is the honest reference; the per-chunk marks still decide staleness, which is what keeps
+     * replay protection on a live stream exactly as tight as it was.
      */
     static final long EPOCH_WINDOW = 100_000L;
 
@@ -61,6 +71,13 @@ public final class CoopDatagramWatermark {
 
     /** Insertion-ordered so the eldest stream is the one evicted when the cap is reached. */
     private final Map<StreamKey, Long> watermarkByStream = new LinkedHashMap<>();
+    /**
+     * Highest epoch accepted from each sender across all of its streams — where that sender's clock
+     * has got to. Only the {@link #EPOCH_WINDOW} test reads it; see that field for why. Bounded and
+     * evicted exactly like {@link #watermarkByStream}, and for the same reason: the sender id is
+     * attacker-influenced once a packet has passed the session token.
+     */
+    private final Map<String, Long> highWaterBySender = new LinkedHashMap<>();
     private String token = "";
     private long rejectedBadEpoch;
 
@@ -69,6 +86,7 @@ public final class CoopDatagramWatermark {
         Objects.requireNonNull(datagram, "datagram");
         if (!token.equals(datagram.token())) {
             watermarkByStream.clear();
+            highWaterBySender.clear();
             token = datagram.token();
         }
         List<CoopMessages.DatagramSection> fresh = new ArrayList<>(datagram.sections().size());
@@ -91,30 +109,42 @@ public final class CoopDatagramWatermark {
         }
         StreamKey key = new StreamKey(senderId, type, section.chunk());
         Long mark = watermarkByStream.get(key);
-        if (mark == null) {
-            if (watermarkByStream.size() >= MAX_STREAMS) {
-                // Evict the eldest rather than grow: at worst this forgives a stream that went quiet
-                // long enough for MAX_STREAMS others to appear, which costs one duplicate apply.
-                Iterator<Map.Entry<StreamKey, Long>> eldest = watermarkByStream.entrySet().iterator();
-                if (eldest.hasNext()) {
-                    eldest.next();
-                    eldest.remove();
-                }
-            }
-            watermarkByStream.put(key, epoch);
-            return true;
-        }
-        if (epoch <= mark) {
+        if (mark != null && epoch <= mark) {
+            // Stale or duplicate for this chunk. Strictly-greater is the whole staleness test and it
+            // is per chunk, unchanged.
             return false;
         }
-        if (epoch - mark > EPOCH_WINDOW) {
+        Long senderHighWater = highWaterBySender.get(senderId);
+        if (senderHighWater != null && epoch - senderHighWater > EPOCH_WINDOW) {
             // A far-future stamp: believing it parks the mark where every real send that follows looks
-            // stale, which is a permanently dead stream bought with one packet.
+            // stale, which is a permanently dead stream bought with one packet. Measured against the
+            // sender's own stream position, so a chunk that merely went quiet is not mistaken for one.
             rejectedBadEpoch++;
             return false;
         }
+        if (mark == null && watermarkByStream.size() >= MAX_STREAMS) {
+            // Evict the eldest rather than grow: at worst this forgives a stream that went quiet
+            // long enough for MAX_STREAMS others to appear, which costs one duplicate apply.
+            evictEldest(watermarkByStream);
+        }
         watermarkByStream.put(key, epoch);
+        if (senderHighWater == null) {
+            if (highWaterBySender.size() >= MAX_STREAMS) {
+                evictEldest(highWaterBySender);
+            }
+            highWaterBySender.put(senderId, epoch);
+        } else if (epoch > senderHighWater) {
+            highWaterBySender.put(senderId, epoch);
+        }
         return true;
+    }
+
+    private static <K> void evictEldest(Map<K, Long> table) {
+        Iterator<Map.Entry<K, Long>> eldest = table.entrySet().iterator();
+        if (eldest.hasNext()) {
+            eldest.next();
+            eldest.remove();
+        }
     }
 
     /**
@@ -168,6 +198,7 @@ public final class CoopDatagramWatermark {
     /** Clears all watermarks (session teardown). */
     public void reset() {
         watermarkByStream.clear();
+        highWaterBySender.clear();
         token = "";
     }
 }

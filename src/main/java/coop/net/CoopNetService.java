@@ -114,6 +114,14 @@ public class CoopNetService {
     public static final int MAX_DATAGRAM_BYTES = 1200;
     private static final long CONNECT_RETRY_DELAY_MILLIS = 500L;
     /**
+     * Ceiling on the backoff between resolver calls for a host name that will not resolve. The JDK
+     * offers no non-blocking resolver and the sandbox forbids the thread that would hide one, so the
+     * only lever is how often the campaign thread is allowed to pay for a lookup: once at
+     * {@code connect()}, then 0.5 s, 1 s, 2 s … up to this. A resolver that comes back still recovers
+     * without relaunching the game.
+     */
+    private static final long RESOLVE_RETRY_MAX_MILLIS = 30_000L;
+    /**
      * Retry delay after the host answered {@code LOBBY_REJECT} (F4). A reject means the host looked at
      * this guest and said no — "lobby already has a guest", a seed or handshake mismatch — and none of
      * those clear inside 500 ms, so knocking ten times a second only costs the host connection slots
@@ -339,6 +347,19 @@ public class CoopNetService {
     private long lastKnownPeerAtMillis;
     private String connectHost;
     private int connectPort;
+    /**
+     * {@link #connectHost} resolved to an address, cached for the whole {@code connect()} call.
+     * Resolution is a <em>blocking</em> OS call and this runs on the campaign thread, so it must not
+     * happen once per 500 ms retry: a name whose resolver is down costs the game a frame-long stall
+     * every retry, which is the one thing nothing here is allowed to do. Null means "not resolved
+     * yet"; see {@link #resolveConnectAddressLocked}.
+     */
+    private InetSocketAddress resolvedConnectAddress;
+    /** Earliest millis at which another resolver call may be made; see {@link #resolveBackoffMillis}. */
+    private long nextResolveAttemptAtMillis;
+    /** Current negative-cache backoff, doubling to {@link #RESOLVE_RETRY_MAX_MILLIS}. */
+    private long resolveBackoffMillis;
+    private boolean resolveFailureLogged;
     private long nextConnectAttemptAtMillis;
     private boolean connectFailureLogged;
     /** Delay the next guest retry is scheduled with; raised by {@link #noteLobbyRejected()}. */
@@ -387,9 +408,13 @@ public class CoopNetService {
      */
     public void setLocalSenderId(String playerId) {
         synchronized (lifecycleLock) {
-            localSenderId = playerId;
-            localDatagramSenderId = playerId == null ? "" : CoopMessages.wireToken(playerId);
+            applyLocalSenderIdLocked(playerId);
         }
+    }
+
+    private void applyLocalSenderIdLocked(String playerId) {
+        localSenderId = playerId;
+        localDatagramSenderId = playerId == null ? "" : CoopMessages.wireToken(playerId);
     }
 
     /**
@@ -561,7 +586,12 @@ public class CoopNetService {
 
     public void startHost(int port) {
         synchronized (lifecycleLock) {
+            String senderId = localSenderId;
             shutdownLocked();
+            // Restored across the teardown: shutdownLocked() clears the id because a finished session
+            // has no local player, but starting a session is not finishing one, and the pump is free
+            // to set the id on either side of this call. See connect() for the case that was broken.
+            applyLocalSenderIdLocked(senderId);
             role = CoopConnectionRole.HOST;
             try {
                 ServerSocketChannel channel = ServerSocketChannel.open();
@@ -581,15 +611,24 @@ public class CoopNetService {
 
     public void connect(String host, int port) {
         synchronized (lifecycleLock) {
+            // Preserved across the teardown below. Both guest start paths set the id and then call
+            // connect(), and shutdownLocked() used to null it — so every frame a guest sent went out
+            // with senderId=null, no peer was ever learned by name, and every host unicast degraded
+            // to the broadcast fallback. Invisible at capacity 1, wrong for the N-ready routing.
+            String senderId = localSenderId;
             shutdownLocked();
+            applyLocalSenderIdLocked(senderId);
             role = CoopConnectionRole.GUEST;
             connectHost = host;
             connectPort = port;
             nextConnectAttemptAtMillis = 0L;
             connectFailureLogged = false;
             // Guest binds an ephemeral UDP port and sends to the host's known address; the host
-            // learns the guest's UDP address from the first datagram it receives.
-            openUdpLocked(new InetSocketAddress(0), new InetSocketAddress(host, port));
+            // learns the guest's UDP address from the first datagram it receives. Null target while
+            // the name has not resolved: flushDatagramsLocked drops rather than buffers, and the
+            // resolution that succeeds later installs the target.
+            openUdpLocked(new InetSocketAddress(0),
+                    resolveConnectAddressLocked(System.currentTimeMillis()));
             pollNetworkLocked();
         }
     }
@@ -810,6 +849,22 @@ public class CoopNetService {
                 return null;
             }
         }
+    }
+
+    /**
+     * Whether a message's meaning is scoped to the TCP connection it was queued for rather than to the
+     * peer slot: the lobby round and the verdicts that end it. Every new connection re-runs that round
+     * from scratch — the pump gates all of these on {@code isConnected()} — so a copy left over from a
+     * socket that died before flushing is never an answer to anything the new peer asked, and
+     * {@link CoopPeerLink#attach} drops it.
+     */
+    static boolean isConnectionScopedControl(CoopMessages.Type type) {
+        return switch (type) {
+            case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT,
+                 HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
+                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT -> true;
+            default -> false;
+        };
     }
 
     /**
@@ -1652,22 +1707,37 @@ public class CoopNetService {
      */
     private void rejectExtraConnectionLocked(SocketChannel channel) {
         try {
-            channel.configureBlocking(false);
-            channel.socket().setTcpNoDelay(true);
-            CoopMessages.Message reject = CoopMessages.lobbyReject(
-                    nextSeq(),
-                    System.currentTimeMillis(),
-                    EXTRA_CONNECTION_REJECT_REASON);
-            ByteBuffer frame = ByteBuffer.wrap((CoopMessages.encode(reject) + "\n")
-                    .getBytes(StandardCharsets.UTF_8));
-            channel.write(frame);
+            boolean whole = writeLobbyRejectFrame(channel, EXTRA_CONNECTION_REJECT_REASON);
             CoopLog.warn(CoopNetService.class, "Coop TCP rejected extra connection with lobby reject"
-                    + (frame.hasRemaining() ? " (partially written; closing anyway)" : ""));
+                    + (whole ? "" : " (partially written; closing anyway)"));
         } catch (Exception ex) {
             CoopLog.warn(CoopNetService.class, "Coop TCP failed to reject extra connection cleanly", ex);
         } finally {
             closeChannel(channel);
         }
+    }
+
+    /**
+     * Writes one lobby reject with a single non-blocking write, leaving the channel open for the
+     * caller to close. Its own method so the C5 regression is provable structurally — "the channel is
+     * non-blocking and the frame is attempted exactly once" — instead of by timing a poll, which on a
+     * loaded machine measures the scheduler rather than this code.
+     *
+     * @return true when the whole frame reached the socket buffer
+     */
+    boolean writeLobbyRejectFrame(SocketChannel channel, String reason) throws Exception {
+        channel.configureBlocking(false);
+        channel.socket().setTcpNoDelay(true);
+        // One write, never a loop: this runs on the campaign thread, and a peer that opened a
+        // connection and never reads from it must not be able to park the frame inside write().
+        CoopMessages.Message reject = CoopMessages.lobbyReject(
+                nextSeq(),
+                System.currentTimeMillis(),
+                reason);
+        ByteBuffer frame = ByteBuffer.wrap((CoopMessages.encode(reject) + "\n")
+                .getBytes(StandardCharsets.UTF_8));
+        channel.write(frame);
+        return !frame.hasRemaining();
     }
 
     private void progressGuestConnectionLocked() throws Exception {
@@ -1702,22 +1772,90 @@ public class CoopNetService {
     }
 
     private void beginConnectAttemptLocked(long now) {
+        InetSocketAddress remote = resolveConnectAddressLocked(now);
+        if (remote == null) {
+            // Nothing to connect to yet. Deliberately no socket: SocketChannel.connect() with an
+            // unresolved address throws UnresolvedAddressException from Net.checkAddress, before the
+            // JDK's own close-on-failure path, so every retry used to leak an open channel.
+            nextConnectAttemptAtMillis = Math.max(nextConnectAttemptAtMillis, nextResolveAttemptAtMillis);
+            return;
+        }
+        SocketChannel channel = null;
         try {
-            SocketChannel channel = SocketChannel.open();
+            channel = SocketChannel.open();
             channel.configureBlocking(false);
             channel.socket().setTcpNoDelay(true);
-            if (channel.connect(new InetSocketAddress(connectHost, connectPort))) {
-                attachChannelLocked(freeSlotLocked(), channel);
+            if (channel.connect(remote)) {
+                SocketChannel established = channel;
+                // Ownership moves to attachChannelLocked, which closes it itself if it throws.
+                channel = null;
+                attachChannelLocked(freeSlotLocked(), established);
                 connectFailureLogged = false;
                 CoopLog.info(CoopNetService.class,
                         "Coop TCP guest connected to " + connectHost + ":" + connectPort);
             } else {
                 pendingConnectChannel = channel;
+                channel = null;
             }
         } catch (Exception ex) {
+            // A failed attempt owns its socket: without this the handle stays open for the life of
+            // the process and the 500 ms loop opens another one every retry.
+            closeChannel(channel);
             scheduleConnectRetryLocked(ex);
             nextConnectAttemptAtMillis = now + connectRetryDelayMillis;
         }
+    }
+
+    /**
+     * The connect target, resolved at most once per {@code connect()} call and once per backoff
+     * window while the name will not resolve.
+     *
+     * @return the resolved address, or null when the name has no address right now (the caller must
+     *         make no connection attempt at all)
+     */
+    private InetSocketAddress resolveConnectAddressLocked(long now) {
+        if (resolvedConnectAddress != null) {
+            return resolvedConnectAddress;
+        }
+        if (connectHost == null || now < nextResolveAttemptAtMillis) {
+            return null;
+        }
+        InetSocketAddress candidate = resolveConnectAddress(connectHost, connectPort);
+        if (candidate == null || candidate.isUnresolved()) {
+            resolveBackoffMillis = resolveBackoffMillis <= 0L
+                    ? CONNECT_RETRY_DELAY_MILLIS
+                    : Math.min(resolveBackoffMillis * 2L, RESOLVE_RETRY_MAX_MILLIS);
+            nextResolveAttemptAtMillis = now + resolveBackoffMillis;
+            if (!resolveFailureLogged) {
+                resolveFailureLogged = true;
+                CoopLog.warn(CoopNetService.class, "Coop TCP guest cannot resolve " + connectHost
+                        + "; retrying with a backoff up to " + RESOLVE_RETRY_MAX_MILLIS + " ms");
+            }
+            return null;
+        }
+        resolvedConnectAddress = candidate;
+        resolveBackoffMillis = 0L;
+        nextResolveAttemptAtMillis = 0L;
+        resolveFailureLogged = false;
+        // A guest that started with the name unresolved has no datagram target; give it one now
+        // rather than leaving the state stream mute for the rest of the session.
+        if (role == CoopConnectionRole.GUEST && udpChannel != null) {
+            for (CoopPeerLink peer : peers) {
+                if (peer.validatedUdpAddress() == null) {
+                    peer.setValidatedUdpAddress(candidate);
+                }
+            }
+        }
+        return candidate;
+    }
+
+    /**
+     * Test seam around the resolver. Overridden by the tests so "this name does not resolve" is a
+     * decision rather than a real DNS round trip; production is one blocking lookup, which is why
+     * {@link #resolveConnectAddressLocked} caches both answers.
+     */
+    InetSocketAddress resolveConnectAddress(String host, int port) {
+        return new InetSocketAddress(host, port);
     }
 
     private void scheduleConnectRetryLocked(Exception ex) {
@@ -1734,8 +1872,7 @@ public class CoopNetService {
             closeChannel(channel);
             return;
         }
-        channel.configureBlocking(false);
-        channel.socket().setTcpNoDelay(true);
+        configurePeerChannel(channel);
         InetAddress pinned = peerAddressOf(channel);
         peer.attach(channel, pinned, clockMillis.getAsLong(), role == CoopConnectionRole.HOST);
         // A fresh connection earns the fast retry back: only the connection that was rejected is slow.
@@ -1746,6 +1883,26 @@ public class CoopNetService {
         CoopLog.info(CoopNetService.class, "Coop TCP channel active as " + role
                 + " on peer slot " + peer.slot()
                 + (pinned == null ? "" : " (UDP pinned to " + pinned.getHostAddress() + ")"));
+    }
+
+    /**
+     * Puts a freshly accepted or established channel into the mode every peer socket runs in, and
+     * closes it if that fails.
+     *
+     * <p>The close is the point. Until {@link CoopPeerLink#attach} runs, this channel is referenced by
+     * nothing: a peer that connects and immediately resets can make {@code setTcpNoDelay} throw, and
+     * the only handler above is {@code pollNetworkLocked}'s, which closes {@code pendingConnectChannel}
+     * — null in the HOST role, and already nulled on the guest's finishConnect path. Each occurrence
+     * was a permanently open handle.
+     */
+    static void configurePeerChannel(SocketChannel channel) throws Exception {
+        try {
+            channel.configureBlocking(false);
+            channel.socket().setTcpNoDelay(true);
+        } catch (Exception ex) {
+            closeChannel(channel);
+            throw ex;
+        }
     }
 
     private void readAvailableLocked(CoopPeerLink peer) {
@@ -1928,7 +2085,9 @@ public class CoopNetService {
         }
         if (expectedSessionToken != null && peer.pinnedPeerAddress() != null) {
             // A link that had proved a session is a peer worth letting back in; see isKnownPeerLocked.
-            // Read before detach(), which forgets the pinned address.
+            // The slot itself stays pinned to this address until the next attach() re-pins it —
+            // detach() forgets the channel, not the peer — so what this copy buys is a record that
+            // outlives the slot being reused, which is what the reconnect grace reads.
             lastKnownPeerAddress = peer.pinnedPeerAddress();
             lastKnownPeerAtMillis = clockMillis.getAsLong();
         }
@@ -1970,6 +2129,10 @@ public class CoopNetService {
         lastKnownPeerAtMillis = 0L;
         connectHost = null;
         connectPort = 0;
+        resolvedConnectAddress = null;
+        nextResolveAttemptAtMillis = 0L;
+        resolveBackoffMillis = 0L;
+        resolveFailureLogged = false;
         nextConnectAttemptAtMillis = 0L;
         connectFailureLogged = false;
         connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
@@ -1978,7 +2141,7 @@ public class CoopNetService {
         role = CoopConnectionRole.NONE;
     }
 
-    private void closeChannel(java.nio.channels.Channel channel) {
+    private static void closeChannel(java.nio.channels.Channel channel) {
         if (channel == null) {
             return;
         }

@@ -155,12 +155,32 @@ public final class CoopPeerLink {
         this.queueDepthWarned = false;
         this.datagramSendFailureLogged = false;
         forgetCandidate();
+        dropConnectionScopedOutbound();
         if (clearValidatedUdpAddress) {
             this.validatedUdpAddress = null;
         }
     }
 
-    /** Forgets the channel and its half-written frame; the queues survive, as they always have. */
+    /**
+     * Drops queued messages that belonged to the connection that just went away rather than to this
+     * slot: the lobby round and the two verdicts that end it (see
+     * {@link CoopNetService#isConnectionScopedControl}). Ordinary traffic still survives a reconnect.
+     *
+     * <p>The failure this closes: a verdict queued for a socket that died before it flushed — a
+     * {@code HANDSHAKE_RESULT} reject with a blocked {@code pendingWrite}, say — was written to
+     * whichever peer attached next, ahead of that peer's own lobby round. The guest treats a reject as
+     * terminal, so a fresh guest was told its mod list was wrong before its manifest had ever been
+     * compared. Every one of these is re-sent by the new connection's own round, so nothing is lost.
+     */
+    private void dropConnectionScopedOutbound() {
+        outbound.removeIf(message -> CoopNetService.isConnectionScopedControl(message.type()));
+    }
+
+    /**
+     * Forgets the channel and its half-written frame; the queues survive, as they always have, and so
+     * do {@link #pinnedPeerAddress} and {@link #senderId} — a detached slot stays pinned to the peer
+     * that last held it until {@link #attach} re-pins it. Only {@link #reset} forgets the peer.
+     */
     void detach() {
         this.channel = null;
         this.pendingWrite = null;
@@ -396,8 +416,9 @@ public final class CoopPeerLink {
 
     /**
      * True when a datagram may be accepted from this source. Address only, for the reason given on
-     * {@link #pinnedPeerAddress}; an unpinned link (no TCP connection yet) accepts any source, and
-     * the session token is what stops that being a hole.
+     * {@link #pinnedPeerAddress}; an unpinned link — one that has never held a TCP connection, since
+     * {@link #detach} keeps the pin — accepts any source, and the session token is what stops that
+     * being a hole.
      */
     boolean acceptsSource(SocketAddress source) {
         if (pinnedPeerAddress == null) {

@@ -208,6 +208,49 @@ class CoopDatagramWatermarkTest {
                 "a jump inside the window is a real sender's, not an attack");
     }
 
+    /**
+     * net-2: one {@link CoopStreamClock} mints the epochs for every type and every chunk, so a chunk
+     * index nobody is near for an hour falls arbitrarily far behind while the counter runs on. Judged
+     * against its own mark, its first datagram back looked like a crafted far-future stamp — and
+     * since a rejection never moves the mark, every later section on that chunk was refused the same
+     * way, for the rest of the session.
+     */
+    @Test
+    void aChunkThatWentQuietWhileTheSendersClockRanOnIsStillAccepted() {
+        long epoch = 5L;
+        assertEquals(1, watermark.accept(datagram("s",
+                CoopMessages.Type.NPC_FLEET_MOTION, chunked(epoch, 1, "busy-system-c1"))).size());
+
+        // An hour of sparse systems: only chunk 0 is sent, and it draws from the same clock, so the
+        // counter walks on while chunk 1's mark stays where it parked. Stepped a window at a time
+        // rather than ticked, which is the same journey at 100,000x fewer datagrams.
+        for (int step = 0; step < 3; step++) {
+            epoch += CoopDatagramWatermark.EPOCH_WINDOW;
+            assertEquals(1, watermark.accept(datagram("s",
+                            CoopMessages.Type.NPC_FLEET_MOTION, chunked(epoch, 0, "c0"))).size(),
+                    "the live chunk keeps the sender's stream position moving");
+        }
+
+        assertEquals(1, watermark.accept(datagram("s",
+                        CoopMessages.Type.NPC_FLEET_MOTION, chunked(epoch + 1L, 1, "c1-is-back"))).size(),
+                "a quiet chunk returning at the sender's current epoch is not an attack");
+        assertEquals(0L, watermark.rejectedBadEpoch());
+    }
+
+    /** The other half of net-2: a fresh chunk index is no longer a way past the window either. */
+    @Test
+    void aCraftedFarFutureEpochOnAChunkNeverSeenBeforeIsStillRefused() {
+        watermark.accept(datagram("s", CoopMessages.Type.NPC_FLEET_MOTION, chunked(5L, 0, "c0")));
+
+        assertEquals(List.of(), watermark.accept(datagram("s",
+                        CoopMessages.Type.NPC_FLEET_MOTION, chunked(Long.MAX_VALUE, 3, "wedge"))),
+                "an unseen chunk must not be a free parking space for the mark");
+        assertEquals(1L, watermark.rejectedBadEpoch());
+        assertEquals(1, watermark.accept(datagram("s",
+                        CoopMessages.Type.NPC_FLEET_MOTION, chunked(6L, 3, "real-c3"))).size(),
+                "the real chunk-3 stream must still be alive after the crafted stamp");
+    }
+
     @Test
     void a5_theStreamTableIsBoundedNoMatterWhatSenderIdsArrive() {
         for (int i = 0; i < CoopDatagramWatermark.MAX_STREAMS * 2; i++) {

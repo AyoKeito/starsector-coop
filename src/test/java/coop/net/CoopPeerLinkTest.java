@@ -197,6 +197,49 @@ class CoopPeerLinkTest {
         assertEquals(1, link.outboundDatagrams().size());
     }
 
+    /**
+     * net-58: a verdict queued for a socket that died before it flushed used to be written to
+     * whichever peer attached next, ahead of that peer's own lobby round — and the guest treats a
+     * reject as terminal, so a fresh guest was told its mod list was wrong before its manifest had
+     * been compared.
+     */
+    @Test
+    void aLobbyRoundQueuedForTheDeadConnectionDoesNotGreetTheNextOne() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.enqueue(CoopMessages.lobbyReject(1L, 0L, "lobby already has a guest"));
+        link.enqueue(CoopMessages.handshakeResultReject(2L, 0L, "mods differ"));
+        link.enqueue(CoopMessages.sessionResumeReject(SESSION, 3L, 0L, "no such session"));
+        link.enqueue(snapshot(1L));
+        link.detach();
+
+        link.attach(null, InetAddress.getByName("127.0.0.2"), 5_000L, false);
+
+        assertEquals(1, link.outboundDepth(),
+                "the previous connection's lobby round must not be replayed at the next peer");
+        assertEquals(CoopMessages.Type.TIME_SNAPSHOT, link.outbound().peek().type(),
+                "ordinary traffic still survives a reconnect");
+    }
+
+    /**
+     * net-37: {@code detach()} forgets the channel, not the peer. The pin and the learned id survive
+     * until the slot is re-attached, which is what {@code closeLinkLocked} and the reconnect grace
+     * are written against.
+     */
+    @Test
+    void detachKeepsThePinAndTheLearnedIdentityUntilTheSlotIsReused() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false);
+        link.learnSenderId("guest-a");
+
+        link.detach();
+
+        assertEquals(InetAddress.getByName("127.0.0.1"), link.pinnedPeerAddress());
+        assertEquals("guest-a", link.senderId());
+        assertFalse(link.acceptsSource(address("203.0.113.9", 65_000)),
+                "a dropped slot stays pinned to the peer that held it");
+    }
+
     @Test
     void aHostReAttachDropsTheValidatedUdpAddressAndAGuestReAttachKeepsIt() throws Exception {
         CoopPeerLink host = link();

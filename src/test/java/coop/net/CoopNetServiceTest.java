@@ -7,6 +7,9 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopNetServiceTest {
@@ -1667,15 +1671,16 @@ class CoopNetServiceTest {
             try (java.net.Socket silent = new java.net.Socket()) {
                 silent.connect(new java.net.InetSocketAddress("127.0.0.1", port), 2_000);
                 silent.setSoTimeout(20);
-                // Never reads a byte until the check below. Every poll must return promptly anyway.
+                byte[] sink = new byte[512];
                 waitUntil(() -> {
-                    long start = System.nanoTime();
                     host.flushOutbound();
-                    long elapsedMillis = (System.nanoTime() - start) / 1_000_000L;
-                    assertTrue(elapsedMillis < 1_000L,
-                            "a poll took " + elapsedMillis + " ms; the reject write is blocking again");
                     try {
-                        return silent.getInputStream().read() < 0;
+                        // Drained a buffer at a time, not a byte at a time: reading one byte per
+                        // 25 ms poll made this wait proportional to the reject frame's length
+                        // (~200 bytes = ~5 s), which is the whole margin waitUntil has. The property
+                        // under test is that the connection is closed, and the property that the
+                        // write is non-blocking is asserted structurally below.
+                        return silent.getInputStream().read(sink) < 0;
                     } catch (java.net.SocketTimeoutException timeout) {
                         return false;
                     } catch (IOException closed) {
@@ -1687,6 +1692,228 @@ class CoopNetServiceTest {
         } finally {
             guest.shutdown();
             host.shutdown();
+        }
+    }
+
+    /**
+     * The structural half of C5, so the regression is caught by a property rather than by a stopwatch:
+     * on a loaded machine "the poll took under a second" measures the scheduler, not this code.
+     */
+    @Test
+    void c5_theRejectFrameIsOneWriteOnANonBlockingChannel() throws Exception {
+        CoopNetService service = new CoopNetService();
+        try (ServerSocketChannel listener = ServerSocketChannel.open()) {
+            listener.bind(new java.net.InetSocketAddress("127.0.0.1", 0));
+            try (SocketChannel client = SocketChannel.open(listener.getLocalAddress());
+                 SocketChannel accepted = listener.accept()) {
+                assertTrue(accepted.isBlocking(), "a freshly accepted channel starts out blocking");
+
+                assertTrue(service.writeLobbyRejectFrame(accepted, "Host already has an active connection"),
+                        "the whole frame fits in an empty socket buffer");
+
+                assertFalse(accepted.isBlocking(),
+                        "the reject must never be written on a channel that can park the frame");
+                ByteBuffer received = ByteBuffer.allocate(1024);
+                client.read(received);
+                assertTrue(new String(received.array(), 0, received.position(),
+                                java.nio.charset.StandardCharsets.UTF_8).contains("LOBBY_REJECT"),
+                        "the courtesy reject still reaches the peer");
+            }
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /**
+     * net-9: both guest start paths set the local id and then call {@code connect()}, whose teardown
+     * used to null it — so every frame a guest sent went out unstamped, no peer was ever learned by
+     * name, and every host unicast fell back to broadcast.
+     */
+    @Test
+    void aSenderIdSetBeforeConnectStillStampsTheGuestsFrames() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.setLocalSenderId("guest-player");
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1000L));
+            guest.flushOutbound();
+
+            CoopMessages.Message inbound = waitForMessage(host, "host inbound ping");
+            assertEquals("guest-player", inbound.senderId(),
+                    "the id the pump set before connect() must survive it");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * net-7: {@code SocketChannel.connect} with an unresolved address throws before the JDK's own
+     * close-on-failure path, so the 500 ms retry loop leaked a handle per attempt — and paid for a
+     * blocking resolver call on the campaign thread every time it did.
+     */
+    @Test
+    void anUnresolvableHostNeverOpensASocketAndBacksOffUntilItResolves() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong lookups = new AtomicLong();
+        AtomicReference<java.net.InetSocketAddress> answer = new AtomicReference<>();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService() {
+            @Override
+            java.net.InetSocketAddress resolveConnectAddress(String name, int servicePort) {
+                lookups.incrementAndGet();
+                java.net.InetSocketAddress resolved = answer.get();
+                return resolved != null
+                        ? resolved
+                        : java.net.InetSocketAddress.createUnresolved(name, servicePort);
+            }
+        };
+        try {
+            host.startHost(port);
+            guest.connect("host.invalid", port);
+            for (int i = 0; i < 20; i++) {
+                guest.flushOutbound();
+            }
+
+            assertFalse(guest.isConnected(), "there is nothing to connect to yet");
+            assertTrue(lookups.get() <= 2L,
+                    "a name that will not resolve is looked up once per backoff window, not once per"
+                            + " poll; was " + lookups.get() + " for 21 polls");
+            assertTrue(guest.nextConnectAttemptAtMillisForTest() > System.currentTimeMillis(),
+                    "the connect loop must back off rather than spin");
+
+            answer.set(new java.net.InetSocketAddress("127.0.0.1", port));
+            waitUntil(() -> {
+                guest.flushOutbound();
+                host.flushOutbound();
+                return bothConnected(host, guest);
+            }, "the guest connects once the name resolves");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * net-32: a channel that fails its socket options is referenced by nothing — the accept path's
+     * only handler closes {@code pendingConnectChannel}, which is null on the host — so leaving it
+     * open leaked a handle per occurrence.
+     */
+    @Test
+    void aChannelThatFailsItsSocketOptionsIsClosedRatherThanOrphaned() {
+        FailingSocketChannel channel = new FailingSocketChannel();
+
+        assertThrows(IOException.class, () -> CoopNetService.configurePeerChannel(channel));
+
+        assertTrue(channel.closed, "the channel nobody else can reach must be closed here");
+    }
+
+    /** A channel whose {@code configureBlocking} fails, which no real socket can be made to do on cue. */
+    private static final class FailingSocketChannel extends SocketChannel {
+        private boolean closed;
+
+        private FailingSocketChannel() {
+            super(java.nio.channels.spi.SelectorProvider.provider());
+        }
+
+        @Override
+        protected void implConfigureBlocking(boolean block) throws IOException {
+            throw new IOException("no");
+        }
+
+        @Override
+        protected void implCloseSelectableChannel() {
+            closed = true;
+        }
+
+        @Override
+        public java.net.Socket socket() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public SocketChannel bind(java.net.SocketAddress local) {
+            return this;
+        }
+
+        @Override
+        public <T> SocketChannel setOption(java.net.SocketOption<T> name, T value) {
+            return this;
+        }
+
+        @Override
+        public <T> T getOption(java.net.SocketOption<T> name) {
+            return null;
+        }
+
+        @Override
+        public java.util.Set<java.net.SocketOption<?>> supportedOptions() {
+            return java.util.Set.of();
+        }
+
+        @Override
+        public SocketChannel shutdownInput() {
+            return this;
+        }
+
+        @Override
+        public SocketChannel shutdownOutput() {
+            return this;
+        }
+
+        @Override
+        public boolean isConnected() {
+            return true;
+        }
+
+        @Override
+        public boolean isConnectionPending() {
+            return false;
+        }
+
+        @Override
+        public boolean connect(java.net.SocketAddress remote) {
+            return true;
+        }
+
+        @Override
+        public boolean finishConnect() {
+            return true;
+        }
+
+        @Override
+        public java.net.SocketAddress getRemoteAddress() {
+            return null;
+        }
+
+        @Override
+        public java.net.SocketAddress getLocalAddress() {
+            return null;
+        }
+
+        @Override
+        public int read(ByteBuffer destination) {
+            return -1;
+        }
+
+        @Override
+        public long read(ByteBuffer[] destinations, int offset, int length) {
+            return -1L;
+        }
+
+        @Override
+        public int write(ByteBuffer source) {
+            return 0;
+        }
+
+        @Override
+        public long write(ByteBuffer[] sources, int offset, int length) {
+            return 0L;
         }
     }
 
