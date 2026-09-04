@@ -7,6 +7,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Host-authoritative market contents and transaction effects (Phase 12).
  *
@@ -260,11 +262,4 @@ public final class CoopMarketSync {
         return items;
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

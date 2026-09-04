@@ -1,6 +1,6 @@
 package coop.interaction;
 
-import java.util.Objects;
+import static coop.util.CoopText.requireText;
 
 /**
  * One held interaction on a shared campaign entity (Phase 9, COOP_MP_DESIGN.md 8.5).
@@ -21,11 +21,4 @@ public record CoopInteractionClaim(String entityId, String playerId, String enti
         }
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

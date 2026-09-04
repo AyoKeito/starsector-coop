@@ -2,7 +2,8 @@ package coop.campaign;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
+
+import static coop.util.CoopText.requireText;
 
 /**
  * Host-authoritative model of faction-to-faction relationships (Phase 12).
@@ -49,11 +50,4 @@ public final class CoopFactionRelations {
         relations.clear();
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

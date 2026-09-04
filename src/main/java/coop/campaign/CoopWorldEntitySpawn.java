@@ -7,6 +7,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Details of a runtime-created world entity, carried inside a {@link CoopWorldDelta.Kind#SPAWN}
  * delta's {@code newStateJson} field (Phase 12d).
@@ -185,11 +187,4 @@ public record CoopWorldEntitySpawn(String coopEntityId, String entityType, Strin
         return String.format(Locale.ROOT, "%.3f", value);
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

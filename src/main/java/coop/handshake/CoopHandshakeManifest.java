@@ -13,6 +13,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 public record CoopHandshakeManifest(
         String gameVersion,
         String coopBuildVersion,
@@ -258,14 +260,6 @@ public record CoopHandshakeManifest(
             return stringValue;
         }
         throw new IllegalArgumentException("Expected string field: " + fieldName);
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     private static String normalize(String value, String fallback) {

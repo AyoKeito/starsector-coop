@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * A single host-authoritative player-reputation change (Phase 12, COOP_MP_DESIGN.md 4.x).
  *
@@ -93,11 +95,4 @@ public record CoopRepDelta(TargetType targetType, String targetId, float delta, 
         return standings;
     }
 
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
-    }
 }

@@ -6,6 +6,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * The single guest&rarr;host channel for any guest-driven interaction that mutates shared / world /
  * host-owned-fleet state (Phase 12).
@@ -168,14 +170,6 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
         kind = Objects.requireNonNull(kind, "kind");
         newStateJson = newStateJson == null ? "" : newStateJson;
         actingPlayerId = CoopDelimited.normalize(actingPlayerId);
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     /**

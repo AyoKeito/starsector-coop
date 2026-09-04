@@ -26,6 +26,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Phase 24 milestone 2: replication of colony <em>lifecycle</em> — a colony founded or abandoned by
  * either player exists, or stops existing, on both engines.
@@ -286,14 +288,6 @@ public final class CoopColonySync {
         } catch (NumberFormatException ex) {
             throw new IllegalArgumentException("Malformed colony " + fieldName + ": " + raw, ex);
         }
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     // ---- Dedup ---------------------------------------------------------------------------------

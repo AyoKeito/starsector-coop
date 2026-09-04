@@ -21,6 +21,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Phase 24 milestone 3: replication of colony <em>management</em> — the industries, construction
  * queue and colony toggles either player edits from their own client.
@@ -345,14 +347,6 @@ public final class CoopColonyManagement {
         } catch (NumberFormatException ex) {
             throw new IllegalArgumentException("Malformed colony " + fieldName + ": " + raw, ex);
         }
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     // ---- Dedup ---------------------------------------------------------------------------------

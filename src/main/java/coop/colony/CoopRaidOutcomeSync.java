@@ -33,6 +33,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static coop.util.CoopText.requireText;
+
 /**
  * Phase 24 milestone 1: replication of player raids and bombardments against NPC colonies.
  *
@@ -272,14 +274,6 @@ public final class CoopRaidOutcomeSync {
         } catch (NumberFormatException ex) {
             throw new IllegalArgumentException("Malformed raid outcome " + fieldName + ": " + raw, ex);
         }
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     // ---- Dedup ---------------------------------------------------------------------------------

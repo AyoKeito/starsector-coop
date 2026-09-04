@@ -10,6 +10,8 @@ import java.security.MessageDigest;
 import java.util.Map;
 import java.util.Objects;
 
+import static coop.util.CoopText.requireText;
+
 public final class CoopSeedSync {
     public static final String PERSISTENT_SEED_LONG = "coop.seedLong";
     public static final String PERSISTENT_SEED_STRING = "coop.seedString";
@@ -263,14 +265,6 @@ public final class CoopSeedSync {
             return "";
         }
         return "sectorFingerprint: host=" + host + " guest=" + guest;
-    }
-
-    private static String requireText(String value, String fieldName) {
-        String normalized = Objects.requireNonNull(value, fieldName).trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is blank");
-        }
-        return normalized;
     }
 
     private static long stableSeedLong(String seedString) {
