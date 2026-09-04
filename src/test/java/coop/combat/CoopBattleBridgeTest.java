@@ -2,12 +2,14 @@ package coop.combat;
 
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
+import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -522,10 +524,228 @@ class CoopBattleBridgeTest {
                 CoopBattleBridge.splitIds(CoopMessages.requiredPayloadString(begin, "npcFleetIds")));
     }
 
+    // ---- Phase 14: DIALOG_BEGIN staging and the shield it borrows ---------------------------------
+
+    @Test
+    void aCustomsStopClearsTheEngagementShieldAndPutsItBackWhenTheEncounterCloses() {
+        // CoopFleetMirror only ever sets FLEET_IGNORES_OTHER_FLEETS on the frame it creates the
+        // mirror, so if the staging's clear is not undone here the mirror stays eligible for
+        // vanilla's battle pull-in for the rest of its life and the guest drags a fleet the host
+        // never engaged into an unrelated battle.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        memoryOf(engine.mirror).set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened);
+        assertFalse(shieldUp(engine.mirror), "the scan rules need the flag down for the encounter");
+
+        engine.dialogOpen = true;
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+        assertFalse(shieldUp(engine.mirror), "still on screen: nothing to restore yet");
+
+        engine.dialogOpen = false;
+        fixture.bridge.tickCampaign(engine.sector, true, 3000L);
+        assertTrue(shieldUp(engine.mirror), "the encounter is over, so the shield goes back on");
+    }
+
+    @Test
+    void aCustomsStopWhoseDialogWillNotOpenRestoresTheShieldOnTheSameFrame() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.dialogRefuses = true;
+        memoryOf(engine.mirror).set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertTrue(engine.dialogsOpened.isEmpty());
+        assertTrue(shieldUp(engine.mirror), "no encounter to protect, so nothing stays unshielded");
+    }
+
+    @Test
+    void aSessionThatEndsMidCustomsStopStillRestoresTheShield() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        memoryOf(engine.mirror).set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        assertFalse(shieldUp(engine.mirror));
+
+        fixture.bridge.tickCampaign(engine.sector, false, 2000L);
+
+        assertTrue(shieldUp(engine.mirror));
+    }
+
+    @Test
+    void aCustomsStopWithNoLocalMirrorIsDroppedWithoutOpeningAnything() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+
+        fixture.bridge.handle(dialogBegin("npc-missing", CoopMessages.DialogKind.INSPECTION));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertTrue(engine.dialogsOpened.isEmpty());
+        // Dropped, not stuck: the next stop for a fleet that does exist still lands.
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened);
+    }
+
+    @Test
+    void aSecondCustomsStopIsIgnoredWhileTheFirstIsStillQueued() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened,
+                "a repeat DIALOG_BEGIN must not queue a second encounter");
+    }
+
+    @Test
+    void aCustomsStopThatNeverGetsAClearFrameIsDroppedOnTheTimeout() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.dialogOpen = true; // the guest is busy in some other dialog for the whole window
+
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        fixture.bridge.tickCampaign(engine.sector, true,
+                CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS + 1L);
+        engine.dialogOpen = false;
+        fixture.bridge.tickCampaign(engine.sector, true,
+                CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS + 2L);
+
+        assertTrue(engine.dialogsOpened.isEmpty(), "a stale stop opens nothing minutes later");
+    }
+
+    @Test
+    void aHandoffThatDiesWithTheSessionDoesNotLeaveAnAutosaveQueuedForTheNextOne() {
+        // ENGAGE_GUEST queues a pre-battle autosave. If the link dies before the encounter opens the
+        // request must die with it: otherwise it is performed on the first dialog-free frame of the
+        // NEXT session (a multi-second freeze with no battle anywhere) and it burns the 10 minute
+        // throttle the next real handoff needs.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        assertTrue(autosaveOf(fixture.bridge).isPending());
+
+        fixture.bridge.tickCampaign(engine.sector, false, 1000L);
+
+        assertFalse(autosaveOf(fixture.bridge).isPending());
+    }
+
+    @Test
+    void aHandoffDroppedForWantOfAMirrorAlsoDropsItsAutosave() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+
+        fixture.bridge.handle(engageGuest("npc-missing", "Ghost Fleet"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+
+        assertFalse(autosaveOf(fixture.bridge).isPending());
+    }
+
+    // ---- Phase 15: what the battle result may and may not claim -----------------------------------
+
+    @Test
+    void aFleetWhoseRosterCannotBeReadIsOmittedFromTheResultRatherThanReportedDestroyed() {
+        // The receiver despawns whatever the destroyed list names, so an engine read that threw on
+        // this side would delete a live authoritative fleet. Unknown resolves away from destruction,
+        // exactly as isAlive() and the null-sector guard already do.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7"); // its fleet proxy throws on getFleetData()
+        List<CoopBattleResult> results = new ArrayList<>();
+        fixture.bridge.setBattleResultSink(results::add);
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 2000L);
+        fixture.bridge.tickCampaign(engine.sector, true, 3000L);
+
+        assertEquals(1, results.size());
+        assertEquals(List.of(), results.get(0).destroyedFleetIds(),
+                "an unreadable fleet is not a dead fleet");
+        assertEquals(List.of(), results.get(0).survivingFleets(),
+                "and it is not a survivor with a short roster either");
+    }
+
+    @Test
+    void aFleetTheEngineReportsAsEmptyIsStillTheDestroyedCase() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7", List.of()); // readable, and there is nothing left in it
+        List<CoopBattleResult> results = new ArrayList<>();
+        fixture.bridge.setBattleResultSink(results::add);
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 2000L);
+        fixture.bridge.tickCampaign(engine.sector, true, 3000L);
+
+        assertEquals(1, results.size());
+        assertEquals(List.of("npc-7"), results.get(0).destroyedFleetIds());
+    }
+
+    @Test
+    void aBattleThatResolvesNoCoopFleetIdsStillFiresTheBattleLifecycleListener() {
+        // The sink does role-independent per-battle work (the pre-battle roster the ship-loss stats
+        // diff against); its per-id loops are no-ops on an empty list, so the empty list must pass.
+        Fixture fixture = Fixture.host();
+        List<List<String>> begun = new ArrayList<>();
+        List<List<String>> concluded = new ArrayList<>();
+        fixture.bridge.setBattleFleetSink(new CoopBattleBridge.BattleFleetListener() {
+            @Override
+            public void onLocalBattleBegun(List<String> coopFleetIds) {
+                begun.add(coopFleetIds);
+            }
+
+            @Override
+            public void onBattleConcluded(List<String> coopFleetIds, boolean localBattle) {
+                concluded.add(coopFleetIds);
+            }
+        });
+
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);
+        fixture.bridge.tickCampaign(null, true, 2000L);
+
+        assertEquals(List.of(List.of()), begun);
+        assertEquals(List.of(List.of()), concluded);
+    }
+
     // ---- helpers -----------------------------------------------------------------------------------
 
     private static CoopMessages.Message engageGuest(String coopFleetId, String fleetName) {
         return CoopMessages.engageGuest("session-a", 1L, 0L, coopFleetId, fleetName, "pirates");
+    }
+
+    private static CoopMessages.Message dialogBegin(String coopFleetId, CoopMessages.DialogKind kind) {
+        return CoopMessages.dialogBegin("session-a", 1L, 0L, coopFleetId, "hegemony", kind);
+    }
+
+    private static MemoryAPI memoryOf(Object fleet) {
+        return ((CampaignFleetAPI) fleet).getMemoryWithoutUpdate();
+    }
+
+    /** True while the mirror still closes vanilla's battle pull-in path. */
+    private static boolean shieldUp(Object fleet) {
+        return memoryOf(fleet).getBoolean(MemFlags.FLEET_IGNORES_OTHER_FLEETS);
+    }
+
+    /** Reads the bridge's pre-battle autosave without widening its public surface. */
+    private static CoopPreBattleAutosave autosaveOf(CoopBattleBridge bridge) {
+        try {
+            java.lang.reflect.Field field = CoopBattleBridge.class.getDeclaredField("autosave");
+            field.setAccessible(true);
+            return (CoopPreBattleAutosave) field.get(bridge);
+        } catch (ReflectiveOperationException ex) {
+            throw new AssertionError(ex);
+        }
     }
 
     private static CoopMessages.Message statusMessage(CoopBattleStatus status) {
@@ -689,7 +909,12 @@ class CoopBattleBridgeTest {
         private boolean dialogRefuses;
 
         private Engine(String mirrorCoopFleetId) {
-            mirror = fleet("Pirate Raiders", mirrorCoopFleetId);
+            this(mirrorCoopFleetId, null);
+        }
+
+        /** A null {@code mirrorRoster} means "this fleet throws when asked for its roster". */
+        private Engine(String mirrorCoopFleetId, List<Object> mirrorRoster) {
+            mirror = fleet("Pirate Raiders", mirrorCoopFleetId, mirrorRoster);
             playerFleet = fleet("Player Fleet", null);
             sector = sector(this);
         }
@@ -751,6 +976,10 @@ class CoopBattleBridgeTest {
      * purpose — the proxy throws, the guards catch, and the log line degrades exactly as in-game.
      */
     private static Object fleet(String name, String coopFleetId) {
+        return fleet(name, coopFleetId, null);
+    }
+
+    private static Object fleet(String name, String coopFleetId, List<Object> roster) {
         Map<String, Object> memory = new LinkedHashMap<>();
         if (coopFleetId != null) {
             memory.put("$coopNpcFleetId", coopFleetId);
@@ -783,12 +1012,31 @@ class CoopBattleBridgeTest {
                 new Class<?>[]{CampaignFleetAPI.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "getMemoryWithoutUpdate" -> mem;
+                    case "getFleetData" -> roster == null ? throwUnreadable() : fleetData(roster);
                     case "getName" -> name;
                     case "getFaction", "getCommander" -> null;
                     case "isHostileTo" -> true;
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
                     case "toString" -> "fleetProxy:" + name;
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    /** A fleet that cannot report its roster at all: the engine read that used to read as a kill. */
+    private static Object throwUnreadable() {
+        throw new UnsupportedOperationException("getFleetData");
+    }
+
+    private static Object fleetData(List<Object> roster) {
+        return Proxy.newProxyInstance(
+                FleetDataAPI.class.getClassLoader(),
+                new Class<?>[]{FleetDataAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getMembersListCopy" -> new ArrayList<>(roster);
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "fleetDataProxy";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }

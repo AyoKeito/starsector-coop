@@ -4,8 +4,10 @@ import com.fs.starfarer.api.campaign.CampaignEventListener;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.fleet.CoopFleetSnapshot;
+import coop.fleet.CoopFleetSnapshotFactory;
 import coop.util.CoopLog;
 
 import java.util.ArrayDeque;
@@ -20,6 +22,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -450,25 +453,57 @@ public final class CoopBattleResultReconciler {
         }
 
         /**
-         * Must mirror {@code CoopFleetSnapshotFactory.captureMember} exactly (hull-variant id,
-         * falling back to the spec id) — the survivors on the wire were produced by that method, and
-         * the multiset match only works if both sides key the same way.
+         * Must mirror {@code CoopFleetSnapshotFactory.captureMember} exactly — the survivors on the
+         * wire were produced by that method, and the multiset match only works if both sides key the
+         * same way. It therefore delegates to the same function rather than re-implementing it.
+         *
+         * <p><b>Why the raw {@code getHullVariantId()} it used to read was wrong.</b> The engine
+         * <em>inflates</em> an NPC fleet the host player has been near: every member gets a brand-new
+         * variant id built from the fleet id ({@code "905d_3"}, {@code DefaultFleetInflater}:476) that
+         * exists in no spec store, while the wire side skips it — {@code streamableVariantId} prefers
+         * {@code getOriginalVariant()} and validates each candidate against the local spec store. The
+         * two key sets were then disjoint for exactly the fleets that matter, so the multiset match
+         * degraded to "remove the first N" (the wrong ships died) and {@code paintDamage} matched
+         * nothing.
          */
-        private static String variantIdOf(FleetMemberAPI member) {
-            String variantId = "";
+        static String variantIdOf(FleetMemberAPI member) {
+            return variantIdOf(member, CoopFleetSnapshotFactory::variantExists);
+        }
+
+        /** Predicate-injectable form: the spec store is engine-only, the key logic is not. */
+        static String variantIdOf(FleetMemberAPI member, Predicate<String> variantExists) {
+            ShipVariantAPI variant;
             try {
-                if (member.getVariant() != null) {
-                    variantId = member.getVariant().getHullVariantId();
-                }
+                variant = member.getVariant();
             } catch (RuntimeException | LinkageError ignored) {
-                variantId = "";
+                variant = null;
             }
-            if (variantId != null && !variantId.isEmpty()) {
-                return variantId;
-            }
+            return CoopFleetSnapshotFactory.streamableVariantId(
+                    originalVariantIdOf(variant), hullVariantIdOf(variant), specIdOf(member),
+                    variantExists);
+        }
+
+        private static String originalVariantIdOf(ShipVariantAPI variant) {
             try {
-                String specId = member.getSpecId();
-                return specId == null ? "" : specId;
+                return variant == null || variant.getOriginalVariant() == null
+                        ? "" : variant.getOriginalVariant();
+            } catch (RuntimeException | LinkageError ex) {
+                return "";
+            }
+        }
+
+        private static String hullVariantIdOf(ShipVariantAPI variant) {
+            try {
+                return variant == null || variant.getHullVariantId() == null
+                        ? "" : variant.getHullVariantId();
+            } catch (RuntimeException | LinkageError ex) {
+                return "";
+            }
+        }
+
+        private static String specIdOf(FleetMemberAPI member) {
+            try {
+                return member.getSpecId() == null ? "" : member.getSpecId();
             } catch (RuntimeException | LinkageError ex) {
                 return "";
             }

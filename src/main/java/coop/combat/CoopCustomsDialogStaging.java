@@ -65,7 +65,8 @@ public final class CoopCustomsDialogStaging {
         StringBuilder out = new StringBuilder();
         // A fleet that ignores the player, or is ignored by everyone, will not stop anybody. The
         // mirror carries FLEET_IGNORES_OTHER_FLEETS permanently (it closes the battle pull-in path),
-        // so it is cleared for the encounter and restored by the next mirror snapshot apply.
+        // so it is cleared for the encounter and put back by {@link #restoreEngagementShield} when
+        // the encounter closes -- see that method for why nothing else ever restores it.
         unsetFlag(mem, out, MemFlags.FLEET_IGNORES_OTHER_FLEETS);
         unsetFlag(mem, out, MemFlags.MEMORY_KEY_IGNORE_PLAYER_COMMS);
         unsetFlag(mem, out, MemFlags.MEMORY_KEY_PATROL_ALLOW_TOFF);
@@ -91,6 +92,29 @@ public final class CoopCustomsDialogStaging {
             setFlagWithReason(mem, out, MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE, "tOff", 7f);
             setFlag(mem, out, MemFlags.MEMORY_KEY_SAW_PLAYER_WITH_TRANSPONDER_OFF, true);
         }
+        return out.toString().trim();
+    }
+
+    /**
+     * Re-asserts the engagement shield {@link #stage} cleared, once the encounter it staged is over.
+     *
+     * <p><b>Nothing else ever does.</b> {@code CoopFleetMirror} sets
+     * {@link MemFlags#FLEET_IGNORES_OTHER_FLEETS} only on the frame it <em>creates</em> the mirror —
+     * a live mirror takes the refresh-identity early return, so no later snapshot apply restores it.
+     * A mirror left without the flag stays eligible for vanilla's battle pull-in
+     * ({@code FleetInteractionDialogPluginImpl.pullInNearbyFleets}, which honours this flag and never
+     * calls {@code canBeEngaged()}), so the guest's next unrelated encounter within
+     * {@code Misc.getBattleJoinRange()} would drag it in and report losses on a host fleet that never
+     * fought. Written the same way the mirror creates it — a bare {@code set}, not a
+     * reference-counted reason — so the two agree. Never throws.
+     */
+    public static String restoreEngagementShield(CampaignFleetAPI mirror) {
+        MemoryAPI mem = memoryOf(mirror);
+        if (mem == null) {
+            return "no-memory";
+        }
+        StringBuilder out = new StringBuilder();
+        setFlag(mem, out, MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
         return out.toString().trim();
     }
 

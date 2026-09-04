@@ -331,8 +331,9 @@ public final class CoopFleetSnapshotFactory {
      * <p>Validating against the local spec store is sound for the remote side because the handshake
      * already requires an identical mod manifest, so "resolvable here" means "resolvable there".
      */
-    static String streamableVariantId(String originalVariantId, String hullVariantId, String specId,
-                                      java.util.function.Predicate<String> variantExists) {
+    public static String streamableVariantId(String originalVariantId, String hullVariantId,
+                                             String specId,
+                                             java.util.function.Predicate<String> variantExists) {
         for (String candidate : List.of(normalize(originalVariantId), normalize(hullVariantId),
                 normalize(specId))) {
             if (!candidate.isEmpty() && variantExists.test(candidate)) {
@@ -401,7 +402,8 @@ public final class CoopFleetSnapshotFactory {
         }
     }
 
-    private static boolean variantExists(String variantId) {
+    /** Public so the host-side battle-result reconciler can key its roster exactly as the wire does. */
+    public static boolean variantExists(String variantId) {
         try {
             return Global.getSettings().doesVariantExist(variantId);
         } catch (RuntimeException | LinkageError ignored) {

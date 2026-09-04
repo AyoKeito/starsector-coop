@@ -3,6 +3,8 @@ package coop.combat;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
+import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.fleet.CoopFleetSnapshot;
 import org.junit.jupiter.api.Test;
 
@@ -121,6 +123,86 @@ class CoopBattleResultReconcilerEngineFleetsTest {
                 () -> null, () -> { }, id -> { });
 
         assertFalse(fleets.exists("fleet-a"));
+    }
+
+    // ---- roster keys: the host must key exactly the way the wire does -----------------------------
+
+    /**
+     * An inflated host fleet is the normal case for anything the player has been near:
+     * {@code DefaultFleetInflater} autofits every member onto a brand-new variant whose id is built
+     * from the fleet id ("905d_3") and exists in no spec store, recording the stock variant it fitted
+     * from as the member's original. The survivors on the wire carry the stock id, so keying the host
+     * roster on the raw hull-variant id made the two key sets disjoint: the multiset match degraded
+     * to "remove the first N" (the wrong ships died) and the damage paint matched nothing.
+     */
+    @Test
+    void anInflatedHostMemberKeysOnTheStockVariantTheWireCarries() {
+        assertEquals("wolf_Assault", CoopBattleResultReconciler.EngineFleets.variantIdOf(
+                member("905d_3", "wolf_Assault", "wolf_Strike"), exists("wolf_Assault")));
+    }
+
+    @Test
+    void anUninflatedMemberStillKeysOnItsOwnHullVariant() {
+        assertEquals("wolf_Assault", CoopBattleResultReconciler.EngineFleets.variantIdOf(
+                member("wolf_Assault", "", "wolf_Strike"), exists("wolf_Assault")));
+    }
+
+    @Test
+    void theSpecIdIsTheLastCandidateAndAnUnresolvableMemberKeysOnNothing() {
+        assertEquals("wolf_Strike", CoopBattleResultReconciler.EngineFleets.variantIdOf(
+                member("905d_3", "", "wolf_Strike"), exists("wolf_Strike")));
+        // Nothing this install can name: "" rather than an id the other side could never match.
+        assertEquals("", CoopBattleResultReconciler.EngineFleets.variantIdOf(
+                member("905d_3", "", "wolf_Strike"), id -> false));
+    }
+
+    @Test
+    void aMemberThatThrowsWhileBeingKeyedIsKeyedOnWhatCouldBeRead() {
+        assertEquals("wolf_Strike", CoopBattleResultReconciler.EngineFleets.variantIdOf(
+                throwingMember("wolf_Strike"), exists("wolf_Strike")));
+    }
+
+    private static java.util.function.Predicate<String> exists(String variantId) {
+        return variantId::equals;
+    }
+
+    private static FleetMemberAPI member(String hullVariantId, String originalVariant, String specId) {
+        Object variant = Proxy.newProxyInstance(
+                ShipVariantAPI.class.getClassLoader(),
+                new Class<?>[]{ShipVariantAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getHullVariantId" -> hullVariantId;
+                    case "getOriginalVariant" -> originalVariant;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "variantProxy";
+                    default -> defaultValue(method.getReturnType());
+                });
+        return (FleetMemberAPI) Proxy.newProxyInstance(
+                FleetMemberAPI.class.getClassLoader(),
+                new Class<?>[]{FleetMemberAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getVariant" -> variant;
+                    case "getSpecId" -> specId;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "memberProxy";
+                    default -> defaultValue(method.getReturnType());
+                });
+    }
+
+    /** A member whose variant read throws: the spec id is all that is left to key on. */
+    private static FleetMemberAPI throwingMember(String specId) {
+        return (FleetMemberAPI) Proxy.newProxyInstance(
+                FleetMemberAPI.class.getClassLoader(),
+                new Class<?>[]{FleetMemberAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getSpecId" -> specId;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "throwingMemberProxy";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     // ---- fixture ---------------------------------------------------------------------------------

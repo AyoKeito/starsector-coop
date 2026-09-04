@@ -12,6 +12,7 @@ import com.fs.starfarer.api.combat.BattleCreationContext;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.fleet.FleetGoal;
+import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.net.CoopConnectionRole;
@@ -215,6 +216,13 @@ public final class CoopBattleBridge {
     private String engageDialogFleetName = "";
     /** Set on the combat frame that the encounter produced, so its close needs no "no battle" line. */
     private boolean engageDialogBecameBattle;
+    /**
+     * The {@code coopFleetId} of a staged {@code DIALOG_BEGIN} encounter whose engagement shield is
+     * currently down, empty when none. {@link CoopCustomsDialogStaging#stage} has to clear
+     * {@code FLEET_IGNORES_OTHER_FLEETS} for the patrol-stop rules to fire, and nothing else ever
+     * puts it back on a live mirror, so this is what remembers to.
+     */
+    private String customsDialogFleetId = "";
 
     private boolean sessionWasActive;
 
@@ -371,7 +379,11 @@ public final class CoopBattleBridge {
             // the campaign pump is not running to refresh it, so a battle longer than the timeout
             // would come back to an already-thawed mirror and the inbound set backlog would resurrect
             // the fleet before the result could be built. Re-marking is an idempotent map write.
-            notifyBattleBegun(localBattleNpcFleetIds);
+            // Only the ids need re-marking here — the begin edge itself already fired from
+            // beginLocalBattle, empty list included.
+            if (!localBattleNpcFleetIds.isEmpty()) {
+                notifyBattleBegun(localBattleNpcFleetIds);
+            }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop battle status capture failed", ex);
         }
@@ -396,8 +408,8 @@ public final class CoopBattleBridge {
                 // ever having seen an active session, and that battle still has to be released.
                 if (sessionWasActive || localBattleActive || remoteBattleActive
                         || pendingEngage != null || pendingDialog != null || pendingResult != null
-                        || !engageDialogFleetId.isEmpty()) {
-                    onSessionEnded();
+                        || !engageDialogFleetId.isEmpty() || !customsDialogFleetId.isEmpty()) {
+                    onSessionEnded(sector);
                     sessionWasActive = false;
                 }
                 flushBanners(sector);
@@ -411,6 +423,7 @@ public final class CoopBattleBridge {
             maybeEndLocalBattle(nowMillis);
             drivePendingResult(sector, nowMillis);
             driveEngageDialog(sector);
+            driveCustomsDialog(sector);
             drivePendingEngage(sector, nowMillis);
             drivePendingDialog(sector, nowMillis);
             flushBanners(sector);
@@ -761,6 +774,12 @@ public final class CoopBattleBridge {
      * longer be found, is not alive, or has no members left is destroyed; anything else is a survivor
      * reported with the roster it has right now, which is what makes a partial outcome (escape,
      * disengage, a fight broken off after two kills) reconcile correctly.
+     *
+     * <p><b>"Unreadable" is neither.</b> A fleet whose lookup or roster read threw is dropped from the
+     * result entirely rather than reported as destroyed: the receiver despawns what this list names
+     * ({@link CoopBattleResultReconciler}), so an engine hiccup on this side would delete a live
+     * authoritative fleet. Same reasoning as {@link #isAlive} and the null-sector guard in
+     * {@link #drivePendingResult} — every unknown resolves away from destruction.
      */
     private CoopBattleResult buildResult(SectorAPI sector, PendingResult parked) {
         List<String> destroyed = new ArrayList<>();
@@ -769,9 +788,26 @@ public final class CoopBattleBridge {
             if (coopFleetId == null || coopFleetId.isEmpty()) {
                 continue;
             }
-            CampaignFleetAPI fleet = findBattleFleet(sector, coopFleetId);
-            List<CoopFleetSnapshot.Member> members = fleet == null ? List.of() : safeMembers(fleet);
-            if (fleet == null || !isAlive(fleet) || members.isEmpty()) {
+            FleetLookup lookup = lookUpBattleFleet(sector, coopFleetId);
+            if (lookup.unreadable()) {
+                CoopLog.warn(CoopBattleBridge.class, "Coop omitted coopFleetId=" + coopFleetId
+                        + " from the battle result: the world could not be read, and an unreadable"
+                        + " fleet must not be reported as destroyed");
+                continue;
+            }
+            CampaignFleetAPI fleet = lookup.fleet();
+            if (fleet == null || !isAlive(fleet)) {
+                destroyed.add(coopFleetId);
+                continue;
+            }
+            List<CoopFleetSnapshot.Member> members = safeMembers(fleet);
+            if (members == null) {
+                CoopLog.warn(CoopBattleBridge.class, "Coop omitted coopFleetId=" + coopFleetId
+                        + " from the battle result: its roster could not be read off a fleet that is"
+                        + " still alive");
+                continue;
+            }
+            if (members.isEmpty()) {
                 destroyed.add(coopFleetId);
             } else {
                 survivors.add(new CoopBattleResult.SurvivingFleet(coopFleetId, members));
@@ -781,25 +817,32 @@ public final class CoopBattleBridge {
                 localFleetSize(sector), destroyed, survivors);
     }
 
+    /**
+     * Fires on every battle, including one whose opponents resolved to no coop fleet ids at all (an
+     * untagged fleet, a context with no other fleet). The listener does role-independent per-battle
+     * work — the pre-battle roster capture the ship-loss stats diff against — that an empty list must
+     * not skip; its per-id loops are already no-ops on one.
+     */
     private void notifyBattleBegun(List<String> coopFleetIds) {
         BattleFleetListener sink = battleFleetSink;
-        if (sink == null || coopFleetIds == null || coopFleetIds.isEmpty()) {
+        if (sink == null) {
             return;
         }
         try {
-            sink.onLocalBattleBegun(coopFleetIds);
+            sink.onLocalBattleBegun(coopFleetIds == null ? List.of() : coopFleetIds);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop battle-begun notification failed", ex);
         }
     }
 
+    /** See {@link #notifyBattleBegun}: an empty id list is a battle too, and the sink knows it. */
     private void notifyBattleConcluded(List<String> coopFleetIds, boolean localBattle) {
         BattleFleetListener sink = battleFleetSink;
-        if (sink == null || coopFleetIds == null || coopFleetIds.isEmpty()) {
+        if (sink == null) {
             return;
         }
         try {
-            sink.onBattleConcluded(coopFleetIds, localBattle);
+            sink.onBattleConcluded(coopFleetIds == null ? List.of() : coopFleetIds, localBattle);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop battle-concluded notification failed", ex);
         }
@@ -941,6 +984,9 @@ public final class CoopBattleBridge {
             CoopLog.warn(CoopBattleBridge.class, "Coop ENGAGE_GUEST dropped: no local mirror for"
                     + " coopFleetId=" + pendingEngage.coopFleetId());
             pendingEngage = null;
+            // Nothing to insure any more: a dropped handoff must not leave a save queued for the next
+            // dialog-free frame (same reasoning as the timeout path above).
+            autosave.cancel();
             return;
         }
         CampaignUIAPI ui = sector.getCampaignUI();
@@ -1052,17 +1098,60 @@ public final class CoopBattleBridge {
             return;
         }
         CoopMessages.DialogKind kind = pendingDialog.kind();
+        String coopFleetId = pendingDialog.coopFleetId();
         pendingDialog = null;
         String staged = CoopCustomsDialogStaging.stage(sector, mirror, kind);
+        // Staging just took the mirror's engagement shield down; own that until the encounter closes.
+        customsDialogFleetId = coopFleetId;
         CoopLog.info(CoopBattleBridge.class, "Coop DIALOG_BEGIN staging kind=" + kind
                 + " " + CoopCustomsDialogStaging.describePreconditions(mirror) + " flags: " + staged);
+        boolean shown = false;
         try {
-            boolean shown = ui.showInteractionDialog(mirror);
+            shown = ui.showInteractionDialog(mirror);
             CoopLog.info(CoopBattleBridge.class, "Coop DIALOG_BEGIN showInteractionDialog returned="
                     + shown + " target=" + safeName(mirror));
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop DIALOG_BEGIN showInteractionDialog threw", ex);
         }
+        if (!shown) {
+            // No encounter to protect: put the shield back on the same frame rather than leaving the
+            // mirror eligible for battle pull-in until some later dialog-free frame.
+            restoreCustomsShield(sector);
+        }
+    }
+
+    /**
+     * Puts back the engagement shield {@link CoopCustomsDialogStaging#stage} had to clear, once the
+     * encounter it staged is off screen (whether it ended in a fight, a scan, or nothing).
+     *
+     * <p>Without this the mirror carries {@code FLEET_IGNORES_OTHER_FLEETS} cleared for the rest of
+     * its life — {@code CoopFleetMirror} only sets that flag on the frame it creates the fleet, and a
+     * live mirror takes the refresh-identity early return — so vanilla's
+     * {@code FleetInteractionDialogPluginImpl.pullInNearbyFleets} would drag it into the guest's next
+     * unrelated battle and the resulting {@code BATTLE_RESULT} would apply losses to a host fleet that
+     * never fought. Same shape as {@link #driveEngageDialog}'s posture clear.
+     */
+    private void driveCustomsDialog(SectorAPI sector) {
+        if (customsDialogFleetId.isEmpty() || sector == null) {
+            return;
+        }
+        if (localBattleActive || isDialogOpen(sector) || currentGameState() != GameState.CAMPAIGN) {
+            return;
+        }
+        restoreCustomsShield(sector);
+    }
+
+    /** Best-effort re-assert of the staged mirror's shield; clears the marker either way. */
+    private void restoreCustomsShield(SectorAPI sector) {
+        if (customsDialogFleetId.isEmpty()) {
+            return;
+        }
+        String coopFleetId = customsDialogFleetId;
+        customsDialogFleetId = "";
+        String restored = CoopCustomsDialogStaging.restoreEngagementShield(
+                sector == null ? null : findNpcMirror(sector, coopFleetId));
+        CoopLog.info(CoopBattleBridge.class, "Coop DIALOG_BEGIN encounter resolved coopFleetId="
+                + coopFleetId + "; engagement shield restored: " + restored);
     }
 
     // ---- spectator banners -----------------------------------------------------------------------
@@ -1159,7 +1248,7 @@ public final class CoopBattleBridge {
 
     // ---- session lifecycle -----------------------------------------------------------------------
 
-    private void onSessionEnded() {
+    private void onSessionEnded(SectorAPI sector) {
         if (localBattleActive && !localBattleEndSent) {
             CoopLog.warn(CoopBattleBridge.class, discardedResultMessage(localBattleId, localEnemySummary));
         }
@@ -1176,9 +1265,14 @@ public final class CoopBattleBridge {
         }
         pendingEngage = null;
         pendingDialog = null;
+        // The handoff that queued this save is gone with the session; without the cancel the request
+        // survives into the next one and lands a multi-second "pre-battle" save with no battle
+        // anywhere — and burns the throttle the next real handoff needs.
+        autosave.cancel();
         engageDialogFleetId = "";
         engageDialogFleetName = "";
         engageDialogBecameBattle = false;
+        restoreCustomsShield(sector);
         if (remoteBattleActive) {
             remoteBattleActive = false;
             remoteBattleSignalAtMillis = 0L;
@@ -1285,14 +1379,21 @@ public final class CoopBattleBridge {
         return new ArrayList<>(ids);
     }
 
+    /**
+     * The outcome of one fleet lookup. {@code unreadable} is the third state the caller needs:
+     * "the scan threw" is not the same answer as "this fleet is gone".
+     */
+    record FleetLookup(CampaignFleetAPI fleet, boolean unreadable) {
+    }
+
     /** A host fleet by {@code coopFleetId}: the guest's mirror tag first, then a raw engine id. */
-    static CampaignFleetAPI findBattleFleet(SectorAPI sector, String coopFleetId) {
+    static FleetLookup lookUpBattleFleet(SectorAPI sector, String coopFleetId) {
         if (sector == null || coopFleetId == null || coopFleetId.isEmpty()) {
-            return null;
+            return new FleetLookup(null, false);
         }
         CampaignFleetAPI mirror = findNpcMirror(sector, coopFleetId);
         if (mirror != null) {
-            return mirror;
+            return new FleetLookup(mirror, false);
         }
         try {
             for (LocationAPI location : sector.getAllLocations()) {
@@ -1301,22 +1402,40 @@ public final class CoopBattleBridge {
                 }
                 for (CampaignFleetAPI fleet : location.getFleets()) {
                     if (fleet != null && coopFleetId.equals(safeId(fleet))) {
-                        return fleet;
+                        return new FleetLookup(fleet, false);
                     }
                 }
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop fleet lookup failed for " + coopFleetId, ex);
+            return new FleetLookup(null, true);
         }
-        return null;
+        return new FleetLookup(null, false);
     }
 
+    /**
+     * This fleet's replicable roster, or {@code null} when reading it failed.
+     *
+     * <p>The distinction is load-bearing. {@code CoopFleetSnapshotFactory.captureMembers} answers both
+     * "this fleet has no ships left" and "I could not read this fleet" with an empty list, and
+     * {@link #buildResult} turns the first into a destruction report — so without the engine roster
+     * cross-check below, one throw on this side despawns a live fleet on the other. A roster the
+     * engine says is non-empty but that captured nothing is reported as unreadable, not as a loss.
+     */
     private static List<CoopFleetSnapshot.Member> safeMembers(CampaignFleetAPI fleet) {
+        List<FleetMemberAPI> engineRoster;
         try {
-            return CoopFleetSnapshotFactory.captureMembers(fleet);
+            engineRoster = fleet.getFleetData().getMembersListCopy();
         } catch (RuntimeException | LinkageError ex) {
-            return List.of();
+            return null;
         }
+        List<CoopFleetSnapshot.Member> members;
+        try {
+            members = CoopFleetSnapshotFactory.captureMembers(fleet);
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+        return members.isEmpty() && engineRoster != null && !engineRoster.isEmpty() ? null : members;
     }
 
     private static boolean isAlive(CampaignFleetAPI fleet) {

@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.BattleAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.FleetAssignment;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -19,6 +20,7 @@ import coop.fleet.CoopGuestMirrorHandle;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
+import coop.time.CoopFastForwardLock;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
@@ -544,11 +546,18 @@ public final class CoopNpcThreatWatcher {
         return contactDistance(chaserRadius, mirrorRadius, Float.NaN, 0);
     }
 
-    /** Edge-to-edge contact plus {@link #handoffMargin} for this pair on this link. */
+    /** Edge-to-edge contact plus {@link #handoffMargin} for this pair on this link, at 1x. */
     public static float contactDistance(float chaserRadius, float mirrorRadius,
                                         float closingSpeedSuPerSec, int p95RttMillis) {
+        return contactDistance(chaserRadius, mirrorRadius, closingSpeedSuPerSec, p95RttMillis, 1f);
+    }
+
+    /** Edge-to-edge contact plus {@link #handoffMargin} at the campaign's current speed. */
+    public static float contactDistance(float chaserRadius, float mirrorRadius,
+                                        float closingSpeedSuPerSec, int p95RttMillis,
+                                        float campaignSpeedMult) {
         return Math.max(0f, chaserRadius) + Math.max(0f, mirrorRadius)
-                + handoffMargin(closingSpeedSuPerSec, p95RttMillis);
+                + handoffMargin(closingSpeedSuPerSec, p95RttMillis, campaignSpeedMult);
     }
 
     /**
@@ -579,14 +588,54 @@ public final class CoopNpcThreatWatcher {
      * @param p95RttMillis         measured p95 RTT; {@code <= 0} means "not measured".
      */
     public static float handoffMargin(float closingSpeedSuPerSec, int p95RttMillis) {
+        return handoffMargin(closingSpeedSuPerSec, p95RttMillis, 1f);
+    }
+
+    /**
+     * The margin at a campaign speed other than 1x.
+     *
+     * <p><b>Why a multiplier is needed at all.</b> Every term of the budget is wall-clock (RTT, the
+     * wall-throttled scan interval, processing slack) while the closing speed is su per <em>campaign</em>
+     * second, and the two are only the same thing at 1x. Under shared fast-forward
+     * {@code CampaignState.advance} runs {@code campaignSpeedupMult} engine advances per wall frame,
+     * so the chaser really covers {@code mult x} the computed distance inside the same budget and an
+     * unscaled margin fires the handoff after contact — the exact failure the Phase 20 M6 derivation
+     * exists to prevent. The multiplier is clamped at 1 so this can only ever widen the band, never
+     * narrow it (the audit's rule), and {@code p95 <= 0} still returns Phase 14's flat geometry
+     * untouched.
+     *
+     * @param campaignSpeedMult campaign seconds per wall second right now — see
+     *                          {@link #campaignSpeedMult(SectorAPI)}.
+     */
+    public static float handoffMargin(float closingSpeedSuPerSec, int p95RttMillis,
+                                      float campaignSpeedMult) {
         if (p95RttMillis <= 0) {
             return CONTACT_MARGIN_SU;
         }
         float closing = Float.isNaN(closingSpeedSuPerSec)
                 ? SPIKE_CLOSING_SPEED_SU_PER_SEC
                 : Math.max(0f, closingSpeedSuPerSec);
+        float mult = Float.isNaN(campaignSpeedMult) ? 1f : Math.max(1f, campaignSpeedMult);
         long budgetMillis = 2L * p95RttMillis + SCAN_INTERVAL_MILLIS + PROCESSING_SLACK_MILLIS;
-        return Math.max(CONTACT_MARGIN_SU, closing * budgetMillis / 1000f);
+        return Math.max(CONTACT_MARGIN_SU, closing * mult * budgetMillis / 1000f);
+    }
+
+    /**
+     * How many campaign seconds this client is running per wall second, read off vanilla's public
+     * fast-forward getter ({@code CampaignUIAPI.isFastForward()}, the same lever
+     * {@code CoopTimeLock.capture()} uses). A session forces {@code campaignSpeedupMult} to
+     * {@link CoopFastForwardLock#SESSION_MULT}, so fast-forward means exactly that multiple.
+     *
+     * <p>Only an affirmative "yes, fast-forwarding" widens the band; a UI that is absent or will not
+     * answer reads as 1x, which is Phase 14's geometry unchanged.
+     */
+    static float campaignSpeedMult(SectorAPI sector) {
+        try {
+            CampaignUIAPI ui = sector == null ? null : sector.getCampaignUI();
+            return ui != null && ui.isFastForward() ? CoopFastForwardLock.SESSION_MULT : 1f;
+        } catch (RuntimeException | LinkageError ex) {
+            return 1f;
+        }
     }
 
     /** Vanilla's pursuit patience for one chaser ({@code StrategicModule.java:554-588}). */
@@ -773,6 +822,9 @@ public final class CoopNpcThreatWatcher {
         boolean transponderOn = transponderOn(mirror);
         boolean diagnostics = CoopDebug.diagnosticsEnabled();
         int p95Rtt = readP95RttMillis();
+        // Read once per scan: the handoff band has to cover the distance the chaser really closes
+        // during the round trip, and fast-forward doubles that for the same wall-clock budget.
+        float speedMult = campaignSpeedMult(sector);
         // The handoff round trip has not closed yet: treat it as "a coop battle is starting".
         // The never-fired sentinel must be checked explicitly: nowMillis - Long.MIN_VALUE overflows
         // negative, which read as "inside the grace window" forever and muzzled every ENGAGE_GUEST
@@ -793,12 +845,12 @@ public final class CoopNpcThreatWatcher {
             boolean visible = canSee(fleet, mirror);
             CustomsPursuit pursuit = trackCustomsVisibility(coopFleetId, visible);
             FleetView view = viewOf(fleet, mirror, coopFleetId, visible, pursuit,
-                    elapsedDaysSince(pursuit), p95Rtt);
+                    elapsedDaysSince(pursuit), p95Rtt, speedMult);
             applyPendingGraceIfQueued(fleet, mirror, view);
             boolean battleBusy = coopBattleActive || handedOff;
             if (diagnostics) {
                 dumpPursuitState(view, synthesized, nowMillis);
-                logDerivedMarginOnce(view, p95Rtt);
+                logDerivedMarginOnce(view, p95Rtt, speedMult);
             }
             Action action = decide(view, synthesized, transponderOn, battleBusy,
                     cooldowns.isReady(cooldownKey(view.coopFleetId(), Action.ENGAGE_GUEST),
@@ -1105,15 +1157,16 @@ public final class CoopNpcThreatWatcher {
      * handoff band. Once per chaser, not per scan — the point is to show which fleets the WAN margin
      * is reaching and by how much, and a per-scan version of that is a 4 Hz log flood.
      */
-    private void logDerivedMarginOnce(FleetView view, int p95Rtt) {
+    private void logDerivedMarginOnce(FleetView view, int p95Rtt, float speedMult) {
         float flat = contactDistance(0f, 0f);
-        float derived = handoffMargin(view.closingSpeedSuPerSec(), p95Rtt);
+        float derived = handoffMargin(view.closingSpeedSuPerSec(), p95Rtt, speedMult);
         if (derived <= flat || !loggedDerivedMargin.add(view.coopFleetId())) {
             return;
         }
         CoopLog.info(CoopNpcThreatWatcher.class, "Coop handoff margin widened by latency"
                 + " fleet=" + view.fleetName() + " (" + view.factionId() + ")"
                 + " p95Rtt=" + p95Rtt + "ms"
+                + " speedMult=" + speedMult
                 + " closing=" + (Float.isNaN(view.closingSpeedSuPerSec())
                         ? "unknown(" + SPIKE_CLOSING_SPEED_SU_PER_SEC + ")"
                         : String.format("%.1f", view.closingSpeedSuPerSec()) + " su/s")
@@ -1152,7 +1205,7 @@ public final class CoopNpcThreatWatcher {
 
     private static FleetView viewOf(CampaignFleetAPI fleet, CampaignFleetAPI mirror, String coopFleetId,
                                     boolean visible, CustomsPursuit pursuit, float customsPursuitDays,
-                                    int p95RttMillis) {
+                                    int p95RttMillis, float campaignSpeedMult) {
         TacticalModulePlugin tactical = tacticalModule(fleet);
         StrategicModulePlugin strategic = strategicModule(fleet);
         boolean patrol = isPatrol(fleet);
@@ -1171,7 +1224,8 @@ public final class CoopNpcThreatWatcher {
                 pursuitDays(tactical),
                 pursuitBudgetDays(patrol, burnLevel(fleet)),
                 distance(fleet, mirror),
-                contactDistance(radius(fleet), radius(mirror), closingSpeed, p95RttMillis),
+                contactDistance(radius(fleet), radius(mirror), closingSpeed, p95RttMillis,
+                        campaignSpeedMult),
                 pursuit != null,
                 customsPursuitDays,
                 pursuit == null ? 0 : pursuit.unseenScans,

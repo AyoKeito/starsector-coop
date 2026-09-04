@@ -86,6 +86,70 @@ class CoopNpcThreatHandoffMarginTest {
     }
 
     @Test
+    void fastForwardWidensTheBandByTheCampaignSpeedMultiplier() {
+        // Every term of the budget is wall-clock, the closing speed is per campaign second, and under
+        // shared fast-forward CampaignState.advance runs campaignSpeedupMult engine advances per wall
+        // frame. The chaser therefore covers twice the distance inside the same 650 ms round trip, so
+        // an unscaled margin fires the handoff after contact - the failure M6 exists to prevent.
+        float oneX = CoopNpcThreatWatcher.handoffMargin(340f, 200);
+        float twoX = CoopNpcThreatWatcher.handoffMargin(340f, 200, 2f);
+
+        assertEquals(expected(340f, 200) * 2f, twoX, 0.001f);
+        assertEquals(2f * oneX, twoX, 0.001f);
+        assertEquals(oneX + 100f, CoopNpcThreatWatcher.contactDistance(100f, 0f, 340f, 200),
+                0.001f, "the 1x overload is unchanged");
+        assertEquals(twoX + 200f, CoopNpcThreatWatcher.contactDistance(100f, 100f, 340f, 200, 2f),
+                0.001f);
+    }
+
+    @Test
+    void aSpeedMultiplierCanOnlyEverWidenTheBand() {
+        for (float mult : new float[] {0f, 0.5f, 1f, Float.NaN, -3f}) {
+            assertEquals(CoopNpcThreatWatcher.handoffMargin(340f, 200),
+                    CoopNpcThreatWatcher.handoffMargin(340f, 200, mult), 0.001f, "mult=" + mult);
+        }
+        // And an unmeasured link keeps Phase 14's flat geometry whatever the campaign speed is.
+        assertEquals(FLAT, CoopNpcThreatWatcher.handoffMargin(340f, 0, 2f), 0f);
+    }
+
+    @Test
+    void onlyAnAffirmativeFastForwardReadWidensTheBand() {
+        assertEquals(coop.time.CoopFastForwardLock.SESSION_MULT,
+                CoopNpcThreatWatcher.campaignSpeedMult(sectorFastForwarding(true)), 0f);
+        assertEquals(1f, CoopNpcThreatWatcher.campaignSpeedMult(sectorFastForwarding(false)), 0f);
+        assertEquals(1f, CoopNpcThreatWatcher.campaignSpeedMult(null), 0f);
+        assertEquals(1f, CoopNpcThreatWatcher.campaignSpeedMult(sectorWith(null)), 0f);
+    }
+
+    private static com.fs.starfarer.api.campaign.SectorAPI sectorFastForwarding(boolean fastForward) {
+        Object ui = java.lang.reflect.Proxy.newProxyInstance(
+                CoopNpcThreatHandoffMarginTest.class.getClassLoader(),
+                new Class<?>[] {com.fs.starfarer.api.campaign.CampaignUIAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "isFastForward" -> fastForward;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "uiStub";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        return sectorWith(ui);
+    }
+
+    /** A null ui is "no campaign UI at all" (loading, teardown): unknown speed must read as 1x. */
+    private static com.fs.starfarer.api.campaign.SectorAPI sectorWith(Object ui) {
+        return (com.fs.starfarer.api.campaign.SectorAPI) java.lang.reflect.Proxy.newProxyInstance(
+                CoopNpcThreatHandoffMarginTest.class.getClassLoader(),
+                new Class<?>[] {com.fs.starfarer.api.campaign.SectorAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getCampaignUI" -> ui;
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "sectorStub";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    @Test
     void aRecedingPairClampsToTheFloor() {
         // A negative projection means the mirror is pulling away. There is no time-to-contact to
         // budget for, so the band stays at the floor rather than going negative.
