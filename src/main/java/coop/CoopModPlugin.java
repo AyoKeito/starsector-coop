@@ -298,9 +298,15 @@ public class CoopModPlugin extends BaseModPlugin {
         clearPreviousGameStatics();
         if (netService != null) {
             // Graceful session end: loading another game tears this session's transport down, so the
-            // partner gets one last checkpoint before the socket closes (the send is flushed inline).
-            // There is no engine hook for quitting to the menu or exiting, so this is the only
-            // graceful end the mod can observe in-process.
+            // partner gets a last notice before the socket closes (the send is flushed inline). There
+            // is no engine hook for quitting to the menu or exiting, so this is the only graceful end
+            // the mod can observe in-process.
+            //
+            // It is a notice, not a save order. By the time this runs the engine has already replaced
+            // the sector, and the campaign being left was never written - Starsector does not autosave
+            // the current game when you load another one. The guest therefore does NOT autosave on a
+            // "session end" checkpoint (CoopSaveCheckpoint.onCheckpointReceived): doing so would put
+            // its save ahead of the host's last real one, and the guest rejoins by loading that file.
             CoopSaveCheckpoint.notifySessionEnding();
             netService.shutdown();
         }

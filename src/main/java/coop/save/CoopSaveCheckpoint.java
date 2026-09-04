@@ -81,7 +81,12 @@ public final class CoopSaveCheckpoint {
         }
     }
 
-    /** Host: the session is ending gracefully; align both saves one last time before teardown. */
+    /**
+     * Host: the session is ending gracefully. This is a <em>notice</em>, not a save order — the guest
+     * deliberately does not autosave on it (see {@link #onCheckpointReceived}), because the host has
+     * not saved either: the engine replaces the sector when another game is loaded and never writes
+     * the campaign being left behind.
+     */
     public static void notifySessionEnding() {
         CoopSaveCheckpoint checkpoint = active;
         if (checkpoint != null) {
@@ -129,6 +134,15 @@ public final class CoopSaveCheckpoint {
      * <p>Duplicates collapse two ways: a checkpoint id already handled is dropped outright (a resend
      * on a flaky link), and a <em>new</em> checkpoint arriving while one is still parked keeps the
      * original deadline rather than extending it — one autosave, one 30-second budget.
+     *
+     * <p><b>{@link #REASON_SESSION_END} is the one checkpoint that must not save.</b> It is sent from
+     * {@code CoopModPlugin.onGameLoad}, after the engine has already swapped the sector out, and the
+     * campaign the host just left was never written — Starsector does not autosave the current game
+     * when you load another one. Saving here would overwrite the guest's coordinated autosave with one
+     * that is <em>ahead</em> of the host's last real save, and the rejoin model has the guest come back
+     * by loading exactly that file. Keeping the older, paired save is what keeps the two clients on the
+     * same state. It still counts as handled, so a resend is deduplicated, and it never cancels an
+     * autosave already parked from a real host save — that one still pairs with a save that exists.
      */
     public void onCheckpointReceived(long checkpointId, String reason, long nowMillis) {
         if (checkpointId == lastHandledCheckpointId) {
@@ -137,6 +151,15 @@ public final class CoopSaveCheckpoint {
             return;
         }
         lastHandledCheckpointId = checkpointId;
+        if (REASON_SESSION_END.equals(reason == null ? "" : reason.trim())) {
+            CoopLog.info(CoopSaveCheckpoint.class, "Coop save checkpoint " + checkpointId
+                    + " received (" + REASON_SESSION_END + "): the host left the campaign without"
+                    + " saving it, so no coordinated autosave is taken. The last coordinated autosave"
+                    + " stays as the rejoin point."
+                    + (autosavePending ? " The autosave already parked from a real host save is"
+                            + " untouched and will still run." : ""));
+            return;
+        }
         if (autosavePending) {
             CoopLog.debug(CoopSaveCheckpoint.class, "Coop save checkpoint " + checkpointId
                     + " folded into the autosave already waiting for a clear screen");

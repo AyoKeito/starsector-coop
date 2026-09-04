@@ -118,6 +118,80 @@ class CoopSaveCheckpointTest {
         assertFalse(checkpoint.isAutosavePending());
     }
 
+    // ---- Guest: the session-end checkpoint must not save ----------------------------------------
+
+    /**
+     * The defect: {@code CoopModPlugin.onGameLoad} sends this checkpoint <em>after</em> the engine has
+     * swapped the sector out, and the campaign the host just left was never written — Starsector does
+     * not autosave the current game when you load another one. Saving on it replaced the guest's
+     * coordinated autosave with one ahead of the host's last real save, and the guest rejoins by
+     * loading exactly that file.
+     */
+    @Test
+    void aSessionEndCheckpointDoesNotAutosave() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = true;
+
+        checkpoint.onCheckpointReceived(1L, CoopSaveCheckpoint.REASON_SESSION_END, 1_000L);
+
+        assertFalse(checkpoint.isAutosavePending(), "nothing may be parked for a session end");
+        assertFalse(checkpoint.tick(target, 1_016L));
+        assertEquals(0, target.autosaves);
+    }
+
+    /** Padding on the wire must not turn the reason into an ordinary host save. */
+    @Test
+    void aSessionEndReasonIsRecognisedWithSurroundingWhitespace() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+
+        checkpoint.onCheckpointReceived(1L, "  " + CoopSaveCheckpoint.REASON_SESSION_END + " ", 1_000L);
+
+        assertFalse(checkpoint.isAutosavePending());
+    }
+
+    /**
+     * The autosave already waiting pairs with a host save that really happened, so the session-end
+     * notice must leave it alone rather than cancelling it.
+     */
+    @Test
+    void aSessionEndCheckpointDoesNotCancelAnAutosaveParkedFromARealHostSave() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = false;
+
+        checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
+        checkpoint.onCheckpointReceived(2L, CoopSaveCheckpoint.REASON_SESSION_END, 1_100L);
+
+        assertTrue(checkpoint.isAutosavePending());
+        target.canAutosave = true;
+        assertTrue(checkpoint.tick(target, 1_116L));
+        assertEquals(1, target.autosaves);
+    }
+
+    /** Handled means handled: a resend of the same id is still deduplicated by the ledger. */
+    @Test
+    void aSessionEndCheckpointStillCountsAsHandledForTheDuplicateLedger() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = true;
+        LogCapture log = LogCapture.attach(CoopSaveCheckpoint.class);
+        try {
+            checkpoint.onCheckpointReceived(4L, CoopSaveCheckpoint.REASON_SESSION_END, 1_000L);
+            checkpoint.onCheckpointReceived(4L, CoopSaveCheckpoint.REASON_SESSION_END, 1_100L);
+
+            assertFalse(checkpoint.isAutosavePending());
+            assertEquals(0, target.autosaves);
+            assertFalse(log.hasWarning(), "a graceful session end is not a warning");
+        } finally {
+            log.detach();
+        }
+        // A genuinely new checkpoint after it still saves: the ledger advanced, nothing is wedged.
+        checkpoint.onCheckpointReceived(5L, "host save", 2_000L);
+        assertTrue(checkpoint.tick(target, 2_016L));
+        assertEquals(1, target.autosaves);
+    }
+
     // ---- Guest: give up -------------------------------------------------------------------------
 
     @Test
