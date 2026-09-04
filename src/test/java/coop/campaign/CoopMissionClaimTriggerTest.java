@@ -11,12 +11,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Supplier;
+import coop.testing.RecordingNetService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static coop.testing.TestSessions.activeGuestSession;
+import static coop.testing.TestSessions.activeHostSession;
 
 /**
  * Phase 12 first-come mission claims, wire level: what the two trigger entry points actually send,
@@ -153,64 +155,4 @@ class CoopMissionClaimTriggerTest {
         return CoopMissionBoardSync.Entry.barOffer(missionId, "HubMissionBarEventWrapper", 7L, "", 30L);
     }
 
-    private static CoopSessionState activeGuestSession() {
-        CoopSessionState session = new CoopSessionState(new SequencedIds("guest-player"));
-        session.startGuest("Guest");
-        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
-        session.guestAcceptHandshake("session-a");
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
-    }
-
-    private static CoopSessionState activeHostSession() {
-        CoopSessionState session = new CoopSessionState(new SequencedIds("lobby-a", "host-player", "session-a"));
-        session.startHost("Host");
-        session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
-        session.hostAcceptHandshake();
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
-    }
-
-    private static final class RecordingNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-        private final List<CoopMessages.Message> sent = new ArrayList<>();
-
-        private RecordingNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-            sent.add(message);
-        }
-
-        @Override
-        public void sendTo(String senderId, CoopMessages.Message message) {
-            sent.add(message);
-        }
-    }
-
-    private static final class SequencedIds implements Supplier<String> {
-        private final List<String> ids;
-        private int index;
-
-        private SequencedIds(String... ids) {
-            this.ids = List.of(ids);
-        }
-
-        @Override
-        public String get() {
-            return ids.get(index++);
-        }
-    }
 }

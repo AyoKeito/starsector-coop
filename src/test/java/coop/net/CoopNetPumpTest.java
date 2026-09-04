@@ -13,7 +13,6 @@ import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopTimeLock;
 import coop.ui.CoopHudState;
-import org.apache.log4j.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +30,8 @@ import coop.stats.CoopSessionStatsCodec;
 import coop.stats.CoopSessionStatsStore;
 import coop.ui.CoopDesyncReason;
 import coop.ui.CoopDoctorMarker;
+import coop.testing.LogCapture;
+import coop.testing.RecordingNetService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static coop.testing.ProxyDefaults.defaultValue;
 
 class CoopNetPumpTest {
     /** A valid, empty {@code NPC_FLEET_MOTION} section body (Phase 20 M4 v2 format). */
@@ -3708,8 +3710,7 @@ class CoopNetPumpTest {
     /** The same frame, in the log: one INFO line and nothing that reads as a failure. */
     @Test
     void theRelaunchRejoinSaysWhatHappenedWithoutCallingItASessionFailure() {
-        CapturingAppender appender = new CapturingAppender();
-        Logger.getLogger(CoopNetPump.class).addAppender(appender);
+        LogCapture appender = LogCapture.attach(CoopNetPump.class);
         try {
             RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
             CoopSessionState session = activeHostSession();
@@ -3735,7 +3736,7 @@ class CoopNetPumpTest {
                             .filter(line -> line.contains("closed without a resume")).count(),
                     "a partner walking back in is not a grace expiry");
         } finally {
-            Logger.getLogger(CoopNetPump.class).removeAppender(appender);
+            appender.detach();
         }
     }
 
@@ -3811,8 +3812,7 @@ class CoopNetPumpTest {
      */
     @Test
     void theGuestsLobbyReleaseLineDoesNotInventAStartAnywayFlag() {
-        CapturingAppender appender = new CapturingAppender();
-        Logger.getLogger(CoopNetPump.class).addAppender(appender);
+        LogCapture appender = LogCapture.attach(CoopNetPump.class);
         try {
             RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
             CoopSessionState session = new CoopSessionState(() -> "guest-player");
@@ -3840,7 +3840,7 @@ class CoopNetPumpTest {
             assertEquals(List.of("Coop lobby released after 4 s"), released,
                     "no flag the guest cannot know");
         } finally {
-            Logger.getLogger(CoopNetPump.class).removeAppender(appender);
+            appender.detach();
         }
     }
 
@@ -4496,25 +4496,6 @@ class CoopNetPumpTest {
                 });
     }
 
-    private static Object defaultValue(Class<?> type) {
-        if (!type.isPrimitive()) {
-            return null;
-        }
-        if (type == boolean.class) {
-            return false;
-        }
-        if (type == float.class) {
-            return 0f;
-        }
-        if (type == long.class) {
-            return 0L;
-        }
-        if (type == void.class) {
-            return null;
-        }
-        return 0;
-    }
-
     /**
      * net-16 / ui-session-1: a retryable reject drained BEFORE the drop leaves REJECTED behind, and
      * the rewind out of it means guestRearmLobby - the only other place that cleared the reason -
@@ -4917,140 +4898,6 @@ class CoopNetPumpTest {
 
         assertEquals(1, service.expectedTokens.size());
         assertNull(service.expectedTokens.get(0), "the token must be cleared, not left armed");
-    }
-
-    private static class RecordingNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-        final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
-        final List<CoopMessages.Message> sent = new ArrayList<>();
-        /** Queued but not yet handed to a socket; {@code flushOutbound} is what empties it. */
-        private final Queue<CoopMessages.Message> pendingOutbound = new ArrayDeque<>();
-        /**
-         * Messages that actually reached the wire, in order. The real transport drops whatever is
-         * still queued when it closes a link, so anything missing here never left this machine.
-         */
-        final List<CoopMessages.Message> flushed = new ArrayList<>();
-        /** Every setExpectedSessionToken call, nulls included — the clear is as load-bearing as the set. */
-        private final List<String> expectedTokens = new ArrayList<>();
-        /** Datagrams that went out over the real UDP path (Phase 20.1 M2 fallback tests). */
-        private final List<String> datagrams = new ArrayList<>();
-        private final Queue<String> inboundDatagrams = new ArrayDeque<>();
-        /** F4: reasons passed to {@link CoopNetService#stopReconnecting(String)}. */
-        final List<String> stopReconnectingReasons = new ArrayList<>();
-        /** F4: {@link CoopNetService#noteLobbyRejected()} call count. */
-        int lobbyRejectBackoffs;
-        private CoopDatagramStats stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-                0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "");
-        boolean connected = true;
-        /** Phase 29 M2 cadence input: what {@code outboundBacklogged()} is derived from. */
-        int outboundDepth;
-        /**
-         * A frame the kernel took only part of, parked in the peer's {@code pendingWrite}. Invisible
-         * to the queue depth, which is exactly why the terminal-stop linger has to ask
-         * {@code outboundIdle()} instead.
-         */
-        boolean partialWritePending;
-        /** Sockets attached over this service's life; a bump with no disconnect is a half-open replace. */
-        long connectionGeneration;
-
-        RecordingNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return connected;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-            sent.add(message);
-            pendingOutbound.add(message);
-        }
-
-        /**
-         * Models the transport reading a frame and the end of the stream in one pass: the message is
-         * handed over and the link is down by the time the frame's later steps look at it.
-         */
-        boolean dropWhenDrained;
-
-        @Override
-        public CoopMessages.Message pollInbound() {
-            CoopMessages.Message next = inbound.poll();
-            if (next != null && dropWhenDrained && inbound.isEmpty()) {
-                connected = false;
-            }
-            return next;
-        }
-
-        /** F4: every {@code stopReconnecting} reason, so a test can prove the loop really ended. */
-        @Override
-        public void stopReconnecting(String reason) {
-            stopReconnectingReasons.add(reason);
-            // The real one closes the socket, and the disconnect edge that follows is load-bearing.
-            connected = false;
-            // ...and closing a link discards its queue, which is the whole defect the linger fixes:
-            // a reject queued and never flushed is a reject the peer never hears.
-            pendingOutbound.clear();
-        }
-
-        /** F4: how many times the retry loop was backed off to the post-reject delay. */
-        @Override
-        public void noteLobbyRejected() {
-            lobbyRejectBackoffs++;
-        }
-
-        @Override
-        public void setExpectedSessionToken(String token) {
-            expectedTokens.add(token);
-        }
-
-        @Override
-        public void flushOutbound() {
-            CoopMessages.Message message;
-            while ((message = pendingOutbound.poll()) != null) {
-                flushed.add(message);
-            }
-        }
-
-        @Override
-        public void sendDatagram(String payload) {
-            datagrams.add(payload);
-        }
-
-        @Override
-        public String pollDatagram() {
-            return inboundDatagrams.poll();
-        }
-
-        @Override
-        public CoopDatagramStats datagramStats() {
-            return stats;
-        }
-
-        @Override
-        public int outboundQueueDepth() {
-            return outboundDepth;
-        }
-
-        @Override
-        public boolean outboundIdle() {
-            return outboundDepth <= 0 && pendingOutbound.isEmpty() && !partialWritePending;
-        }
-
-        @Override
-        public long connectionGeneration() {
-            return connectionGeneration;
-        }
-
-        private void noteUdpInboundAt(long atMillis) {
-            stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, atMillis, "");
-        }
     }
 
     private static final class RecordingSector {
@@ -5705,8 +5552,7 @@ class CoopNetPumpTest {
      */
     @Test
     void aSeedRejectArrivingWithTheDropIsAnsweredRatherThanHeldForAGrace() {
-        CapturingAppender marker = new CapturingAppender();
-        Logger.getLogger(CoopDoctorMarker.class).addAppender(marker);
+        LogCapture marker = LogCapture.attach(CoopDoctorMarker.class);
         try {
             RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
             CoopSessionState session = lobbyHostSession();
@@ -5738,15 +5584,14 @@ class CoopNetPumpTest {
                     "the lobby is back to waiting for a guest immediately");
             assertNull(session.sessionId());
         } finally {
-            Logger.getLogger(CoopDoctorMarker.class).removeAppender(marker);
+            marker.detach();
         }
     }
 
     /** The same drop with no reject at all: still no grace, because no session was ever joined. */
     @Test
     void aGuestThatVanishesBeforeTheSeedLockGetsNoGraceAndOneWarning() {
-        CapturingAppender log = new CapturingAppender();
-        Logger.getLogger(CoopNetPump.class).addAppender(log);
+        LogCapture log = LogCapture.attach(CoopNetPump.class);
         try {
             RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
             CoopSessionState session = lobbyHostSession();
@@ -5769,7 +5614,7 @@ class CoopNetPumpTest {
                     "one WARN, not a dialog: nothing failed that needs explaining as a desync");
             assertFalse(pump.desyncDialogRequestedForTest());
         } finally {
-            Logger.getLogger(CoopNetPump.class).removeAppender(log);
+            log.detach();
         }
     }
 
@@ -6731,8 +6576,7 @@ class CoopNetPumpTest {
      */
     @Test
     void aUiThatWillNotOpenTheDesyncDialogIsAskedOncePerSecondAndLoggedOnce() {
-        CapturingAppender appender = new CapturingAppender();
-        Logger.getLogger(coop.ui.CoopDialogController.class).addAppender(appender);
+        LogCapture appender = LogCapture.attach(coop.ui.CoopDialogController.class);
         try {
             RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
             CoopSessionState session = lobbyHostSession();
@@ -6759,7 +6603,7 @@ class CoopNetPumpTest {
                             .filter(line -> line.contains("could not open the desync dialog")).count(),
                     "one WARN per request, not one per frame");
         } finally {
-            Logger.getLogger(coop.ui.CoopDialogController.class).removeAppender(appender);
+            appender.detach();
         }
     }
 
@@ -6957,28 +6801,6 @@ class CoopNetPumpTest {
                             default -> throw new UnsupportedOperationException(method.getName());
                         };
                     });
-        }
-    }
-
-    private static final class CapturingAppender extends org.apache.log4j.AppenderSkeleton {
-        private final List<String> messages = new ArrayList<>();
-
-        private List<String> messages() {
-            return List.copyOf(messages);
-        }
-
-        @Override
-        protected void append(org.apache.log4j.spi.LoggingEvent event) {
-            messages.add(String.valueOf(event.getMessage()));
-        }
-
-        @Override
-        public void close() {
-        }
-
-        @Override
-        public boolean requiresLayout() {
-            return false;
         }
     }
 

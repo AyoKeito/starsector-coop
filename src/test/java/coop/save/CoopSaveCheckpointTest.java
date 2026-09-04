@@ -1,13 +1,10 @@
 package coop.save;
 
-import org.apache.log4j.AppenderSkeleton;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
-import org.apache.log4j.spi.LoggingEvent;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import coop.testing.LogCapture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -128,7 +125,7 @@ class CoopSaveCheckpointTest {
         CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
         ScriptedTarget target = new ScriptedTarget();
         target.canAutosave = false;
-        CapturingAppender log = CapturingAppender.attach(CoopSaveCheckpoint.class);
+        LogCapture log = LogCapture.attach(CoopSaveCheckpoint.class);
         try {
             checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
 
@@ -267,46 +264,4 @@ class CoopSaveCheckpointTest {
         }
     }
 
-    /** Minimal log4j sink so the give-up path can be asserted on rather than assumed. */
-    private static final class CapturingAppender extends AppenderSkeleton {
-        private final List<String> warnings = new ArrayList<>();
-        private Logger attachedTo;
-
-        private static CapturingAppender attach(Class<?> source) {
-            CapturingAppender appender = new CapturingAppender();
-            appender.attachedTo = Logger.getLogger(source);
-            appender.attachedTo.addAppender(appender);
-            return appender;
-        }
-
-        private void detach() {
-            if (attachedTo != null) {
-                attachedTo.removeAppender(this);
-            }
-        }
-
-        private boolean hasWarning() {
-            return !warnings.isEmpty();
-        }
-
-        private List<String> warnings() {
-            return warnings;
-        }
-
-        @Override
-        protected void append(LoggingEvent event) {
-            if (event.getLevel().isGreaterOrEqual(Level.WARN)) {
-                warnings.add(String.valueOf(event.getMessage()));
-            }
-        }
-
-        @Override
-        public void close() {
-        }
-
-        @Override
-        public boolean requiresLayout() {
-            return false;
-        }
-    }
 }

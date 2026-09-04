@@ -1,9 +1,6 @@
 package coop.config;
 
 import coop.config.CoopOptionsStore.Source;
-import org.apache.log4j.AppenderSkeleton;
-import org.apache.log4j.Logger;
-import org.apache.log4j.spi.LoggingEvent;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
@@ -15,6 +12,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Function;
+import coop.testing.LogCapture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -440,9 +438,7 @@ class CoopOptionsStoreTest {
      */
     @Test
     void aOneShotKeyInTheUserFileIsNotReportedAsAnUnknownEntry() {
-        CapturingAppender appender = new CapturingAppender();
-        Logger logger = Logger.getLogger(CoopOptionsStore.class);
-        logger.addAppender(appender);
+        LogCapture appender = LogCapture.attach(CoopOptionsStore.class);
         try {
             FakeSource source = new FakeSource();
             source.common = json(Map.of(
@@ -459,26 +455,7 @@ class CoopOptionsStoreTest {
             assertFalse(joined.contains("coop.adoptCampaignId"), joined);
             assertFalse(joined.contains("coop.newGameSeed"), joined);
         } finally {
-            logger.removeAppender(appender);
-        }
-    }
-
-    /** Minimal log4j sink; the store reports its file complaints as WARN and nowhere else. */
-    private static final class CapturingAppender extends AppenderSkeleton {
-        private final List<String> messages = new ArrayList<>();
-
-        @Override
-        protected void append(LoggingEvent event) {
-            messages.add(String.valueOf(event.getMessage()));
-        }
-
-        @Override
-        public void close() {
-        }
-
-        @Override
-        public boolean requiresLayout() {
-            return false;
+            appender.detach();
         }
     }
 

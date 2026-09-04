@@ -19,14 +19,13 @@ import coop.time.CoopSharedPauseCoordinator;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.function.Supplier;
+import coop.testing.RecordingNetService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -847,46 +846,6 @@ class CoopBattleBridgeTest {
     private static Supplier<String> sequencedIds(String... ids) {
         Iterator<String> iterator = List.of(ids).iterator();
         return () -> iterator.hasNext() ? iterator.next() : "extra-id";
-    }
-
-    private static final class RecordingNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-        private final List<CoopMessages.Message> sent = new ArrayList<>();
-        private final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
-        private long seq;
-
-        private RecordingNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public long nextSeq() {
-            return ++seq;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-            sent.add(message);
-        }
-
-        @Override
-        public CoopMessages.Message pollInbound() {
-            return inbound.poll();
-        }
-
-        @Override
-        public void flushOutbound() {
-        }
     }
 
     // ---- campaign proxies (ENGAGE_GUEST paths) -----------------------------------------------------
