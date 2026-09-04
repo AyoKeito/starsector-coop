@@ -3,6 +3,7 @@ package coop.util;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.config.CoopOptionsRegistry;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -43,7 +44,7 @@ import java.util.function.LongSupplier;
  */
 public final class CoopFrameProfiler {
 
-    public static final String PROPERTY = "coop.debug.frameProfile";
+    public static final String PROPERTY = CoopOptionsRegistry.DEBUG_FRAME_PROFILE;
     public static final String MEMORY_FLAG = "$coopFrameProfile";
 
     /** One summary every ~5 s of real time, measured on the profiler's own nano clock. */

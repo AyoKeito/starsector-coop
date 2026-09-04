@@ -3,6 +3,7 @@ package coop.newgame;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.impl.campaign.procgen.StarAge;
+import coop.config.CoopOptionsRegistry;
 import coop.util.CoopLog;
 
 import java.util.Locale;
@@ -33,9 +34,9 @@ import java.util.Objects;
 public final class CoopWorldSettings {
 
     /** Sector persistent data key for the size the sector was generated at. */
-    public static final String PERSISTENT_SECTOR_SIZE = "coop.sectorSize";
+    public static final String PERSISTENT_SECTOR_SIZE = CoopOptionsRegistry.SECTOR_SIZE;
     /** Sector persistent data key for the star age the sector was generated at. */
-    public static final String PERSISTENT_SECTOR_AGE = "coop.sectorAge";
+    public static final String PERSISTENT_SECTOR_AGE = CoopOptionsRegistry.SECTOR_AGE;
 
     /**
      * What the new-game dialog last pinned, held from the dialog until

@@ -3,6 +3,7 @@ package coop.util;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.config.CoopOptionsRegistry;
 
 /**
  * Opt-in switch for the dormant coop diagnostics (orbit-dump, dialog-state). These are off by default
@@ -23,7 +24,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
  * {@link CoopFrameProfiler} uses for its own toggle.
  */
 public final class CoopDebug {
-    public static final String PROPERTY = "coop.debug.diagnostics";
+    public static final String PROPERTY = CoopOptionsRegistry.DEBUG_DIAGNOSTICS;
     public static final String MEMORY_FLAG = "$coopDebug";
 
     /**
@@ -33,7 +34,7 @@ public final class CoopDebug {
      * frame + TCP one-way + guest frame). Dormant at 0, which is the default and what every shipped
      * session runs; it is a test instrument, not a tuning knob.
      */
-    public static final String INTERACTION_DELAY_PROPERTY = "coop.debug.interactionDelayMs";
+    public static final String INTERACTION_DELAY_PROPERTY = CoopOptionsRegistry.DEBUG_INTERACTION_DELAY_MS;
 
     /**
      * Sanity cap on the lever: past this the session is unplayable and the value is a typo.

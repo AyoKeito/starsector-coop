@@ -3,6 +3,7 @@ package coop.debug;
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import coop.config.CoopOptionsRegistry;
 import coop.net.CoopNetPump;
 import coop.util.CoopLog;
 
@@ -57,7 +58,7 @@ import java.util.Objects;
 public final class CoopAgentBridge implements EveryFrameScript {
 
     /** Set to the port the bridge should listen on. Anything unparsable means dormant. */
-    public static final String PORT_PROPERTY = "coop.debug.bridge";
+    public static final String PORT_PROPERTY = CoopOptionsRegistry.DEBUG_BRIDGE;
 
     /** Dispatch budget per frame, shared by every client. Excess input stays buffered. */
     static final int MAX_COMMANDS_PER_FRAME = 4;

@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.config.CoopOptionsRegistry;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
 import coop.session.CoopLobbyState;
@@ -4814,7 +4815,7 @@ class CoopNetPumpTest {
         withoutPlayerNameProperty(() -> assertEquals("Guest", pump.localPlayerName(CoopConnectionRole.GUEST)));
     }
 
-    private static final String PLAYER_NAME_PROPERTY = "coop.playerName";
+    private static final String PLAYER_NAME_PROPERTY = CoopOptionsRegistry.PLAYER_NAME;
 
     private static void withoutPlayerNameProperty(Runnable body) {
         String previous = System.getProperty(PLAYER_NAME_PROPERTY);

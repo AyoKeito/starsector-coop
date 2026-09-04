@@ -266,6 +266,8 @@ public final class CoopOptionsRegistry {
     public static final String ADOPT_CAMPAIGN_ID = "coop.adoptCampaignId";
     public static final String EXPECTED_CAMPAIGN_ID = "coop.expectedCampaignId";
     public static final String ALLOW_GAME_VERSION_MISMATCH = "coop.allowGameVersionMismatch";
+    // CoopRandom (coop-forks.jar, a separate compilation with its own classpath) carries its own
+    // copy of this literal rather than depending on this class.
     public static final String NEW_GAME_SEED = "coop.newGameSeed";
     public static final String SECTOR_SIZE = "coop.sectorSize";
     public static final String SECTOR_AGE = "coop.sectorAge";

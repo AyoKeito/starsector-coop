@@ -31,24 +31,24 @@ import java.util.regex.Pattern;
  * clamping getters.
  */
 public final class CoopNetStartupConfig {
-    public static final String HOST_PORT_PROPERTY = "coop.hostPort";
-    public static final String CONNECT_HOST_PROPERTY = "coop.connectHost";
-    public static final String CONNECT_PORT_PROPERTY = "coop.connectPort";
-    public static final String NEW_GAME_SEED_PROPERTY = "coop.newGameSeed";
+    public static final String HOST_PORT_PROPERTY = CoopOptionsRegistry.HOST_PORT;
+    public static final String CONNECT_HOST_PROPERTY = CoopOptionsRegistry.CONNECT_HOST;
+    public static final String CONNECT_PORT_PROPERTY = CoopOptionsRegistry.CONNECT_PORT;
+    public static final String NEW_GAME_SEED_PROPERTY = CoopOptionsRegistry.NEW_GAME_SEED;
     /**
      * {@code auto} (default) lets {@link CoopPortMapper} ask the router to forward the host port;
      * {@code off} skips it. Off exists because a few routers answer UPnP badly enough to be worth
      * not talking to, and because a host on a VPN pseudo-LAN or a manual port forward has nothing to
      * gain from the attempt.
      */
-    public static final String PORT_MAPPING_PROPERTY = "coop.portMapping";
+    public static final String PORT_MAPPING_PROPERTY = CoopOptionsRegistry.PORT_MAPPING;
     /**
      * Phase 20.2: how long a dropped socket keeps its session alive before the session really ends,
      * in seconds. Default {@link #DEFAULT_RECONNECT_GRACE_SECONDS}. {@code 0} disables the grace
      * entirely and restores the pre-20.2 "every drop ends the session" behaviour, which is worth
      * keeping reachable for anyone debugging a teardown path.
      */
-    public static final String RECONNECT_GRACE_PROPERTY = "coop.reconnectGraceSeconds";
+    public static final String RECONNECT_GRACE_PROPERTY = CoopOptionsRegistry.RECONNECT_GRACE_SECONDS;
     /**
      * Phase 20.4 optional lobby password. Set on both installs; unset (or blank) on the host means no
      * password is asked for and the lobby exchange is byte-identical to the pre-20.4 one.
@@ -57,20 +57,20 @@ public final class CoopNetStartupConfig {
      * {@code SHA-256(password + nonce)} over a fresh host nonce, and what it buys is that a port
      * scanner who finds the open port cannot join. Confidentiality is the VPN tier's job.
      */
-    public static final String PASSWORD_PROPERTY = "coop.password";
+    public static final String PASSWORD_PROPERTY = CoopOptionsRegistry.PASSWORD;
     /**
      * Phase 20.5 peer-table capacity. Any value other than {@link #MAX_GUESTS_V1} is clamped with a
      * warning: the transport is N-ready, the <em>gameplay</em> arbitration is not (Phase 27), and
      * silently honouring {@code coop.maxGuests=3} would produce a session that connects and then
      * misbehaves in ways no test covers.
      */
-    public static final String MAX_GUESTS_PROPERTY = "coop.maxGuests";
+    public static final String MAX_GUESTS_PROPERTY = CoopOptionsRegistry.MAX_GUESTS;
     /**
      * Phase 20.6 HUD corner placement: {@code TR} (default), {@code TL}, {@code BR} or {@code BL},
      * case-insensitive. See {@link coop.ui.CoopHudCorner#parse(String)} for the fallback behaviour on
      * an unrecognised value.
      */
-    public static final String HUD_CORNER_PROPERTY = "coop.hudCorner";
+    public static final String HUD_CORNER_PROPERTY = CoopOptionsRegistry.HUD_CORNER;
 
     /** The only supported guest count in v1. */
     public static final int MAX_GUESTS_V1 = 1;
