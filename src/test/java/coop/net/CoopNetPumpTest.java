@@ -3621,7 +3621,13 @@ class CoopNetPumpTest {
 
         // The session record is still live, so without the whitelist every campaign handler would
         // run for whoever happens to be on the far end of this socket.
+        //
+        // net-fix-5: the generation bump is what makes this a DIFFERENT socket. The real transport
+        // cannot produce a reconnect without one - every attach increments the counter - and the
+        // stamp it puts on inbound messages is now what tells the departing partner's last word apart
+        // from the first thing a stranger says.
         service.connected = true;
+        service.connectionGeneration++;
         service.inbound.add(CoopMessages.worldDelta("session-a", 5L, 2000L,
                 "entity-1", "CONSUME", true, "", "guest-player"));
         pump.advance(0f);
@@ -3637,6 +3643,102 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         assertEquals(1, countOf(service, CoopMessages.Type.WORLD_DELTA));
+    }
+
+    /**
+     * net-fix-5. The failure this closes: inbound messages carried no record of which socket produced
+     * them, so the pre-drain labelled them by position — "everything drained before the drop edge came
+     * from the partner". One {@code pollNetworkLocked} closes a stale link and accepts its replacement,
+     * so that drain routinely mixes the dead connection's tail with the first frames of a socket that
+     * has authenticated nothing, and tagged both proven. A {@code WORLD_DELTA} from the replacement
+     * then bypassed the grace whitelist and mutated the host's campaign before any password or resume
+     * proof.
+     */
+    @Test
+    void aReplacementConnectionsTrafficIsIgnoredWhileTheDeadTailIsStillApplied() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.sent.clear();
+
+        // The half-open link was closed and its replacement accepted inside one poll, so isConnected()
+        // reads true either side of the edge and both sockets' frames sit in the same queue. Generation
+        // 0 is the partner's dying connection; generation 1 is whoever just took the slot.
+        service.connectionGeneration = 1L;
+        service.inbound.add(CoopMessages.worldDelta("session-a", 5L, 2000L,
+                "entity-predrop", "CONSUME", true, "", "guest-player"));
+        service.inboundGenerations.add(0L);
+        service.inbound.add(CoopMessages.worldDelta("session-a", 6L, 2000L,
+                "entity-stranger", "CONSUME", true, "", "someone-else"));
+        service.inboundGenerations.add(1L);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(),
+                "the replacement is a drop edge and opens the window");
+        assertEquals(1L, pump.preDropMessagesAppliedForTest(),
+                "exactly one of the two came off the connection that carried the session");
+        List<CoopMessages.Message> echoed = service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.WORLD_DELTA)
+                .toList();
+        assertEquals(1, echoed.size(), "only the dead connection's tail may be applied: " + echoed);
+        assertTrue(echoed.get(0).payloadJson().contains("entity-predrop"),
+                "the applied delta is the partner's last word, not the stranger's: "
+                        + echoed.get(0).payloadJson());
+    }
+
+    /**
+     * The same rule when the drop is an ordinary disconnect with no replacement behind it: the
+     * generation does not move, the queued tail is still the proven connection's, and it is applied.
+     * The guard against over-correcting the fix above.
+     */
+    @Test
+    void aPlainDisconnectStillAppliesTheDeadConnectionsQueuedTail() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+        service.sent.clear();
+
+        service.inbound.add(CoopMessages.worldDelta("session-a", 5L, 2000L,
+                "entity-predrop", "CONSUME", true, "", "guest-player"));
+        service.connected = false;
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(), "the window opened");
+        assertEquals(1L, pump.preDropMessagesAppliedForTest());
+        assertEquals(1, countOf(service, CoopMessages.Type.WORLD_DELTA),
+                "no socket replaced this one, so the tail in the queue is the partner's");
+    }
+
+    /**
+     * net-fix-7: the transport reports which snapshot the queue cap threw away, and the pump forces
+     * the producers that suppress unchanged content to send it again. Without this a dropped
+     * {@code NPC_FLEET_SET} was permanent — {@code sendSetIfChanged} skips every send while the roster
+     * hash is unchanged — and the guest kept rendering fleets the host no longer had.
+     */
+    @Test
+    void aSnapshotTheQueueCapDiscardedIsForcedBackOntoTheWire() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+
+        service.overflowDroppedSnapshotTypes.add(CoopMessages.Type.NPC_FLEET_SET);
+        service.overflowDroppedSnapshotTypes.add(CoopMessages.Type.MISSION_POOL_SNAPSHOT);
+        // TIME_SNAPSHOT goes out again every few frames on its own, so it must NOT force anything.
+        service.overflowDroppedSnapshotTypes.add(CoopMessages.Type.TIME_SNAPSHOT);
+        pump.advance(0f);
+
+        assertEquals(java.util.Set.of(CoopMessages.Type.NPC_FLEET_SET,
+                        CoopMessages.Type.MISSION_POOL_SNAPSHOT),
+                pump.overflowSnapshotResendsForcedForTest(),
+                "only the producers that suppress an unchanged hash owe a forced resend");
+        assertTrue(service.overflowDroppedSnapshotTypes.isEmpty(),
+                "the report is drained, so one drop cannot force a resend every frame after it");
     }
 
     @Test
@@ -4714,7 +4816,7 @@ class CoopNetPumpTest {
         }
 
         @Override
-        public CoopMessages.Message pollInbound() {
+        public Inbound pollInboundEntry() {
             return null;
         }
 
@@ -6145,12 +6247,12 @@ class CoopNetPumpTest {
         }
 
         @Override
-        public CoopMessages.Message pollInbound() {
+        public Inbound pollInboundEntry() {
             if (throwOnNextPoll) {
                 throwOnNextPoll = false;
                 throw new IllegalStateException("simulated transport failure mid-frame");
             }
-            return super.pollInbound();
+            return super.pollInboundEntry();
         }
     }
 

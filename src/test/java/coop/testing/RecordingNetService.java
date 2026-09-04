@@ -53,6 +53,21 @@ public class RecordingNetService extends CoopNetService {
     /** Messages a test wants the next {@link #pollInbound()} calls to return. */
     public final Queue<CoopMessages.Message> inbound = new ArrayDeque<>();
 
+    /**
+     * Connection generations to stamp onto the next messages taken from {@link #inbound}, one per
+     * message, in the same order (net-fix-5). Empty means "stamp whatever
+     * {@link #connectionGeneration} currently reads", which is what a test that never thinks about
+     * provenance wants: one connection, one generation, and every message on it.
+     *
+     * <p>A test only needs to fill this to model the case the stamp exists for — a poll that reads
+     * the dying connection's tail and the replacement socket's first frames into the same queue.
+     */
+    public final Queue<Long> inboundGenerations = new ArrayDeque<>();
+
+    /** Snapshot types {@link #drainOverflowDroppedSnapshotTypes()} should report once (net-fix-7). */
+    public final java.util.Set<CoopMessages.Type> overflowDroppedSnapshotTypes =
+            java.util.EnumSet.noneOf(CoopMessages.Type.class);
+
     /** Queued but not yet handed to a socket; {@link #flushOutbound} is what empties it. */
     private final Queue<CoopMessages.Message> pendingOutbound = new ArrayDeque<>();
 
@@ -149,13 +164,32 @@ public class RecordingNetService extends CoopNetService {
         pendingOutbound.add(message);
     }
 
+    /**
+     * The primitive the real service polls through, so overriding this one covers
+     * {@link #pollInbound()} as well.
+     */
     @Override
-    public CoopMessages.Message pollInbound() {
+    public Inbound pollInboundEntry() {
         CoopMessages.Message next = inbound.poll();
-        if (next != null && dropWhenDrained && inbound.isEmpty()) {
+        if (next == null) {
+            return null;
+        }
+        if (dropWhenDrained && inbound.isEmpty()) {
             connected = false;
         }
-        return next;
+        Long stamped = inboundGenerations.poll();
+        return new Inbound(next, stamped == null ? connectionGeneration : stamped);
+    }
+
+    @Override
+    public java.util.Set<CoopMessages.Type> drainOverflowDroppedSnapshotTypes() {
+        if (overflowDroppedSnapshotTypes.isEmpty()) {
+            return java.util.Collections.emptySet();
+        }
+        java.util.Set<CoopMessages.Type> drained =
+                java.util.EnumSet.copyOf(overflowDroppedSnapshotTypes);
+        overflowDroppedSnapshotTypes.clear();
+        return drained;
     }
 
     /** F4: every {@code stopReconnecting} reason, so a test can prove the loop really ended. */

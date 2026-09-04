@@ -74,6 +74,31 @@ public final class CoopPeerLink {
      * ceiling exists to bound work per poll, not to punch holes in a TCP stream.
      */
     private ByteBuffer deferredInbound;
+    /**
+     * {@link CoopNetService#connectionGeneration()} at the instant this slot's current channel
+     * attached, stamped onto every message framed off it (net-fix-5).
+     *
+     * <p>The failure it prevents: inbound messages used to reach the pump with no record of which
+     * socket produced them, and the pump labelled them by <em>position</em> — "everything drained
+     * before the drop edge came from the partner". One {@code pollNetworkLocked} can close a stale
+     * link and accept its replacement, so that drain routinely mixed the dead connection's tail with
+     * the first frames of a socket that has proved nothing at all, and tagged both as proven. A
+     * {@code WORLD_DELTA} or {@code MARKET_TXN} from the replacement then bypassed the reconnect
+     * grace whitelist and mutated the host's campaign before any password or resume proof.
+     */
+    private long attachGeneration;
+    /**
+     * Whether the peer on the <em>current</em> connection has proved itself: the handshake was
+     * accepted, or a session resume was (red-team A3 follow-up).
+     *
+     * <p>Per connection, not per session, and that is the whole point. The abuse gates used to read
+     * the service-wide {@code expectedSessionToken}, which stays set for the entire reconnect grace
+     * window — so any socket that happened to hold the slot during a window inherited a proof it had
+     * never given: exempt from the connection throttle, exempt from the failed-password cooldown,
+     * remembered as a "known peer" for minutes after it was closed, and immune to the handshake
+     * deadline. Attachment happens before authentication, so that is a stranger's flag to claim.
+     */
+    private boolean proven;
 
     /**
      * The peer's full player id, learned from the first TCP message it stamps (Phase 20.5). Null
@@ -146,15 +171,24 @@ public final class CoopPeerLink {
      *                                 and a reconnecting guest behind NAT almost always comes back on
      *                                 a different port. The guest's target is configured, so it keeps
      *                                 its own.
+     * @param attachGeneration         the value {@link CoopNetService#connectionGeneration()} reports
+     *                                 for <em>this</em> channel, stamped onto every message framed off
+     *                                 it. The service bumps the counter before calling, so the stamp
+     *                                 equals what the pump observes for the same socket; see
+     *                                 {@link #attachGeneration}.
      */
     void attach(SocketChannel channel, InetAddress pinnedPeerAddress, long nowMillis,
-                boolean clearValidatedUdpAddress) {
+                boolean clearValidatedUdpAddress, long attachGeneration) {
         this.channel = channel;
         requeuePendingWriteForResend();
         this.inboundFrameLength = 0;
         this.discardingOversizedFrame = false;
         this.lastInboundFrameAtMillis = nowMillis;
         this.attachedAtMillis = nowMillis;
+        this.attachGeneration = attachGeneration;
+        // A new socket has proved nothing, whatever the previous one proved and whatever session the
+        // service is still holding open for a peer that has not come back yet.
+        this.proven = false;
         this.deferredInbound = null;
         this.pinnedPeerAddress = pinnedPeerAddress;
         this.senderId = null;
@@ -206,6 +240,11 @@ public final class CoopPeerLink {
         this.inboundFrameLength = 0;
         this.discardingOversizedFrame = false;
         this.deferredInbound = null;
+        // The proof belonged to the socket, so it dies with it. Callers that need to read it one last
+        // time (closeLinkLocked, deciding whether this address is worth remembering) do so before
+        // calling this. attachGeneration survives on purpose: messages already framed off the dead
+        // channel carry its stamp, and the pump is still deciding what to do with them.
+        this.proven = false;
     }
 
     SocketChannel channel() {
@@ -228,6 +267,25 @@ public final class CoopPeerLink {
     /** When this slot's current channel attached; 0 when nothing is attached. See {@link #attach}. */
     long attachedAtMillis() {
         return attachedAtMillis;
+    }
+
+    /** Connection generation of the channel currently in this slot; see {@link #attachGeneration}. */
+    long attachGeneration() {
+        return attachGeneration;
+    }
+
+    /** Whether the peer on the current connection has proved itself; see {@link #proven}. */
+    boolean proven() {
+        return proven;
+    }
+
+    /**
+     * Records that the peer on the current connection proved itself. Called from
+     * {@link CoopNetService#setExpectedSessionToken(String)} with a non-null token, which is the one
+     * instant at which a handshake or a resume has been accepted for whoever holds this slot.
+     */
+    void markProven() {
+        this.proven = true;
     }
 
     /** Bytes carried over from a poll that hit its frame ceiling, or null. */
@@ -405,22 +463,32 @@ public final class CoopPeerLink {
 
     /**
      * Discards the oldest message the coalescing whitelist calls a superseded snapshot (red-team A4).
-     * Called only at the queue's hard cap, and only ever on a snapshot: past the cap something must
-     * go, and the one class of message whose loss changes nothing is the one a newer copy of is
-     * already queued behind it.
+     * Called only at the queue's hard cap: past the cap something must go, and a snapshot is the one
+     * class of message whose loss cannot change the outcome of the game the way losing a MARKET_TXN
+     * or a COLONY_FOUNDED can.
      *
-     * @return true when a message was dropped; false when the whole queue is semantic events, which
-     *         is the case the caller escalates to dropping the link
+     * <p><b>What is dropped here is usually the only copy.</b> This used to claim that "a newer copy
+     * is already queued behind it", which is false and was never true: {@link #replaceQueued} keeps
+     * exactly one queued message per coalescing key, so the oldest coalescable message <em>is</em> the
+     * newest one of its kind. The loss is only harmless when the producer sends that snapshot again —
+     * and {@code NPC_FLEET_SET} and {@code MISSION_POOL_SNAPSHOT} both suppress resends while their
+     * content hash is unchanged, so for those the drop was permanent until the roster changed or the
+     * link reconnected (ghost or missing NPC fleets on the guest, a stale bar). That is why the caller
+     * now reports the dropped type back to the pump, which forces those producers to resend.
+     *
+     * @return the message that was dropped, or null when the whole queue is semantic events — the
+     *         case the caller escalates to dropping the link
      */
-    boolean dropOldestCoalescable() {
+    CoopMessages.Message dropOldestCoalescable() {
         ListIterator<CoopMessages.Message> cursor = outbound.listIterator();
         while (cursor.hasNext()) {
-            if (CoopNetService.coalesceKey(cursor.next()) != null) {
+            CoopMessages.Message candidate = cursor.next();
+            if (CoopNetService.coalesceKey(candidate) != null) {
                 cursor.remove();
-                return true;
+                return candidate;
             }
         }
-        return false;
+        return null;
     }
 
     /** Discards everything queued for a link being dropped; @return how many messages were lost. */
@@ -600,6 +668,8 @@ public final class CoopPeerLink {
         deferredInbound = null;
         lastInboundFrameAtMillis = 0L;
         attachedAtMillis = 0L;
+        attachGeneration = 0L;
+        proven = false;
         senderId = null;
         pinnedPeerAddress = null;
         validatedUdpAddress = null;

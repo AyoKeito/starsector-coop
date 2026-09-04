@@ -1210,6 +1210,32 @@ public final class CoopCampaignReplicator
     }
 
     /**
+     * Forgets that the bar pool was already broadcast, so {@link #tickBarPool()} sends it again on
+     * its next poll even though nothing about the pool changed (net-fix-7).
+     *
+     * <p>Called when the transport's outbound queue cap discarded a {@code MISSION_POOL_SNAPSHOT}.
+     * The cap treats snapshots as safe to drop because a newer one follows, which is exactly what
+     * {@link CoopBarPoolCapture#markChanged} guarantees will <em>not</em> happen: the signature is
+     * unchanged, so the watcher sends nothing and the guest keeps rendering a bar the host no longer
+     * has. The poll timer is cleared too, so the resend is one frame away rather than one poll
+     * interval.
+     */
+    public void forceResendMissionPool() {
+        barPoolCapture.reset();
+        lastBarPoolPollMillis = 0L;
+    }
+
+    /**
+     * Pulls the next player-reputation snapshot forward to the next tick (net-fix-7), for the same
+     * reason as {@link #forceResendMissionPool()}. This one is on a timer rather than a content hash,
+     * so it heals on its own — but {@code PLAYER_REP_SYNC_INTERVAL_MILLIS} of guest-side standings
+     * drift is long enough to be visible in a dialog, and clearing a timestamp costs nothing.
+     */
+    public void forceResendPlayerRepSnapshot() {
+        lastPlayerRepSyncMillis = 0L;
+    }
+
+    /**
      * Phase 12c host bar-pool watcher: poll the global portside pool, and on any membership, seed,
      * pin or <em>order</em> change push the whole ordered list to the guest.
      *

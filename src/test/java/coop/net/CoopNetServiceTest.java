@@ -204,6 +204,95 @@ class CoopNetServiceTest {
         }
     }
 
+    /**
+     * net-fix-5: every inbound message carries the generation of the socket it was framed off, and
+     * the stamp changes when the socket does.
+     *
+     * <p>Without it the pump has no way to tell the departing partner's last campaign deltas from the
+     * first thing a replacement socket says, because a single {@code pollNetworkLocked} can close the
+     * stale link, accept the replacement and read from both — so the two peers' messages come out of
+     * one queue with nothing but their order to tell them apart, and order is exactly what does not
+     * survive that.
+     */
+    @Test
+    void inboundMessagesAreStampedWithTheGenerationOfTheSocketTheyCameFrom() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        CoopNetService stranded = new CoopNetService();
+        CoopNetService returning = new CoopNetService();
+        try {
+            host.startHost(port);
+            stranded.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, stranded), "first guest connected");
+
+            stranded.send(CoopMessages.ping(null, stranded.nextSeq(), 1000L));
+            AtomicReference<CoopNetService.Inbound> first = new AtomicReference<>();
+            waitUntil(() -> {
+                host.flushOutbound();
+                stranded.flushOutbound();
+                first.set(host.pollInboundEntry());
+                return first.get() != null;
+            }, "host read the first guest's ping");
+            long firstGeneration = first.get().connectionGeneration();
+            assertEquals(host.connectionGeneration(), firstGeneration,
+                    "the stamp is the value the pump watches, not one behind it");
+
+            // The held channel goes quiet for the whole half-open threshold, so the next connection
+            // replaces it: close and attach inside one poll, with no isConnected() edge in between.
+            clock.addAndGet(CoopNetService.HALF_OPEN_REPLACE_MILLIS);
+            returning.connect("127.0.0.1", port);
+            returning.send(CoopMessages.ping(null, returning.nextSeq(), 2000L));
+
+            AtomicReference<CoopNetService.Inbound> second = new AtomicReference<>();
+            waitUntil(() -> {
+                host.flushOutbound();
+                returning.flushOutbound();
+                second.set(host.pollInboundEntry());
+                return second.get() != null;
+            }, "host read the replacement's ping");
+
+            assertNotEquals(firstGeneration, second.get().connectionGeneration(),
+                    "a different socket must produce a different stamp");
+            assertEquals(host.connectionGeneration(), second.get().connectionGeneration());
+            assertEquals(CoopMessages.Type.PING, second.get().message().type());
+        } finally {
+            returning.shutdown();
+            stranded.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * net-fix-7: the queue cap reports which snapshot type it discarded.
+     *
+     * <p>The cap drops the oldest coalescable message on the reasoning that a superseded snapshot
+     * costs nothing. {@link CoopPeerLink#replaceQueued} keeps exactly one message per coalescing key,
+     * so what it drops is the only copy — and {@code NPC_FLEET_SET} is suppressed by its producer
+     * while the roster hash is unchanged, so nothing sends another one. The report is what lets the
+     * pump force that producer's hand.
+     */
+    @Test
+    void aSnapshotDroppedAtTheQueueCapIsReportedByType() {
+        CoopNetService service = new CoopNetService(() -> 1_000L);
+
+        assertTrue(service.drainOverflowDroppedSnapshotTypes().isEmpty(), "nothing dropped yet");
+
+        // One coalescable snapshot at the head, then a wall of semantic events behind it. The events
+        // are what push the depth past the cap, and the snapshot is the only thing there is to drop.
+        service.send(CoopMessages.npcFleetSet("session-a", service.nextSeq(), 1_000L, 0L, "set"));
+        for (int i = 0; i <= CoopNetService.QUEUE_HARD_CAP_MESSAGES; i++) {
+            service.send(CoopMessages.worldDelta("session-a", service.nextSeq(), 1_000L,
+                    "entity-" + i, "CONSUME", true, "", "guest-player"));
+        }
+
+        assertEquals(java.util.Set.of(CoopMessages.Type.NPC_FLEET_SET),
+                service.drainOverflowDroppedSnapshotTypes(),
+                "the transport must name what it threw away, not just count it");
+        assertTrue(service.drainOverflowDroppedSnapshotTypes().isEmpty(),
+                "draining clears it, so one drop cannot force a resend on every frame after it");
+    }
+
     @Test
     void droppingTheActiveConnectionTakesTheOrdinaryDisconnectPathAndTheGuestRetries() throws Exception {
         int port = reserveLocalPort();
