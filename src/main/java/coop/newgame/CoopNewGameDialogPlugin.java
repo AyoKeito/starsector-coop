@@ -100,6 +100,8 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
 
     private void resetCoopState() {
         // The engine instantiates settings plugins once and reuses the instance across dialogs.
+        // A dialog that is opened and abandoned must not leave its settings behind for the next one.
+        CoopWorldSettings.clearPending();
         config = null;
         coopLaunch = false;
         data = null;
@@ -188,6 +190,10 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
             CoopSectorProcGen.applyCoopSeedIfPresent(data, announce);
             data.setSectorSize(choices.sectorSize());
             data.setSectorAge(choices.sectorAge());
+            // The sector about to be generated will not remember either of these, and no getter
+            // brings them back: this is the one moment they are known. CoopModPlugin moves them onto
+            // the sector once procgen has made one.
+            CoopWorldSettings.rememberPending(choices.sectorSize(), choices.sectorAge());
 
             String line = CoopNewGameChoices.pinnedLogLine(
                     seedStringOf(data), choices.sectorSize(), choices.sectorAge(), role());

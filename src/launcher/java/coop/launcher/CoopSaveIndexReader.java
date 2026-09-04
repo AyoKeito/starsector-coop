@@ -73,6 +73,10 @@ public final class CoopSaveIndexReader {
     private static final String KEY_AUTOSAVE = "autosave";
     private static final String KEY_ROLE = "role";
     private static final String KEY_SEED_STRING = "seedString";
+    // Added by the mod on 2026-09-04, and optional for good: rows written before then have no
+    // sector size or star age, and the version stayed at 1 precisely so both kinds keep parsing.
+    private static final String KEY_SECTOR_SIZE = "sectorSize";
+    private static final String KEY_SECTOR_AGE = "sectorAge";
 
     /** {@code 2026-05-28 18:16:01.129 UTC} - the shape {@code descriptor.xml} writes. */
     private static final DateTimeFormatter DESCRIPTOR_DATE =
@@ -101,11 +105,15 @@ public final class CoopSaveIndexReader {
      * One save, after the join: index row plus whatever {@code descriptor.xml} had to say about it.
      * Every instance names a folder that existed when the index was read.
      *
-     * @param autosave {@code null} when neither the row nor the descriptor could tell
+     * @param autosave   {@code null} when neither the row nor the descriptor could tell
+     * @param sectorSize the size the sector was generated at, {@code ""} on a row that does not
+     *                   record it -- which every row written before 2026-09-04 is
+     * @param sectorAge  the star age the sector was generated at, same rule
      */
     public record Save(String campaignId, String saveDirName, String characterName, int level,
                        String gameDate, long gameDateTimestamp, long savedAtMillis,
-                       Boolean autosave, String role, String seedString) {
+                       Boolean autosave, String role, String seedString, String sectorSize,
+                       String sectorAge) {
 
         public Save {
             campaignId = text(campaignId);
@@ -114,6 +122,13 @@ public final class CoopSaveIndexReader {
             gameDate = text(gameDate);
             role = text(role).toUpperCase(Locale.ROOT);
             seedString = text(seedString);
+            sectorSize = text(sectorSize).toLowerCase(Locale.ROOT);
+            sectorAge = text(sectorAge).toLowerCase(Locale.ROOT);
+        }
+
+        /** True when this row knows both world settings, so the launcher can put them back. */
+        public boolean hasWorldSettings() {
+            return !sectorSize.isEmpty() && !sectorAge.isEmpty();
         }
 
         /** True for a save this player made as the host, or outside a session. */
@@ -302,7 +317,8 @@ public final class CoopSaveIndexReader {
     /** An index row before the folder join. */
     private record Row(String campaignId, String saveDirName, String characterName, int level,
                        String gameDate, long gameDateTimestamp, long savedAtMillis,
-                       Boolean autosave, String role, String seedString) {
+                       Boolean autosave, String role, String seedString, String sectorSize,
+                       String sectorAge) {
     }
 
     private static Row row(JSONObject json) {
@@ -333,7 +349,9 @@ public final class CoopSaveIndexReader {
                 json.optLong(KEY_SAVED_AT_MILLIS, 0L),
                 autosave,
                 text(json.optString(KEY_ROLE, "")),
-                text(json.optString(KEY_SEED_STRING, "")));
+                text(json.optString(KEY_SEED_STRING, "")),
+                text(json.optString(KEY_SECTOR_SIZE, "")),
+                text(json.optString(KEY_SECTOR_AGE, "")));
     }
 
     /** Index row plus descriptor, the descriptor winning every field it has an answer for. */
@@ -357,7 +375,8 @@ public final class CoopSaveIndexReader {
             }
         }
         return new Save(row.campaignId, folder, character, level, row.gameDate,
-                row.gameDateTimestamp, savedAt, autosave, row.role, row.seedString);
+                row.gameDateTimestamp, savedAt, autosave, row.role, row.seedString, row.sectorSize,
+                row.sectorAge);
     }
 
     /**

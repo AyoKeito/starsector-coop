@@ -3,6 +3,7 @@ package coop.launcher;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * The model behind the host's <b>Campaign</b> drop-down and the one line of advice under both
@@ -38,14 +39,20 @@ public final class CoopCampaignPicker {
      *                   entry, and the seed the mod recorded in the save index on a saved campaign.
      *                   {@code ""} on a row written before the mod recorded seeds, which is the one
      *                   case the launcher must not overwrite the seed box for.
+     * @param sectorSize the size that sector was generated at, and {@code ""} on a row that does
+     *                   not record it. Same rule as the seed: never recorded means never overwrite.
+     * @param sectorAge  the star age that sector was generated at, same rule
      */
-    public record Entry(String campaignId, String label, String folderName, String seedString) {
+    public record Entry(String campaignId, String label, String folderName, String seedString,
+                        String sectorSize, String sectorAge) {
 
         public Entry {
             campaignId = text(campaignId);
             label = text(label);
             folderName = text(folderName);
             seedString = text(seedString);
+            sectorSize = text(sectorSize);
+            sectorAge = text(sectorAge);
         }
 
         public boolean newCampaign() {
@@ -72,18 +79,22 @@ public final class CoopCampaignPicker {
         if (index != null && index.ok()) {
             for (CoopSaveIndexReader.Save save : index.newestPerHostCampaign()) {
                 entries.add(new Entry(save.campaignId(), save.label(zone), save.saveDirName(),
-                        save.seedString()));
+                        save.seedString(), save.sectorSize(), save.sectorAge()));
             }
         }
         return List.copyOf(entries);
     }
 
-    /** The first line of the drop-down on its own, for a seed that changed under it. */
+    /**
+     * The first line of the drop-down on its own, for a seed that changed under it. It carries no
+     * world settings: a new campaign's size and age are whatever the host's drop-downs say, and the
+     * drop-downs are the draft.
+     */
     public static Entry newCampaignEntry(String seed) {
         String trimmed = text(seed);
         return new Entry(NEW_CAMPAIGN_ID,
                 trimmed.isEmpty() ? "New campaign" : "New campaign (seed " + trimmed + ")", "",
-                trimmed);
+                trimmed, "", "");
     }
 
     /**
@@ -111,12 +122,39 @@ public final class CoopCampaignPicker {
      *                    knows their own seed
      */
     public static String seedAfterPick(Entry selected, String draftSeed, String currentSeed) {
+        return afterPick(selected, Entry::seedString, draftSeed, currentSeed);
+    }
+
+    /**
+     * What the Sector size drop-down should hold once the picker has moved to {@code selected}. Same
+     * argument as the seed, and the same fallback: a row that does not record its size leaves the
+     * drop-down where it was, because a wrong size in the invite builds the wrong sector on the
+     * partner's machine just as surely as a wrong seed does.
+     */
+    public static String sectorSizeAfterPick(Entry selected, String draftSize, String currentSize) {
+        return afterPick(selected, Entry::sectorSize, draftSize, currentSize);
+    }
+
+    /** What the Star age drop-down should hold once the picker has moved to {@code selected}. */
+    public static String sectorAgeAfterPick(Entry selected, String draftAge, String currentAge) {
+        return afterPick(selected, Entry::sectorAge, draftAge, currentAge);
+    }
+
+    /**
+     * The one rule all three controls follow: the saved campaign's own value wins, New restores the
+     * draft, and anything unrecorded leaves the control alone.
+     *
+     * @param recorded what to read off a saved entry; New is never asked, because a new campaign's
+     *                 settings are the draft by definition
+     */
+    private static String afterPick(Entry selected, Function<Entry, String> recorded, String draft,
+                                    String current) {
         if (selected == null || selected.newCampaign()) {
-            String draft = text(draftSeed);
-            return draft.isEmpty() ? text(currentSeed) : draft;
+            String drafted = text(draft);
+            return drafted.isEmpty() ? text(current) : drafted;
         }
-        String saved = selected.seedString();
-        return saved.isEmpty() ? text(currentSeed) : saved;
+        String saved = text(recorded.apply(selected));
+        return saved.isEmpty() ? text(current) : saved;
     }
 
     /** The folder line under the picker, or {@code ""} when a new campaign is selected. */
@@ -165,13 +203,23 @@ public final class CoopCampaignPicker {
         }
         String line = "Load the save \"" + save.characterName() + "\", level " + save.level()
                 + ", saved " + save.savedLocal(zone) + " (folder " + save.saveDirName() + ").";
-        if (save.seedString().isEmpty()) {
-            // The row predates the mod recording seeds, so the box above still shows whatever seed
-            // was last drafted. Loading a save does not use it - but the invite carries it, and a
-            // partner without a save of this campaign would generate a sector out of it.
+        // What the row does not record, the launcher cannot put in the boxes above, and those boxes
+        // are what the invite is built from. Loading a save does not use any of the three - but a
+        // partner without a save of this campaign generates a whole sector out of them.
+        boolean noSeed = save.seedString().isEmpty();
+        boolean noWorld = !save.hasWorldSettings();
+        if (noSeed && noWorld) {
+            line += " This save records neither its seed nor the sector size and star age it was"
+                    + " made with, so none of the three boxes above are this campaign's: your"
+                    + " partner has to load their own save of it rather than start a new game.";
+        } else if (noSeed) {
             line += " This save does not record its seed, so the Seed box above is not this"
                     + " campaign's: your partner has to load their own save of it rather than start"
                     + " a new game.";
+        } else if (noWorld) {
+            line += " This save does not record the sector size and star age it was made with, so"
+                    + " those two boxes above are still your own draft; the seed is this"
+                    + " campaign's.";
         }
         return line;
     }

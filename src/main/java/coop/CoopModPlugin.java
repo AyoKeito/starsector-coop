@@ -12,6 +12,7 @@ import coop.config.CoopOptionsRegistry;
 import coop.debug.CoopAgentBridge;
 import coop.handshake.CoopGameVersionCheck;
 import coop.fleet.CoopSystemDriveFrameHook;
+import coop.newgame.CoopWorldSettings;
 import coop.net.CoopNetPump;
 import coop.net.CoopNetPumpInstaller;
 import coop.net.CoopNetService;
@@ -426,6 +427,9 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void onNewGameAfterProcGen() {
         CoopSeedSync.storeCurrentSectorFingerprint();
+        // Sector size and star age have no getter on a generated sector, so the pair the new-game
+        // dialog pinned is written down here or lost. Nothing pending means nothing recorded.
+        CoopWorldSettings.storePendingIntoCurrentSector();
     }
 
     /**

@@ -214,12 +214,21 @@ public final class CoopLauncherApp {
     private boolean writingCampaignBox;
     /** True while the code, not the player, is writing the host seed field. */
     private boolean writingSeedField;
+    /** True while the code, not the player, is moving the sector size and star age drop-downs. */
+    private boolean writingWorldBoxes;
     /**
      * The seed for a new campaign, kept aside while a saved campaign is selected. The box itself
      * shows the picked campaign's own seed then, so this is the only copy of what the host had
      * drafted, and going back to New puts it back.
      */
     private String draftSeed = "";
+    /**
+     * The same for the two world drop-downs, which follow the picker for the reason the seed does: a
+     * saved campaign shows the settings its own sector was generated at, and New puts the host's
+     * draft back.
+     */
+    private String draftSectorSize = DEFAULT_SECTOR_SIZE;
+    private String draftSectorAge = DEFAULT_STAR_AGE;
     /** The campaign the picker was last on, so a pick can be told from a redraw of the same pick. */
     private String pickedCampaignId = CoopCampaignPicker.NEW_CAMPAIGN_ID;
 
@@ -624,8 +633,8 @@ public final class CoopLauncherApp {
             }
         });
         publicAddressField.getDocument().addDocumentListener(preview);
-        sectorSizeBox.addActionListener(event -> refreshInvitePreview());
-        sectorAgeBox.addActionListener(event -> refreshInvitePreview());
+        sectorSizeBox.addActionListener(event -> onWorldBoxEdited());
+        sectorAgeBox.addActionListener(event -> onWorldBoxEdited());
         return panel;
     }
 
@@ -1018,6 +1027,8 @@ public final class CoopLauncherApp {
                 registryDefault(CoopOptionsRegistry.HUD_CORNER));
         select(sectorSizeBox, config.value(CoopLauncherConfig.SECTOR_SIZE), DEFAULT_SECTOR_SIZE);
         select(sectorAgeBox, config.value(CoopLauncherConfig.SECTOR_AGE), DEFAULT_STAR_AGE);
+        draftSectorSize = selected(sectorSizeBox);
+        draftSectorAge = selected(sectorAgeBox);
         guestSectorSizeField.setText(orDefault(config.value(CoopLauncherConfig.SECTOR_SIZE),
                 DEFAULT_SECTOR_SIZE));
         guestSectorAgeField.setText(orDefault(config.value(CoopLauncherConfig.SECTOR_AGE),
@@ -1143,7 +1154,7 @@ public final class CoopLauncherApp {
      */
     private void onCampaignPicked() {
         CoopCampaignPicker.Entry entry = selectedCampaignEntry();
-        applyPickedSeed(entry);
+        applyPickedWorldSettings(entry);
         boolean newCampaign = CoopCampaignPicker.worldControlsEnabled(entry);
         hostSeedField.setEnabled(newCampaign);
         hostSeedGenerateButton.setEnabled(newCampaign);
@@ -1158,39 +1169,101 @@ public final class CoopLauncherApp {
     }
 
     /**
-     * The seed box follows the picker: a saved campaign puts its own seed there, New puts the draft
-     * back. Only on an actual change of pick - a redraw of the same pick must not fight the field.
+     * The seed box and the two world drop-downs follow the picker: a saved campaign puts its own
+     * seed, sector size and star age there, New puts the drafts back. Only on an actual change of
+     * pick - a redraw of the same pick must not fight the controls.
+     *
+     * <p>A campaign saved before the mod recorded a value has none, and that control is then left
+     * where the host had it; the hint line under the picker says so.
      *
      * <p>The write is queued rather than done here because this method is reachable from the seed
      * field's own document listener (a keystroke rebuilds the picker), and Swing throws
      * "Attempt to mutate in notification" for a document changed inside its own notification.
      */
-    private void applyPickedSeed(CoopCampaignPicker.Entry entry) {
+    private void applyPickedWorldSettings(CoopCampaignPicker.Entry entry) {
         String picked = entry == null ? CoopCampaignPicker.NEW_CAMPAIGN_ID : entry.campaignId();
         if (picked.equals(pickedCampaignId)) {
             return;
         }
         if (pickedCampaignId.isEmpty()) {
-            // Leaving New: whatever is in the box is the draft, even if it was never generated.
+            // Leaving New: whatever is in the controls is the draft, even if it was never generated.
             draftSeed = hostSeedField.getText().trim();
+            draftSectorSize = selected(sectorSizeBox);
+            draftSectorAge = selected(sectorAgeBox);
         }
         pickedCampaignId = picked;
-        String wanted = CoopCampaignPicker.seedAfterPick(entry, draftSeed,
-                hostSeedField.getText().trim());
-        if (wanted.equals(hostSeedField.getText().trim())) {
+        String currentSeed = hostSeedField.getText().trim();
+        String wantedSeed = CoopCampaignPicker.seedAfterPick(entry, draftSeed, currentSeed);
+        String wantedSize = knownOption(sectorSizeBox, "sector size",
+                CoopCampaignPicker.sectorSizeAfterPick(entry, draftSectorSize,
+                        selected(sectorSizeBox)));
+        String wantedAge = knownOption(sectorAgeBox, "star age",
+                CoopCampaignPicker.sectorAgeAfterPick(entry, draftSectorAge,
+                        selected(sectorAgeBox)));
+        boolean seedChanged = !wantedSeed.equals(currentSeed);
+        boolean sizeChanged = !wantedSize.equalsIgnoreCase(selected(sectorSizeBox));
+        boolean ageChanged = !wantedAge.equalsIgnoreCase(selected(sectorAgeBox));
+        if (!seedChanged && !sizeChanged && !ageChanged) {
             return;
         }
-        LOG.info("Campaign picked (" + (picked.isEmpty() ? "new" : picked) + "); seed field set to "
-                + wanted);
+        LOG.info("Campaign picked (" + (picked.isEmpty() ? "new" : picked) + "); seed=" + wantedSeed
+                + " sectorSize=" + wantedSize + " sectorAge=" + wantedAge);
         SwingUtilities.invokeLater(() -> {
             writingSeedField = true;
+            writingWorldBoxes = true;
             try {
-                hostSeedField.setText(wanted);
+                if (seedChanged) {
+                    hostSeedField.setText(wantedSeed);
+                }
+                if (sizeChanged) {
+                    select(sectorSizeBox, wantedSize, wantedSize);
+                }
+                if (ageChanged) {
+                    select(sectorAgeBox, wantedAge, wantedAge);
+                }
             } finally {
                 writingSeedField = false;
+                writingWorldBoxes = false;
             }
             refreshInvitePreview();
         });
+    }
+
+    /**
+     * {@code wanted} when the drop-down has it, and whatever is selected now when it does not. A
+     * value this launcher does not offer can only come from a save index written by another version
+     * of the mod, and snapping the box to its first entry would put a sector size in the invite that
+     * nobody chose.
+     */
+    private static String knownOption(JComboBox<String> box, String what, String wanted) {
+        String trimmed = wanted == null ? "" : wanted.trim();
+        for (int i = 0; i < box.getItemCount(); i++) {
+            if (trimmed.equalsIgnoreCase(box.getItemAt(i))) {
+                return trimmed;
+            }
+        }
+        if (!trimmed.isEmpty()) {
+            LOG.warn("The save index records " + what + " \"" + trimmed + "\", which this"
+                    + " launcher does not offer; leaving the drop-down where it is");
+        }
+        return selected(box);
+    }
+
+    /**
+     * A move of either world drop-down. While a new campaign is picked the boxes <em>are</em> the
+     * draft, so the draft follows them; picking a saved campaign disables both, so nothing but our
+     * own write can get here otherwise.
+     */
+    private void onWorldBoxEdited() {
+        if (writingWorldBoxes) {
+            // Our own write, made to match a pick that has already been applied everywhere.
+            return;
+        }
+        if (CoopCampaignPicker.worldControlsEnabled(selectedCampaignEntry())) {
+            draftSectorSize = selected(sectorSizeBox);
+            draftSectorAge = selected(sectorAgeBox);
+        }
+        refreshInvitePreview();
     }
 
     /**

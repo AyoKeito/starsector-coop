@@ -20,7 +20,8 @@ class CoopCampaignGuardTest {
 
     private static CoopSaveIndex.Row row(String campaignId) {
         return new CoopSaveIndex.Row(campaignId, "save_Kaz_9f2", "Kaz Alba", 12, 5_000L,
-                "Cycle 206, Kerenth 12", 1_700_000_000_000L, Boolean.TRUE, "GUEST", "MN-42");
+                "Cycle 206, Kerenth 12", 1_700_000_000_000L, Boolean.TRUE, "GUEST", "MN-42",
+                "normal", "mixed");
     }
 
     private static final List<CoopSaveIndex.Row> INDEX = List.of(row("camp-invited"));
@@ -121,7 +122,7 @@ class CoopCampaignGuardTest {
     @Test
     void aRowWithNothingButACampaignIdStillDescribesItself() {
         String described = CoopCampaignGuard.describe(
-                new CoopSaveIndex.Row("camp-a", "", "", 0, 0L, "", 0L, null, "", ""));
+                new CoopSaveIndex.Row("camp-a", "", "", 0, 0L, "", 0L, null, "", "", "", ""));
 
         assertEquals("\"unnamed character\"", described);
     }

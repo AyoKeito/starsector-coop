@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -318,5 +319,52 @@ class CoopSaveIndexReaderTest {
                 + " \"characterName\": \"" + character + "\", \"level\": " + level + ","
                 + " \"gameDateTimestamp\": 500, \"gameDate\": \"Cycle 206\","
                 + " \"savedAtMillis\": 1, \"autosave\": false, \"role\": \"" + role + "\"}";
+    }
+
+    // ---- the world settings ----------------------------------------------------------------------
+
+    @Test
+    void aRowThatRecordsItsWorldSettingsCarriesThemThroughTheJoin() throws IOException {
+        folder("save_a", "Kaz", 4, 500L, "2026-05-28 18:16:01.129 UTC");
+        writeIndex("{\"version\": 1, \"saves\": [" + worldRow("c1", "save_a", "small", "young")
+                + "]}");
+
+        CoopSaveIndexReader.Save save = CoopSaveIndexReader.read(saves).saves().get(0);
+
+        assertEquals("small", save.sectorSize());
+        assertEquals("young", save.sectorAge());
+        assertTrue(save.hasWorldSettings());
+    }
+
+    /** Every row written before 2026-09-04 looks like this, and the version is still 1. */
+    @Test
+    void aRowFromBeforeTheWorldSettingsExistedParsesWithoutThem() throws IOException {
+        folder("save_a", "Kaz", 4, 500L, "2026-05-28 18:16:01.129 UTC");
+        writeIndex("{\"version\": 1, \"saves\": [" + row("c1", "save_a", "Kaz", 4) + "]}");
+
+        CoopSaveIndexReader.Index index = CoopSaveIndexReader.read(saves);
+
+        assertEquals(CoopSaveIndexReader.Status.OK, index.status());
+        CoopSaveIndexReader.Save save = index.saves().get(0);
+        assertEquals("", save.sectorSize());
+        assertEquals("", save.sectorAge());
+        assertFalse(save.hasWorldSettings());
+    }
+
+    @Test
+    void halfTheWorldSettingsIsNotEnoughToPutInTheDropDowns() throws IOException {
+        folder("save_a", "Kaz", 4, 500L, "2026-05-28 18:16:01.129 UTC");
+        writeIndex("{\"version\": 1, \"saves\": [" + worldRow("c1", "save_a", "small", "")
+                + "]}");
+
+        assertFalse(CoopSaveIndexReader.read(saves).saves().get(0).hasWorldSettings());
+    }
+
+    private static String worldRow(String campaignId, String folder, String sectorSize,
+                                   String sectorAge) {
+        String base = row(campaignId, folder, "Kaz", 4);
+        return base.substring(0, base.length() - 1)
+                + ", \"sectorSize\": \"" + sectorSize + "\", \"sectorAge\": \"" + sectorAge
+                + "\"}";
     }
 }

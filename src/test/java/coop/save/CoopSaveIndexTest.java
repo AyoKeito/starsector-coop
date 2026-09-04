@@ -25,7 +25,7 @@ class CoopSaveIndexTest {
 
     private static CoopSaveIndex.Row row(String campaignId, String dir, long savedAt) {
         return new CoopSaveIndex.Row(campaignId, dir, "Kaz Alba", 7, 1_000L,
-                "Cycle 206, Kerenth 12", savedAt, null, "HOST", "MN-42");
+                "Cycle 206, Kerenth 12", savedAt, null, "HOST", "MN-42", "small", "young");
     }
 
     // ---- add and update ------------------------------------------------------------------------
@@ -185,13 +185,15 @@ class CoopSaveIndexTest {
     @Test
     void aRowNormalisesItsOwnTextAndDefaultsTheRole() {
         CoopSaveIndex.Row normalised = new CoopSaveIndex.Row(" camp-a ", null, "  Kaz  ", 3, 1L,
-                null, 9L, Boolean.TRUE, "", null);
+                null, 9L, Boolean.TRUE, "", null, " NORMAL ", " Mixed ");
 
         assertEquals("camp-a", normalised.campaignId());
         assertEquals("", normalised.saveDirName());
         assertEquals("Kaz", normalised.characterName());
         assertEquals("NONE", normalised.role());
         assertEquals("", normalised.seedString());
+        assertEquals("normal", normalised.sectorSize());
+        assertEquals("mixed", normalised.sectorAge());
         assertTrue(normalised.usable());
     }
 
@@ -200,7 +202,7 @@ class CoopSaveIndexTest {
     @Test
     void theAutosaveFlagSurvivesTheRoundTripAndIsOmittedWhenUnknown() throws Exception {
         CoopSaveIndex.Row marked = new CoopSaveIndex.Row("camp-a", "save_1", "Kaz", 1, 1L, "",
-                100L, Boolean.TRUE, "GUEST", "");
+                100L, Boolean.TRUE, "GUEST", "", "", "");
         String text = CoopSaveIndex.withRowText(null, marked);
         assertEquals(Boolean.TRUE, CoopSaveIndex.rowsFromText(text).get(0).autosave());
 
@@ -249,5 +251,55 @@ class CoopSaveIndexTest {
         assertTrue(text.length() < CoopSaveIndex.MAX_BYTES, "index grew to " + text.length());
         assertEquals(CoopSaveIndex.MAX_CAMPAIGNS * CoopSaveIndex.MAX_ROWS_PER_CAMPAIGN,
                 CoopSaveIndex.rowsFromText(text).size());
+    }
+
+    // ---- the world settings ----------------------------------------------------------------------
+
+    @Test
+    void theSectorSizeAndStarAgeSurviveTheRoundTrip() {
+        String text = CoopSaveIndex.withRowText(null, row("camp-a", "save_Kaz_1", 100L));
+
+        CoopSaveIndex.Row stored = CoopSaveIndex.rowsFromText(text).get(0);
+        assertEquals("small", stored.sectorSize());
+        assertEquals("young", stored.sectorAge());
+    }
+
+    /**
+     * A campaign generated before the mod recorded these, or through the vanilla dialog. The keys go
+     * out of the row entirely rather than carrying a default the sector was never generated at.
+     */
+    @Test
+    void aRowWithNoWorldSettingsOmitsBothKeys() throws Exception {
+        String text = CoopSaveIndex.withRowText(null,
+                new CoopSaveIndex.Row("camp-a", "save_1", "Kaz", 1, 1L, "", 100L, null, "HOST",
+                        "MN-42", "", ""));
+
+        JSONObject entry = new JSONObject(text)
+                .optJSONArray(CoopSaveIndex.KEY_SAVES).optJSONObject(0);
+        assertFalse(entry.has(CoopSaveIndex.KEY_SECTOR_SIZE));
+        assertFalse(entry.has(CoopSaveIndex.KEY_SECTOR_AGE));
+        CoopSaveIndex.Row stored = CoopSaveIndex.rowsFromText(text).get(0);
+        assertEquals("", stored.sectorSize());
+        assertEquals("", stored.sectorAge());
+    }
+
+    /**
+     * The two keys were added on 2026-09-04 without touching the version, so a launcher that has
+     * never heard of them keeps reading the file. A row written before them has to keep reading too.
+     */
+    @Test
+    void aRowFromBeforeTheWorldSettingsExistedStillReadsAtVersionOne() throws Exception {
+        String text = "{\"version\": 1, \"saves\": [{\"campaignId\": \"camp-a\","
+                + " \"saveDirName\": \"save_1\", \"characterName\": \"Kaz\", \"level\": 3,"
+                + " \"gameDateTimestamp\": 1, \"savedAtMillis\": 100, \"role\": \"HOST\"}]}";
+
+        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+
+        assertEquals(1, rows.size());
+        assertEquals("", rows.get(0).sectorSize());
+        assertEquals("", rows.get(0).sectorAge());
+        assertEquals(1, CoopSaveIndex.FORMAT_VERSION,
+                "the world settings are additive; bumping the version would lock older launchers"
+                        + " out of a file they can read perfectly well");
     }
 }

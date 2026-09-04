@@ -5,6 +5,7 @@ import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import coop.net.CoopNetStartupConfig;
+import coop.newgame.CoopWorldSettings;
 import coop.seed.CoopSeedSync;
 import coop.util.CoopLog;
 import org.json.JSONArray;
@@ -18,6 +19,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -94,6 +96,15 @@ public final class CoopSaveIndex {
     public static final String KEY_AUTOSAVE = "autosave";
     public static final String KEY_ROLE = "role";
     public static final String KEY_SEED_STRING = "seedString";
+    /**
+     * Sector size and star age, added 2026-09-04. Both are optional: only a campaign generated
+     * through the coop new-game dialog since that date has them, so an older row simply leaves them
+     * out and the launcher leaves its own controls alone. Additive on purpose -- the format version
+     * is unchanged, because a launcher that has never heard of these keys goes on reading every row
+     * exactly as before, and one that has, reads an old file just as happily.
+     */
+    public static final String KEY_SECTOR_SIZE = "sectorSize";
+    public static final String KEY_SECTOR_AGE = "sectorAge";
 
     /**
      * How many rows one campaign keeps. Eight covers the three autosave slots the engine keeps plus a
@@ -149,7 +160,7 @@ public final class CoopSaveIndex {
      */
     public record Row(String campaignId, String saveDirName, String characterName, int level,
                       long gameDateTimestamp, String gameDate, long savedAtMillis, Boolean autosave,
-                      String role, String seedString) {
+                      String role, String seedString, String sectorSize, String sectorAge) {
 
         public Row {
             campaignId = text(campaignId);
@@ -158,6 +169,8 @@ public final class CoopSaveIndex {
             gameDate = text(gameDate);
             role = text(role).isEmpty() ? "NONE" : text(role);
             seedString = text(seedString);
+            sectorSize = text(sectorSize).toLowerCase(Locale.ROOT);
+            sectorAge = text(sectorAge).toLowerCase(Locale.ROOT);
         }
 
         /** Whether this row carries enough to be worth keeping. */
@@ -354,6 +367,12 @@ public final class CoopSaveIndex {
             if (!row.seedString().isEmpty()) {
                 entry.put(KEY_SEED_STRING, row.seedString());
             }
+            if (!row.sectorSize().isEmpty()) {
+                entry.put(KEY_SECTOR_SIZE, row.sectorSize());
+            }
+            if (!row.sectorAge().isEmpty()) {
+                entry.put(KEY_SECTOR_AGE, row.sectorAge());
+            }
         } catch (Exception ignored) {
             // Constant keys and primitives; org.json only refuses null keys and NaN.
         }
@@ -373,7 +392,9 @@ public final class CoopSaveIndex {
                 entry.optLong(KEY_SAVED_AT_MILLIS, 0L),
                 autosave,
                 entry.optString(KEY_ROLE, "NONE"),
-                entry.optString(KEY_SEED_STRING, ""));
+                entry.optString(KEY_SEED_STRING, ""),
+                entry.optString(KEY_SECTOR_SIZE, ""),
+                entry.optString(KEY_SECTOR_AGE, ""));
     }
 
     private static JSONObject parseOrNull(String indexText) {
@@ -442,7 +463,9 @@ public final class CoopSaveIndex {
                     + ": campaignId=" + row.campaignId()
                     + " saveDirName=" + (row.hasSaveDirName() ? row.saveDirName() : "<unknown>")
                     + " character=" + row.characterName() + " level=" + row.level()
-                    + " role=" + row.role());
+                    + " role=" + row.role()
+                    + " sectorSize=" + (row.sectorSize().isEmpty() ? "<unrecorded>" : row.sectorSize())
+                    + " sectorAge=" + (row.sectorAge().isEmpty() ? "<unrecorded>" : row.sectorAge()));
         } catch (Exception | LinkageError ex) {
             CoopLog.warn(CoopSaveIndex.class, "Coop could not update the save index " + COMMON_PATH
                     + "; the launcher will not be able to name this save for a co-op invite", ex);
@@ -478,7 +501,11 @@ public final class CoopSaveIndex {
                 System.currentTimeMillis(),
                 autosaveFlag(),
                 currentRole(),
-                CoopSeedSync.currentSectorSeedString());
+                CoopSeedSync.currentSectorSeedString(),
+                // Empty for any campaign generated before the mod started recording these, and for
+                // one made through the vanilla dialog. The launcher says so rather than guessing.
+                CoopWorldSettings.currentSectorSize(),
+                CoopWorldSettings.currentSectorAge());
     }
 
     /**

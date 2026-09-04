@@ -30,8 +30,24 @@ class CoopCampaignPickerTest {
 
     private static CoopSaveIndexReader.Save save(String campaignId, String folder, String character,
                                                  int level, long savedAt, String role, String seed) {
+        return save(campaignId, folder, character, level, savedAt, role, seed, "small", "young");
+    }
+
+    private static CoopSaveIndexReader.Save save(String campaignId, String folder, String character,
+                                                 int level, long savedAt, String role, String seed,
+                                                 String sectorSize, String sectorAge) {
         return new CoopSaveIndexReader.Save(campaignId, folder, character, level, "Cycle 206",
-                500L, savedAt, Boolean.FALSE, role, seed);
+                500L, savedAt, Boolean.FALSE, role, seed, sectorSize, sectorAge);
+    }
+
+    private static CoopCampaignPicker.Entry entry(String campaignId, String seed) {
+        return entry(campaignId, seed, "small", "young");
+    }
+
+    private static CoopCampaignPicker.Entry entry(String campaignId, String seed, String sectorSize,
+                                                  String sectorAge) {
+        return new CoopCampaignPicker.Entry(campaignId, "Kaz", "save_a", seed, sectorSize,
+                sectorAge);
     }
 
     private static CoopSaveIndexReader.Index ok(CoopSaveIndexReader.Save... saves) {
@@ -103,8 +119,7 @@ class CoopCampaignPickerTest {
     /** The bug: the invite kept quoting the draft seed while a saved campaign was selected. */
     @Test
     void pickingASavedCampaignPutsThatCampaignsSeedInTheBox() {
-        CoopCampaignPicker.Entry saved =
-                new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "MN-777");
+        CoopCampaignPicker.Entry saved = entry("cA", "MN-777");
 
         assertEquals("MN-777", CoopCampaignPicker.seedAfterPick(saved, "MN-draft", "MN-draft"));
     }
@@ -120,7 +135,7 @@ class CoopCampaignPickerTest {
     /** A row written before the mod recorded seeds. Blanking the box would be worse than leaving it. */
     @Test
     void aSavedCampaignWithNoRecordedSeedLeavesTheBoxAlone() {
-        CoopCampaignPicker.Entry saved = new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "");
+        CoopCampaignPicker.Entry saved = entry("cA", "");
 
         assertEquals("MN-draft", CoopCampaignPicker.seedAfterPick(saved, "MN-draft", "MN-draft"));
     }
@@ -137,7 +152,7 @@ class CoopCampaignPickerTest {
     @Test
     void theSeedAndWorldSettingsAreLiveOnlyForANewCampaign() {
         CoopCampaignPicker.Entry brandNew = CoopCampaignPicker.newCampaignEntry("MN-42");
-        CoopCampaignPicker.Entry existing = new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "MN-42");
+        CoopCampaignPicker.Entry existing = entry("cA", "MN-42");
 
         assertTrue(CoopCampaignPicker.worldControlsEnabled(brandNew));
         assertTrue(CoopCampaignPicker.worldControlsEnabled(null));
@@ -147,7 +162,7 @@ class CoopCampaignPickerTest {
     @Test
     void theFolderLineNamesTheSaveAndIsBlankForANewCampaign() {
         assertEquals("folder save_a",
-                CoopCampaignPicker.folderLine(new CoopCampaignPicker.Entry("cA", "Kaz", "save_a", "MN-42")));
+                CoopCampaignPicker.folderLine(entry("cA", "MN-42")));
         assertEquals("", CoopCampaignPicker.folderLine(CoopCampaignPicker.newCampaignEntry("MN-1")));
         assertEquals("", CoopCampaignPicker.folderLine(null));
     }
@@ -262,5 +277,83 @@ class CoopCampaignPickerTest {
         assertNotNull(CoopCampaignPicker.campaignIdProblem("a&b=c"));
         assertNotNull(CoopCampaignPicker.campaignIdProblem("../../etc"));
         assertNotNull(CoopCampaignPicker.campaignIdProblem("x".repeat(129)));
+    }
+
+    // ---- the world settings follow the picker too --------------------------------------------------
+
+    @Test
+    void everyEntryCarriesTheSizeAndAgeItsSectorWasGeneratedAt() {
+        List<CoopCampaignPicker.Entry> entries = CoopCampaignPicker.entries("MN-draft",
+                ok(save("cA", "save_a", "Kaz", 12, SAVED, "HOST", "MN-777", "small", "old")), UTC);
+
+        assertEquals("", entries.get(0).sectorSize(), "a new campaign has no recorded settings");
+        assertEquals("", entries.get(0).sectorAge());
+        assertEquals("small", entries.get(1).sectorSize());
+        assertEquals("old", entries.get(1).sectorAge());
+    }
+
+    @Test
+    void pickingASavedCampaignPutsItsOwnSizeAndAgeInTheDropDowns() {
+        CoopCampaignPicker.Entry saved = entry("cA", "MN-777", "small", "old");
+
+        assertEquals("small", CoopCampaignPicker.sectorSizeAfterPick(saved, "normal", "normal"));
+        assertEquals("old", CoopCampaignPicker.sectorAgeAfterPick(saved, "mixed", "mixed"));
+    }
+
+    @Test
+    void goingBackToNewRestoresTheDraftedSizeAndAge() {
+        CoopCampaignPicker.Entry brandNew = CoopCampaignPicker.newCampaignEntry("MN-777");
+
+        assertEquals("normal", CoopCampaignPicker.sectorSizeAfterPick(brandNew, "normal", "small"));
+        assertEquals("mixed", CoopCampaignPicker.sectorAgeAfterPick(brandNew, "mixed", "old"));
+        assertEquals("normal", CoopCampaignPicker.sectorSizeAfterPick(null, "normal", "small"));
+        assertEquals("mixed", CoopCampaignPicker.sectorAgeAfterPick(null, "mixed", "old"));
+    }
+
+    /** A row written before the mod recorded these. The drop-downs stay where the host left them. */
+    @Test
+    void aSavedCampaignWithNoRecordedSizeOrAgeLeavesTheDropDownsAlone() {
+        CoopCampaignPicker.Entry saved = entry("cA", "MN-777", "", "");
+
+        assertEquals("normal", CoopCampaignPicker.sectorSizeAfterPick(saved, "small", "normal"));
+        assertEquals("mixed", CoopCampaignPicker.sectorAgeAfterPick(saved, "young", "mixed"));
+    }
+
+    @Test
+    void aHostWithNoDraftedSizeYetKeepsWhateverTheDropDownShows() {
+        CoopCampaignPicker.Entry brandNew = CoopCampaignPicker.newCampaignEntry("");
+
+        assertEquals("small", CoopCampaignPicker.sectorSizeAfterPick(brandNew, "  ", "small"));
+        assertEquals("old", CoopCampaignPicker.sectorAgeAfterPick(brandNew, "", "old"));
+    }
+
+    // ---- what the hint line says about a row that records less -------------------------------------
+
+    @Test
+    void aSaveWithNoRecordedSizeOrAgeSaysThoseTwoBoxesAreStillTheHostsDraft() {
+        String hint = CoopCampaignPicker.hint("cA",
+                ok(save("cA", "save_a", "Kaz", 12, SAVED, "HOST", "MN-42", "", "")), UTC);
+
+        assertTrue(hint.contains("does not record the sector size and star age"), hint);
+        assertTrue(hint.contains("the seed is this campaign's"), hint);
+    }
+
+    @Test
+    void aSaveRecordingNeitherSeedNorWorldSettingsSaysSoInOneSentence() {
+        String hint = CoopCampaignPicker.hint("cA",
+                ok(save("cA", "save_a", "Kaz", 12, SAVED, "HOST", "", "", "")), UTC);
+
+        assertTrue(hint.contains("records neither its seed nor the sector size and star age"), hint);
+        assertFalse(hint.contains("does not record its seed"), "one sentence, not two: " + hint);
+    }
+
+    @Test
+    void aSaveRecordingEverythingSaysNothingExtra() {
+        String hint = CoopCampaignPicker.hint("cA",
+                ok(save("cA", "save_a", "Kaz", 12, SAVED, "HOST", "MN-42", "small", "old")), UTC);
+
+        assertTrue(hint.startsWith("Load the save"), hint);
+        assertFalse(hint.contains("does not record"), hint);
+        assertFalse(hint.contains("records neither"), hint);
     }
 }
