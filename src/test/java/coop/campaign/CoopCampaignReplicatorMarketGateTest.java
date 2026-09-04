@@ -13,8 +13,7 @@ import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
-import coop.session.CoopPlayerInfo;
-import coop.session.CoopSessionState;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -214,16 +213,8 @@ class CoopCampaignReplicatorMarketGateTest {
 
     private CoopCampaignReplicator guestReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(CoopConnectionRole.GUEST), activeGuestSession(), clock::get);
-    }
-
-    private static CoopSessionState activeGuestSession() {
-        CoopSessionState session = new CoopSessionState(() -> "guest-player");
-        session.startGuest("Guest");
-        session.guestAcceptLobby("lobby-a", new CoopPlayerInfo("host-player", "Host"));
-        session.guestAcceptHandshake("session-a");
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
-        return session;
+                new SilentNetService(CoopConnectionRole.GUEST), TestSessions.activeGuestSession(),
+                clock::get);
     }
 
     private static SectorAPI sector(FakeMarket market, FakeDialog dialog) {

@@ -5,12 +5,12 @@ import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -76,13 +76,19 @@ class CoopSalvageTallyTest {
                 new SilentNetService(CoopConnectionRole.HOST), activeHostSession(), () -> 5678L);
     }
 
+    /**
+     * A strict id supplier rather than {@link TestSessions#activeHostSession()}'s repeating one: this
+     * test's original copy threw {@code IndexOutOfBoundsException} on an over-draw, and
+     * {@link TestSessions#strictSequencedIds} is the shared variant that keeps that loud-failure
+     * behaviour (as a {@code NoSuchElementException} instead, which nothing here asserts on).
+     */
     private static CoopSessionState activeHostSession() {
         CoopSessionState session = new CoopSessionState(
-                new SequencedIds("lobby-a", "host-player", "session-a"));
+                TestSessions.strictSequencedIds("lobby-a", "host-player", "session-a"));
         session.startHost("Host");
         session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
         session.hostAcceptHandshake();
-        session.recordSeedLock(123L, "seed-a", "fingerprint-a");
+        session.recordSeedLock(TestSessions.SEED, "seed-a", "fingerprint-a");
         return session;
     }
 
@@ -107,20 +113,6 @@ class CoopSalvageTallyTest {
         @Override
         public void send(CoopMessages.Message message) {
             sent.add(message);
-        }
-    }
-
-    private static final class SequencedIds implements Supplier<String> {
-        private final List<String> ids;
-        private int index;
-
-        private SequencedIds(String... ids) {
-            this.ids = List.of(ids);
-        }
-
-        @Override
-        public String get() {
-            return ids.get(index++);
         }
     }
 }
