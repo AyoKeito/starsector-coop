@@ -57,6 +57,17 @@ import java.util.function.Supplier;
  * Keyed by {@code battleId} in a bounded insertion-ordered set ({@link #SEEN_BATTLE_CAPACITY}), so a
  * re-delivered or replayed result applies exactly once and the set can never grow without bound over
  * a long session.
+ *
+ * <p><b>Only a battle that actually landed stays in that set.</b> Every mutation the engine refuses
+ * (a despawn that throws, a roster edit that throws) drops the {@code battleId} back out of the
+ * ledger, so a resent {@code BATTLE_RESULT} is re-attempted instead of being waved through as
+ * "already applied" — the failure that used to leave a destroyed fleet alive on the host until some
+ * unrelated set change happened to remove it, while the pump counted the battle as a success.
+ *
+ * <p>Re-applying a result is safe by construction: the despawn pass skips any fleet that no longer
+ * {@link AuthoritativeFleets#exists}, and the survivor pass recomputes the removal set against the
+ * host's <em>current</em> roster, so ships the first attempt already deleted are simply not deleted
+ * again. A retry is therefore never worse than the first attempt.
  */
 public final class CoopBattleResultReconciler {
 
@@ -69,14 +80,24 @@ public final class CoopBattleResultReconciler {
         /** True when a real engine fleet with this {@code coopFleetId} still exists. */
         boolean exists(String coopFleetId);
 
-        /** Vanilla-clean removal of a fleet the engaging client destroyed. */
-        void despawn(String coopFleetId);
+        /**
+         * Vanilla-clean removal of a fleet the engaging client destroyed.
+         *
+         * @return false when the removal did not happen because the engine threw. An implementation
+         *         must never report success for work it swallowed: the caller drops the battle from
+         *         the applied ledger on false so a resend can retry. A fleet that is already gone is
+         *         success — there is nothing left to remove.
+         */
+        boolean despawn(String coopFleetId);
 
         /**
          * Reduces the fleet's roster to the reported post-battle survivors and paints their CR/hull.
          * Called only for fleets {@link #exists} confirmed.
+         *
+         * @return false when the roster was not updated because the engine threw, on the same
+         *         contract as {@link #despawn}.
          */
-        void applySurvivingRoster(String coopFleetId, List<CoopFleetSnapshot.Member> survivors);
+        boolean applySurvivingRoster(String coopFleetId, List<CoopFleetSnapshot.Member> survivors);
 
         /** Forces the next Phase 9 tick to rebroadcast the full {@code NPC_FLEET_SET}. */
         void rebroadcastSet();
@@ -95,6 +116,15 @@ public final class CoopBattleResultReconciler {
     /**
      * Integrates one battle result. Returns false (and does nothing) when this {@code battleId} was
      * already applied. Never throws: a reconcile failure must not take down the pump frame.
+     *
+     * <p>Also returns false when a mutation the result asked for did not happen. The {@code battleId}
+     * then comes back out of the applied-battle ledger, so a resend of the same result is re-attempted
+     * rather than dismissed as a duplicate; the class Javadoc records why replaying one is safe. Only
+     * a true return means the host's world matches the result, which is what the pump's battle stats
+     * count.
+     *
+     * <p>The set rebroadcast goes out on every path, success or failure: it costs one message and it
+     * is what releases the guest's frozen mirrors, so withholding it on failure would strand them.
      */
     public boolean apply(CoopBattleResult result) {
         Objects.requireNonNull(result, "result");
@@ -103,53 +133,81 @@ public final class CoopBattleResultReconciler {
                     "Coop BATTLE_RESULT ignored (already applied) battleId=" + result.battleId());
             return false;
         }
-        int despawned = 0;
-        int updated = 0;
+        int[] counts = new int[2];
+        String failedStep;
         try {
-            for (String coopFleetId : result.involvedFleetIds()) {
-                // Restart the cooldown even for a fleet that no longer exists: the id may still be
-                // sitting in the watcher's throttle map, and a stale entry costs nothing to refresh.
-                fleets.restartEngageCooldown(coopFleetId);
-            }
-            for (String coopFleetId : result.destroyedFleetIds()) {
-                if (coopFleetId.isEmpty() || !fleets.exists(coopFleetId)) {
-                    continue;
-                }
-                fleets.despawn(coopFleetId);
-                despawned++;
-            }
-            for (CoopBattleResult.SurvivingFleet survivor : result.survivingFleets()) {
-                String coopFleetId = survivor.coopFleetId();
-                if (coopFleetId.isEmpty() || !fleets.exists(coopFleetId)) {
-                    continue;
-                }
-                if (survivor.members().isEmpty()) {
-                    // Reported alive but crewless: the engaging client saw an empty hull of a fleet.
-                    // Treat it as destroyed rather than leaving a zero-ship fleet in the set.
-                    fleets.despawn(coopFleetId);
-                    despawned++;
-                    continue;
-                }
-                fleets.applySurvivingRoster(coopFleetId, survivor.members());
-                updated++;
-            }
+            failedStep = mutate(result, counts);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleResultReconciler.class,
-                    "Coop BATTLE_RESULT reconcile failed battleId=" + result.battleId(), ex);
+                    "Coop BATTLE_RESULT reconcile threw battleId=" + result.battleId(), ex);
+            failedStep = "an unexpected error during the reconcile";
         }
-        // Always rebroadcast, even for an empty result. It costs one message and it is the guest's
-        // signal to release the mirrors it froze pending reconciliation (see CoopFleetMirrorRegistry).
         try {
             fleets.rebroadcastSet();
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleResultReconciler.class, "Coop failed to force an NPC_FLEET_SET"
                     + " rebroadcast after battleId=" + result.battleId(), ex);
         }
+        if (failedStep != null) {
+            // Out of the ledger again: the world does not match the result, so a resend has to be let
+            // through instead of being answered with "already applied".
+            seenBattleIds.remove(result.battleId());
+            CoopLog.warn(CoopBattleResultReconciler.class, "Coop BATTLE_RESULT reconcile failed"
+                    + " battleId=" + result.battleId() + " step=" + failedStep
+                    + "; the battle left the applied ledger so a resend can retry (despawned="
+                    + counts[0] + " rosterUpdated=" + counts[1] + ")");
+            return false;
+        }
         CoopLog.info(CoopBattleResultReconciler.class, "Coop BATTLE_RESULT applied battleId="
                 + result.battleId() + " by=" + result.engagingPlayerId()
-                + " outcome=" + result.outcome() + " despawned=" + despawned
-                + " rosterUpdated=" + updated);
+                + " outcome=" + result.outcome() + " despawned=" + counts[0]
+                + " rosterUpdated=" + counts[1]);
         return true;
+    }
+
+    /**
+     * The mutation pass, split out of {@link #apply} so the first refusal can abandon the rest with a
+     * plain return rather than a labelled break. Whatever already landed stays landed: the battle
+     * leaves the ledger and the resend redoes the whole thing against the world as it is then.
+     *
+     * @param counts out-parameter, {@code [despawned, rosterUpdated]}
+     * @return null when everything the result asked for happened, otherwise the step that refused
+     */
+    private String mutate(CoopBattleResult result, int[] counts) {
+        for (String coopFleetId : result.involvedFleetIds()) {
+            // Restart the cooldown even for a fleet that no longer exists: the id may still be
+            // sitting in the watcher's throttle map, and a stale entry costs nothing to refresh.
+            fleets.restartEngageCooldown(coopFleetId);
+        }
+        for (String coopFleetId : result.destroyedFleetIds()) {
+            if (coopFleetId.isEmpty() || !fleets.exists(coopFleetId)) {
+                continue;
+            }
+            if (!fleets.despawn(coopFleetId)) {
+                return "despawn of destroyed coopFleetId=" + coopFleetId;
+            }
+            counts[0]++;
+        }
+        for (CoopBattleResult.SurvivingFleet survivor : result.survivingFleets()) {
+            String coopFleetId = survivor.coopFleetId();
+            if (coopFleetId.isEmpty() || !fleets.exists(coopFleetId)) {
+                continue;
+            }
+            if (survivor.members().isEmpty()) {
+                // Reported alive but crewless: the engaging client saw an empty hull of a fleet.
+                // Treat it as destroyed rather than leaving a zero-ship fleet in the set.
+                if (!fleets.despawn(coopFleetId)) {
+                    return "despawn of crewless coopFleetId=" + coopFleetId;
+                }
+                counts[0]++;
+                continue;
+            }
+            if (!fleets.applySurvivingRoster(coopFleetId, survivor.members())) {
+                return "surviving roster of coopFleetId=" + coopFleetId;
+            }
+            counts[1]++;
+        }
+        return null;
     }
 
     /** Session (re)start: forget the applied-battle history along with the rest of the session. */
@@ -271,10 +329,12 @@ public final class CoopBattleResultReconciler {
         }
 
         @Override
-        public void despawn(String coopFleetId) {
+        public boolean despawn(String coopFleetId) {
             CampaignFleetAPI fleet = find(coopFleetId);
             if (fleet == null) {
-                return;
+                // Already gone: a Phase 9 sweep, a raid, or an earlier attempt at this same result.
+                // "Nothing left to remove" is the outcome the caller asked for, so it is success.
+                return true;
             }
             String name = safeName(fleet);
             // This id is about to stop resolving; do not leave it memoised for the survivor pass.
@@ -284,17 +344,24 @@ public final class CoopBattleResultReconciler {
                 fleet.despawn(CampaignEventListener.FleetDespawnReason.DESTROYED_BY_BATTLE, null);
                 CoopLog.info(CoopBattleResultReconciler.class, "Coop despawned NPC fleet destroyed in"
                         + " the partner's battle coopFleetId=" + coopFleetId + " name=" + name);
+                return true;
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopBattleResultReconciler.class, "Coop failed to despawn destroyed NPC"
                         + " fleet coopFleetId=" + coopFleetId + " name=" + name, ex);
+                // Reported rather than swallowed: the fleet is still in the world, so the battle must
+                // not be recorded as applied or the resend would be dismissed and the ghost would stay.
+                return false;
             }
         }
 
         @Override
-        public void applySurvivingRoster(String coopFleetId, List<CoopFleetSnapshot.Member> survivors) {
+        public boolean applySurvivingRoster(String coopFleetId,
+                                           List<CoopFleetSnapshot.Member> survivors) {
             CampaignFleetAPI fleet = find(coopFleetId);
             if (fleet == null) {
-                return;
+                // Gone between the exists() check and here: there is no roster left to reduce, and
+                // whatever removed it has already produced the state the result describes.
+                return true;
             }
             try {
                 List<FleetMemberAPI> current = fleet.getFleetData().getMembersListCopy();
@@ -315,9 +382,13 @@ public final class CoopBattleResultReconciler {
                 CoopLog.info(CoopBattleResultReconciler.class, "Coop applied post-battle roster to NPC"
                         + " fleet coopFleetId=" + coopFleetId + " name=" + safeName(fleet)
                         + " lost=" + remove.size() + " remaining=" + (current.size() - remove.size()));
+                return true;
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopBattleResultReconciler.class, "Coop failed to apply the post-battle"
                         + " roster to coopFleetId=" + coopFleetId, ex);
+                // The roster may be half-edited. Reporting the failure is still right: the retry
+                // recomputes the diff against whatever is there then, so it cannot over-remove.
+                return false;
             }
         }
 

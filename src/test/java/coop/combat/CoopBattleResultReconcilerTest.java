@@ -104,6 +104,77 @@ class CoopBattleResultReconcilerTest {
         assertEquals(1, fleets.rebroadcasts);
     }
 
+    /**
+     * The defect this pins: the ledger used to record the battle before touching a single fleet, and
+     * a despawn the engine refused was swallowed with a warning, so {@code apply} returned true, the
+     * pump counted the battle, and the resend was answered with "already applied" — leaving the
+     * destroyed fleet alive on the host until an unrelated set change removed it.
+     */
+    @Test
+    void aRefusedDespawnFailsTheApplyAndTheResendRetriesIt() {
+        FakeFleets fleets = new FakeFleets("fleet_alpha");
+        fleets.failDespawnOf.add("fleet_alpha");
+        CoopBattleResultReconciler reconciler = new CoopBattleResultReconciler(fleets);
+        CoopBattleResult result = result("battle-1", List.of("fleet_alpha"), List.of());
+
+        assertFalse(reconciler.apply(result), "a despawn that did not happen is not a success");
+        assertTrue(fleets.despawned.isEmpty());
+        assertEquals(0, reconciler.seenBattleCount(), "the battle must leave the applied ledger");
+        // The mirrors the guest froze are released either way.
+        assertEquals(1, fleets.rebroadcasts);
+
+        assertTrue(reconciler.apply(result), "the resend must be re-attempted, not deduplicated");
+        assertEquals(List.of("fleet_alpha"), fleets.despawned);
+        assertEquals(1, reconciler.seenBattleCount());
+    }
+
+    @Test
+    void aRefusedRosterUpdateFailsTheApplyAndTheResendRetriesIt() {
+        FakeFleets fleets = new FakeFleets("fleet_alpha");
+        fleets.failRosterOf.add("fleet_alpha");
+        CoopBattleResultReconciler reconciler = new CoopBattleResultReconciler(fleets);
+        List<CoopFleetSnapshot.Member> survivors = List.of(member("wolf", "wolf_Assault", 0.4f, 0.3f));
+        CoopBattleResult result = result("battle-1", List.of(),
+                List.of(new CoopBattleResult.SurvivingFleet("fleet_alpha", survivors)));
+
+        assertFalse(reconciler.apply(result));
+        assertTrue(fleets.rosters.isEmpty());
+        assertEquals(0, reconciler.seenBattleCount());
+
+        assertTrue(reconciler.apply(result));
+        assertEquals(survivors, fleets.rosters.get("fleet_alpha"));
+    }
+
+    /** A fleet the first pass already despawned is skipped on the retry rather than despawned twice. */
+    @Test
+    void aRetryAfterAPartialApplyDoesNotRedoTheWorkThatLanded() {
+        FakeFleets fleets = new FakeFleets("fleet_alpha", "fleet_beta");
+        fleets.failDespawnOf.add("fleet_beta");
+        CoopBattleResultReconciler reconciler = new CoopBattleResultReconciler(fleets);
+        CoopBattleResult result =
+                result("battle-1", List.of("fleet_alpha", "fleet_beta"), List.of());
+
+        assertFalse(reconciler.apply(result));
+        assertEquals(List.of("fleet_alpha"), fleets.despawned);
+
+        assertTrue(reconciler.apply(result));
+        assertEquals(List.of("fleet_alpha", "fleet_beta"), fleets.despawned,
+                "alpha was already gone, so the retry only had beta left to do");
+    }
+
+    /** A throwing implementation is a failure too, not a silently successful reconcile. */
+    @Test
+    void aThrowingMutationFailsTheApplyWithoutThrowingOutOfIt() {
+        FakeFleets fleets = new FakeFleets("fleet_alpha");
+        fleets.throwOnDespawn = true;
+        CoopBattleResultReconciler reconciler = new CoopBattleResultReconciler(fleets);
+
+        assertFalse(reconciler.apply(result("battle-1", List.of("fleet_alpha"), List.of())));
+
+        assertEquals(0, reconciler.seenBattleCount());
+        assertEquals(1, fleets.rebroadcasts, "the rebroadcast still has to go out");
+    }
+
     @Test
     void differentBattleIdsBothApply() {
         FakeFleets fleets = new FakeFleets("fleet_alpha", "fleet_beta");
@@ -230,6 +301,10 @@ class CoopBattleResultReconcilerTest {
         private final Map<String, List<CoopFleetSnapshot.Member>> rosters = new LinkedHashMap<>();
         private final List<String> cooldownRestarts = new ArrayList<>();
         private final List<String> operations = new ArrayList<>();
+        /** Ids whose next despawn/roster edit refuses; consumed on use, so the retry succeeds. */
+        private final java.util.Set<String> failDespawnOf = new LinkedHashSet<>();
+        private final java.util.Set<String> failRosterOf = new LinkedHashSet<>();
+        private boolean throwOnDespawn;
         private int rebroadcasts;
 
         private FakeFleets(String... existing) {
@@ -243,16 +318,30 @@ class CoopBattleResultReconcilerTest {
         }
 
         @Override
-        public void despawn(String coopFleetId) {
+        public boolean despawn(String coopFleetId) {
             operations.add("despawn");
+            if (throwOnDespawn) {
+                throw new IllegalStateException("engine refused the despawn");
+            }
+            if (failDespawnOf.remove(coopFleetId)) {
+                // The engine refused: the fleet is still in the world. Same shape as EngineFleets
+                // catching a throw out of CampaignFleetAPI.despawn.
+                return false;
+            }
             present.remove(coopFleetId);
             despawned.add(coopFleetId);
+            return true;
         }
 
         @Override
-        public void applySurvivingRoster(String coopFleetId, List<CoopFleetSnapshot.Member> survivors) {
+        public boolean applySurvivingRoster(String coopFleetId,
+                                            List<CoopFleetSnapshot.Member> survivors) {
             operations.add("applySurvivingRoster");
+            if (failRosterOf.remove(coopFleetId)) {
+                return false;
+            }
             rosters.put(coopFleetId, survivors);
+            return true;
         }
 
         @Override

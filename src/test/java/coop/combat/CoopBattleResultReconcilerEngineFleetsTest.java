@@ -35,10 +35,57 @@ class CoopBattleResultReconcilerEngineFleetsTest {
         CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
 
         assertTrue(fleets.exists("fleet-a"));
-        fleets.despawn("fleet-a");
+        assertTrue(fleets.despawn("fleet-a"));
 
         assertEquals(1, world.scans.get(), "the resolved fleet must carry over to the despawn");
         assertEquals(List.of("fleet-a"), world.despawned);
+    }
+
+    // ---- failure reporting: the reconciler's ledger depends on it ---------------------------------
+
+    /**
+     * A despawn the engine throws out of used to be logged and swallowed, so the reconciler recorded
+     * the battle as applied while the fleet was still in the world. It has to come back as false.
+     */
+    @Test
+    void aDespawnTheEngineRefusesIsReportedAsAFailure() {
+        World world = new World("fleet-a");
+        world.failDespawn = true;
+        CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
+
+        assertFalse(fleets.despawn("fleet-a"));
+
+        assertTrue(world.despawned.isEmpty());
+        assertTrue(fleets.exists("fleet-a"), "the fleet is still there, which is the whole point");
+    }
+
+    /** Nothing left to remove is the outcome the caller asked for, so it is success, not failure. */
+    @Test
+    void despawningAFleetThatIsAlreadyGoneIsASuccess() {
+        World world = new World("fleet-a");
+        CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
+
+        assertTrue(fleets.despawn("ghost"));
+    }
+
+    @Test
+    void aRosterEditThatThrowsIsReportedAsAFailure() {
+        // getFleetData() hands back null in the fixture, so the edit throws exactly where a real
+        // engine failure would - inside the try block, after the fleet resolved.
+        World world = new World("fleet-a");
+        CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
+
+        assertFalse(fleets.applySurvivingRoster("fleet-a", List.of(
+                new CoopFleetSnapshot.Member("m-1", "wolf", "wolf_Assault", "Ship", "Cpt", 0.7f, 1f))));
+    }
+
+    @Test
+    void aRosterEditForAFleetThatIsAlreadyGoneIsASuccess() {
+        World world = new World("fleet-a");
+        CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
+
+        assertTrue(fleets.applySurvivingRoster("ghost", List.of()));
+        assertEquals(0, world.fleetDataReads.get());
     }
 
     @Test
@@ -216,6 +263,8 @@ class CoopBattleResultReconcilerEngineFleetsTest {
         private final List<CampaignFleetAPI> fleets = new ArrayList<>();
         private final List<String> alive = new ArrayList<>();
         private final LocationAPI location;
+        /** When set, {@code despawn()} throws the way a hostile engine state would. */
+        private boolean failDespawn;
 
         private World(String... fleetIds) {
             location = (LocationAPI) Proxy.newProxyInstance(
@@ -245,6 +294,9 @@ class CoopBattleResultReconcilerEngineFleetsTest {
                         case "isAlive" -> alive.contains(id);
                         case "getContainingLocation" -> containedIn(id);
                         case "despawn" -> {
+                            if (failDespawn) {
+                                throw new IllegalStateException("engine refused the despawn");
+                            }
                             despawned.add(id);
                             removeQuietly(id);
                             yield null;
