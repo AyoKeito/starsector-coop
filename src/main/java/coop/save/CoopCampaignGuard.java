@@ -88,13 +88,13 @@ public final class CoopCampaignGuard {
      * @param index              every save row known on this machine
      */
     public static Notice onLoad(String expectedCampaignId, String loadedCampaignId,
-                                List<CoopSaveIndex.Row> index) {
+                                List<CoopSaveIndexSchema.Row> index) {
         String expected = text(expectedCampaignId);
         String loaded = text(loadedCampaignId);
         if (expected.isEmpty() || loaded.isEmpty() || expected.equals(loaded)) {
             return Notice.none();
         }
-        CoopSaveIndex.Row row = CoopSaveIndex.newestForCampaign(index, expected);
+        CoopSaveIndexSchema.Row row = CoopSaveIndex.newestForCampaign(index, expected);
         String head = "This is not the campaign the co-op invite is for."
                 + "\n\nThe invite is for campaign " + shortId(expected)
                 + "; this save belongs to campaign " + shortId(loaded) + ".";
@@ -117,13 +117,13 @@ public final class CoopCampaignGuard {
      * @param adoptConsent       whether {@code coop.adoptCampaignId} was given for this launch, which
      *                           is the one gesture that overrides the seed lock
      */
-    public static Notice onNewGame(String expectedCampaignId, List<CoopSaveIndex.Row> index,
+    public static Notice onNewGame(String expectedCampaignId, List<CoopSaveIndexSchema.Row> index,
                                    boolean adoptConsent) {
         String expected = text(expectedCampaignId);
         if (expected.isEmpty() || adoptConsent) {
             return Notice.none();
         }
-        CoopSaveIndex.Row row = CoopSaveIndex.newestForCampaign(index, expected);
+        CoopSaveIndexSchema.Row row = CoopSaveIndex.newestForCampaign(index, expected);
         if (row == null) {
             return Notice.none();
         }
@@ -150,7 +150,7 @@ public final class CoopCampaignGuard {
             if (expected.isEmpty()) {
                 return Notice.none();
             }
-            List<CoopSaveIndex.Row> index = CoopSaveIndex.readRows();
+            List<CoopSaveIndexSchema.Row> index = CoopSaveIndex.readRows();
             Notice notice = newGame
                     ? onNewGame(expected, index, adoptConsentGiven())
                     : onLoad(expected, loadedCampaignId(), index);
@@ -194,7 +194,7 @@ public final class CoopCampaignGuard {
     }
 
     /** One row as a player reads it: who, how far, when, and where the folder is. */
-    static String describe(CoopSaveIndex.Row row) {
+    static String describe(CoopSaveIndexSchema.Row row) {
         StringBuilder text = new StringBuilder();
         text.append('"')
                 .append(row.characterName().isEmpty() ? "unnamed character" : row.characterName())

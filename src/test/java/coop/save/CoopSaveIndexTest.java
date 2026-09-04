@@ -23,8 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class CoopSaveIndexTest {
 
-    private static CoopSaveIndex.Row row(String campaignId, String dir, long savedAt) {
-        return new CoopSaveIndex.Row(campaignId, dir, "Kaz Alba", 7, 1_000L,
+    private static CoopSaveIndexSchema.Row row(String campaignId, String dir, long savedAt) {
+        return new CoopSaveIndexSchema.Row(campaignId, dir, "Kaz Alba", 7, 1_000L,
                 "Cycle 206, Kerenth 12", savedAt, null, "HOST", "MN-42", "small", "young");
     }
 
@@ -34,9 +34,9 @@ class CoopSaveIndexTest {
     void aRowIsAddedToAnEmptyIndex() throws Exception {
         String text = CoopSaveIndex.withRowText(null, row("camp-a", "save_Kaz_1", 100L));
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(1, rows.size());
-        CoopSaveIndex.Row stored = rows.get(0);
+        CoopSaveIndexSchema.Row stored = rows.get(0);
         assertEquals("camp-a", stored.campaignId());
         assertEquals("save_Kaz_1", stored.saveDirName());
         assertEquals("Kaz Alba", stored.characterName());
@@ -56,7 +56,7 @@ class CoopSaveIndexTest {
         String text = CoopSaveIndex.withRowText(null, row("camp-a", "save_Kaz_1", 100L));
         text = CoopSaveIndex.withRowText(text, row("camp-a", "save_Kaz_1", 200L));
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(1, rows.size());
         assertEquals(200L, rows.get(0).savedAtMillis());
     }
@@ -74,7 +74,7 @@ class CoopSaveIndexTest {
         String text = CoopSaveIndex.withRowText(null, row("camp-a", "", 100L));
         text = CoopSaveIndex.withRowText(text, row("camp-a", "", 200L));
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         // With nothing to match on there is no way to know the two are the same slot, so both are
         // kept and retention decides. The launcher matches these against descriptor.xml instead.
         assertEquals(2, rows.size());
@@ -101,7 +101,7 @@ class CoopSaveIndexTest {
             text = CoopSaveIndex.withRowText(text, row("camp-a", "save_Kaz_" + i, i * 100L));
         }
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(CoopSaveIndex.MAX_ROWS_PER_CAMPAIGN, rows.size());
         assertEquals(1_200L, rows.get(0).savedAtMillis());
         assertEquals(500L, rows.get(rows.size() - 1).savedAtMillis());
@@ -114,7 +114,7 @@ class CoopSaveIndexTest {
             text = CoopSaveIndex.withRowText(text, row("camp-busy", "save_B_" + i, i * 100L));
         }
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(1, CoopSaveIndex.forCampaign(rows, "camp-quiet").size());
         assertEquals(CoopSaveIndex.MAX_ROWS_PER_CAMPAIGN,
                 CoopSaveIndex.forCampaign(rows, "camp-busy").size());
@@ -127,7 +127,7 @@ class CoopSaveIndexTest {
             text = CoopSaveIndex.withRowText(text, row("camp-" + i, "save_" + i, i * 100L));
         }
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(CoopSaveIndex.MAX_CAMPAIGNS, rows.size());
         assertTrue(CoopSaveIndex.forCampaign(rows, "camp-1").isEmpty());
         assertTrue(CoopSaveIndex.forCampaign(rows, "camp-2").isEmpty());
@@ -142,9 +142,9 @@ class CoopSaveIndexTest {
         text = CoopSaveIndex.withRowText(text, row("camp-a", "save_2", 100L));
         text = CoopSaveIndex.withRowText(text, row("camp-a", "save_3", 200L));
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(List.of(300L, 200L, 100L),
-                rows.stream().map(CoopSaveIndex.Row::savedAtMillis).toList());
+                rows.stream().map(CoopSaveIndexSchema.Row::savedAtMillis).toList());
         assertEquals("save_1", CoopSaveIndex.newestForCampaign(rows, "camp-a").saveDirName());
         assertNull(CoopSaveIndex.newestForCampaign(rows, "camp-b"));
         assertNull(CoopSaveIndex.newestForCampaign(rows, ""));
@@ -156,7 +156,7 @@ class CoopSaveIndexTest {
     void aMalformedFileIsReplacedByAFreshIndexRatherThanThrowing() {
         String text = CoopSaveIndex.withRowText("{ this is not json", row("camp-a", "save_1", 100L));
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(1, rows.size());
         assertEquals("camp-a", rows.get(0).campaignId());
     }
@@ -166,7 +166,7 @@ class CoopSaveIndexTest {
         String text = "{\"version\":1,\"saves\":[7,{\"characterName\":\"no id\"},"
                 + "{\"campaignId\":\"camp-a\",\"savedAtMillis\":50}]}";
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
         assertEquals(1, rows.size());
         assertEquals("camp-a", rows.get(0).campaignId());
         // And the next write keeps the one salvageable row alongside the new one.
@@ -184,7 +184,7 @@ class CoopSaveIndexTest {
 
     @Test
     void aRowNormalisesItsOwnTextAndDefaultsTheRole() {
-        CoopSaveIndex.Row normalised = new CoopSaveIndex.Row(" camp-a ", null, "  Kaz  ", 3, 1L,
+        CoopSaveIndexSchema.Row normalised = new CoopSaveIndexSchema.Row(" camp-a ", null, "  Kaz  ", 3, 1L,
                 null, 9L, Boolean.TRUE, "", null, " NORMAL ", " Mixed ");
 
         assertEquals("camp-a", normalised.campaignId());
@@ -201,7 +201,7 @@ class CoopSaveIndexTest {
 
     @Test
     void theAutosaveFlagSurvivesTheRoundTripAndIsOmittedWhenUnknown() throws Exception {
-        CoopSaveIndex.Row marked = new CoopSaveIndex.Row("camp-a", "save_1", "Kaz", 1, 1L, "",
+        CoopSaveIndexSchema.Row marked = new CoopSaveIndexSchema.Row("camp-a", "save_1", "Kaz", 1, 1L, "",
                 100L, Boolean.TRUE, "GUEST", "", "", "");
         String text = CoopSaveIndex.withRowText(null, marked);
         assertEquals(Boolean.TRUE, CoopSaveIndex.rowsFromText(text).get(0).autosave());
@@ -259,7 +259,7 @@ class CoopSaveIndexTest {
     void theSectorSizeAndStarAgeSurviveTheRoundTrip() {
         String text = CoopSaveIndex.withRowText(null, row("camp-a", "save_Kaz_1", 100L));
 
-        CoopSaveIndex.Row stored = CoopSaveIndex.rowsFromText(text).get(0);
+        CoopSaveIndexSchema.Row stored = CoopSaveIndex.rowsFromText(text).get(0);
         assertEquals("small", stored.sectorSize());
         assertEquals("young", stored.sectorAge());
     }
@@ -271,14 +271,14 @@ class CoopSaveIndexTest {
     @Test
     void aRowWithNoWorldSettingsOmitsBothKeys() throws Exception {
         String text = CoopSaveIndex.withRowText(null,
-                new CoopSaveIndex.Row("camp-a", "save_1", "Kaz", 1, 1L, "", 100L, null, "HOST",
+                new CoopSaveIndexSchema.Row("camp-a", "save_1", "Kaz", 1, 1L, "", 100L, null, "HOST",
                         "MN-42", "", ""));
 
         JSONObject entry = new JSONObject(text)
                 .optJSONArray(CoopSaveIndex.KEY_SAVES).optJSONObject(0);
         assertFalse(entry.has(CoopSaveIndex.KEY_SECTOR_SIZE));
         assertFalse(entry.has(CoopSaveIndex.KEY_SECTOR_AGE));
-        CoopSaveIndex.Row stored = CoopSaveIndex.rowsFromText(text).get(0);
+        CoopSaveIndexSchema.Row stored = CoopSaveIndex.rowsFromText(text).get(0);
         assertEquals("", stored.sectorSize());
         assertEquals("", stored.sectorAge());
     }
@@ -293,7 +293,7 @@ class CoopSaveIndexTest {
                 + " \"saveDirName\": \"save_1\", \"characterName\": \"Kaz\", \"level\": 3,"
                 + " \"gameDateTimestamp\": 1, \"savedAtMillis\": 100, \"role\": \"HOST\"}]}";
 
-        List<CoopSaveIndex.Row> rows = CoopSaveIndex.rowsFromText(text);
+        List<CoopSaveIndexSchema.Row> rows = CoopSaveIndex.rowsFromText(text);
 
         assertEquals(1, rows.size());
         assertEquals("", rows.get(0).sectorSize());

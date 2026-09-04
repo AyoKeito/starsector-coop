@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import coop.net.CoopNetStartupConfig;
 import coop.newgame.CoopWorldSettings;
+import coop.save.CoopSaveIndexSchema.Row;
 import coop.seed.CoopSeedSync;
 import coop.util.CoopLog;
 import org.json.JSONArray;
@@ -19,7 +20,6 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -66,45 +66,47 @@ import java.util.Map;
  * wrapped; an unreadable or malformed existing file is logged once and replaced by a fresh index
  * rather than throwing back into the engine's save routine.
  *
+ * <p><b>The format lives next door.</b> {@link CoopSaveIndexSchema} holds the version, the key names,
+ * the {@link CoopSaveIndexSchema.Row} record and the codec, because the desktop launcher reads the
+ * same file from a JVM that never loads the game API and so can never link this class. What stays
+ * here is the engine side: when a row is written, what goes in it, and the retention rules.
+ *
  * <p><b>Rows go stale on purpose.</b> The engine prunes autosave folders to {@code maxAutosaveSlots}
  * (3 by default) without telling any mod, so a row can name a folder that is no longer there. The
  * index does not try to keep up: the reader (the launcher) stats the folder and skips what is gone.
  */
 public final class CoopSaveIndex {
 
+    // The file's shape - version, key names, the row record and its codec - lives on
+    // CoopSaveIndexSchema, which the launcher can link against because it names nothing from the
+    // game API. These are aliases so every existing caller and test keeps its spelling.
+
     /** The name handed to {@code SettingsAPI}'s {@code ...Common} calls. */
-    public static final String COMMON_FILE = "coop_saves.json";
+    public static final String COMMON_FILE = CoopSaveIndexSchema.COMMON_FILE;
 
     /** Where the file actually sits, for anything a player or a launcher reads. */
-    public static final String COMMON_PATH = "saves/common/coop_saves.json.data";
+    public static final String COMMON_PATH = CoopSaveIndexSchema.COMMON_PATH;
 
     /** Bumped only if the row shape changes incompatibly; a reader that sees a higher one should stop. */
-    public static final int FORMAT_VERSION = 1;
+    public static final int FORMAT_VERSION = CoopSaveIndexSchema.FORMAT_VERSION;
 
     /** Top-level keys. */
-    public static final String KEY_VERSION = "version";
-    public static final String KEY_SAVES = "saves";
+    public static final String KEY_VERSION = CoopSaveIndexSchema.KEY_VERSION;
+    public static final String KEY_SAVES = CoopSaveIndexSchema.KEY_SAVES;
 
-    /** Row keys, spelled once so the launcher-side parser can be checked against them. */
-    public static final String KEY_CAMPAIGN_ID = "campaignId";
-    public static final String KEY_SAVE_DIR_NAME = "saveDirName";
-    public static final String KEY_CHARACTER_NAME = "characterName";
-    public static final String KEY_LEVEL = "level";
-    public static final String KEY_GAME_DATE_TIMESTAMP = "gameDateTimestamp";
-    public static final String KEY_GAME_DATE = "gameDate";
-    public static final String KEY_SAVED_AT_MILLIS = "savedAtMillis";
-    public static final String KEY_AUTOSAVE = "autosave";
-    public static final String KEY_ROLE = "role";
-    public static final String KEY_SEED_STRING = "seedString";
-    /**
-     * Sector size and star age, added 2026-09-04. Both are optional: only a campaign generated
-     * through the coop new-game dialog since that date has them, so an older row simply leaves them
-     * out and the launcher leaves its own controls alone. Additive on purpose -- the format version
-     * is unchanged, because a launcher that has never heard of these keys goes on reading every row
-     * exactly as before, and one that has, reads an old file just as happily.
-     */
-    public static final String KEY_SECTOR_SIZE = "sectorSize";
-    public static final String KEY_SECTOR_AGE = "sectorAge";
+    /** Row keys. */
+    public static final String KEY_CAMPAIGN_ID = CoopSaveIndexSchema.KEY_CAMPAIGN_ID;
+    public static final String KEY_SAVE_DIR_NAME = CoopSaveIndexSchema.KEY_SAVE_DIR_NAME;
+    public static final String KEY_CHARACTER_NAME = CoopSaveIndexSchema.KEY_CHARACTER_NAME;
+    public static final String KEY_LEVEL = CoopSaveIndexSchema.KEY_LEVEL;
+    public static final String KEY_GAME_DATE_TIMESTAMP = CoopSaveIndexSchema.KEY_GAME_DATE_TIMESTAMP;
+    public static final String KEY_GAME_DATE = CoopSaveIndexSchema.KEY_GAME_DATE;
+    public static final String KEY_SAVED_AT_MILLIS = CoopSaveIndexSchema.KEY_SAVED_AT_MILLIS;
+    public static final String KEY_AUTOSAVE = CoopSaveIndexSchema.KEY_AUTOSAVE;
+    public static final String KEY_ROLE = CoopSaveIndexSchema.KEY_ROLE;
+    public static final String KEY_SEED_STRING = CoopSaveIndexSchema.KEY_SEED_STRING;
+    public static final String KEY_SECTOR_SIZE = CoopSaveIndexSchema.KEY_SECTOR_SIZE;
+    public static final String KEY_SECTOR_AGE = CoopSaveIndexSchema.KEY_SECTOR_AGE;
 
     /**
      * How many rows one campaign keeps. Eight covers the three autosave slots the engine keeps plus a
@@ -136,52 +138,6 @@ public final class CoopSaveIndex {
     private static volatile boolean saveDirWarned;
 
     private CoopSaveIndex() {
-    }
-
-    /**
-     * One save, as the launcher's picker needs it.
-     *
-     * @param campaignId        the sector-persistent {@code coop.campaignId}; a row without one is
-     *                          meaningless and is never written
-     * @param saveDirName       the {@code saves/} folder name, or {@code ""} when the engine getter
-     *                          could not be reached
-     * @param characterName     the creation-time character name, the same string the engine writes to
-     *                          {@code descriptor.xml} as {@code characterName}
-     * @param level             the player's level, as {@code descriptor.xml} records it
-     * @param gameDateTimestamp {@code CampaignClockAPI.getTimestamp()}, the in-game clock as a long
-     * @param gameDate          the same instant as the game prints it ("Cycle 206, Kerenth 12"), or
-     *                          {@code ""}
-     * @param savedAtMillis     wall clock at the moment the save finished; the ordering key
-     * @param autosave          {@code TRUE} when the mod itself asked for this autosave, {@code null}
-     *                          when it cannot be told apart from a manual save (the engine does not
-     *                          pass the flag to the hook)
-     * @param role              {@code HOST}, {@code GUEST} or {@code NONE}, from the launch settings
-     * @param seedString        the campaign's seed, or {@code ""} before one is stored
-     */
-    public record Row(String campaignId, String saveDirName, String characterName, int level,
-                      long gameDateTimestamp, String gameDate, long savedAtMillis, Boolean autosave,
-                      String role, String seedString, String sectorSize, String sectorAge) {
-
-        public Row {
-            campaignId = text(campaignId);
-            saveDirName = text(saveDirName);
-            characterName = text(characterName);
-            gameDate = text(gameDate);
-            role = text(role).isEmpty() ? "NONE" : text(role);
-            seedString = text(seedString);
-            sectorSize = text(sectorSize).toLowerCase(Locale.ROOT);
-            sectorAge = text(sectorAge).toLowerCase(Locale.ROOT);
-        }
-
-        /** Whether this row carries enough to be worth keeping. */
-        public boolean usable() {
-            return !campaignId.isEmpty();
-        }
-
-        /** Whether the launcher can open the folder directly instead of matching descriptors. */
-        public boolean hasSaveDirName() {
-            return !saveDirName.isEmpty();
-        }
     }
 
     // ---- pure index maths ----------------------------------------------------------------------
@@ -216,7 +172,7 @@ public final class CoopSaveIndex {
             if (entry == null) {
                 continue;
             }
-            Row row = readRow(entry);
+            Row row = CoopSaveIndexSchema.readRow(entry);
             if (row.usable()) {
                 result.add(row);
             }
@@ -330,7 +286,7 @@ public final class CoopSaveIndex {
         while (true) {
             JSONArray saves = new JSONArray();
             for (Row row : pending) {
-                saves.put(writeRow(row));
+                saves.put(CoopSaveIndexSchema.writeRow(row));
             }
             try {
                 index.put(KEY_SAVES, saves);
@@ -344,57 +300,6 @@ public final class CoopSaveIndex {
             // goes rather than the write being refused.
             pending.remove(pending.size() - 1);
         }
-    }
-
-    private static JSONObject writeRow(Row row) {
-        JSONObject entry = new JSONObject();
-        try {
-            entry.put(KEY_CAMPAIGN_ID, row.campaignId());
-            if (row.hasSaveDirName()) {
-                entry.put(KEY_SAVE_DIR_NAME, row.saveDirName());
-            }
-            entry.put(KEY_CHARACTER_NAME, row.characterName());
-            entry.put(KEY_LEVEL, row.level());
-            entry.put(KEY_GAME_DATE_TIMESTAMP, row.gameDateTimestamp());
-            if (!row.gameDate().isEmpty()) {
-                entry.put(KEY_GAME_DATE, row.gameDate());
-            }
-            entry.put(KEY_SAVED_AT_MILLIS, row.savedAtMillis());
-            if (row.autosave() != null) {
-                entry.put(KEY_AUTOSAVE, row.autosave().booleanValue());
-            }
-            entry.put(KEY_ROLE, row.role());
-            if (!row.seedString().isEmpty()) {
-                entry.put(KEY_SEED_STRING, row.seedString());
-            }
-            if (!row.sectorSize().isEmpty()) {
-                entry.put(KEY_SECTOR_SIZE, row.sectorSize());
-            }
-            if (!row.sectorAge().isEmpty()) {
-                entry.put(KEY_SECTOR_AGE, row.sectorAge());
-            }
-        } catch (Exception ignored) {
-            // Constant keys and primitives; org.json only refuses null keys and NaN.
-        }
-        return entry;
-    }
-
-    private static Row readRow(JSONObject entry) {
-        Boolean autosave = entry.has(KEY_AUTOSAVE) && !entry.isNull(KEY_AUTOSAVE)
-                ? Boolean.valueOf(entry.optBoolean(KEY_AUTOSAVE, false))
-                : null;
-        return new Row(entry.optString(KEY_CAMPAIGN_ID, ""),
-                entry.optString(KEY_SAVE_DIR_NAME, ""),
-                entry.optString(KEY_CHARACTER_NAME, ""),
-                entry.optInt(KEY_LEVEL, 0),
-                entry.optLong(KEY_GAME_DATE_TIMESTAMP, 0L),
-                entry.optString(KEY_GAME_DATE, ""),
-                entry.optLong(KEY_SAVED_AT_MILLIS, 0L),
-                autosave,
-                entry.optString(KEY_ROLE, "NONE"),
-                entry.optString(KEY_SEED_STRING, ""),
-                entry.optString(KEY_SECTOR_SIZE, ""),
-                entry.optString(KEY_SECTOR_AGE, ""));
     }
 
     private static JSONObject parseOrNull(String indexText) {
