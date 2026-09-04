@@ -224,7 +224,7 @@ points the launcher at your Starsector folder when it could not work out where t
 | `starsector-core` | The folder is missing. |
 | `mods\coop\jars\coop.jar` | The mod is unpacked wrong or incompletely. |
 | `mods\coop\jars\coop-forks.jar` | Same. |
-| `coop-forks.jar first on the JVM classpath` | Section 3 was skipped, or the entry is on the line but behind another jar, where it does nothing. |
+| `coop-forks.jar first on the JVM classpath` | Section 3 was skipped, or the entry is on the line but behind another jar, where it does nothing. Any way of writing the path counts (relative or absolute, either slash, any capitalisation); only its position on the line matters. |
 | `no leftover -Dcoop.* in vmparams` | See below. |
 | `co-op enabled in mods\enabled_mods.json` | The mod is not ticked in the Starsector launcher. |
 | `mod_info.json version matches coop.jar` | Two builds got mixed in one folder. Delete `mods\coop` and unzip once. |
@@ -493,7 +493,7 @@ The rest:
 | `coop.playerName` | your character's name | The name your partner sees in the HUD and on the session page. |
 | `coop.hudCorner` | `TR` | Where the co-op status line is drawn: `TR`, `TL`, `BR`, `BL`. |
 | `coop.hud.disable` | `false` | `true` removes the status line. |
-| `coop.adoptCampaignId` | `false` | Guest only, and only for the case in the note below. |
+| `coop.adoptCampaignId` | `false` | Guest only, and only for the case in the note below. It is consumed by the launch that uses it: the mod strikes it out of the settings file right after reading it, and the launcher clears it again when the game exits and when it next opens. Set it for each launch that needs it. |
 | `coop.maxGuests` | `1` | Peer capacity. Anything other than 1 is clamped back to 1 with a warning in the log. |
 
 The launcher's Advanced card sets `coop.portMapping` (Port mapping), `coop.hudCorner` (Link HUD
@@ -505,7 +505,9 @@ launcher field at all. This table is the plain `vmparams` form for setting any o
 Rejoining after the guest quits: load the co-op autosave the mod wrote, not New Game. A fresh
 campaign on the same seed is refused because the host's campaign is already in flight.
 `-Dcoop.adoptCampaignId=true`, or the Advanced card's **Start over inside the host's campaign**
-checkbox, forces it through at the cost of everything the guest had.
+checkbox, forces it through at the cost of everything the guest had. The consent lasts exactly one
+launch. A value typed into `saves\common\coop_options.json.data` by hand is cleared the next time the
+launcher opens, so tick the box in the launcher instead unless you launch the game without it.
 
 The `coop.debug.*` properties, `coop.fullFidelityGuestSystem`, `coop.ff.disable` and
 `coop.clock.disable` are diagnostics for bug reports and development; the launcher's Advanced card

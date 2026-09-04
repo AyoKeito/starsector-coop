@@ -27,6 +27,25 @@ Current rules:
 - Keep coop networking progressed from `EveryFrameScript.advance()` on the campaign thread.
 - Keep runtime dependencies minimal and covered by sandbox compatibility tests.
 
+### What the loader actually refuses (read off the shipped class, 2026-09-04)
+
+`com/fs/starfarer/loading/scripts/B.loadClass` refuses every name that starts with `java.io`,
+`java.nio.file.File` or `java.lang.reflect`, minus an explicit allow-list held in its constant pool:
+
+- `java.io`: `BufferedInputStream`, `BufferedReader`, `FilterInputStream`, `InputStreamReader`,
+  `Reader`, `Serializable`, `InvalidClassException`, `ObjectStreamException`, `InputStream`,
+  `IOException`, `PrintStream`, `PrintWriter`, `ByteArrayInputStream`, `FilterOutputStream`,
+  `OutputStream`, `Closeable`, `Flushable`, `StringReader`, `FileReader`.
+- `java.nio.file`: `Path` and `Paths` pass (they do not start with `File`); `Files` and
+  `FileSystems` do not.
+- `java.lang.reflect`: `AnnotatedElement`, `InvocationTargetException`, `Type` and
+  `GenericDeclaration` pass; everything else does not.
+
+The project rule above stays as written: it is a superset of the engine's list, it costs nothing,
+and it survives an engine update that trims the list. But it is not an explanation for a crash. The
+types that actually trip the guard include `UncheckedIOException`, `StringWriter`,
+`ByteArrayOutputStream`, `EOFException` and `File`, and `java.io.IOException` is not one of them.
+
 ### Handshake checksums: RESOLVED — `SettingsAPI.loadText` works in the sandbox (Phase 6b, 2026-08-17)
 
 Phase 12b could not settle whether `SettingsAPI.loadText(String, String modId)` survives the script
@@ -41,9 +60,10 @@ via `loadText` + `CoopChecksum.sha256Text` (line endings normalized so a CRLF/LF
 does not read as a mismatch), and the probe was deleted. Two safety conditions survive from the
 probe era and are pinned by `CoopHandshakeSandboxCompatibilityTest`:
 
-- The call catches `Throwable`, never a named checked exception — `loadText` declares `IOException`,
-  and naming that type makes the verifier resolve a blocked i/o class in the calling class, the
-  exact pattern recorded above as sandbox-fatal.
+- The call catches `Throwable`, never a named checked exception. `loadText` declares `IOException`;
+  that one type is on the loader's allow-list above, so naming it would in fact load, but the broad
+  catch costs nothing and is what keeps the call safe against the `java.io` types that are blocked.
+  (Corrected 2026-09-04: this bullet used to state that naming `IOException` trips the guard.)
 - A per-mod failure degrades to that mod's `UNAVAILABLE:script-sandbox` placeholder entry instead of
   throwing out of `capture()`, so one unreadable third-party mod cannot kill the handshake.
 
@@ -183,6 +203,14 @@ while fast-forwarding, the campaign clock advanced at exactly 2x, yet both
 > toggle; (2) if the player opens the vanilla settings menu *during* a session and applies, vanilla
 > writes the current (forced-true) value to its settings file, and the mod cannot tell. Neither is
 > worth a fix in v1; noted so a "my Shift became a toggle" report is recognised.
+>
+> **Consequence for the NPC handoff margin (2026-09-04).** `CoopNpcThreatWatcher.handoffMargin`
+> takes a campaign speed multiplier, read per scan off `CampaignUIAPI.isFastForward()`: at
+> `CoopFastForwardLock.SESSION_MULT` a chaser covers that multiple of the distance inside the same
+> RTT budget, so a margin sized for 1x fired the pre-contact handoff after contact. The multiplier is
+> clamped at 1, so it can only widen the band. The `p95 <= 0` case (a loopback link) still returns
+> the flat `CONTACT_MARGIN_SU` and is deliberately not scaled: that floor covers measurement noise,
+> not travel.
 
 Because hold-mode fast-forward cannot be mirrored or blocked via public API, the v1 coop session was
 locked to 1x instead:
@@ -502,3 +530,67 @@ launch cleans it up.
 Routers with working lease timers expire it on their own within the renewal interval. The case that
 matters is a router that rejects timed leases (`UPnPError 725`): the mod falls back to a permanent
 mapping there, so a crash leaves the port open until the next launch.
+
+### A UPnP response larger than 256 KB is abandoned
+
+`CoopPortMapper` stops reading a gateway's HTTP response at `MAX_RESPONSE_BYTES` (256 KB) and settles
+the exchange as failed rather than growing its buffer. Real device descriptors and SOAP replies are a
+few kilobytes; the cap exists so a gateway that answers with a stream, or a device on the LAN
+pretending to be one, cannot make the mod accumulate unbounded bytes on the campaign thread. A router
+whose descriptor genuinely exceeds it will not be mapped, and the log says which limit was hit.
+
+## Bug audit 2026-09-04 — Four Accepted Divergences
+
+Found by the bug-hunt campaign recorded in the plan; each was judged not worth the code it would take
+in v1. The full report lives outside the repo at
+`tmp_ff_analysis\bughunt\BUG-REPORT-2026-09-03.md`.
+
+### The guest's `PirateBaseManager` start date restarts on every guest load (fleet-12)
+
+`CoopNpcFleetSuppressor.removeSpawnerScripts` takes `PirateBaseManager` out of `sector.getScripts()`,
+so a guest save no longer carries it. On the next load vanilla's `CoreLifecyclePluginImpl` sees
+`!sector.hasScript(PirateBaseManager.class)` and constructs a fresh one, whose constructor sets
+`start = clock.getTimestamp()` and overwrites the `$core_pirateBaseManager` handle that
+`MANAGER_HANDLES` deliberately preserves as a data holder.
+
+The visible effect is that `PirateBaseManager.getInstance().getDaysSinceStart()` reads ~0 on the guest
+after a reload while the host's reads the real campaign age. It feeds `Tuning.getDaysSinceStart()` and
+a few locally constructed bar missions (`SurplusShipHull` cycles, `CustomProductionContract`), so
+those parameters differ between the two clients and reset again on every subsequent guest load. Fixing
+it means writing a private field on a vanilla manager after construction, on every load, which is more
+surface than the drift is worth.
+
+### An orphan mirror cargo pod can outlive the pod it copies
+
+Mirror pods are created with `setNeverExpire(true)` so the creating client stays the only owner of the
+decay timer. The cost is the other direction: when the original expires while nobody is in that
+location, nothing generates the `WORLD_DELTA(CONSUME)` that would remove the mirror, so the partner
+keeps a pod that no longer exists on the authoritative side and can still loot it. This is the milder
+half of a trade — the alternative, letting each client run its own timer, deleted live pods out from
+under the player who dropped them.
+
+### Ambient fleets can appear on top of a guest in a system the host is not in (forks-2)
+
+The `DisposableFleetManager` fork makes `currSpawnLoc` presence-aware so ambient pirate and Pather
+fleets spawn around the guest as well as the host. Vanilla's placement, however, branches on
+`fleet.getContainingLocation() == Global.getSector().getCurrentLocation()`, which on the host-authored
+side is the host's location, and only the host-present branch routes through
+`Misc.pickLocationNotNearPlayer`. In a guest-only system the fleet takes the other branch and is
+dropped at `Misc.getPointAtRadius(target.getLocation(), target.getRadius() + 100f)` with no distance
+check against anyone — which can be the jump point or planet the guest is sitting at.
+
+The result is a hostile fleet materializing next to the guest instead of at a polite distance. The fix
+is a second geometry edit inside a forked vanilla placement path, and the fork subtree is already the
+most expensive thing in the mod to keep in step with an engine update, so v1 accepts the pop-in.
+
+### The colony editor is claimed whole, because no API says which colony it is editing (colony-3)
+
+The colony screen reached from the command tab (`CoreUITabId.OUTPOSTS`) docks nothing and fires no
+market callback, so `CoopInteractionGate` — which keys claims on the entity a dialog opened — had
+nothing to key on, and both players could edit the same colony at once. There is no engine call that
+reports which colony that tab currently shows, and none that closes the core UI, so the claim is taken
+for the synthetic entity id `coop:colony-management`: while either player has the tab open, the other
+sees "Remote player is interacting: colony management" and is bounced to the INTEL tab.
+
+Two consequences to expect in play: the lockout is global, so the second player cannot edit a
+*different* colony either, and the bounce is a tab switch rather than a closed screen.

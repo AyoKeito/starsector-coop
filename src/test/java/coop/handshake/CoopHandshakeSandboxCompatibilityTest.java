@@ -62,7 +62,8 @@ class CoopHandshakeSandboxCompatibilityTest {
         assertTrue(source.contains("catch (Throwable"),
                 "the loadText call must catch Throwable, never a named checked exception");
         assertFalse(source.contains("IOException"),
-                "naming the checked exception type resolves a blocked i/o class in the verifier");
+                "house rule: no named java.io type in a sandboxed class, even one the loader's"
+                        + " allow-list happens to pass");
         assertFalse(source.contains("openStream("),
                 "Open stream calls trip Starsector's script sandbox");
     }

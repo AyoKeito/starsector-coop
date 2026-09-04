@@ -129,6 +129,40 @@ same day.
   from the invite.
 - The mod's description in Starsector's own mod list was reworded.
 
+**Fixed in the pre-release audit**
+
+A full read of the code, the scripts and the documents on 2026-09-03 and 2026-09-04, before the
+release build. 107 confirmed defects, fixed across twelve passes. The ones a player would have met:
+
+- The launcher replayed the whole game log from the top whenever the game wrote a byte it could not
+  decode, which spun a core and eventually truncated the live log during a rollover. It also kept
+  holding the co-op port after a connection check that finished late, so the game it then started
+  could not bind it.
+- A colony upgrade the guest cancelled came back on the next sync, and an industry the mirror had
+  already finished could be reported as a downgrade. Colony state is now compared as content, per
+  industry, and a failure in one industry no longer starves the ones behind it.
+- Two players could edit the same colony from the command tab at once and one player's edit was
+  dropped without a refund. The colony editor is now claimed by whoever opens it.
+- A second hostile act in the same raid was dropped, so part of a raid's outcome never reached the
+  other player.
+- A battle result built from a roster the engine would not fully read could report a live fleet as
+  destroyed. An unreadable roster is now omitted from the result instead.
+- Ship repair state was paired to the wrong ships whenever a fleet was merely reordered.
+- A guest that pressed "Cancel countdown" during a start-anyway countdown was ignored; the session
+  started anyway.
+- Mirror fleets stopped for a customs stop stayed eligible to be pulled into someone else's battle
+  for the rest of their lives.
+- A port already mapped by another device on the network was evicted on every renewal. The mod now
+  asks who owns it and says to pick another port.
+- A guest that lost its save could be told the campaign was already in flight because a failed seed
+  lock had written the campaign id anyway.
+- A build from a modified checkout was stamped with the last commit's hash, so two players could
+  shake hands on different code. It reports `<hash>-dirty` now.
+
+Development tooling gained the agent bridge verbs the smoke checks were missing: `cargo` (supplies,
+fuel, crew, capacity, overload) and `addship`, and the bridge accepts four clients at once instead of
+one. None of it runs unless the bridge is switched on.
+
 **Known limits.** Both players need identical Starsector versions and identical mod lists, and both
 have to edit one line in `vmparams` by hand. Traffic is plaintext. One guest. Both players
 piloting in the same battle is not in this release. `docs/player/LIMITATIONS.md` has the full list of

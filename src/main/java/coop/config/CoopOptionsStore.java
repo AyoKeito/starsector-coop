@@ -33,8 +33,9 @@ import java.util.function.Function;
  * {@code java.lang.reflect}. Every file read here goes through {@code SettingsAPI}
  * ({@code loadJSON(path, modId)}, {@code fileExistsInCommon}, {@code readJSONFromCommon}), and the
  * calls are caught as {@code Exception | LinkageError} rather than by their declared
- * {@code IOException} - naming the checked type would make the verifier resolve a {@code java.io}
- * class in this class, which is the exact pattern the sandbox refuses.
+ * {@code IOException}. That type is in fact on the loader's allow-list (see
+ * {@code docs/starsector-runtime-limitations.md}), but the broad catch is the house rule: it holds
+ * for the {@code java.io} types that are blocked, and it does not depend on the list staying put.
  *
  * <p><b>Failure model.</b> A missing, unreadable or malformed file degrades to "no override" with a
  * single WARN. Config is never load-bearing enough to stop the game from starting.

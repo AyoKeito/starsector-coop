@@ -37,6 +37,13 @@ canonical entries, including deep-space systems.
     positive session seed while preserving vanilla's deterministic `seedUniquifier()`
     counter.
   - Logs one `[COOP-FORK] Misc fork active...` probe to prove the classpath override loaded.
+  - Both the field and the probe are bound during core data loading, about ten seconds before any
+    mod plugin exists, so the seeding above only happens in time on the `-D` path. The Phase 31
+    launcher's seed lives in `saves/common/coop_options.json.data` and becomes a system property
+    only when `CoopModPlugin.onApplicationLoad` republishes it; on that path the probe legitimately
+    reads `coopSession=false` and `CoopModPlugin.rebindTheForkedSharedRandom` writes the field from
+    the same `CoopRandom` stream immediately afterwards. The line that says the seed took is
+    `Coop reseeded the forked Misc.random`, not the probe.
 - `com.fs.starfarer.api.impl.campaign.world.GateHaulerLocation`
   - Temporarily swaps `StarSystemGenerator.random` to an independent
     `CoopRandom.of("GateHaulerLocation")` stream for `generate()`, then restores it.

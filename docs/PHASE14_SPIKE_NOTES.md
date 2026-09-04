@@ -464,7 +464,11 @@ kept as the historical record and is not called from production code.
 - Verdict (a) &rarr; `coop.combat.CoopCustomsDialogStaging`. The `toff` flag set, the `$sourceMarket`
   pick, and the precondition logging were re-derived here rather than reused from the spike; the one
   behavioural difference is that only `FLEET_IGNORES_OTHER_FLEETS` is cleared for the encounter
-  (12b's `FLEET_IGNORED_BY_OTHER_FLEETS` no longer exists on mirrors).
+  (12b's `FLEET_IGNORED_BY_OTHER_FLEETS` no longer exists on mirrors). Since 2026-09-04 the clear is
+  also undone: `CoopCustomsDialogStaging.restoreEngagementShield`, driven from the bridge when the
+  encounter closes, puts the flag back. Nothing else ever did — `CoopFleetMirror` sets it on the frame
+  it creates the mirror — so a staged mirror stayed eligible for vanilla's battle pull-in for the rest
+  of its life.
 - Verdict (b) &rarr; `CoopBattleBridge.drivePendingEngage`, which runs the same
   `BattleCreationContext(player, ATTACK, mirror, ATTACK)` call after the pre-battle autosave, with
   `BATTLE_BEGIN` flushed before the state transition. The spike's "TCP backlog survives the combat

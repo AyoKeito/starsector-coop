@@ -48,6 +48,13 @@
       "body": "<span class=\"rp\" data-jump=\"31\">Phase 31</span> (coop launcher) is built and pushed; its smoke is <b>deferred into Phase 19</b> by user decision 2026-09-03. Open there: confirm in a launcher-started game that the settings-file flags are republished (log line <code>Coop published the settings-file</code>), the invite round trip, the guest test connection against the host launcher, and the bug-report zip. <span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt). Left there: the forum-thread URL in <code>docs/player/LISTING.md</code> and the COOP TEST Ziggurat new-game option in <code>data/campaign/rules.csv</code> (remove or dev-gate before a public build). Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the final two-instance checklist, fixes limited to what it fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass)."
     },
     {
+      "sev": "revisit",
+      "sevLabel": "live smoke",
+      "head": "Four bug-audit fixes to watch in the next two-instance session",
+      "state": "open; folds into the Phase 19 checklist",
+      "body": "The 2026-09-03/04 bug audit fixed 107 findings; four of them change behaviour a smoke run should look at. (1) The command-tab colony editor is now claimed whole as <code>coop:colony-management</code>: while either player has it open the other is bounced to the INTEL tab and sees \"Remote player is interacting: colony management\" — the lockout is global, so the second player cannot edit a different colony either. (2) The host's options page should no longer read \"pending\" for policy values that are not the default. (3) A router that speaks UPnP but not <code>GetSpecificPortMappingEntry</code> will not clear even its own stale entry after a crash: expect a conflict report naming the owner and a port change, not an eviction. (4) The host now learns the guest id and <code>sendTo</code> unicasts, so the N-ready routing paths are exercised live for the first time."
+    },
+    {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Parked Phase 14 fallout (cosmetic/UX)",

@@ -248,6 +248,12 @@ launch scripts' `-ExtraJvmProps`. All of them are optional in the sense that the
 | `coop.debug.wiretap` | `false` | Logs sampled decoded payloads in both directions plus a per-message-type composed-size histogram every 60 s. Diagnostic only; it prints your session's game state into the log. |
 | `coop.debug.wiretapSample` | `10` | With the wiretap on, log one payload in every N. |
 
+The three role keys have sector-memory twins (`coop.hostPort`, `coop.connectHost`, `coop.connectPort`
+set through the dev console) for starting a session inside a running game. Since 2026-09-04 the pump
+reads each of them once and unsets it in the same frame: sector memory is written into the save, so a
+flag that survived the read had the failed bind retrying at frame rate, and a console join redialling
+on every later load of that save.
+
 Since Phase 28 milestone 1 these are also file-backed: `saves/common/coop_options.json.data` for
 user overrides (the engine appends `.data` to every `saves/common` name; the store still passes
 `coop_options.json` to `SettingsAPI`), `mods/coop/data/config/coop_options.json` for the shipped
@@ -393,7 +399,7 @@ new session with a full resync. You lose the grace window's convenience, not the
 | `CGNAT/double NAT` in the host log | The ISP, not your router | Tier 1 if you have IPv6, tier 0 otherwise. |
 | Mapper says "no UPnP gateway answered" | UPnP is off, or the router does not speak it | Turn UPnP on in the router, or use tier 2. |
 | Mapper says "no UPnP gateway answered" on a MikroTik, or any router with VLANs | The UPnP internal interface is the bridge, which holds no LAN address | Point it at the interface that holds the LAN address: `/ip upnp interfaces set 0 interface=vlan10-LAN`. |
-| Mapper says `UPnPError 718` twice | Another device owns that external port | Pick a different `coop.hostPort`, for example 7778. |
+| Mapper says `already mapped to <client>` after a 718 | Another device owns that external port | Pick a different `coop.hostPort`, for example 7778. The mod queries the owner and refuses to evict it. |
 | Mapper says `UPnPError 725` | Router refuses timed leases | Nothing to do. The mod retries with a permanent lease automatically and deletes it on exit. |
 | Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both `New-NetFirewallRule` commands from tier 1. |
 | Everything is fine but choppy | Latency, not reachability | Check RTT in the guest's doctor block. Above ~250 ms, try a VPN with a closer relay. |
@@ -469,6 +475,13 @@ Coop connection doctor:
 both `AddPortMapping` calls. The mapping was deleted again on shutdown, and the external address is
 public, so this connection is not behind CGNAT.
 
+Since 2026-09-04 the 718 path asks first: a conflict is answered with one
+`GetSpecificPortMappingEntry`, and the entry is deleted and re-added only when the router says it
+belongs to this machine. When it belongs to someone else, or when the router does not answer that
+call at all, the mapper reports the conflict and leaves the mapping alone rather than evicting a
+neighbour on every renewal. A router that speaks UPnP but not `GetSpecificPortMappingEntry` therefore
+will not clear even its own stale entry after a crash; pick another `coop.hostPort`.
+
 Four error paths this run did not exercise, all covered by `CoopPortMapperUpnpExchangeTest` against
 a stub IGD on loopback instead: the 718 delete-and-retry path, the 725 permanent-lease retry, an
 outright refusal, and a gateway advertising no WAN connection service. Run 1 covered the give-up
@@ -508,8 +521,10 @@ Three findings:
    compares peer addresses (the UDP return-address pinning in `CoopNetService`) will compare v6 to v6
    and v4 to v4, with no mixed-family case to handle.
 3. `coop.connectHost` accepts both `::1` and `[::1]`. It rejects `::1:27015`, which is what someone
-   pastes when they think the host and port go in one property. That failure is loud, not silent:
-   the address stays unresolved and the connect attempt fails immediately.
+   pastes when they think the host and port go in one property. A name that does not resolve makes no
+   connect attempt at all: the guest logs the failure once, then re-tries the lookup on a backoff that
+   grows 0.5 s, 1 s, 2 s up to 30 s, so a resolver that comes back still joins without a relaunch and
+   a name that never resolves costs one frame-long stall every 30 s rather than every retry.
 
 The machine has no global IPv6 (`IPv6Connectivity : NoTraffic`), so tier 1 was verified on loopback
 only. A real two-household IPv6 session is still outstanding.

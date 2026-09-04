@@ -27,12 +27,21 @@ Read `docs/starsector-runtime-limitations.md` before changing campaign scripts, 
 
 ## Save-Visible State
 
-The mod writes two things into the sector's persistent data. Both survive in the host save; neither is removed by the Phase 12b orphan sweep.
+Everything the mod writes into the sector's persistent data is in the table below. It all survives in the host save; none of it is removed by the Phase 12b orphan sweep. The point of the list is that a later audit can tell mod state from dead state, and that a rename of any class named here has to bring an XStream alias with it.
 
 | Key | Written by | Read by |
 | --- | --- | --- |
 | `coop.seedLong`, `coop.seedString`, `coop.sectorFingerprint`, `coop.campaignId` | `coop.seed.CoopSeedSync` | seed lock (Phase 6b) |
+| `coop.localPlayerId` | `coop.seed.CoopSeedSync.storeLocalPlayerId`, on the first co-op launch of the save | `CoopSeedSync.currentLocalPlayerId`, so a relaunch keeps the same player id |
 | `coop.guestFleetSnapshot` | `coop.save.CoopGuestSnapshotStore`, from `CoopModPlugin.beforeGameSave()` | **nothing — deliberately write-only** |
+| `coop.sessionStats` | `coop.stats.CoopSessionStats.writeInto`, via `CoopSessionStatsStore` | `CoopNetPump.sessionStats()`, which is what makes the stats page survive a reload |
+| `coop.options.<key>`, `coop.optionsPolicyVersion` | `coop.config.CoopOptionsPolicy.persist` (host only) | `CoopOptionsPolicy.ensureSeeded`, where a stored value beats the install default |
+
+Two sector-memory flags ride alongside: `$coopStatsPinned` (`CoopSessionStatsIntel`) and `$coopOptionsPinned` (`CoopOptionsPage`) remember whether the player pinned those intel pages.
+
+`coop.sessionStats` holds a `CoopSessionStats` bean, XStream-aliased `coopStats`/`coopStatsPlayer`/`coopStatsLoss` in `CoopModPlugin.configureXStream`. The options keys and the two flags are plain strings, so they cost nothing to rename beyond the migration every existing save would need.
+
+One class reaches a save without a key of its own: `coop.colony.CoopExpeditionWarningIntel` is an intel entry that also registers itself with `sector.addScript(this)`, so it serializes under its own class name with **no alias**. Renaming or moving it breaks every save that carries one. Guest saves are also missing the vanilla spawner and `BarEventManager` scripts the Phase 13 suppressors remove, which is why a guest save is co-op-only (see the plan's guest-save policy).
 
 `coop.guestFleetSnapshot` holds a `CoopGuestSnapshot`: the guest's fleet, cargo, credits and officers as the host last received them, XStream-aliased as `coopGuestSnap` (plus `coopGuestSnapShip`/`coopGuestSnapStack`/`coopGuestSnapOfficer`). It is refreshed on every host save and **never read back by v1 code. That is a decision (2026-06-10), not dead state — do not delete it.**
 
@@ -226,9 +235,10 @@ supplies the `version` field of the `coop` entry in `enabledMods`, and that one 
 rejects the session. So a release bump is two edits that have to agree: `mod_info.json`'s `version`
 and `build.gradle`'s `version`. `coopGitCommit` is compared too and comes from
 `git rev-parse --short=12 HEAD`, which has a consequence worth stating plainly: two people who each
-build the mod from their own checkout will be refused even at an identical version, and an uncommitted
-build reports `dev-uncommitted`. A release is one built artifact that both players install, not a
-version number both players reproduce.
+build the mod from their own checkout will be refused even at an identical version. A build from a
+modified working tree reports `<hash>-dirty`, so it will not match a clean build of the same commit
+either; `dev-uncommitted` is now only what a checkout with no git metadata at all reports. A release
+is one built artifact that both players install, not a version number both players reproduce.
 
 Steps:
 
@@ -247,8 +257,9 @@ Steps:
 5. `scripts\deploy-to-test-clients.ps1`, then a two-client session: handshake accepted, both status
    lines read `session active`, and the host log's connection-doctor block names a tier.
 6. `scripts\package-release.ps1` writes `dist\coop-<version>.zip`. It runs step 4's build itself
-   unless you pass `-SkipBuild`, and it refuses to package a dirty tree, mismatched versions, jars
-   whose baked-in commit is not `HEAD`, or a broken classloader split. What it ships:
+   unless you pass `-SkipBuild`, and it refuses to package a dirty tree, a `mod_info.json`,
+   `build.gradle` or `coop.version` that disagree on the version, jars whose baked-in commit is not
+   `HEAD`, or a broken classloader split. What it ships:
    `mod_info.json`, `jars\`, `data\`, `Coop Launcher.cmd`, `coop.version`, `LICENSE`,
    `CHANGELOG.md`, `docs\player\`. Not `build\`, not `src\`, not `forks\`, not `tools\`, not
    `tmp_ff_analysis`. The archive unpacks to a folder named `coop`, because the handshake compares
