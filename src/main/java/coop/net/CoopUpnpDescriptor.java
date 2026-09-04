@@ -125,53 +125,11 @@ public final class CoopUpnpDescriptor {
 
     /**
      * Text of the first {@code <name>} element at or after {@code from}; namespace prefixes tolerated,
-     * so {@code <dev:friendlyName>} matches {@code friendlyName}.
-     *
-     * <p>Every index here is an index into {@code xml} itself. The scan used to search a lower-cased
-     * copy and apply those offsets to the original (red-team net-31), which silently misaligns as soon
-     * as lower-casing changes the string's length — {@code "İ"} folds to two chars — and then extracts
-     * a value with a fragment of the closing tag glued on, or misses the element entirely.
+     * so {@code <dev:friendlyName>} matches {@code friendlyName}. See {@link CoopUpnpXml} for what the
+     * scan tolerates and why it never lower-cases the document.
      */
     private static String elementValue(String xml, String name, int from) {
-        int cursor = Math.max(0, from);
-        while (true) {
-            int open = xml.indexOf('<', cursor);
-            if (open < 0) {
-                return null;
-            }
-            int tagEnd = xml.indexOf('>', open);
-            if (tagEnd < 0) {
-                return null;
-            }
-            String tag = xml.substring(open + 1, tagEnd).trim();
-            if (isOpeningTagFor(tag, name)) {
-                if (tag.endsWith("/")) {
-                    return ""; // <friendlyName/>: present but empty.
-                }
-                int close = closeTagIndex(xml, tagEnd + 1, name);
-                return close < 0 ? null : xml.substring(tagEnd + 1, close).trim();
-            }
-            cursor = tagEnd + 1;
-        }
-    }
-
-    /** Index of the matching {@code </name>} at or after {@code from}, or {@code -1}. */
-    private static int closeTagIndex(String xml, int from, String name) {
-        int cursor = from;
-        while (true) {
-            cursor = xml.indexOf("</", cursor);
-            if (cursor < 0) {
-                return -1;
-            }
-            int tagEnd = xml.indexOf('>', cursor);
-            if (tagEnd < 0) {
-                return -1;
-            }
-            if (bareName(xml.substring(cursor + 2, tagEnd).trim()).equalsIgnoreCase(name)) {
-                return cursor;
-            }
-            cursor = tagEnd + 1;
-        }
+        return CoopUpnpXml.elementValue(xml, name, from);
     }
 
     /** Start of the last {@code <service>} opening tag before {@code limit}, or {@code -1}. */
@@ -187,7 +145,7 @@ public final class CoopUpnpDescriptor {
             if (tagEnd < 0) {
                 return best;
             }
-            if (isOpeningTagFor(xml.substring(open + 1, tagEnd).trim(), "service")) {
+            if (CoopUpnpXml.isOpeningTagFor(xml.substring(open + 1, tagEnd).trim(), "service")) {
                 best = open;
             }
             cursor = tagEnd + 1;
@@ -196,31 +154,7 @@ public final class CoopUpnpDescriptor {
 
     /** Index of the first {@code </service>} at or after {@code from}, or {@code -1}. */
     private static int nextServiceCloseTag(String xml, int from) {
-        return closeTagIndex(xml, from, "service");
-    }
-
-    /** True for an opening (not closing, not declaration) tag whose local name is {@code name}. */
-    private static boolean isOpeningTagFor(String tag, String name) {
-        if (tag.isEmpty() || tag.charAt(0) == '/' || tag.charAt(0) == '?' || tag.charAt(0) == '!') {
-            return false;
-        }
-        return bareName(tag).equalsIgnoreCase(name);
-    }
-
-    /** Strips a namespace prefix, attributes and any self-closing slash from a tag body. */
-    private static String bareName(String tag) {
-        String name = tag.endsWith("/") ? tag.substring(0, tag.length() - 1).trim() : tag;
-        int cut = name.length();
-        for (int i = 0; i < name.length(); i++) {
-            char c = name.charAt(i);
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-                cut = i;
-                break;
-            }
-        }
-        name = name.substring(0, cut);
-        int colon = name.indexOf(':');
-        return colon < 0 ? name : name.substring(colon + 1);
+        return CoopUpnpXml.closeTagIndex(xml, from, "service");
     }
 
     /** Length-preserving case-insensitive search, so the index means the same in both cases. */

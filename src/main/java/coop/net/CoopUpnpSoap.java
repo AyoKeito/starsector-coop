@@ -161,59 +161,12 @@ public final class CoopUpnpSoap {
         return upper;
     }
 
-    /** Namespace-prefix-tolerant element text lookup (bodies come back as {@code <u:...>} or bare). */
+    /**
+     * Namespace-prefix-tolerant element text lookup (bodies come back as {@code <u:...>} or bare).
+     * See {@link CoopUpnpXml} for what the scan tolerates and why it never lower-cases the body.
+     */
     private static String element(String xml, String name) {
-        if (xml == null) {
-            return null;
-        }
-        String lower = xml.toLowerCase(Locale.ROOT);
-        String needle = name.toLowerCase(Locale.ROOT);
-        int from = 0;
-        while (true) {
-            int open = lower.indexOf('<', from);
-            if (open < 0) {
-                return null;
-            }
-            int tagEnd = xml.indexOf('>', open);
-            if (tagEnd < 0) {
-                return null;
-            }
-            String tag = lower.substring(open + 1, tagEnd).trim();
-            if (!tag.startsWith("/") && bareName(tag).equals(needle)) {
-                int close = closeTagIndex(lower, tagEnd, needle);
-                return close < 0 ? null : xml.substring(tagEnd + 1, close).trim();
-            }
-            from = tagEnd + 1;
-        }
-    }
-
-    private static int closeTagIndex(String lowerXml, int from, String needle) {
-        int cursor = from;
-        while (true) {
-            cursor = lowerXml.indexOf("</", cursor);
-            if (cursor < 0) {
-                return -1;
-            }
-            int tagEnd = lowerXml.indexOf('>', cursor);
-            if (tagEnd < 0) {
-                return -1;
-            }
-            if (bareName(lowerXml.substring(cursor + 2, tagEnd).trim()).equals(needle)) {
-                return cursor;
-            }
-            cursor = tagEnd + 1;
-        }
-    }
-
-    /** Strips a namespace prefix and any attributes from a lower-cased tag body. */
-    private static String bareName(String tag) {
-        String name = tag.endsWith("/") ? tag.substring(0, tag.length() - 1).trim() : tag;
-        int space = name.indexOf(' ');
-        if (space >= 0) {
-            name = name.substring(0, space);
-        }
-        int colon = name.indexOf(':');
-        return colon < 0 ? name : name.substring(colon + 1);
+        return CoopUpnpXml.elementValue(xml, name);
     }
 
     private static String escape(String value) {
