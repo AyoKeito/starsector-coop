@@ -129,6 +129,20 @@ execution-policy prompt.
 FlatLaf (Apache-2.0) is fetched by Gradle into `jars/flatlaf.jar` via `copyLauncherLibs` and sits on
 the `.cmd`'s classpath alongside `coop-launcher.jar`.
 
+**Naming the save to load.** `CoopSaveIndexReader` reads `coop_saves.json.data`, refuses a `version`
+above 1 rather than guessing at it, and joins every row to what is on disk: a row naming a folder the
+engine has pruned is dropped, a surviving row gets its folder's `descriptor.xml` parsed (JDK DOM,
+DTDs off, root's own children only, because the file nests a whole mod list inside itself) and the
+descriptor wins every display field, and a row with no `saveDirName` is matched by `characterName`
+plus `gameDateTimestamp` against those same descriptors. `CoopCampaignPicker` turns that into the
+host card's **Campaign** drop-down (New first, then one entry per campaign with a save here, newest
+first, campaigns this install only ever guested in left out) and into the one advice line under each
+card. Picking a save greys the seed, sector size and star age. `CoopInvite` carries the pick as a
+`cid` query parameter, last in the line and optional on the way in, so an invite from a host on an
+older release still parses. `refreshSaveIndex` runs on the worker with the same generation counter
+the connection check uses, on install adoption, on window focus and on game exit; at Launch the id
+goes into `coop.expectedCampaignId`, blank for a new campaign.
+
 **The launcher writes two files outside `saves/common`.** `CoopInstallFixer` applies the two install
 edits the mod itself cannot reach, on a **Fix** button hanging off the row that failed:
 

@@ -77,6 +77,17 @@ Two-player co-operative Starsector. One shared sector, one campaign clock, two f
   the guest presses Paste invite and has the address, the port, the password, the seed, the sector
   size and the star age filled in at once. The password is generated for the host rather than left
   empty.
+- The launcher names the save to load. A Starsector save folder is named after the character, and
+  the game's load screen lists it by character and date; neither says which co-op campaign it
+  belongs to, so two campaigns meant guessing. The host now picks the campaign from a drop-down that
+  lists each of their co-op campaigns as its newest save, the invite carries the pick, and both
+  players get one line under the card: `Load the save "Kaz Alba", level 12, saved 2026-05-28 18:16
+  (folder save_Kaz_...)`, or that this session is a new campaign and neither of you loads anything.
+  Picking a save greys the seed, sector size and star age, which only do anything for a new game. A
+  save folder the game has already pruned is never named.
+- If you load the wrong save anyway, the mod says so in-game and names the right one: character,
+  level, in-game date and folder. It is a warning you close, not a refusal; the seed check at connect
+  still has the last word.
 - Check my connection on the host runs the port mapping and the connection doctor before the game is
   loaded and puts the result on screen. It then holds the port so the guest's Test connection can
   measure TCP, UDP and round trip against it.

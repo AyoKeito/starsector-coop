@@ -166,22 +166,28 @@ with the fix and left to you.
 
 1. Press **Host**, the button at the top right of the window. That is what makes this install the
    host.
-2. Leave **Port** at 7777 unless something else on your PC wants it. It is the TCP and UDP port your
+2. **Campaign** picks what this session is. It opens on `New campaign (seed ...)`, which is the right
+   answer the first time. Once you have saved a co-op campaign, that campaign appears in the
+   drop-down as its newest save, labelled the way the game's own load screen labels it: character,
+   level, in-game date, and when you saved. Pick one to carry on with it; the folder name shows up
+   under the drop-down, and **Seed**, **Sector size** and **Star age** go grey, because a save
+   already has its sector and those three only do anything for a new game.
+3. Leave **Port** at 7777 unless something else on your PC wants it. It is the TCP and UDP port your
    partner connects to.
-3. **Password** fills itself in with a generated one when you leave it empty. The eye button next to
+4. **Password** fills itself in with a generated one when you leave it empty. The eye button next to
    it reveals what it holds. The invite carries the password, so your partner never types it.
    Clearing the field is allowed and leaves the port open to anyone who finds it while a session is
    waiting.
-4. **Seed** is filled in for you when the launcher opens. Press **Generate** for a different one, or
+5. **Seed** is filled in for you when the launcher opens. Press **Generate** for a different one, or
    type your own. Both games generate the sector locally from this string, and the check at connect
    compares what came out. It only matters for a new campaign.
-5. **Your address** is looked up for you when the launcher opens with the field empty. That is one
+6. **Your address** is looked up for you when the launcher opens with the field empty. That is one
    HTTPS request to a service that replies with the address your packets came from; **Look up**
    repeats it. If the two of you connect over a LAN or a VPN, type that address over the answer.
-6. **Sector size** and **Star age** are two drop-downs, defaulting to `normal` and `mixed`. Change
+7. **Sector size** and **Star age** are two drop-downs, defaulting to `normal` and `mixed`. Change
    them only if you want a different world; the invite carries whatever you pick, so your partner
    does not have to match them by hand.
-7. Press **Copy** next to **Invite for your partner**, which updates on its own as you fill in the
+8. Press **Copy** next to **Invite for your partner**, which updates on its own as you fill in the
    fields above. Send your partner the one line it puts on your clipboard.
 
 The invite looks like this, and it carries the password in clear text, so send it the way you would
@@ -190,6 +196,37 @@ send a password:
 ```text
 coop://203.0.113.9:7777/?seed=MN-1234567890123456789&pw=hullmod&size=normal&age=mixed
 ```
+
+Picking an existing campaign adds one more part, `cid`, which is that campaign's id. It is what lets
+your partner's launcher name the save they should load. An invite for a new campaign does not carry
+it, and neither does an invite from a host running the release before this one; both still work.
+
+### The line under the card that says which save to load
+
+The launcher cannot load a save for you, and it never touches your saves folder. What it does is
+name the right one, under the card, in a single line:
+
+```text
+Load the save "Kaz Alba", level 12, saved 2026-05-28 18:16 (folder save_Kaz_1402953574686505955).
+```
+
+Start the game, press **Load Game**, and pick the slot that matches. The folder name in brackets is
+there for the case the load screen shows you two saves that look alike; it is the folder under
+`<install>\saves`.
+
+The other two things it can say are just as literal. `Start a New Game with the seed above` means
+this session is a fresh campaign, so neither of you loads anything. `No co-op save for this campaign
+on this machine: start a New Game with the seed above` means the campaign your partner picked has
+never been saved on your PC, which is what a first session looks like from the guest's side.
+
+If the launcher cannot read `saves\common\coop_saves.json.data`, or that file was written by a newer
+version of the mod than the launcher, it says so on that same line and stops naming saves. Nothing
+else changes and **LAUNCH** still works.
+
+The mod checks the same thing from inside the game. Load a save belonging to a different campaign
+than the one the launcher was pointed at and a message names the save you meant to load instead. It
+is a warning, not a refusal: it appears, you close it, and the game carries on. Loading an unrelated
+save on purpose is allowed.
 
 ### The guest's fields
 
@@ -201,6 +238,11 @@ read-only here on purpose: they come from the invite, and they are used only whe
 campaign. Rejoining by loading a co-op save ignores all three. **Sector size** and **Star age** read
 `normal` and `mixed` when the invite does not carry them, the same defaults the host's drop-downs
 open on.
+
+An accepted invite also puts the save line described above under the guest card, so you know before
+you press **LAUNCH** whether this session starts with **Load Game** or with **New Game**. There is no
+campaign drop-down on the guest side: the host decides which campaign the session is, and the invite
+carries it.
 
 You can also type **Host address** and **Port** in by hand and have the host tell you the password.
 The seed still has to match, which is what the invite is for, and so do sector size and star age. The
@@ -533,7 +575,9 @@ The rest:
 
 The launcher's Advanced card sets `coop.portMapping` (Port mapping), `coop.hudCorner` (Link HUD
 corner), `coop.reconnectGraceSeconds` (Reconnect grace) and `coop.adoptCampaignId` (Start over inside
-the host's campaign) for players who use it, by the mechanism above. `coop.password` and
+the host's campaign) for players who use it, by the mechanism above. `coop.expectedCampaignId` is set
+by the host's **Campaign** drop-down and by the `cid` part of a pasted invite, not by a field you can
+type into. `coop.password` and
 `coop.playerName` are Session-card fields instead, and `coop.hud.disable` and `coop.maxGuests` have no
 launcher field at all. This table is the plain `vmparams` form for setting any of them without it.
 

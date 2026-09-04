@@ -50,6 +50,13 @@
     {
       "sev": "revisit",
       "sevLabel": "live smoke",
+      "head": "Phase 31 launcher two-instance smoke now also covers: Fix button, save finder hint, in-game wrong-save notice, getSaveDirName handle resolution",
+      "state": "open; folds into the Phase 19 checklist",
+      "body": "Two features landed after the smoke step was written and neither has been in front of a running game. <b>Fix button</b> (<span class=\"rp\" data-jump=\"31\">Phase 31</span>, 8c22624/3a85328): press it on both red install rows and confirm the classpath entry lands in <code>vmparams</code> with <code>vmparams.backup</code> beside it, that the file is still one line, and that a Starsector update turning the row red again is fixed by the same button. <b>Save finder</b> (f43b63f): save on both sides, alt-tab back to each launcher, and confirm the host's <b>Campaign</b> drop-down grew an entry for that campaign with the folder under it and the seed greyed, and that a re-pasted invite makes the guest's card read <code>Load the save \"…\"</code>. <b>Wrong-save notice</b>: load an unrelated save on the guest on purpose and confirm <code>CoopCampaignGuard</code> names the right one and closes without blocking. <b>getSaveDirName</b>: grep the game log for that name and expect no WARN, which is what says the <code>MethodHandle</code> resolved on the shipped build rather than the launcher falling back to matching descriptors by character and date."
+    },
+    {
+      "sev": "revisit",
+      "sevLabel": "live smoke",
       "head": "Four bug-audit fixes to watch in the next two-instance session",
       "state": "open; folds into the Phase 19 checklist",
       "body": "The 2026-09-03/04 bug audit fixed 107 findings; four of them change behaviour a smoke run should look at. (1) The command-tab colony editor is now claimed whole as <code>coop:colony-management</code>: while either player has it open the other is bounced to the INTEL tab and sees \"Remote player is interacting: colony management\" — the lockout is global, so the second player cannot edit a different colony either. (2) The host's options page should no longer read \"pending\" for policy values that are not the default. (3) A router that speaks UPnP but not <code>GetSpecificPortMappingEntry</code> will not clear even its own stale entry after a crash: expect a conflict report naming the owner and a port change, not an eviction. (4) The host now learns the guest id and <code>sendTo</code> unicasts, so the N-ready routing paths are exercised live for the first time."
@@ -969,22 +976,23 @@
       "theme": "config",
       "track": "v1",
       "status": "built",
-      "summary": "A Windows launcher window (Swing jar on the game's bundled JRE) that writes the options file the mod already reads, checks the install, runs the host doctor and a launcher-to-launcher test connection, then starts the game with a log tail. Invite string carries address, port, seed and password so the guest pastes one line.",
+      "summary": "A Windows launcher window (Swing jar on the game's bundled JRE) that writes the options file the mod already reads, checks the install and fixes the two rows it can (vmparams classpath, enabled_mods) with a Fix button, runs the host doctor and a launcher-to-launcher test connection, names which save each player should load for the picked campaign, then starts the game with a log tail. The invite carries address, port, seed, password, world settings and the campaign id, so the guest pastes one line.",
       "introduces": [
         "jars/coop-launcher.jar + Coop Launcher.cmd",
-        "invite string coop://host:port/?seed=…",
-        "install check rows (report-only)",
+        "invite string coop://host:port/?seed=…&cid=…",
+        "install check rows + a Fix button on vmparams and enabled_mods",
         "host pre-flight via CoopPortMapper + doctor",
         "guest test connection (banner-first probe)",
+        "campaign picker + \"load this save\" hint from coop_saves.json.data",
         "starsector.log status tail"
       ],
       "residue": [
-        "two-instance smoke deferred into Phase 19 (incl. in-game proof that System.setProperty passes the sandbox)",
+        "two-instance smoke deferred into Phase 19 (now also the Fix button, the save-finder hint, the in-game wrong-save notice and getSaveDirName handle resolution)",
         "Windows only; starsector.sh installs keep the manual path",
         "seed over the wire stays a Maybe",
         "no external reachability probe"
       ],
-      "note": "Created, decided AND built 2026-09-03 (2275 -> 2445 tests, five commits b1372f7..5cc5303): launcher core, dark FlatLaf redesign, bug-report zip, update check, default password, every -Dcoop flag in Advanced, invite with world settings, launch gate, COOP-GAME game-version check, package-release.ps1, Version Checker file, docs rewrite, README, issue forms. Two-instance smoke DEFERRED into Phase 19 (user, 2026-09-03)."
+      "note": "Created, decided AND built 2026-09-03 (2275 -> 2445 tests, five commits b1372f7..5cc5303): launcher core, dark FlatLaf redesign, bug-report zip, update check, default password, every -Dcoop flag in Advanced, invite with world settings, launch gate, COOP-GAME game-version check, package-release.ps1, Version Checker file, docs rewrite, README, issue forms. Two more landed 2026-09-04. The Fix button (8c22624, 3a85328) moved the two install edits from report-only into scope: the launcher writes the coop-forks.jar classpath entry into vmparams (backup first, ISO-8859-1, one line) and adds coop to enabled_mods.json, and offers an elevated relaunch when Windows refuses the write under Program Files. The save finder (2faeb2b mod side, f43b63f launcher side, 2678 -> 2722 tests) closes the \"which of my saves is this invite for\" gap: the mod indexes every save by campaign id into saves/common/coop_saves.json.data, the launcher joins that index to the folders on disk, the host picks the campaign from a drop-down, the invite carries the id as cid, both cards say which save to load, and coop.expectedCampaignId lets the mod repeat the answer in-game when the wrong save is loaded anyway. Two-instance smoke still DEFERRED into Phase 19 (user, 2026-09-03), and it now has to cover both."
     }
   ],
   "buildOrderFallback": [

@@ -476,7 +476,11 @@ carries on: the whole world state is rebroadcast so both sides restart from one 
 is rolled back.
 
 You do not have to sit the window out. If the game on the dropped side went down rather than just
-the connection, load the co-op save from that campaign and let it reconnect: a lobby hello arriving
+the connection, load the co-op save from that campaign and let it reconnect. Which save that is, the
+launcher will tell you: paste the invite again (guest) or leave the host's **Campaign** drop-down on
+the campaign you were playing, and the line under the card names the save down to the folder, the
+character, the level and the time you saved it. `INSTALL.md` section 6 covers that line. A lobby
+hello arriving
 while the countdown is running ends the wait there and then, the roster's reconnecting row is
 dropped, and the pair goes through an ordinary lobby round on the new connection. The countdown on
 the other screen is a deadline, not a delay you have to serve.
