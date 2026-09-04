@@ -12,7 +12,7 @@ import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
-import coop.net.CoopNetService;
+import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -213,7 +213,7 @@ class CoopCampaignReplicatorMarketGateTest {
 
     private CoopCampaignReplicator guestReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(CoopConnectionRole.GUEST), TestSessions.activeGuestSession(),
+                new RecordingNetService(CoopConnectionRole.GUEST), TestSessions.activeGuestSession(),
                 clock::get);
     }
 
@@ -370,27 +370,4 @@ class CoopCampaignReplicatorMarketGateTest {
                     });
         }
     }
-
-    private static final class SilentNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-
-        private SilentNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-        }
-    }
-
 }

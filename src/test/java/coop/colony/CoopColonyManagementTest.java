@@ -1,7 +1,6 @@
 package coop.colony;
 
 import com.fs.starfarer.api.Global;
-import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.SpecialItemData;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
@@ -9,11 +8,11 @@ import com.fs.starfarer.api.campaign.econ.Industry;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue;
 import com.fs.starfarer.api.loading.IndustrySpecAPI;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.awt.Color;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -41,7 +40,7 @@ class CoopColonyManagementTest {
      */
     @BeforeEach
     void stubSettings() {
-        Global.setSettings(fakeSettings());
+        Global.setSettings(ApiProxies.whiteSettings());
     }
 
     @AfterEach
@@ -829,19 +828,6 @@ class CoopColonyManagementTest {
         market.addIndustry("spaceport");
         market.addIndustryCalls = 0;
         return market;
-    }
-
-    private static SettingsAPI fakeSettings() {
-        return (SettingsAPI) Proxy.newProxyInstance(
-                SettingsAPI.class.getClassLoader(),
-                new Class<?>[]{SettingsAPI.class},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getColor" -> Color.WHITE;
-                    case "toString" -> "Settings";
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    default -> defaultValue(method.getReturnType());
-                });
     }
 
     // ---- Engine fakes --------------------------------------------------------------------------

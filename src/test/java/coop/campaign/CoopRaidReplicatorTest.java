@@ -1,7 +1,6 @@
 package coop.campaign;
 
 import com.fs.starfarer.api.Global;
-import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
@@ -18,11 +17,11 @@ import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.awt.Color;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -54,26 +53,13 @@ class CoopRaidReplicatorTest {
      */
     @BeforeEach
     void stubSettings() {
-        Global.setSettings(fakeSettings());
+        Global.setSettings(ApiProxies.whiteSettings());
     }
 
     @AfterEach
     void clearGlobals() {
         Global.setSector(null);
         Global.setSettings(null);
-    }
-
-    private static SettingsAPI fakeSettings() {
-        return (SettingsAPI) Proxy.newProxyInstance(
-                SettingsAPI.class.getClassLoader(),
-                new Class<?>[]{SettingsAPI.class},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getColor" -> Color.WHITE;
-                    case "toString" -> "Settings";
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    default -> defaultValue(method.getReturnType());
-                });
     }
 
     @Test
@@ -533,23 +519,7 @@ class CoopRaidReplicatorTest {
             if (cached != null) {
                 return cached;
             }
-            ListenerManagerAPI listenerManager = (ListenerManagerAPI) Proxy.newProxyInstance(
-                    ListenerManagerAPI.class.getClassLoader(),
-                    new Class<?>[]{ListenerManagerAPI.class},
-                    (proxy, method, args) -> switch (method.getName()) {
-                        case "addListener" -> {
-                            listeners.add(args[0]);
-                            yield null;
-                        }
-                        case "removeListener" -> {
-                            listeners.remove(args[0]);
-                            yield null;
-                        }
-                        case "toString" -> "ListenerManager";
-                        case "hashCode" -> System.identityHashCode(proxy);
-                        case "equals" -> proxy == args[0];
-                        default -> defaultValue(method.getReturnType());
-                    });
+            ListenerManagerAPI listenerManager = ApiProxies.listenerManager(listeners);
             EconomyAPI economy = (EconomyAPI) Proxy.newProxyInstance(
                     EconomyAPI.class.getClassLoader(),
                     new Class<?>[]{EconomyAPI.class},

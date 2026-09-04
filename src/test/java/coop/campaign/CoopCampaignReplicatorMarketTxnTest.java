@@ -7,7 +7,6 @@ import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
-import coop.net.CoopNetService;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.util.CoopLog;
@@ -15,7 +14,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import coop.testing.LogCapture;
@@ -118,7 +116,7 @@ class CoopCampaignReplicatorMarketTxnTest {
 
     private static CoopCampaignReplicator hostReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(CoopConnectionRole.HOST), activeHostSession(), () -> 5678L);
+                new RecordingNetService(CoopConnectionRole.HOST), activeHostSession(), () -> 5678L);
     }
 
     /** Sector whose "sindria" open submarket reports the given cargo (null = never materialized). */
@@ -169,27 +167,4 @@ class CoopCampaignReplicatorMarketTxnTest {
                     default -> null;
                 });
     }
-
-    private static final class SilentNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-
-        private SilentNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-        }
-    }
-
 }
