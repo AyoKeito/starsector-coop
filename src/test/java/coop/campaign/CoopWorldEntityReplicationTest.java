@@ -10,7 +10,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.CargoPodsEntityPlugin;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
-import coop.net.CoopNetService;
+import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -299,22 +299,6 @@ class CoopWorldEntityReplicationTest {
 
     private static CoopCampaignReplicator guestReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(), TestSessions.activeGuestSession(), () -> 10L);
-    }
-
-    private static final class SilentNetService extends CoopNetService {
-        @Override
-        public CoopConnectionRole role() {
-            return CoopConnectionRole.GUEST;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-        }
+                new RecordingNetService(CoopConnectionRole.GUEST), TestSessions.activeGuestSession(), () -> 10L);
     }
 }

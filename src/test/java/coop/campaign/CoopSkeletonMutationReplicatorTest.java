@@ -19,6 +19,7 @@ import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -1019,23 +1020,7 @@ class CoopSkeletonMutationReplicatorTest {
                         case "equals" -> proxy == args[0];
                         default -> defaultValue(method.getReturnType());
                     });
-            ListenerManagerAPI listenerManager = (ListenerManagerAPI) Proxy.newProxyInstance(
-                    ListenerManagerAPI.class.getClassLoader(),
-                    new Class<?>[]{ListenerManagerAPI.class},
-                    (proxy, method, args) -> switch (method.getName()) {
-                        case "addListener" -> {
-                            listeners.add(args[0]);
-                            yield null;
-                        }
-                        case "removeListener" -> {
-                            listeners.remove(args[0]);
-                            yield null;
-                        }
-                        case "toString" -> "ListenerManager";
-                        case "hashCode" -> System.identityHashCode(proxy);
-                        case "equals" -> proxy == args[0];
-                        default -> defaultValue(method.getReturnType());
-                    });
+            ListenerManagerAPI listenerManager = ApiProxies.listenerManager(listeners);
             EconomyAPI economy = (EconomyAPI) Proxy.newProxyInstance(
                     EconomyAPI.class.getClassLoader(),
                     new Class<?>[]{EconomyAPI.class},

@@ -1,7 +1,6 @@
 package coop.colony;
 
 import com.fs.starfarer.api.Global;
-import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SpecialItemData;
 import com.fs.starfarer.api.campaign.econ.CommodityOnMarketAPI;
@@ -16,11 +15,11 @@ import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.population.PopulationComposition;
 import com.fs.starfarer.api.impl.campaign.rulecmd.salvage.MarketCMD;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.awt.Color;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -51,26 +50,13 @@ class CoopRaidOutcomeSyncTest {
      */
     @BeforeEach
     void stubSettings() {
-        Global.setSettings(fakeSettings());
+        Global.setSettings(ApiProxies.whiteSettings());
     }
 
     @AfterEach
     void clearGlobals() {
         Global.setSector(null);
         Global.setSettings(null);
-    }
-
-    private static SettingsAPI fakeSettings() {
-        return (SettingsAPI) Proxy.newProxyInstance(
-                SettingsAPI.class.getClassLoader(),
-                new Class<?>[]{SettingsAPI.class},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getColor" -> Color.WHITE;
-                    case "toString" -> "Settings";
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    default -> defaultValue(method.getReturnType());
-                });
     }
 
     // ---- Codec ---------------------------------------------------------------------------------

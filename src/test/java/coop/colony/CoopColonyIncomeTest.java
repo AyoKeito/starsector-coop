@@ -1,7 +1,6 @@
 package coop.colony;
 
 import com.fs.starfarer.api.Global;
-import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -11,11 +10,11 @@ import com.fs.starfarer.api.impl.campaign.CoreScript;
 import com.fs.starfarer.api.impl.campaign.shared.SharedData;
 import com.fs.starfarer.api.util.MutableValue;
 import coop.rewards.CoopRewardSplitter;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.awt.Color;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -38,7 +37,7 @@ class CoopColonyIncomeTest {
 
     @BeforeEach
     void stubGlobals() {
-        Global.setSettings(fakeSettings());
+        Global.setSettings(ApiProxies.whiteSettings());
         sector = new FakeSector();
         Global.setSector(sector.proxy());
     }
@@ -324,19 +323,6 @@ class CoopColonyIncomeTest {
                     case "getName" -> id;
                     case "isPlayerOwned" -> playerOwned;
                     case "toString" -> "Market[" + id + "]";
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    default -> defaultValue(method.getReturnType());
-                });
-    }
-
-    private static SettingsAPI fakeSettings() {
-        return (SettingsAPI) Proxy.newProxyInstance(
-                SettingsAPI.class.getClassLoader(),
-                new Class<?>[]{SettingsAPI.class},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getColor" -> Color.WHITE;
-                    case "toString" -> "Settings";
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
                     default -> defaultValue(method.getReturnType());

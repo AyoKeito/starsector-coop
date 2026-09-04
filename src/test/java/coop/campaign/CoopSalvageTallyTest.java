@@ -2,14 +2,12 @@ package coop.campaign;
 
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
-import coop.net.CoopNetService;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -73,7 +71,7 @@ class CoopSalvageTallyTest {
 
     private static CoopCampaignReplicator hostReplicator() {
         return new CoopCampaignReplicator(
-                new SilentNetService(CoopConnectionRole.HOST), activeHostSession(), () -> 5678L);
+                new RecordingNetService(CoopConnectionRole.HOST), activeHostSession(), () -> 5678L);
     }
 
     /**
@@ -90,29 +88,5 @@ class CoopSalvageTallyTest {
         session.hostAcceptHandshake();
         session.recordSeedLock(TestSessions.SEED, "seed-a", "fingerprint-a");
         return session;
-    }
-
-    private static final class SilentNetService extends CoopNetService {
-        private final CoopConnectionRole role;
-        private final List<CoopMessages.Message> sent = new ArrayList<>();
-
-        private SilentNetService(CoopConnectionRole role) {
-            this.role = role;
-        }
-
-        @Override
-        public CoopConnectionRole role() {
-            return role;
-        }
-
-        @Override
-        public boolean isConnected() {
-            return true;
-        }
-
-        @Override
-        public void send(CoopMessages.Message message) {
-            sent.add(message);
-        }
     }
 }
