@@ -23,20 +23,24 @@
  * would change the save shape). With no registered presence every code path below evaluates exactly
  * as vanilla does.
  *
- * Spawn geometry: deliberately NOT edited, and NOT because it is player-independent - it is not.
- * setLocationAndOrders puts the fleet into currSpawnLoc (or into hyperspace, flying in under
+ * Spawn geometry: the placement inside currSpawnLoc is NOT player-independent, so it does need one
+ * edit. setLocationAndOrders puts the fleet into currSpawnLoc (or into hyperspace, flying in under
  * DisposableAggroAssignmentAI), which is system-relative and does follow the presence-aware system
  * choice. The placement inside that system does not: DisposableAggroAssignmentAI branches on
  * `fleet.getContainingLocation() == Global.getSector().getCurrentLocation()` - the HOST's location,
  * always - and only the host-present branch routes through Misc.pickLocationNotNearPlayer. In a
  * guest-only system the other branch runs and drops the fleet at the guarded entity's radius + 100
- * units with no distance check against anyone, so a pirate hunter or Pather cell can pop in on top
+ * units with no distance check against anyone, so a pirate hunter or Pather cell would pop in on top
  * of a guest parked at that planet or jump point. Vanilla never does that to the host, because that
  * branch only runs when nobody is there to see it.
- * ACCEPTED DIVERGENCE, not an oversight: the alternative is editing spawn geometry (forcing the
- * hyperspace fly-in whenever the presence entity is in currSpawnLoc), which is gameplay logic this
- * fork is not allowed to touch and which would change ambient spawn behaviour for the host too.
- * The forks the presence term does edit stay in the system-choice tests below.
+ * The fix (edit 3) is a post-placement nudge rather than a rewrite of the vanilla branch: the AI's
+ * constructor sets the fleet's position synchronously, so setLocationAndOrders reads that position
+ * back afterwards and, only when the presence entity is in the same system and the fleet came out
+ * inside vanilla's own maxSensorRange + 500 of it, moves the fleet to the distance vanilla itself
+ * would have used (that minimum plus pickLocationNotNearPlayer's 2000-unit margin - see
+ * coop.presence.CoopSpawnSpacing). Which branch the AI took, which entity it guarded and the
+ * fly-in-from-hyperspace path are all untouched, and the moved point is only accepted when it is
+ * clear of the host too, so the nudge can never hand the host the pop-in it removes for the guest.
  *
  * Known limitation (documented, not a bug): currSpawnLoc is a single field, and the no-new-fields
  * rule forbids a second one. With both players parked in different populated systems only one of the
@@ -47,6 +51,7 @@
  * Edits (all tagged "COOP FORK" inline):
  *   - line ~250 : pickNearestPopulatedSystem()    - candidate distance = min over {player, presence}
  *   - line ~275 : pickNearestPopulatedSystem()    - the "stick with current system" fallback, same min
+ *   - line ~380 : setLocationAndOrders()          - post-placement nudge off the presence entity
  *
  * Version drift guard: this fork mirrors 0.98a-RC8 line for line. On first use of the presence term
  * the running game version is checked against CoopPresenceRegistry.PINNED_VERSION; on a mismatch one
@@ -59,6 +64,9 @@
 package com.fs.starfarer.api.impl.campaign.fleets;
 
 import java.util.LinkedHashMap;
+
+// COOP FORK: added for edit 3's position arithmetic; org.lwjgl is already on the game's classpath.
+import org.lwjgl.util.vector.Vector2f;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
@@ -380,6 +388,36 @@ public abstract class DisposableFleetManager extends PlayerVisibleFleetManager {
 			system.addEntity(fleet);
 		}
 		fleet.addScript(new DisposableAggroAssignmentAI(fleet, system, this, probStayInHyper));
+
+		// COOP FORK (edit 3): the AI constructor above sets the fleet's position synchronously, and in
+		// a system the host is not in it does so with no distance check against anyone - which is how
+		// an ambient fleet ends up in the co-op guest's lap. Read the position back and, only if the
+		// guest's presence entity is in this same system and the fleet landed too close to it, move the
+		// fleet out to the same berth vanilla gives the host. Everything the AI decided (which branch,
+		// which entity it guards, the hyperspace fly-in) is left alone. Outside a co-op session
+		// coopPresence() is null and this whole block is skipped, so behaviour is exactly vanilla.
+		SectorEntityToken coopPresence = coopPresence();
+		if (coopPresence != null && fleet.getContainingLocation() == system
+				&& coopPresence.getContainingLocation() == system) {
+			float coopMinDist = Global.getSettings().getMaxSensorRange() + 500f;
+			Vector2f coopNudged = coop.presence.CoopSpawnSpacing.awayFrom(
+					fleet.getLocation(), coopPresence.getLocation(), coopMinDist);
+			if (coopNudged != null) {
+				// ...and never at the host's expense. In the case this fixes the host is in another
+				// system, so this is trivially true; the check is here so that if both players ever are
+				// in the spawn system, the nudge is dropped rather than allowed to create for the host
+				// the pop-in Misc.pickLocationNotNearPlayer just spared him.
+				CampaignFleetAPI coopHost = Global.getSector().getPlayerFleet();
+				boolean coopHostClear = coopHost == null || coopHost.getContainingLocation() != system
+						|| Misc.getDistance(coopHost.getLocation(), coopNudged) >= coopMinDist;
+				if (coopHostClear) {
+					fleet.setLocation(coopNudged.x, coopNudged.y);
+					Global.getLogger(DisposableFleetManager.class).info(
+							"[COOP-FORK] " + getSpawnId() + " spawn nudged off the guest in "
+									+ system.getNameWithLowercaseType());
+				}
+			}
+		}
 	}
 }
 
