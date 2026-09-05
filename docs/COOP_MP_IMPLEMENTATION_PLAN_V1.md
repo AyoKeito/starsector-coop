@@ -3466,6 +3466,59 @@ have not been in front of a running game.
   set sends in the host log.
 
 
+## Fifth fix pass (2026-09-05, review findings)
+
+Seven review findings, each checked against the code before deciding. Three were declined:
+splitting the pump and replicator (rejected 2026-09-04, nothing has changed), a source fingerprint in
+the build stamp (the manifest already compares version, commit with a dirty suffix, mod_info
+checksums and the forks jar; two dirty checkouts only collide between dev machines, which deploy one
+jar), and a two-peer transport harness with real codecs and injected drops (a real gap, but days of
+work with no transport change planned). The other four came in from worktree branches merged at
+`2913e76` (bridge, `42d03a5`), `6ddcf4f` (launcher, `3c753fc`), `bff07fa` (net test, `964d603`)
+and `2641e0d` (colony, `b8ab699`). Suite 2993 green, one pre-existing skip; MCP 43. Deployed to
+both test profiles.
+
+**Colony (`coop.colony`, `coop.campaign`):**
+
+- **A failed COLONY_MGMT apply rolled the peer's edit back (P1).** `handleColonyMgmt` marked the
+  received hash synced before the engine write. If the write threw, the local engine still held the
+  old state, the next 2 s poll saw a hash change and reported the stale state as a fresh edit, and
+  the peer applied it (host rebroadcast included). Symmetric on both sides. `applyToEngine` now
+  returns whether any reconcile step was dropped; the handler marks synced only on success and
+  otherwise parks the report as a pending apply: the poll reports nothing for that market until the
+  apply lands, the engine reaches that content on its own, or the local player closes the colony
+  screen there (an explicit local edit still wins and clears the pending). The next two poll ticks
+  retry. A duplicate delivery no longer touches the synced hash. A market the report cannot resolve
+  counts as success, because the poll never captures it. **Smoke:** ordinary colony edits both ways
+  must still converge in about 2 s as in the Phase 24 smoke; grep both logs for
+  `COLONY_MGMT apply FAILED`, which should not appear.
+
+**Net (`coop.net`):**
+
+- **Nothing enforced the per-type policy tables.** Seven tables (coalesce, connection-scoped,
+  reconnect grace, drop edge, terminal reject, control plane, high frequency) each say a new type
+  must be argued onto the list, and each has a default branch. `CoopMessageTypePolicyTest` holds an
+  explicit registry of all 66 types, fails naming the missing one when the enum grows, pins every
+  table's answer per type, and asserts three cross-table rules the javadocs promise. Five pump
+  tables went from private to package-private; no behaviour change.
+
+**Launcher (`coop.launcher`):**
+
+- **Four launcher writes left a truncated file when interrupted.** The settings file was the worst
+  case: a truncated `coop_options.json.data` sets `readError` on the next launch and `write` then
+  refuses to touch it, so the player is stuck until they delete it by hand. `CoopAtomicFiles` writes
+  a same-directory temp file and renames it with `ATOMIC_MOVE` (plain replace as the fallback);
+  vmparams and `enabled_mods.json` go through it too. The original exception is rethrown unchanged,
+  so the fixer's access-denied result is the same.
+
+**Tools (`tools/starsector-mcp`):**
+
+- **The bridge client replayed mutations after a dropped socket.** `BridgeClient.send` retried any
+  command once with a new id, and the bridge has no request dedup, so `give` or `addship` could run
+  twice. Only the ten read verbs retry now; a mutation resets the connection and throws
+  `BridgeOutcomeUnknownError`.
+
+
 ## Maybe (Post-V1 Ideas — Not Committed)
 
 > Researched candidates that are out of committed v1 scope. Each needs a design decision before it becomes a phase. Do not implement from this section without promoting it into a numbered phase first.
