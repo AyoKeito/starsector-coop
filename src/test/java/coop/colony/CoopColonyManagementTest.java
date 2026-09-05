@@ -749,7 +749,143 @@ class CoopColonyManagementTest {
         assertEquals("host-player:poll:1", baseline.get(0).reportId(), "the id counter restarts");
     }
 
+    // ---- Poll: a failed apply must not turn into a rollback ------------------------------------
+
+    /**
+     * The defect this suppression exists for: an inbound report that never reached the engine leaves
+     * this side holding the state the peer has already moved off. If the poll reports it, the peer
+     * applies it and their own edit is rolled back — a failed apply would be worse than a skipped one.
+     */
+    @Test
+    void aMarketWithAnUnappliedReportIsNotPolledAtAll() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+
+        poll.markPendingApply(peerBuiltAMine(market));
+
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty(),
+                "the engine is still on the pre-report state; reporting it would undo the peer's build");
+        assertEquals(1, poll.pendingApplyCount());
+    }
+
+    /**
+     * And it stays quiet through a local edit, because the local state still carries the half the
+     * report failed to apply: shipping it would take the peer's mine away and add the toggle.
+     */
+    @Test
+    void aSuppressedMarketStaysQuietThroughALocalEditToo() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+        poll.markPendingApply(peerBuiltAMine(market));
+
+        market.freePort = true;
+
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty());
+    }
+
+    /** The engine getting there on its own is the second way out, and it needs no message. */
+    @Test
+    void anEngineThatReachesTheUnappliedContentByItselfClearsTheSuppression() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+        poll.markPendingApply(peerBuiltAMine(market));
+
+        market.addIndustry("mining");
+
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty(),
+                "that content is by definition what the peer already holds");
+        assertEquals(0, poll.pendingApplyCount());
+
+        market.freePort = true;
+        List<CoopColonyManagement.State> reports =
+                poll.poll("host-player", List.of(market.proxy()), false);
+
+        assertEquals(1, reports.size(), "and normal change reporting resumes");
+        assertTrue(reports.get(0).freePort());
+    }
+
+    /** A later report that does apply supersedes the one that did not. */
+    @Test
+    void aSuccessfulApplyForTheSameMarketClearsTheSuppression() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+        poll.markPendingApply(peerBuiltAMine(market));
+
+        market.addIndustry("mining");
+        market.freePort = true;
+        poll.markSynced(CoopColonyManagement.capture("guest-player:poll:2", "guest-player",
+                market.proxy()));
+
+        assertEquals(0, poll.pendingApplyCount());
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty());
+    }
+
+    @Test
+    void theRetryBudgetIsSpentOncePerCallAndThenTheReportIsAbandoned() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        CoopColonyManagement.State pending = peerBuiltAMine(market);
+        poll.markPendingApply(pending);
+
+        int retries = 0;
+        for (int tick = 0; tick < 10; tick++) {
+            retries += poll.pendingApplyRetries().size();
+            poll.markPendingApply(pending);   // the retry failed again
+        }
+
+        assertEquals(CoopColonyManagement.PENDING_APPLY_ATTEMPTS - 1, retries,
+                "the inbound delivery that failed is the first of the attempts");
+        assertFalse(poll.canRetryPendingApply("market_planet_eos"));
+        assertEquals(1, poll.pendingApplyCount(), "giving up on the apply is not giving up on the suppression");
+        assertTrue(poll.poll("host-player", List.of(market.proxy()), false).isEmpty());
+    }
+
+    /** A session edge is a clean slate for the suppression exactly as it is for the hashes. */
+    @Test
+    void armingTheBaselineDropsEveryPendingApply() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+        poll.markPendingApply(peerBuiltAMine(market));
+
+        poll.armBaseline();
+
+        assertEquals(0, poll.pendingApplyCount());
+        assertEquals(1, poll.poll("host-player", List.of(market.proxy()), true).size(),
+                "the host baseline still heals every colony");
+    }
+
+    @Test
+    void resettingThePollDropsEveryPendingApply() {
+        FakeMarket market = colony();
+        CoopColonyManagement.Poll poll = new CoopColonyManagement.Poll();
+        poll.poll("host-player", List.of(market.proxy()), false);
+        poll.markPendingApply(peerBuiltAMine(market));
+
+        poll.reset();
+
+        assertEquals(0, poll.pendingApplyCount());
+        assertEquals(0, poll.syncedCount());
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------
+
+    /**
+     * The state the peer reported and this engine failed to apply: this colony plus a mine. Built by
+     * adding the industry, capturing, and taking it away again, so the content is byte-identical to
+     * what this engine would capture if the apply had worked.
+     */
+    private static CoopColonyManagement.State peerBuiltAMine(FakeMarket market) {
+        market.addIndustry("mining");
+        CoopColonyManagement.State reported = CoopColonyManagement.capture("guest-player:poll:1",
+                "guest-player", market.proxy());
+        market.industries.remove("mining");
+        return reported;
+    }
 
     private static CoopColonyManagement.State withFreePortFlipped(CoopColonyManagement.State state) {
         return new CoopColonyManagement.State(state.reportId(), state.marketId(),

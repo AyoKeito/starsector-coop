@@ -50,8 +50,16 @@ import static coop.util.CoopText.requireText;
  * frame or two of each other, so both polls see a change and both may send once. Each inbound state is
  * then content-identical to what the receiver already has: the apply is a no-op (guarded by an
  * explicit content-equality check in {@link #applyToEngine}) and it marks the market synced, so
- * neither side re-sends. "Known synced" is updated on send <em>and</em> on apply for exactly that
- * reason.
+ * neither side re-sends. "Known synced" is updated on send <em>and</em> on a <em>successful</em> apply
+ * for exactly that reason.
+ *
+ * <p><b>An apply that failed must not be marked synced.</b> {@link #applyToEngine} returns whether the
+ * reconcile actually ran; a false there means this engine still holds the state the peer has already
+ * moved off. Marking that synced would be a lie in the worst direction: the next tick would see the
+ * local content differ from the recorded hash, report the <em>stale</em> state as a fresh change, and
+ * roll the other player's edit back. So a failed apply parks the report on the poll instead
+ * ({@link Poll#markPendingApply}), which suppresses that market until the apply succeeds on a retry, a
+ * later report for the market lands, or the engine reaches the reported content on its own.
  *
  * <p><b>Concurrency is not solved here, and it is not fully solved by the interaction gate either.</b>
  * The Phase 10 gate is a global first-come lockout on interaction <em>dialogs</em>, so it does keep the
@@ -559,15 +567,21 @@ public final class CoopColonyManagement {
      * a guest baseline-send would race the host's with the older of the two states. The guest's normal
      * change-driven sends resume as soon as the host's baseline has landed and marked the markets
      * synced.
+     *
+     * <p><b>Pending applies.</b> A market whose inbound report failed to reach the engine is parked
+     * here by {@link #markPendingApply} and reports nothing until it is resolved — see that method for
+     * why the alternative is a silent rollback of the other player's edit.
      */
     public static final class Poll {
         private final Map<String, String> syncedContent = new LinkedHashMap<>();
+        private final Map<String, PendingApply> pendingApplies = new LinkedHashMap<>();
         private long counter;
         private boolean baselineArmed = true;
 
         /** Session (re)start: nothing is known-synced any more, and the next tick is the baseline. */
         public void armBaseline() {
             syncedContent.clear();
+            pendingApplies.clear();
             baselineArmed = true;
         }
 
@@ -592,6 +606,21 @@ public final class CoopColonyManagement {
                 }
                 State current = capture(BASELINE_REPORT_ID, actingPlayerId, market);
                 String content = current.contentHash();
+                PendingApply pending = pendingApplies.get(market.getId());
+                if (pending != null) {
+                    // This engine is behind on purpose: an inbound report for this market never made
+                    // it in, so whatever we hold is what the peer has already moved off. Reporting it
+                    // would push their edit back out of their own engine. The one way out that does
+                    // not need another message is the engine arriving at the reported content by
+                    // itself -- the transient this guards is a market mid-teardown or a build that
+                    // finishes a beat later on both sides -- and then there is nothing to report
+                    // either, because that content is by definition what the peer already has.
+                    if (content.equals(pending.contentHash())) {
+                        pendingApplies.remove(market.getId());
+                        syncedContent.put(market.getId(), content);
+                    }
+                    continue;
+                }
                 boolean send = baseline ? baselineSend : !content.equals(syncedContent.get(market.getId()));
                 syncedContent.put(market.getId(), content);
                 if (send) {
@@ -601,12 +630,69 @@ public final class CoopColonyManagement {
             return reports;
         }
 
-        /** This state is now what both engines hold: sent by us, or applied from the peer. */
+        /**
+         * This state is now what both engines hold: sent by us, or successfully applied from the peer.
+         *
+         * <p>Either way the market is no longer behind, so any parked report for it is dropped. A send
+         * counts because the peer is about to take our state whatever it was holding, and a later
+         * inbound report counts because an absolute state that applied cleanly supersedes the one that
+         * did not.
+         */
         public void markSynced(State state) {
             if (state == null) {
                 return;
             }
+            pendingApplies.remove(state.marketId());
             syncedContent.put(state.marketId(), state.contentHash());
+        }
+
+        /**
+         * An inbound report for this market did <em>not</em> reach the engine. Park it: this market
+         * reports nothing until {@link #markSynced} clears it or the engine reaches the parked content
+         * on its own.
+         *
+         * <p>Re-parking the same content is not a new failure — the retry budget in
+         * {@link #pendingApplyRetries()} owns the attempt count — but a report with different content
+         * replaces the parked one, because it is the newer picture of what the peer holds.
+         */
+        public void markPendingApply(State state) {
+            if (state == null) {
+                return;
+            }
+            PendingApply existing = pendingApplies.get(state.marketId());
+            if (existing != null && existing.contentHash().equals(state.contentHash())) {
+                return;
+            }
+            pendingApplies.put(state.marketId(), new PendingApply(state));
+        }
+
+        /**
+         * The parked reports that are still worth another apply, one attempt spent per call. The
+         * inbound delivery that failed counts as the first attempt, so a report is tried
+         * {@link #PENDING_APPLY_ATTEMPTS} times in total and then left parked forever: giving up on
+         * the apply is not the same as giving up on the suppression, because the stale state is just
+         * as wrong on the tenth tick as on the first.
+         */
+        public List<State> pendingApplyRetries() {
+            List<State> retries = new ArrayList<>();
+            for (PendingApply pending : pendingApplies.values()) {
+                if (pending.attempts() < PENDING_APPLY_ATTEMPTS) {
+                    pending.spendAttempt();
+                    retries.add(pending.state());
+                }
+            }
+            return retries;
+        }
+
+        /** False once this market's parked report has spent its retry budget (or has none parked). */
+        public boolean canRetryPendingApply(String marketId) {
+            PendingApply pending = marketId == null ? null : pendingApplies.get(marketId);
+            return pending != null && pending.attempts() < PENDING_APPLY_ATTEMPTS;
+        }
+
+        /** Test/diagnostic seam: how many markets are suppressed by a failed apply. */
+        public int pendingApplyCount() {
+            return pendingApplies.size();
         }
 
         private String nextReportId(String actingPlayerId) {
@@ -618,12 +704,44 @@ public final class CoopColonyManagement {
         public void reset() {
             counter = 0;
             syncedContent.clear();
+            pendingApplies.clear();
             baselineArmed = true;
         }
 
         /** Test/diagnostic seam: how many markets have a known-synced hash. */
         public int syncedCount() {
             return syncedContent.size();
+        }
+    }
+
+    /** How many times one inbound report is handed to the engine before the retries stop. */
+    public static final int PENDING_APPLY_ATTEMPTS = 3;
+
+    /** One market's unapplied inbound report, with the attempts already spent on it. */
+    private static final class PendingApply {
+        private final State state;
+        private final String contentHash;
+        private int attempts = 1;
+
+        private PendingApply(State state) {
+            this.state = state;
+            this.contentHash = state.contentHash();
+        }
+
+        private State state() {
+            return state;
+        }
+
+        private String contentHash() {
+            return contentHash;
+        }
+
+        private int attempts() {
+            return attempts;
+        }
+
+        private void spendAttempt() {
+            attempts++;
         }
     }
 
@@ -638,14 +756,25 @@ public final class CoopColonyManagement {
     /**
      * Resolves the report's market on this engine and applies it. A missing market is logged and
      * dropped, never thrown: one malformed message must not kill the net pump.
+     *
+     * @return true when this engine is now caller-visibly in step with the report — the reconcile ran
+     *         without dropping a step, it was already a no-op, or there is nothing here the report can
+     *         apply to. False means the local market kept state the peer has moved off, and the caller
+     *         must not record the report as synced.
      */
-    public static void applyToEngine(State state) {
+    public static boolean applyToEngine(State state) {
         Objects.requireNonNull(state, "state");
         MarketAPI market = resolveMarket(state.marketId());
         if (market == null) {
+            // Counted as success, not failure. The suppression a failure buys only pays off for a
+            // market the poll would otherwise report, and a market that does not exist here is never
+            // captured at all (isManaged is false for a market that is not there). Suppressing it
+            // would park a report that nothing can ever clear; the market appearing later -- a
+            // COLONY_FOUNDED that lost the race with its own management report -- is picked up by the
+            // poll as a new colony anyway.
             CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT names market "
                     + state.marketId() + ", which does not exist here; dropped");
-            return;
+            return true;
         }
         // The capture side only ever reports managed colonies, so an unmanaged market here means the
         // report raced a teardown: an abandonment or a deciv has already flipped this back to the
@@ -653,10 +782,13 @@ public final class CoopColonyManagement {
         // planet keeps the link). Reconciling it would add industries, a construction queue and a
         // free_market condition to an uncolonized planet, and the poll — which skips unmanaged
         // markets — would never converge it back.
+        //
+        // Success for the same reason a missing market is: the poll skips unmanaged markets, so there
+        // is no stale re-report to suppress here either.
         if (!isManaged(market)) {
             CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT names market "
                     + state.marketId() + ", which is not a player colony here; dropped");
-            return;
+            return true;
         }
         // The two engines run the same colony through the same vanilla code, so a queue entry popping
         // into a build lands on both within a frame or two and both polls report it. Reading the local
@@ -665,13 +797,13 @@ public final class CoopColonyManagement {
         try {
             if (capture(BASELINE_REPORT_ID, state.actingPlayerId(), market).contentHash()
                     .equals(state.contentHash())) {
-                return;
+                return true;
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopColonyManagement.class,
                     "Could not read local colony state for " + state.marketId() + "; applying anyway", ex);
         }
-        applyToMarket(market, state);
+        return applyToMarket(market, state);
     }
 
     /**
@@ -715,32 +847,60 @@ public final class CoopColonyManagement {
      * <p>Every step is guarded on its own. A colony that converged on four of five fields is strictly
      * better than an exception thrown out of the net pump, and the next edit re-sends the whole
      * absolute state anyway.
+     *
+     * @return true when every step ran. False means at least one was dropped, so this market may still
+     *         hold state the report replaced — the caller decides what that is worth (the replicator
+     *         suppresses the market's poll rather than re-report the half it kept).
      */
-    public static void applyToMarket(MarketAPI market, State state) {
+    public static boolean applyToMarket(MarketAPI market, State state) {
         Objects.requireNonNull(market, "market");
         Objects.requireNonNull(state, "state");
         boolean changed = false;
+        boolean applied = true;
         try {
-            changed = applyIndustries(market, state);
+            Reconcile industries = applyIndustries(market, state);
+            changed = industries.changed();
+            applied = !industries.dropped();
         } catch (RuntimeException | LinkageError ex) {
+            applied = false;
             CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony industries", ex);
         }
         try {
             applyQueue(market, state.queue());
         } catch (RuntimeException | LinkageError ex) {
+            applied = false;
             CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony construction queue", ex);
         }
         try {
             applyToggles(market, state);
         } catch (RuntimeException | LinkageError ex) {
+            applied = false;
             CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony toggles", ex);
         }
         if (changed) {
             try {
                 market.reapplyIndustries();
             } catch (RuntimeException | LinkageError ex) {
+                applied = false;
                 CoopLog.warn(CoopColonyManagement.class, "Failed to reapply coop colony industries", ex);
             }
+        }
+        return applied;
+    }
+
+    /**
+     * What one reconcile pass did: whether it wrote anything (so the market needs a re-apply) and
+     * whether any part of it was dropped by a guard.
+     */
+    private record Reconcile(boolean changed, boolean dropped) {
+        private static final Reconcile CLEAN = new Reconcile(false, false);
+
+        private Reconcile with(boolean moreChanged, boolean moreDropped) {
+            return new Reconcile(changed || moreChanged, dropped || moreDropped);
+        }
+
+        private Reconcile merge(Reconcile other) {
+            return with(other.changed(), other.dropped());
         }
     }
 
@@ -757,9 +917,9 @@ public final class CoopColonyManagement {
      * industry whose target is already present here is treated as satisfied, and the target is
      * protected from removal.
      *
-     * @return true when something changed and the market needs {@code reapplyIndustries}.
+     * @return what changed, and whether any industry was dropped by a guard.
      */
-    private static boolean applyIndustries(MarketAPI market, State state) {
+    private static Reconcile applyIndustries(MarketAPI market, State state) {
         Set<String> wanted = new LinkedHashSet<>();
         Set<String> satisfiedByUpgrade = new LinkedHashSet<>();
         for (IndustryState reported : state.industries()) {
@@ -771,7 +931,7 @@ public final class CoopColonyManagement {
             }
         }
 
-        boolean changed = false;
+        Reconcile outcome = Reconcile.CLEAN;
         List<Industry> live = market.getIndustries();
         if (live != null) {
             for (Industry industry : new ArrayList<>(live)) {
@@ -785,8 +945,9 @@ public final class CoopColonyManagement {
                     // (BaseIndustry.getCargoForInteractionMode returns null for a null mode,
                     // BaseIndustry.java:690-696). Vanilla's own scripted removals pass null too.
                     market.removeIndustry(industry.getId(), null, false);
-                    changed = true;
+                    outcome = outcome.with(true, false);
                 } catch (RuntimeException | LinkageError ex) {
+                    outcome = outcome.with(false, true);
                     CoopLog.warn(CoopColonyManagement.class, "Failed to remove coop colony industry "
                             + industry.getId() + " from market " + state.marketId(), ex);
                 }
@@ -801,16 +962,17 @@ public final class CoopColonyManagement {
             // it. The live failure this guard exists for cost a colony its whole reconcile -- the
             // population industry threw first and the spaceport behind it was never added at all.
             try {
-                changed |= applyIndustry(market, state, reported);
+                outcome = outcome.merge(applyIndustry(market, state, reported));
             } catch (RuntimeException | LinkageError ex) {
+                outcome = outcome.with(false, true);
                 CoopLog.warn(CoopColonyManagement.class, "Failed to apply coop colony industry "
                         + reported.industryId() + " on market " + state.marketId(), ex);
             }
         }
-        return changed;
+        return outcome;
     }
 
-    private static boolean applyIndustry(MarketAPI market, State state, IndustryState reported) {
+    private static Reconcile applyIndustry(MarketAPI market, State state, IndustryState reported) {
         boolean freshlyAdded = false;
         boolean changed = false;
         if (!market.hasIndustry(reported.industryId())) {
@@ -822,11 +984,11 @@ public final class CoopColonyManagement {
         if (industry == null) {
             CoopLog.warn(CoopColonyManagement.class, "Coop COLONY_MGMT could not add industry "
                     + reported.industryId() + " to market " + state.marketId());
-            return changed;
+            return new Reconcile(changed, true);
         }
         changed |= applyBuildState(industry, reported, freshlyAdded);
         changed |= applyIndustryItems(industry, reported);
-        return changed;
+        return new Reconcile(changed, false);
     }
 
     /**
