@@ -314,6 +314,172 @@ class CoopColonyMgmtReplicatorTest {
         assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(), "a guest never rebroadcasts");
     }
 
+    // ---- COLONY_MGMT apply failures --------------------------------------------------------------
+
+    /**
+     * The rollback the suppression exists to prevent. An apply that does not reach the engine leaves
+     * this client holding the state the peer already moved off; marking that synced would make the
+     * next poll tick report it as a fresh change, and the peer would apply their own edit away.
+     */
+    @Test
+    void anApplyThatFailsSuppressesTheMarketInsteadOfReReportingTheStaleState() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();          // the guest baseline tick records and stays quiet
+        boolean[] applyFails = {true};
+        replicator.setColonyMgmtApplyForTest(state ->
+                !applyFails[0] && CoopColonyManagement.applyToEngine(state));
+
+        replicator.handle(mgmtMessage("host-player:1"));
+
+        assertFalse(market.freePort, "nothing reached the engine");
+        assertTrue(replicator.colonyMgmtLedger().isApplied("host-player:1"),
+                "the report id is still deduped: a failed apply is no licence to re-run it on the echo");
+        assertEquals(1, replicator.colonyMgmtPoll().pendingApplyCount());
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(), "a guest answers nothing");
+
+        // A local edit on top does not lift the suppression: what this engine holds still lacks the
+        // industry the report carried, so shipping it would take that industry off the peer.
+        market.freePort = true;
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(),
+                "the stale state must never be polled back out");
+    }
+
+    /** The normal heal: the next report for the same market applies and the market is live again. */
+    @Test
+    void aLaterReportThatAppliesClearsTheSuppression() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        boolean[] applyFails = {true};
+        replicator.setColonyMgmtApplyForTest(state ->
+                !applyFails[0] && CoopColonyManagement.applyToEngine(state));
+        replicator.handle(mgmtMessage("host-player:1"));
+        assertEquals(1, replicator.colonyMgmtPoll().pendingApplyCount());
+
+        applyFails[0] = false;
+        replicator.handle(mgmtMessage("host-player:2"));
+
+        assertEquals(0, replicator.colonyMgmtPoll().pendingApplyCount());
+        assertTrue(market.freePort, "the second delivery did reach the engine");
+
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(),
+                "and what was applied is what the peer already holds, so still nothing to say");
+    }
+
+    /**
+     * The host rebroadcast is unconditional by design - it is how the report gets its canonical echo -
+     * and a local apply failure does not change what the host was told.
+     */
+    @Test
+    void theHostStillRebroadcastsAReportItsOwnEngineCouldNotApply() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();          // the host baseline ships every colony
+        service.sent.clear();
+        replicator.setColonyMgmtApplyForTest(state -> false);
+
+        replicator.handle(mgmtMessage("guest-player:1"));
+
+        assertEquals(1, of(service, CoopMessages.Type.COLONY_MGMT).size(), "the rebroadcast stands");
+        assertFalse(market.freePort);
+
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertEquals(1, of(service, CoopMessages.Type.COLONY_MGMT).size(),
+                "but the host does not poll its stale copy back at the guest");
+    }
+
+    /** The transient this retries for: a market mid-teardown that is fine a couple of seconds later. */
+    @Test
+    void aFailedApplyIsRetriedOnTheNextPollTick() {
+        FakeMarket market = sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        boolean[] applyFails = {true};
+        replicator.setColonyMgmtApplyForTest(state ->
+                !applyFails[0] && CoopColonyManagement.applyToEngine(state));
+        replicator.handle(mgmtMessage("host-player:1"));
+
+        applyFails[0] = false;
+        clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+        replicator.tickColonyManagement();
+
+        assertTrue(market.freePort, "the retry landed the report the inbound delivery dropped");
+        assertTrue(market.industries.contains("mining"));
+        assertEquals(0, replicator.colonyMgmtPoll().pendingApplyCount());
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty(),
+                "and the market it just caught up on has nothing to report");
+    }
+
+    @Test
+    void theRetriesStopAtTheBudgetButTheSuppressionDoesNot() {
+        sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        long[] clock = {1_000_000L};
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> clock[0]);
+        replicator.registerOn(sector.proxy());
+        replicator.tickColonyManagement();
+        int[] attempts = {0};
+        replicator.setColonyMgmtApplyForTest(state -> {
+            attempts[0]++;
+            return false;
+        });
+
+        replicator.handle(mgmtMessage("host-player:1"));
+        for (int tick = 0; tick < 10; tick++) {
+            clock[0] += CoopCampaignReplicator.COLONY_MGMT_POLL_INTERVAL_MILLIS;
+            replicator.tickColonyManagement();
+        }
+
+        assertEquals(CoopColonyManagement.PENDING_APPLY_ATTEMPTS, attempts[0],
+                "the inbound delivery plus its retries, and then it stops trying");
+        assertEquals(1, replicator.colonyMgmtPoll().pendingApplyCount(),
+                "the state this engine kept is no less stale for the retries having stopped");
+        assertTrue(of(service, CoopMessages.Type.COLONY_MGMT).isEmpty());
+    }
+
+    /** Session teardown drops the suppression with everything else the poll holds. */
+    @Test
+    void sessionTeardownDropsAPendingApply() {
+        sector.addColony("market_planet_eos");
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeGuestSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+        replicator.setColonyMgmtApplyForTest(state -> false);
+        replicator.handle(mgmtMessage("host-player:1"));
+        assertEquals(1, replicator.colonyMgmtPoll().pendingApplyCount());
+
+        replicator.dispose(sector.proxy());
+
+        assertEquals(0, replicator.colonyMgmtPoll().pendingApplyCount());
+    }
+
     // ---- Income ---------------------------------------------------------------------------------
 
     @Test

@@ -84,6 +84,7 @@ import java.util.HashMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 /**
  * Phase 12 hub: replicates host-authoritative campaign state across the coop session.
@@ -220,6 +221,14 @@ public final class CoopCampaignReplicator
     private final CoopColonyManagement.Ledger colonyMgmtLedger = new CoopColonyManagement.Ledger();
     private final CoopColonyManagement.Diff colonyMgmtDiff = new CoopColonyManagement.Diff();
     private final CoopColonyManagement.Poll colonyMgmtPoll = new CoopColonyManagement.Poll();
+    /**
+     * The engine write for one inbound {@code COLONY_MGMT}, as a seam. Production is
+     * {@code CoopColonyManagement::applyToEngine}; a test swaps in an apply that fails, because the
+     * failure path (suppress the market's poll instead of re-reporting the stale state) is not
+     * reachable through a proxy market that behaves.
+     */
+    private Predicate<CoopColonyManagement.State> colonyMgmtApply =
+            CoopColonyManagement::applyToEngine;
     /**
      * Colony-management poll cadence. Two seconds is the same figure the bar pool uses and is well
      * inside human reaction time for "I toggled free port and my partner's colony followed"; the tick
@@ -2362,12 +2371,36 @@ public final class CoopCampaignReplicator
         }
         lastColonyMgmtPollMillis = nowMillis;
         try {
+            // Before the capture, not after: a retry that succeeds marks the market synced, so the
+            // poll below sees a market that is in step rather than one still suppressed.
+            retryPendingColonyMgmtApplies();
             for (CoopColonyManagement.State state
                     : colonyMgmtPoll.poll(session.localPlayerId(), playerColonies(), isHost())) {
                 sendColonyMgmt(state, "poll");
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to poll colony management state", ex);
+        }
+    }
+
+    /**
+     * Re-drives the inbound reports whose apply failed. The case this pays for is a market caught
+     * mid-teardown or mid-registration: a second or two later the same absolute state applies
+     * cleanly. When the budget runs out the report is abandoned but the market stays suppressed --
+     * the state this engine kept is no less stale for the retries having stopped.
+     */
+    private void retryPendingColonyMgmtApplies() {
+        for (CoopColonyManagement.State pending : colonyMgmtPoll.pendingApplyRetries()) {
+            if (applyColonyMgmt(pending)) {
+                colonyMgmtPoll.markSynced(pending);
+                CoopLog.info(CoopCampaignReplicator.class, "Coop COLONY_MGMT apply retry SUCCEEDED"
+                        + " market=" + pending.marketId() + " id=" + pending.reportId());
+            } else if (!colonyMgmtPoll.canRetryPendingApply(pending.marketId())) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Coop COLONY_MGMT apply GAVE UP after "
+                        + CoopColonyManagement.PENDING_APPLY_ATTEMPTS + " attempts market="
+                        + pending.marketId() + " id=" + pending.reportId()
+                        + "; stale state stays suppressed");
+            }
         }
     }
 
@@ -2397,6 +2430,23 @@ public final class CoopCampaignReplicator
     }
 
     /**
+     * One inbound report into the local engine, through the seam. Returns false when the engine kept
+     * state the report replaced -- a thrown apply counts, because a report that blew up halfway is
+     * exactly the case the caller must not record as synced.
+     */
+    private boolean applyColonyMgmt(CoopColonyManagement.State state) {
+        replayGuard.begin();
+        try {
+            return colonyMgmtApply.test(state);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply COLONY_MGMT", ex);
+            return false;
+        } finally {
+            replayGuard.end();
+        }
+    }
+
+    /**
      * The single outbound path for both capture routes, so the ledger entry that kills the host's echo
      * and the known-synced hash that stops the poll re-sending are always taken together.
      */
@@ -2420,20 +2470,24 @@ public final class CoopCampaignReplicator
         CoopColonyManagement.State state = CoopColonyManagement.decode(
                 CoopMessages.requiredPayloadString(message, "mgmt"));
         boolean firstApply = colonyMgmtLedger.apply(state);
-        // Whether or not the engine apply runs, this state is now what the peer holds for that market:
-        // marking it synced is what stops both polls re-reporting an engine-driven transition that
-        // fired on both engines at once, forever.
-        colonyMgmtPoll.markSynced(state);
         if (firstApply) {
-            replayGuard.begin();
-            try {
-                CoopColonyManagement.applyToEngine(state);
-            } catch (RuntimeException | LinkageError ex) {
-                CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply COLONY_MGMT", ex);
-            } finally {
-                replayGuard.end();
+            if (applyColonyMgmt(state)) {
+                // Only now is this state what both engines hold. Marking it synced is what stops both
+                // polls re-reporting an engine-driven transition that fired on both engines at once,
+                // forever.
+                colonyMgmtPoll.markSynced(state);
+            } else {
+                // The engine kept the state the peer has already moved off. Marking that synced would
+                // make the next poll tick report it as a fresh change and roll their edit back, so the
+                // market is suppressed until the apply lands or the engine gets there by itself.
+                colonyMgmtPoll.markPendingApply(state);
+                CoopLog.warn(CoopCampaignReplicator.class, "Coop COLONY_MGMT apply FAILED market="
+                        + state.marketId() + " id=" + state.reportId()
+                        + "; suppressing stale re-report");
             }
         }
+        // A duplicate changes nothing: whatever the first delivery decided -- synced or suppressed --
+        // is still the truth, and re-marking it synced here would quietly undo a suppression.
         // The host owns the canonical market: it integrates the guest's report and rebroadcasts so
         // both clients converge. The originator's ledger entry kills the echo.
         if (isHost() && isActive()) {
@@ -4098,6 +4152,11 @@ public final class CoopCampaignReplicator
         }
         LocationAPI hyperspace = sector.getHyperspace();
         return hyperspace != null && locationId.equals(hyperspace.getId()) ? hyperspace : null;
+    }
+
+    /** Test seam: replaces the {@code COLONY_MGMT} engine write, so a test can make it fail. */
+    void setColonyMgmtApplyForTest(Predicate<CoopColonyManagement.State> apply) {
+        colonyMgmtApply = Objects.requireNonNull(apply, "apply");
     }
 
     /** Test seam: the guest hire baseline a snapshot would have installed. */
