@@ -11,12 +11,10 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
   slipstream map.
 - **Deep space and sensor ghosts are host-only.** The abyss content exists on the host's engine, and
   the guest sees no sensor ghosts anywhere.
-- **Story missions are the host's,** by agreement between the two of you rather than by enforcement.
-  Contacts and person bounties are local to each player.
+- **Story missions are the host's.** The mod removes every way into the Galatia Academy chain on
+  the guest. Contacts, person bounties and system bounties are local to each player.
 - **No direct trade between players.** Cargo goes by jettisoned pod, ships through colony storage,
   credits not at all.
-- **Talking your way out of an encounter is local on the guest.** The host's copy of the fleet is
-  not told; fights are reconciled, conversations are not.
 - **The host's save is the campaign.** The guest's save is co-op material and needs the mod and a
   host to be worth loading.
 - **Rejoin by loading the co-op save,** never by starting a New Game on the same seed.
@@ -103,15 +101,17 @@ contents from it. Same rule for survey data.
 
 **Neither, in this release.** Contacts, the missions contacts offer, and person bounties are local to
 each player. The guest gets no person bounties at all; the script that generates them is one of the
-ones held back so it does not spawn a second copy of the host's world.
+ones held back so it does not spawn a second copy of the host's world. System bounties are posted by
+each game separately, so the guest sees bounties the host does not and is paid by its own game for
+kills in them.
 
 **Story missions are the host's.** The Galatia Academy chain and the missions it unlocks run on one
-engine only, the host's, and their rewards go to the host. This is a rule you keep, not one the mod
-enforces: nothing stops the guest from docking at the Academy and accepting the same missions, but
-the story flags and the places those missions create live in each game's own memory and are not
-copied across. A guest who starts the chain gets a private second storyline the host never sees,
-and the two worlds drift apart from there. One-of-a-kind finds in the shared world are a different
-matter: a derelict, a ruin, a cryosleeper or a one-time bar offer goes to whoever gets there first,
+engine only, the host's, and their rewards go to the host. The mod enforces this on the guest: the
+bar offer that introduces the Academy, the provost meeting at the station, the data core a survey
+turns up, the relay message after the first year and the Hamatsu recovery are all removed on the
+guest's game, because the story flags and the places those missions create live in each game's own
+memory and are not copied across. The guest can still dock at the Academy and ask about it. One-of-a-kind
+finds in the shared world are a different matter: a derelict, a ruin, a cryosleeper or a one-time bar offer goes to whoever gets there first,
 and the other player sees it taken.
 
 ## Trading with each other
@@ -129,20 +129,20 @@ timer deleted live pods out from under the player who had just dropped them.
 ## Talking to fleets
 
 When a hostile fleet catches the guest, the guest gets the normal vanilla encounter on their own PC:
-fight, try to disengage, spend the story point, or leave. Paying tribute comes out of the guest's own
-credits. What the host's engine sees is only the result of a fight, if there was one. A fleet the
-guest talked their way past has not been talked to on the host, so after a two minute cooldown it can
-catch the guest again. Demanding surrender or tribute from an NPC fleet works the same way: whatever
-the guest gets out of it stays on the guest's screen, and the host's fleet carries on.
+fight, try to disengage, spend the story point, or leave. Only a fight reaches the host, as the
+reconciled result. A disengage does not, and does not need to: vanilla tells the pursuing fleet
+nothing after a disengage either, and its pursuit patience decides whether it tries again. The one
+difference is timing. Vanilla gives you about three seconds of grace after an encounter; the co-op
+handoff waits fifteen before the same fleet can catch the guest again. A fleet the guest beat in
+battle leaves the guest alone for about a day, as in vanilla.
 
 A customs scan or inspection against the guest is the one dialog the host does drive. The host
 notices the patrol's intent, tells the guest's game, and the guest resolves the scan against their
 own cargo; the fine and the standing change are reported back.
 
-Pirate and Pather fleets that spawn around the guest, in a system the host is not in, can appear
-right on top of the guest instead of at a distance. Vanilla only keeps spawns away from the player
-the engine knows about, and on the host's engine that is the host. Expect the occasional ambush
-that a solo game would have placed further out.
+Pirate and Pather fleets that spawn around the guest, in a system the host is not in, are placed at
+the same distance vanilla keeps from the host. Vanilla only knows about one player; the mod applies
+the same spacing to the guest.
 
 ## Divergences you will actually run into
 
@@ -157,9 +157,9 @@ past the gap between the two starts. And a colony's commodity shortage markers c
 each engine solves supply for the whole sector on its own schedule. The host's reading is the one to
 trust.
 
-Also on the guest: the vanilla hostile-activity meter runs its own simulation and predicts nothing
-real, because the fleets it would spawn are suppressed. The co-op expedition warning, the one with a
-countdown, is the entry that matches the fleets actually coming.
+The guest has no hostile-activity meter. Its own copy predicted nothing real, because the fleets it
+would have spawned are suppressed, so the mod ends it. The co-op expedition warning, the one with a
+countdown, is the entry that shows the fleets actually coming, on both screens.
 
 **Bar offers.** The same offers appear for both of you, from the same people, for the same
 commodities, at different tonnage and different pay. The wire carries the offer's seed and each game
@@ -202,11 +202,10 @@ converges them. Right after a guest opens a market, mercenary captains and their
 the second or two before the host's snapshot lands. A damaged multi-module ship in a listing arrives
 on the other side with clean modules.
 
-**Two abilities behave slightly differently for the guest.** An interdiction pulse the guest fires is
-resolved on the host at slightly the wrong radius and strength, because one of the stats behind it is
-not mirrored; the reputation cost is also charged when you start the charge-up rather than when the
-pulse lands. And a distress call the guest makes brings the responding fleet in near the host, though
-it does route to the right system.
+**Two abilities behave slightly differently for the guest.** An interdiction pulse the guest fires
+charges its reputation cost when the charge-up starts rather than when the pulse lands, and only for
+the fleets the guest's own game could see at the time. And a distress call the guest makes brings the
+responding fleet in near the host, though it does route to the right system.
 
 ## Clocks
 

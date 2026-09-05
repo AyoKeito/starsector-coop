@@ -376,7 +376,10 @@ Accepted. The retained reference is inert: neither `DelayedActionScript.doAction
 
 Second-order consequence, also accepted: because `spawnFleet` positions the response fleet relative to `getPlayerFleet()`, a guest-triggered distress response arrives near the **host**, not the guest. The jump points it routes through are still the guest's (they come from the `DistressResponseData` captured at activation, when the mirror was the fleet in system), so the responder does reach the right system; only the hyperspace approach is anchored wrong.
 
-### Guest interdiction pulse: radius and duration read an unpinned stat
+### Guest interdiction pulse: radius and duration read an unpinned stat — RESOLVED by the Phase 20 red-team pass (C3)
+
+**Correction 2026-09-05:** the first paragraph below is stale. `CoopSensorSync.Profile` has carried the three `sensorRangeMod` aggregates (flat, percent, mult) since red-team finding C3 (`04a8676`), and `applySensorRange` pins them on the mirror every frame next to the sensor strength, so `InterdictionPulseAbility.getRange`/`getInterdictSeconds` now read the guest's real values on the host. What remains accepted is the second and third paragraph: the standing hit is charged by the guest's own pulse at charge-up time, and only against fleets the guest's client knows about.
+
 
 `InterdictionPulseAbility.getRange` and `getInterdictSeconds` both read `fleet.getSensorRangeMod().computeEffective(fleet.getSensorStrength())` (`InterdictionPulseAbility.java:123,309`). Phase 14b's `CoopSensorSync` pins the mirror's *sensor strength* and its `detectedRangeMod` totals, but not `sensorRangeMod`, so a guest whose skills or hullmods modify sensor range gets a pulse on the host that is slightly the wrong size and slightly the wrong strength against each victim. Accepted for v1: the error is a percentage on a 500+ su radius, and the pulse is not a state the two clients have to agree on — the host's result is the only one that exists.
 
@@ -470,7 +473,7 @@ Consistent with the shared world the rest of Phase 12 builds, and the same thing
 
 The consequence is that the guest's own hostile-activity intel is not a reliable read on what is actually coming. The mirrored `CoopExpeditionWarningIntel` entry is the authoritative inbound-attack signal on the guest: it is scanned off the host's live intel manager and reconciled as a set. A guest that sees a native hostile-activity entry and a coop warning for the same colony is seeing its own simulation next to the real one; the coop entry is the one with a countdown that matches the fleets on the map.
 
-Not fixed because suppression would cost more than it buys. `HostileActivityEventIntel` is a singleton other systems reach through `HostileActivityEventIntel.get()`, and removing it guest-side would strip a UI surface for no gameplay gain when its fleets already cannot spawn.
+**RESOLVED 2026-09-05 (`5e342e2`):** the paragraph that stood here argued suppression would cost more than it buys because `HostileActivityEventIntel.get()` is a singleton other systems reach for. Every reader was checked in the pristine source and tolerates null, so `HostileActivityManager` now joins the guest suppression set and the session-start pass ends any `HostileActivityEventIntel` the save holds, removes it and unsets `$hae_ref`. The guest has no meter and no `HOSTILE_ACTIVITY` colony condition; the coop expedition warning is its only inbound-attack signal. The host is untouched.
 
 ### Construction progress drifts between the two clients until an industry finishes
 
@@ -560,6 +563,16 @@ few kilobytes; the cap exists so a gateway that answers with a stream, or a devi
 pretending to be one, cannot make the mod accumulate unbounded bytes on the campaign thread. A router
 whose descriptor genuinely exceeds it will not be mapped, and the log says which limit was hit.
 
+## Limitations review 2026-09-05 — One New Divergence, One Enforced Rule
+
+### System bounties are posted per engine (planned fix: Phase 34)
+
+`SystemBountyManager` (`CoreLifecyclePluginImpl.java:722`, a `BaseEventManager` sector script) was never in the Phase 13 suppression set: it spawns no fleets, only `SystemBountyIntel` entries, so the "spawner" filter did not catch it. Each engine therefore posts its own system bounties from its own rolls, and `SystemBountyIntel.reportBattleOccurred` pays the local player from the local intel for local kills. The guest is paid by its own game for bounties the host never saw, and sees none of the host's. Accepted until Phase 34 replicates the host's set and suppresses the guest's manager; person bounties (already suppressed, so the guest has none) are the other half of that phase.
+
+### The Galatia Academy chain is unavailable on the guest (enforced 2026-09-05)
+
+Not a divergence but the rule that prevents one. `CoopStoryChainGate` publishes `$coopIsGuest` on sector memory from the `CoopModPlugin.beginGameSession()` prologue (set on a guest launch, unset on host or no-role), and nine vanilla `rules.csv` rows are replaced by id with `!$global.coopIsGuest` appended: `goToTheGABarEventOption`, `goToGA_barEvent`, `gaAddOptionMeetProvost`, `gaIntro2surveyOpen`, `gaDHOhookStart`, `gaDHOhookStartDev`, `gaDHOjustFoundArrayStart`, `hamatsu_PostShipRecoverySpecial`, `gaDevMenuOption`. Everything downstream tests state only those roots can write. Tutorial-only entries are unreachable because the mod forces the tutorial skip. `CoopRulesFileTest` pins the gate on every root and the file's id uniqueness.
+
 ## Bug audit 2026-09-04 — Four Accepted Divergences
 
 Found by the bug-hunt campaign recorded in the plan; each was judged not worth the code it would take
@@ -590,7 +603,10 @@ keeps a pod that no longer exists on the authoritative side and can still loot i
 half of a trade — the alternative, letting each client run its own timer, deleted live pods out from
 under the player who dropped them.
 
-### Ambient fleets can appear on top of a guest in a system the host is not in (forks-2)
+### Ambient fleets can appear on top of a guest in a system the host is not in (forks-2) — RESOLVED 2026-09-05 (`5dece99`)
+
+**Resolution:** the forked `setLocationAndOrders` reads the position back after the AI constructor places the fleet and, when the guest's presence entity is in the same system and the fleet is inside `getMaxSensorRange() + 500` of it, moves it to `minDist + 2000` toward the star (the same numbers `pickLocationNotNearPlayer` uses for the host), unless that point would land within the same distance of the host. Presence null = vanilla. The paragraphs below describe the defect as it was.
+
 
 The `DisposableFleetManager` fork makes `currSpawnLoc` presence-aware so ambient pirate and Pather
 fleets spawn around the guest as well as the host. Vanilla's placement, however, branches on

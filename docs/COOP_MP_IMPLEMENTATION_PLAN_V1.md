@@ -64,6 +64,7 @@ Authoritative build status per phase. Checkbox state inside the early phases pre
 | 31 | **BUILT** (smoke deferred into Phase 19) | **Built 2026-09-03, the same day it was created** (2275 → 2413 tests): launcher core, bug-report bundle, update check, default password, packaging script, Version Checker file, docs rewrite, root README, issue forms. Two-instance launcher smoke still to run (see the phase's manual test steps; must also confirm `System.setProperty` passes the sandbox via the `Coop published the settings-file seed` log line). **Created 2026-09-03 and pulled into V1 the same day (user decision):** a Windows launcher window (Swing jar on the game's bundled JRE) that writes the options file the mod already reads, checks the install, runs the host doctor and a launcher-to-launcher test connection, and starts the game with a log tail. Sits after 23, before 19. Decisions settled 2026-09-03 (see the phase). |
 | 30 | **BUILT + LIVE-VERIFIED** | Dev tooling (agent bridge + starsector-mcp), created, built, AND live-verified all on 2026-08-25 (`c51ee37` mod side, 943 tests; `4ed9a77` tools side, 20 mock-bridge tests; live bridged check + the automated 7-item 12c smoke portion both PASS same day — results in the 12c smoke step). Dormant without `-Dcoop.debug.bridge`; Phase 23 confirms dormancy (checklist line added). Minor bridge/MCP nits recorded in step 4 (diff `role`/`engineId` exclusion, survey by-id lookup, no toggle-off). |
 | 32 | NOT BUILT | Specced 2026-09-05 from a two-worker feasibility pass (storage / black + military / direct transfer). Decisions same day: all storage markets shared, black + military in the same phase, no migration, direct p2p transfer stays a Maybe. Sits after 31, before 19. |
+| 34 | NOT BUILT | Specced 2026-09-05 (post-release limitations review): person + system bounties replicated to the guest, guest paid from its reconciled battle result via a pre-reconcile hook and `CREDITS_GRANT`; guest `SystemBountyManager` suppressed. Post-V1, order open. |
 
 ## Source Layout
 
@@ -2516,6 +2517,14 @@ Implement Phase 21 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Build the multiplayer
 - `readResolve` on the guest must **not** run vanilla's "init cells to random mid-storm state" loop (lines 264-282): a guest loading a save gets `STORM_SET` on connect and derives trackers from it; before the session connects, the grid from the save is displayed as-is with keyed trackers.
 - Bridge: a storm table (generation, a hash of `cells`, and the tracker state at a fixed sample of cells around each player fleet) so `ss_diff` compares the two engines; this is the acceptance gate.
 
+**Milestone 5 (decide at build time, added 2026-09-05, promoted from the Maybe entry "Sensor-ghost cosmetics for the guest") — Sensor ghosts on the guest:**
+
+- Today `SensorGhostManager` is in the Phase 13 suppression set with its `$ghostManager` handle preserved, so the guest sees no ghosts anywhere. The reason was that several ghost types touch shared state. A source pass over `impl/campaign/ghosts/types` (2026-09-05) sorts them: **shared-state types** are `EncounterTricksterGhost` (creates fleets, writes memory), `RemnantGhost` (creates a fleet), `ShipGhost` (writes memory), and every type whose creator or behaviour calls `GBIGenerateSlipstream` or references slipstreams (`EchoGhostCreator`, `GuideGhostCreator`, `LeviathanGhost`/`LeviathanCalfGhost` and their creators, `MinnowGhostCreator`, `RacerGhost`/`RacerGhostCreator`, `RemoraGhostCreator`, `StormcallerGhostCreator`), because a locally generated slipstream is shared terrain that milestone 1 makes host-authoritative. **Cosmetic types** with no fleet, no memory write and no slipstream reference: `AbyssalDrifterGhost`, `ChargerGhost`, `StormTricksterGhost`, `ZigguratGhost`, `NoGhost`. Re-verify the split at build time against the engine version.
+- **Option A (recommended): local cosmetic subset.** A coop `SensorGhostManager` replacement on the guest (the `removeScript`/`addScript`-at-`onGameLoad` mechanism the base managers use) whose creator list holds only the cosmetic types. Ghosts are per-player sensor phenomena in vanilla too, so the two players seeing different cosmetic ghosts is not a divergence anyone can observe. Nothing on the wire.
+- **Option B: replicate the host's ghosts.** Stream ghost entities like fleets. Rejected at sketch time: ghosts are transient, behaviour-driven and player-relative (`GBFollow`, `GBLeadPlayerTo`), so a mirrored ghost following the host looks wrong to the guest.
+- The shared-state types stay host-only. Their fleets already mirror (Phase 9), and after milestone 1 a host-generated ghost slipstream reaches the guest as a stream.
+- Acceptance: the guest sees cosmetic ghosts again (log `Coop ghost manager installed` with the type list), never a fleet-spawning or slipstream-generating one; grep the guest log for any of the shared-state class names.
+
 **Stretch (separate decision, may stay unbuilt):** guest-proximity triggering — replace the host's `EncounterManager` with a coop-aware variant that also generates/range-checks EPs around the guest's mirrored fleet, so ambient encounters fire when the players travel apart. Without it, encounters trigger only around the host (today's v1 behavior minus the guest's divergent local sim). The manager is ~200 lines of pure API and replaceable by the same `removeScript`/`addScript` mechanism; the EP providers are listener-driven (`ListenerUtil.generateEncounterPoints`).
 
 **Decision points to settle before building:**
@@ -2523,6 +2532,7 @@ Implement Phase 21 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Build the multiplayer
 - Message shape: dedicated `STREAM_*`/`ENC_*` family (BASE_SET-style set-reconciled, recommended) vs more `WORLD_DELTA` subtypes. **Left to the implementer at build time (user, 2026-09-05); the recommendation stands.**
 - Milestone 3 mechanism (forked re-execution vs direct entity replication vs accept-divergence) — and whether it ships at all. **Open (user, 2026-09-05): the recorded scope is milestones 1 and 2.**
 - The stretch milestone: is solo-guest ambient content worth a replaced host manager, or does "encounters happen around the host" suffice for the co-op fantasy. **Open (user, 2026-09-05), same decision as milestone 3.**
+- Milestone 5 (sensor ghosts): ships or not, option A (local cosmetic subset, recommended) vs B. **Open (user, 2026-09-05).** Independent of milestones 1-4.
 - Milestone 4 (storms): ships or not, and option A vs B for the trackers. **Open (user, 2026-09-05, added the same day); recommendation is B.** Independent of milestones 1-3: it touches neither the slipstream manager nor the encounter path, so it can be built in any order once milestone 1 has proven the terrain-capture pattern.
 - Ordering: **decided 2026-09-05: first post-V1 phase, after Phase 19 and before 33 → 22.** Milestone 1 is the cheapest and lowest-risk post-V1 item; milestone 2 is authorized as the narrow proof (one rogue-object system end to end) and the lights/stretch decision waits on its result.
 
@@ -2541,6 +2551,7 @@ Implement Phase 21 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Build the multiplayer
 - [ ] Milestone 1: suppression + sweep, poll capture, polyline + fade-state apply, despawn/remove flow, `STREAM_SET` reconcile, bridge stream table; two-instance smoke — bridge `ss_diff` on the stream table shows no sampled brightness difference above 0.05 during a spawn and during a despawn, host and guest hyperspace maps show the same streams (positions/widths/faded gaps), a fleet riding a stream on one screen rides it on the other, month-6/12 turnover mirrors, a reconnect during a despawn lands on the host's brightness.
 - [ ] Milestone 2 (starts after the milestone 1 smoke passes): capture poll + coop despawner, guest re-execution + the four corrections and the dire-hint override, `$coopEncId` + ordinal mapping, fingerprint exclusion, bridge manifest; two-instance smoke — host triggers a rogue-object encounter → guest gets the same system at the same hyper location and the bridge manifest diff is empty (types, orbit radii, memory flags; names excluded), both can enter it together, a wreck salvaged on one side is consumed on the other, Threat fleets mirror inside, the host leaves while the guest stays and the system survives, removal happens only when both players are away, reconnect with a live temp system passes the fingerprint and creates no duplicate.
 - [ ] Milestone 3 + stretch: per the decisions above.
+- [ ] Milestone 5 (if it ships): coop ghost manager on the guest with the cosmetic creator list; test pins the allowlist against the class names above; two-instance smoke: guest sees a ghost in deep hyperspace, guest log never names a shared-state type.
 - [ ] Milestone 4 (if it ships): terrain.json override + subclasses, host commit hook + `STORM_GRID`, guest apply + `STORM_SET` reconcile, keyed trackers with elapsed catch-up (option B), bridge storm table; two-instance smoke — `ss_diff` on the storm table shows equal grid hashes within one round trip of each host commit and equal tracker states at the sampled cells around both fleets, the two hyperspace maps show the same storm cells with the same flashes, both fleets flying the same route through a storm get boosted and struck in the same cells (timing within a fleet stays random), a guest joining mid-generation lands on the host's generation, and a guest loading a save shows no storm activity until `STORM_SET` lands.
 - [ ] Document residual divergences (names/catalog ids, light-cluster offsets if M3 re-executes, solo-guest triggering if stretch unbuilt) in `docs/starsector-runtime-limitations.md`, replacing the v1 slipstream/abyss accept-divergence entries.
 - [ ] Commit `feat: replicate slipstreams and abyssal encounters (hyperspace ambient world)`.
@@ -2998,7 +3009,7 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 - **All storage markets are shared,** not only colonies. The 5000-credit unlock paid by either player opens it for both; each engine keeps billing its own monthly storage fee for the same contents (accepted, it is the price of one unlock for two players).
 - **Black market and military submarket are in the same phase,** with the per-engine divergences listed below accepted.
 - **No migration, no backwards compatibility.** There are no ongoing games. The first snapshot replaces whatever the guest's local storage held.
-- **Direct player-to-player transfer stays out.** Researched feasible (vanilla cargo and fleet-member pickers exist, the mirror is a real fleet, the engagement shield already releases for the targeted mirror) but it needs a new interaction dialog on the mirror plus an escrow protocol. Recorded under Maybe.
+- **Direct player-to-player transfer stays out.** Researched feasible (vanilla cargo and fleet-member pickers exist, the mirror is a real fleet, the engagement shield already releases for the targeted mirror) but it needs a new interaction dialog on the mirror plus an escrow protocol. Recorded under Maybe. **Credits are the exception (added 2026-09-05 evening):** they need no dialog and no escrow, see addition B below.
 
 **Engine facts the design rests on (api_src, 2026-09-05):**
 
@@ -3028,6 +3039,11 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 - Both engines bill their own monthly storage fee for the same contents.
 - Commission salary and bounties exist only on the host. The guest gets the access clause only.
 
+**Additions (2026-09-05 evening, from the limitations review; scope decision open — the user decides whether these ride in V1 with the rest of Phase 32 or wait for post-V1):**
+
+- **A. Hidden-base markets are shared.** A pirate or Luddic Path base is reconstructed on the guest by `CoopBaseAuthority` from a `(kind, systemId)` identity, but the constructor mints its own `genUID` market id, so the market-open snapshot (`findMarket(marketId)`, `CoopCampaignReplicator.java:1162`) cannot resolve the host's market on the guest and the trade screen opens unsynced (ledger: "Hidden bases are not shared markets"). Fix: `CoopBaseRecord` carries the host's `marketId`; the guest keeps a `hostMarketId <-> localMarketId` map for bases (rebuilt from the base set on connect, so it survives reload); `findMarket` and every `MARKET_*`/`WORLD_DELTA` market reference go through one `CoopMarketIds.resolve` that consults the map in both directions. Then the ordinary snapshot-on-open and per-transaction deltas apply to a hidden base with no further code. Accepted residue: the base's name and orbit still differ per engine (already documented). Test: resolve both directions, map rebuild on connect, a `MARKET_OPEN` on a local base id reaches the host as the host id.
+- **B. Credit transfer between players.** The direct cargo/ship transfer stays Maybe (dialog + escrow); credits need neither. A "Send credits" row on the Coop Options intel page (the `TooltipMakerAPI.addButton` surface `CoopOptionsPage` already uses: an amount stepper and a Send button) debits the sender locally and sends `CREDITS_GRANT(ledgerId, amount, reason = "gift")` over reliable TCP; the receiver credits once per ledger id and posts a feed line. No escrow: the debit happens on send, the message is reliable and ledger-deduplicated, and a transfer sent during a reconnect hold is queued with the rest of the TCP stream. `CREDITS_GRANT` is the same message Phase 34 uses for bounty payouts; whichever phase builds first defines it. Test: debit on send, single credit on duplicate delivery, refusal when the sender cannot cover the amount.
+
 **Steps:**
 
 - [ ] `CoopMessages`: `submarketId` on the three market messages, `submarketCount` on the snapshot; codec tests.
@@ -3037,6 +3053,8 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 - [ ] Storage unlock flag: MethodHandles getter, persistent-data flag, `STORAGE_UNLOCK` world delta both directions; tests with a fake plugin.
 - [ ] Commission mirror: host poll, `COMMISSION` world delta, guest memory write; tests.
 - [ ] Docs: `starsector-runtime-limitations.md` entries above; player docs sentence on shared storage and fees.
+- [ ] Addition A (if in scope): `CoopBaseRecord.marketId`, `CoopMarketIds` map + resolve, route every market reference through it; tests above.
+- [ ] Addition B (if in scope): `CREDITS_GRANT` + ledger, Coop Options "Send credits" row; tests above.
 
 **Smoke (two instances, folds into the Phase 19 checklist):**
 
@@ -3045,6 +3063,8 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 - Both players buy from the same black market in turn; stock on the second opener matches the first's leftovers.
 - Host holds a commission; guest opens that faction's military submarket and can buy a commission-gated item.
 - Cut the guest's link with a storage deposit in flight; after the resume the host's storage holds it once (no duplicate, no loss).
+- Addition A: both players dock at the same pirate base in turn; the second opener sees the first's leftovers, and a purchase on the guest shows up in the host's stock.
+- Addition B: guest sends the host credits from the options page; sender's total drops, receiver's rises by the same amount, once; repeat during a reconnect hold and confirm it lands after the resume.
 
 ## Phase 33: AI-Ally Battles (post-V1; step 1 of the Phase 22 track)
 
@@ -3101,6 +3121,53 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 - Guest engages with the host nearby, host toggle on: same in the other direction.
 - An NPC attacks one player with the other nearby and allowed.
 - Losses: note the ally's hull and CR before; after the battle the owner's real fleet shows the damage, and a destroyed ship is gone on both engines.
+
+## Phase 34: Bounties for the Guest (post-V1)
+
+> **Why this phase exists (2026-09-05, from the limitations review after the 0.1.0 release).** The guest gets no person bounties at all: `PersonBountyManager` is in the Phase 13 suppression set because it spawns fleets, and the intel entries it creates never existed on the guest. Person bounties are a main mid-game income source, so the guest plays a poorer campaign than the host. The review also found an undocumented divergence in the same family: `SystemBountyManager` is **not** suppressed (`CoreLifecyclePluginImpl.java:722` adds it on every load), so each engine posts its own, different system bounties, and a guest's local one pays the guest for kills the host never saw a bounty for. This phase replicates both bounty kinds from the host and pays the guest from the host's reconciled battle result.
+
+**Verified engine facts (2026-09-05, `intel/PersonBountyIntel.java`, `intel/SystemBountyIntel.java`, `CoreLifecyclePluginImpl.java`, `coop.combat.CoopBattleResultReconciler`):**
+
+- `PersonBountyIntel` (extends `BaseIntelPlugin`, `FleetEventListener`): fields `person`, `fleet`, `faction`, `bountyCredits`, `level`, `duration` (`MAX_DURATION = 90`), `elapsedDays`, `hideoutLocation` are **private**; public getters exist for `getPerson`, `getFleet`, `getFaction`, `getBountyCredits`, `getLevel`, `getHideoutLocation`, `getElapsedDays`. `result` (line 452) and `cleanUpFleetAndEndIfNecessary`, `willPay`, `willRepIncrease` are **protected**. The target fleet is a plain host fleet spawned by `spawnFleet()` (private), so **Phase 9 already mirrors it to the guest**; the intel entry is what the guest lacks.
+- Payout path, lines 491-548: `reportBattleOccurred` pays only when `battle.isPlayerInvolved()` or the **local** player fleet is within 2000 su in the same location, and only if the flagship's captain is no longer `person`. It credits `Global.getSector().getPlayerFleet()`, adjusts faction rep (shared state, host-authoritative already), sets `result = END_PLAYER_BOUNTY` and calls `cleanUpFleetAndEndIfNecessary`. A guest kill never satisfies either involvement test on the host.
+- **The despawn race.** `reportFleetDespawnedToListener` (line 556) fires when the bounty fleet is despawned for any reason, replaces the commander and ends the intel with `END_OTHER` (no payment). `CoopBattleResultReconciler.apply` despawns destroyed host fleets through vanilla `fleet.despawn(DESTROYED_BY_BATTLE, null)` (lines 186-199, 344). So a guest kill applied today ends the bounty as "someone else got him" the instant the reconciler runs. The coop payout must be decided **before** the reconciler despawns the fleet, or the reconciler must despawn with a reason the intel treats as already handled; the intel checks `result != null` first in both listeners, so setting `result` first wins the race.
+- `SystemBountyIntel.reportBattleOccurred` (line 227) pays `bounty * battle.getPlayerInvolvementFraction()` per destroyed FP when `battle.isPlayerInvolved()`, and rep in proportion; it is a per-system standing offer with a duration, created by `SystemBountyManager` (`BaseEventManager` subclass, `getInstance()` singleton, sector script). Not suppressed on the guest today.
+- Credits never travel on the wire today: `COLONY_INCOME` carries a figure and each engine pays its own half locally (`CoopMessages` line 819, "Carries no money"). A host-to-guest credit grant is a **new message kind** and needs a ledger id so a resend cannot pay twice.
+- The guest already owns coop intel classes that mirror a host set and reconcile in place (`CoopExpeditionWarningIntel` + `CoopExpeditionWarningSync`, Phase 24): identity + attributes, ADD/UPDATE/REMOVE, `setImportant`, message-feed announce on stage change, save-migration marker. Same shape here.
+
+**Design:**
+
+- **Suppress the guest's `SystemBountyManager`** (add to `CoopNpcFleetSuppressor`'s set with a manager handle, the `PersonBountyManager` pattern) and end any local `SystemBountyIntel` on the guest at session start, so the only bounties the guest sees are the host's.
+- **Host capture.** `CoopBountyAuthority` polls the intel manager every few seconds for live `PersonBountyIntel` and `SystemBountyIntel`. Record per person bounty: `bountyId` (the intel's own id or a coop-minted one stamped into intel memory), `coopFleetId` of the target (from the Phase 9 registry), person name and portrait id, faction, level, credits, hideout system id, days remaining, stage. Per system bounty: system id, faction, credits per FP, days remaining. `BOUNTY_SET` (full set, reliable TCP, set-reconciled like `EXPEDITION_WARNING`) on change and on connect.
+- **Guest intel.** `CoopPersonBountyIntel` and `CoopSystemBountyIntel`, coop-owned, rendered to match vanilla's list bullets and small description (target, faction, reward, hideout, days), map marker on the hideout system, `New` on add, feed announce on add/remove. No vanilla `PersonBountyIntel` is ever instantiated on the guest (it would spawn a fleet and run its own timer).
+- **Payout on a guest kill.** In the host's `BATTLE_RESULT` handling, **before** `CoopBattleResultReconciler.apply`, the bounty authority checks each `destroyedFleetIds` entry and each surviving-fleet roster against live person bounties: destroyed, or surviving with the flagship's captain no longer `person`, means the guest collected. The host then (1) sets `result` on the vanilla intel to `END_PLAYER_BOUNTY` with the payment through a `MethodHandles` setter (`java.lang.reflect` is blocked, `invoke` is not; the `CoopBarSync` pattern), applies the faction rep with vanilla's `RepActionEnvelope(PERSON_BOUNTY_REWARD, ...)` (shared standing, rebroadcast by the existing rep snapshot), calls `cleanUpFleetAndEndIfNecessary` the same way, and (2) sends `CREDITS_GRANT(ledgerId, amount, reason = "bounty:<bountyId>")` to the guest, who adds the credits once per ledger id and posts the vanilla-style payout message. `willPay`/`willRepIncrease` read the **host** player's standing with the faction; standing is shared, so the answer is the same for the guest. For system bounties the same pre-reconcile pass sums destroyed FP of the bounty faction's enemies in the bounty system from the result and grants `credits per FP x FP` (the guest was the only player involved, so involvement fraction is 1).
+- **Host kill of a guest-visible bounty** needs nothing: vanilla pays the host, the intel ends, the next `BOUNTY_SET` removes the guest's entry with a "collected by <host>" feed line.
+- **Both players in the fight** is Phase 33/22 territory; until then a bounty fleet is fought by one player and the rule above covers it.
+
+**Decision points to settle before building:**
+
+- Whether the guest's payout is the full bounty (recommended: yes, vanilla itself pays in full regardless of involvement fraction for person bounties, line 517) or split with the host when the host's mirror was within 2000 su. Recommendation: full to the killer, no split, matching the Phase 33 "no spoils split" decision.
+- Whether `CREDITS_GRANT` is built here or in the Phase 32 credit-transfer addition, whichever lands first; one message, one ledger.
+
+**Files:**
+
+- Create `mods/coop/src/main/java/coop/campaign/CoopBountyAuthority.java` (+ tests: record capture from proxied intel, set reconcile, pre-reconcile payout detection from a `CoopBattleResult` for destroyed and for captain-replaced survivors, no double payment on a resent result, system bounty FP sum)
+- Create `mods/coop/src/main/java/coop/ui/CoopPersonBountyIntel.java`, `CoopSystemBountyIntel.java` (+ render tests in the `CoopExpeditionWarningIntel` shape)
+- Modify `coop/fleet/CoopNpcFleetSuppressor` (`SystemBountyManager` + handle), `coop/net/CoopMessages` (`BOUNTY_SET`, `CREDITS_GRANT`, policy-test rows), the host `BATTLE_RESULT` handler (pre-reconcile hook), `CoopWorldDelta.Ledger` or a sibling for grant ids, the Phase 30 bridge dump (bounty table: id, target fleet, credits, days, stage on both engines)
+
+**Steps:**
+
+- [ ] Suppression + session-start cleanup of local system bounties on the guest; tests.
+- [ ] Host capture + `BOUNTY_SET` + guest intel classes; bridge bounty table; two-instance smoke: a person bounty posted on the host appears on the guest within a poll with matching reward and hideout, the target fleet is the mirrored one, expiry removes it on both.
+- [ ] Pre-reconcile payout + `CREDITS_GRANT`; smoke: guest kills the target, guest's credits rise by the bounty, host's do not, host's intel ends as collected, faction rep rises once on both, log `Coop bounty paid` on the host and `Coop credits granted` on the guest; resend the result (bridge) and confirm no second payment.
+- [ ] System bounty payout; smoke: guest kills a pirate fleet in a system-bounty system, payout per FP matches the intel's figure.
+- [ ] Docs: retire the "guest gets no person bounties" entries in `LIMITATIONS.md`/`LISTING.md` and the ledger; record the system-bounty suppression.
+- [ ] Commit `feat: person and system bounties for the guest`.
+
+**Acceptance:**
+
+- The guest sees every live host bounty with the same reward and target, never a local one, and is paid once and exactly the vanilla amount when its reconciled battle result collects it; the host's intel ends as collected, not as "someone else".
+- Bridge bounty table diff is empty across the two engines apart from the poll lag.
 
 ## V1 Playable Acceptance Checklist
 
@@ -3614,6 +3681,90 @@ both test profiles.
   `BridgeOutcomeUnknownError`.
 
 
+## Sixth fix pass (2026-09-05, limitations review after the 0.1.0 release)
+
+A read of every accepted divergence in `starsector-runtime-limitations.md`, the V1 non-goals and the
+player docs, sorted into "fix now", "plan" and "leave". The "plan" items became Phase 34, Phase 26
+milestone 5 and the two Phase 32 additions. The "fix now" items are below: three code changes from
+worktree branches merged at `67a8844` (`5dece99` forks, `5e342e2` suppressor, `1a5b01c` story gate),
+and two that turned out to be documentation errors once the code was read. Suite 3005 to 3034 green,
+one pre-existing skip. Deployed to both test profiles.
+
+**Fork (`forks/.../DisposableFleetManager.java`, `coop.presence`):**
+
+- **Ambient spawns landed on the guest in a guest-only system (forks-2, was accepted).** The
+  placement is in vanilla's `DisposableAggroAssignmentAI` constructor, which only routes through
+  `Misc.pickLocationNotNearPlayer` when the host is in the system. The forked manager now reads the
+  position back after constructing the AI and, when the guest's presence entity is in that system
+  and the fleet landed inside `getMaxSensorRange() + 500` of it (the literal vanilla passes for the
+  host), moves it out to `minDist + 2000`, the push `pickLocationNotNearPlayer` itself uses, toward
+  the star rather than out of the system. The nudge is dropped if the moved point would land within
+  the same distance of the host. Presence null means the block is skipped, so solo and host-side
+  behaviour is byte-for-byte vanilla. The arithmetic lives in `coop.presence.CoopSpawnSpacing`,
+  which is compiled into the forks jar only (the `CoopPresenceRegistry` contract), because the fork
+  classes are not on the unit-test classpath and putting them there would shadow `starfarer.api.jar`
+  for the whole suite. No new fields on the manager. **Smoke:** guest parks alone on a jump point in
+  a populated system at least 2 LY from the host and lets 10 to 20 days pass; ambient fleets still
+  appear, never inside the guest's sensor circle; grep the host log for
+  `spawn nudged off the guest` (one line per rescued spawn).
+
+**Suppressor (`coop.fleet.CoopNpcFleetSuppressor`):**
+
+- **The guest ran its own hostile-activity simulation.** `HostileActivityManager` was never in the
+  suppression set, so the guest's `HostileActivityEventIntel` rolled its own events, stamped the
+  `HOSTILE_ACTIVITY` condition on the shared faction's colonies from its own dice and showed a meter
+  that predicted nothing (its fleets are suppressed). Option A was taken over hiding the intel: the
+  manager joins `KNOWN_SPAWNERS` (no `MANAGER_HANDLES` entry: it is stateless and vanilla caches no
+  handle), and the once-per-session suppression pass ends every `HostileActivityEventIntel` the
+  save holds, removes it from the intel manager and unsets `$hae_ref`. Every vanilla reader of
+  `HostileActivityEventIntel.get()` was checked in the pristine source and tolerates null
+  (`WarSimScript`, `PirateBaseRumorBarEvent`, `DisposableHostileActivityFleetManager` returns zero
+  fleets, the three faction factors, eleven `HA_CMD` sites, `KantaCMD`; `PerseanLeagueBlockade` and
+  `KnightsOfLuddTakeoverExpedition` abort through their own null check). `CoopExpeditionWarningIntel`
+  reads nothing from the vanilla event. The host is untouched. **Smoke:** with a shared colony, the
+  guest's intel screen shows no Hostile Activity entry and the colony has no such condition, the host
+  still shows both, the coop expedition warning still reaches the guest; reload a guest save and the
+  entry stays gone; grep the guest log for `hostile-activity event intel`.
+
+**Story gate (`coop.campaign.CoopStoryChainGate`, `data/campaign/rules.csv`, `CoopModPlugin`):**
+
+- **The Galatia Academy chain could be started on the guest.** The plan's Maybe entry "Guest-side
+  story gate" is now built. A new `CoopModPlugin.beginGameSession()` prologue, first statement of
+  both `onNewGame` and `onGameLoad`, publishes `$coopIsGuest` on sector memory on a guest launch and
+  unsets it (never writes false) on a host or no-role launch, so a save that changes hands is right
+  on the next load. Nine vanilla rules are replaced by id, copied verbatim with `!$global.coopIsGuest`
+  appended: the day-180 bar offer and its handler (`goToTheGABarEventOption`, `goToGA_barEvent`),
+  the provost meeting at the Academy (`gaAddOptionMeetProvost`), the survey data-core find
+  (`gaIntro2surveyOpen`), the day-365 relay message and its dev variant (`gaDHOhookStart`,
+  `gaDHOhookStartDev`), the sensor-array find (`gaDHOjustFoundArrayStart`), the Hamatsu recovery
+  (`hamatsu_PostShipRecoverySpecial`) and the dev menu (`gaDevMenuOption`). Everything downstream
+  tests state only those roots can write. Tutorial-only routes are unreachable already (the mod
+  forces the tutorial skip). Nothing on the Java side auto-starts the chain. A new
+  `CoopRulesFileTest` parses the mod's rules.csv and pins column count, unique ids (quoted comment
+  rows occupy ids) and the gate on every root. **Smoke:** guest log has
+  `Guest launch: the Galatia Academy story chain is off on this client`; guest docks at the Academy
+  and sees only "Ask about the Galatia Academy" and "Leave"; host sees "Request a meeting with the
+  provost"; guest bar visits past day 180 never offer the academician; relaunch the guest install as
+  host on the same save and the provost option is back.
+
+**Documentation errors found by reading the code, no code change:**
+
+- The ledger's "Guest interdiction pulse: radius and duration read an unpinned stat" was stale:
+  `CoopSensorSync.Profile` has carried the three `sensorRangeMod` aggregates since red-team C3
+  (`04a8676`) and pins them on the mirror every frame. Only the rep-timing residue stands. Corrected
+  in the ledger and the player docs.
+- The player docs written earlier the same day said a fleet the guest talked its way past "can come
+  back two minutes later". The watcher's per-fleet handoff cooldown is 15 s
+  (`CoopNpcThreatWatcher.ENGAGE_COOLDOWN_MILLIS`, revised from 120 s on 2026-08-19; the
+  `CoopBattleBridge` javadoc still says 120 s and is wrong), vanilla grants about 3 s, and vanilla's
+  `applyPursuitOption` tells the NPC fleet nothing after a `LET_THEM_GO` either, so a disengage not
+  reaching the host is vanilla-equivalent. The "encounter outcomes" item planned as a phase was
+  dropped on those grounds. Vanilla also has no tribute or surrender option in the being-caught
+  dialog; the sentence claiming it was removed.
+
+**New divergence found, documented, fix planned (Phase 34):** `SystemBountyManager` is not
+suppressed on the guest, so each engine posts its own system bounties.
+
 ## Maybe (Post-V1 Ideas — Not Committed)
 
 > Researched candidates that are out of committed v1 scope. Each needs a design decision before it becomes a phase. Do not implement from this section without promoting it into a numbered phase first.
@@ -3671,7 +3822,7 @@ Deferred-not-cancelled items, recorded with their sketches so promotion is cheap
 - **Abyss encounter-point replication** — ~~host broadcasts its EP set (id + position)~~ **numbered as Phase 26 milestone 2 (2026-06-10)** with a corrected model: EPs are transient per-player probe points, not world state — replicate each encounter *outcome* (`ENC_SPAWN` with position; EP id/depth/nearest all derive from position), and the existing `AbyssalRogueStellarObjectEPEC` fork makes guest re-execution deterministic, exactly as intended. Restores co-op abyss exploration.
 - **Pirate/Pather base *reconstruction*** — if Phase 13 invoked the pre-authorized SUPPRESS-ONLY fallback, the corrected reconstruction spec (constructor side-effect notes, `isLarge` via MethodHandles, post-construction `PirateActivityIntel` cleanup) stays in Phase 13 for later promotion.
 - **Rendered live combat spectating** — recorded as INFEASIBLE with current engine surface (Phase 14 engine facts). Re-evaluate only if a future Starsector version adds an observer/replay combat mode; do not attempt the puppet-battle route again. The sanctioned substitutes are now numbered: Phase 22 milestone 0 (tactical-map observer) for watching, Phase 22 piloted co-op (input forwarding + out-of-band video) for participating.
-- **Sensor-ghost cosmetics for the guest** — if ghost atmosphere is missed, a cosmetic-only subset (no encounter/story ghost types) could run guest-side; needs a filter inside `SensorGhostManager`'s creator list, i.e. a fork or a custom manager. Low value, only worth bundling with other work.
+- ~~**Sensor-ghost cosmetics for the guest**~~ — **numbered as Phase 26 milestone 5 (2026-09-05)** with the type split done against the source; the custom-manager route, no fork.
 
 ### Maybe: Guest-save recovery from the host's guest snapshot
 
@@ -3723,7 +3874,9 @@ Out of v1 scope (Phase 20.3 Tier 4 / 20.4). If the IPv6 + port-forward + UPnP + 
 
 Feasible: `InteractionDialogAPI.showCargoPickerDialog` / `showFleetMemberPickerDialog` exist, the partner mirror is a real `CampaignFleetAPI`, and `CoopFleetMirror.assertEngagementShield` already releases the shield for the mirror the local player targets. Two gaps: no interaction dialog on the mirror today (vanilla resolves to the fleet-encounter dialog; needs a rules.csv row or a custom interaction plugin), and a gift needs escrow, since a GIFT queued for a partner who never returns would have already destroyed the goods on the giver's side (host-authoritative apply closes that). Smaller than Phase 32 in code; deferred behind it because shared storage already gives the two players an exchange channel and closes the ship-fidelity gaps a gift would need.
 
-### Maybe: Guest-side story gate (raised 2026-09-04)
+### Maybe: Guest-side story gate (raised 2026-09-04) — BUILT 2026-09-05 (sixth fix pass, `1a5b01c`)
+
+> The cheap option below is what shipped: nine vanilla rules replaced by id with a `!$global.coopIsGuest` condition, flag published by `CoopStoryChainGate` from the `CoopModPlugin.beginGameSession()` prologue. The text below is the original analysis.
 
 **Question:** should the mod refuse the Galatia Academy dialog options on the guest, instead of leaving the rule to the players? `LIMITATIONS.md` states the rule as it stands since 2026-09-04: story missions are the host's, nothing enforces it, and a guest who accepts one gets a private storyline whose flags and generated places never cross the wire.
 

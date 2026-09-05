@@ -97,17 +97,13 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
   encounters) exists on the host's engine only. The guest can fly in, and finds it empty. Sensor
   ghosts do not appear for the guest anywhere.
 - **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
-  rewards go to the host. The mod does not stop the guest from accepting those missions, but the story
-  state is not shared, so a guest who does gets a private storyline the host never sees.
-- **Contacts, their missions and person bounties are local to each player,** and the guest gets no
-  person bounties at all.
+  rewards go to the host. The story state is not shared, so the mod removes every way into the chain
+  on the guest.
+- **Contacts, their missions, person bounties and system bounties are local to each player,** and
+  the guest gets no person bounties at all.
 - **No direct trade between players.** Nothing on screen moves credits or cargo from you to your
   partner. Cargo goes by jettisoned pod, ships through a colony's storage, and credits cannot be
   handed over at all.
-- **Talking your way out is local on the guest.** When a fleet catches the guest, the vanilla
-  encounter runs on the guest's PC: pay them off, spend the story point, or leave. The host's copy of
-  that fleet hears none of it, so the same fleet can come back for another try two minutes later.
-  Fighting is different: losses on both sides are reconciled into the shared world.
 - **No text chat.** The mod assumes you are on voice.
 - **Solo play is not supported with the mod enabled.** Difficulty is forced to Normal, the tutorial
   is skipped, and the career list gains a test start. Turn the mod off for solo campaigns.
