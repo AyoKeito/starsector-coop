@@ -3019,7 +3019,7 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 - **Deploy everything.** The fleet AI decides what to deploy, flagship included.
 - **No spoils sharing.** The piloting player keeps XP, salvage, credits and recoveries, as vanilla does for a battle with allies. `CoopRewardSplitter` stays out of combat.
 
-**Live spike (code on main 2026-09-05, run pending):** `-Dcoop.debug.allyPullIn=true` on both instances creates the player mirror without the flag, stops re-asserting it, and turns the threat watcher's eject into log lines (`Coop SPIKE ally pull-in: mirror is in a battle` with sides and the pre-battle roster, `mirror left the battle` with the post-battle roster). `-Dcoop.debug.allyPullInDropShield=true` also drops the per-frame `setNoEngaging`, for a second run if the first shows no join. Runbook: `tmp_ff_analysis\ally-pullin-spike\RUNBOOK.md`. Facts to collect: whether the mirror joins and on which side, whether it deploys under a placeholder commander, what the mirror's roster looks like after the battle, and whether the owner's next snapshot rebuilds a gutted mirror. The design below assumes the join works; if it does not, the fallback is an explicit `battle.join(mirror, side)` from `CoopBattleBridge` when the engage dialog opens.
+**Live spike (code on main 2026-09-05; run DEFERRED by the user the same day, it opens the phase when Phase 33 starts):** `-Dcoop.debug.allyPullIn=true` on both instances creates the player mirror without the flag, stops re-asserting it, and turns the threat watcher's eject into log lines (`Coop SPIKE ally pull-in: mirror is in a battle` with sides and the pre-battle roster, `mirror left the battle` with the post-battle roster). `-Dcoop.debug.allyPullInDropShield=true` also drops the per-frame `setNoEngaging`, for a second run if the first shows no join. Runbook: `tmp_ff_analysis\ally-pullin-spike\RUNBOOK.md`. Facts to collect: whether the mirror joins and on which side, whether it deploys under a placeholder commander, what the mirror's roster looks like after the battle, and whether the owner's next snapshot rebuilds a gutted mirror. The design below assumes the join works; if it does not, the fallback is an explicit `battle.join(mirror, side)` from `CoopBattleBridge` when the engage dialog opens.
 
 **Engine facts the design rests on:**
 
@@ -3047,7 +3047,7 @@ Implement Phase 30 from COOP_MP_IMPLEMENTATION_PLAN_V1.md exactly as specced: th
 
 **Steps:**
 
-- [ ] Run the spike on both instances; record the facts above in this section.
+- [ ] Run the spike on both instances (deferred 2026-09-05, user; first step when the phase starts); record the facts above in this section.
 - [ ] Ability row, plugin, add-at-session-start; test.
 - [ ] Ally bit on the fleet snapshot (if absent); posture apply in `CoopFleetMirror`; posture-aware threat watcher and customs restore; tests including "an NPC mirror is never joinable".
 - [ ] `ALLY_BATTLE_RESULT` codec, capture in `CoopBattleBridge`, owner apply with banner, policy-table classification; tests.

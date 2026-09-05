@@ -41,13 +41,6 @@
   "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is built (5cc5303: dark FlatLaf window, invite string with seed and world settings, install checks incl. the game version, host pre-flight and guest test connection, bug-report zip, update check, every -Dcoop flag in Advanced, COOP-GAME refusal). <b>Its two-instance smoke is deferred</b> (user, 2026-09-03) and runs as part of the Phase 19 checklist; until then the sandbox's acceptance of <code>System.setProperty</code> for the republished launcher flags is unverified in-game. A second fix pass merged 2026-09-04 (<code>755b587</code>, 2787 tests green): its reconnect message-loss fix, the guest saturation-bombardment deciv, stable-location construction (ticked in the plan since 2026-06-10 but never built) and guest gate scanning are unit-verified only and need the same session, as does the mission-board claim trigger merged later the same day (b8b8e4b): the first-come arbitration had no trigger since Phase 12c, so both players could accept the same bar offer. A third pass the same evening (<code>7d7e553</code>, 2943 green) closed nine review findings, one of them a P0 in the reconnect grace (replacement-socket traffic tagged as the dead partner's); its four smoke items are listed under ATTENTION. A fourth pass on 2026-09-05 (<code>8f66a8b</code>, 2966 green) closed four more: the transport now holds session traffic from an unproven replacement socket, guest storage and black-market trades no longer land on the host's open market, post-battle mirror freezes expire on a per-frame clock, and NPC CR/hull reach the guest through a rate-limited health resend; its three smoke items are listed under ATTENTION. A fifth pass the same day (<code>2641e0d</code>, 2993 green) closed four of seven review findings: a failed colony-management apply no longer rolls the partner's edit back, launcher file writes are atomic, the bridge client stops replaying mutations, and a test pins every message type's policy classification; its one smoke item is listed under ATTENTION. <b>Phase 32</b> (shared storage, black market and military submarket) was researched and specced 2026-09-05 on user decisions (all storage markets, no migration) and is next in the build order, before the Phase 19 sign-off. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist plus the launcher smoke, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
   "attention": [
     {
-      "sev": "revisit",
-      "sevLabel": "spike",
-      "head": "Phase 33 ally pull-in spike: live run pending",
-      "state": "open; user drives the games",
-      "body": "Post-V1 <span class=\"rp\" data-jump=\"33\">Phase 33</span> (AI-ally battles) was specced 2026-09-05. Its one engine unknown is whether vanilla's battle pull-in takes the partner's mirror as an ally once the shield is down. The switch is on main: launch both instances with <code>-Dcoop.debug.allyPullIn=true</code> (runbook in <code>tmp_ff_analysis\\ally-pullin-spike</code>), open a fight with the partner within 700 su, and grep for <code>Coop SPIKE ally pull-in</code>. No <code>Coop EJECTED</code> line may appear. If the mirror never joins, rerun with <code>-Dcoop.debug.allyPullInDropShield=true</code> as well."
-    },
-    {
       "sev": "action",
       "sevLabel": "action",
       "head": "Before Phase 19: the launcher smoke (deferred), the listing URL and the Ziggurat test start",
@@ -802,7 +795,7 @@
         "allied wrecks unrecoverable (vanilla)",
         "owner cannot direct or retreat its ships"
       ],
-      "note": "Specced 2026-09-05 on user decisions (real losses, owner-side toggle, deploy everything, no spoils split). Live pull-in spike switch is on main (-Dcoop.debug.allyPullIn); the run is pending."
+      "note": "Specced 2026-09-05 on user decisions (real losses, owner-side toggle, deploy everything, no spoils split). Live pull-in spike switch is on main (-Dcoop.debug.allyPullIn, runbook in tmp_ff_analysis); the run was deferred by the user the same day and is the first step when the phase starts."
     },
     {
       "id": "22",
