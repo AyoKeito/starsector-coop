@@ -9,9 +9,11 @@ import java.util.Objects;
 /**
  * The host's full authoritative set of non-player campaign fleets, carried by the reliable TCP
  * {@code NPC_FLEET_SET} message (Phase 9). The whole set is rebroadcast whenever {@link #setHash()}
- * changes; the guest reconciles against it idempotently (add fleets present here but missing locally,
- * dispose mirrors absent here). Full-set rebroadcast is chosen for v1 because it is self-correcting
- * (no add/remove delta ordering or lost-packet bugs).
+ * changes, and — since 2026-09-05 — also when {@link #computeHealthHash} changes, at most once every
+ * {@code CoopNpcFleetReplicator.HEALTH_RESYNC_INTERVAL_MILLIS}; the guest reconciles against it
+ * idempotently (add fleets present here but missing locally, dispose mirrors absent here). Full-set
+ * rebroadcast is chosen for v1 because it is self-correcting (no add/remove delta ordering or
+ * lost-packet bugs).
  *
  * <p>{@link #setHash()} is order-independent and folds in each fleet's identity, name, faction,
  * location, transponder state, roster ({@code fleetHash}) and action text
@@ -50,6 +52,14 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
      * moves — a rename (the 2026-08-19 identity fix) or a "traveling to X" → "pursuing Y" flip
      * (Phase 9b) that does not flip the hash would sit on the host until an unrelated structural
      * change happened to flush it.
+     *
+     * <p><b>Health is deliberately absent</b> — CR and hull fraction are not in {@code fleetHash}
+     * (see {@link CoopFleetSnapshot#computeFleetHash}) and so are not in this hash either, because a
+     * flip here means the guest re-applies structure and the guest's freeze-release logic
+     * ({@code CoopFleetMirrorRegistry}) reads {@code fleetHash} as "the ship set changed". Health
+     * reaches the guest through the separate, rate-limited {@link #computeHealthHash} trigger in
+     * {@code CoopNpcFleetReplicator}, which sends the very same set message without disturbing the
+     * meaning of either structural hash.
      */
     public static String computeSetHash(List<CoopNpcFleetSnapshot> fleets) {
         List<String> records = new ArrayList<>();
@@ -63,6 +73,42 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
         }
         records.sort(null);
         return CoopChecksum.sha256Text(String.join("\n", records));
+    }
+
+    /**
+     * Order-independent hash over every member's CR and hull fraction, bucketed to 5%. The second
+     * send trigger for {@code NPC_FLEET_SET}: {@link #computeSetHash} is structural on purpose, and
+     * the 10 Hz {@code NPC_FLEET_MOTION} datagram carries neither CR nor hull, so before this existed
+     * a fleet that repaired from 30% hull to full produced no wire traffic at all and the guest's
+     * mirror showed the damage until some unrelated field of some fleet happened to move.
+     *
+     * <p>The 5% buckets and the replicator's 10 s floor are what keep this from re-creating the
+     * 2026-08-17 rebuild storm the structural hash was carved out to stop: this hash only decides
+     * <em>whether to send</em>, and the guest's receive path treats the arriving set as unchanged
+     * structure and paints CR/hull onto the existing members in place
+     * ({@code CoopFleetMirror#updateMemberState}). A percent-accurate hash would fire every second on
+     * any repairing fleet; a 5% step on a fleet under repair fires a few times per recovery.
+     */
+    public static String computeHealthHash(List<CoopNpcFleetSnapshot> fleets) {
+        List<String> records = new ArrayList<>();
+        if (fleets != null) {
+            for (CoopNpcFleetSnapshot fleet : fleets) {
+                List<String> members = new ArrayList<>();
+                for (CoopFleetSnapshot.Member member : fleet.members()) {
+                    members.add(member.fleetMemberId() + ":" + healthBucket(member.cr())
+                            + "/" + healthBucket(member.hullFraction()));
+                }
+                members.sort(null);
+                records.add(fleet.coopFleetId() + "|" + String.join(",", members));
+            }
+        }
+        records.sort(null);
+        return CoopChecksum.sha256Text(String.join("\n", records));
+    }
+
+    /** A 0..1 fraction onto 5% steps; a NaN reading buckets as 0 rather than poisoning the hash. */
+    private static int healthBucket(float value) {
+        return Float.isNaN(value) ? 0 : Math.round(value * 20f);
     }
 
     public String encode() {

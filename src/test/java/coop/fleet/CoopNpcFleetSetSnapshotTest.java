@@ -96,6 +96,60 @@ class CoopNpcFleetSetSnapshotTest {
                         "corvus", "lasher", true, ""))));
     }
 
+    // ---- health hash: the second send trigger -----------------------------------------------------
+
+    /** Same fixture as above but with the member's CR and hull under the caller's control. */
+    private static CoopNpcFleetSnapshot damaged(String id, float cr, float hullFraction) {
+        return CoopNpcFleetSnapshot.create(id, "hegemony", "Name " + id, "corvus", 1f, 2f, 0f, 0f,
+                true, sensors(150f, 90f), "",
+                List.of(new CoopFleetSnapshot.Member("m-" + id, "lasher", "lasher_Standard",
+                        "Ship", "Cpt", cr, hullFraction)));
+    }
+
+    @Test
+    void healthHashChangesOnCombatReadiness() {
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeHealthHash(List.of(damaged("f1", 0.20f, 1.0f))),
+                CoopNpcFleetSetSnapshot.computeHealthHash(List.of(damaged("f1", 0.70f, 1.0f))));
+    }
+
+    @Test
+    void healthHashChangesOnHullFraction() {
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeHealthHash(List.of(damaged("f1", 0.80f, 0.30f))),
+                CoopNpcFleetSetSnapshot.computeHealthHash(List.of(damaged("f1", 0.80f, 1.00f))));
+    }
+
+    @Test
+    void healthHashIgnoresMovementInsideOneBucket() {
+        // 5% buckets: a ship recovering CR a thousandth at a time must not put a full set on the wire
+        // every tick. That is the whole reason CR left the structural hash in 2026-08-17.
+        assertEquals(
+                CoopNpcFleetSetSnapshot.computeHealthHash(List.of(damaged("f1", 0.500f, 1.0f))),
+                CoopNpcFleetSetSnapshot.computeHealthHash(List.of(damaged("f1", 0.510f, 1.0f))));
+    }
+
+    @Test
+    void healthHashIsIndependentOfFleetOrder() {
+        List<CoopNpcFleetSnapshot> a = List.of(
+                damaged("f3", 0.20f, 0.35f), damaged("f1", 0.90f, 1.0f), damaged("f2", 0.55f, 0.75f));
+        List<CoopNpcFleetSnapshot> b = List.of(
+                damaged("f2", 0.55f, 0.75f), damaged("f3", 0.20f, 0.35f), damaged("f1", 0.90f, 1.0f));
+
+        assertEquals(CoopNpcFleetSetSnapshot.computeHealthHash(a),
+                CoopNpcFleetSetSnapshot.computeHealthHash(b));
+    }
+
+    @Test
+    void setHashStaysStructuralWhenOnlyHealthMoves() {
+        // Regression pin. If health ever leaks into the structural hash, every repairing fleet flips
+        // fleetHash again and the guest goes back to a full roster teardown per second (39 fps,
+        // 2026-08-17) — and CoopFleetMirrorRegistry's freeze release starts firing on repair.
+        assertEquals(
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(damaged("f1", 0.20f, 0.30f))),
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(damaged("f1", 1.00f, 1.00f))));
+    }
+
     @Test
     void encodeDecodeRoundTripsWholeSet() {
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(List.of(
