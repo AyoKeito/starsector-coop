@@ -10,6 +10,7 @@ import com.fs.starfarer.api.campaign.TextPanelAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.testing.RecordingNetService;
@@ -78,7 +79,7 @@ class CoopCampaignReplicatorMarketGateTest {
         // 500 ms later the snapshot lands: the stock is written first, the options open after.
         clock.set(1500L);
         replicator.handle(CoopMessages.marketSnapshot("session-a", 9L, 1500L, "sindria",
-                CoopMarketSync.encodeStock(List.of())));
+                Submarkets.SUBMARKET_OPEN, 1, CoopMarketSync.encodeStock(List.of())));
 
         assertNull(replicator.marketSyncGate().pendingMarketId());
         assertTrue(dialog.options.enabled.get("marketOpenCoreUI"));
@@ -358,8 +359,11 @@ class CoopCampaignReplicatorMarketGateTest {
             return (MarketAPI) Proxy.newProxyInstance(
                     MarketAPI.class.getClassLoader(), new Class<?>[]{MarketAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
-                        case "hasSubmarket" -> hasOpenSubmarket;
-                        case "getSubmarket" -> hasOpenSubmarket ? submarket : null;
+                        // Phase 32: one shared submarket, so one snapshot resolves the gate.
+                        case "hasSubmarket" -> hasOpenSubmarket
+                                && Submarkets.SUBMARKET_OPEN.equals(args[0]);
+                        case "getSubmarket" -> hasOpenSubmarket
+                                && Submarkets.SUBMARKET_OPEN.equals(args[0]) ? submarket : null;
                         case "isHidden" -> hidden;
                         case "getId" -> id;
                         case "getPeopleCopy" -> List.of();

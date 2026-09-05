@@ -6492,8 +6492,8 @@ class CoopNetPumpTest {
         CoopSessionState session = activeHostSession();
         CoopNetPump pump = livePump(service, session, () -> 1000L);
 
-        service.inbound.add(CoopMessages.marketTxn("session-a", 9L, 1000L, "jangala", "COMMODITY",
-                "supplies", 10, 0f, "guest-player"));
+        service.inbound.add(CoopMessages.marketTxn("session-a", 9L, 1000L, "jangala", "open_market",
+                "COMMODITY", "supplies", 10, 0f, "guest-player"));
         pump.advance(0f);
 
         assertEquals(List.of("jangala"),

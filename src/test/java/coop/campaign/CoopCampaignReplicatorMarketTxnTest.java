@@ -59,7 +59,8 @@ class CoopCampaignReplicatorMarketTxnTest {
         attachAppender();
 
         hostReplicator().handle(CoopMessages.marketTxn(
-                "session-a", 7L, 5000L, "sindria", "COMMODITY", "fuel", 50, 0f, "guest-player"));
+                "session-a", 7L, 5000L, "sindria", Submarkets.SUBMARKET_OPEN,
+                "COMMODITY", "fuel", 50, 0f, "guest-player"));
 
         assertTrue(appender.messages().stream().anyMatch(m -> m.contains("not applied to engine")),
                 "the unreachable-engine path must warn, naming the market and item");
@@ -73,7 +74,8 @@ class CoopCampaignReplicatorMarketTxnTest {
         attachAppender();
 
         hostReplicator().handle(CoopMessages.marketTxn(
-                "session-a", 7L, 5000L, "sindria", "COMMODITY", "fuel", 50, 0f, "guest-player"));
+                "session-a", 7L, 5000L, "sindria", Submarkets.SUBMARKET_OPEN,
+                "COMMODITY", "fuel", 50, 0f, "guest-player"));
 
         String warn = appender.messages().stream()
                 .filter(m -> m.contains("not applied to engine"))
@@ -146,8 +148,9 @@ class CoopCampaignReplicatorMarketTxnTest {
                 MarketAPI.class.getClassLoader(),
                 new Class<?>[]{MarketAPI.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "hasSubmarket" -> true;
-                    case "getSubmarket" -> submarket;
+                    // Open market only; storage/black/military have their own fixtures (Phase 32).
+                    case "hasSubmarket" -> Submarkets.SUBMARKET_OPEN.equals(args[0]);
+                    case "getSubmarket" -> Submarkets.SUBMARKET_OPEN.equals(args[0]) ? submarket : null;
                     case "getId" -> "sindria";
                     case "toString" -> "FakeMarket[sindria]";
                     case "hashCode" -> System.identityHashCode(proxy);
@@ -178,32 +181,67 @@ class CoopCampaignReplicatorMarketTxnTest {
                 });
     }
 
-    // ---- Submarket fence -------------------------------------------------------------------------
+    // ---- Submarket allowlist (Phase 32) ----------------------------------------------------------
     //
-    // The host applies every MARKET_TXN to the market's OPEN submarket (hostApplyMarketTxn ->
-    // applyItemDeltaToEngine -> openMarketCargo). So anything the guest reports from another
-    // submarket lands on the wrong stock: withdrawing 50 fuel from the guest's own storage locker
-    // used to delete 50 fuel from the host's open market, and a deposit invented some. Black market
-    // and generic_military are per-player shops that are deliberately not synced at all.
+    // Every MARKET_TXN now names the submarket it happened in, and the host applies it there
+    // (hostApplyMarketTxn -> applyItemDeltaToEngine -> submarketCargo). Before the stamp existed the
+    // host applied everything to its open market, so a storage withdrawal deleted 50 fuel from the
+    // host's shop and a deposit invented some. What the allowlist still refuses is local_resources
+    // (a derived view of colony production, not an inventory) and anything unrecognized.
 
     @Test
-    void guestStorageWithdrawalIsNotReported() {
+    void guestStorageMoveIsReportedAgainstStorage() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         guestReplicator(service).onPlayerMarketTransaction(
                 transaction("sindria", Submarkets.SUBMARKET_STORAGE, commodityStack("fuel", 50)));
 
-        assertTrue(marketTxns(service).isEmpty(),
-                "a storage withdrawal is the player's own cargo, not the host's stock: " + service.sent);
+        List<CoopMessages.Message> txns = marketTxns(service);
+        assertEquals(1, txns.size(), "storage is shared since Phase 32: " + service.sent);
+        assertEquals(Submarkets.SUBMARKET_STORAGE,
+                CoopMessages.requiredPayloadString(txns.get(0), "submarketId"),
+                "and it must be stamped as storage, or the host applies it to its shop shelf");
     }
 
     @Test
-    void guestBlackMarketPurchaseIsNotReported() {
+    void guestBlackMarketPurchaseIsReportedAgainstTheBlackMarket() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         guestReplicator(service).onPlayerMarketTransaction(
                 transaction("sindria", Submarkets.SUBMARKET_BLACK, commodityStack("drugs", 10)));
 
+        List<CoopMessages.Message> txns = marketTxns(service);
+        assertEquals(1, txns.size(), "the black market is host-canonical since Phase 32: " + service.sent);
+        assertEquals(Submarkets.SUBMARKET_BLACK,
+                CoopMessages.requiredPayloadString(txns.get(0), "submarketId"));
+    }
+
+    @Test
+    void guestLocalResourcesTransactionIsDropped() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        attachAppender();
+
+        guestReplicator(service).onPlayerMarketTransaction(
+                transaction("sindria", Submarkets.LOCAL_RESOURCES, commodityStack("ore", 30)));
+
         assertTrue(marketTxns(service).isEmpty(),
-                "the black market is per-player and not host-synced: " + service.sent);
+                "local_resources is the colony's own production view, not a shared inventory: "
+                        + service.sent);
+        assertTrue(appender.messages().stream().anyMatch(m -> m.contains(Submarkets.LOCAL_RESOURCES)),
+                "and the drop names the submarket: " + appender.messages());
+    }
+
+    @Test
+    void guestUnknownSubmarketTransactionIsDropped() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        attachAppender();
+
+        guestReplicator(service).onPlayerMarketTransaction(
+                transaction("sindria", "modded_bazaar", commodityStack("ore", 30)));
+
+        assertTrue(marketTxns(service).isEmpty(),
+                "a submarket this build has never reasoned about is not host-canonical: "
+                        + service.sent);
+        assertTrue(appender.messages().stream().anyMatch(m -> m.contains("modded_bazaar")),
+                "and the drop names it: " + appender.messages());
     }
 
     @Test
@@ -213,8 +251,10 @@ class CoopCampaignReplicatorMarketTxnTest {
                 transaction("sindria", Submarkets.SUBMARKET_OPEN, commodityStack("fuel", 50)));
 
         List<CoopMessages.Message> txns = marketTxns(service);
-        assertEquals(1, txns.size(), "the open market is the one shop the host mirrors: " + service.sent);
+        assertEquals(1, txns.size(), "one confirmed transaction is one line: " + service.sent);
         assertEquals("sindria", CoopMessages.requiredPayloadString(txns.get(0), "marketId"));
+        assertEquals(Submarkets.SUBMARKET_OPEN,
+                CoopMessages.requiredPayloadString(txns.get(0), "submarketId"));
         assertEquals(CoopMarketSync.ItemKind.COMMODITY.name(),
                 CoopMessages.requiredPayloadString(txns.get(0), "kind"));
         assertEquals("fuel", CoopMessages.requiredPayloadString(txns.get(0), "itemId"));
@@ -231,7 +271,8 @@ class CoopCampaignReplicatorMarketTxnTest {
                 transaction("sindria", null, commodityStack("fuel", 50)));
 
         assertTrue(marketTxns(service).isEmpty(),
-                "with no submarket there is no way to tell it was the open market: " + service.sent);
+                "with no submarket there is no way to tell which inventory it belongs to: "
+                        + service.sent);
         assertTrue(appender.messages().stream().anyMatch(m -> m.contains("has no submarket")),
                 "and the drop is warned about, naming the market: " + appender.messages());
     }

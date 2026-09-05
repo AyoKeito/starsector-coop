@@ -91,6 +91,102 @@ class CoopMarketSyncGateTest {
         assertFalse(gate.announced());
     }
 
+    // ---- Phase 32: one open, several submarkets ---------------------------------------------------
+
+    @Test
+    void theGateHoldsUntilEverySubmarketOfTheOpenHasApplied() {
+        // Releasing on the first snapshot would put the player in a trade screen whose black market
+        // and locker are still their own engine's roll.
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+
+        assertFalse(gate.onResolved("sindria", "open_market", 3));
+        assertTrue(gate.isBlocking(1100L));
+        assertFalse(gate.onResolved("sindria", "black_market", 3));
+        assertTrue(gate.isBlocking(1200L));
+
+        assertTrue(gate.onResolved("sindria", "storage", 3), "the last one releases it");
+        assertFalse(gate.isBlocking(1300L));
+        assertNull(gate.pendingMarketId());
+    }
+
+    @Test
+    void aDuplicateSubmarketSnapshotDoesNotCountTwice() {
+        // A resend of the same submarket is not the other one arriving.
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+
+        assertFalse(gate.onResolved("sindria", "open_market", 2));
+        assertFalse(gate.onResolved("sindria", "open_market", 2));
+        assertEquals(1, gate.appliedSubmarketCount());
+        assertTrue(gate.isBlocking(1100L));
+
+        assertTrue(gate.onResolved("sindria", "storage", 2));
+    }
+
+    @Test
+    void aSingleSubmarketMarketReleasesOnItsOneSnapshot() {
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+
+        assertTrue(gate.onResolved("sindria", "open_market", 1));
+        assertNull(gate.pendingMarketId());
+    }
+
+    @Test
+    void aNonsenseCountStillReleasesOnTheFirstSnapshot() {
+        // A count of zero or less cannot be counted down to; reading it as "this is the whole
+        // answer" opens the shop, which beats wedging it shut until the timeout.
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+
+        assertTrue(gate.onResolved("sindria", "open_market", 0));
+    }
+
+    @Test
+    void aSnapshotForAnotherMarketNeverCountsTowardsThePendingOne() {
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+
+        assertFalse(gate.onResolved("jangala", "open_market", 1));
+        assertEquals(0, gate.appliedSubmarketCount());
+        assertTrue(gate.isBlocking(1100L));
+    }
+
+    @Test
+    void aSecondDockStartsItsOwnCount() {
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+        gate.onResolved("sindria", "open_market", 2);
+
+        gate.onOpenRequested("jangala", 20_000L);
+
+        assertEquals(0, gate.appliedSubmarketCount(),
+                "the previous dock's applied set must not carry over and release this one early");
+        assertFalse(gate.onResolved("jangala", "open_market", 2));
+    }
+
+    @Test
+    void aBlankSubmarketIdIsNotCounted() {
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+
+        assertFalse(gate.onResolved("sindria", "", 1));
+        assertFalse(gate.onResolved("sindria", null, 1));
+        assertEquals(0, gate.appliedSubmarketCount());
+    }
+
+    @Test
+    void theDialogClosingStillDropsTheWholeGate() {
+        // The one-argument overload is "nothing more is coming", not "one submarket applied".
+        CoopMarketSyncGate gate = new CoopMarketSyncGate();
+        gate.onOpenRequested("sindria", 1000L);
+        gate.onResolved("sindria", "open_market", 3);
+
+        assertTrue(gate.onResolved("sindria"));
+        assertNull(gate.pendingMarketId());
+    }
+
     @Test
     void theTradeOptionIdsCoverEveryVanillaRouteToASubmarketScreen() {
         // From starsector-core/data/campaign/rules.csv. Refit is on the list because the refit screen
