@@ -1,10 +1,16 @@
 package coop.campaign;
 
+import com.fs.starfarer.api.FactoryAPI;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignUIAPI.CoreUITradeMode;
+import com.fs.starfarer.api.campaign.CargoAPI;
+import com.fs.starfarer.api.campaign.CargoStackAPI;
+import com.fs.starfarer.api.campaign.PlayerMarketTransaction;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.session.CoopPlayerInfo;
@@ -16,7 +22,9 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import coop.testing.LogCapture;
+import coop.testing.ProxyDefaults;
 import coop.testing.RecordingNetService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,6 +49,7 @@ class CoopCampaignReplicatorMarketTxnTest {
     void detachAppenderAndSector() {
         appender.detach();
         Global.setSector(null);
+        Global.setFactory(null);
     }
 
     @Test
@@ -165,6 +174,183 @@ class CoopCampaignReplicatorMarketTxnTest {
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
                     default -> null;
+                });
+    }
+
+    // ---- Submarket fence -------------------------------------------------------------------------
+    //
+    // The host applies every MARKET_TXN to the market's OPEN submarket (hostApplyMarketTxn ->
+    // applyItemDeltaToEngine -> openMarketCargo). So anything the guest reports from another
+    // submarket lands on the wrong stock: withdrawing 50 fuel from the guest's own storage locker
+    // used to delete 50 fuel from the host's open market, and a deposit invented some. Black market
+    // and generic_military are per-player shops that are deliberately not synced at all.
+
+    @Test
+    void guestStorageWithdrawalIsNotReported() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        guestReplicator(service).onPlayerMarketTransaction(
+                transaction("sindria", Submarkets.SUBMARKET_STORAGE, commodityStack("fuel", 50)));
+
+        assertTrue(marketTxns(service).isEmpty(),
+                "a storage withdrawal is the player's own cargo, not the host's stock: " + service.sent);
+    }
+
+    @Test
+    void guestBlackMarketPurchaseIsNotReported() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        guestReplicator(service).onPlayerMarketTransaction(
+                transaction("sindria", Submarkets.SUBMARKET_BLACK, commodityStack("drugs", 10)));
+
+        assertTrue(marketTxns(service).isEmpty(),
+                "the black market is per-player and not host-synced: " + service.sent);
+    }
+
+    @Test
+    void guestOpenMarketPurchaseIsReportedOnce() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        guestReplicator(service).onPlayerMarketTransaction(
+                transaction("sindria", Submarkets.SUBMARKET_OPEN, commodityStack("fuel", 50)));
+
+        List<CoopMessages.Message> txns = marketTxns(service);
+        assertEquals(1, txns.size(), "the open market is the one shop the host mirrors: " + service.sent);
+        assertEquals("sindria", CoopMessages.requiredPayloadString(txns.get(0), "marketId"));
+        assertEquals(CoopMarketSync.ItemKind.COMMODITY.name(),
+                CoopMessages.requiredPayloadString(txns.get(0), "kind"));
+        assertEquals("fuel", CoopMessages.requiredPayloadString(txns.get(0), "itemId"));
+        assertEquals(50L, CoopMessages.requiredPayloadLong(txns.get(0), "qty"),
+                "bought means the item left the host's stock, so the delta is positive");
+    }
+
+    @Test
+    void guestTransactionWithNoSubmarketIsNotReported() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        attachAppender();
+
+        guestReplicator(service).onPlayerMarketTransaction(
+                transaction("sindria", null, commodityStack("fuel", 50)));
+
+        assertTrue(marketTxns(service).isEmpty(),
+                "with no submarket there is no way to tell it was the open market: " + service.sent);
+        assertTrue(appender.messages().stream().anyMatch(m -> m.contains("has no submarket")),
+                "and the drop is warned about, naming the market: " + appender.messages());
+    }
+
+    @Test
+    void hostStorageTransactionIsNotTalliedAsATrade() {
+        AtomicInteger trades = new AtomicInteger();
+        CoopCampaignReplicator replicator = hostReplicator();
+        replicator.setStatsSink(countingTrades(trades));
+
+        replicator.onPlayerMarketTransaction(
+                transaction("sindria", Submarkets.SUBMARKET_STORAGE, commodityStack("fuel", 50)));
+
+        assertEquals(0, trades.get(),
+                "moving your own cargo in and out of a locker is not a trade with the market");
+    }
+
+    @Test
+    void hostOpenMarketTransactionIsStillTallied() {
+        AtomicInteger trades = new AtomicInteger();
+        CoopCampaignReplicator replicator = hostReplicator();
+        replicator.setStatsSink(countingTrades(trades));
+
+        replicator.onPlayerMarketTransaction(
+                transaction("sindria", Submarkets.SUBMARKET_OPEN, commodityStack("fuel", 50)));
+
+        assertEquals(1, trades.get(), "the storage skip must not swallow real trades");
+    }
+
+    // ---- Transaction harness ---------------------------------------------------------------------
+
+    private static CoopCampaignReplicator guestReplicator(RecordingNetService service) {
+        return new CoopCampaignReplicator(service, activeGuestSession(), () -> 5678L);
+    }
+
+    private static List<CoopMessages.Message> marketTxns(RecordingNetService service) {
+        return service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.MARKET_TXN)
+                .toList();
+    }
+
+    /** A stats sink that counts nothing but {@code onTrade}; the other three hooks are inert here. */
+    private static CoopCampaignReplicator.StatsSink countingTrades(AtomicInteger trades) {
+        return new CoopCampaignReplicator.StatsSink() {
+            @Override
+            public void onTrade(String playerId, String marketId, long netCredits) {
+                trades.incrementAndGet();
+            }
+
+            @Override
+            public void onMissionClaimed(String playerId) {
+            }
+
+            @Override
+            public void onSalvageConsumed() {
+            }
+
+            @Override
+            public void onColonyFounded(String playerId) {
+            }
+        };
+    }
+
+    /**
+     * A confirmed purchase of {@code bought} at {@code marketId}'s {@code submarketSpecId} shop.
+     *
+     * <p>{@code PlayerMarketTransaction} is a concrete API class whose {@code bought}/{@code sold}
+     * fields initialize from {@code Global.getFactory().createCargo(true)}, so a factory has to be
+     * installed before the constructor runs or it throws. The fake one hands back {@code null} and
+     * the cargo is then overwritten with {@link #setBought}, which is the only side this test uses -
+     * the null {@code sold} side is what "the player bought and sold nothing" looks like to
+     * {@code reportCargoDeltas}, which returns on a null cargo.
+     */
+    private static PlayerMarketTransaction transaction(String marketId, String submarketSpecId,
+                                                       CargoStackAPI bought) {
+        Global.setFactory(fake(FactoryAPI.class, Map.of()));
+        SubmarketAPI submarket = submarketSpecId == null ? null
+                : fake(SubmarketAPI.class, Map.<String, Answer>of("getSpecId", args -> submarketSpecId));
+        MarketAPI market = fake(MarketAPI.class, Map.<String, Answer>of("getId", args -> marketId));
+        PlayerMarketTransaction transaction =
+                new PlayerMarketTransaction(market, submarket, CoreUITradeMode.OPEN);
+        transaction.setBought(fake(CargoAPI.class, Map.<String, Answer>of(
+                "getStacksCopy", args -> new ArrayList<>(List.of(bought)))));
+        transaction.setCreditValue(-1000f);
+        return transaction;
+    }
+
+    private static CargoStackAPI commodityStack(String commodityId, int size) {
+        return fake(CargoStackAPI.class, Map.<String, Answer>of(
+                "isCommodityStack", args -> true,
+                "getCommodityId", args -> commodityId,
+                "getSize", args -> (float) size));
+    }
+
+    /** Answers the named methods; everything else falls through to its zero value. */
+    private interface Answer {
+        Object answer(Object[] args);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T fake(Class<T> type, Map<String, Answer> answers) {
+        return (T) Proxy.newProxyInstance(
+                type.getClassLoader(),
+                new Class<?>[]{type},
+                (proxy, method, args) -> {
+                    Object[] safeArgs = args == null ? new Object[0] : args;
+                    switch (method.getName()) {
+                        case "toString":
+                            return "Fake" + type.getSimpleName();
+                        case "hashCode":
+                            return System.identityHashCode(proxy);
+                        case "equals":
+                            return proxy == safeArgs[0];
+                        default:
+                            break;
+                    }
+                    Answer answer = answers.get(method.getName());
+                    return answer == null
+                            ? ProxyDefaults.defaultValue(method.getReturnType())
+                            : answer.answer(safeArgs);
                 });
     }
 }

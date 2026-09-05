@@ -1558,19 +1558,45 @@ public final class CoopCampaignReplicator
         // transaction, so the host needs no coop action here. The guest reports each commodity delta;
         // the host applies it to its canonical market. Since both sides started identical at open and
         // apply the same delta, displayed quantities stay consistent without any live re-sync.
+        String submarketId = submarketSpecId(transaction);
         if (!isGuest()) {
             // Phase 21 stats, host only: this is the host's own trade, and it is the only place the
             // credit value of one is available at all (the wire's MARKET_TXN carries per-item
             // deltas, not prices). Dedup guarantee: vanilla fires onPlayerMarketTransaction exactly
             // once per confirmed transaction, and the replay guard above has already excluded the
             // re-drive of a remote one.
+            //
+            // Storage is not a trade: parking your own cargo in a locker and taking it back out fires
+            // this callback too, and tallying it would put a market you never traded at into the
+            // "markets traded with" set. Every other submarket (open, black, military, local
+            // resources) is a real trade and still counts.
+            if (Submarkets.SUBMARKET_STORAGE.equals(submarketId)) {
+                return;
+            }
             String hostMarketId = transaction.getMarket().getId();
             long credits = (long) transaction.getCreditValue();
             tally(sink -> sink.onTrade(session.localPlayerId(), hostMarketId, credits));
             return;
         }
+        String marketId = transaction.getMarket().getId();
+        // Guest capture is fenced to the open submarket, for the reason spelled out on
+        // {@link #openMarketCargo(MarketAPI)}: the host applies every MARKET_TXN to its OPEN
+        // submarket, so reporting a storage withdrawal here made the host delete open-market stock,
+        // and a storage deposit invented some. Black market and generic_military are per-player shops
+        // that are deliberately not synced at all.
+        if (submarketId == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop market transaction at market="
+                    + marketId + " has no submarket; nothing reported, because there is no way to"
+                    + " tell whether it was the open market the host mirrors");
+            return;
+        }
+        if (!Submarkets.SUBMARKET_OPEN.equals(submarketId)) {
+            CoopLog.info(CoopCampaignReplicator.class, "Coop market transaction at market="
+                    + marketId + " submarket=" + submarketId + " not reported; only the open market"
+                    + " is host-synced");
+            return;
+        }
         try {
-            String marketId = transaction.getMarket().getId();
             // Bought: item leaves the market (+qty removed from stock). Sold: it returns (-qty).
             reportCargoDeltas(marketId, transaction.getBought(), +1);
             reportCargoDeltas(marketId, transaction.getSold(), -1);
@@ -1578,6 +1604,20 @@ public final class CoopCampaignReplicator
             reportShipDeltas(marketId, transaction.getShipsSold(), -1);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to report market transaction", ex);
+        }
+    }
+
+    /**
+     * The spec id of the shop a transaction happened in, or {@code null} when there is none or it
+     * cannot be read. Total: a broken or half-built transaction must not throw out of the vanilla
+     * callback, and a {@code null} here is handled by every caller as "unknown shop".
+     */
+    private static String submarketSpecId(PlayerMarketTransaction transaction) {
+        try {
+            SubmarketAPI submarket = transaction == null ? null : transaction.getSubmarket();
+            return submarket == null ? null : submarket.getSpecId();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
         }
     }
 
@@ -4685,6 +4725,12 @@ public final class CoopCampaignReplicator
      *   <li>{@code local_resources} ({@link Submarkets#LOCAL_RESOURCES}) — a derived view of the
      *       colony's production, not a stocked shop.</li>
      * </ul>
+     *
+     * <p>For the same reason, guest-side transaction capture in
+     * {@link #onPlayerMarketTransaction(PlayerMarketTransaction)} is filtered to the open submarket
+     * before anything goes on the wire: the host applies every {@code MARKET_TXN} through this
+     * accessor, so a storage, black-market or military line reported from the guest would land on
+     * the host's open-market stock and corrupt it.
      *
      * <p>Widening the snapshot to any of them is Phase 12c work and needs its own model (per-player
      * visibility, not one canonical list). {@code CoopCampaignReplicatorStorageFenceTest} asserts a
