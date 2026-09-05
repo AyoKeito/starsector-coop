@@ -131,6 +131,20 @@ public record CoopShipDetail(String memberId,
                 List.of(), 1f, "", Map.of());
     }
 
+    /**
+     * The same detail under a different member id (Phase 32, {@link CoopMemberIds}).
+     *
+     * <p>Two callers, both about the origin-namespaced wire id: capture stamps
+     * {@code wireId(localPlayerId, memberId)} on the way out, and the storage reconcile stamps the
+     * incoming listing's id onto a <em>local</em> capture so the two blobs can be compared field for
+     * field without the id itself counting as a difference.
+     */
+    public CoopShipDetail withMemberId(String newMemberId) {
+        return new CoopShipDetail(newMemberId, shipName, baseVariantId, hullSpecId, baseCR, vents,
+                caps, permaMods, sMods, sModdedBuiltIns, refitMods, suppressedMods, weapons, wings,
+                weaponGroups, hullFraction, displayName, modules);
+    }
+
     public String encode() {
         return CoopDelimited.field(memberId)
                 + '|' + CoopDelimited.field(shipName)
