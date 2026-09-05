@@ -1574,7 +1574,6 @@ public final class CoopLauncherApp {
         }
         LOG.info("Install fix requested for " + what + " " + targets);
         append("Fixing: " + what + ".");
-        setDrawerVisible(true);
         CoopInstallLayout install = layout;
         List<CoopInstallFixer.Target> wanted = List.copyOf(targets);
         background.submit(() -> {
@@ -1671,7 +1670,6 @@ public final class CoopLauncherApp {
         }
         append("Both edits are written out in docs/player/INSTALL.md, sections 3 and 4. Press Guide"
                 + " to open it.");
-        setDrawerVisible(true);
     }
 
     /**
@@ -2014,7 +2012,6 @@ public final class CoopLauncherApp {
             note("Port mapping is off. Forward port " + port + " by hand, or use a VPN or LAN"
                     + " address.");
         }
-        setDrawerVisible(true);
     }
 
     private boolean openListener(int port) {
