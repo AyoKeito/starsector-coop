@@ -45,7 +45,13 @@ import java.util.function.Supplier;
  *       become permanent divergence. The battle bridge re-marks on a ~2 s cadence for as long as the
  *       fight and then the post-battle dialog actually last (a player can browse salvage for
  *       minutes), so in practice the timeout only starts counting once the bridge stops renewing —
- *       i.e. once the result has been sent or genuinely abandoned.</li>
+ *       i.e. once the result has been sent or genuinely abandoned. The timeout is checked
+ *       <b>every frame</b> by {@link #expirePendingReconcile} rather than only when the next set
+ *       happens to arrive: the host sends {@code NPC_FLEET_SET} only when its structural hash
+ *       changes, so a freeze whose release depended on set arrival could outlive the timeout
+ *       indefinitely. On expiry the mark is dropped and the most recent snapshot the freeze skipped
+ *       (if any) is applied, so the mirror lands on the host's state immediately instead of waiting
+ *       for the host's set to change.</li>
  * </ul>
  *
  * <p>The freeze costs nothing visually: the 10 Hz {@code NPC_FLEET_MOTION} datagrams are deliberately
@@ -108,6 +114,10 @@ public final class CoopFleetMirrorRegistry {
                 if (shouldDeferReassert(pending.markHash(), pending.markedAtMillis(),
                         snapshot.fleetHash(), nowMillis)) {
                     // Frozen: the local battle changed this fleet and the host has not caught up yet.
+                    // Keep the snapshot (replacing any older deferred one) so the timeout has
+                    // something to apply if the host never sends another set.
+                    pendingReconcile.put(id, new PendingReconcile(pending.markHash(),
+                            pending.markedAtMillis(), snapshot, sampleTimeSeconds));
                     continue;
                 }
                 pendingReconcile.remove(id);
@@ -144,7 +154,9 @@ public final class CoopFleetMirrorRegistry {
     /**
      * Freezes a mirror the local battle just changed until the host's set reflects the outcome. See
      * the class doc for the release conditions. Re-marking an already-marked fleet only refreshes the
-     * clock — the hash recorded at the first mark is the one the release test compares against.
+     * clock — the hash recorded at the first mark is the one the release test compares against, and
+     * any snapshot already deferred by {@link #applySet} is carried over so the timeout still has the
+     * host's latest word to apply.
      */
     public void markPendingReconcile(String coopFleetId, long nowMillis) {
         if (coopFleetId == null || coopFleetId.isEmpty() || !mirrors.containsKey(coopFleetId)) {
@@ -152,8 +164,10 @@ public final class CoopFleetMirrorRegistry {
         }
         PendingReconcile existing = pendingReconcile.get(coopFleetId);
         String markHash = existing != null ? existing.markHash() : lastAppliedHash.get(coopFleetId);
-        pendingReconcile.put(coopFleetId,
-                new PendingReconcile(markHash == null ? "" : markHash, nowMillis));
+        CoopNpcFleetSnapshot deferred = existing != null ? existing.deferredSnapshot() : null;
+        double deferredSample = existing != null ? existing.deferredSampleTimeSeconds() : 0.0;
+        pendingReconcile.put(coopFleetId, new PendingReconcile(markHash == null ? "" : markHash,
+                nowMillis, deferred, deferredSample));
         if (existing == null) {
             // Only the first mark is worth a line: the freeze is refreshed on the battle's status
             // cadence so a long fight cannot outlive its wall-clock timeout.
@@ -174,6 +188,55 @@ public final class CoopFleetMirrorRegistry {
         }
         return Objects.equals(markHash == null ? "" : markHash,
                 incomingHash == null ? "" : incomingHash);
+    }
+
+    /**
+     * Expires timed-out post-battle freezes on a wall clock instead of on set arrival. Driven once
+     * per frame by the guest pump.
+     *
+     * <p>{@link #shouldDeferReassert} is only consulted from {@link #applySet}, so before this
+     * existed the timeout could only fire when the host sent another {@code NPC_FLEET_SET} — and the
+     * host sends one only when its structural hash changes. A freeze whose {@code BATTLE_RESULT} was
+     * lost, against a host set that then sat unchanged, stayed frozen forever, which is exactly the
+     * permanent divergence the class doc promises cannot happen.
+     *
+     * <p>For every mark at or past {@link #PENDING_RECONCILE_TIMEOUT_MILLIS} the mark is dropped. If
+     * {@link #applySet} deferred a snapshot while the freeze stood, and the mirror is still
+     * registered, that snapshot is applied now with the {@code sampleTimeSeconds} it arrived with.
+     * Re-using the original (old) sample time is deliberate: {@link CoopFleetMirror#applySnapshot}
+     * runs its {@code isStaleSample} check against the newest motion sample and skips only the
+     * position stamp when the sample is older, while transponder state, sensors, roster and action
+     * text still apply. Stamping a stale position into the interpolation buffer would yank the mirror
+     * backwards; skipping the roster would leave the divergence in place.
+     *
+     * @param nowMillis the pump's wall clock for this frame
+     */
+    public void expirePendingReconcile(long nowMillis) {
+        if (pendingReconcile.isEmpty()) {
+            return;
+        }
+        List<String> expired = new ArrayList<>();
+        for (Map.Entry<String, PendingReconcile> entry : pendingReconcile.entrySet()) {
+            if (nowMillis - entry.getValue().markedAtMillis() >= PENDING_RECONCILE_TIMEOUT_MILLIS) {
+                expired.add(entry.getKey());
+            }
+        }
+        for (String id : expired) {
+            PendingReconcile pending = pendingReconcile.remove(id);
+            CoopNpcFleetSnapshot deferred = pending == null ? null : pending.deferredSnapshot();
+            CoopNpcMirror mirror = mirrors.get(id);
+            if (deferred != null && mirror != null) {
+                mirror.applySnapshot(deferred, pending.deferredSampleTimeSeconds());
+                lastAppliedHash.put(id, deferred.fleetHash());
+                CoopLog.info(CoopFleetMirrorRegistry.class, "Coop mirror post-battle freeze timed"
+                        + " out, applying the host's last snapshot coopFleetId=" + id
+                        + " fleetHash=" + deferred.fleetHash());
+            } else {
+                CoopLog.info(CoopFleetMirrorRegistry.class, "Coop mirror post-battle freeze timed"
+                        + " out with no deferred snapshot; the next set applies normally"
+                        + " coopFleetId=" + id);
+            }
+        }
     }
 
     /** Fleets currently frozen pending the host's battle reconciliation (diagnostics + tests). */
@@ -274,6 +337,13 @@ public final class CoopFleetMirrorRegistry {
         return hash;
     }
 
-    private record PendingReconcile(String markHash, long markedAtMillis) {
+    /**
+     * A standing freeze. {@code deferredSnapshot} is the most recent snapshot {@link #applySet}
+     * skipped for this fleet (null until one arrives), kept so {@link #expirePendingReconcile} can
+     * apply the host's last word rather than waiting for a set that may never come.
+     */
+    private record PendingReconcile(String markHash, long markedAtMillis,
+                                    CoopNpcFleetSnapshot deferredSnapshot,
+                                    double deferredSampleTimeSeconds) {
     }
 }
