@@ -63,7 +63,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.FLEET_ROSTER_REQUEST, CoopMessages.Type.READY_STATE,
             CoopMessages.Type.LOBBY_STATUS, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.SHIP_LOST, CoopMessages.Type.OPTIONS_SNAPSHOT,
-            CoopMessages.Type.OPTIONS_APPLIED);
+            CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT);
 
     // ---- table: CoopNetService.coalesceKey(Message) ------------------------------------------
     // Whitelist of whole-state snapshots that may supersede a queued copy of themselves; every
@@ -120,7 +120,11 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.GUEST_SNAPSHOT, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,
             CoopMessages.Type.PAUSE_INTENT, CoopMessages.Type.OPTIONS_SNAPSHOT,
-            CoopMessages.Type.OPTIONS_APPLIED);
+            CoopMessages.Type.OPTIONS_APPLIED,
+            // Phase 32 addition B: the sender debited itself before this was queued, so dropping it
+            // on the drop edge would destroy the money. Reliable TCP either side of the edge, and
+            // the receiver's grant ledger absorbs a duplicate.
+            CoopMessages.Type.CREDITS_GRANT);
 
     // ---- table: CoopNetPump.isTerminalRejectType(Type) ---------------------------------------
     // The peer's verdicts on a join, dispatched a few lines early out of the pre-drop drain so

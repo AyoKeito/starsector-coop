@@ -436,6 +436,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // all - over a save that has no coop session in it at all. The new pump installs its own
         // feed; this is the window between the two.
         CoopSessionIntelFeed.uninstall();
+        // Phase 32 addition B: same window, same argument, and money makes it sharper — the options
+        // page's Send button must not be live against the outgoing pump's session, and the pending
+        // amount must not carry into the next campaign.
+        coop.campaign.CoopCreditTransfer.uninstall();
         // Phase 28: same window, same argument. The policy belongs to the campaign the outgoing pump
         // was playing, and the options page must not edit it into the next one.
         CoopOptionsPolicy.uninstall();

@@ -739,4 +739,70 @@ class CoopMessagesTest {
         assertEquals("a \"quoted\" value",
                 decoded.values().get(coop.config.CoopOptionsRegistry.PARTNER_COLOR));
     }
+
+    // ---- Phase 32 addition B: CREDITS_GRANT ------------------------------------------------------
+
+    @Test
+    void creditsGrantRoundTripsThroughTheWire() {
+        CoopMessages.Message message = CoopMessages.creditsGrant("session-a", 11L, 1234L,
+                "player-7-42", 25_000, "gift");
+
+        assertEquals("{\"ledgerId\":\"player-7-42\",\"amount\":25000,\"reason\":\"gift\"}",
+                message.payloadJson());
+
+        CoopMessages.CreditsGrant parsed =
+                CoopMessages.parseCreditsGrant(CoopMessages.decode(CoopMessages.encode(message)));
+
+        assertEquals("player-7-42", parsed.ledgerId());
+        assertEquals(25_000, parsed.amount());
+        assertEquals("gift", parsed.reason());
+    }
+
+    @Test
+    void creditsGrantCarriesPhase34sBountyReasonUnchanged() {
+        // The reason field is deliberately free text: Phase 34 reuses this message for bounty
+        // payouts and must not need a codec change to do it.
+        CoopMessages.CreditsGrant parsed = CoopMessages.parseCreditsGrant(
+                CoopMessages.decode(CoopMessages.encode(CoopMessages.creditsGrant(
+                        "session-a", 12L, 1235L, "e0f1-uuid", 180_000, "bounty:pirate_9"))));
+
+        assertEquals("bounty:pirate_9", parsed.reason());
+        assertEquals(180_000, parsed.amount());
+    }
+
+    @Test
+    void creditsGrantRejectsANonPositiveAmountAtConstruction() {
+        assertThrows(IllegalArgumentException.class, () ->
+                CoopMessages.creditsGrant("session-a", 1L, 0L, "ledger-1", 0, "gift"));
+        assertThrows(IllegalArgumentException.class, () ->
+                CoopMessages.creditsGrant("session-a", 1L, 0L, "ledger-1", -5, "gift"));
+        assertThrows(IllegalArgumentException.class, () ->
+                CoopMessages.creditsGrant("session-a", 1L, 0L, "ledger-1",
+                        CoopMessages.MAX_CREDITS_GRANT + 1, "gift"));
+    }
+
+    @Test
+    void creditsGrantRequiresALedgerIdAndAReason() {
+        assertThrows(IllegalArgumentException.class, () ->
+                CoopMessages.creditsGrant("session-a", 1L, 0L, " ", 100, "gift"));
+        assertThrows(IllegalArgumentException.class, () ->
+                CoopMessages.creditsGrant("session-a", 1L, 0L, "ledger-1", 100, ""));
+    }
+
+    @Test
+    void aMalformedCreditsGrantThrowsRatherThanCreditingAGuessedAmount() {
+        CoopMessages.Message noAmount = new CoopMessages.Message(CoopMessages.Type.CREDITS_GRANT,
+                "session-a", 1L, 0L, "{\"ledgerId\":\"ledger-1\",\"reason\":\"gift\"}");
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseCreditsGrant(noAmount));
+
+        CoopMessages.Message negative = new CoopMessages.Message(CoopMessages.Type.CREDITS_GRANT,
+                "session-a", 1L, 0L,
+                "{\"ledgerId\":\"ledger-1\",\"amount\":-3,\"reason\":\"gift\"}");
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseCreditsGrant(negative));
+
+        CoopMessages.Message absurd = new CoopMessages.Message(CoopMessages.Type.CREDITS_GRANT,
+                "session-a", 1L, 0L,
+                "{\"ledgerId\":\"ledger-1\",\"amount\":9999999999,\"reason\":\"gift\"}");
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseCreditsGrant(absurd));
+    }
 }

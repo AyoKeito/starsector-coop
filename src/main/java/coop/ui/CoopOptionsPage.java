@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
 import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
 import com.fs.starfarer.api.ui.Alignment;
+import com.fs.starfarer.api.ui.ButtonAPI;
 import com.fs.starfarer.api.ui.CustomPanelAPI;
 import com.fs.starfarer.api.ui.IntelUIAPI;
 import com.fs.starfarer.api.ui.SectorMapAPI;
@@ -31,7 +32,9 @@ import java.util.Set;
  * {@link CoopSessionStatsIntel}): removed in {@code beforeGameSave}, recreated in
  * {@code afterGameSave} and {@code onGameLoad}, so no instance of this class ever reaches XStream.
  * It holds no state at all - every value is read live from {@link CoopOptionsPolicy} and
- * {@link CoopOptionsStore} on render.
+ * {@link CoopOptionsStore} on render, and the one piece of state the page's own widgets own (the
+ * pending credit-transfer amount) lives in a static on {@link coop.campaign.CoopCreditTransfer},
+ * where the save cycle cannot reach it either.
  *
  * <p><b>The intel surface is buttons, not a settings menu.</b> {@code TooltipMakerAPI.addButton}
  * with a {@code buttonPressConfirmed} callback is the whole vocabulary, so booleans get a toggle,
@@ -54,6 +57,15 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     /** Button id for "put everything back the way it shipped". */
     public static final Object BUTTON_RESET = new Object();
 
+    /** Button id for "hand the pending amount to the partner" (Phase 32 addition B). */
+    public static final Object BUTTON_SEND_CREDITS = new Object();
+
+    /** Button id for "back to nothing pending". */
+    public static final Object BUTTON_CLEAR_CREDITS = new Object();
+
+    /** Heading of the credit-transfer block. */
+    static final String CREDITS_HEADING = "Send credits";
+
     /** Rendered instead of the page when anything at all goes wrong building it. */
     static final String UNAVAILABLE_LINE = CoopOptionsView.UNAVAILABLE_LINE;
 
@@ -62,6 +74,24 @@ public class CoopOptionsPage extends BaseIntelPlugin {
 
     /** One button press: which key, and which way. */
     record Press(String key, int direction) {
+    }
+
+    /** One press of a credit step button: how many credits to add to the pending amount. */
+    record CreditStep(int delta) {
+    }
+
+    /**
+     * Everything the "Send credits" block renders, decided without touching the engine so it can be
+     * unit-tested. See {@link #creditRow}.
+     *
+     * @param amountText  the pending amount, always shown, so the player can read what Send will do
+     * @param walletText  what the local player has, or "" when there is no wallet to read
+     * @param note        the one-line reason Send is disabled, or "" when it is not
+     * @param sendEnabled whether the Send button is live
+     * @param canStep     whether the amount buttons are worth drawing at all
+     */
+    record CreditRow(String amountText, String walletText, String note, boolean sendEnabled,
+                     boolean canStep) {
     }
 
     // ---- registration ----------------------------------------------------------------------------
@@ -382,6 +412,7 @@ public class CoopOptionsPage extends BaseIntelPlugin {
                 addRowButtons(info, row, buttonWidth);
             }
         }
+        addCreditsBlock(info, buttonWidth);
         addResetButton(info, buttonWidth);
     }
 
@@ -420,16 +451,103 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         }
     }
 
+    // ---- Phase 32 addition B: the "Send credits" block -------------------------------------------
+
+    /**
+     * The credit-transfer block's whole model, engine-free.
+     *
+     * <p>Send is live only when a session is up and the peer is connected — the button must not
+     * promise something {@link coop.campaign.CoopCreditTransfer#send} would refuse — and, on top of
+     * that, only when the pending amount is something the local wallet can actually cover. A wallet
+     * that cannot be read ({@code credits < 0}) is not treated as "you have nothing": the cover
+     * check runs again inside {@code send}, which is the one that matters.
+     *
+     * @param canSend  the transfer's own answer for "is there a session with a connected peer"
+     * @param pending  the amount the step buttons have accumulated
+     * @param credits  the local player's credits, negative when unreadable
+     */
+    static CreditRow creditRow(boolean canSend, int pending, long credits) {
+        String amountText = coop.campaign.CoopCreditTransfer.format(Math.max(0, pending));
+        String walletText = credits < 0 ? ""
+                : coop.campaign.CoopCreditTransfer.format(credits);
+        if (!canSend) {
+            return new CreditRow(amountText, walletText,
+                    "No co-op session; there is nobody to send credits to.", false, false);
+        }
+        if (pending <= 0) {
+            return new CreditRow(amountText, walletText,
+                    "Step the amount up, then press Send.", false, true);
+        }
+        if (credits >= 0 && credits < pending) {
+            return new CreditRow(amountText, walletText,
+                    "You do not have that many credits.", false, true);
+        }
+        return new CreditRow(amountText, walletText, "", true, true);
+    }
+
+    /** The live model: the installed transfer's session state, wallet and pending amount. */
+    static CreditRow liveCreditRow() {
+        try {
+            coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
+            return creditRow(transfer != null && transfer.canSend(),
+                    coop.campaign.CoopCreditTransfer.pendingAmount(),
+                    transfer == null ? -1L : transfer.credits());
+        } catch (RuntimeException | LinkageError ex) {
+            logRenderFailureOnce(ex);
+            return creditRow(false, 0, -1L);
+        }
+    }
+
+    /**
+     * One heading, one line naming the pending amount, one line naming the wallet, the step buttons
+     * and Send. Drawn even with no session so the feature is discoverable before one starts - it is
+     * the Send button that is dead then, not the block.
+     */
+    private void addCreditsBlock(TooltipMakerAPI info, float width) {
+        CreditRow row = liveCreditRow();
+        Color highlight = Misc.getHighlightColor();
+        Color gray = Misc.getGrayColor();
+        info.addSectionHeading(CREDITS_HEADING, Alignment.MID, 12f);
+        info.addPara("Hands credits straight to your partner. The amount leaves your account when"
+                + " you press Send and arrives once, even across a reconnect.", gray, 6f);
+        info.addPara("Amount to send: " + row.amountText() + " credits",
+                row.sendEnabled() ? highlight : gray, 6f);
+        if (!row.walletText().isEmpty()) {
+            info.addPara(BULLET + "You have " + row.walletText() + " credits", gray, 2f);
+        }
+        if (!row.note().isEmpty()) {
+            info.addPara(BULLET + row.note(), gray, 2f);
+        }
+        if (row.canStep()) {
+            for (int step : coop.campaign.CoopCreditTransfer.STEPS) {
+                addButton(info, "+ " + coop.campaign.CoopCreditTransfer.format(step),
+                        new CreditStep(step), width);
+            }
+            for (int step : coop.campaign.CoopCreditTransfer.STEPS) {
+                addButton(info, "- " + coop.campaign.CoopCreditTransfer.format(step),
+                        new CreditStep(-step), width);
+            }
+            addButton(info, "Clear amount", BUTTON_CLEAR_CREDITS, width);
+        }
+        ButtonAPI send = addButton(info, "Send " + row.amountText() + " credits",
+                BUTTON_SEND_CREDITS, width);
+        if (send != null && !row.sendEnabled()) {
+            send.setEnabled(false);
+        }
+    }
+
     private void addResetButton(TooltipMakerAPI info, float width) {
         addButton(info, "Reset to defaults", BUTTON_RESET, width);
     }
 
-    private void addButton(TooltipMakerAPI info, String text, Object id, float width) {
+    /** @return the widget, or null when the engine refused to build it (already logged). */
+    private ButtonAPI addButton(TooltipMakerAPI info, String text, Object id, float width) {
         try {
-            info.addButton(text, id, Misc.getBasePlayerColor(), Misc.getDarkPlayerColor(),
+            return info.addButton(text, id, Misc.getBasePlayerColor(), Misc.getDarkPlayerColor(),
                     width, 20f, 8f);
         } catch (RuntimeException | LinkageError ex) {
             logRenderFailureOnce(ex);
+            return null;
         }
     }
 
@@ -438,7 +556,8 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     @Override
     public boolean doesButtonHaveConfirmDialog(Object buttonId) {
         try {
-            if (buttonId == BUTTON_RESET) {
+            if (buttonId == BUTTON_RESET || buttonId == BUTTON_SEND_CREDITS) {
+                // Money, and irreversible: there is no take-back message and no escrow to cancel.
                 return true;
             }
             return buttonId instanceof Press press
@@ -464,6 +583,8 @@ public class CoopOptionsPage extends BaseIntelPlugin {
             String text;
             if (buttonId == BUTTON_RESET) {
                 text = CoopOptionsView.resetPrompt(role() == CoopConnectionRole.GUEST);
+            } else if (buttonId == BUTTON_SEND_CREDITS) {
+                text = sendCreditsPrompt();
             } else if (buttonId instanceof Press press) {
                 text = CoopOptionsView.confirmPrompt(press.key(), currentValue(press.key()));
             } else {
@@ -487,6 +608,12 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         try {
             if (buttonId == BUTTON_RESET) {
                 resetToDefaults();
+            } else if (buttonId == BUTTON_SEND_CREDITS) {
+                sendPendingCredits();
+            } else if (buttonId == BUTTON_CLEAR_CREDITS) {
+                coop.campaign.CoopCreditTransfer.clearPendingAmount();
+            } else if (buttonId instanceof CreditStep step) {
+                coop.campaign.CoopCreditTransfer.stepPendingAmount(step.delta());
             } else if (buttonId instanceof Press press) {
                 apply(press);
             }
@@ -541,6 +668,35 @@ public class CoopOptionsPage extends BaseIntelPlugin {
             return;
         }
         CoopOptionsStore.system().writeOverride(press.key(), next);
+    }
+
+    /** The confirmation text for Send: what leaves, to whom, and that there is no undo. */
+    static String sendCreditsPrompt() {
+        coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
+        String amount = coop.campaign.CoopCreditTransfer.format(
+                coop.campaign.CoopCreditTransfer.pendingAmount());
+        String partner = transfer == null ? "your co-op partner" : transfer.partnerLabelForUi();
+        return "Send " + amount + " credits to " + partner + "?\n"
+                + "The credits leave your account now and arrive on the other side once, even if the"
+                + " link drops in between.\n"
+                + "There is no way to take them back.";
+    }
+
+    /**
+     * One Send press. The transfer owns every rule (cover check, debit, wire, feed line); this only
+     * clears the pending amount on a success, so a second press cannot repeat a gift by accident.
+     */
+    private void sendPendingCredits() {
+        coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
+        if (transfer == null) {
+            CoopLog.warn(CoopOptionsPage.class,
+                    "Coop credits cannot be sent: no session is installed");
+            return;
+        }
+        if (transfer.send(coop.campaign.CoopCreditTransfer.pendingAmount())
+                == coop.campaign.CoopCreditTransfer.Result.SENT) {
+            coop.campaign.CoopCreditTransfer.clearPendingAmount();
+        }
     }
 
     /**

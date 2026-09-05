@@ -463,6 +463,9 @@ public final class CoopCampaignReplicator
         constructionScratch.clear();
         watchedLocationId = null;
         lastSalvageScanMillis = 0L;
+        // Grant ids are minted per session and saved nowhere, so a new session cannot collide with
+        // one of these and keeping them would only pin memory.
+        creditTransfer.clear();
     }
 
     public boolean isRegistered() {
@@ -494,6 +497,7 @@ public final class CoopCampaignReplicator
             case EXPEDITION_WARNING -> handleExpeditionWarning(message);
             case ABILITY_ACTIVATE -> hostHandleAbilityActivate(message);
             case ORBIT_SNAPSHOT -> applyOrbitSnapshot(message);
+            case CREDITS_GRANT -> handleCreditsGrant(message);
             default -> {
                 return false;
             }
@@ -5003,5 +5007,76 @@ public final class CoopCampaignReplicator
     public void applyObjectiveOwnershipForBridge(String entityId, String factionId) {
         applyObjectiveOwnershipToEngine(new CoopWorldDelta(entityId,
                 CoopWorldDelta.Kind.OBJECTIVE_OWNERSHIP, false, factionId, session.localPlayerId()));
+    }
+
+    // ---- Phase 32 addition B: credit transfer ----------------------------------------------------
+
+    /**
+     * The credit transfer this replicator owns, installed as the static handle the options page
+     * reads. Constructed here rather than in the pump because this is the class that already has
+     * the session, the sequence counter and the send seam it needs, and because the inbound half is
+     * an ordinary case on {@link #handle}.
+     */
+    private CoopCreditTransfer creditTransfer = CoopCreditTransfer.live(new GrantLink());
+
+    {
+        // Field initializer, not the constructor: there are two constructors and only one of them
+        // does any work, and installing from a field block cannot be forgotten by a third.
+        CoopCreditTransfer.install(creditTransfer);
+    }
+
+    /** The wire half of {@link CoopCreditTransfer}, bound to this replicator's session and service. */
+    private final class GrantLink implements CoopCreditTransfer.Link {
+
+        @Override
+        public boolean canSend() {
+            return isActive() && service.isConnected()
+                    && service.role() != coop.net.CoopConnectionRole.NONE;
+        }
+
+        @Override
+        public String mintLedgerId() {
+            // Player id plus the transport's own monotonic sequence: unique within the session
+            // without a UUID, and readable in a log line next to the seq of the message carrying it.
+            return session.localPlayerId() + "-" + service.nextSeq();
+        }
+
+        @Override
+        public void sendGrant(String ledgerId, int amount, String reason) {
+            send(CoopMessages.creditsGrant(session.sessionId(), service.nextSeq(), now(),
+                    ledgerId, amount, reason));
+        }
+    }
+
+    /** The sender-side transfer, for the options page's Send button and for tests. */
+    public CoopCreditTransfer creditTransfer() {
+        return creditTransfer;
+    }
+
+    /**
+     * Test seam: swaps the live wallet and feed for a fake while keeping this replicator's real
+     * {@link GrantLink}, so a test exercises the actual session id, sequence and ledger-id minting
+     * rather than a stand-in for them. Never called from production code.
+     */
+    CoopCreditTransfer replaceCreditTransferEngineForTest(CoopCreditTransfer.Engine engine) {
+        creditTransfer = new CoopCreditTransfer(engine, new GrantLink());
+        CoopCreditTransfer.install(creditTransfer);
+        return creditTransfer;
+    }
+
+    /**
+     * Inbound {@code CREDITS_GRANT}: credit the local player once per ledger id. Both roles receive;
+     * this is the one message on the wire that moves money and it moves it in either direction.
+     *
+     * <p>A malformed grant is logged and dropped rather than guessed at — see
+     * {@link CoopMessages#parseCreditsGrant}.
+     */
+    private void handleCreditsGrant(CoopMessages.Message message) {
+        try {
+            CoopMessages.CreditsGrant grant = CoopMessages.parseCreditsGrant(message);
+            creditTransfer.receive(grant.ledgerId(), grant.amount(), grant.reason());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop could not apply a CREDITS_GRANT", ex);
+        }
     }
 }

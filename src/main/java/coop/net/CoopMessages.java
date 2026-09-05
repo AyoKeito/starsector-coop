@@ -169,7 +169,24 @@ public final class CoopMessages {
          *
          * <p>Not on the reconnect-grace whitelist, for the same reason as {@code OPTIONS_SNAPSHOT}.
          */
-        OPTIONS_APPLIED
+        OPTIONS_APPLIED,
+        /**
+         * Phase 32 addition B: <b>the first and only message that moves money.</b> Every other
+         * credit figure on the wire is informational — {@code COLONY_INCOME} explicitly "carries no
+         * money" and each engine pays its own player locally. This one is a transfer: the sender has
+         * already debited itself when it hands this to the transport, and the receiver adds exactly
+         * {@code amount} to the local player's cargo the first time it sees {@code ledgerId}.
+         *
+         * <p>Reliable TCP, either direction, session-only. There is no escrow and none is needed:
+         * the debit happens on send, TCP guarantees the message eventually lands (a transfer queued
+         * during a reconnect hold goes with the rest of the stream), and the sender-minted
+         * {@code ledgerId} makes a duplicate or a rebroadcast a no-op rather than a second payment.
+         *
+         * <p>{@code reason} is deliberately generic. Phase 32 sends {@code "gift"} from the options
+         * page; Phase 34 reuses this same message and ledger for bounty payouts with
+         * {@code "bounty:<bountyId>"}, and the receiver only reads it to choose the feed wording.
+         */
+        CREDITS_GRANT
     }
 
     /**
@@ -1882,5 +1899,62 @@ public final class CoopMessages {
     /** The proof a resume request carries, or "" for the first (and for any pre-fix sender). */
     public static String parseResumeProof(Message message) {
         return optionalPayloadString(message, "proof", "");
+    }
+
+    // ---- Phase 32 addition B: credit transfer ----------------------------------------------------
+    // Appended rather than filed beside the market factories for the same reason the red-team block
+    // above is: this landed on a branch running alongside three other workers editing this file.
+
+    /** Largest transfer the codec will carry. Well inside {@code int}, and far past any real wallet. */
+    public static final int MAX_CREDITS_GRANT = 1_000_000_000;
+
+    /**
+     * One credit transfer from the sender's wallet to the receiver's (reliable TCP, either
+     * direction). See {@link Type#CREDITS_GRANT} for why there is no escrow.
+     *
+     * @param ledgerId sender-minted and unique within the session ({@code <playerId>-<seq>}); the
+     *                 receiver credits once per id, so a duplicate delivery pays nothing
+     * @param amount   strictly positive; a zero or negative "transfer" is a caller bug, not a wire
+     *                 state, and is rejected here rather than silently clamped
+     * @param reason   why the money moved, for the receiver's feed line: {@code "gift"} from the
+     *                 options page, {@code "bounty:<id>"} from Phase 34. Never parsed for meaning
+     *                 beyond the {@code gift} wording choice, so new senders need no codec change.
+     */
+    public static Message creditsGrant(String sessionId, long seq, long sentAtMillis,
+                                       String ledgerId, int amount, String reason) {
+        return new Message(Type.CREDITS_GRANT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"ledgerId\":\"" + escapeJson(requireText(ledgerId, "ledgerId")) + "\","
+                        + "\"amount\":" + requireGrantAmount(amount) + ","
+                        + "\"reason\":\"" + escapeJson(requireText(reason, "reason")) + "\"}");
+    }
+
+    /** Decoded {@link Type#CREDITS_GRANT}. */
+    public record CreditsGrant(String ledgerId, int amount, String reason) {
+        public CreditsGrant {
+            ledgerId = requireText(ledgerId, "ledgerId");
+            amount = requireGrantAmount(amount);
+            reason = requireText(reason, "reason");
+        }
+    }
+
+    /**
+     * Throws rather than clamps on a malformed grant. A payload that does not say how much money to
+     * move is not something to guess at: the caller's {@code catch} logs it and no credits appear.
+     */
+    public static CreditsGrant parseCreditsGrant(Message message) {
+        Payload payload = payload(message);
+        long amount = payload.requiredLong("amount");
+        if (amount > MAX_CREDITS_GRANT) {
+            throw new IllegalArgumentException("credits grant amount out of range: " + amount);
+        }
+        return new CreditsGrant(payload.requiredString("ledgerId"), (int) amount,
+                payload.requiredString("reason"));
+    }
+
+    private static int requireGrantAmount(int amount) {
+        if (amount <= 0 || amount > MAX_CREDITS_GRANT) {
+            throw new IllegalArgumentException("credits grant amount out of range: " + amount);
+        }
+        return amount;
     }
 }
