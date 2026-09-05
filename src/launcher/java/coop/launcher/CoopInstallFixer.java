@@ -6,7 +6,6 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
-import java.nio.file.Path;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -307,7 +306,7 @@ public final class CoopInstallFixer {
             } else {
                 LOG.info("Leaving the existing " + backup + " alone");
             }
-            Files.write(file.toPath(), patched.getBytes(BYTES));
+            CoopAtomicFiles.writeAtomically(file.toPath(), patched.getBytes(BYTES));
         } catch (AccessDeniedException ex) {
             LOG.warn("Access denied writing " + file, ex);
             return denied(file);
@@ -346,11 +345,7 @@ public final class CoopInstallFixer {
                     "\"" + CoopInstallLayout.MOD_ID + "\" is already in " + file + ".");
         }
         try {
-            Path parent = file.toPath().getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            Files.write(file.toPath(), written.getBytes(StandardCharsets.UTF_8));
+            CoopAtomicFiles.writeAtomically(file.toPath(), written.getBytes(StandardCharsets.UTF_8));
         } catch (AccessDeniedException ex) {
             LOG.warn("Access denied writing " + file, ex);
             return denied(file);

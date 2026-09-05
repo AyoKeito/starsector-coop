@@ -231,7 +231,8 @@ public final class CoopLauncherConfig {
         }
         Map<String, Object> remaining = new LinkedHashMap<>(current.existing);
         remaining.remove(ADOPT_CAMPAIGN_ID);
-        Files.writeString(file.toPath(), renderFile(remaining), StandardCharsets.UTF_8);
+        CoopAtomicFiles.writeAtomically(file.toPath(),
+                renderFile(remaining).getBytes(StandardCharsets.UTF_8));
         return true;
     }
 
@@ -276,12 +277,7 @@ public final class CoopLauncherConfig {
                     + ": it exists but could not be read (" + readError + ")");
         }
         String text = compose(host, owned);
-        Path path = file.toPath();
-        Path parent = path.getParent();
-        if (parent != null) {
-            Files.createDirectories(parent);
-        }
-        Files.writeString(path, text, StandardCharsets.UTF_8);
+        CoopAtomicFiles.writeAtomically(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

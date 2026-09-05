@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.json.JSONObject;
@@ -217,6 +218,9 @@ class CoopLauncherConfigTest {
         assertEquals("7777", reread.value("coop.hostPort"));
         assertEquals("MN-42", reread.value("coop.newGameSeed"));
         assertEquals("", reread.value("coop.connectHost"));
+        try (var listing = Files.list(file.toPath().getParent())) {
+            assertEquals(List.of(file.toPath()), listing.toList());
+        }
     }
 
     /**
