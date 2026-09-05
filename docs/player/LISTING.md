@@ -48,7 +48,8 @@ abilities. Patrols, traders, pirates and bounty fleets are simulated once by the
 including the ones chasing your partner. Salvage, surveys and exploration are shared, so one of you
 looting a wreck means both of you see it gone. Markets, shop stock, officer pools and bar offers are
 shared, and docking refreshes what you see. Faction reputation is shared, which means your partner's
-smuggling shows up on your standing.
+smuggling shows up on your standing. Cargo pods are shared too, and they are how you hand your partner
+fuel or supplies: jettison it, they fly over and pick it up.
 
 **Colonies.** One player faction with two governors. Both of you can found colonies, build
 industries, run the construction queue and use colony storage on the same colonies, one of you at a
@@ -86,38 +87,43 @@ settings file for you.
 
 The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before you download:
 
-- **Identical installs.** The two games compare manifests at connect and refuse a session over one
-  differing field, down to the git commit baked into the jar.
-- **One line of `vmparams` changed,** on both PCs. `jars/coop-forks.jar` holds engine classes the
-  JVM only prefers if they come first on the system classpath, and Starsector's mod loader is too
-  late for that. The launcher's install check makes the edit for you with a Fix button, or you paste
-  one entry by hand. Skip it and the game still runs, with NPC fleets clustering around the host and
-  largely ignoring the guest.
-- **Traffic is plaintext.** Anyone on the network path between the two of you can read the message
-  payloads. The lobby password stops strangers from joining an open port; it does not encrypt
-  anything. A VPN is the only thing that does.
-- **One guest.** The wire format can carry more, and the setting exists, but any value other than 1
-  is clamped back to 1: the gameplay side of a third player is not built.
 - **Both players in one battle is not in this release.** There is no in-game view of your partner's
   fight either. People watch over Discord screen share.
+- **Hyperspace is only partly shared.** Storm cells, star flares and slipstreams are rolled on each PC
+  separately, so the two of you see different weather and different slipstream maps, and your
+  partner's fleet can appear to cross empty hyperspace faster than it should. A storm only hits the
+  fleet standing in it, so what you lose is the matching sky, not ships.
+- **Deep space is the host's.** The abyss content (rogue stellar objects, the lights, Threat
+  encounters) exists on the host's engine only. The guest can fly in, and finds it empty. Sensor
+  ghosts do not appear for the guest anywhere.
+- **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
+  rewards go to the host. The mod does not stop the guest from accepting those missions, but the story
+  state is not shared, so a guest who does gets a private storyline the host never sees.
+- **Contacts, their missions and person bounties are local to each player,** and the guest gets no
+  person bounties at all.
+- **No direct trade between players.** Nothing on screen moves credits or cargo from you to your
+  partner. Cargo goes by jettisoned pod, ships through a colony's storage, and credits cannot be
+  handed over at all.
+- **Talking your way out is local on the guest.** When a fleet catches the guest, the vanilla
+  encounter runs on the guest's PC: pay them off, spend the story point, or leave. The host's copy of
+  that fleet hears none of it, so the same fleet can come back for another try two minutes later.
+  Fighting is different: losses on both sides are reconciled into the shared world.
+- **No text chat.** The mod assumes you are on voice.
 - **Solo play is not supported with the mod enabled.** Difficulty is forced to Normal, the tutorial
   is skipped, and the career list gains a test start. Turn the mod off for solo campaigns.
 - **The guest's save is co-op material,** not a solo campaign you can load later. Both saves need the
   mod from then on.
-- **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
-  rewards go to the host. The mod does not stop the guest from accepting those missions, but the story
-  state is not shared, so a guest who does gets a private storyline the host never sees.
 - **Fast forward becomes a toggle** rather than a hold for the duration of a session, at the engine's
   own 2x. Your setting is restored when the session ends.
+- **One guest.** The wire format can carry more, and the setting exists, but any value other than 1
+  is clamped back to 1: the gameplay side of a third player is not built.
+- **Traffic is plaintext.** The lobby password stops strangers from joining an open port; it does not
+  encrypt anything. A VPN is the only thing that does.
 
 ## Accepted divergences
 
 Places where the two games legitimately read differently. None of these is a bug report.
 
-- Contacts, their missions and person bounties are local to each player, and the guest gets no person
-  bounties at all.
-- Sensor ghosts do not appear for the guest. The abyss content lives on the host's engine.
-- The two of you see different slipstream maps and different hyperspace storms.
 - Bar offers are the same jobs from the same people at different tonnage and pay.
 - A system can be remote-surveyed once by each of you.
 - Colony construction bars and shortage markers can read differently on the two screens until they

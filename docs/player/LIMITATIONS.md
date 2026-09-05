@@ -7,14 +7,22 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
 ## The short list
 
 - **You fight your own battles.** Two players in one battle is not in this release.
+- **Hyperspace weather and slipstreams differ between you.** Each PC rolls its own storms, flares and
+  slipstream map.
+- **Deep space and sensor ghosts are host-only.** The abyss content exists on the host's engine, and
+  the guest sees no sensor ghosts anywhere.
+- **Story missions are the host's,** by agreement between the two of you rather than by enforcement.
+  Contacts and person bounties are local to each player.
+- **No direct trade between players.** Cargo goes by jettisoned pod, ships through colony storage,
+  credits not at all.
+- **Talking your way out of an encounter is local on the guest.** The host's copy of the fleet is
+  not told; fights are reconciled, conversations are not.
 - **The host's save is the campaign.** The guest's save is co-op material and needs the mod and a
   host to be worth loading.
 - **Rejoin by loading the co-op save,** never by starting a New Game on the same seed.
 - **Turn the mod off for solo campaigns.** With it enabled the game is under co-op rules whether or
   not a session exists.
 - **One guest.** Traffic is plaintext; the lobby password is a gate, not encryption.
-- **Story missions are the host's,** by agreement between the two of you rather than by enforcement.
-- **The launcher is Windows only in this release.**
 
 ---
 
@@ -105,6 +113,36 @@ copied across. A guest who starts the chain gets a private second storyline the 
 and the two worlds drift apart from there. One-of-a-kind finds in the shared world are a different
 matter: a derelict, a ruin, a cryosleeper or a one-time bar offer goes to whoever gets there first,
 and the other player sees it taken.
+
+## Trading with each other
+
+There is no trade screen between the two of you. Cargo moves the vanilla way: jettison it, and the pod
+appears on your partner's map for them to pick up. Ships move through a colony's storage, which both
+of you can use. Credits do not move at all; the closest thing is colony income, which is split down
+the middle every month.
+
+One catch with pods. A pod is owned by whoever dropped it, and only that game runs its expiry timer.
+If the pod expires while neither of you is in that system, the partner's copy is never told and stays
+on their map, and it can still be looted. The other way round was worse: letting both games run the
+timer deleted live pods out from under the player who had just dropped them.
+
+## Talking to fleets
+
+When a hostile fleet catches the guest, the guest gets the normal vanilla encounter on their own PC:
+fight, try to disengage, spend the story point, or leave. Paying tribute comes out of the guest's own
+credits. What the host's engine sees is only the result of a fight, if there was one. A fleet the
+guest talked their way past has not been talked to on the host, so after a two minute cooldown it can
+catch the guest again. Demanding surrender or tribute from an NPC fleet works the same way: whatever
+the guest gets out of it stays on the guest's screen, and the host's fleet carries on.
+
+A customs scan or inspection against the guest is the one dialog the host does drive. The host
+notices the patrol's intent, tells the guest's game, and the guest resolves the scan against their
+own cargo; the fine and the standing change are reported back.
+
+Pirate and Pather fleets that spawn around the guest, in a system the host is not in, can appear
+right on top of the guest instead of at a distance. Vanilla only keeps spawns away from the player
+the engine knows about, and on the host's engine that is the host. Expect the occasional ambush
+that a solo game would have placed further out.
 
 ## Divergences you will actually run into
 
