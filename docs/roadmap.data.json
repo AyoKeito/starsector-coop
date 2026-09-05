@@ -800,22 +800,25 @@
     {
       "id": "22",
       "num": 22,
-      "title": "Co-op Piloted Battles + Tactical-Map Observer",
+      "title": "Tactical Orders for Your Own Joined Ships",
       "theme": "combat",
       "track": "post-v1",
       "status": "not-built",
-      "summary": "Both players fight one host-side battle; the guest pilots its own ship via networked virtual keyboard, plus a drawn tactical-map observer.",
+      "summary": "Rescoped 2026-09-05. While one player fights, the other opens a drawn tactical map of the battle on their own machine, sees what the fighting side sees, selects the ships their fleet contributed under Phase 33, and gives them fleet orders (engage, escort, defend, retreat, cancel). The fighting engine applies them through the allied task manager and reports accepted or rejected. Ship AI still flies. No remote piloting; that route is a Maybe.",
       "introduces": [
-        "CoopRemotePilotAI",
-        "CoopVirtualKeyboard",
-        "CoopFleetManifest",
-        "CoopTacticalMapPanel",
-        "KEY_STATE UDP",
-        "FLEET_MANIFEST",
-        "CoopRewardSplitter",
-        "vendored CoOpShipAI"
+        "positions, facing, assignments and fog on BATTLE_STATUS at 5-10 Hz",
+        "CoopTacticalMapPanel (GL-drawn, pan/zoom/select, opt-in and dismissable)",
+        "BATTLE_ORDER / BATTLE_ORDER_ACK with ownership check",
+        "combat-frame inbound drain with a whitelist",
+        "mirror rebuild freeze + slot map for the battle"
       ],
-      "residue": []
+      "residue": [
+        "no allied wreck recovery (vanilla)",
+        "no orders to stations; IGNORE unavailable for allies",
+        "unordered allied ships stay with the allied admiral",
+        "ally fidelity (officers, skills) only in M4 if needed"
+      ],
+      "note": "Requires Phase 33. Feasibility pass 2026-09-05 (docs/PHASE22_TACTICAL_FEASIBILITY.md): every engine surface exists via public API; seven live checks remain. Decisions: fighting side's fog, free orders, keep the allied admiral."
     },
     {
       "id": "23",
