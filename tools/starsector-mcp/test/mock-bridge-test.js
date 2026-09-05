@@ -7,7 +7,14 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import test from 'node:test';
 
-import { BridgeClient, BridgeError, BridgeTimeoutError, BridgeUnreachableError } from '../lib/bridge-client.js';
+import {
+  BridgeClient,
+  BridgeError,
+  BridgeOutcomeUnknownError,
+  BridgeTimeoutError,
+  BridgeUnreachableError,
+  READ_ONLY_COMMANDS
+} from '../lib/bridge-client.js';
 import { DEFAULT_IGNORE_KEYS, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
 import { Bridges, ssAct, ssAdvanceDays, ssDiff, ssDump, MS_PER_GAME_DAY } from '../lib/tools.js';
 
@@ -162,7 +169,7 @@ test('times out a request the bridge never answers', async (t) => {
   });
 });
 
-test('reconnects and retries once when the socket drops mid-request', async (t) => {
+test('reconnects and retries once when the socket drops mid-request on a read command', async (t) => {
   let seen = 0;
   const bridge = new MockBridge(() => {
     seen++;
@@ -177,6 +184,42 @@ test('reconnects and retries once when the socket drops mid-request', async (t) 
 
   assert.deepEqual(await client.send('status'), { attempt: 2 });
   assert.equal(bridge.connections, 2, 'the retry opened a fresh connection');
+});
+
+test('does not retry a mutating command after a mid-request drop; throws BridgeOutcomeUnknownError', async (t) => {
+  let seen = 0;
+  const bridge = new MockBridge(() => {
+    seen++;
+    return seen === 1 ? { drop: true } : { ok: true, data: { attempt: seen } };
+  });
+  await bridge.start();
+  const client = clientFor(bridge);
+  t.after(async () => {
+    client.close();
+    await bridge.stop();
+  });
+
+  await assert.rejects(() => client.send('give', { credits: 1000 }), (err) => {
+    assert.ok(err instanceof BridgeOutcomeUnknownError);
+    assert.equal(err.instance, 'host');
+    assert.equal(err.cmd, 'give');
+    assert.match(err.message, /may or may not have executed/);
+    assert.match(err.message, /status|cargo/);
+    return true;
+  });
+
+  assert.equal(bridge.requests.length, 1, 'the mutation was sent exactly once, no replayed request line');
+  assert.equal(bridge.requests[0].cmd, 'give');
+});
+
+test('READ_ONLY_COMMANDS is exactly the ten read verbs and none of the mutations', () => {
+  assert.deepEqual(
+    [...READ_ONLY_COMMANDS].sort(),
+    ['barpool', 'cargo', 'colonizable', 'fleets', 'landmarks', 'market', 'markets', 'status', 'survey', 'visibility']
+  );
+  for (const mutation of ['teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset', 'expedition']) {
+    assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
+  }
 });
 
 test('reuses one connection across sequential requests', async (t) => {
