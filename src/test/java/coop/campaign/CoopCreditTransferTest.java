@@ -1,5 +1,6 @@
 package coop.campaign;
 
+import coop.testing.FakeCreditEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class CoopCreditTransferTest {
 
-    private final FakeEngine engine = new FakeEngine(100_000L);
+    private final FakeCreditEngine engine = new FakeCreditEngine(100_000L);
     private final FakeLink link = new FakeLink();
     private final CoopCreditTransfer transfer = new CoopCreditTransfer(engine, link);
 
@@ -106,12 +107,24 @@ class CoopCreditTransferTest {
     }
 
     @Test
-    void aGiftNamesThePartnerAndAnyOtherReasonNamesItself() {
+    void theWordingIsChosenFromTheReasonPrefixAndNeverEchoesTheRawReason() {
         transfer.receive("ledger-a", 1_000, CoopCreditTransfer.REASON_GIFT);
         assertEquals("Ayo sent you 1,000 credits.", engine.feed.get(0));
 
+        // Credit red-team P2-2: this used to render "Received 180,000 credits (bounty:pirate_9)."
+        // and would have shown Phase 34's internal bounty ids to the player.
         transfer.receive("ledger-b", 180_000, "bounty:pirate_9");
-        assertEquals("Received 180,000 credits (bounty:pirate_9).", engine.feed.get(1));
+        assertEquals("Bounty payout: 180,000 credits.", engine.feed.get(1));
+
+        transfer.receive("ledger-c", 25, "some_future_sender:internal_id_42");
+        assertEquals("Received 25 credits.", engine.feed.get(2));
+
+        transfer.receive("ledger-d", 25, "whatever");
+        assertEquals("Received 25 credits.", engine.feed.get(3));
+
+        assertTrue(engine.feed.stream().noneMatch(line -> line.contains("pirate_9")
+                        || line.contains("internal_id_42")),
+                "no wire string may reach the screen: " + engine.feed);
     }
 
     @Test
@@ -152,6 +165,127 @@ class CoopCreditTransferTest {
         assertFalse(transfer.hasApplied("ledger-a"));
     }
 
+    // ---- P0-1: a wallet write that does not land ---------------------------------------------------
+
+    @Test
+    void aGrantWhoseWalletWriteFailsCreditsNothingIsNotRememberedAndThePayingRedeliveryStillPays() {
+        engine.failNextWrites = 1;
+
+        assertFalse(transfer.receive("ledger-a", 50_000, CoopCreditTransfer.REASON_GIFT),
+                "a refused wallet write is not a successful payment");
+        assertEquals(100_000L, engine.credits, "nothing was credited");
+        assertFalse(transfer.hasApplied("ledger-a"),
+                "the id must stay unapplied or the redelivery is discarded as a duplicate and the"
+                        + " money is destroyed on both sides");
+        assertTrue(engine.feed.isEmpty(), "nobody may be told about credits that never arrived");
+
+        // The exact redelivery the reliable transport produces once the fleet exists again.
+        assertTrue(transfer.receive("ledger-a", 50_000, CoopCreditTransfer.REASON_GIFT));
+
+        assertEquals(150_000L, engine.credits, "paid exactly once, on the delivery that worked");
+        assertEquals(1, engine.feed.size());
+        assertEquals(2, engine.writeAttempts, "one refused write, one that landed");
+    }
+
+    @Test
+    void aDebitThatDoesNotLandStopsTheSendRatherThanCreatingMoneyOnTheFarSide() {
+        engine.failNextWrites = 1;
+
+        assertEquals(CoopCreditTransfer.Result.SEND_FAILED, transfer.send(25_000));
+
+        assertEquals(100_000L, engine.credits);
+        assertTrue(link.sent.isEmpty(), "an undebited grant on the wire would mint credits");
+    }
+
+    // ---- P2-3: the arrival is also on the intel page ------------------------------------------------
+
+    @Test
+    void anArrivalIsRecordedOnTheIntelPageAsWellAsTheFeed() {
+        transfer.receive("ledger-a", 1_000, CoopCreditTransfer.REASON_GIFT);
+
+        // CoopFeed.post is dropped when there is no campaign UI - mid-battle, between screens - and
+        // the player would see a balance change with no explanation anywhere (credit red-team P2-3).
+        assertEquals(List.of("Ayo sent you 1,000 credits."), engine.intel);
+    }
+
+    // ---- P1-1/P1-2/P1-4: refunds -------------------------------------------------------------------
+
+    @Test
+    void aDiscardedGrantIsRefundedExactlyOnceAndSaysSo() {
+        assertEquals(CoopCreditTransfer.Result.SENT, transfer.send(25_000));
+        assertEquals(75_000L, engine.credits);
+        String ledgerId = link.sent.get(0).ledgerId();
+
+        assertTrue(transfer.refund(ledgerId, 25_000, "queue-cap"));
+
+        assertEquals(100_000L, engine.credits, "an undelivered gift is the sender's money again");
+        assertEquals("Your 25,000 credits to Ayo could not be delivered and were returned.",
+                engine.feed.get(engine.feed.size() - 1));
+        assertTrue(engine.intel.contains(
+                "Your 25,000 credits to Ayo could not be delivered and were returned."));
+
+        assertFalse(transfer.refund(ledgerId, 25_000, "shutdown"),
+                "a second notification for the same grant must pay nothing");
+        assertEquals(100_000L, engine.credits);
+    }
+
+    @Test
+    void aGrantThisEngineNeverSentIsNeverRefunded() {
+        assertFalse(transfer.refund("somebody-elses-ledger-7", 999_999, "queue-cap"));
+
+        assertEquals(100_000L, engine.credits, "refunding a stranger's grant would mint credits");
+        assertTrue(engine.feed.isEmpty());
+    }
+
+    @Test
+    void aRefundWhoseWalletWriteFailsKeepsTheGrantRefundableForTheNextNotification() {
+        transfer.send(25_000);
+        String ledgerId = link.sent.get(0).ledgerId();
+        engine.failNextWrites = 1;
+
+        assertFalse(transfer.refund(ledgerId, 25_000, "queue-cap"));
+        assertEquals(75_000L, engine.credits);
+        assertTrue(transfer.hasSent(ledgerId), "still owed, so a later notification can pay it");
+
+        assertTrue(transfer.refund(ledgerId, 25_000, "shutdown"));
+        assertEquals(100_000L, engine.credits);
+    }
+
+    @Test
+    void onlyACreditsGrantMessageIsEverRefunded() {
+        transfer.send(25_000);
+
+        transfer.onOutboundDiscarded(
+                coop.net.CoopMessages.ping("session-a", 1L, 1_000L), "queue-cap");
+
+        assertEquals(75_000L, engine.credits, "the transport reports every discard; only grants pay");
+    }
+
+    @Test
+    void aDiscardedGrantMessageIsParsedAndRefunded() {
+        transfer.send(25_000);
+        String ledgerId = link.sent.get(0).ledgerId();
+
+        transfer.onOutboundDiscarded(coop.net.CoopMessages.creditsGrant("session-a", 1L, 1_000L,
+                ledgerId, 25_000, CoopCreditTransfer.REASON_GIFT), "session-end");
+
+        assertEquals(100_000L, engine.credits);
+        assertFalse(transfer.hasSent(ledgerId));
+    }
+
+    @Test
+    void clearingTheSessionLedgerLeavesTheSentIdsRefundable() {
+        transfer.send(25_000);
+        String ledgerId = link.sent.get(0).ledgerId();
+
+        // Teardown is the moment the transport reports its undelivered grants, so the provenance set
+        // has to outlive it or every refund at shutdown becomes a "did not send it" no-op.
+        transfer.clear();
+
+        assertTrue(transfer.refund(ledgerId, 25_000, "shutdown"));
+        assertEquals(100_000L, engine.credits);
+    }
+
     // ---- the page's pending amount ----------------------------------------------------------------
 
     @Test
@@ -188,36 +322,6 @@ class CoopCreditTransferTest {
     }
 
     // ---- fakes -----------------------------------------------------------------------------------
-
-    private static final class FakeEngine implements CoopCreditTransfer.Engine {
-        private long credits;
-        private String partner = "Ayo";
-        private final List<String> feed = new ArrayList<>();
-
-        private FakeEngine(long credits) {
-            this.credits = credits;
-        }
-
-        @Override
-        public long credits() {
-            return credits;
-        }
-
-        @Override
-        public void addCredits(long delta) {
-            credits += delta;
-        }
-
-        @Override
-        public void feed(String line) {
-            feed.add(line);
-        }
-
-        @Override
-        public String partnerName() {
-            return partner;
-        }
-    }
 
     private record Grant(String ledgerId, int amount, String reason) {
     }

@@ -2,12 +2,10 @@ package coop.campaign;
 
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
+import coop.testing.FakeCreditEngine;
 import coop.testing.RecordingNetService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-
-import java.util.ArrayList;
-import java.util.List;
 
 import static coop.testing.TestSessions.activeGuestSession;
 import static coop.testing.TestSessions.activeHostSession;
@@ -31,7 +29,7 @@ class CoopCampaignReplicatorCreditsTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopCampaignReplicator replicator =
                 new CoopCampaignReplicator(service, activeGuestSession(), () -> 4242L);
-        FakeEngine engine = new FakeEngine(60_000L);
+        FakeCreditEngine engine = new FakeCreditEngine(60_000L);
         CoopCreditTransfer transfer = replicator.replaceCreditTransferEngineForTest(engine);
 
         assertEquals(CoopCreditTransfer.Result.SENT, transfer.send(50_000));
@@ -43,7 +41,11 @@ class CoopCampaignReplicatorCreditsTest {
         CoopMessages.CreditsGrant grant = CoopMessages.parseCreditsGrant(message);
         assertEquals(50_000, grant.amount());
         assertEquals("gift", grant.reason());
-        assertTrue(grant.ledgerId().startsWith("guest-player-"), grant.ledgerId());
+        // Credit red-team P1-3: the session id has to be in the prefix. nextSeq restarts at 1 with a
+        // new CoopNetService (loading a save builds one), so a bare <playerId>-<seq> can reuse an id
+        // the peer's still-live applied-ledger has already paid, and the peer would discard the new
+        // grant as a duplicate while this side showed a "Sent" line.
+        assertTrue(grant.ledgerId().startsWith("session-a-guest-player-"), grant.ledgerId());
     }
 
     @Test
@@ -51,7 +53,7 @@ class CoopCampaignReplicatorCreditsTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         CoopCampaignReplicator replicator =
                 new CoopCampaignReplicator(service, activeHostSession(), () -> 1L);
-        FakeEngine engine = new FakeEngine(1_000L);
+        FakeCreditEngine engine = new FakeCreditEngine(1_000L);
         replicator.replaceCreditTransferEngineForTest(engine);
 
         CoopMessages.Message grant = CoopMessages.creditsGrant("session-a", 9L, 100L,
@@ -69,7 +71,7 @@ class CoopCampaignReplicatorCreditsTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         CoopCampaignReplicator replicator =
                 new CoopCampaignReplicator(service, activeHostSession(), () -> 1L);
-        FakeEngine engine = new FakeEngine(1_000L);
+        FakeCreditEngine engine = new FakeCreditEngine(1_000L);
         replicator.replaceCreditTransferEngineForTest(engine);
 
         assertTrue(replicator.handle(new CoopMessages.Message(CoopMessages.Type.CREDITS_GRANT,
@@ -83,7 +85,7 @@ class CoopCampaignReplicatorCreditsTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
         CoopCampaignReplicator replicator =
                 new CoopCampaignReplicator(service, activeHostSession(), () -> 1L);
-        FakeEngine engine = new FakeEngine(0L);
+        FakeCreditEngine engine = new FakeCreditEngine(0L);
         CoopCreditTransfer transfer = replicator.replaceCreditTransferEngineForTest(engine);
 
         replicator.handle(CoopMessages.creditsGrant("session-a", 9L, 100L, "g-1", 500, "gift"));
@@ -94,32 +96,42 @@ class CoopCampaignReplicatorCreditsTest {
         org.junit.jupiter.api.Assertions.assertFalse(transfer.hasApplied("g-1"));
     }
 
-    private static final class FakeEngine implements CoopCreditTransfer.Engine {
-        private long credits;
-        private final List<String> feed = new ArrayList<>();
+    /**
+     * Credit red-team P1-1/P1-2: the replicator is where the transport's discard reports are wired to
+     * the refund, and {@code replaceCreditTransferEngineForTest} swaps the transfer instance, so the
+     * registration has to follow the swap rather than pin the instance that existed at construction.
+     */
+    @Test
+    void aDiscardedGrantIsRefundedThroughTheReplicatorsRegistration() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator =
+                new CoopCampaignReplicator(service, activeGuestSession(), () -> 1L);
+        FakeCreditEngine engine = new FakeCreditEngine(60_000L);
+        CoopCreditTransfer transfer = replicator.replaceCreditTransferEngineForTest(engine);
 
-        private FakeEngine(long credits) {
-            this.credits = credits;
-        }
+        assertEquals(CoopCreditTransfer.Result.SENT, transfer.send(50_000));
+        assertEquals(10_000L, engine.credits);
+        CoopMessages.Message grant = service.lastOfType(CoopMessages.Type.CREDITS_GRANT);
 
-        @Override
-        public long credits() {
-            return credits;
-        }
+        service.reportOutboundDiscardForTest(grant, "session-end");
 
-        @Override
-        public void addCredits(long delta) {
-            credits += delta;
-        }
+        assertEquals(60_000L, engine.credits, "an undelivered grant comes back to the sender");
+        assertTrue(engine.feed.stream().anyMatch(line -> line.contains("were returned")),
+                engine.feed.toString());
+    }
 
-        @Override
-        public void feed(String line) {
-            feed.add(line);
-        }
+    /** Credit red-team P2-3: an arrival is on the intel page too, not only the campaign feed. */
+    @Test
+    void anAppliedGrantIsRecordedOnTheSessionIntelFeed() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator =
+                new CoopCampaignReplicator(service, activeHostSession(), () -> 1L);
+        FakeCreditEngine engine = new FakeCreditEngine(0L);
+        replicator.replaceCreditTransferEngineForTest(engine);
 
-        @Override
-        public String partnerName() {
-            return "Partner";
-        }
+        replicator.handle(CoopMessages.creditsGrant("session-a", 9L, 100L, "g-1", 500, "gift"));
+
+        assertEquals(1, engine.intel.size(), engine.intel.toString());
+        assertTrue(engine.intel.get(0).contains("500 credits"), engine.intel.toString());
     }
 }

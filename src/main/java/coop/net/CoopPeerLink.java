@@ -50,6 +50,13 @@ public final class CoopPeerLink {
 
     private final int slot;
 
+    /**
+     * Where queue entries that will never be written are reported (Phase 32 addition B). Never null:
+     * {@link CoopOutboundDiscardListener#NONE} until {@link CoopNetService} installs a real one, so
+     * no drop site has to null-check.
+     */
+    private CoopOutboundDiscardListener discardListener = CoopOutboundDiscardListener.NONE;
+
     private SocketChannel channel;
     private ByteBuffer pendingWrite;
     /**
@@ -159,6 +166,32 @@ public final class CoopPeerLink {
         return slot;
     }
 
+    /** Installs the sink for {@link #reportDiscarded}; null restores the do-nothing default. */
+    void setOutboundDiscardListener(CoopOutboundDiscardListener listener) {
+        this.discardListener = listener == null ? CoopOutboundDiscardListener.NONE : listener;
+    }
+
+    /**
+     * Reports queue entries that were dropped without being written. Called <em>after</em> the queue
+     * mutation that produced them, never during it, so a listener cannot see a half-edited queue —
+     * and wrapped, so a listener that throws costs the transport nothing.
+     */
+    private void reportDiscarded(java.util.List<CoopMessages.Message> discarded, String cause) {
+        if (discarded.isEmpty()) {
+            return;
+        }
+        CoopOutboundDiscardListener sink = discardListener;
+        for (CoopMessages.Message message : discarded) {
+            try {
+                sink.onOutboundDiscarded(message, cause);
+            } catch (RuntimeException | LinkageError ex) {
+                coop.util.CoopLog.warn(CoopPeerLink.class, "Coop outbound-discard listener threw for a "
+                        + message.type() + " dropped on peer slot " + slot + " (cause=" + cause + ")",
+                        ex);
+            }
+        }
+    }
+
     // ---- TCP channel ------------------------------------------------------------------------------
 
     /**
@@ -181,6 +214,19 @@ public final class CoopPeerLink {
      */
     void attach(SocketChannel channel, InetAddress pinnedPeerAddress, long nowMillis,
                 boolean clearValidatedUdpAddress, long attachGeneration) {
+        attach(channel, pinnedPeerAddress, nowMillis, clearValidatedUdpAddress, attachGeneration,
+                false);
+    }
+
+    /**
+     * @param grantsHeldForResume true when something upstream is deliberately holding queued
+     *                            {@code CREDITS_GRANT}s for a session resume, in which case this
+     *                            attach must leave them alone; see
+     *                            {@link #dropStaleOutboundForNewSocket}
+     */
+    void attach(SocketChannel channel, InetAddress pinnedPeerAddress, long nowMillis,
+                boolean clearValidatedUdpAddress, long attachGeneration,
+                boolean grantsHeldForResume) {
         this.channel = channel;
         requeuePendingWriteForResend();
         this.inboundFrameLength = 0;
@@ -205,7 +251,7 @@ public final class CoopPeerLink {
         this.oversizedFrameWarned = false;
         this.preProofHoldLogged = false;
         forgetCandidate();
-        dropConnectionScopedOutbound();
+        dropStaleOutboundForNewSocket(grantsHeldForResume);
         if (clearValidatedUdpAddress) {
             this.validatedUdpAddress = null;
         }
@@ -221,9 +267,54 @@ public final class CoopPeerLink {
      * whichever peer attached next, ahead of that peer's own lobby round. The guest treats a reject as
      * terminal, so a fresh guest was told its mod list was wrong before its manifest had ever been
      * compared. Every one of these is re-sent by the new connection's own round, so nothing is lost.
+     *
+     * <p>Credit grants go the same way, for the mirror-image reason and with a refund attached
+     * (credit red-team P1-1). A grant queued into a session that has already ended is not re-sent by
+     * anybody: written onto the new socket ahead of its lobby round it is discarded by the far side
+     * as pre-session traffic, and written after one it pays whoever took the slot rather than the
+     * player it was meant for. Both outcomes lose the sender's money, so the grant is dropped here
+     * and {@link #reportDiscarded} hands it back.
+     *
+     * <p><b>Except during a reconnect grace</b>, which is the one case where a grant queued before
+     * the socket died is still going to the player it was meant for. That path is deliberate and
+     * works: the pump's outbound write gate refuses {@code CREDITS_GRANT} for the whole grace, the
+     * queue keeps it in order, and it goes out the moment the resume is accepted. Refunding it here
+     * would cancel a delivery that was about to succeed. {@code grantsHeldForResume} is the caller's
+     * answer to "is that gate currently holding them", and when the grace expires instead of
+     * resuming, {@link CoopNetService#discardOutboundCreditsGrants()} clears them at that edge.
      */
-    private void dropConnectionScopedOutbound() {
-        outbound.removeIf(message -> CoopNetService.isConnectionScopedControl(message.type()));
+    private void dropStaleOutboundForNewSocket(boolean grantsHeldForResume) {
+        java.util.List<CoopMessages.Message> discarded = new java.util.ArrayList<>(0);
+        outbound.removeIf(message -> {
+            if (CoopNetService.isConnectionScopedControl(message.type())) {
+                return true;
+            }
+            if (!grantsHeldForResume && message.type() == CoopMessages.Type.CREDITS_GRANT) {
+                discarded.add(message);
+                return true;
+            }
+            return false;
+        });
+        reportDiscarded(discarded, "attach");
+    }
+
+    /**
+     * Drops every queued {@code CREDITS_GRANT} and refunds it, for the session-end path that has no
+     * new socket to trigger {@link #dropStaleOutboundForNewSocket} (credit red-team P1-1 step 2).
+     *
+     * @return how many grants were dropped
+     */
+    int discardOutboundGrants(String cause) {
+        java.util.List<CoopMessages.Message> discarded = new java.util.ArrayList<>(0);
+        outbound.removeIf(message -> {
+            if (message.type() == CoopMessages.Type.CREDITS_GRANT) {
+                discarded.add(message);
+                return true;
+            }
+            return false;
+        });
+        reportDiscarded(discarded, cause);
+        return discarded.size();
     }
 
     /**
@@ -503,11 +594,22 @@ public final class CoopPeerLink {
         return null;
     }
 
-    /** Discards everything queued for a link being dropped; @return how many messages were lost. */
-    int discardOutbound() {
-        int dropped = outbound.size();
+    /**
+     * Discards everything queued for a link being dropped. Every entry is reported to the
+     * discard listener first, so the one message type that cannot survive the loss — a
+     * {@code CREDITS_GRANT}, which was already debited from the sender's wallet — is refunded rather
+     * than silently deleted (credit red-team P1-2).
+     *
+     * @return how many messages were lost
+     */
+    int discardOutbound(String cause) {
+        if (outbound.isEmpty()) {
+            return 0;
+        }
+        java.util.List<CoopMessages.Message> discarded = new java.util.ArrayList<>(outbound);
         outbound.clear();
-        return dropped;
+        reportDiscarded(discarded, cause);
+        return discarded.size();
     }
 
     /** One warning per link per queue-depth excursion; a stalled socket must not log per message. */
@@ -694,7 +796,9 @@ public final class CoopPeerLink {
         datagramSendFailureLogged = false;
         oversizedFrameWarned = false;
         invalidFrames = 0;
-        outbound.clear();
+        // Reported rather than cleared outright: shutdown is the "session ends forever" case, and it
+        // is still the sender's money sitting in that queue (credit red-team P1-4).
+        discardOutbound("shutdown");
         outboundDatagrams.clear();
     }
 

@@ -26,10 +26,24 @@ import java.util.Set;
  * message in flight until the peer applies it. That is safe because the message is reliable TCP —
  * it is queued with the rest of the stream through a reconnect hold and delivered when the link
  * comes back — and because every grant carries a sender-minted ledger id, so a re-delivery or a
- * rebroadcast credits nothing. The failure the design does not defend against is the session ending
- * forever with a grant undelivered, which loses the sender's money; an escrow protocol trades that
- * for a two-phase handshake that can wedge instead, and losing a gift to a permanently dead session
- * is the cheaper failure.
+ * rebroadcast credits nothing. An escrow protocol would trade that for a two-phase handshake that
+ * can wedge instead, which is the worse failure.
+ *
+ * <p><b>What happens when it cannot be delivered: a refund, not a loss.</b> Every site in the
+ * transport that throws a queued message away before it reaches a socket reports it back through
+ * {@link coop.net.CoopOutboundDiscardListener}, and {@link #onOutboundDiscarded} pays the amount
+ * back into the sender's wallet with a feed line. The four sites are the outbound queue cap, a new
+ * socket attaching over a stale queue, the reconnect grace expiring, and transport shutdown. The one
+ * case that is <em>not</em> refunded is a grant already handed to the OS socket: TCP owns it from
+ * there, this engine cannot know whether the far side credited it, and refunding one the peer
+ * applied would mint money. See {@link coop.net.CoopOutboundDiscardListener} for that boundary.
+ *
+ * <p><b>Conservation is exact in this class and approximate in the engine.</b> Every figure here is a
+ * {@code long}, but the campaign's wallet is a {@code float} ({@code MutableValue}); past 2^24
+ * (16,777,216) credits a {@code float} cannot represent consecutive integers, so a grant added to a
+ * large balance can land a credit or two off. That is vanilla's own representation — the same
+ * rounding applies to any trade — and nothing here can fix it, but nobody should read the word
+ * "conservation" below as arithmetic exactness at those balances.
  *
  * <p><b>Seams.</b> {@link Engine} is everything that touches the campaign (the wallet, the message
  * feed, the partner's name) and {@link Link} is everything that touches the wire, so every rule in
@@ -41,10 +55,17 @@ import java.util.Set;
  * every save and holds no state of its own; a static field here is the one place the amount can
  * live where XStream will never see it and the page can still read it back after a re-render.
  */
-public final class CoopCreditTransfer {
+public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardListener {
 
     /** The {@code reason} the options page sends. Phase 34 uses {@code "bounty:<id>"} instead. */
     public static final String REASON_GIFT = "gift";
+
+    /**
+     * The prefix Phase 34 will send ({@code "bounty:<bountyId>"}). Named here rather than there
+     * because this class owns the wording the receiver sees, and the id after the colon is never
+     * shown to anybody.
+     */
+    public static final String REASON_BOUNTY = "bounty";
 
     /** Step sizes the options page offers, smallest first. */
     public static final int[] STEPS = {1_000, 10_000, 100_000};
@@ -78,11 +99,31 @@ public final class CoopCreditTransfer {
         /** The local player's credits, or a negative value when there is no fleet to read. */
         long credits();
 
-        /** Adds {@code delta} to the local player's credits; negative debits. */
-        void addCredits(long delta);
+        /**
+         * Adds {@code delta} to the local player's credits; negative debits.
+         *
+         * <p><b>Reports whether the write landed, and every caller checks</b> (credit red-team P0-1).
+         * The wallet is reached through {@code Global.getSector().getPlayerFleet().getCargo()}, and
+         * there are frames where the sector exists and the fleet does not — the Phase 17 wipe/respawn
+         * window is the concrete one. This used to return {@code void} and log a warning on that
+         * path, so an inbound grant was marked applied, credited nothing, and told the player it had
+         * arrived. A {@code false} here means no credits moved and the caller must undo whatever it
+         * did on the assumption that they had.
+         *
+         * @return true when the credits actually moved
+         */
+        boolean addCredits(long delta);
 
         /** One line in the campaign message feed. */
         void feed(String line);
+
+        /**
+         * One line in the session intel feed's event log (credit red-team P2-3). The campaign feed is
+         * dropped on the floor when there is no campaign UI — mid-battle, between screens — and a
+         * player who is paid while looking at something else would otherwise see a balance change
+         * with no explanation anywhere. This one survives the moment.
+         */
+        void intel(String line);
 
         /** The partner's display name, or {@code ""} when there is none to show. */
         String partnerName();
@@ -93,7 +134,14 @@ public final class CoopCreditTransfer {
         /** A session is up and the peer is connected, so a grant sent now has somewhere to go. */
         boolean canSend();
 
-        /** A ledger id unique within this session; {@code <playerId>-<seq>} in the live wiring. */
+        /**
+         * A ledger id unique within this session <em>and</em> across a rejoin;
+         * {@code <sessionId>-<playerId>-<seq>} in the live wiring. The session id is load-bearing:
+         * the sequence counter restarts at 1 when a new {@code CoopNetService} is built (loading a
+         * save does exactly that), while the peer's applied-ledger survives the whole reconnect
+         * grace, so a bare {@code <playerId>-<seq>} could collide with a paid grant from before the
+         * rejoin and be discarded as a duplicate (credit red-team P1-3).
+         */
         String mintLedgerId();
 
         /** Sends the grant reliably. Throwing here is a send failure and rolls the debit back. */
@@ -152,6 +200,18 @@ public final class CoopCreditTransfer {
     /** Ledger ids already credited, oldest first; see {@link #LEDGER_CAPACITY}. */
     private final Set<String> applied = new LinkedHashSet<>();
 
+    /**
+     * Ledger ids this engine minted and handed to the transport, still awaiting delivery as far as
+     * this side knows. An id is removed the moment it is refunded, which is what makes a second
+     * discard notification for the same grant a no-op, and what stops a grant this engine never sent
+     * — a rebroadcast, a mirrored frame, anything — from paying anybody.
+     *
+     * <p>Not cleared by {@link #clear()}, unlike {@link #applied}: a discard notification arrives
+     * <em>from</em> the teardown that clears the session, so an id dropped at that moment is exactly
+     * the id the refund needs. Bounded by the same ring, so it cannot grow without limit either.
+     */
+    private final Set<String> sent = new LinkedHashSet<>();
+
     public CoopCreditTransfer(Engine engine, Link link) {
         this.engine = engine;
         this.link = link;
@@ -192,18 +252,33 @@ public final class CoopCreditTransfer {
             engine.feed("Coop: could not send credits.");
             return Result.SEND_FAILED;
         }
-        engine.addCredits(-amount);
+        if (!engine.addCredits(-amount)) {
+            // The wallet refused the debit, so the money never left. Sending anyway would create it
+            // on the far side out of nothing.
+            CoopLog.warn(CoopCreditTransfer.class, "Coop credits send failed amount=" + amount
+                    + " ledger=" + ledgerId + ": the wallet could not be debited; nothing was sent");
+            engine.feed("Coop: could not send credits.");
+            return Result.SEND_FAILED;
+        }
         try {
             link.sendGrant(ledgerId, amount, REASON_GIFT);
         } catch (RuntimeException | LinkageError ex) {
             // The debit is only safe because the send is reliable. If the send did not happen at
             // all, the debit must not stand either.
-            engine.addCredits(amount);
+            if (!engine.addCredits(amount)) {
+                CoopLog.warn(CoopCreditTransfer.class, "Coop credits send failed amount=" + amount
+                        + " ledger=" + ledgerId + " AND THE ROLLBACK ALSO FAILED: the wallet could not"
+                        + " be written, so this amount is debited with nothing on the wire", ex);
+                engine.feed("Coop: could not send credits, and the amount could not be returned to"
+                        + " your account. See the log.");
+                return Result.SEND_FAILED;
+            }
             CoopLog.warn(CoopCreditTransfer.class, "Coop credits send failed amount=" + amount
                     + " ledger=" + ledgerId + "; the debit was rolled back", ex);
             engine.feed("Coop: could not send credits.");
             return Result.SEND_FAILED;
         }
+        rememberSent(ledgerId);
         CoopLog.info(CoopCreditTransfer.class, "Coop credits sent amount=" + amount
                 + " ledger=" + ledgerId + " reason=" + REASON_GIFT);
         engine.feed("Sent " + format(amount) + " credits to " + partnerLabel() + ".");
@@ -213,8 +288,17 @@ public final class CoopCreditTransfer {
     /**
      * Applies an inbound grant, once per ledger id.
      *
-     * @return true when the credits were added, false for a duplicate (which is a normal event on a
-     *         resumed session, not an error)
+     * <p><b>The wallet write comes first and the ledger entry second</b> (credit red-team P0-1). The
+     * other order looks safer — record it, then pay, so a re-entrant delivery cannot double-pay — but
+     * it is not: {@link Engine#addCredits} can refuse (no player fleet on this frame), and an id
+     * marked applied against a payment that never happened makes every redelivery of that grant a
+     * free duplicate. Money destroyed on both sides, unrecoverably. Paying first risks nothing in
+     * return, because delivery is one message on one campaign thread: there is no second call in
+     * flight to slip in between the two statements.
+     *
+     * @return true when the credits were added; false for a duplicate (a normal event on a resumed
+     *         session) and false when the wallet refused the write, in which case the id stays
+     *         unapplied on purpose so a redelivery can still pay
      */
     public boolean receive(String ledgerId, int amount, String reason) {
         String id = coop.util.CoopText.requireText(ledgerId, "ledgerId");
@@ -222,18 +306,110 @@ public final class CoopCreditTransfer {
             throw new IllegalArgumentException("credits grant amount out of range: " + amount);
         }
         String why = reason == null || reason.isBlank() ? REASON_GIFT : reason.trim();
-        if (!remember(id)) {
+        if (applied.contains(id)) {
             CoopLog.info(CoopCreditTransfer.class, "Coop credits grant already applied ledger=" + id
                     + " amount=" + amount + "; no credits added");
             return false;
         }
-        engine.addCredits(amount);
+        if (!engine.addCredits(amount)) {
+            CoopLog.warn(CoopCreditTransfer.class, "Coop credits grant NOT applied ledger=" + id
+                    + " amount=" + amount + ": the wallet could not be written. The ledger id is left"
+                    + " unapplied so a redelivery of this grant still pays.");
+            return false;
+        }
+        remember(id);
         CoopLog.info(CoopCreditTransfer.class, "Coop credits received amount=" + amount
                 + " ledger=" + id + " reason=" + why);
-        engine.feed(REASON_GIFT.equals(why)
-                ? partnerLabel() + " sent you " + format(amount) + " credits."
-                : "Received " + format(amount) + " credits (" + why + ").");
+        String line = arrivalLine(amount, why);
+        engine.feed(line);
+        noteIntel(line);
         return true;
+    }
+
+    /**
+     * The receiver's wording, chosen from the prefix before the colon and never echoing the raw
+     * reason (credit red-team P2-2). {@code bounty:sindrian_diktat_7} is an internal id; the player
+     * gets "Bounty payout", and a reason nobody has taught this method about degrades to a plain
+     * "Received" rather than putting a wire string on screen.
+     */
+    private String arrivalLine(int amount, String reason) {
+        int colon = reason.indexOf(':');
+        String prefix = colon < 0 ? reason : reason.substring(0, colon);
+        return switch (prefix) {
+            case REASON_GIFT -> partnerLabel() + " sent you " + format(amount) + " credits.";
+            case REASON_BOUNTY -> "Bounty payout: " + format(amount) + " credits.";
+            default -> "Received " + format(amount) + " credits.";
+        };
+    }
+
+    // ---- refunds ---------------------------------------------------------------------------------
+
+    /**
+     * The transport telling this engine that a message it queued will never be written. A
+     * {@code CREDITS_GRANT} this engine sent is paid straight back into the local wallet; everything
+     * else is somebody else's problem and is ignored here.
+     *
+     * <p>See {@link coop.net.CoopOutboundDiscardListener} for why a message already handed to the
+     * socket never reaches this method.
+     */
+    @Override
+    public void onOutboundDiscarded(coop.net.CoopMessages.Message message, String cause) {
+        if (message == null || message.type() != coop.net.CoopMessages.Type.CREDITS_GRANT) {
+            return;
+        }
+        coop.net.CoopMessages.CreditsGrant grant;
+        try {
+            grant = coop.net.CoopMessages.parseCreditsGrant(message);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCreditTransfer.class, "Coop could not read a discarded CREDITS_GRANT to"
+                    + " refund it (cause=" + cause + ")", ex);
+            return;
+        }
+        refund(grant.ledgerId(), grant.amount(), cause);
+    }
+
+    /**
+     * Puts an undelivered grant back in the sender's wallet, once.
+     *
+     * @return true when credits were returned; false when this engine did not send that grant, has
+     *         already refunded it, or the wallet refused the write
+     */
+    public boolean refund(String ledgerId, int amount, String cause) {
+        String id = coop.util.CoopText.requireText(ledgerId, "ledgerId");
+        String site = cause == null || cause.isBlank() ? "unknown" : cause.trim();
+        if (amount <= 0 || amount > MAX_AMOUNT) {
+            CoopLog.warn(CoopCreditTransfer.class, "Coop refused to refund an impossible amount="
+                    + amount + " ledger=" + id + " cause=" + site);
+            return false;
+        }
+        if (!sent.contains(id)) {
+            // Either this engine never sent it (a mirrored or replayed frame) or it has already been
+            // refunded. Both must pay nothing: the first would mint money, the second would double it.
+            CoopLog.info(CoopCreditTransfer.class, "Coop credits refund skipped ledger=" + id
+                    + " amount=" + amount + " cause=" + site
+                    + "; this engine did not send it or it was already refunded");
+            return false;
+        }
+        if (!engine.addCredits(amount)) {
+            // Deliberately left in the sent set: the wallet is unreadable right now, and a later
+            // notification for the same id is the one chance left to pay it back.
+            CoopLog.warn(CoopCreditTransfer.class, "Coop credits refund FAILED amount=" + amount
+                    + " ledger=" + id + " cause=" + site + ": the wallet could not be written");
+            return false;
+        }
+        sent.remove(id);
+        CoopLog.warn(CoopCreditTransfer.class, "Coop credits refunded amount=" + amount
+                + " ledger=" + id + " cause=" + site);
+        String line = "Your " + format(amount) + " credits to " + partnerLabel()
+                + " could not be delivered and were returned.";
+        engine.feed(line);
+        noteIntel(line);
+        return true;
+    }
+
+    /** Whether this engine still considers a grant it sent to be in flight. Tests and the bridge. */
+    public boolean hasSent(String ledgerId) {
+        return sent.contains(coop.util.CoopText.requireText(ledgerId, "ledgerId"));
     }
 
     /**
@@ -268,7 +444,15 @@ public final class CoopCreditTransfer {
         return applied.contains(coop.util.CoopText.requireText(ledgerId, "ledgerId"));
     }
 
-    /** Drops the ledger. Called on session teardown; ids never outlive the session that minted them. */
+    /**
+     * Drops the applied ledger. Called on session teardown; ids never outlive the session that minted
+     * them, and the session id in {@link Link#mintLedgerId()} is why a new session cannot collide
+     * with one.
+     *
+     * <p>{@link #sent} is deliberately <em>not</em> cleared here — see its field comment. Teardown is
+     * the moment the transport reports its undelivered grants, and clearing the provenance set first
+     * would turn every one of those refunds into a "this engine did not send it" no-op.
+     */
     public void clear() {
         applied.clear();
     }
@@ -278,12 +462,32 @@ public final class CoopCreditTransfer {
         if (!applied.add(ledgerId)) {
             return false;
         }
-        while (applied.size() > LEDGER_CAPACITY) {
-            Iterator<String> oldest = applied.iterator();
+        evictOldest(applied);
+        return true;
+    }
+
+    /** Records a grant handed to the transport, so a discard of it can be refunded. */
+    private void rememberSent(String ledgerId) {
+        sent.add(ledgerId);
+        evictOldest(sent);
+    }
+
+    private static void evictOldest(Set<String> ring) {
+        while (ring.size() > LEDGER_CAPACITY) {
+            Iterator<String> oldest = ring.iterator();
             oldest.next();
             oldest.remove();
         }
-        return true;
+    }
+
+    /** The intel-feed line, total: a broken feed seam must not take the payment down with it. */
+    private void noteIntel(String line) {
+        try {
+            engine.intel(line);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCreditTransfer.class, "Coop could not record a credit event on the"
+                    + " session intel page", ex);
+        }
     }
 
     private String partnerLabel() {
@@ -317,19 +521,35 @@ public final class CoopCreditTransfer {
         }
 
         @Override
-        public void addCredits(long delta) {
+        public boolean addCredits(long delta) {
             MutableValue wallet = wallet();
             if (wallet == null) {
                 CoopLog.warn(CoopCreditTransfer.class,
                         "Coop credits could not be applied: no player cargo (delta=" + delta + ")");
-                return;
+                return false;
             }
-            wallet.add(delta);
+            try {
+                wallet.add(delta);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCreditTransfer.class,
+                        "Coop credits could not be applied (delta=" + delta + ")", ex);
+                return false;
+            }
+            return true;
         }
 
         @Override
         public void feed(String line) {
             CoopFeed.post(line, null);
+        }
+
+        @Override
+        public void intel(String line) {
+            CoopSessionIntelFeed feed = CoopSessionIntelFeed.active();
+            if (feed == null) {
+                return;
+            }
+            feed.noteEvent(line);
         }
 
         @Override

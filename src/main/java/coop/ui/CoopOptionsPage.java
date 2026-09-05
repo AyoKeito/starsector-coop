@@ -89,9 +89,12 @@ public class CoopOptionsPage extends BaseIntelPlugin {
      * @param note        the one-line reason Send is disabled, or "" when it is not
      * @param sendEnabled whether the Send button is live
      * @param canStep     whether the amount buttons are worth drawing at all
+     * @param canClear    whether "Clear amount" is worth drawing; true whenever something is pending,
+     *                    independent of {@code canStep}, so an amount stepped up before the link died
+     *                    can still be put away (credit red-team P2-5)
      */
     record CreditRow(String amountText, String walletText, String note, boolean sendEnabled,
-                     boolean canStep) {
+                     boolean canStep, boolean canClear) {
     }
 
     // ---- registration ----------------------------------------------------------------------------
@@ -458,9 +461,13 @@ public class CoopOptionsPage extends BaseIntelPlugin {
      *
      * <p>Send is live only when a session is up and the peer is connected — the button must not
      * promise something {@link coop.campaign.CoopCreditTransfer#send} would refuse — and, on top of
-     * that, only when the pending amount is something the local wallet can actually cover. A wallet
-     * that cannot be read ({@code credits < 0}) is not treated as "you have nothing": the cover
-     * check runs again inside {@code send}, which is the one that matters.
+     * that, only when the pending amount is something the local wallet can actually cover.
+     *
+     * <p>An unreadable wallet ({@code credits < 0}) disables Send and says so (credit red-team P2-4).
+     * It used to leave the button live on the reasoning that the real cover check is in {@code send};
+     * that is true, but {@code send} answers it with "not enough credits — 25,000 needed, 0
+     * available" on a page that shows no balance at all, so the player got an enabled button that
+     * always failed with a message contradicting what was in front of them.
      *
      * @param canSend  the transfer's own answer for "is there a session with a connected peer"
      * @param pending  the amount the step buttons have accumulated
@@ -470,19 +477,25 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         String amountText = coop.campaign.CoopCreditTransfer.format(Math.max(0, pending));
         String walletText = credits < 0 ? ""
                 : coop.campaign.CoopCreditTransfer.format(credits);
+        boolean canClear = pending > 0;
         if (!canSend) {
             return new CreditRow(amountText, walletText,
-                    "No co-op session; there is nobody to send credits to.", false, false);
+                    "No co-op session; there is nobody to send credits to.", false, false, canClear);
+        }
+        if (credits < 0) {
+            return new CreditRow(amountText, walletText,
+                    "Your wallet could not be read; credits cannot be sent right now.",
+                    false, true, canClear);
         }
         if (pending <= 0) {
             return new CreditRow(amountText, walletText,
-                    "Step the amount up, then press Send.", false, true);
+                    "Step the amount up, then press Send.", false, true, canClear);
         }
-        if (credits >= 0 && credits < pending) {
+        if (credits < pending) {
             return new CreditRow(amountText, walletText,
-                    "You do not have that many credits.", false, true);
+                    "You do not have that many credits.", false, true, canClear);
         }
-        return new CreditRow(amountText, walletText, "", true, true);
+        return new CreditRow(amountText, walletText, "", true, true, canClear);
     }
 
     /** The live model: the installed transfer's session state, wallet and pending amount. */
@@ -508,8 +521,9 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         Color highlight = Misc.getHighlightColor();
         Color gray = Misc.getGrayColor();
         info.addSectionHeading(CREDITS_HEADING, Alignment.MID, 12f);
-        info.addPara("Hands credits straight to your partner. The amount leaves your account when"
-                + " you press Send and arrives once, even across a reconnect.", gray, 6f);
+        info.addPara("Hands credits straight to your partner. The amount leaves your account when you"
+                + " press Send; it arrives once, even across a reconnect; and if it cannot be"
+                + " delivered at all, it comes back to you.", gray, 6f);
         info.addPara("Amount to send: " + row.amountText() + " credits",
                 row.sendEnabled() ? highlight : gray, 6f);
         if (!row.walletText().isEmpty()) {
@@ -527,6 +541,10 @@ public class CoopOptionsPage extends BaseIntelPlugin {
                 addButton(info, "- " + coop.campaign.CoopCreditTransfer.format(step),
                         new CreditStep(-step), width);
             }
+        }
+        if (row.canClear()) {
+            // Outside the canStep block on purpose: an amount stepped up before the link dropped has
+            // to be clearable without waiting for the session to come back.
             addButton(info, "Clear amount", BUTTON_CLEAR_CREDITS, width);
         }
         ButtonAPI send = addButton(info, "Send " + row.amountText() + " credits",
@@ -678,8 +696,9 @@ public class CoopOptionsPage extends BaseIntelPlugin {
         String partner = transfer == null ? "your co-op partner" : transfer.partnerLabelForUi();
         return "Send " + amount + " credits to " + partner + "?\n"
                 + "The credits leave your account now and arrive on the other side once, even if the"
-                + " link drops in between.\n"
-                + "There is no way to take them back.";
+                + " link drops in between. If they cannot be delivered at all, they come back to"
+                + " you.\n"
+                + "Once they arrive there is no way to take them back.";
     }
 
     /**

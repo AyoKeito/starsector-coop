@@ -3883,6 +3883,15 @@ public class CoopNetPump implements EveryFrameScript {
     private void endSessionAfterDrop() {
         boolean changed = sessionState.onChannelDisconnected();
         latestTimeSnapshot = null;
+        // Credit red-team P1-1: past this edge peerProvenForOutbound() goes true again and
+        // expectedSessionToken is already null, so both gates that were holding a queued CREDITS_GRANT
+        // for the reconnect are down. The next socket to attach would be written a grant belonging to
+        // a session that no longer exists. Drop them here instead; each one is refunded to the sender.
+        int refundedGrants = service.discardOutboundCreditsGrants();
+        if (refundedGrants > 0) {
+            CoopLog.warn(CoopNetPump.class, "Coop dropped " + refundedGrants
+                    + " undelivered credit grant(s) with the session; they were returned to the sender");
+        }
         // The slot is free, so the next guest owes its own seed-lock ack before it counts as one.
         guestSeedLockAcked = false;
         // Phase 20.6: drop every live reading but keep the event log, so the page still explains what
