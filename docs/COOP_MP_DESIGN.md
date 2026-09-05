@@ -700,7 +700,7 @@ Confidence: ★★★★★ (observed live).
 
 - Both players can be docked at the same station simultaneously
 - Private screens (own refit, own officers, own cargo, own intel) concurrent — no conflicts
-- Shared-state screens (shop inventory, submarkets — host-authoritative market contents) mutually exclusive — only one player at a time. Other sees "PlayerX is using the shop" + wait/move-on options. Station storage is per-player (private), so it is not mutexed
+- Shared-state screens (shop inventory, submarkets — host-authoritative market contents) mutually exclusive — only one player at a time. Other sees "PlayerX is using the shop" + wait/move-on options. ~~Station storage is per-player (private), so it is not mutexed~~ *(2026-09-05, plan Phase 32: storage is shared and host-canonical like the other submarkets, so it is inside the same lockout as the rest of the dock)*
 - Bar listing shows other player's presence
 
 Confidence: ★★★★.

@@ -326,6 +326,8 @@ Was accepted here as "each player hires from their own pool". Now replicated: th
 
 Per-player by design: local dialog interactions against a player's own cargo and rep, with no shared state touched. Accepted.
 
+**Widened by Phase 32 (2026-09-05), same reasoning.** The black market and the military submarket are shared now, but everything a trade *causes* still runs only on the engine that made the trade: smuggling suspicion, the odds a patrol scans you, learning a blueprint from a sale, and the price impact of a large trade. Two players standing at the same black market can read different suspicion strings. The cargo moves; the consequences do not.
+
 Bar *offers* used to be listed here on the same reasoning. They are not accepted any more; Phase 12c build task C replicates the pool instead of trying to reseed it. The seeding half of that old entry stands and is why the pool had to be replicated: offer selection runs through a `WeightedRandomPicker` with a null `Random`, which falls back to `Math.random()`, so equal `BarEventManager.seed` values never produced equal offers (memory `bar-mission-seed-sync`). What the seed does control is the shown subset, and that is now synced too. See "Phase 12c — Bar Pool" below for what still diverges.
 
 ### Slipstream networks
@@ -389,13 +391,13 @@ The residue is a narrow **undercharge**: the guest's own pulse only sees the fle
 
 ## Phase 12c — Market Capture Fidelity: Accepted Gaps
 
-Gaps 2a through 2e closed most of what the market snapshot used to drop. Three things it still does not carry.
+Gaps 2a through 2e closed most of what the market snapshot used to drop. Two things it still does not carry; the third, module loadouts, was closed by Phase 32.
 
-### Multi-module ships arrive with pristine modules
+### Multi-module ships arrive with pristine modules — RESOLVED by Phase 32 (2026-09-05)
 
-`CoopShipDetail` captures one variant: the parent's hull spec, perma mods, s-mods, refit, suppressed mods, weapons, wings, vents/caps and the member's base CR. A station or multi-module hull keeps its modules as separate variants referenced from the parent's module slots, and the codec does not recurse into them. A damaged Prometheus MkII listing therefore reconstructs with a battered parent and clean modules.
+Was accepted here because `CoopShipDetail` captured one variant: a damaged Prometheus MkII listing reconstructed with a battered parent and clean modules. Phase 32 needed the same blob for shared storage, where a parked ship losing its modules is a real loss rather than a wrong price, so the codec now recurses `getModuleSlots()`/`setModuleVariant` to a depth of four and carries weapon groups, current hull fraction and the variant display name with it.
 
-Not attempted because the recursion is unbounded in the wrong direction: module variants can themselves reference modules, the slot-to-variant mapping is not exposed as a settable pair on `ShipVariantAPI`, and the market listings that carry modules at all are rare (station hulls are almost never open-market stock). The parent's D-mods and CR are what price the listing, and those do survive.
+Two residues, both in the Phase 32 section below: only a module hanging directly off the member carries its hull damage, and nesting past four levels is refused rather than walked.
 
 ### Mercenary level rolled off `Misc.random` before the snapshot
 
@@ -631,3 +633,80 @@ sees "Remote player is interacting: colony management" and is bounced to the INT
 
 Two consequences to expect in play: the lockout is global, so the second player cannot edit a
 *different* colony either, and the bounce is a tab switch rather than a closed screen.
+
+
+## Phase 32 — Shared Submarkets and Storage: Accepted Divergences
+
+Storage, the black market and the military submarket became host-canonical on 2026-09-05, on the same snapshot-on-open and guest-delta path the open market had used since Phase 12. What follows is what the two engines still do differently, and what a player sees when they hit it.
+
+### One unlock, two monthly fees
+
+Either player's 5000 credits opens a market's storage for both, and after that both engines bill their own monthly storage fee against the same contents. The fee is charged locally by each engine's economy tick, and the alternative, billing one player for a locker both use, was worse. It is the price of one unlock for two players.
+
+### Shop listings diverge between opens
+
+Ship and weapon stock on the open, black and military submarkets is rolled from unseeded item RNG on each engine, so the two disagree until someone docks. Snapshot-on-open is the whole convergence mechanism: the host answers the dock with one snapshot per shared submarket and the partner's shelf is replaced with the host's. Between opens they drift again, and the 30-day save-time reroll described under `OpenMarketPlugin.writeReplace` above adds to it. Docking fixes it.
+
+### The guest holds the host's commission, and none of what it pays
+
+The host's commission faction is mirrored to the guest as the `$fcm_faction` memory key, which is the one thing the military submarket reads to decide whether a commission-gated item is buyable. That is the whole of it: the salary, the commission bounties and the `FactionCommissionIntel` entry stay on the host, because instantiating the intel on the guest would run a second salary and a second termination. The guest also cannot sign or resign a commission of its own, and that is enforced rather than accepted: `cmsn_askForCommissionOpt` and `cmsn_resignCommissionOpt` are replaced in `rules.csv` with `!$global.coopIsGuest` appended, the same mechanism that removes the Galatia chain. Resign is gated because the mirrored key otherwise makes vanilla offer the guest the chance to resign the host's commission.
+
+### A locker too big to send is not sent
+
+There is no chunking on `MARKET_SNAPSHOT`. A submarket whose encoded stock passes the 1 MB frame cap is skipped, and the host player gets a feed line naming the submarket, the market and the size in KB; the partner keeps whatever it had until the locker shrinks. A warning fires at 256 KB, well before the cap. It takes thousands of hulls to get there, and the remedy is to take ships out of that locker.
+
+### A stored hull the host cannot capture in full is listed degraded
+
+The partner sees a pristine hull of the right variant with the right CR and hull damage; the D-mods, s-mods, weapons and weapon groups are missing on their side only. The alternative was omitting the hull from the listing, which reads to the other player as a ship that was stolen. The log line is `Coop stored hull member=... could not be captured in full`, and the depositor's own copy is untouched.
+
+### A stored ship the receiver cannot rebuild comes back as its base variant
+
+The same failure at the other end: the ship is added on the base variant with the sender's CR and hull fraction, losing the refit, the D-mods and the custom name, rather than being dropped. A ship listing in a *shop* that fails the same rebuild is skipped instead, because a shop listing belongs to nobody and a wrong price is worse than a missing line.
+
+### A withdrawal that matches nothing on the host is a no-op
+
+If a guest withdraws a hull whose id the host cannot find, the host logs a warning and changes nothing. The guest's own view is corrected by the next snapshot, which is the next time it opens that storage.
+
+### An s-modded built-in hull mod gains a `permaMods` entry
+
+Built-in hull mods are not in `permaMods` on a stock variant; s-modding one puts it there on the rebuilt copy, so a capture, rebuild and re-capture cycle adds the entry. It is stable after one cycle and changes nothing in play, but a field-by-field diff of the same ship before and after a round trip shows it.
+
+### Only a module hanging directly off the member carries its hull damage
+
+Module variants recurse, module *damage* does not: the per-module hull fraction is read off the member's status index, which vanilla populates one level deep. A module of a module rebuilds undamaged. Vanilla nests one level, so this is reachable only with a mod that nests deeper.
+
+### Module nesting is capped at four levels
+
+Capture warns and stops at four; decoding a deeper blob throws. The cap exists so a mod that manages to make a module cycle costs a warning rather than the campaign thread.
+
+### Officers do not travel with a stored ship
+
+Vanilla removes the officer when the player stores a ship, so there is nothing to carry across and nothing is lost. The officer stays in the depositor's fleet.
+
+### Weapon groups under a mod mismatch
+
+When the receiving engine cannot resolve a weapon in a group, that slot is dropped from the group. A group that ends up empty stays as an empty placeholder so the surviving groups keep their numbers, and if no group survives at all the receiver autogenerates them the way the refit screen does. A warning names the member.
+
+### A market whose only shared submarket is a locked locker opens on the timeout
+
+The guest's sync gate arms on the dock, the host finds nothing shareable to snapshot, and the trade options open 5 seconds later on the timeout instead of on the reply. Same for a hidden base the guest has paired but the host has since lost. It looks like a slow dock and nothing else.
+
+### The host materialises an empty locker for every unlocked market the guest opens
+
+Capturing storage calls `getCargo()`, which creates the submarket's cargo object when it does not exist. On the host that means an unlocked market the host has never used gets an empty locker object. It rolls nothing, costs nothing and is invisible in play.
+
+### Hidden-base markets are shared, with two residues
+
+A pirate or Luddic Path base's market is paired across the two engines by id now, so its stock and transactions are shared. The base's **name and orbit still differ per engine**, because each engine mints those itself. And a base carries only `open_market` and `black_market`, no storage and no military, so the storage half of the shared-submarket code never runs there.
+
+### Storage-unlock flags outlive the market only in persistent data
+
+The host resolves every market id before sending its unlock baseline, so a destroyed base or an abandoned colony is pruned out of what the peer receives. The `coop.storageUnlocked:<marketId>` key itself stays in sector persistent data, deliberately: a market rebuilt at the same id keeps its unlock instead of charging 5000 credits a second time.
+
+### Credits are a float, and a delivered grant is delivered
+
+The engine wallet is a `float`, so above 2^24 credits a small transfer can land a credit or two off. That is vanilla arithmetic, not the wire. Two consequences of the transfer design itself: a grant already written to the OS socket counts as delivered, so a receiving process that dies before applying it loses the money the way it loses any other unsaved state; and a grant that never reaches the socket (queue cap, session end, shutdown) is refunded to the sender with a feed line. Gifts are counted nowhere in the session stats.
+
+### Two notes for the runbooks
+
+Ship ids in the Phase 30 bridge market dump are origin-namespaced (`c_<playerId>_<memberId>`), so a grep for a bare member id finds nothing. And `SNAPSHOT_WARN_BYTES`/`SNAPSHOT_MAX_BYTES` in `CoopCampaignReplicator` mirror `CoopNetService`'s frame constants by value rather than by reference; changing the frame cap means changing both.

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**Shared storage and submarkets**
+
+- Storage is shared at every market that has a locker. Either player's 5000-credit unlock opens it
+  for both, and a ship one of you parks comes out for the other with its refit, weapon groups, hull
+  damage and modules. Each game still bills its own monthly storage fee against the contents.
+- The black market and the military submarket are shared on the same terms as the open market: the
+  host's shelf, refreshed each time either of you docks. What a trade causes stays local, so
+  smuggling suspicion, scan odds, blueprints learned from a sale and price impact are still each
+  game's own.
+- A commission held by the host lets the guest buy that faction's commission-gated military items.
+  The salary and the commission's own bounties stay with the host, and the guest can no longer sign
+  or resign a commission.
+- Pirate and Luddic Path bases share their shop between the two games. Each game still names the
+  base and places its orbit itself, and a base carries no storage locker.
+- Ship listings now carry weapon groups, current hull damage, the variant's display name and module
+  loadouts, so a refitted ship survives the round trip in either direction.
+
+**Credits**
+
+- A Send credits row on the Coop Options page moves money between players: step the amount, press
+  Send, confirm. It leaves your account on send and lands once on the other side. A transfer made
+  while the link is down goes through on the resume; one that can never be delivered is put back in
+  your account with a message-feed line.
+
 ## 0.1.0, first release
 
 Two-player co-operative Starsector. One shared sector, one campaign clock, two fleets.

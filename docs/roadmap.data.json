@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b and 7c built + live smoke PASSED 2026-09-02; 20 built + red-teamed + six-profile shaped-loopback matrix PASSED 2026-09-02, real-Internet smoke PASSED the same evening; 29 M2 built + certified on the shaped matrix 2026-09-03; 21 and 28 built 2026-09-03 and two-instance smoke PASSED the same day after 7 fixes (c5c50cb); two fix campaigns on top, 2026-09-03/04 (ae1e3a5, 107 audit findings) and 2026-09-04 (755b587, 2787 tests green), the second holding five items that have not been in front of a running game"
+      "note": "code-complete and smoke-verified in-game (P1–18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b and 7c built + live smoke PASSED 2026-09-02; 20 built + red-teamed + six-profile shaped-loopback matrix PASSED 2026-09-02, real-Internet smoke PASSED the same evening; 29 M2 built + certified on the shaped matrix 2026-09-03; 21 and 28 built 2026-09-03 and two-instance smoke PASSED the same day after 7 fixes (c5c50cb); two fix campaigns on top, 2026-09-03/04 (ae1e3a5, 107 audit findings) and 2026-09-04 (755b587, 2787 tests green), the second holding five items that have not been in front of a running game; 32 specced and built 2026-09-05 with a five-lens red-team pass on top (6ba4bca), two-instance smoke pending"
     },
     {
       "key": "partial",
@@ -28,7 +28,7 @@
       "key": "queued",
       "icon": "◆",
       "label": "Queued for V1",
-      "note": "committed to V1, not yet built — shown below in build order"
+      "note": "committed to V1, not yet built. Empty since 2026-09-05: Phase 19 is the only V1 phase left and it sits under Next up"
     },
     {
       "key": "postv1",
@@ -37,9 +37,16 @@
       "note": "after the private soak / public release; order decided 2026-09-05: 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 33 → 22 → 25 → 27, as appetite allows"
     }
   ],
-  "hereHead": "You are here: 0.1.0 published on GitHub 2026-09-05 (v0.1.0, 43e090b); the user solo-smokes it, fixes go to 0.1.1, first friend test on 0.1.1; outstanding: two-instance smoke for the launcher and the fix passes, the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
-  "here": "<b>0.1.0 is published.</b> Tag <code>v0.1.0</code> on <code>43e090b</code>, 3005 tests green, <code>coop-0.1.0.zip</code> attached at <a href=\"https://github.com/AyoKeito/starsector-coop/releases/tag/v0.1.0\">releases/tag/v0.1.0</a> (2026-09-05). It is a full release, not a prerelease, because the launcher update check reads <code>releases/latest</code>. The Ziggurat test start shipped in it on purpose. The user runs the solo smoke list against this zip (fresh install from the archive, launcher-driven two-instance session, reconnect mid-purchase, save and resume, one tunnelled WAN run); what it catches is fixed into 0.1.1, and the first session with a second real player happens on 0.1.1. <b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is built (5cc5303: dark FlatLaf window, invite string with seed and world settings, install checks incl. the game version, host pre-flight and guest test connection, bug-report zip, update check, every -Dcoop flag in Advanced, COOP-GAME refusal). <b>Its two-instance smoke is deferred</b> (user, 2026-09-03) and runs as part of the Phase 19 checklist; until then the sandbox's acceptance of <code>System.setProperty</code> for the republished launcher flags is unverified in-game. A second fix pass merged 2026-09-04 (<code>755b587</code>, 2787 tests green): its reconnect message-loss fix, the guest saturation-bombardment deciv, stable-location construction (ticked in the plan since 2026-06-10 but never built) and guest gate scanning are unit-verified only and need the same session, as does the mission-board claim trigger merged later the same day (b8b8e4b): the first-come arbitration had no trigger since Phase 12c, so both players could accept the same bar offer. A third pass the same evening (<code>7d7e553</code>, 2943 green) closed nine review findings, one of them a P0 in the reconnect grace (replacement-socket traffic tagged as the dead partner's); its four smoke items are listed under ATTENTION. A fourth pass on 2026-09-05 (<code>8f66a8b</code>, 2966 green) closed four more: the transport now holds session traffic from an unproven replacement socket, guest storage and black-market trades no longer land on the host's open market, post-battle mirror freezes expire on a per-frame clock, and NPC CR/hull reach the guest through a rate-limited health resend; its three smoke items are listed under ATTENTION. A fifth pass the same day (<code>2641e0d</code>, 2993 green) closed four of seven review findings: a failed colony-management apply no longer rolls the partner's edit back, launcher file writes are atomic, the bridge client stops replaying mutations, and a test pins every message type's policy classification; its one smoke item is listed under ATTENTION. A sixth pass the same evening (<code>67a8844</code>, 3034 green), from a review of every accepted divergence after the release, fixed three: ambient spawns no longer land on a guest in a guest-only system, the guest has no hostile-activity meter, and the Galatia Academy chain is unavailable on the guest; its three smoke items are listed under ATTENTION. The same review specced <b>Phase 34</b> (bounties for the guest), Phase 26 milestone 5 (sensor ghosts) and two Phase 32 additions (shared hidden-base markets, credit transfer). <b>Phase 32</b> (shared storage, black market and military submarket) was researched and specced 2026-09-05 on user decisions (all storage markets, no migration) and is next in the build order, before the Phase 19 sign-off. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist plus the launcher smoke, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
+  "hereHead": "You are here: 0.1.0 is published (v0.1.0, 43e090b) and Phase 32 is built on top of it; outstanding: the two-instance smoke for the launcher, for six fix passes and for Phase 32, the listing forum URL and the Ziggurat test start (Phase 23), then the Phase 19 sign-off",
+  "here": "<b>0.1.0 is published and Phase 32 is built on top of it.</b> Tag <code>v0.1.0</code> on <code>43e090b</code>, <code>coop-0.1.0.zip</code> attached at <a href=\"https://github.com/AyoKeito/starsector-coop/releases/tag/v0.1.0\">releases/tag/v0.1.0</a> (2026-09-05). The user solo-smokes that zip, what it catches is fixed into 0.1.1, and the first session with a second real player happens on 0.1.1. <b>Everything below is outstanding.</b> <b>No two-instance session has run since 2026-09-03.</b> Six fix passes and <span class=\"rp\" data-jump=\"32\">Phase 32</span> (<code>6ba4bca</code>: shared storage at every market, black market and military submarket, hidden-base markets paired across the engines, credit transfer from the options page; specced and built 2026-09-05 with a five-lens red-team pass on top) are therefore unit-verified only. Every one of their smoke items is listed under ATTENTION and folds into the Phase 19 checklist. <span class=\"rp\" data-jump=\"31\">Phase 31</span>'s launcher smoke is deferred the same way (user, 2026-09-03), so the sandbox's acceptance of <code>System.setProperty</code> for the republished launcher flags is still unverified in-game. <span class=\"rp\" data-jump=\"23\">Phase 23</span> needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist plus everything above, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
   "attention": [
+    {
+      "sev": "revisit",
+      "sevLabel": "live smoke",
+      "head": "Phase 32 shared submarkets and storage: built and red-teamed, never played",
+      "state": "open; folds into the Phase 19 checklist",
+      "body": "Merged at <code>6ba4bca</code>, deployed. Twelve items, two instances. From the spec: guest stores a refitted ship with custom weapon groups and hull damage, host withdraws it and compares the refit screen field by field, then stores it back; guest pays the 5000-credit unlock at a non-colony market and the host finds the locker open with the deposit in it; both buy from one black market in turn and the second sees the first's leftovers; the guest buys a commission-gated item at the military submarket while the host holds the commission; a deposit in flight across a cut link lands exactly once after the resume; both dock at one pirate base in turn and a guest purchase shows in the host's stock; credits go both ways, including one sent during a reconnect hold. Added by the red-team pass: the guest opens storage twice in a row after depositing and the ship keeps its identity (bridge shows <code>kept=</code>, no rebuild flicker); the host is killed with a grant queued and the sender's balance comes back with the returned-credits feed line; a guest unlock at a pirate base right after a reconnect blip opens the host's locker with no <code>flagged unknown market</code> for a guest-local id; the host's commission ends while the guest is disconnected and the military submarket refuses the gated item after the rejoin; a locker of 30+ refitted hulls may log <code>Coop MARKET_SNAPSHOT is large</code> but must never log <code>refused</code>."
+    },
     {
       "sev": "revisit",
       "sevLabel": "live smoke",
@@ -1089,22 +1096,27 @@
       "title": "Shared Submarkets + Storage",
       "theme": "economy",
       "track": "v1",
-      "status": "not-built",
-      "summary": "Host-canonical storage, black market and military submarket on the same snapshot-on-open plus guest-delta path the open market uses today. Shared storage at every market is the two players' way to park and exchange ships until a direct transfer exists; ship listings gain weapon groups, hull damage, display name and module loadouts so a refitted ship survives the round trip.",
+      "status": "built",
+      "summary": "Host-canonical storage, black market and military submarket on the same snapshot-on-open plus guest-delta path the open market uses. Shared storage at every market is how the two players park and exchange ships; ship listings gained weapon groups, hull damage, display name and module loadouts so a refitted ship survives the round trip. Hidden-base markets are paired across the two engines, and credits move between players from the Coop Options page.",
       "introduces": [
         "submarketId on MARKET_OPEN / MARKET_SNAPSHOT / MARKET_TXN",
         "submarketCargo allowlist accessor (open, black, military, storage; local_resources denied)",
-        "storage apply that never drops a deposit",
-        "CoopShipDetail weapon groups + hull + display name + modules",
-        "STORAGE_UNLOCK and COMMISSION world deltas"
+        "storage apply that reconciles per hull and never drops a deposit",
+        "CoopShipDetail weapon groups + hull fraction + display name + modules",
+        "STORAGE_UNLOCK and COMMISSION world deltas",
+        "CoopMarketIds host/local pairing for hidden bases (addition A)",
+        "CREDITS_GRANT + Send credits row on the options page (addition B)"
       ],
       "residue": [
+        "two-instance smoke pending: refit round trip, non-colony unlock, black-market leftovers, commission-gated item, deposit across a cut, pirate base both ways, credits both ways",
+        "red-team smoke additions: storage reconcile keeps identity, host killed mid-gift refunds, unlock right after a blip, commission ended while the guest is away, 30+ hull locker",
         "smuggling suspicion, blueprint learn-from-sale and price impact stay per engine",
         "both engines bill their own monthly storage fee",
-        "commission salary and bounties host-only",
-        "direct player-to-player transfer stays a Maybe"
+        "commission salary and bounties host-only; the guest gets the access clause",
+        "no snapshot chunking: a locker past the 1 MB frame cap is not sent",
+        "direct player-to-player cargo/ship transfer stays a Maybe"
       ],
-      "note": "Specced 2026-09-05 after a two-worker feasibility pass; user decisions the same day: all storage markets, black + military included, no migration (no ongoing games). Not built."
+      "note": "Specced and BUILT 2026-09-05, the same day, on user decisions taken that morning (all storage markets, black + military included, no migration). Six feature commits c5e3060..2fdbf24 plus four red-team fix commits, merged at 6ba4bca; additions A (hidden-base markets) and B (credit transfer) both in scope. A five-lens red-team pass the same day (credits, ship-detail codec, market/storage integrity, unlock/commission/ids, lifecycle) found five P0s, all fixed: a grant marked applied before the wallet write, a capture failure deleting the guest's stored ship, a deposit at an unpaired hidden base destroyed by the next snapshot, a reconnect that never re-baselined unlocks or commission, and cargo destroyed in the post-edge unmapped window. Nothing has been in front of two running games yet."
     }
   ],
   "buildOrderFallback": [

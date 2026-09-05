@@ -13,8 +13,8 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
   the guest sees no sensor ghosts anywhere.
 - **Story missions are the host's.** The mod removes every way into the Galatia Academy chain on
   the guest. Contacts, person bounties and system bounties are local to each player.
-- **No direct trade between players.** Cargo goes by jettisoned pod, ships through colony storage,
-  credits not at all.
+- **No trade screen between the two of you.** Cargo goes by jettisoned pod, ships through shared
+  storage, credits through a row on the Coop Options page.
 - **The host's save is the campaign.** The guest's save is co-op material and needs the mod and a
   host to be worth loading.
 - **Rejoin by loading the co-op save,** never by starting a New Game on the same seed.
@@ -93,11 +93,13 @@ breaks anything; both explain a "my Shift became a toggle" surprise.
 
 **Shared.** The world and everything in it: NPC fleets, markets and their stock, colonies and their
 industries, survey levels, explored ruins, salvaged wrecks, faction reputation, and the campaign
-clock.
+clock. Markets share four counters, not one: the open market, the black market, the military
+submarket and the storage locker.
 
-**Per-player.** Your fleet, your cargo, your credits, your officers, your skills. Salvage loot is
-per-player by design: the world remembers that a wreck was taken, and each of you rolls your own
-contents from it. Same rule for survey data.
+**Per-player.** Your fleet, your cargo, your credits, your officers, your skills. Credits are yours
+alone until you send some: the Coop Options page has a Send credits row and that is the only thing
+that moves money between you. Salvage loot is per-player by design: the world remembers that a wreck
+was taken, and each of you rolls your own contents from it. Same rule for survey data.
 
 **Neither, in this release.** Contacts, the missions contacts offer, and person bounties are local to
 each player. The guest gets no person bounties at all; the script that generates them is one of the
@@ -117,9 +119,31 @@ and the other player sees it taken.
 ## Trading with each other
 
 There is no trade screen between the two of you. Cargo moves the vanilla way: jettison it, and the pod
-appears on your partner's map for them to pick up. Ships move through a colony's storage, which both
-of you can use. Credits do not move at all; the closest thing is colony income, which is split down
-the middle every month.
+appears on your partner's map for them to pick up.
+
+**Storage is one locker, at every market that has one.** Whichever of you pays the 5000 credits opens
+that market's storage for both, and from then on what one of you parks the other can take out. A ship
+comes back the way it went in: refit, weapon groups, hull damage, modules. Two things follow from
+sharing it. Each game bills its own monthly storage fee against the same contents, so one locker
+costs two fees. And it is behind the same one-player-at-a-time lockout as the rest of the dock, so
+you take turns.
+
+**The black market and the military submarket are shared as well.** You buy from the same shelf your
+partner does, refreshed from the host's game each time either of you docks, so what they bought is
+gone when you get there. What a trade *causes* stays local: your smuggling suspicion, your odds of
+being scanned, blueprints learned from a sale and the price impact of a big trade are each game's
+own, so the two of you can read different suspicion strings at the same market.
+
+**A commission is the host's, and the guest gets the door it opens.** While the host holds one, the
+guest can buy the commission-gated items at that faction's military submarket. The salary and the
+commission's own bounties are paid to the host. The guest cannot sign or resign a commission of its
+own; those dialog options are removed on the guest's game.
+
+**Credits move from the Coop Options page.** Open the intel screen, Coop Options, the Send credits
+row: step the amount, press Send, confirm. The money leaves your account when you press it and lands
+once on the other side, including when it was sent during a dropped link, in which case it arrives
+with the rest of the queued traffic on the resume. If it can never be delivered, because the session
+ended first or the game is closing, it is put back in your account and the message feed says so.
 
 One catch with pods. A pod is owned by whoever dropped it, and only that game runs its expiry timer.
 If the pod expires while neither of you is in that system, the partner's copy is never told and stays
@@ -171,11 +195,11 @@ guest until the next pool update drops it, so an accept can come back "already t
 Pather base rumour is generated locally on each side, which can shuffle the whole list into a
 different order, so the two bars occasionally show different picks out of the same pool.
 
-**Hidden bases are not shared markets.** A pirate or Luddic Path base is built by whichever game
-found it, and its market is minted there with an id the other game cannot resolve. So the shop you
-dock at is your own game's, its stock is not synchronised, and the trade screen opens straight away
-instead of waiting for the host's snapshot the way an ordinary market does. Two players buying from
-one hidden base are buying from two different piles.
+**Hidden bases share their shop, not their name.** A pirate or Luddic Path base is built by whichever
+game found it, and each game names it and places its orbit itself, so the same base can read
+differently on your two maps. The shop is shared: dock in turn and the second of you sees the first's
+leftovers. A base carries an open market and a black market and nothing else, so there is no storage
+locker to share there.
 
 **Surveying.** A system can be remote-surveyed once by each of you, where a solo campaign allows one
 sweep. The survey data commodity goes to whoever ran the survey; the other player gets the survey
@@ -199,8 +223,7 @@ so they are held back entirely.
 **Markets neither of you has visited recently** can drift apart, because Starsector rerolls shop stock
 on save when the last roll is over 30 days old, and the two of you save at different moments. Docking
 converges them. Right after a guest opens a market, mercenary captains and their levels can differ for
-the second or two before the host's snapshot lands. A damaged multi-module ship in a listing arrives
-on the other side with clean modules.
+the second or two before the host's snapshot lands.
 
 **Two abilities behave slightly differently for the guest.** An interdiction pulse the guest fires
 charges its reputation cost when the charge-up starts rather than when the pulse lands, and only for

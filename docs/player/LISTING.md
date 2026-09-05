@@ -47,13 +47,20 @@ forward is shared and both clocks speed up together.
 abilities. Patrols, traders, pirates and bounty fleets are simulated once by the host and mirrored,
 including the ones chasing your partner. Salvage, surveys and exploration are shared, so one of you
 looting a wreck means both of you see it gone. Markets, shop stock, officer pools and bar offers are
-shared, and docking refreshes what you see. Faction reputation is shared, which means your partner's
-smuggling shows up on your standing. Cargo pods are shared too, and they are how you hand your partner
-fuel or supplies: jettison it, they fly over and pick it up.
+shared, and docking refreshes what you see, on the open market, the black market and the military
+submarket alike. Faction reputation is shared, which means your partner's smuggling shows up on your
+standing. Cargo pods are shared too, and they are how you hand your partner fuel or supplies:
+jettison it, they fly over and pick it up.
+
+**Handing things over.** Storage is one locker at every market that has one: whichever of you pays
+the 5000 credits opens it for both, and a ship parked by one of you comes out for the other with its
+refit, weapon groups, hull damage and modules intact. Each game bills its own monthly fee for the
+contents. Credits move from a Send credits row on the Coop Options page, once, with the amount put
+back in your account if it cannot be delivered.
 
 **Colonies.** One player faction with two governors. Both of you can found colonies, build
-industries, run the construction queue and use colony storage on the same colonies, one of you at a
-time in the colony screen. Monthly income splits evenly. Raids and bombardments work in both
+industries and run the construction queue on the same colonies, one of you at a time in the colony
+screen. Monthly income splits evenly. Raids and bombardments work in both
 directions, and an incoming expedition raises a warning with a countdown on both screens.
 
 **Combat.** Whoever gets engaged fights on their own PC and pilots it as normal. The other player is
@@ -101,9 +108,9 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
   on the guest.
 - **Contacts, their missions, person bounties and system bounties are local to each player,** and
   the guest gets no person bounties at all.
-- **No direct trade between players.** Nothing on screen moves credits or cargo from you to your
-  partner. Cargo goes by jettisoned pod, ships through a colony's storage, and credits cannot be
-  handed over at all.
+- **No trade screen between the two of you.** Cargo goes by jettisoned pod, ships through the shared
+  storage locker at any market, and credits through a Send credits row on the Coop Options page.
+  There is no screen where you hand your partner a stack of supplies directly.
 - **No text chat.** The mod assumes you are on voice.
 - **Solo play is not supported with the mod enabled.** Difficulty is forced to Normal, the tutorial
   is skipped, and the career list gains a test start. Turn the mod off for solo campaigns.
@@ -124,8 +131,11 @@ Places where the two games legitimately read differently. None of these is a bug
 - A system can be remote-surveyed once by each of you.
 - Colony construction bars and shortage markers can read differently on the two screens until they
   converge, with the host's reading canonical.
-- A pirate or Luddic Path base is built by whichever game found it, so its market is that game's own:
-  the stock is not synchronised between you.
+- A pirate or Luddic Path base is built by whichever game found it, so the two of you can see it
+  named differently and orbiting differently. Its shop is shared.
+- A commission is the host's: the guest can buy the commission-gated military items while the host
+  holds one, but the salary and the commission's bounties are the host's, and the guest cannot sign
+  one of its own.
 
 ## Reporting a problem
 
