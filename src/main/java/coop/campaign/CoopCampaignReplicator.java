@@ -75,12 +75,14 @@ import coop.util.CoopLog;
 
 import java.awt.Color;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
@@ -223,6 +225,36 @@ public final class CoopCampaignReplicator
      * Luddic-Path base. {@code CoopBaseAuthority} is the only writer.
      */
     private final CoopMarketIds marketIds = new CoopMarketIds();
+
+    /**
+     * Guest, Phase 32 (P1-4): the market this dock has already asked the host about.
+     *
+     * <p>Vanilla reports a market open more than once per dock — the dock dialog's
+     * {@code showInteractionDialog}, then the core Crew/Cargo screen's own
+     * {@code reportPlayerOpenedMarketAndCargoUpdated}. The second one fires from <em>inside</em> the
+     * trade screen, which is the one place {@link CoopMarketSyncGate} structurally cannot reach (it
+     * disables dock-dialog option ids, and the player is already past them). Answering it means a
+     * full strip-and-replace of the black market and the storage locker while the player is looking
+     * at them. So one {@code MARKET_OPEN} per dock: cleared on market close, on a different market,
+     * and on session teardown. Host-initiated re-snapshots are unaffected.
+     */
+    private String marketOpenRequestedFor;
+
+    /**
+     * Host, Phase 32 (P1-3): {@code senderId#seq} of every {@code MARKET_TXN} line already applied.
+     *
+     * <p>{@code MARKET_TXN} is on the pump's {@code survivesTheDropEdge} list and a peer's
+     * {@code detach} requeues a partially written frame, so a line parked before a reconnect can be
+     * delivered twice. Every apply is additive against a locker — a duplicated deposit is a phantom
+     * hull no withdrawal can remove, a duplicated withdrawal takes a second ship — so the "the host
+     * never rebroadcasts" transport argument needs an actual check behind it. Bounded to
+     * {@link #MARKET_TXN_LEDGER_MAX} in insertion order: this only has to span a reconnect edge, not
+     * a campaign.
+     */
+    private final Set<String> appliedMarketTxns = new LinkedHashSet<>();
+
+    /** How many {@code (senderId, seq)} pairs the duplicate-transaction ledger remembers. */
+    private static final int MARKET_TXN_LEDGER_MAX = 512;
 
     private final CoopStorageUnlockSync storageUnlockSync =
             new CoopStorageUnlockSync(CoopStorageUnlockSync.liveEngine());
@@ -503,6 +535,11 @@ public final class CoopCampaignReplicator
         missionBoard.clear();
         marketSync.clear();
         appliedHireables.clear();
+        // Phase 32: the per-dock MARKET_OPEN latch and the duplicate-transaction ledger are both
+        // session-scoped. Keeping the latch across a teardown would silence the first open of the
+        // next session; keeping the ledger would only pin memory (seqs restart with the service).
+        marketOpenRequestedFor = null;
+        appliedMarketTxns.clear();
         // Same rule as tickMarketSyncGate: put the trade options back before forgetting the gate,
         // or a teardown mid-dock leaves them greyed out with nothing left to re-enable them.
         if (marketSyncGate.pendingMarketId() != null) {
@@ -972,6 +1009,20 @@ public final class CoopCampaignReplicator
         // guest asks the host for a snapshot and applies it to its own market once; thereafter both
         // sides apply the same per-transaction delta, so they stay consistent with no live re-sync.
         if (isGuest()) {
+            // Phase 32 (P1-4): one MARKET_OPEN per dock. The second vanilla callback fires from
+            // inside the core trade screen, and answering it lands a full strip-and-replace of the
+            // black market and the storage locker under the player's hands -- the one case the sync
+            // gate cannot cover, because the gate disables dock-dialog options and the player is
+            // already past them. Nothing else happens on the repeat either: the hire baseline stays
+            // (no second snapshot is coming to re-add a person hired in between, and the close diff
+            // still catches it) and the gate keeps its original arming clock.
+            if (market.getId() != null && market.getId().equals(marketOpenRequestedFor)) {
+                CoopLog.debug(CoopCampaignReplicator.class,
+                        "Coop MARKET_OPEN suppressed: this dock already asked for market="
+                                + market.getId() + " (vanilla reports one open twice)");
+                return;
+            }
+            marketOpenRequestedFor = market.getId();
             // Drop the hire baseline before asking for a fresh one. It is a claim generator: every
             // person still in it at market-close that is no longer hireable is reported to the host
             // as "the guest hired them", and the host deletes them from the canonical pool. A
@@ -1037,6 +1088,9 @@ public final class CoopCampaignReplicator
         if (market == null) {
             return;
         }
+        // Phase 32 (P1-4): the dock is over, so the next open of this market is a real one again.
+        // Cleared unconditionally rather than only for a matching id: a close is a close.
+        marketOpenRequestedFor = null;
         // Phase 12c gap 2d: there is no vanilla hire event, so the guest claims its hires here by
         // diffing the market's hireable set against the set the last snapshot applied.
         if (isGuest() && isActive() && !replayGuard.isReplaying()) {
@@ -1313,11 +1367,83 @@ public final class CoopCampaignReplicator
                 items.addAll(captureHireablePool(market));
             }
             marketSync.applySnapshot(market.getId(), specId, items);
+            String encoded = CoopMarketSync.encodeStock(items);
+            if (!snapshotFitsAFrame(market, specId, items.size(), encoded)) {
+                continue;
+            }
             sendTo(toSenderId, CoopMessages.marketSnapshot(session.sessionId(), service.nextSeq(), now(),
-                    market.getId(), specId, count, CoopMarketSync.encodeStock(items)));
+                    market.getId(), specId, count, encoded));
             CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_SNAPSHOT market=" + market.getId()
                     + " submarket=" + specId + " of " + count
                     + " items=" + items.size() + " " + kindBreakdown(items));
+        }
+    }
+
+    /**
+     * Soft threshold at which an outbound {@code MARKET_SNAPSHOT} is loud about its size. Mirrors
+     * {@code CoopNetService.WARN_FRAME_BYTES}; the transport warns once per message <em>type</em>,
+     * which for a per-market snapshot is one warning for the whole session.
+     */
+    static final int SNAPSHOT_WARN_BYTES = 256 * 1024;
+
+    /**
+     * Hard cap, mirroring {@code CoopNetService.MAX_FRAME_BYTES}. Mirrored rather than referenced
+     * because both transport constants are package-private to {@code coop.net} and this class must
+     * not widen them; if that cap is ever changed, change this one with it. Past this the transport
+     * drops the frame with a
+     * WARN and continues, and nothing above it learns the snapshot never went — the guest's gate
+     * then times out, its locker keeps whatever it had, and the two engines diverge silently.
+     *
+     * <p><b>No chunking (accepted limitation).</b> Splitting a submarket's listings across frames is
+     * a protocol change; this build refuses the send instead and tells the host's player, so the
+     * divergence is visible rather than silent. A locker that big is unreachable in ordinary play:
+     * a fully specified capital hull encodes to a few KB, so the cap is thousands of hulls.
+     */
+    static final int SNAPSHOT_MAX_BYTES = 1024 * 1024;
+
+    /**
+     * Host: is this snapshot small enough to put on the wire? Warns near the transport's soft
+     * threshold; refuses, logs at ERROR and posts a feed line past its hard cap (Phase 32, P2-8).
+     */
+    private boolean snapshotFitsAFrame(MarketAPI market, String specId, int itemCount, String encoded) {
+        int bytes = encoded == null ? 0 : encoded.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes < SNAPSHOT_WARN_BYTES) {
+            return true;
+        }
+        String marketId = market == null ? "?" : market.getId();
+        if (bytes < SNAPSHOT_MAX_BYTES) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_SNAPSHOT is large: market="
+                    + marketId + " submarket=" + specId + " items=" + itemCount + " bytes=" + bytes
+                    + " (soft threshold " + SNAPSHOT_WARN_BYTES + ", hard cap " + SNAPSHOT_MAX_BYTES
+                    + "); there is no chunking, so past the cap it will not be sent at all");
+            return true;
+        }
+        CoopLog.error(CoopCampaignReplicator.class, "Coop MARKET_SNAPSHOT refused: market="
+                + marketId + " submarket=" + specId + " items=" + itemCount + " encodes to " + bytes
+                + " bytes, past the " + SNAPSHOT_MAX_BYTES + " byte frame cap. It is not sent, so"
+                + " the partner's copy of this inventory stays their own until it shrinks.");
+        // A literal colour rather than Misc.getNegativeHighlightColor(): Misc's static initializer
+        // reads a dozen values out of Global.getSettings(), so the first touch of that class outside
+        // a live game leaves it permanently unusable for the rest of the JVM. Nothing on a snapshot
+        // path is worth that.
+        CoopFeed.post("Coop: " + specId + " at " + marketDisplayName(market)
+                + " is too large to share (" + (bytes / 1024) + " KB)", FEED_WARNING_COLOR);
+        return false;
+    }
+
+    /** Vanilla's negative-highlight red, spelled out; see {@link #snapshotFitsAFrame}. */
+    private static final Color FEED_WARNING_COLOR = new Color(255, 110, 110);
+
+    /** The market's display name for a player-facing line, falling back to its id. Total. */
+    private static String marketDisplayName(MarketAPI market) {
+        try {
+            if (market == null) {
+                return "an unknown market";
+            }
+            String name = market.getName();
+            return name == null || name.isBlank() ? market.getId() : name;
+        } catch (RuntimeException | LinkageError ex) {
+            return "an unknown market";
         }
     }
 
@@ -1680,6 +1806,28 @@ public final class CoopCampaignReplicator
     }
 
     // ---- Market contents + transactions -------------------------------------------------------
+    //
+    // Two ids run through every message in this section, and they are translated in exactly one
+    // place each. Getting either direction wrong loses a ship, so both rules are stated here.
+    //
+    // 1. MARKET ID (CoopMarketIds, Phase 32 addition A). toWire on the way out (sendMarketTxn, the
+    //    MARKET_OPEN send), toLocal on the way in (handleMarketOpen, hostApplyMarketTxn,
+    //    applyMarketSnapshot). Identity for every market whose id agrees across the two engines,
+    //    which is all of them except a mirrored pirate / Luddic-Path base.
+    //
+    // 2. FLEET-MEMBER ID (CoopMemberIds, Phase 32). A hull listed in a shared inventory travels
+    //    under c_<originPlayerId>_<originMemberId>, never under a raw genUID. Vanilla mints member
+    //    ids from a per-sector counter that both engines draw from, so a raw id stamped into the
+    //    other engine's object graph is an id that engine will itself mint later -- a scheduled
+    //    collision in the one place where a collision means "withdraw ship A, get ship B".
+    //      - capture (captureSubmarketStock, reportShipDeltas) stamps wireId(localPlayerId, id)
+    //        into both the StockItem.itemId and the CoopShipDetail.memberId, and the stamp is
+    //        idempotent so a hull round-tripping guest -> host -> guest keeps one stable name;
+    //      - a rebuilt member on the receiving engine is setId()'d to that wire id, which cannot
+    //        collide with a genUID (the c_ prefix is not hex);
+    //      - the originating engine's real ship keeps its own local id, so every match against a
+    //        local roster -- withdrawal by id, the storage reconcile, the duplicate-add guard --
+    //        goes through CoopMemberIds.matchesLocal rather than String.equals.
 
     @Override
     public void onPlayerMarketTransaction(PlayerMarketTransaction transaction) {
@@ -1794,13 +1942,31 @@ public final class CoopCampaignReplicator
             return;
         }
         for (PlayerMarketTransaction.ShipSaleInfo info : ships) {
-            CoopShipDetail detail = captureShipDetail(info == null ? null : info.getMember());
+            CoopShipDetail detail = stampWireMemberId(
+                    captureShipDetail(info == null ? null : info.getMember()));
             if (detail == null) {
                 continue;
             }
             sendMarketTxn(marketId, submarketId, CoopMarketSync.ItemKind.SHIP, detail.memberId(), sign,
                     sign < 0 ? detail.encode() : "");
         }
+    }
+
+    /**
+     * Re-stamps a freshly captured detail with its origin-namespaced wire id ({@link CoopMemberIds}).
+     *
+     * <p>The one place a hull's name crosses from "this engine's object graph" to "the wire", and it
+     * is deliberately not folded into {@code captureShipDetail}: that method is static and shared
+     * with the module recursion, which has no member id and no session to namespace one with.
+     * Idempotent, so re-capturing a member this engine rebuilt from a snapshot does not stack a
+     * second prefix on it.
+     */
+    private CoopShipDetail stampWireMemberId(CoopShipDetail detail) {
+        if (detail == null) {
+            return null;
+        }
+        String wireId = CoopMemberIds.wireId(session.localPlayerId(), detail.memberId());
+        return wireId.equals(detail.memberId()) ? detail : detail.withMemberId(wireId);
     }
 
     private void sendMarketTxn(String marketId, String submarketId, CoopMarketSync.ItemKind kind,
@@ -1848,6 +2014,14 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return;
         }
+        // Phase 32 (P1-3): the dedup check the old comment only argued for. MARKET_TXN survives the
+        // drop edge and a detaching peer requeues a partially written frame, so the same line can
+        // arrive twice across a reconnect -- and every apply here is additive against a locker.
+        if (!recordMarketTxnApplied(message)) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_TXN ignored as a duplicate"
+                    + " delivery sender=" + message.senderId() + " seq=" + message.seq());
+            return;
+        }
         CoopMessages.Payload payload = CoopMessages.payload(message);
         // Identity on the host (its table is always empty), translated at the boundary all the same
         // so the direction of every market id in this class is stated rather than assumed.
@@ -1868,12 +2042,25 @@ public final class CoopCampaignReplicator
         int qty = (int) payload.requiredLong("qty");
         String detail = payload.requiredString("detail");
         String actingPlayerId = payload.requiredString("actingPlayerId");
-        // Phase 21 stats. Dedup guarantee: MARKET_TXN is guest -> host only and the host never
-        // rebroadcasts it, so every message that reaches here is one transaction line, once.
+        boolean isHire = CoopPersonDetail.roleOf(kind) != null;
+        // Phase 32 (P3-12): the allowlist above says "one of the four shared inventories", which is
+        // not the same fence for a hire. The hireable pool lives on the market and rides the
+        // open-market snapshot only, so an OFFICER line stamped submarketId=storage would otherwise
+        // pass the allowlist and then delete a person from the host's pool, ignoring the submarket
+        // it claimed to happen in.
+        if (isHire && !Submarkets.SUBMARKET_OPEN.equals(submarketId)) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_TXN refused: a " + kind
+                    + " hire can only happen at " + Submarkets.SUBMARKET_OPEN + ", not submarket="
+                    + submarketId + " at market=" + marketId);
+            return;
+        }
+        // Phase 21 stats. Dedup is the (senderId, seq) ledger at the top of this method (Phase 32
+        // P1-3), not the transport argument this comment used to make. Counted here, after every
+        // refusal, so a line the host drops does not put a market into the player's trade history.
         //
         // Accepted v1 limitation, stated here so it is not read as a bug: the credit magnitude is
-        // qty * unitPrice, and unitPrice has always been sent as 0f (sendMarketTxn line 1338) because
-        // the sender diffs stack sizes and never sees a price. So a guest trade joins the
+        // qty * unitPrice, and unitPrice has always been sent as 0f (sendMarketTxn) because the
+        // sender diffs stack sizes and never sees a price. So a guest trade joins the
         // markets-traded-with set -- which is what the page's "markets traded with" column counts --
         // but contributes nothing to best-single-trade. Filling that in needs a price on the wire,
         // which is a protocol change this phase is not allowed to make.
@@ -1886,10 +2073,32 @@ public final class CoopCampaignReplicator
         // Keep the in-memory model in step (used by tests / future assertions).
         marketSync.applyTransaction(new CoopMarketSync.Transaction(marketId, submarketId, kind, itemId,
                 qty, payload.requiredFloat("unitPrice"), detail));
+        // Phase 32 (P0-1): a market this engine cannot resolve -- an unmapped mirrored hidden base
+        // is the case that produced this finding. The guest holds a deposit until the base is
+        // mapped, but a line that gets here anyway is a real loss, so it is named in full (submarket,
+        // kind, item, quantity) rather than dying two frames later inside a cargo accessor. No
+        // parking: replaying a stale cargo delta against a locker that has since been snapshotted is
+        // its own way to lose a ship.
+        MarketAPI targetMarket = findMarket(marketId);
+        if (targetMarket == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_TXN dropped: no host-side market"
+                    + " for id=" + marketId + " submarket=" + submarketId + " " + kind + ":" + itemId
+                    + " qty=" + qty + (detail.isEmpty() ? "" : " (carrying a ship detail)")
+                    + "; the line is lost");
+            return;
+        }
+        // Phase 32 (P2-6): the guest paid for the locker and the STORAGE_UNLOCK poll has not caught
+        // up yet. The host accepting a storage line while snapshotTargets still hides storage is
+        // what puts the same hull in both lockers at once, so the acceptance itself is the unlock.
+        if (Submarkets.SUBMARKET_STORAGE.equals(submarketId)
+                && CoopStorageUnlock.unlock(Global.getSector(), targetMarket)) {
+            CoopLog.info(CoopCampaignReplicator.class, "Coop storage unlocked at market=" + marketId
+                    + " by a guest transaction arriving before the STORAGE_UNLOCK poll");
+        }
         // A hire is an availability removal on a second engine structure (the officer manager's pools),
         // not a cargo delta, so it routes past applyItemDeltaToEngine entirely. No credit deduction:
         // credits are per-player and the guest's own engine already charged the hiring bonus.
-        boolean applied = CoopPersonDetail.roleOf(kind) != null
+        boolean applied = isHire
                 ? applyHireToEngine(marketId, itemId)
                 : applyItemDeltaToEngine(marketId, submarketId, kind, itemId, qty, detail);
         // Only claim "applied" when the engine mutation ran; the previous unconditional log asserted
@@ -1898,6 +2107,29 @@ public final class CoopCampaignReplicator
             CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_TXN market=" + marketId
                     + " submarket=" + submarketId + " " + kind + ":" + itemId + " qty=" + qty);
         }
+    }
+
+    /**
+     * Records a {@code MARKET_TXN} as applied. Returns false when this exact line has already been
+     * applied on this host, i.e. the caller must not apply it again (Phase 32, P1-3).
+     *
+     * <p>Keyed {@code senderId#seq}: a sender's sequence numbers are unique within a session, and
+     * the duplicate this guards against is a re-delivery of the <em>same</em> frame across a
+     * reconnect edge, not two lines that happen to look alike. Two identical deposits deliberately
+     * made twice by the player carry different seqs and both apply, which is the intended reading.
+     *
+     * <p>Bounded in insertion order to {@link #MARKET_TXN_LEDGER_MAX}: it only has to outlive one
+     * reconnect grace, and an unbounded set would grow for the length of the campaign.
+     */
+    private boolean recordMarketTxnApplied(CoopMessages.Message message) {
+        String key = (message.senderId() == null ? "" : message.senderId()) + "#" + message.seq();
+        if (!appliedMarketTxns.add(key)) {
+            return false;
+        }
+        while (appliedMarketTxns.size() > MARKET_TXN_LEDGER_MAX) {
+            appliedMarketTxns.remove(appliedMarketTxns.iterator().next());
+        }
+        return true;
     }
 
     private void applyMarketSnapshot(CoopMessages.Message message) {
@@ -1940,11 +2172,24 @@ public final class CoopCampaignReplicator
         //
         // Phase 32: and it only opens once *every* submarket of this open has landed, so the player
         // is never let into a screen whose black market or locker is still their own engine's.
+        //
+        // Phase 32 (P2-5): the count is the *host's* submarket set. A colony or rebuilt hidden base
+        // whose submarket set differs per engine leaves the guest permanently one short, and the
+        // shop then opens on the gate's 5 s timeout at that one market, every dock, with nothing in
+        // the log pointing at why. A snapshot that arrived and was addressed to the pending market
+        // counts; whether the engine wrote is a separate fact, and it is the one that gets named.
         if (!applied) {
-            return;
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_SNAPSHOT wrote nothing:"
+                    + " submarket=" + submarketId + " does not materialize at market=" + marketId
+                    + hostSuffix(marketId, wireMarketId)
+                    + " on this client (the host has it, this engine does not); counted toward the"
+                    + " sync gate so the trade screens are not held for the full timeout");
         }
         if (marketSyncGate.onResolved(marketId, submarketId, submarketCount)) {
-            releaseMarketSyncGate("snapshot applied");
+            releaseMarketSyncGate(applied ? "snapshot applied" : "snapshot batch complete");
+        }
+        if (!applied) {
+            return;
         }
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_SNAPSHOT market=" + marketId
                 + hostSuffix(marketId, wireMarketId)
@@ -1952,9 +2197,30 @@ public final class CoopCampaignReplicator
     }
 
     /**
-     * Guest: replace one submarket's stock (all kinds) with the host's canonical set.
+     * Guest: bring one submarket's stock into line with the host's canonical set.
      *
-     * @return {@code true} only when the replacement actually ran against a real cargo.
+     * <p><b>Shops are replaced; the locker is reconciled (Phase 32).</b> For {@code open_market},
+     * {@code black_market} and {@code generic_military} this is a full strip-and-rebuild, because
+     * weapon/fighter/ship <em>types</em> are rolled independently per engine and merging quantities
+     * would leave the guest's own roll unioned with the host's.
+     *
+     * <p>{@code storage} cannot be treated that way, and the old code that did was an amplifier
+     * sitting under every other defect in this codec. The locker is not a shelf that rerolls in 30
+     * days: the hull the partner parked exists nowhere else. A wholesale
+     * {@code clearMothballedShips} meant that the depositor's own real fleet member was destroyed on
+     * the next dock and replaced by a rebuild of a rebuild of its own blob -- so every fidelity gap
+     * in {@link CoopShipDetail} applied twice, permanently, to a ship the player never sold; and
+     * anything the host's capture happened to omit (one throw in one accessor) was deleted from the
+     * guest's engine with no log and no way back.
+     *
+     * <p>So for storage: a local hull the snapshot still lists <em>and</em> whose own capture encodes
+     * to the same blob is left strictly alone (same object, same identity, no rebuild); one the
+     * snapshot lists differently is replaced; one the snapshot does not list is removed (the partner
+     * withdrew it); one the snapshot lists and this engine does not have is built. Cargo stacks stay
+     * set-semantics on both paths, because a stack of supplies is fungible and a stack of supplies
+     * is all it is.
+     *
+     * @return {@code true} only when the write actually ran against a real cargo.
      */
     private boolean applySnapshotToEngine(String marketId, String submarketId,
                                           List<CoopMarketSync.StockItem> items) {
@@ -1984,6 +2250,7 @@ public final class CoopCampaignReplicator
                     + " no cargo for market=" + marketId + " submarket=" + submarketId);
             return false;
         }
+        boolean isStorage = Submarkets.SUBMARKET_STORAGE.equals(submarketId);
         replayGuard.begin();
         try {
             // A snapshot is a full *replacement*, not a quantity-merge. Weapon/fighter/ship TYPES are
@@ -1991,12 +2258,19 @@ public final class CoopCampaignReplicator
             // leave the guest's own roll behind (the host set unioned with the guest's). So strip the
             // guest's current weapons/fighters/ships and any commodity the host no longer stocks,
             // then add the host's canonical set back. After this the guest holds exactly the host set.
-            Set<String> snapshotCommodities = new HashSet<>();
+            //
+            // Phase 32 (P3-11): the target quantities are summed per commodity id first. A submarket
+            // cargo holding two stacks of the same commodity is not a shape vanilla produces (stacks
+            // merge per commodity), but if one ever arrives, the second line must add to the first
+            // rather than overwrite it -- setCommodityQuantity is set-semantics while everything
+            // beside it is add-semantics, so the naive loop silently loses the earlier stack.
+            Map<String, Integer> commodityTargets = new LinkedHashMap<>();
             for (CoopMarketSync.StockItem item : items) {
                 if (item.kind() == CoopMarketSync.ItemKind.COMMODITY) {
-                    snapshotCommodities.add(item.itemId());
+                    commodityTargets.merge(item.itemId(), item.quantity(), Integer::sum);
                 }
             }
+            Set<String> snapshotCommodities = commodityTargets.keySet();
             for (CargoStackAPI stack : cargo.getStacksCopy()) {
                 StackRef ref = classify(stack);
                 if (ref == null) {
@@ -2017,17 +2291,37 @@ public final class CoopCampaignReplicator
                     default -> { /* nothing */ }
                 }
             }
-            clearMothballedShips(cargo);
+            if (isStorage) {
+                // A locker is never wiped. See the method javadoc: this removes only what the
+                // snapshot no longer lists and rebuilds only what actually changed.
+                reconcileStoredHulls(cargo, items, marketId);
+            } else {
+                clearMothballedShips(cargo);
+            }
+            for (Map.Entry<String, Integer> target : commodityTargets.entrySet()) {
+                try {
+                    // Commodities survive the strip (shared list), so set them to the target.
+                    setCommodityQuantity(cargo, target.getKey(), target.getValue());
+                } catch (RuntimeException | LinkageError ex) {
+                    CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply snapshot item "
+                            + CoopMarketSync.ItemKind.COMMODITY + ":" + target.getKey(), ex);
+                }
+            }
             for (CoopMarketSync.StockItem item : items) {
                 try {
                     switch (item.kind()) {
-                        // Commodities survive the strip (shared list), so set them to the target.
-                        case COMMODITY -> setCommodityQuantity(cargo, item.itemId(), item.quantity());
-                        // Weapons/fighters/specials/ships were stripped to zero, so just add the host's.
+                        // Summed and applied above, so the loop does not set the same id twice.
+                        case COMMODITY -> { /* handled by commodityTargets */ }
+                        // Weapons/fighters/specials were stripped to zero, so just add the host's.
                         case WEAPON -> cargo.addWeapons(item.itemId(), item.quantity());
                         case FIGHTER -> cargo.addFighters(item.itemId(), item.quantity());
                         case SPECIAL -> addSpecial(cargo, item.itemId(), item.quantity());
-                        case SHIP -> addMothballedShipFromDetail(cargo, item.detail(), submarketId);
+                        // Storage hulls are the reconcile's business, not this loop's.
+                        case SHIP -> {
+                            if (!isStorage) {
+                                addMothballedShipFromDetail(cargo, item.detail(), submarketId);
+                            }
+                        }
                         // Hireable people are not cargo; applyHireablePool handles them.
                         default -> { /* officers/mercs/admins */ }
                     }
@@ -2042,6 +2336,119 @@ public final class CoopCampaignReplicator
             return false;
         } finally {
             replayGuard.end();
+        }
+    }
+
+    /**
+     * Guest: bring the storage locker's hulls into line with the host's listing set without wiping
+     * it (Phase 32; the amplifier behind the whole ship-detail red team).
+     *
+     * <p>Four cases, decided per local member and then per unmatched listing:
+     * <ol>
+     *   <li><b>Unchanged</b> — the snapshot lists this member ({@link CoopMemberIds#matchesLocal})
+     *       and the member's own capture, re-stamped with the listing's wire id so the id itself is
+     *       not a difference, encodes to the same blob. The object is left strictly alone. This is
+     *       the depositor's own ship on every dock after the deposit, which is the case that used to
+     *       be destroyed and rebuilt from its own lossy round trip.</li>
+     *   <li><b>Changed</b> — listed, but the blob differs (the partner refitted it, repaired it,
+     *       renamed it). Removed and rebuilt from the host's blob, because the host is canonical.</li>
+     *   <li><b>Gone</b> — not listed at all: the partner withdrew it. Removed.</li>
+     *   <li><b>New</b> — listed and absent here: built and added.</li>
+     * </ol>
+     *
+     * <p>A local member whose own capture fails is treated as "changed" rather than kept: an object
+     * this engine cannot describe is one it cannot compare, and the host's blob is the better copy.
+     */
+    private void reconcileStoredHulls(CargoAPI cargo, List<CoopMarketSync.StockItem> items,
+                                      String marketId) {
+        List<CoopMarketSync.StockItem> listings = new ArrayList<>();
+        for (CoopMarketSync.StockItem item : items) {
+            if (item.kind() == CoopMarketSync.ItemKind.SHIP) {
+                listings.add(item);
+            }
+        }
+        FleetDataAPI ships = mothballedShips(cargo);
+        if (ships == null) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop storage reconcile skipped: no mothballed"
+                    + " roster at market=" + marketId + " and none could be initialised;"
+                    + " " + listings.size() + " listed hull(s) not applied");
+            return;
+        }
+        String localPlayerId = session.localPlayerId();
+        Set<String> matchedListings = new HashSet<>();
+        List<CoopMarketSync.StockItem> toBuild = new ArrayList<>();
+        int kept = 0;
+        int replaced = 0;
+        int removed = 0;
+        for (FleetMemberAPI member : ships.getMembersListCopy()) {
+            CoopMarketSync.StockItem listing = null;
+            for (CoopMarketSync.StockItem candidate : listings) {
+                if (matchedListings.contains(candidate.itemId())) {
+                    continue;
+                }
+                if (CoopMemberIds.matchesLocal(candidate.itemId(), memberIdOf(member), localPlayerId)) {
+                    listing = candidate;
+                    break;
+                }
+            }
+            if (listing == null) {
+                ships.removeFleetMember(member);
+                removed++;
+                continue;
+            }
+            matchedListings.add(listing.itemId());
+            if (storedHullMatchesListing(member, listing)) {
+                kept++;
+                continue;
+            }
+            ships.removeFleetMember(member);
+            toBuild.add(listing);
+            replaced++;
+        }
+        for (CoopMarketSync.StockItem listing : listings) {
+            if (!matchedListings.contains(listing.itemId())) {
+                toBuild.add(listing);
+            }
+        }
+        for (CoopMarketSync.StockItem listing : toBuild) {
+            try {
+                addMothballedShipFromDetail(cargo, listing.detail(), Submarkets.SUBMARKET_STORAGE);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply stored hull "
+                        + listing.itemId() + " at market=" + marketId, ex);
+            }
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop storage reconciled market=" + marketId
+                + " listed=" + listings.size() + " kept=" + kept + " replaced=" + replaced
+                + " removed=" + removed + " added=" + (toBuild.size() - replaced));
+    }
+
+    /** A member's id, or the empty string when it cannot be read. Total. */
+    private static String memberIdOf(FleetMemberAPI member) {
+        try {
+            String id = member == null ? null : member.getId();
+            return id == null ? "" : id;
+        } catch (RuntimeException | LinkageError ex) {
+            return "";
+        }
+    }
+
+    /**
+     * Is this local hull already exactly what the listing describes? Compares the member's own
+     * capture against the incoming blob with the listing's wire id stamped on, so the origin
+     * namespace is not read as a difference. False on any failure — an unreadable local object is
+     * replaced by the host's copy rather than kept on a guess.
+     */
+    private boolean storedHullMatchesListing(FleetMemberAPI member, CoopMarketSync.StockItem listing) {
+        try {
+            String blob = listing.detail();
+            if (blob == null || blob.isEmpty()) {
+                return false;
+            }
+            CoopShipDetail local = captureShipDetail(member);
+            return local != null && local.withMemberId(listing.itemId()).encode().equals(blob);
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
         }
     }
 
@@ -2192,10 +2599,16 @@ public final class CoopCampaignReplicator
      *                    cargo is in hand there is no way to ask it which submarket it belongs to.
      */
     private void addMothballedShipFromDetail(CargoAPI cargo, String encodedDetail, String submarketId) {
+        boolean isStorage = Submarkets.SUBMARKET_STORAGE.equals(submarketId);
         if (encodedDetail == null || encodedDetail.isEmpty()) {
+            // Phase 32 (ship-detail P0-1): a SHIP line with no blob names a hull that exists on the
+            // sender and cannot be built here. Silent before; on a locker it is a ship that just
+            // failed to arrive, so it is named.
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing carries no detail blob;"
+                    + " nothing to rebuild submarket=" + submarketId
+                    + (isStorage ? " (a stored hull did not make the trip)" : ""));
             return;
         }
-        boolean isStorage = Submarkets.SUBMARKET_STORAGE.equals(submarketId);
         CoopShipDetail detail;
         try {
             detail = CoopShipDetail.decode(encodedDetail);
@@ -2208,6 +2621,15 @@ public final class CoopCampaignReplicator
         }
         FleetDataAPI ships = mothballedShips(cargo);
         if (ships == null) {
+            return;
+        }
+        // Phase 32 (P1-2/P1-3 backstop): never let one id name two hulls in one roster. A duplicate
+        // delivery, or a snapshot that re-lists a hull the reconcile already kept, would otherwise
+        // add a second member under the same id -- and a withdrawal removes the *first* match, so
+        // the twin stays in the locker forever and is re-published on every snapshot.
+        if (rosterHolds(ships, detail.memberId())) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member=" + detail.memberId()
+                    + " is already in the " + submarketId + " roster; the duplicate add is skipped");
             return;
         }
         try {
@@ -2735,20 +3157,43 @@ public final class CoopCampaignReplicator
         }
     }
 
+    /** True when this roster already holds a member the wire id names ({@link CoopMemberIds}). */
+    private boolean rosterHolds(FleetDataAPI ships, String wireMemberId) {
+        if (ships == null || wireMemberId == null || wireMemberId.isEmpty()) {
+            return false;
+        }
+        String localPlayerId = session.localPlayerId();
+        for (FleetMemberAPI member : ships.getMembersListCopy()) {
+            if (CoopMemberIds.matchesLocal(wireMemberId, memberIdOf(member), localPlayerId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
-     * Removes the listing with this fleet-member id. There is no {@code getMemberWithId}, so the
-     * members list is scanned; ids match across clients because the guest rebuilds each listing with
-     * {@code setId} from the host's snapshot.
+     * Removes the listing this wire member id names. There is no {@code getMemberWithId}, so the
+     * members list is scanned, and the match is {@link CoopMemberIds#matchesLocal} rather than
+     * {@code equals}: the receiving engine's rebuilt member carries the wire id verbatim, but the
+     * <em>originating</em> engine still holds the real ship under its own local id.
+     *
+     * <p>Phase 32 (P2-7): the roster is reached through {@link #mothballedShips(CargoAPI)} and a
+     * null one falls through to the WARN below rather than returning silently. A withdrawal arriving
+     * at a locker that has never held a ship on this engine is precisely the drift the WARN exists
+     * to name, and it was the one case that produced no log at all.
      */
     private void removeMothballedShipById(CargoAPI cargo, String memberId, String submarketId) {
-        FleetDataAPI ships = cargo.getMothballedShips();
-        if (ships == null || memberId == null) {
+        if (memberId == null) {
             return;
         }
-        for (FleetMemberAPI member : ships.getMembersListCopy()) {
-            if (memberId.equals(member.getId())) {
-                ships.removeFleetMember(member);
-                return;
+        FleetDataAPI ships = mothballedShips(cargo);
+        String localPlayerId = session.localPlayerId();
+        if (ships != null) {
+            for (FleetMemberAPI member : ships.getMembersListCopy()) {
+                if (CoopMemberIds.matchesLocal(memberId, memberIdOf(member), localPlayerId)) {
+                    ships.removeFleetMember(member);
+                    return;
+                }
             }
         }
         // A withdrawal that matches nothing (Phase 32): the two lockers have drifted, which the next
@@ -2778,6 +3223,13 @@ public final class CoopCampaignReplicator
         }
     }
 
+    /**
+     * Empties a <em>shop</em>'s ship shelf before the host's roll is added back.
+     *
+     * <p><b>Never call this on {@code storage}.</b> A shop shelf rerolls in 30 days; a locker holds
+     * the only copy of a hull that exists. See {@link #reconcileStoredHulls} for what storage does
+     * instead, and {@link #applySnapshotToEngine} for why the difference is load-bearing.
+     */
     private void clearMothballedShips(CargoAPI cargo) {
         FleetDataAPI ships = cargo.getMothballedShips();
         if (ships == null) {
@@ -4960,11 +5412,23 @@ public final class CoopCampaignReplicator
         }
         FleetDataAPI ships = cargo.getMothballedShips();
         if (ships != null) {
+            boolean isStorage = Submarkets.SUBMARKET_STORAGE.equals(specId);
             // One listing per member, keyed by the member id rather than the variant id: two hulls of
             // the same variant are not interchangeable once one of them has three D-mods and 40% CR,
-            // and a per-variant count could not tell the guest which is which.
+            // and a per-variant count could not tell the guest which is which. The id on the wire is
+            // origin-namespaced (see CoopMemberIds and the section banner above).
             for (FleetMemberAPI member : ships.getMembersListCopy()) {
-                CoopShipDetail detail = captureShipDetail(member);
+                CoopShipDetail detail = stampWireMemberId(captureShipDetail(member));
+                if (detail == null && isStorage) {
+                    // Phase 32 (P2-9 / ship-detail P0-1): a locker listing is never dropped
+                    // silently. captureShipDetail returns null on any throw anywhere in the capture
+                    // -- a modded module variant, an accessor that raises -- and the failure is
+                    // deterministic, so it recurs on every snapshot. Omitting the line publishes a
+                    // locker that does not contain the partner's ship. A degraded line (identity,
+                    // hull, CR, damage; no refit) at least keeps the hull in the shared locker and
+                    // says out loud what was lost.
+                    detail = degradedStoredHullDetail(member);
+                }
                 if (detail != null) {
                     items.add(new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP,
                             detail.memberId(), 1, 0f, detail.encode()));
@@ -4972,6 +5436,55 @@ public final class CoopCampaignReplicator
             }
         }
         return items;
+    }
+
+    /**
+     * The fallback storage listing for a hull whose full capture threw: member identity, ship name,
+     * base variant / hull spec, base CR and hull fraction, and nothing else.
+     *
+     * <p>The rebuild on the far side then produces a pristine hull rather than the battered one --
+     * a real loss of D-mods and refit -- but the ship is still in the locker, which is the property
+     * a locker has to keep. Returns null (with a WARN) only when even this much cannot be read, and
+     * that is the one case where the listing is dropped.
+     */
+    private CoopShipDetail degradedStoredHullDetail(FleetMemberAPI member) {
+        String memberId = memberIdOf(member);
+        try {
+            String wireId = CoopMemberIds.wireId(session.localPlayerId(), memberId);
+            if (wireId.isEmpty()) {
+                throw new IllegalStateException("mothballed member has no id");
+            }
+            String hullSpecId = "";
+            String variantId = "";
+            ShipVariantAPI variant = member.getVariant();
+            if (variant != null) {
+                variantId = orBlank(variant.getHullVariantId());
+                hullSpecId = variant.getHullSpec() == null ? "" : orBlank(variant.getHullSpec().getHullId());
+            }
+            // baseVariantId is required text; a hull id is a usable stand-in because createBaseMember
+            // falls through to the empty-variant-off-the-hull-spec branch when it names no variant.
+            String baseVariantId = variantId.isBlank() ? hullSpecId : variantId;
+            if (baseVariantId.isBlank()) {
+                throw new IllegalStateException("neither a variant id nor a hull id is readable");
+            }
+            float baseCR = member.getRepairTracker() == null ? 0f : member.getRepairTracker().getBaseCR();
+            float hullFraction = member.getStatus() == null ? 1f : member.getStatus().getHullFraction();
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop stored hull member=" + wireId
+                    + " could not be captured in full; shipping a degraded listing (" + baseVariantId
+                    + ", no refit/D-mods/weapons) so the locker still holds it");
+            return new CoopShipDetail(wireId, orBlank(member.getShipName()), baseVariantId, hullSpecId,
+                    baseCR, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(),
+                    Map.of(), Map.of(), List.of(), hullFraction, "", Map.of());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop stored hull member="
+                    + (memberId.isEmpty() ? "?" : memberId) + " cannot be described at all;"
+                    + " it stays on this engine and the partner will not see it", ex);
+            return null;
+        }
+    }
+
+    private static String orBlank(String value) {
+        return value == null ? "" : value;
     }
 
     /**

@@ -183,6 +183,83 @@ class CoopCampaignReplicatorSharedSubmarketsTest {
     }
 
     @Test
+    void oneDockAsksTheHostOnceEvenThoughVanillaReportsTheOpenTwice() {
+        // P1-4: the second vanilla callback (reportPlayerOpenedMarketAndCargoUpdated) fires from
+        // inside the core trade screen, which is the one place the sync gate cannot reach -- it
+        // disables dock-dialog option ids and the player is already past them. Answering it lands a
+        // full strip-and-replace of the black market and the locker under the player's hands.
+        FakeMarket market = new FakeMarket("sindria")
+                .with(Submarkets.SUBMARKET_OPEN)
+                .with(Submarkets.SUBMARKET_STORAGE)
+                .storageUnlocked();
+        Global.setSector(market.sector());
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopCampaignReplicator replicator = guestReplicator(service);
+
+        replicator.onPlayerOpenedMarket(market.api(), false);
+        replicator.onPlayerOpenedMarket(market.api(), true);
+
+        assertEquals(1, marketOpens(service).size(),
+                "one dock, one request: " + marketOpens(service).size());
+
+        // A real second dock is a real second request.
+        replicator.onPlayerClosedMarket(market.api());
+        replicator.onPlayerOpenedMarket(market.api(), false);
+        assertEquals(2, marketOpens(service).size(),
+                "the latch has to drop when the dialog closes, or the next dock never syncs");
+    }
+
+    @Test
+    void aSnapshotTheEngineCannotApplyStillCountsTowardTheGate() {
+        // P2-5: the count is the *host's* submarket set. A colony or rebuilt hidden base whose
+        // submarket set differs per engine leaves the guest permanently one short, and the shop then
+        // opens on the gate's 5 s timeout at that one market, on every dock, with nothing in the log
+        // pointing at why.
+        FakeMarket market = new FakeMarket("sindria").with(Submarkets.SUBMARKET_OPEN);
+        Global.setSector(market.sector());
+        CoopCampaignReplicator replicator = guestReplicator(
+                new RecordingNetService(CoopConnectionRole.GUEST));
+        attachAppender();
+
+        replicator.onPlayerOpenedMarket(market.api(), false);
+        replicator.handle(CoopMessages.marketSnapshot("session-a", 8L, 5100L, "sindria",
+                Submarkets.SUBMARKET_OPEN, 2, CoopMarketSync.encodeStock(List.of())));
+        assertEquals("sindria", replicator.marketSyncGate().pendingMarketId());
+
+        // The host has a military submarket here; this engine does not, so nothing can be written.
+        replicator.handle(CoopMessages.marketSnapshot("session-a", 9L, 5200L, "sindria",
+                Submarkets.GENERIC_MILITARY, 2, CoopMarketSync.encodeStock(List.of())));
+
+        assertNull(replicator.marketSyncGate().pendingMarketId(),
+                "the batch is complete, so the trade screens open now rather than in five seconds");
+        assertTrue(appender.messages().stream()
+                        .anyMatch(m -> m.contains("wrote nothing")
+                                && m.contains(Submarkets.GENERIC_MILITARY)),
+                "and the submarket that did not land is named: " + appender.messages());
+    }
+
+    @Test
+    void aHireStampedWithANonOpenSubmarketIsRefused() {
+        // P3-12: the shared-inventory allowlist passes a line stamped submarketId=storage, and the
+        // hire branch then ignores the submarket entirely and removes a person from the host's pool.
+        FakeMarket market = new FakeMarket("sindria")
+                .with(Submarkets.SUBMARKET_OPEN)
+                .with(Submarkets.SUBMARKET_STORAGE)
+                .storageUnlocked();
+        Global.setSector(market.sector());
+        attachAppender();
+
+        hostReplicator(new RecordingNetService(CoopConnectionRole.HOST)).handle(
+                CoopMessages.marketTxn("session-a", 7L, 5000L, "sindria",
+                        Submarkets.SUBMARKET_STORAGE, "OFFICER", "person-1", 1, 0f, "guest-player"));
+
+        assertTrue(appender.messages().stream()
+                        .anyMatch(m -> m.contains("OFFICER") && m.contains("hire can only happen")),
+                "the hire fence has to hold where the inventory allowlist does not: "
+                        + appender.messages());
+    }
+
+    @Test
     void aMarketWithNoSharedSubmarketAtAllIsNotGated() {
         FakeMarket market = new FakeMarket("derelict-7");
         Global.setSector(market.sector());
@@ -265,6 +342,12 @@ class CoopCampaignReplicatorSharedSubmarketsTest {
     private static List<CoopMessages.Message> snapshots(RecordingNetService service) {
         return service.sent.stream()
                 .filter(m -> m.type() == CoopMessages.Type.MARKET_SNAPSHOT)
+                .toList();
+    }
+
+    private static List<CoopMessages.Message> marketOpens(RecordingNetService service) {
+        return service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.MARKET_OPEN)
                 .toList();
     }
 

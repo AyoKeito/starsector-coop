@@ -3,7 +3,9 @@ package coop.campaign;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.CargoStackAPI;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
@@ -31,11 +33,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and is now its inverse).
  *
  * <p>Storage <em>is</em> replicated now, which makes the boundary sharper rather than softer: a
- * snapshot apply is still a full <b>replacement</b>, so the submarket a snapshot names is the only
- * thing standing between the host's shop roll and the player's parked ships. These tests pin that
- * naming in every direction — storage writes reach storage and nothing else, shop writes never
- * reach storage, {@code local_resources} is never read or written at all, and a locked storage
- * submarket is not snapshotted by the host in the first place.
+ * snapshot apply still <b>replaces</b> a shop's stock wholesale, so the submarket a snapshot names
+ * is the only thing standing between the host's shop roll and the player's parked ships. These
+ * tests pin that naming in every direction — storage writes reach storage and nothing else, shop
+ * writes never reach storage, {@code local_resources} is never read or written at all, and a locked
+ * storage submarket is not snapshotted by the host in the first place.
+ *
+ * <p>The locker itself is <b>reconciled, never wiped</b> (see
+ * {@code CoopCampaignReplicatorStorageReconcileTest} for the four cases by object identity). The
+ * one thing pinned here is the negative: no code path on a storage snapshot empties the hull roster
+ * wholesale. Cargo stacks keep set semantics on both paths, because a stack of supplies is fungible
+ * and a parked hull is not.
  */
 class CoopCampaignReplicatorStorageFenceTest {
 
@@ -85,6 +93,37 @@ class CoopCampaignReplicatorStorageFenceTest {
 
         assertEquals(42, storage.commodities.get("supplies"),
                 "storage is reached with getCargo(), which builds the locker on demand");
+    }
+
+    @Test
+    void aStorageSnapshotReconcilesTheLockerPerHullInsteadOfClearingIt() {
+        // The old code ran clearMothballedShips for storage exactly as it does for a shop, so a
+        // deposit lived only until the next dock: the depositor's own fleet member was destroyed and
+        // replaced by a rebuild of a rebuild of its own blob, and any hull the host failed to capture
+        // was deleted outright. A shop shelf rerolls in 30 days; the locker holds the only copy.
+        //
+        // The property pinned here is that removal is per member and decided against the snapshot's
+        // own listing set. (The four reconcile cases by object identity are in
+        // CoopCampaignReplicatorStorageReconcileTest.)
+        FakeCargo openMarket = new FakeCargo(Map.of());
+        FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+        storage.mothballed.add(bareHull("c_guest-player_8f9a"));
+        storage.mothballed.add(bareHull("c_host-player_364d"));
+
+        // The host's locker now holds neither hull (the partner withdrew both) but has cargo in it.
+        guestReplicator().handle(CoopMessages.marketSnapshot(
+                "session-a", 7L, 5000L, "jangala", Submarkets.SUBMARKET_STORAGE, 1,
+                CoopMarketSync.encodeStock(List.of(new CoopMarketSync.StockItem(
+                        CoopMarketSync.ItemKind.COMMODITY, "supplies", 900, 0f)))));
+
+        assertEquals(900, storage.commodities.get("supplies"),
+                "cargo stacks are fungible and keep set semantics on both paths");
+        assertEquals(List.of("c_guest-player_8f9a", "c_host-player_364d"), storage.removedMembers,
+                "each hull is removed by name against the snapshot's listing set, not swept:"
+                        + " " + storage.removedMembers);
+        assertEquals(List.of(), storage.mothballed);
     }
 
     @Test
@@ -359,13 +398,52 @@ class CoopCampaignReplicatorStorageFenceTest {
         }
     }
 
-    /** Commodity-only cargo that records every call made against it. */
+    /** A fleet member that answers nothing but its id — enough to be named in a reconcile. */
+    private static FleetMemberAPI bareHull(String memberId) {
+        return (FleetMemberAPI) Proxy.newProxyInstance(
+                FleetMemberAPI.class.getClassLoader(),
+                new Class<?>[]{FleetMemberAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getId" -> memberId;
+                    case "toString" -> "BareHull[" + memberId + "]";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+    }
+
+    /** Commodity cargo plus a mothballed roster; records every call made against it. */
     private static final class FakeCargo {
         private final Map<String, Integer> commodities = new LinkedHashMap<>();
         private final List<String> calls = new ArrayList<>();
+        private final List<FleetMemberAPI> mothballed = new ArrayList<>();
+        private final List<String> removedMembers = new ArrayList<>();
 
         private FakeCargo(Map<String, Integer> initial) {
             commodities.putAll(initial);
+        }
+
+        private FleetDataAPI ships() {
+            return (FleetDataAPI) Proxy.newProxyInstance(
+                    FleetDataAPI.class.getClassLoader(),
+                    new Class<?>[]{FleetDataAPI.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getMembersListCopy" -> new ArrayList<>(mothballed);
+                        case "addFleetMember" -> {
+                            mothballed.add((FleetMemberAPI) args[0]);
+                            yield null;
+                        }
+                        case "removeFleetMember" -> {
+                            FleetMemberAPI member = (FleetMemberAPI) args[0];
+                            removedMembers.add(member.getId());
+                            mothballed.remove(member);
+                            yield null;
+                        }
+                        case "toString" -> "FakeShips";
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        default -> null;
+                    });
         }
 
         private CargoAPI proxy() {
@@ -385,6 +463,8 @@ class CoopCampaignReplicatorStorageFenceTest {
                         }
                         calls.add(method.getName());
                         switch (method.getName()) {
+                            case "getMothballedShips":
+                                return mothballed.isEmpty() ? null : ships();
                             case "getStacksCopy":
                                 return stacks();
                             case "getCommodityQuantity":
