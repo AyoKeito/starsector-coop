@@ -45,11 +45,49 @@ export class BridgeTimeoutError extends Error {
   }
 }
 
-/** The connection went away mid-request. Internal: triggers exactly one reconnect+retry. */
+/** The connection went away mid-request. Internal: triggers a reconnect, and a retry iff `cmd` is read-only. */
 class BridgeDroppedError extends Error {
   constructor(instance, reason) {
     super(`bridge "${instance}" connection dropped: ${reason}`);
     this.name = 'BridgeDroppedError';
+  }
+}
+
+/**
+ * The bridge's read-only verbs (coop.debug.CoopAgentCommands, the command table's non-mutating
+ * half). A dropped-socket retry is safe only for these: the server has no request dedup, so
+ * replaying a mutating verb such as `give` or `addship` after a lost response can run it twice.
+ */
+export const READ_ONLY_COMMANDS = Object.freeze(
+  new Set([
+    'status',
+    'fleets',
+    'cargo',
+    'market',
+    'markets',
+    'barpool',
+    'survey',
+    'visibility',
+    'colonizable',
+    'landmarks'
+  ])
+);
+
+/**
+ * The connection dropped after a mutating command was sent, so whether the bridge ran it before
+ * the response was lost is unknown. Not retried automatically, unlike a read command: replaying a
+ * mutation such as `give` or `addship` risks running it twice. Re-check state with a read command
+ * (`status`, `cargo`, ...) before deciding whether to re-issue it.
+ */
+export class BridgeOutcomeUnknownError extends Error {
+  constructor(instance, cmd) {
+    super(
+      `bridge "${instance}" connection dropped after "${cmd}" was sent; it may or may not have executed. ` +
+        `Re-check state with a read command (e.g. "status" or "cargo") before deciding whether to re-issue "${cmd}".`
+    );
+    this.name = 'BridgeOutcomeUnknownError';
+    this.instance = instance;
+    this.cmd = cmd;
   }
 }
 
@@ -76,12 +114,22 @@ export class BridgeClient {
     this._buffer = '';
   }
 
-  /** Send one command and resolve with its `data` object. Retries once on a dropped socket. */
+  /**
+   * Send one command and resolve with its `data` object.
+   * On a dropped socket: a read-only command (READ_ONLY_COMMANDS) is retried once against a
+   * fresh connection. A mutating command is not retried — the connection is reset and this
+   * throws BridgeOutcomeUnknownError, since the bridge does not deduplicate requests and a
+   * replayed mutation could run twice.
+   */
   async send(cmd, args) {
     try {
       return await this._request(cmd, args);
     } catch (err) {
       if (!(err instanceof BridgeDroppedError)) throw err;
+      if (!READ_ONLY_COMMANDS.has(cmd)) {
+        this._reset(`connection reset after an unconfirmed "${cmd}": ${err.message}`);
+        throw new BridgeOutcomeUnknownError(this.instance, cmd);
+      }
       this._reset(`retrying after: ${err.message}`);
       return await this._request(cmd, args);
     }

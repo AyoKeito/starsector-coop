@@ -326,7 +326,7 @@ No screenshots, no vision, no keyboard or mouse injection, no save or load contr
 powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop\tools\starsector-mcp'; npm test"
 ```
 
-`test/mock-bridge-test.js` stands up a mock bridge, a plain `net` server speaking the same newline-JSON protocol, and runs the client and the diff against it. It covers out-of-order response correlation, the request timeout, reconnect-and-retry after a mid-request socket drop, the unreachable-port message, `ok:false` passthrough, order-insensitive and index-based diffing, the default and overridden `ignore` lists, and the `ss_advance_days` pause-poll-pause loop with its stall diagnosis. Starsector does not need to be running.
+`test/mock-bridge-test.js` stands up a mock bridge, a plain `net` server speaking the same newline-JSON protocol, and runs the client and the diff against it. It covers out-of-order response correlation, the request timeout, reconnect-and-retry after a mid-request socket drop on a read-only command (a mutating command is not retried, since the bridge has no request dedup; it throws `BridgeOutcomeUnknownError` instead), the unreachable-port message, `ok:false` passthrough, order-insensitive and index-based diffing, the default and overridden `ignore` lists, and the `ss_advance_days` pause-poll-pause loop with its stall diagnosis. Starsector does not need to be running.
 
 ## Layout
 
