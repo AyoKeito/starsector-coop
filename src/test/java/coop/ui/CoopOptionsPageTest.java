@@ -68,6 +68,62 @@ class CoopOptionsPageTest {
         assertFalse(CoopOptionsPage.renderFailureLogged());
     }
 
+    // ---- Phase 32 addition B: the "Send credits" block -------------------------------------------
+
+    @Test
+    void theSendCreditsRowShowsThePendingAmountAndIsDeadWithoutASession() {
+        coop.campaign.CoopCreditTransfer.uninstall();
+        coop.campaign.CoopCreditTransfer.stepPendingAmount(25_000);
+
+        CoopOptionsPage.CreditRow row = CoopOptionsPage.liveCreditRow();
+
+        assertEquals("25,000", row.amountText(), "the amount Send would move must be on the page");
+        assertFalse(row.sendEnabled(), "no session, nobody to send to");
+        assertFalse(row.canStep());
+        assertTrue(row.note().contains("No co-op session"));
+
+        coop.campaign.CoopCreditTransfer.uninstall();
+    }
+
+    @Test
+    void theSendButtonIsLiveOnlyForAnAmountTheWalletCoversInALiveSession() {
+        assertFalse(CoopOptionsPage.creditRow(true, 0, 100_000L).sendEnabled(),
+                "nothing pending is nothing to send");
+        assertTrue(CoopOptionsPage.creditRow(true, 0, 100_000L).canStep());
+
+        assertFalse(CoopOptionsPage.creditRow(true, 100_001, 100_000L).sendEnabled(),
+                "the button must not promise what send() would refuse");
+        assertEquals("You do not have that many credits.",
+                CoopOptionsPage.creditRow(true, 100_001, 100_000L).note());
+
+        CoopOptionsPage.CreditRow ready = CoopOptionsPage.creditRow(true, 100_000, 100_000L);
+        assertTrue(ready.sendEnabled());
+        assertEquals("", ready.note());
+        assertEquals("100,000", ready.walletText());
+    }
+
+    @Test
+    void anUnreadableWalletDoesNotBlockTheButtonItLeavesTheCoverCheckToSend() {
+        CoopOptionsPage.CreditRow row = CoopOptionsPage.creditRow(true, 5_000, -1L);
+
+        assertTrue(row.sendEnabled());
+        assertEquals("", row.walletText(), "no wallet line rather than a fake zero");
+    }
+
+    @Test
+    void theSendConfirmationNamesTheAmountAndSaysItCannotBeUndone() {
+        coop.campaign.CoopCreditTransfer.uninstall();
+        coop.campaign.CoopCreditTransfer.stepPendingAmount(7_500);
+
+        String prompt = CoopOptionsPage.sendCreditsPrompt();
+
+        assertTrue(prompt.contains("7,500"), prompt);
+        assertTrue(prompt.contains("take them back"), prompt);
+        assertTrue(page.doesButtonHaveConfirmDialog(CoopOptionsPage.BUTTON_SEND_CREDITS));
+
+        coop.campaign.CoopCreditTransfer.uninstall();
+    }
+
     @Test
     void isQuietAndPermanentLikeItsSiblings() {
         assertFalse(page.isEnded());

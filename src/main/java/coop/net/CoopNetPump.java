@@ -4121,6 +4121,9 @@ public class CoopNetPump implements EveryFrameScript {
                  ABILITY_ACTIVATE,
                  BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
                  SAVE_CHECKPOINT, RESPAWN_PLAYER, STALL_NOTICE,
+                 // The sender already debited itself; dropping this on the drop edge would burn the
+                 // money. The receiver's grant ledger absorbs the duplicate if it also arrives again.
+                 CREDITS_GRANT,
                  // Snapshots. Superseded by the resume's forced rebroadcast when one comes, and the
                  // best available picture of the world when it does not.
                  ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, FLEET_SNAPSHOT,
