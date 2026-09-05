@@ -2,6 +2,9 @@ package coop.campaign;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -59,6 +62,40 @@ public final class CoopStorageUnlock {
             return false;
         }
         return data.put(flagKey(marketId), Boolean.TRUE) == null;
+    }
+
+    /**
+     * Every market id the coop flag is set for, sorted so the order does not depend on a
+     * {@code HashMap}'s iteration. The host's session-start baseline resend reads this: a guest
+     * joining a campaign where unlocks were paid before it arrived has no other way to learn about
+     * them, since nothing in the save carries them across the wire.
+     *
+     * <p>Snapshots the key set before walking it, so a poll running in the same frame as a write
+     * cannot throw {@code ConcurrentModificationException} out of a baseline.
+     */
+    public static List<String> flaggedMarketIds(SectorAPI sector) {
+        Map<String, Object> data = persistentData(sector);
+        if (data == null) {
+            return List.of();
+        }
+        List<String> ids = new ArrayList<>();
+        try {
+            for (String key : new ArrayList<>(data.keySet())) {
+                if (key == null || !key.startsWith(FLAG_PREFIX)
+                        || !Boolean.TRUE.equals(data.get(key))) {
+                    continue;
+                }
+                String marketId = key.substring(FLAG_PREFIX.length());
+                if (!marketId.isEmpty()) {
+                    ids.add(marketId);
+                }
+            }
+        } catch (RuntimeException ex) {
+            CoopLog.warn(CoopStorageUnlock.class, "Could not list unlocked storage markets", ex);
+            return List.of();
+        }
+        Collections.sort(ids);
+        return ids;
     }
 
     /** The market's storage submarket, or null when it has none. */

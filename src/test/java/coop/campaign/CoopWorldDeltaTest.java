@@ -211,6 +211,51 @@ class CoopWorldDeltaTest {
         assertFalse(CoopWorldDelta.Kind.SPAWN.latestWins());
         // A single one-way flip with a constant payload: the set-based key is the right one.
         assertFalse(CoopWorldDelta.Kind.RUINS_EXPLORED.latestWins());
+        // Phase 32. The unlock is the same one-way-flip shape as RUINS_EXPLORED; the commission is a
+        // value that comes back to a faction it already held.
+        assertFalse(CoopWorldDelta.Kind.STORAGE_UNLOCK.latestWins());
+        assertTrue(CoopWorldDelta.Kind.COMMISSION.latestWins());
+    }
+
+    // ---- Phase 32: storage unlock + commission --------------------------------------------------
+
+    @Test
+    void aStorageUnlockAppliesOncePerMarket() {
+        CoopWorldDelta.Ledger ledger = new CoopWorldDelta.Ledger();
+
+        assertTrue(ledger.apply(storageUnlock("market_jangala")));
+        // Both the host's echo rebroadcast and its session-start baseline resend arrive as the same
+        // (kind, entity, "true") triple, and both must die here.
+        assertFalse(ledger.apply(storageUnlock("market_jangala")));
+        assertFalse(ledger.apply(new CoopWorldDelta("market_jangala",
+                CoopWorldDelta.Kind.STORAGE_UNLOCK, false, "true", "host")));
+        assertTrue(ledger.apply(storageUnlock("market_culann")), "tracked per market");
+        assertEquals(0, ledger.size(), "an unlock consumes nothing");
+    }
+
+    @Test
+    void aCommissionAppliesEveryTimeItChangesIncludingBackToTheSameFaction() {
+        // One entity id for the whole campaign, so the payload is the only thing that can
+        // distinguish "signed with the Hegemony again" from the host's echo of the first signing.
+        CoopWorldDelta.Ledger ledger = new CoopWorldDelta.Ledger();
+
+        assertTrue(ledger.apply(commission("hegemony")));
+        assertFalse(ledger.apply(commission("hegemony")), "the host's echo is inert");
+        assertTrue(ledger.apply(commission("")), "the commission ended");
+        assertFalse(ledger.apply(commission("")));
+        assertTrue(ledger.apply(commission("hegemony")), "signed again with the same faction");
+        assertEquals("hegemony", ledger.latestState(CoopWorldDelta.Kind.COMMISSION,
+                CoopCommissionSync.ENTITY_ID));
+    }
+
+    private static CoopWorldDelta storageUnlock(String marketId) {
+        return new CoopWorldDelta(marketId, CoopWorldDelta.Kind.STORAGE_UNLOCK, false, "true",
+                "guest");
+    }
+
+    private static CoopWorldDelta commission(String factionId) {
+        return new CoopWorldDelta(CoopCommissionSync.ENTITY_ID, CoopWorldDelta.Kind.COMMISSION,
+                false, factionId, "host");
     }
 
     @Test
@@ -261,14 +306,24 @@ class CoopWorldDeltaTest {
     // ---- Direction ------------------------------------------------------------------------------
 
     /**
-     * DECIV is the only kind a host refuses from a peer: it deletes a colony out of the authoritative
-     * world and the guest's own saturation bombardment already reaches the host as a RAID_RESULT.
+     * Two kinds a host refuses from a peer. DECIV deletes a colony out of the authoritative world
+     * and the guest's own saturation bombardment already reaches the host as a RAID_RESULT.
+     * COMMISSION is the host's own contract: the guest mirrors the memory flag and nothing else, so
+     * a guest-originated one could only be an echo or a desync.
      */
     @Test
-    void decivIsTheOnlyHostOnlyKind() {
+    void decivAndCommissionAreTheOnlyHostOnlyKinds() {
         for (CoopWorldDelta.Kind kind : CoopWorldDelta.Kind.values()) {
-            assertEquals(kind == CoopWorldDelta.Kind.DECIV, kind.hostOnly(), kind.name());
+            boolean expected = kind == CoopWorldDelta.Kind.DECIV
+                    || kind == CoopWorldDelta.Kind.COMMISSION;
+            assertEquals(expected, kind.hostOnly(), kind.name());
         }
+    }
+
+    /** The unlock is paid inside whichever player's dock dialog, so it travels both ways. */
+    @Test
+    void storageUnlockIsNotHostOnly() {
+        assertFalse(CoopWorldDelta.Kind.STORAGE_UNLOCK.hostOnly());
     }
 
     /** Gate activation travels both ways since a guest can scan a gate in its own dialog. */

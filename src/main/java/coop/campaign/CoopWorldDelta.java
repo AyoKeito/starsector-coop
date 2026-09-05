@@ -137,7 +137,36 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * (false&rarr;true, never back), so the set-based (kind, entity) key is exactly right and
          * cheaper. Either dedup would behave identically here — the payload never varies.
          */
-        RUINS_EXPLORED;
+        RUINS_EXPLORED,
+        /**
+         * A market's storage submarket was unlocked (Phase 32): either player paid vanilla's
+         * one-time 5000-credit fee, and the locker is shared, so it opens on both engines.
+         * {@code entityId} is the market id, payload {@code "true"}.
+         *
+         * <p>Bidirectional — the fee is paid inside whichever player's dock dialog, and
+         * {@link CoopStorageUnlockSync} polls for it on both roles.
+         *
+         * <p><b>Not</b> latest-wins, deliberately, and the payload constant is what makes that
+         * right: this is a single one-way flip (locked&rarr;open, never back — vanilla has no
+         * re-lock), so the set-based (kind, entity) key is exactly the dedup this wants and it also
+         * kills the host's session-start baseline resend for a market the receiver already knows
+         * about.
+         */
+        STORAGE_UNLOCK,
+        /**
+         * The player's faction commission changed (Phase 32). {@code entityId} is the constant
+         * {@link CoopCommissionSync#ENTITY_ID} — there is one commission per campaign, not one per
+         * world entity — and the payload is the faction id, or the empty string for "no commission".
+         *
+         * <p>{@link #hostOnly() Host-only}: the commission is signed, paid and terminated on the
+         * host, and the guest mirrors only the memory flag vanilla's military-submarket access check
+         * reads. A guest that originated one would be claiming a commission nobody signed.
+         *
+         * <p>{@link #latestWins() Latest-wins}: a commission is taken, ended, and taken again with
+         * the same faction later, so the value returns to one it already held and a set-based key
+         * would freeze the guest on the first faction it ever heard about.
+         */
+        COMMISSION;
 
         /**
          * Whether the {@link Ledger} should dedup this kind by <em>payload</em> rather than by the
@@ -146,22 +175,28 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          */
         public boolean latestWins() {
             return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED || this == SURVEY
-                    || this == DECIV;
+                    || this == DECIV || this == COMMISSION;
         }
 
         /**
          * Whether only the host may originate this kind, i.e. the host must refuse it when it
-         * arrives from a peer. True for {@link #DECIV} alone: it deletes a colony out of the
-         * authoritative world, it has no legitimate guest producer (the deciv capture is host-gated
-         * and the guest's deciv sim is suppressed), and the guest's own saturation bombardment
-         * already reaches the host as a {@code RAID_RESULT} that re-drives the transition there.
+         * arrives from a peer.
+         *
+         * <p>{@link #DECIV}: it deletes a colony out of the authoritative world, it has no
+         * legitimate guest producer (the deciv capture is host-gated and the guest's deciv sim is
+         * suppressed), and the guest's own saturation bombardment already reaches the host as a
+         * {@code RAID_RESULT} that re-drives the transition there.
+         *
+         * <p>{@link #COMMISSION}: the commission is the host's — it is signed on the host, the host
+         * pays its salary and posts its bounties, and the guest only mirrors the memory flag. A
+         * guest-originated one could only be an echo of what the host just told it, or a desync.
          *
          * <p>Guests are trusted friends, so this is not a security boundary — it is the check that
          * keeps a modified or desynced jar from silently erasing a colony, and it costs one enum
          * test per delta.
          */
         public boolean hostOnly() {
-            return this == DECIV;
+            return this == DECIV || this == COMMISSION;
         }
     }
 

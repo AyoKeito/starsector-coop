@@ -196,6 +196,15 @@ public final class CoopCampaignReplicator
     private long lastSkeletonPollMillis;
     private DecivCapture decivCapture;
 
+    // Phase 32: the two 1 Hz reconcilers that carry shared-submarket access. Storage unlock is polled
+    // on both roles while a dialog is open (the fee is paid inside it and there is no event to hook);
+    // the commission is host-only. Both keep their engine contact behind a seam so the decisions are
+    // unit-testable, and both are emitted on the same WORLD_DELTA channel as the skeleton mutations.
+    private final CoopStorageUnlockSync storageUnlockSync =
+            new CoopStorageUnlockSync(CoopStorageUnlockSync.liveEngine());
+    private final CoopCommissionSync commissionSync =
+            new CoopCommissionSync(CoopCommissionSync.liveEngine());
+
     // Phase 24 milestone 1: player raids/bombardments against colonies. Bidirectional -- whoever
     // performs the act captures the vanilla outcome and reports it; the host canonicalizes and
     // rebroadcasts, and the ledger absorbs the echo on the originator.
@@ -437,6 +446,8 @@ public final class CoopCampaignReplicator
         factionRelationsSeeded = false;
         lastPlayerRepSyncMillis = 0L;
         lastSkeletonPollMillis = 0L;
+        storageUnlockSync.reset();
+        commissionSync.reset();
         lastBarPoolPollMillis = 0L;
         barPoolCapture.reset();
         barPoolInjector.reset();
@@ -2803,6 +2814,16 @@ public final class CoopCampaignReplicator
                 applyRuinsExploredToEngine(delta);
                 return;
             }
+            case STORAGE_UNLOCK -> {
+                storageUnlockSync.applyRemote(delta.entityId());
+                return;
+            }
+            case COMMISSION -> {
+                // Host-only, so this only ever runs on a guest: handleWorldDelta refuses a
+                // guest-originated COMMISSION on the host before it reaches the engine at all.
+                commissionSync.applyRemote(delta.newStateJson());
+                return;
+            }
             default -> {
                 // Fall through to the consume path below.
             }
@@ -3323,12 +3344,64 @@ public final class CoopCampaignReplicator
      * the host that is a broadcast; on the guest it is the upward report the host then integrates.
      */
     private void emitSkeletonDelta(CoopWorldDelta.Kind kind, CoopSkeletonMutationWatcher.Flip flip) {
-        CoopWorldDelta delta = new CoopWorldDelta(flip.entityId(), kind, false, flip.state(),
-                session.localPlayerId());
-        if (worldLedger.apply(delta)) {
-            reportWorldDelta(delta);
+        if (emitWorldDelta(kind, flip.entityId(), flip.state())) {
             CoopLog.info(CoopCampaignReplicator.class, "Coop captured " + kind + " entity="
                     + flip.entityId() + " state=" + flip.state());
+        }
+    }
+
+    /**
+     * Records one of this engine's own non-consuming captures in the ledger and sends it, returning
+     * whether the ledger accepted it as new. Recording before sending is what makes the peer's echo
+     * inert on the originator; every poller-driven kind goes through here.
+     */
+    private boolean emitWorldDelta(CoopWorldDelta.Kind kind, String entityId, String payload) {
+        CoopWorldDelta delta = new CoopWorldDelta(entityId, kind, false, payload,
+                session.localPlayerId());
+        if (!worldLedger.apply(delta)) {
+            return false;
+        }
+        reportWorldDelta(delta);
+        return true;
+    }
+
+    /**
+     * Phase 32: storage unlocks. Both roles poll, because either player can pay the fee; the host
+     * additionally ships a once-per-session baseline of everything already unlocked, which is the
+     * only way a guest joining an older campaign learns about unlocks paid before it arrived.
+     */
+    private void tickStorageUnlock() {
+        try {
+            if (isHost()) {
+                for (String marketId : storageUnlockSync.takeBaseline()) {
+                    emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, marketId, "true");
+                }
+            }
+            String unlocked = storageUnlockSync.pollDockedUnlock(now());
+            if (unlocked != null
+                    && emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, unlocked, "true")) {
+                CoopLog.info(CoopCampaignReplicator.class,
+                        "Coop captured STORAGE_UNLOCK market=" + unlocked);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Storage-unlock poll failed", ex);
+        }
+    }
+
+    /** Phase 32: the host's commission, mirrored to the guest as one memory key. Host-only. */
+    private void tickCommission() {
+        if (!isHost()) {
+            return;
+        }
+        try {
+            String factionId = commissionSync.poll(now());
+            if (factionId != null && emitWorldDelta(CoopWorldDelta.Kind.COMMISSION,
+                    CoopCommissionSync.ENTITY_ID, factionId)) {
+                CoopLog.info(CoopCampaignReplicator.class,
+                        "Coop captured COMMISSION faction=" + CoopCommissionSync.describe(factionId));
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Commission poll failed", ex);
         }
     }
 
@@ -3358,6 +3431,10 @@ public final class CoopCampaignReplicator
         // Self-throttled, and deliberately ahead of the hyperspace early-return below: objectives and
         // gates flip whether or not the polling client is sitting in a star system.
         tickSkeletonMutations();
+        // Same reason (Phase 32): a dialog can be open and a commission can be signed or lost with
+        // the player's fleet parked in hyperspace, and the salvage scan below returns early there.
+        tickStorageUnlock();
+        tickCommission();
         long nowMillis = now();
         if (!shouldScanSalvage(lastSalvageScanMillis, nowMillis)) {
             return;

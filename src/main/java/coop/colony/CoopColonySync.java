@@ -13,6 +13,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
 import com.fs.starfarer.api.impl.campaign.submarkets.StoragePlugin;
 import coop.campaign.CoopDelimited;
+import coop.campaign.CoopStorageUnlock;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
@@ -760,12 +761,19 @@ public final class CoopColonySync {
      * {@code StoragePlugin.playerPaidToUnlock} is private with a setter and no getter
      * ({@code StoragePlugin.java:19}, {@code :90-92}), so this is write-only and unconditional — the
      * same call vanilla's own colony recipe makes.
+     *
+     * <p>Phase 32 adds the coop flag alongside it. The plugin field alone would be lost the next
+     * time this engine rebuilds the mirrored colony (a fresh {@code StoragePlugin} starts locked),
+     * and the flag is what {@code CoopStorageUnlockSync}'s dialog poll reads to put it back. A
+     * founded colony is unlocked by definition, so nothing is sent over the wire here: both engines
+     * run this same recipe for the same colony.
      */
     private static void unlockStorage(MarketAPI market) {
         SubmarketAPI storage = market.getSubmarket(Submarkets.SUBMARKET_STORAGE);
         if (storage != null && storage.getPlugin() instanceof StoragePlugin plugin) {
             plugin.setPlayerPaidToUnlock(true);
         }
+        CoopStorageUnlock.unlock(Global.getSector(), market);
     }
 
     /**
