@@ -34,7 +34,7 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "after the private soak / public release"
+      "note": "after the private soak / public release; order decided 2026-09-05: 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 33 → 22 → 25 → 27, as appetite allows"
     }
   ],
   "hereHead": "You are here: V1 code complete; outstanding: two-instance smoke for the launcher (deferred into Phase 19) and for the 2026-09-04 fix pass, the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
@@ -907,18 +907,19 @@
         "STREAM_ADD/SET/DESPAWN/REMOVE",
         "ENC_SPAWN/ENC_REMOVE",
         "AbyssalRogueStellarObjectDireHintsEPEC fork",
-        "$coopStreamId / $coopEncId",
-        "segment polyline replication"
+        "$coopStreamId / $coopEncId / $coopEncOrdinal",
+        "segment polyline + fade-state replication",
+        "bridge stream table + temp-system manifest"
       ],
       "residue": [
-        "M1 slipstream capture/apply/reconcile + smoke",
-        "M2 abyssal re-execution + three corrections + fingerprint exclusion + smoke",
-        "M3 abyssal lights/dire hints (decide at build)",
-        "stretch guest-proximity triggering (may stay unbuilt)",
+        "M1 slipstream capture/apply/reconcile incl. fade state + bridge-gated smoke",
+        "M2 (after M1 smoke) abyssal re-execution + four corrections + dire-hint override + ordinal keys + fingerprint exclusion + bridge-gated smoke",
+        "M3 abyssal lights/dire hints (open, user 2026-09-05)",
+        "stretch guest-proximity triggering (open, user 2026-09-05)",
         "document residual divergences + retire v1 accept-divergence entries",
         "commit"
       ],
-      "note": "Requires Phase 13 (suppressor + coop-forks.jar); builds on Phase 9 NPC mirrors + Phase 8 hyper position"
+      "note": "Requires Phase 13 (suppressor + coop-forks.jar); builds on Phase 9 NPC mirrors + Phase 8 hyper position. Review pass 2026-09-05 corrected four points against the API source: slipstream fades scale travel intensity (despawn fades run up to 27 days), so fade state is replicated instead of drawn locally; the dire-hints draw is filtered by per-install UniqueEncounterData, so the host ships its resolved choice; entities inside a generated system take Sector.genUID() ids that differ per client, so they are keyed by creation ordinal; and acceptance is gated on bridge diffs, not unit tests. Ordered first post-V1 (after 19, before 33/22) by user decision the same day; scope M1 + M2, M3 and stretch open."
     },
     {
       "id": "27",
