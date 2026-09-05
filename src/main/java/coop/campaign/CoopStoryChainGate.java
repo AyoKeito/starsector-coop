@@ -9,6 +9,13 @@ import coop.util.CoopLog;
 /**
  * Publishes "this client is the guest" into sector memory, where the rules engine can read it.
  *
+ * <p>Two things are gated on it, and the mechanism is the same for both: the mod's
+ * {@code data/campaign/rules.csv} replaces a vanilla row by id with a verbatim copy carrying one
+ * extra condition, {@link #GUEST_RULE_CONDITION}. The Galatia Academy story chain (below), and the
+ * faction-commission dialog options — see {@link CoopCommissionSync} for why a guest must not sign
+ * or resign one of its own. {@link #GUEST_GATED_OPTIONS} names the options that vanish, for the log
+ * line and for {@code CoopRulesFileTest}.
+ *
  * <p><b>Why.</b> The Galatia Academy story chain — {@code GAIntro}, {@code GAIntro2},
  * {@code GATalkToBaird}, {@code GAKallichore}, {@code GAFindingCoureuse}, {@code GAProjectZiggurat},
  * {@code GAAtTheGates}, {@code GADetectHyperspaceOddity} and the Sebestyen contact jobs — runs
@@ -46,6 +53,19 @@ public final class CoopStoryChainGate {
      */
     public static final String GUEST_RULE_CONDITION = "!$global.coopIsGuest";
 
+    /**
+     * Dialog options a guest launch withholds, named in the one log line this class writes.
+     *
+     * <p>Only the commission pair is listed. The academy chain is gated at rows that are triggers
+     * and bar events as much as options, so "the option that vanished" is not a useful description
+     * of it; the commission gate removes exactly two options from exactly one conversation, and a
+     * player who wonders where they went has nothing else to go on. The rules engine offers no hook
+     * to log from at the moment a row is refused — a gated row simply does not fire — so this is
+     * once per guest launch rather than once per refusal.
+     */
+    public static final java.util.List<String> GUEST_GATED_OPTIONS =
+            java.util.List.of("cmsn_askCommission", "cmsn_resignCommission");
+
     private CoopStoryChainGate() {
     }
 
@@ -77,7 +97,10 @@ public final class CoopStoryChainGate {
         if (role == CoopConnectionRole.GUEST) {
             memory.set(GUEST_MEMORY_FLAG, true);
             CoopLog.info(CoopStoryChainGate.class,
-                    "Guest launch: the Galatia Academy story chain is off on this client");
+                    "Guest launch: the Galatia Academy story chain is off on this client, and so are"
+                            + " the faction-commission dialog options "
+                            + String.join(", ", GUEST_GATED_OPTIONS)
+                            + " (the host signs; CoopCommissionSync mirrors it here)");
         } else {
             // Not set-to-false: see the class note. Unset on a save that never carried the key is a
             // no-op, which is the overwhelmingly common case (host, and solo launches).

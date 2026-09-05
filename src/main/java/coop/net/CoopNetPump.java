@@ -4231,6 +4231,14 @@ public class CoopNetPump implements EveryFrameScript {
         // out the 5 Hz cadence; the guest snapshot is cheap and re-establishes the save material.
         nextTimeSnapshotAtMillis = 0L;
         nextGuestSnapshotAtMillis = 0L;
+        // Phase 32 (red-team P0-1): the storage-unlock baseline and the commission first-poll are
+        // once-per-session and the replicator is NOT torn down by a reconnect grace
+        // (campaignReplicatorShouldBeActive keeps it alive), so nothing re-armed them. Both kept
+        // polling into a dead link while the peer was away, burning their world-ledger entries on
+        // sends that reached nobody. Re-arming them here is the same guarantee the base set and the
+        // roster get one line up; the ledger refusal that would otherwise swallow the resend is
+        // handled by the replicator's baseline emit path.
+        campaignReplicator.rearmSessionBaselines();
     }
 
     /** The grace window's side effects; see {@link CoopReconnectCoordinator}. */

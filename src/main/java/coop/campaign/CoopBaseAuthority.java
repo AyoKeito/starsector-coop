@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * Phase 13: makes vanilla's dynamic pirate / Luddic-Path bases host-authoritative.
@@ -93,6 +94,14 @@ public final class CoopBaseAuthority {
     private long nextGuestReconcileAtMillis;
     /** Identity keys whose construction failed; retrying every tick would spam the engine. */
     private final Set<String> constructionFailures = new HashSet<>();
+    /**
+     * Where this engine's live bases are read from, as a seam. Production is
+     * {@link #sectorBaseWorld()} over {@code Global.getSector()}; a test swaps it, because
+     * {@code PirateBaseIntel} and {@code LuddicPathBaseIntel} are massively side-effectful classes
+     * that cannot be constructed outside a running engine, and the pairing in
+     * {@link #applySet(String)} has no other way in.
+     */
+    private Supplier<BaseWorld> baseWorld = CoopBaseAuthority::sectorBaseWorld;
 
     public CoopBaseAuthority(CoopNetService service, CoopSessionState sessionState,
                              LongSupplier clockMillis) {
@@ -288,15 +297,21 @@ public final class CoopBaseAuthority {
      * wiped set is unrecoverable until the host's set-hash happens to change (it never resends an
      * unchanged set mid-session). The session-start frame can order dispatch before the lazy edge in
      * the pump, which made the old wipe-on-reset lose a just-arrived set (caught live 2026-08-19).
+     *
+     * <p>The market-id table deliberately survives too, for the same shape of reason (red-team
+     * P2-10/P0-2). It used to be cleared here, and this reset runs on an edge the replicator does not
+     * share: {@code shouldStreamFleet()} is {@code isConnected()} alone, while the replicator holds
+     * its session across a reconnect grace. So every session edge and every resume wiped a table the
+     * replicator went on translating against, and until the next 5 s reconcile refilled it a hidden
+     * base's {@code MARKET_TXN} went out under an id the host's economy could not resolve — cargo
+     * deposited in that window was recorded by neither engine. {@code CoopCampaignReplicator.dispose()}
+     * is now the only clearer. A stale entry for a base that is gone is harmless: {@code findMarket}
+     * returns null for it and logs.
      */
     public void reset() {
         lastSetHash = "";
         nextGuestReconcileAtMillis = 0L;
         constructionFailures.clear();
-        // The market-id table describes this engine's live bases against one host's set. It is
-        // refilled from the first reconcile after the host's post-reset BASE_SET, so dropping it here
-        // costs nothing and keeps a stale local id from a torn-down campaign out of the next one.
-        marketIds.clear();
     }
 
     // ---- Guest --------------------------------------------------------------------------------
@@ -310,6 +325,13 @@ public final class CoopBaseAuthority {
      * (which runs later that same frame) then destroys. Caught live 2026-08-19: the guest ended the
      * frame with zero bases. Storing here and reconciling from {@link #tickGuest()} — which the pump
      * calls after {@code syncNpcReplication()} — guarantees cleanup-before-build ordering.
+     *
+     * <p>It <em>does</em> pair market ids here, which is a different thing (red-team P0-2). Pairing
+     * is a pure read of the intel manager into {@link CoopMarketIds}: it constructs nothing, so the
+     * ordering hazard above does not apply to it, and every base that already exists locally — which
+     * after a reload or a resume is all of them — is mapped one message after the {@code BASE_SET}
+     * instead of up to {@link #GUEST_RECONCILE_INTERVAL_MILLIS} later. Bases this set adds are paired
+     * by the reconcile that builds them, as before.
      */
     public void applySet(String encodedSet) {
         desiredSet = CoopBaseRecord.decodeSet(encodedSet == null ? "" : encodedSet);
@@ -318,6 +340,29 @@ public final class CoopBaseAuthority {
         constructionFailures.clear();
         // Reconcile on the very next tick rather than waiting out the low-rate interval.
         nextGuestReconcileAtMillis = 0L;
+        pairExistingBasesNow();
+    }
+
+    /**
+     * Maps every host record in the stored set against the base of the same identity that already
+     * exists on this engine. Total: a failure here costs the fast pairing, never the stored set, and
+     * the next reconcile does the same work anyway.
+     */
+    private void pairExistingBasesNow() {
+        try {
+            BaseWorld world = baseWorld.get();
+            if (world == null) {
+                return;
+            }
+            int learned = learnMarketIds(desiredSet, world.localBases());
+            if (learned > 0) {
+                CoopLog.info(CoopBaseAuthority.class,
+                        "Coop paired base market ids on BASE_SET arrival learned=" + learned);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopBaseAuthority.class,
+                    "Failed to pair base market ids on BASE_SET arrival", ex);
+        }
     }
 
     /**
@@ -338,11 +383,10 @@ public final class CoopBaseAuthority {
 
     private void reconcileNow() {
         try {
-            SectorAPI sector = Global.getSector();
-            if (sector == null || sector.getIntelManager() == null) {
+            BaseWorld world = baseWorld.get();
+            if (world == null) {
                 return;
             }
-            BaseWorld world = new SectorBaseWorld(sector);
             Summary summary = apply(world, desiredSet, constructionFailures);
             if (!summary.isNoOp()) {
                 CoopLog.info(CoopBaseAuthority.class, "Coop guest reconciled bases " + summary);
@@ -366,6 +410,17 @@ public final class CoopBaseAuthority {
     /** The shared base market-id table this authority fills; for the replicator and the bridge. */
     public CoopMarketIds marketIds() {
         return marketIds;
+    }
+
+    /** The live engine's base world, or null when there is no sector or no intel manager yet. */
+    private static BaseWorld sectorBaseWorld() {
+        SectorAPI sector = Global.getSector();
+        return sector == null || sector.getIntelManager() == null ? null : new SectorBaseWorld(sector);
+    }
+
+    /** Test seam; see {@link #baseWorld}. */
+    void setBaseWorldForTest(Supplier<BaseWorld> supplier) {
+        this.baseWorld = Objects.requireNonNull(supplier, "supplier");
     }
 
     /**

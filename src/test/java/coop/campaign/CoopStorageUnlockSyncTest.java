@@ -216,6 +216,90 @@ class CoopStorageUnlockSyncTest {
         assertEquals(0, engine.unlockCalls);
     }
 
+    /**
+     * Red-team P1-4. A base destroyed and rebuilt in the same system keeps its
+     * {@code (kind, systemId)} identity, so {@code CoopMarketIds.learn} hands the same host id a
+     * fresh local id — and by then the flag is parked under the <em>old local</em> id, because the
+     * first mapping already moved it off the host's. Migrating only from the host id did nothing:
+     * the rebuilt base's locker stayed shut, the dead key stayed in the save, and the 1 Hz repair
+     * could not help because it reads the flag under the new id.
+     */
+    @Test
+    void aFlagParkedUnderTheDisplacedLocalIdIsMigratedToTheRebuiltMarket() {
+        FakeEngine engine = new FakeEngine();
+        engine.markets.put("market_REBUILT", market("market_REBUILT"));
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+        sync.applyRemote("market_HOST");
+        sync.onMarketIdMapped("market_HOST", "market_LOCAL");
+        assertEquals(List.of("market_LOCAL"), List.copyOf(engine.flagged));
+
+        sync.onMarketIdMapped("market_HOST", "market_REBUILT", "market_LOCAL");
+
+        assertEquals(List.of("market_REBUILT"), List.copyOf(engine.flagged),
+                "the dead local key must go with it, or it rides the save forever");
+        assertEquals(List.of("market_REBUILT"), engine.unlocked);
+    }
+
+    @Test
+    void aFlagUnderBothTheHostIdAndTheDisplacedLocalIdIsFullyCollapsed() {
+        FakeEngine engine = new FakeEngine();
+        engine.flagged.add("market_HOST");
+        engine.flagged.add("market_LOCAL");
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+
+        sync.onMarketIdMapped("market_HOST", "market_REBUILT", "market_LOCAL");
+
+        assertEquals(List.of("market_REBUILT"), List.copyOf(engine.flagged));
+    }
+
+    /**
+     * Red-team P2-7. The repair does not stick when {@code playerPaidToUnlock} is unreadable or the
+     * storage plugin is not a {@code StoragePlugin} — {@code unlockPlugin} is a silent no-op there —
+     * and the old code then re-ran it, and logged, on every 1 Hz poll for as long as the dialog was
+     * open. Once per market per dialog; the next dock gets its one attempt.
+     */
+    @Test
+    void aRepairThatDoesNotStickIsAttemptedOncePerMarketPerDialog() {
+        FakeEngine engine = new FakeEngine();
+        engine.unlockIsANoOp = true;
+        engine.dialogMarket = market("market_base");
+        engine.flagged.add("market_base");
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+        long now = T0;
+
+        assertNull(sync.pollDockedUnlock(now));
+        assertEquals(1, engine.unlockCalls);
+
+        for (int poll = 0; poll < 5; poll++) {
+            assertNull(sync.pollDockedUnlock(now += CoopStorageUnlockSync.POLL_INTERVAL_MILLIS));
+        }
+        assertEquals(1, engine.unlockCalls, "one attempt, not one per second");
+
+        // Undock, then dock again: a fresh dialog is a fresh chance.
+        engine.dialogMarket = null;
+        assertNull(sync.pollDockedUnlock(now += CoopStorageUnlockSync.POLL_INTERVAL_MILLIS));
+        engine.dialogMarket = market("market_base");
+        assertNull(sync.pollDockedUnlock(now + CoopStorageUnlockSync.POLL_INTERVAL_MILLIS));
+
+        assertEquals(2, engine.unlockCalls);
+    }
+
+    @Test
+    void dockingAtASecondMarketGetsItsOwnRepairAttempt() {
+        FakeEngine engine = new FakeEngine();
+        engine.unlockIsANoOp = true;
+        engine.flagged.add("market_a");
+        engine.flagged.add("market_b");
+        engine.dialogMarket = market("market_a");
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+
+        assertNull(sync.pollDockedUnlock(T0));
+        engine.dialogMarket = market("market_b");
+        assertNull(sync.pollDockedUnlock(T0 + CoopStorageUnlockSync.POLL_INTERVAL_MILLIS));
+
+        assertEquals(List.of("market_a", "market_b"), engine.unlocked);
+    }
+
     @Test
     void degenerateMappingsAreIgnored() {
         FakeEngine engine = new FakeEngine();
@@ -237,6 +321,12 @@ class CoopStorageUnlockSyncTest {
         private MarketAPI dialogMarket;
         private int dialogReads;
         private int unlockCalls;
+        /**
+         * Models the two ways {@code unlockPlugin} cannot take: an unreadable
+         * {@code playerPaidToUnlock}, and a storage submarket whose plugin is not a
+         * {@code StoragePlugin}. Both leave {@code pluginPaid} false forever.
+         */
+        private boolean unlockIsANoOp;
 
         @Override
         public MarketAPI dialogMarket() {
@@ -258,7 +348,7 @@ class CoopStorageUnlockSyncTest {
         public void unlockPlugin(MarketAPI market) {
             unlockCalls++;
             unlocked.add(market == null ? null : market.getId());
-            if (market != null && market.getId() != null) {
+            if (!unlockIsANoOp && market != null && market.getId() != null) {
                 paid.add(market.getId());
             }
         }

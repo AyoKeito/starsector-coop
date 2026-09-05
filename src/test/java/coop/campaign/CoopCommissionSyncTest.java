@@ -5,7 +5,9 @@ import com.fs.starfarer.api.campaign.CharacterDataAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -18,6 +20,7 @@ import static coop.testing.ProxyDefaults.defaultValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The host's commission poll and the guest's one-key apply.
@@ -32,6 +35,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class CoopCommissionSyncTest {
 
     private static final long T0 = 1_000_000L;
+
+    /**
+     * {@code Misc} initializes static {@code Color} fields off {@code Global.getSettings()}, and a
+     * class whose {@code <clinit>} throws stays broken for the life of the JVM — every later touch
+     * is a {@code NoClassDefFoundError}, which the live engine catches and reads as "no commission".
+     * The live-engine rows below go through {@code Misc.getCommissionFactionId}, so this class has to
+     * install settings before the first of them rather than relying on some earlier test class having
+     * done it. Not cleared: a stub {@code SettingsAPI} left in place can only help whoever runs next,
+     * while nulling it is how the trap gets set.
+     */
+    @BeforeEach
+    void stubSettings() {
+        Global.setSettings(ApiProxies.whiteSettings());
+    }
 
     @AfterEach
     void clearGlobalSector() {
@@ -49,14 +66,18 @@ class CoopCommissionSyncTest {
     }
 
     @Test
-    void aSessionThatStartsWithNoCommissionSaysNothing() {
-        // Every poller in this family is silent when it has nothing to report, and "no commission"
-        // is what a guest assumes anyway. See CoopCommissionSync#poll for the trade and its residue.
+    void aSessionThatStartsWithNoCommissionSaysSoOutLoud() {
+        // Red-team P1-5. This used to be silent, on the argument that "no commission" is the state a
+        // guest is in anyway. It is not, after a reconnect: the guest may be carrying a mirrored
+        // faction from before the outage while the host's commission ended during it, and the
+        // resume re-arms this poll precisely so the empty payload can correct that.
         FakeEngine engine = new FakeEngine();
         CoopCommissionSync sync = new CoopCommissionSync(engine);
 
-        assertNull(sync.poll(T0));
-        assertNull(sync.poll(T0 + CoopCommissionSync.POLL_INTERVAL_MILLIS));
+        assertEquals("", sync.poll(T0));
+        assertTrue(sync.lastPollWasSessionBaseline(), "so the replicator sends it past the ledger");
+        assertNull(sync.poll(T0 + CoopCommissionSync.POLL_INTERVAL_MILLIS), "unchanged");
+        assertFalse(sync.lastPollWasSessionBaseline());
     }
 
     @Test
@@ -66,7 +87,7 @@ class CoopCommissionSyncTest {
         List<String> reported = new ArrayList<>();
         long now = T0;
 
-        assertNull(sync.poll(now), "the silent seeding poll");
+        assertEquals("", sync.poll(now), "the session baseline, empty and sent anyway");
         engine.factionId = "hegemony";
         reported.add(sync.poll(now += CoopCommissionSync.POLL_INTERVAL_MILLIS));
         engine.factionId = null;
@@ -186,7 +207,7 @@ class CoopCommissionSyncTest {
         Global.setSector(sectorWithCharacterMemory(null));
         CoopCommissionSync sync = new CoopCommissionSync(CoopCommissionSync.liveEngine());
 
-        assertNull(sync.poll(T0), "an unreadable commission reads as none, not as a crash");
+        assertEquals("", sync.poll(T0), "an unreadable commission reads as none, not as a crash");
         sync.applyRemote("hegemony");
     }
 

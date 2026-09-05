@@ -47,6 +47,17 @@ class CoopNetPumpTest {
     private static final String EMPTY_MOTION_BODY =
             coop.fleet.CoopNpcFleetMotion.encodeFullSection(java.util.List.of());
 
+    /**
+     * {@code Misc} builds static {@code Color} fields from {@code Global.getSettings()} in its
+     * {@code <clinit>}, and a class whose static init throws stays broken for the life of the JVM.
+     * A host pump's {@code advance()} reaches {@code Misc.getCommissionFactionId} through the Phase
+     * 32 commission poll, so settings go in here rather than depending on which test class ran first.
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void stubSettings() {
+        Global.setSettings(coop.testing.ApiProxies.whiteSettings());
+    }
+
     @AfterEach
     void clearGlobalSector() {
         Global.setSector(null);
@@ -222,9 +233,10 @@ class CoopNetPumpTest {
         assertEquals(123456789L, session.seedLong());
         assertEquals("coop-seed", session.seedString());
         assertEquals("fingerprint-host", session.sectorFingerprint());
-        assertEquals(2, service.sent.size());
-        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, service.sent.get(0).type());
-        CoopMessages.Message request = service.sent.get(1);
+        List<CoopMessages.Message> sent = sentWithoutCommissionBaseline(service);
+        assertEquals(2, sent.size());
+        assertEquals(CoopMessages.Type.HANDSHAKE_RESULT, sent.get(0).type());
+        CoopMessages.Message request = sent.get(1);
         assertEquals(CoopMessages.Type.SEED_LOCK_REQUEST, request.type());
         assertEquals("session-a", request.sessionId());
         assertEquals(123456789L, CoopMessages.requiredPayloadLong(request, "seedLong"));
@@ -391,8 +403,9 @@ class CoopNetPumpTest {
         now.set(1200L);
         pump.advance(0f);
 
-        assertEquals(1, service.sent.size());
-        CoopMessages.Message snapshot = service.sent.get(0);
+        List<CoopMessages.Message> sent = sentWithoutCommissionBaseline(service);
+        assertEquals(1, sent.size());
+        CoopMessages.Message snapshot = sent.get(0);
         assertEquals(CoopMessages.Type.TIME_SNAPSHOT, snapshot.type());
         assertEquals("session-a", snapshot.sessionId());
         assertEquals("true", CoopMessages.requiredPayloadString(snapshot, "paused"));
@@ -2142,6 +2155,29 @@ class CoopNetPumpTest {
         return (int) service.sent.stream().filter(m -> m.type() == type).count();
     }
 
+    /**
+     * Every message sent except the Phase 32 commission baseline.
+     *
+     * <p>The host's first {@code tickWorldDeltas()} of a session reports the current commission
+     * unconditionally now, empty payload included (red-team P1-5): a guest returning from a
+     * reconnect may hold a mirrored faction the host no longer has, and nothing else on the wire
+     * ever corrects it. So every host pump in this file emits one extra {@code WORLD_DELTA} on its
+     * first advance, which has nothing to do with what these rows pin.
+     */
+    static List<CoopMessages.Message> sentWithoutCommissionBaseline(RecordingNetService service) {
+        return service.sent.stream()
+                .filter(m -> m.type() != CoopMessages.Type.WORLD_DELTA
+                        || !coop.campaign.CoopWorldDelta.Kind.COMMISSION.name()
+                                .equals(CoopMessages.requiredPayloadString(m, "kind")))
+                .toList();
+    }
+
+    private static int countOfExcludingCommission(RecordingNetService service,
+                                                  CoopMessages.Type type) {
+        return (int) sentWithoutCommissionBaseline(service).stream()
+                .filter(m -> m.type() == type).count();
+    }
+
     private static CoopMessages.Message onlyOf(RecordingNetService service, CoopMessages.Type type) {
         List<CoopMessages.Message> matches = service.sent.stream()
                 .filter(m -> m.type() == type)
@@ -3584,6 +3620,60 @@ class CoopNetPumpTest {
                 "a resume must re-seed the guest's clock immediately");
     }
 
+    /**
+     * Red-team P0-1. A reconnect grace is deliberately not a teardown, so the campaign replicator is
+     * never disposed and the two once-per-session Phase 32 pollers were never re-armed: they kept
+     * running with no peer attached, burning their world-ledger entries on sends that
+     * {@code CoopNetService.send} dropped into an empty peer list. A fee paid or a commission signed
+     * or ended while the guest was away therefore never reached it — the guest's locker stayed shut
+     * for the rest of the session and could be paid for a second time, and its military-submarket
+     * access clause read the wrong answer until the host's next commission change. The forced
+     * rebroadcast re-arms both, and the replicator's baseline path sends past the ledger entry that
+     * would otherwise refuse the resend.
+     */
+    @Test
+    void aResumeReArmsBothPhase32SessionBaselines() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        RecordingSector sector = new RecordingSector(false);
+        sector.persistentData.put(
+                coop.campaign.CoopStorageUnlock.flagKey("market_jangala"), Boolean.TRUE);
+        sector.markets.put("market_jangala", bareMarket("market_jangala"));
+        Global.setSector(sector.proxy());
+        RecordingTimeLock timeLock = new RecordingTimeLock(
+                new CoopTimeLock.TimeSnapshot(false, false, 5_000L, 3L, 1000L, ""));
+        CoopNetPump pump = pumpWithTimeLock(service, session, now::get, timeLock);
+
+        pump.advance(0f);
+        assertEquals(1, worldDeltasOfKind(service, "STORAGE_UNLOCK"),
+                "the host ships everything already unlocked once per session: " + service.sent);
+        assertEquals(1, worldDeltasOfKind(service, "COMMISSION"));
+
+        service.connected = false;
+        pump.advance(0f);
+        service.sent.clear();
+
+        service.connected = true;
+        now.addAndGet(4_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(), "guest-player"));
+        pump.advance(0f);
+        now.addAndGet(2_000L);
+        pump.advance(0f);
+
+        assertEquals(1, worldDeltasOfKind(service, "STORAGE_UNLOCK"),
+                "the returning guest is owed the unlock baseline again: " + service.sent);
+        assertEquals(1, worldDeltasOfKind(service, "COMMISSION"),
+                "and the commission, which is how an outage-time change reaches it at all");
+    }
+
+    private static int worldDeltasOfKind(RecordingNetService service, String kind) {
+        return (int) service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.WORLD_DELTA)
+                .filter(m -> kind.equals(CoopMessages.requiredPayloadString(m, "kind")))
+                .count();
+    }
+
     @Test
     void aStrangerIsRejectedAndTheHostKeepsWaitingForTheRealPartner() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
@@ -3633,7 +3723,7 @@ class CoopNetPumpTest {
                 "entity-1", "CONSUME", true, "", "guest-player"));
         pump.advance(0f);
 
-        assertEquals(0, countOf(service, CoopMessages.Type.WORLD_DELTA),
+        assertEquals(0, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA),
                 "an unproven peer's campaign traffic must not reach the replicator");
 
         // After a matching resume the same message is ordinary session traffic again.
@@ -3643,7 +3733,7 @@ class CoopNetPumpTest {
                 "entity-1", "CONSUME", true, "", "guest-player"));
         pump.advance(0f);
 
-        assertEquals(1, countOf(service, CoopMessages.Type.WORLD_DELTA));
+        assertEquals(1, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA));
     }
 
     /**
@@ -5003,12 +5093,46 @@ class CoopNetPumpTest {
         assertNull(service.expectedTokens.get(0), "the token must be cleared, not left armed");
     }
 
+    /** An economy that resolves exactly the ids it was given, and nothing else. */
+    private static Object economyProxy(java.util.Map<String, Object> markets) {
+        return Proxy.newProxyInstance(
+                com.fs.starfarer.api.campaign.econ.EconomyAPI.class.getClassLoader(),
+                new Class<?>[]{com.fs.starfarer.api.campaign.econ.EconomyAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getMarket" -> markets.get(String.valueOf(args[0]));
+                    case "toString" -> "FakeEconomy";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> coop.testing.ProxyDefaults.defaultValue(method.getReturnType());
+                });
+    }
+
+    /** A market that answers to one id and nothing more; enough for {@code economy.getMarket}. */
+    private static Object bareMarket(String id) {
+        return Proxy.newProxyInstance(
+                com.fs.starfarer.api.campaign.econ.MarketAPI.class.getClassLoader(),
+                new Class<?>[]{com.fs.starfarer.api.campaign.econ.MarketAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getId" -> id;
+                    case "toString" -> "BareMarket[" + id + "]";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> coop.testing.ProxyDefaults.defaultValue(method.getReturnType());
+                });
+    }
+
     private static final class RecordingSector {
         private boolean paused;
         private final RecordingCampaignUi campaignUi;
         private final RecordingFleet playerFleet;
         /** Phase 28: where the campaign's option policy is stored, beside coop.campaignId. */
         private final java.util.Map<String, Object> persistentData = new java.util.LinkedHashMap<>();
+        /**
+         * Markets this engine can resolve by id. Empty for almost every row here; the Phase 32
+         * storage-unlock baseline is the one thing in the pump that reads the economy, and it now
+         * refuses to broadcast a flag whose market this engine cannot find.
+         */
+        private final java.util.Map<String, Object> markets = new java.util.LinkedHashMap<>();
 
         private RecordingSector(boolean paused) {
             this(paused, null, null);
@@ -5054,6 +5178,9 @@ class CoopNetPumpTest {
                             }
                             case "getPersistentData" -> {
                                 return persistentData;
+                            }
+                            case "getEconomy" -> {
+                                return economyProxy(markets);
                             }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }

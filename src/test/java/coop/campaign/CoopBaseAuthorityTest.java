@@ -490,6 +490,51 @@ class CoopBaseAuthorityTest {
         assertEquals("local-1", ids.toLocal("market_HOST_P"));
     }
 
+    /**
+     * Red-team P0-2. The pairing used to hang off the 5 s reconcile tick alone, so after every
+     * session start and every resume there was a multi-second window in which a mirrored base's
+     * market-id translation was the identity and its traffic went out under an id the host resolves
+     * nothing by. Pairing on the {@code BASE_SET} itself makes that window one message wide.
+     *
+     * <p>The reconcile still deliberately does not run here — that ordering hazard is real and is
+     * why {@code applySet} stores rather than builds — but pairing constructs nothing.
+     */
+    @Test
+    void aBaseSetPairsTheBasesThatAlreadyExistWithoutWaitingForTheReconcileTick() {
+        MintingWorld world = new MintingWorld();
+        List<CoopBaseRecord> desired = List.of(
+                CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST_P"));
+        CoopBaseAuthority.apply(world, desired, new HashSet<>());
+        world.calls.clear();
+
+        CoopMarketIds ids = new CoopMarketIds();
+        CoopBaseAuthority authority = authority(ids);
+        authority.setBaseWorldForTest(() -> world);
+
+        authority.applySet(CoopBaseRecord.encodeSet(desired));
+
+        assertEquals("local-1", ids.toLocal("market_HOST_P"));
+        assertEquals("market_HOST_P", ids.toWire("local-1"));
+        assertTrue(world.calls.isEmpty(),
+                "pairing must not build or end anything -- that is still the reconcile's job: "
+                        + world.calls);
+    }
+
+    @Test
+    void aBaseSetWithNoWorldUnderItStillStoresTheSet() {
+        // The headless path: no sector, or no intel manager yet. The pairing is best-effort and the
+        // stored set is not.
+        CoopMarketIds ids = new CoopMarketIds();
+        CoopBaseAuthority authority = authority(ids);
+        authority.setBaseWorldForTest(() -> null);
+
+        authority.applySet(CoopBaseRecord.encodeSet(List.of(
+                CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST_P"))));
+
+        assertEquals(1, authority.desiredBaseCount());
+        assertEquals(0, ids.size());
+    }
+
     @Test
     void aBaseWithNoMarketOnEitherSideIsNotPaired() {
         assertEquals(Map.of(), CoopBaseAuthority.pairMarketIds(
@@ -511,13 +556,19 @@ class CoopBaseAuthorityTest {
     }
 
     @Test
-    void resetForgetsTheLearnedMarketIds() {
+    void resetKeepsTheLearnedMarketIds() {
+        // Red-team P2-10/P0-2. This reset used to clear the table, and its edge is not the
+        // replicator's: shouldStreamFleet() is isConnected() alone, while the replicator holds its
+        // session through a reconnect grace. So a resume wiped a table the replicator was still
+        // translating against, and until the next 5 s reconcile refilled it a hidden base's
+        // MARKET_TXN went out under an id the host could not resolve -- cargo deposited in that
+        // window was recorded by neither engine. CoopCampaignReplicator.dispose() owns the clear now.
         CoopMarketIds ids = new CoopMarketIds();
         ids.learn("market_HOST_P", "local-1");
         authority(ids).reset();
 
-        assertEquals(0, ids.size());
-        assertEquals("market_HOST_P", ids.toLocal("market_HOST_P"));
+        assertEquals(1, ids.size());
+        assertEquals("local-1", ids.toLocal("market_HOST_P"));
     }
 
     private static CoopBaseAuthority authority(CoopMarketIds ids) {
