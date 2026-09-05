@@ -5995,6 +5995,10 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         npcFleetRegistry.assertEngagementShields(playerEngagementTargetOrNull(), now);
+        // Same frame, same clock read: post-battle freezes expire on wall time, not on the host
+        // happening to send another NPC_FLEET_SET (it only sends one when its set hash changes, so
+        // a lost BATTLE_RESULT used to freeze a mirror indefinitely).
+        npcFleetRegistry.expirePendingReconcile(now);
     }
 
     /**

@@ -401,6 +401,104 @@ class CoopFleetMirrorRegistryTest {
         assertTrue(registry.pendingReconcileIds().isEmpty());
     }
 
+    // ---- the freeze expires on a per-frame clock, not only on set arrival ------------------------
+
+    @Test
+    void anExpiredFreezeAppliesTheSnapshotItDeferred() {
+        // The host only sends NPC_FLEET_SET when its set hash changes, so the timeout cannot depend
+        // on another set arriving: the per-frame expiry applies the host's last word instead.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+        CoopNpcFleetSetSnapshot deferred = set(fleet("a", "corvus", "wolf"));
+        registry.applySet(deferred, 7.5, 3000L);
+        assertEquals(1, mirror.snapshotApplies, "still frozen while the mark stands");
+
+        registry.expirePendingReconcile(
+                2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS);
+
+        assertEquals(2, mirror.snapshotApplies, "exactly one apply on expiry");
+        assertSame(deferred.fleets().get(0), mirror.lastSnapshot);
+        assertEquals(7.5, mirror.lastSampleTimeSeconds, 1e-9,
+                "the deferred sample time rides along; the mirror's own staleness check drops the"
+                        + " position stamp if it is behind");
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+
+        // And the freeze is genuinely gone: the very next identical set applies normally.
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 8.0, 70_000L);
+        assertEquals(3, mirror.snapshotApplies);
+    }
+
+    @Test
+    void expiringOneSecondEarlyChangesNothing() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 7.5, 3000L);
+
+        registry.expirePendingReconcile(
+                2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS - 1000L);
+
+        assertEquals(1, mirror.snapshotApplies);
+        assertEquals(List.of("a"), new ArrayList<>(registry.pendingReconcileIds()));
+    }
+
+    @Test
+    void expiryCountsFromTheLastReMarkNotTheFirst() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+        CoopNpcFleetSetSnapshot deferred = set(fleet("a", "corvus", "wolf"));
+        registry.applySet(deferred, 7.5, 3000L);
+        // The battle bridge renews the mark 30 s in; the deferred snapshot must survive the re-mark.
+        registry.markPendingReconcile("a", 32_000L);
+
+        registry.expirePendingReconcile(82_000L);
+        assertEquals(1, mirror.snapshotApplies, "only 50 s since the re-mark");
+        assertEquals(List.of("a"), new ArrayList<>(registry.pendingReconcileIds()));
+
+        registry.expirePendingReconcile(92_000L);
+        assertEquals(2, mirror.snapshotApplies);
+        assertSame(deferred.fleets().get(0), mirror.lastSnapshot);
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+    }
+
+    @Test
+    void expiringAFreezeThatNeverSawASetJustClearsTheMark() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        registry.expirePendingReconcile(
+                2000L + CoopFleetMirrorRegistry.PENDING_RECONCILE_TIMEOUT_MILLIS);
+
+        assertEquals(1, mirror.snapshotApplies, "nothing was deferred, so nothing is applied");
+        assertFalse(mirror.disposed);
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+    }
+
+    @Test
+    void aReconciledSetStillReleasesTheFreezeImmediately() {
+        // Regression: the per-frame expiry must not have displaced the fast path.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.markPendingReconcile("a", 2000L);
+
+        registry.applySet(set(fleet("a", "corvus", "lasher")), 0.0, 3000L);
+
+        assertEquals(2, mirror.snapshotApplies);
+        assertTrue(registry.pendingReconcileIds().isEmpty());
+
+        // Nothing left to expire, and the expiry pass must not re-apply an old snapshot.
+        registry.expirePendingReconcile(120_000L);
+        assertEquals(2, mirror.snapshotApplies);
+    }
+
     @Test
     void theFreezePredicateIsPureAndTimeBounded() {
         assertTrue(CoopFleetMirrorRegistry.shouldDeferReassert("hash-1", 0L, "hash-1", 5000L));
