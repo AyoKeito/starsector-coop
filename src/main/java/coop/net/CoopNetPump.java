@@ -793,7 +793,10 @@ public class CoopNetPump implements EveryFrameScript {
         this.campaignReplicator.setStatsSink(new StatsSink());
         this.npcFleetReplicator = new CoopNpcFleetReplicator(service, sessionState, clockMillis,
                 streamClock, this::sendStateDatagram);
-        this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis);
+        // Phase 32 addition A: the base authority is the only writer of the hidden-base market-id
+        // table and the replicator the only reader, so they share the replicator's instance.
+        this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis,
+                campaignReplicator.marketIds());
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
         this.battleResultReconciler = new CoopBattleResultReconciler(

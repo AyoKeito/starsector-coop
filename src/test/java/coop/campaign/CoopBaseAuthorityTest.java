@@ -10,6 +10,8 @@ import coop.campaign.CoopBaseAuthority.BaseWorld;
 import coop.campaign.CoopBaseAuthority.Summary;
 import coop.campaign.CoopBaseRecord.Kind;
 import coop.net.CoopConnectionRole;
+import coop.testing.RecordingNetService;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -17,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,7 +42,8 @@ class CoopBaseAuthorityTest {
     @Test
     void recordRoundTripsDelimiterHostileIds() {
         CoopBaseRecord record = new CoopBaseRecord(Kind.PATHER,
-                "sys|with\\pipes\nand\r\nbreaks", "fac|tion\\x", CoopBaseRecord.ATTR_LARGE);
+                "sys|with\\pipes\nand\r\nbreaks", "fac|tion\\x", CoopBaseRecord.ATTR_LARGE,
+                "market_1F|A\\9");
         CoopBaseRecord decoded = CoopBaseRecord.decode(record.encode());
         assertEquals(record, decoded);
         assertEquals("sys|with\\pipes\nand\r\nbreaks", decoded.systemId());
@@ -68,9 +72,10 @@ class CoopBaseAuthorityTest {
 
     @Test
     void decodeRejectsWrongFieldCountAndUnknownKind() {
-        assertThrows(IllegalArgumentException.class, () -> CoopBaseRecord.decode("PIRATE|corvus|pirates"));
         assertThrows(IllegalArgumentException.class,
-                () -> CoopBaseRecord.decode("REMNANT|corvus|pirates|TIER_1_1MODULE"));
+                () -> CoopBaseRecord.decode("PIRATE|corvus|pirates|TIER_1_1MODULE"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopBaseRecord.decode("REMNANT|corvus|pirates|TIER_1_1MODULE|market_1"));
     }
 
     // ---- Set hash -----------------------------------------------------------------------------
@@ -386,6 +391,187 @@ class CoopBaseAuthorityTest {
 
         assertEquals(List.of(added),
                 CoopBaseAuthority.liveIntelIncludingQueued(manager, PirateActivityIntel.class));
+    }
+
+    // ---- Phase 32 addition A: the market id on the record -----------------------------------
+
+    @Test
+    void aRecordCarriesItsMarketIdThroughTheCodec() {
+        CoopBaseRecord record = CoopBaseRecord.pirate("corvus", "pirates", "TIER_3_2MODULE",
+                "market_00A1F");
+        CoopBaseRecord decoded = CoopBaseRecord.decode(record.encode());
+
+        assertEquals("market_00A1F", decoded.marketId());
+        assertEquals(record, decoded);
+    }
+
+    @Test
+    void aRecordWithNoMarketYetRoundTripsAsAnEmptyId() {
+        // A base captured mid-construction, or one whose intel has no market. The trailing empty
+        // field is what keeps the record five fields wide so decode still parses it.
+        CoopBaseRecord record = CoopBaseRecord.pather("askonia", "luddic_path", true);
+
+        assertEquals("", record.marketId());
+        assertEquals("PATHER|askonia|luddic_path|large|", record.encode());
+        assertEquals(record, CoopBaseRecord.decode(record.encode()));
+    }
+
+    @Test
+    void theSetHashFoldsInTheMarketId() {
+        // Stable per base (a market is minted once in the constructor and never replaced), so this
+        // costs no rebroadcast churn -- but a set that names different markets is a different set.
+        assertNotEquals(
+                CoopBaseRecord.setHash(List.of(
+                        CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_A"))),
+                CoopBaseRecord.setHash(List.of(
+                        CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_B"))));
+    }
+
+    @Test
+    void planIgnoresTheMarketId() {
+        // The load-bearing one. For a correctly mirrored base the two ids ALWAYS differ -- the guest
+        // minted its own with Misc.genUID() -- so reading the difference as an attribute change
+        // would issue an UPDATE_ATTR on every reconcile pass, forever, for every base.
+        List<Action> plan = CoopBaseAuthority.plan(
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST")),
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_LOCAL")));
+
+        assertEquals(List.of(), plan);
+    }
+
+    @Test
+    void planStillUpdatesWhenTheAttributeMovesUnderDifferingMarketIds() {
+        List<Action> plan = CoopBaseAuthority.plan(
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_4_3MODULE", "market_HOST")),
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_LOCAL")));
+
+        assertEquals(1, plan.size());
+        assertEquals(ActionType.UPDATE_ATTR, plan.get(0).type());
+    }
+
+    // ---- Phase 32 addition A: the market-id map rebuild ---------------------------------------
+
+    @Test
+    void aReconcilePairsEachHostBaseWithTheLocalOneItBuilt() {
+        MintingWorld world = new MintingWorld();
+        CoopMarketIds ids = new CoopMarketIds();
+        CoopBaseAuthority authority = authority(ids);
+        List<CoopBaseRecord> desired = List.of(
+                CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST_P"),
+                CoopBaseRecord.pather("askonia", "luddic_path", true, "market_HOST_L"));
+
+        CoopBaseAuthority.apply(world, desired, new HashSet<>());
+        assertEquals(2, authority.learnMarketIds(desired, world.localBases()));
+
+        assertEquals("local-1", ids.toLocal("market_HOST_P"));
+        assertEquals("local-2", ids.toLocal("market_HOST_L"));
+        assertEquals("market_HOST_P", ids.toWire("local-1"));
+    }
+
+    @Test
+    void theMapIsRebuiltFromABaseSetThatProducesNoActions() {
+        // The reload case, and the reason the rebuild does not hang off the plan. After a reload the
+        // mirrored bases are already in the save, so the reconcile is a no-op -- but this in-memory
+        // table is empty and the host's post-reconnect BASE_SET is the only thing that refills it.
+        MintingWorld world = new MintingWorld();
+        List<CoopBaseRecord> desired = List.of(
+                CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST_P"));
+        CoopBaseAuthority.apply(world, desired, new HashSet<>());
+        assertEquals(List.of("create:PIRATE/corvus"), world.calls);
+        world.calls.clear();
+
+        CoopMarketIds ids = new CoopMarketIds();
+        CoopBaseAuthority authority = authority(ids);
+        assertEquals(new Summary(0, 0, 0, 0, 0),
+                CoopBaseAuthority.apply(world, desired, new HashSet<>()));
+        assertEquals(1, authority.learnMarketIds(desired, world.localBases()));
+
+        assertTrue(world.calls.isEmpty(), "nothing was rebuilt: " + world.calls);
+        assertEquals("local-1", ids.toLocal("market_HOST_P"));
+    }
+
+    @Test
+    void aBaseWithNoMarketOnEitherSideIsNotPaired() {
+        assertEquals(Map.of(), CoopBaseAuthority.pairMarketIds(
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "")),
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "local-1"))));
+        assertEquals(Map.of(), CoopBaseAuthority.pairMarketIds(
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST")),
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", ""))));
+    }
+
+    @Test
+    void aBaseOnlyOneSideHasIsNotPaired() {
+        // Nothing to pair with: the guest has not built it yet, or the host retired it. The next
+        // pass, after the reconcile has caught up, is what makes the pair.
+        assertEquals(Map.of("market_HOST_P", "local-1"), CoopBaseAuthority.pairMarketIds(
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "market_HOST_P"),
+                        CoopBaseRecord.pather("askonia", "luddic_path", true, "market_HOST_L")),
+                List.of(CoopBaseRecord.pirate("corvus", "pirates", "TIER_1_1MODULE", "local-1"))));
+    }
+
+    @Test
+    void resetForgetsTheLearnedMarketIds() {
+        CoopMarketIds ids = new CoopMarketIds();
+        ids.learn("market_HOST_P", "local-1");
+        authority(ids).reset();
+
+        assertEquals(0, ids.size());
+        assertEquals("market_HOST_P", ids.toLocal("market_HOST_P"));
+    }
+
+    private static CoopBaseAuthority authority(CoopMarketIds ids) {
+        return new CoopBaseAuthority(new RecordingNetService(CoopConnectionRole.GUEST),
+                TestSessions.activeGuestSession(), () -> 1_000L, ids);
+    }
+
+    /**
+     * A {@link BaseWorld} that mints its own market id for every base it builds, the way the vanilla
+     * constructors do with {@code Misc.genUID()}. That divergence is the entire reason
+     * {@link CoopMarketIds} exists, so the fake that drives the rebuild has to reproduce it rather
+     * than store the host's record as-is.
+     */
+    private static final class MintingWorld implements BaseWorld {
+        private final List<CoopBaseRecord> bases = new ArrayList<>();
+        private final List<String> calls = new ArrayList<>();
+        private int minted;
+
+        @Override
+        public List<CoopBaseRecord> localBases() {
+            return new ArrayList<>(bases);
+        }
+
+        @Override
+        public boolean create(CoopBaseRecord record) {
+            calls.add("create:" + record.kind().name() + "/" + record.systemId());
+            bases.add(new CoopBaseRecord(record.kind(), record.systemId(), record.factionId(),
+                    record.attr(), "local-" + (++minted)));
+            return true;
+        }
+
+        @Override
+        public void remove(CoopBaseRecord record) {
+            calls.add("remove:" + record.kind().name() + "/" + record.systemId());
+            bases.removeIf(base -> base.sameIdentity(record));
+        }
+
+        @Override
+        public boolean updateAttr(CoopBaseRecord record) {
+            calls.add("updateAttr:" + record.kind().name() + "/" + record.systemId());
+            for (int i = 0; i < bases.size(); i++) {
+                CoopBaseRecord mine = bases.get(i);
+                if (mine.sameIdentity(record)) {
+                    bases.set(i, new CoopBaseRecord(record.kind(), record.systemId(),
+                            record.factionId(), record.attr(), mine.marketId()));
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public void endDerivedActivityIntel() {
+        }
     }
 
     private static IntelManagerAPI intelManager(List<IntelInfoPlugin> added,

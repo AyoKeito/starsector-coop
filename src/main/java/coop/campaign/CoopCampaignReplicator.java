@@ -215,6 +215,14 @@ public final class CoopCampaignReplicator
     // on both roles while a dialog is open (the fee is paid inside it and there is no event to hook);
     // the commission is host-only. Both keep their engine contact behind a seam so the decisions are
     // unit-testable, and both are emitted on the same WORLD_DELTA channel as the skeleton mutations.
+    /**
+     * Phase 32 addition A: the hidden-base {@code hostMarketId <-> localMarketId} table. Empty (and
+     * therefore the identity function in both directions) on the host and for every market whose id
+     * already agrees across the two engines, which is every market except a mirrored pirate or
+     * Luddic-Path base. {@code CoopBaseAuthority} is the only writer.
+     */
+    private final CoopMarketIds marketIds = new CoopMarketIds();
+
     private final CoopStorageUnlockSync storageUnlockSync =
             new CoopStorageUnlockSync(CoopStorageUnlockSync.liveEngine());
     private final CoopCommissionSync commissionSync =
@@ -305,6 +313,18 @@ public final class CoopCampaignReplicator
         this.service = Objects.requireNonNull(service, "service");
         this.session = Objects.requireNonNull(session, "session");
         this.clock = Objects.requireNonNull(clock, "clock");
+        // A STORAGE_UNLOCK for a base can arrive before the base is mapped -- the world delta and the
+        // BASE_SET are independent messages -- and applyRemote then flags it under the host's id.
+        // Learning the mapping is the one moment that flag can be moved onto the local market.
+        marketIds.setListener(storageUnlockSync::onMarketIdMapped);
+    }
+
+    /**
+     * The hidden-base market-id table (Phase 32 addition A). Written by {@code CoopBaseAuthority},
+     * read here and by the Phase 30 bridge dump.
+     */
+    public CoopMarketIds marketIds() {
+        return marketIds;
     }
 
     // ---- Listener lifecycle -------------------------------------------------------------------
@@ -462,6 +482,9 @@ public final class CoopCampaignReplicator
         lastPlayerRepSyncMillis = 0L;
         lastSkeletonPollMillis = 0L;
         storageUnlockSync.reset();
+        // The table names this campaign's live base markets; CoopBaseAuthority refills it from the
+        // host's post-reconnect BASE_SET.
+        marketIds.clear();
         commissionSync.reset();
         lastBarPoolPollMillis = 0L;
         barPoolCapture.reset();
@@ -963,20 +986,31 @@ public final class CoopCampaignReplicator
                 }
             }
             appliedHireables.remove(market.getId());
+            // Phase 32 addition A: a mirrored hidden base is the one market whose local id the
+            // host's economy cannot resolve, so the request names the host's id for it. Identity for
+            // everything else.
+            String wireMarketId = marketIds.toWire(market.getId());
             send(CoopMessages.marketOpen(session.sessionId(), service.nextSeq(), now(),
-                    market.getId(), CoopMessages.SUBMARKET_ALL, session.localPlayerId()));
-            CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_OPEN requested market=" + market.getId());
+                    wireMarketId, CoopMessages.SUBMARKET_ALL, session.localPlayerId()));
+            CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_OPEN requested market="
+                    + wireMarketId + localSuffix(market.getId(), wireMarketId));
             // Phase 20 M6: hold the trade screens shut until that reply lands. Only for a market that
             // actually has stock to be wrong about -- a procgen derelict never gets a snapshot back,
             // and there is nothing on its dialog for the gate to disable anyway.
             //
-            // Hidden markets are excluded for the same reason, one step further along: a pirate or
-            // Luddic-path base market is minted locally with Misc.genUID() (vanilla PirateBaseIntel /
-            // LuddicPathBaseIntel), so the guest's mirrored copy carries an id the host's economy
-            // cannot resolve. It has an open submarket, so the old predicate armed the gate on every
-            // dock at a hidden base and held the shop shut for the full timeout with no snapshot
-            // ever on its way.
-            if (hasSharedSubmarket(market) && !isHiddenMarket(market)) {
+            // Hidden markets were excluded for the same reason, one step further along: a pirate
+            // or Luddic-path base market is minted locally with Misc.genUID() (vanilla
+            // PirateBaseIntel / LuddicPathBaseIntel), so the guest's mirrored copy carried an id the
+            // host's economy could not resolve. The old predicate armed the gate on every dock at a
+            // hidden base and held the shop shut for the full timeout with no snapshot ever on its
+            // way.
+            //
+            // Phase 32 addition A: once CoopBaseAuthority has paired this base with the host's, a
+            // snapshot *is* on its way, so the gate arms for it like any other market. An unmapped
+            // hidden base -- a base the guest has not reconciled yet, or one the host does not have
+            // -- keeps the old exclusion, because for that one nothing is coming back.
+            if (hasSharedSubmarket(market)
+                    && (!isHiddenMarket(market) || marketIds.isMappedLocal(market.getId()))) {
                 marketSyncGate.onOpenRequested(market.getId(), now());
             }
         }
@@ -1203,7 +1237,7 @@ public final class CoopCampaignReplicator
         if (!isHost() || !isActive()) {
             return;
         }
-        String marketId = CoopMessages.requiredPayloadString(message, "marketId");
+        String marketId = marketIds.toLocal(CoopMessages.requiredPayloadString(message, "marketId"));
         String requestedSubmarketId = CoopMessages.requiredPayloadString(message, "submarketId");
         MarketAPI market = findMarket(marketId);
         if (market == null) {
@@ -1767,12 +1801,29 @@ public final class CoopCampaignReplicator
         sendMarketTxn(marketId, submarketId, kind, itemId, qty, "");
     }
 
+    /**
+     * The one place a {@code MARKET_TXN} is put on the wire, and therefore the one place the local
+     * market id is translated to the host's (Phase 32 addition A). Every caller passes the id its own
+     * engine knows the market by; identity for everything but a mirrored hidden base.
+     */
     private void sendMarketTxn(String marketId, String submarketId, CoopMarketSync.ItemKind kind,
                                String itemId, int qty, String detail) {
+        String wireMarketId = marketIds.toWire(marketId);
         send(CoopMessages.marketTxn(session.sessionId(), service.nextSeq(), now(),
-                marketId, submarketId, kind.name(), itemId, qty, 0f, session.localPlayerId(), detail));
-        CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_TXN sent market=" + marketId
+                wireMarketId, submarketId, kind.name(), itemId, qty, 0f, session.localPlayerId(), detail));
+        CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_TXN sent market=" + wireMarketId
+                + localSuffix(marketId, wireMarketId)
                 + " submarket=" + submarketId + " " + kind + ":" + itemId + " qty=" + qty);
+    }
+
+    /** {@code " (local=<id>)"} when a translation happened, empty when the two ids are the same. */
+    private static String localSuffix(String localId, String wireId) {
+        return localId == null || localId.equals(wireId) ? "" : " (local=" + localId + ")";
+    }
+
+    /** The receive-side mirror of {@link #localSuffix}: names the host id behind a local one. */
+    private static String hostSuffix(String localId, String wireId) {
+        return wireId == null || wireId.equals(localId) ? "" : " (host=" + wireId + ")";
     }
 
     /**
@@ -1791,7 +1842,9 @@ public final class CoopCampaignReplicator
             return;
         }
         CoopMessages.Payload payload = CoopMessages.payload(message);
-        String marketId = payload.requiredString("marketId");
+        // Identity on the host (its table is always empty), translated at the boundary all the same
+        // so the direction of every market id in this class is stated rather than assumed.
+        String marketId = marketIds.toLocal(payload.requiredString("marketId"));
         String submarketId = payload.requiredString("submarketId");
         if (!isSharedSubmarket(submarketId)) {
             // The sending guest already filters against this allowlist, so a line that gets here is a
@@ -1845,7 +1898,11 @@ public final class CoopCampaignReplicator
             return;
         }
         CoopMessages.Payload payload = CoopMessages.payload(message);
-        String marketId = payload.requiredString("marketId");
+        // Phase 32 addition A: translated once, here, so everything downstream -- the in-memory
+        // stock model, the engine apply and the sync gate, which was armed with the local id -- is
+        // keyed the same way. Identity for every market except a mirrored hidden base.
+        String wireMarketId = payload.requiredString("marketId");
+        String marketId = marketIds.toLocal(wireMarketId);
         String submarketId = payload.requiredString("submarketId");
         int submarketCount = (int) payload.requiredLong("submarketCount");
         if (!isSharedSubmarket(submarketId)) {
@@ -1883,6 +1940,7 @@ public final class CoopCampaignReplicator
             releaseMarketSyncGate("snapshot applied");
         }
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied MARKET_SNAPSHOT market=" + marketId
+                + hostSuffix(marketId, wireMarketId)
                 + " submarket=" + submarketId + " of " + submarketCount + " items=" + items.size());
     }
 
@@ -3179,7 +3237,11 @@ public final class CoopCampaignReplicator
                 return;
             }
             case STORAGE_UNLOCK -> {
-                storageUnlockSync.applyRemote(delta.entityId());
+                // Phase 32 addition A: the entity id is a market id, so it needs the same
+                // translation the MARKET_* messages get. An unmapped hidden base falls through as
+                // itself and is flagged under the host's id; onMarketIdMapped moves that flag the
+                // moment CoopBaseAuthority pairs the base.
+                storageUnlockSync.applyRemote(marketIds.toLocal(delta.entityId()));
                 return;
             }
             case COMMISSION -> {
@@ -3742,10 +3804,15 @@ public final class CoopCampaignReplicator
                 }
             }
             String unlocked = storageUnlockSync.pollDockedUnlock(now());
+            // Phase 32 addition A: the poll reads the local market behind the dialog, so a hidden
+            // base's unlock must be reported under the host's id or the far side flags a market that
+            // does not exist there.
+            String wireUnlocked = marketIds.toWire(unlocked);
             if (unlocked != null
-                    && emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, unlocked, "true")) {
+                    && emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, wireUnlocked, "true")) {
                 CoopLog.info(CoopCampaignReplicator.class,
-                        "Coop captured STORAGE_UNLOCK market=" + unlocked);
+                        "Coop captured STORAGE_UNLOCK market=" + wireUnlocked
+                                + localSuffix(unlocked, wireUnlocked));
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Storage-unlock poll failed", ex);
@@ -5379,12 +5446,22 @@ public final class CoopCampaignReplicator
         }
     }
 
+    /**
+     * The economy lookup every market-id-keyed apply in this class goes through, and therefore the
+     * one place an inbound id is resolved to a local market (Phase 32 addition A).
+     *
+     * <p>{@link CoopMarketIds#toLocal(String)} is the identity function for every market whose id
+     * already agrees across the two engines -- which is all of them except a mirrored pirate or
+     * Luddic-Path base, whose market the vanilla constructor mints with {@code Misc.genUID()} -- and
+     * is always the identity on the host. It is also idempotent for an id that is already local, so
+     * callers holding a local id (the colony path, the bridge) are unaffected.
+     */
     private MarketAPI findMarket(String marketId) {
         SectorAPI sector = Global.getSector();
         if (sector == null || sector.getEconomy() == null) {
             return null;
         }
-        return sector.getEconomy().getMarket(marketId);
+        return sector.getEconomy().getMarket(marketIds.toLocal(marketId));
     }
 
     private float playerRelationshipTo(String factionId) {

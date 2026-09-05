@@ -76,6 +76,12 @@ public final class CoopBaseAuthority {
     private final CoopNetService service;
     private final CoopSessionState sessionState;
     private final LongSupplier clockMillis;
+    /**
+     * The guest's base market-id translation table (Phase 32 addition A). Shared with
+     * {@code CoopCampaignReplicator}, which reads it on every market message; this class is the only
+     * thing that writes it.
+     */
+    private final CoopMarketIds marketIds;
 
     // Host state.
     private long nextHostPollAtMillis;
@@ -88,10 +94,17 @@ public final class CoopBaseAuthority {
     /** Identity keys whose construction failed; retrying every tick would spam the engine. */
     private final Set<String> constructionFailures = new HashSet<>();
 
-    public CoopBaseAuthority(CoopNetService service, CoopSessionState sessionState, LongSupplier clockMillis) {
+    public CoopBaseAuthority(CoopNetService service, CoopSessionState sessionState,
+                             LongSupplier clockMillis) {
+        this(service, sessionState, clockMillis, new CoopMarketIds());
+    }
+
+    public CoopBaseAuthority(CoopNetService service, CoopSessionState sessionState,
+                             LongSupplier clockMillis, CoopMarketIds marketIds) {
         this.service = Objects.requireNonNull(service, "service");
         this.sessionState = Objects.requireNonNull(sessionState, "sessionState");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
+        this.marketIds = Objects.requireNonNull(marketIds, "marketIds");
     }
 
     // ---- Host ---------------------------------------------------------------------------------
@@ -280,6 +293,10 @@ public final class CoopBaseAuthority {
         lastSetHash = "";
         nextGuestReconcileAtMillis = 0L;
         constructionFailures.clear();
+        // The market-id table describes this engine's live bases against one host's set. It is
+        // refilled from the first reconcile after the host's post-reset BASE_SET, so dropping it here
+        // costs nothing and keeps a stale local id from a torn-down campaign out of the next one.
+        marketIds.clear();
     }
 
     // ---- Guest --------------------------------------------------------------------------------
@@ -325,10 +342,18 @@ public final class CoopBaseAuthority {
             if (sector == null || sector.getIntelManager() == null) {
                 return;
             }
-            Summary summary = apply(new SectorBaseWorld(sector), desiredSet, constructionFailures);
+            BaseWorld world = new SectorBaseWorld(sector);
+            Summary summary = apply(world, desiredSet, constructionFailures);
             if (!summary.isNoOp()) {
                 CoopLog.info(CoopBaseAuthority.class, "Coop guest reconciled bases " + summary);
             }
+            // Deliberately outside the isNoOp() guard, and deliberately re-reading localBases()
+            // rather than trusting the plan. A reload is exactly the case where the reconcile has
+            // nothing to do -- the mirrored bases are already in the save -- and is also exactly the
+            // case where this in-memory table is empty and must be refilled. The host clears its
+            // lastSetHash on every session edge (reset()), so a BASE_SET always arrives after a
+            // reconnect to drive this.
+            learnMarketIds(desiredSet, world.localBases());
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBaseAuthority.class, "Failed to reconcile host base set", ex);
         }
@@ -336,6 +361,51 @@ public final class CoopBaseAuthority {
 
     public int desiredBaseCount() {
         return desiredSet.size();
+    }
+
+    /** The shared base market-id table this authority fills; for the replicator and the bridge. */
+    public CoopMarketIds marketIds() {
+        return marketIds;
+    }
+
+    /**
+     * Fills {@link CoopMarketIds} from one reconcile pass: pair each host record with the local base
+     * of the same {@code (kind, systemId)} and teach the table the two market ids.
+     *
+     * @return how many mappings this pass newly learned (0 on a settled guest, and 0 on the host,
+     *         whose desired and local records are the same engine's and so pair id-to-itself)
+     */
+    int learnMarketIds(Collection<CoopBaseRecord> desired, Collection<CoopBaseRecord> local) {
+        int learned = 0;
+        for (Map.Entry<String, String> pair : pairMarketIds(desired, local).entrySet()) {
+            if (marketIds.learn(pair.getKey(), pair.getValue())) {
+                learned++;
+            }
+        }
+        return learned;
+    }
+
+    /**
+     * Pure half of {@link #learnMarketIds}: {@code hostMarketId -> localMarketId} for every identity
+     * present on both sides with a market id on both sides.
+     *
+     * <p>A record with an empty market id contributes nothing -- that is a base captured before its
+     * market existed, or a local base still mid-construction -- and an identity present on only one
+     * side contributes nothing either, because there is no pair to make.
+     */
+    static Map<String, String> pairMarketIds(Collection<CoopBaseRecord> desired,
+                                             Collection<CoopBaseRecord> local) {
+        Map<String, CoopBaseRecord> have = byIdentity(local);
+        Map<String, String> pairs = new LinkedHashMap<>();
+        for (Map.Entry<String, CoopBaseRecord> entry : byIdentity(desired).entrySet()) {
+            CoopBaseRecord wanted = entry.getValue();
+            CoopBaseRecord mine = have.get(entry.getKey());
+            if (mine == null || wanted.marketId().isEmpty() || mine.marketId().isEmpty()) {
+                continue;
+            }
+            pairs.put(wanted.marketId(), mine.marketId());
+        }
+        return pairs;
     }
 
     // ---- Pure decision functions (unit-tested) ------------------------------------------------
@@ -374,6 +444,12 @@ public final class CoopBaseAuthority {
      *
      * <p>Duplicate identities in either input are collapsed last-wins; vanilla cannot produce them,
      * but a malformed payload must not make the plan quadratic or non-deterministic.
+     *
+     * <p><b>{@link CoopBaseRecord#marketId()} is not compared</b> (Phase 32 addition A), and cannot
+     * be: the desired record carries the host's market id and the local one carries the guest's, and
+     * for a correctly mirrored base those two <em>always</em> differ. Reading that as an attribute
+     * change would issue an UPDATE_ATTR on every single reconcile pass, forever, for every base.
+     * The pairing it does drive is {@link #pairMarketIds}, which runs after the plan, not inside it.
      */
     public static List<Action> plan(Collection<CoopBaseRecord> desired, Collection<CoopBaseRecord> local) {
         Map<String, CoopBaseRecord> want = byIdentity(desired);
@@ -768,7 +844,8 @@ public final class CoopBaseAuthority {
                 if (system == null || tier == null) {
                     return null;
                 }
-                return CoopBaseRecord.pirate(system.getId(), factionId(pirate.getMarket()), tier.name());
+                return CoopBaseRecord.pirate(system.getId(), factionId(pirate.getMarket()),
+                        tier.name(), marketId(pirate.getMarket()));
             }
             if (intel instanceof LuddicPathBaseIntel path) {
                 if (path.isEnding() || path.isEnded()) {
@@ -778,7 +855,8 @@ public final class CoopBaseAuthority {
                 if (system == null) {
                     return null;
                 }
-                return CoopBaseRecord.pather(system.getId(), factionId(path.getMarket()), path.isLarge());
+                return CoopBaseRecord.pather(system.getId(), factionId(path.getMarket()),
+                        path.isLarge(), marketId(path.getMarket()));
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBaseAuthority.class, "Failed to read base intel", ex);
@@ -788,6 +866,20 @@ public final class CoopBaseAuthority {
 
     private static String factionId(MarketAPI market) {
         return market == null || market.getFactionId() == null ? "" : market.getFactionId();
+    }
+
+    /**
+     * The emitting engine's id for this base's market, or {@code ""} when the base has none yet.
+     *
+     * <p>Phase 32 addition A. On the host this is the id every {@code MARKET_*} message will name;
+     * on the guest it is what the local copy answers to, and pairing the two by
+     * {@code (kind, systemId)} is what fills {@link CoopMarketIds}. The base constructors mint it
+     * with {@code createMarket(Misc.genUID(), ...)} and register it with the economy
+     * ({@code PirateBaseIntel.java:173} and {@code :255}, {@code LuddicPathBaseIntel.java:122}), so
+     * it both differs per engine and is resolvable through {@code economy.getMarket} on each.
+     */
+    private static String marketId(MarketAPI market) {
+        return market == null || market.getId() == null ? "" : market.getId();
     }
 
     private static PirateBaseIntel.PirateBaseTier parseTier(String attr) {

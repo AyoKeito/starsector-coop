@@ -168,6 +168,67 @@ class CoopStorageUnlockSyncTest {
                 });
     }
 
+    // ---- Phase 32 addition A: the parked-flag migration ------------------------------------
+
+    @Test
+    void learningABaseMarketIdMovesTheFlagParkedUnderTheHostsIdAndOpensTheLocker() {
+        // A STORAGE_UNLOCK for a hidden base can arrive before CoopBaseAuthority has paired that
+        // base, and applyRemote then flags it under the host's id -- an id that names no market
+        // here and that no rebuild would ever resolve, because the local base answers to its own
+        // genUID id. Learning the mapping is the one moment the flag can be moved.
+        FakeEngine engine = new FakeEngine();
+        engine.markets.put("market_LOCAL", market("market_LOCAL"));
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+        sync.applyRemote("market_HOST");
+        assertTrue(engine.flagged.contains("market_HOST"));
+        assertEquals(0, engine.unlockCalls, "there was no local market to open under that id");
+
+        sync.onMarketIdMapped("market_HOST", "market_LOCAL");
+
+        assertEquals(List.of("market_LOCAL"), List.copyOf(engine.flagged),
+                "the host-id key must go: the host resends flaggedMarketIds as its baseline");
+        assertEquals(List.of("market_LOCAL"), engine.unlocked);
+    }
+
+    @Test
+    void learningAMappingWithNoParkedFlagChangesNothing() {
+        // The normal case, and it runs for every base on every reconcile, so it has to be cheap and
+        // silent rather than inventing an unlock nobody paid for.
+        FakeEngine engine = new FakeEngine();
+        engine.markets.put("market_LOCAL", market("market_LOCAL"));
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+
+        sync.onMarketIdMapped("market_HOST", "market_LOCAL");
+
+        assertTrue(engine.flagged.isEmpty());
+        assertEquals(0, engine.unlockCalls);
+    }
+
+    @Test
+    void aParkedFlagIsStillMovedWhenTheLocalMarketCannotBeResolvedYet() {
+        FakeEngine engine = new FakeEngine();
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+        sync.applyRemote("market_HOST");
+
+        sync.onMarketIdMapped("market_HOST", "market_LOCAL");
+
+        assertEquals(List.of("market_LOCAL"), List.copyOf(engine.flagged));
+        assertEquals(0, engine.unlockCalls);
+    }
+
+    @Test
+    void degenerateMappingsAreIgnored() {
+        FakeEngine engine = new FakeEngine();
+        engine.flagged.add("market_HOST");
+        CoopStorageUnlockSync sync = new CoopStorageUnlockSync(engine);
+
+        sync.onMarketIdMapped("market_HOST", "market_HOST");
+        sync.onMarketIdMapped(null, "market_LOCAL");
+        sync.onMarketIdMapped("market_HOST", "");
+
+        assertEquals(List.of("market_HOST"), List.copyOf(engine.flagged));
+    }
+
     private static final class FakeEngine implements CoopStorageUnlockSync.Engine {
         private final Set<String> paid = new LinkedHashSet<>();
         private final Set<String> flagged = new LinkedHashSet<>();
@@ -210,6 +271,11 @@ class CoopStorageUnlockSyncTest {
         @Override
         public boolean setFlag(String marketId) {
             return flagged.add(marketId);
+        }
+
+        @Override
+        public boolean clearFlag(String marketId) {
+            return flagged.remove(marketId);
         }
 
         @Override

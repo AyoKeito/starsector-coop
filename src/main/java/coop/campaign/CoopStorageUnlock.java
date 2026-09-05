@@ -65,6 +65,24 @@ public final class CoopStorageUnlock {
     }
 
     /**
+     * Clears the coop flag. Returns true when it was set.
+     *
+     * <p>Exists for one case (Phase 32 addition A): a {@code STORAGE_UNLOCK} for a hidden base that
+     * arrived before {@code CoopBaseAuthority} had paired that base is flagged under the <em>host's</em>
+     * market id, which names no market on this engine. When the pairing lands the flag is moved to
+     * the local id, and leaving the host-id key behind would put a phantom market into
+     * {@link #flaggedMarketIds(SectorAPI)} -- which the host resends as its session-start baseline,
+     * so the phantom would propagate rather than die.
+     */
+    public static boolean clearFlag(SectorAPI sector, String marketId) {
+        Map<String, Object> data = persistentData(sector);
+        if (data == null || marketId == null || marketId.isEmpty()) {
+            return false;
+        }
+        return data.remove(flagKey(marketId)) != null;
+    }
+
+    /**
      * Every market id the coop flag is set for, sorted so the order does not depend on a
      * {@code HashMap}'s iteration. The host's session-start baseline resend reads this: a guest
      * joining a campaign where unlocks were paid before it arrived has no other way to learn about

@@ -66,6 +66,9 @@ public final class CoopStorageUnlockSync {
         /** Sets the coop flag; true when it was not set before. */
         boolean setFlag(String marketId);
 
+        /** Clears the coop flag; true when it was set. */
+        boolean clearFlag(String marketId);
+
         /** Every market id the coop flag is set for, for the host's session-start baseline. */
         List<String> flaggedMarketIds();
     }
@@ -164,6 +167,37 @@ public final class CoopStorageUnlockSync {
         CoopLog.info(CoopStorageUnlockSync.class, "Coop applied STORAGE_UNLOCK market=" + marketId);
     }
 
+    /**
+     * Phase 32 addition A: {@code CoopMarketIds} has just learned that the host's
+     * {@code hostMarketId} is this engine's {@code localMarketId}, so a flag parked under the host's
+     * id can now find its market.
+     *
+     * <p>The parked flag is the documented outcome of {@link #applyRemote(String)} for a market that
+     * does not exist here yet ("flagged unknown market"), and for a hidden base that state can
+     * persist: the base <em>does</em> exist locally, it just answers to a different id, so no later
+     * rebuild would ever pick the flag up. Moving it is what makes the locker open. No-op unless a
+     * flag is actually parked, which is the normal case.
+     */
+    public void onMarketIdMapped(String hostMarketId, String localMarketId) {
+        if (hostMarketId == null || localMarketId == null
+                || hostMarketId.isEmpty() || localMarketId.isEmpty()
+                || hostMarketId.equals(localMarketId)) {
+            return;
+        }
+        if (!engine.flagSet(hostMarketId)) {
+            return;
+        }
+        engine.clearFlag(hostMarketId);
+        engine.setFlag(localMarketId);
+        MarketAPI market = engine.findMarket(localMarketId);
+        if (market != null) {
+            engine.unlockPlugin(market);
+        }
+        CoopLog.info(CoopStorageUnlockSync.class, "Coop moved STORAGE_UNLOCK flag from host market="
+                + hostMarketId + " to local market=" + localMarketId
+                + (market == null ? " (no local market to open yet)" : ""));
+    }
+
     /** The engine seam wired to {@code Global}; every read is null-safe at each step. */
     public static Engine liveEngine() {
         return new Engine() {
@@ -199,6 +233,11 @@ public final class CoopStorageUnlockSync {
             @Override
             public boolean setFlag(String marketId) {
                 return CoopStorageUnlock.setFlag(Global.getSector(), marketId);
+            }
+
+            @Override
+            public boolean clearFlag(String marketId) {
+                return CoopStorageUnlock.clearFlag(Global.getSector(), marketId);
             }
 
             @Override

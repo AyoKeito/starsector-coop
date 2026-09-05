@@ -269,6 +269,22 @@ public final class CoopAgentCommands {
         out.put("pause", pauseBlock(roleOf(pump),
                 pump == null ? null : pump.pauseCoordinatorForBridge(),
                 CoopNetPump.blockingScreenOpenForBridge(sector)));
+        // Phase 32 addition A: the guest's hidden-base market-id translations, so a smoke can see
+        // from outside the game whether a base has been paired. Always empty on the host, where the
+        // local ids are the wire ids.
+        out.put("baseMarketIds", baseMarketIds(pump == null ? null : pump.campaignReplicatorForBridge()));
+        return out;
+    }
+
+    /** {@code hostMarketId -> localMarketId} for every mirrored hidden base; empty on the host. */
+    static JSONObject baseMarketIds(CoopCampaignReplicator replicator) throws JSONException {
+        JSONObject out = new JSONObject();
+        if (replicator == null) {
+            return out;
+        }
+        for (Map.Entry<String, String> entry : replicator.marketIds().mappings().entrySet()) {
+            out.put(entry.getKey(), entry.getValue());
+        }
         return out;
     }
 
@@ -507,12 +523,16 @@ public final class CoopAgentCommands {
 
     static JSONObject market(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
-        String marketId = requiredString(args, "marketId");
+        String requestedId = requiredString(args, "marketId");
         CoopCampaignReplicator replicator = requireReplicator(context);
 
+        // Phase 32 addition A: the verb takes either id for a mirrored hidden base. A smoke reads a
+        // market id out of the host's dump and asks the guest about it, and translating here is what
+        // lets the same id name the same base on both sockets. Identity for every other market.
+        String marketId = replicator.marketIds().toLocal(requestedId);
         MarketAPI market = sector.getEconomy() == null ? null : sector.getEconomy().getMarket(marketId);
         if (market == null) {
-            throw new IllegalArgumentException("no market with id " + marketId);
+            throw new IllegalArgumentException("no market with id " + requestedId);
         }
 
         boolean host = roleOf(context.pump()) == CoopConnectionRole.HOST;
@@ -524,6 +544,7 @@ public final class CoopAgentCommands {
         }
         JSONObject out = new JSONObject();
         out.put("marketId", marketId);
+        out.put("requestedMarketId", requestedId);
         out.put("submarketId", submarketId);
         out.put("role", roleOf(context.pump()).name());
 

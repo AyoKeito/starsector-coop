@@ -14,9 +14,18 @@ import java.util.Objects;
  *
  * <p><b>Identity is {@code (kind, systemId)}</b>: vanilla places at most one pirate base and one
  * Luddic-Path base per star system per manager, and neither the base's market id nor its station
- * entity id can cross the wire (both come from the engine's {@code Sector.genUID()} and differ per
+ * entity id can be an identity (both come from the engine's {@code Sector.genUID()} and differ per
  * client by construction). {@link #factionId()} and {@link #attr()} are mutable <em>attributes</em>
  * of that identity, not part of it — pirate bases upgrade tier over time.
+ *
+ * <p><b>{@link #marketId()} is provenance, not identity and not an attribute</b> (Phase 32 addition
+ * A). It carries the id the <em>emitting</em> engine's market has, so the guest can pair the host's
+ * base with its own copy and fill {@link CoopMarketIds}; without that pairing every
+ * {@code MARKET_OPEN} / {@code MARKET_SNAPSHOT} / {@code MARKET_TXN} naming a hidden base failed to
+ * resolve on the far side and the base's trade screen opened unsynced. It is deliberately invisible
+ * to {@link CoopBaseAuthority#plan}: the guest's own local record carries the guest's own id, so
+ * treating a difference as an attribute change would make every reconcile issue a pointless UPDATE
+ * forever. Empty when the base has no market yet.
  *
  * <p>{@link #attr()} is kind-specific:
  * <ul>
@@ -31,7 +40,8 @@ import java.util.Objects;
  * {@link CoopDelimited#field(String)} so a system or faction id containing a delimiter round-trips
  * exactly.
  */
-public record CoopBaseRecord(Kind kind, String systemId, String factionId, String attr) {
+public record CoopBaseRecord(Kind kind, String systemId, String factionId, String attr,
+                             String marketId) {
 
     /** Which vanilla base manager owns this base. */
     public enum Kind {
@@ -52,15 +62,27 @@ public record CoopBaseRecord(Kind kind, String systemId, String factionId, Strin
         systemId = CoopDelimited.normalize(systemId);
         factionId = CoopDelimited.normalize(factionId);
         attr = CoopDelimited.normalize(attr);
+        marketId = CoopDelimited.normalize(marketId);
     }
 
-    /** Convenience for the Luddic-Path {@code isLarge} boolean. */
+    /** Convenience for the Luddic-Path {@code isLarge} boolean, with no market id. */
     public static CoopBaseRecord pather(String systemId, String factionId, boolean large) {
-        return new CoopBaseRecord(Kind.PATHER, systemId, factionId, large ? ATTR_LARGE : ATTR_SMALL);
+        return pather(systemId, factionId, large, "");
+    }
+
+    public static CoopBaseRecord pather(String systemId, String factionId, boolean large,
+                                        String marketId) {
+        return new CoopBaseRecord(Kind.PATHER, systemId, factionId,
+                large ? ATTR_LARGE : ATTR_SMALL, marketId);
     }
 
     public static CoopBaseRecord pirate(String systemId, String factionId, String tierName) {
-        return new CoopBaseRecord(Kind.PIRATE, systemId, factionId, tierName);
+        return pirate(systemId, factionId, tierName, "");
+    }
+
+    public static CoopBaseRecord pirate(String systemId, String factionId, String tierName,
+                                        String marketId) {
+        return new CoopBaseRecord(Kind.PIRATE, systemId, factionId, tierName, marketId);
     }
 
     /** True when a {@link Kind#PATHER} record describes a large base. Meaningless for pirate bases. */
@@ -85,16 +107,18 @@ public record CoopBaseRecord(Kind kind, String systemId, String factionId, Strin
         return CoopDelimited.field(kind.name())
                 + FIELD_SEPARATOR + CoopDelimited.field(systemId)
                 + FIELD_SEPARATOR + CoopDelimited.field(factionId)
-                + FIELD_SEPARATOR + CoopDelimited.field(attr);
+                + FIELD_SEPARATOR + CoopDelimited.field(attr)
+                + FIELD_SEPARATOR + CoopDelimited.field(marketId);
     }
 
     public static CoopBaseRecord decode(String line) {
         Objects.requireNonNull(line, "line");
         List<String> fields = CoopDelimited.split(line);
-        if (fields.size() != 4) {
-            throw new IllegalArgumentException("Expected 4 base record fields, got " + fields.size());
+        if (fields.size() != 5) {
+            throw new IllegalArgumentException("Expected 5 base record fields, got " + fields.size());
         }
-        return new CoopBaseRecord(parseKind(fields.get(0)), fields.get(1), fields.get(2), fields.get(3));
+        return new CoopBaseRecord(parseKind(fields.get(0)), fields.get(1), fields.get(2),
+                fields.get(3), fields.get(4));
     }
 
     private static Kind parseKind(String raw) {
@@ -119,7 +143,8 @@ public record CoopBaseRecord(Kind kind, String systemId, String factionId, Strin
         Objects.requireNonNull(encoded, "encoded");
         List<CoopBaseRecord> records = new ArrayList<>();
         if (encoded.isEmpty()) {
-            // The empty set. A single all-blank record still encodes as "|||", so this is unambiguous.
+            // The empty set. A single all-blank record still encodes as "||||", so this is
+            // unambiguous.
             return records;
         }
         for (String line : encoded.split(String.valueOf(RECORD_SEPARATOR), -1)) {
@@ -132,6 +157,10 @@ public record CoopBaseRecord(Kind kind, String systemId, String factionId, Strin
      * Order-independent hash over the whole set; the host rebroadcasts only when this changes. Folds
      * in every field, so a tier upgrade or an {@code isLarge} flip triggers a resend just like a
      * spawn or despawn does.
+     *
+     * <p>{@link #marketId()} is folded in with the rest and costs nothing: a base's market is minted
+     * once in its constructor and never replaced, so on the host the id is stable for the base's
+     * whole life and adds no rebroadcast churn.
      */
     public static String setHash(Collection<CoopBaseRecord> records) {
         return CoopChecksum.sha256Text(String.join("\n", encodedLines(records)));
