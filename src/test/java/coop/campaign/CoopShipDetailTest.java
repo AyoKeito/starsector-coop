@@ -1,13 +1,16 @@
 package coop.campaign;
 
+import coop.campaign.CoopShipDetail.WeaponGroup;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -117,8 +120,163 @@ class CoopShipDetailTest {
     }
 
     @Test
-    void aBlankMemberIdIsRejected() {
-        assertThrows(IllegalArgumentException.class, () -> new CoopShipDetail("  ", "n", "v", "h",
+    void aBlankMemberIdNormalizesToEmptyBecauseModulesHaveNone() {
+        // A module is a variant, not a fleet member, so it has no member id and the record cannot
+        // reject the empty string outright. The loud check moved to the two places where a top-level
+        // listing without an id is a real defect: capture drops the member, and the rebuild logs a
+        // WARN and keeps the locally generated id.
+        CoopShipDetail anonymous = new CoopShipDetail("  ", "n", "v", "h",
+                1f, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), Map.of());
+
+        assertEquals("", anonymous.memberId());
+        assertEquals("", CoopShipDetail.decode(anonymous.encode()).memberId());
+    }
+
+    @Test
+    void aBlankBaseVariantIdIsStillRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new CoopShipDetail("m1", "n", " ", "h",
                 1f, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), Map.of()));
+    }
+
+    // ---- Phase 32: storage fidelity ------------------------------------------------------------
+
+    /** A parent whose module carries a module of its own: two levels of the record inside itself. */
+    private static CoopShipDetail modularStation() {
+        CoopShipDetail innerModule = new CoopShipDetail("", "", "station_side_mod", "station_side",
+                0f, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(),
+                Map.of("WS0009", "lightac"), Map.of(),
+                List.of(new WeaponGroup(List.of("WS0009"), false, true)),
+                1f, "Escort", Map.of());
+        CoopShipDetail outerModule = new CoopShipDetail("", "", "station_mid_mod", "station_mid",
+                0f, 3, 4, List.of("dmod_armor"), List.of(), List.of(), List.of(), List.of(),
+                Map.of("WS0005", "hveldriver"), Map.of(),
+                List.of(new WeaponGroup(List.of("WS0005"), true, false)),
+                1f, "Battery", Map.of("INNER", innerModule));
+        Map<String, String> weapons = new LinkedHashMap<>();
+        weapons.put("WS0001", "heavymauler");
+        weapons.put("WS0002", "annihilator");
+        return new CoopShipDetail("member-91", "ISS Fortress", "station_base", "station",
+                0.63f, 20, 10,
+                List.of("dmod_engine"), List.of(), List.of("ground_support"),
+                List.of("solar_shielding"), List.of("safetyoverrides"),
+                weapons, Map.of("0", "talon_wing"),
+                List.of(new WeaponGroup(List.of("WS0001", "WS0002"), false, true),
+                        new WeaponGroup(List.of("WS0002"), true, false)),
+                0.31f, "Warlord",
+                Map.of("MODULE1", outerModule));
+    }
+
+    @Test
+    void roundTripsGroupsHullFractionDisplayNameAndTwoLevelsOfModules() {
+        CoopShipDetail back = CoopShipDetail.decode(modularStation().encode());
+
+        assertEquals(modularStation(), back);
+        assertEquals(0.31f, back.hullFraction(), 1e-6f);
+        assertEquals("Warlord", back.displayName());
+        assertEquals(List.of("WS0001", "WS0002"), back.weaponGroups().get(0).slots());
+        assertFalse(back.weaponGroups().get(0).alternating());
+        assertTrue(back.weaponGroups().get(0).autofire());
+        assertTrue(back.weaponGroups().get(1).alternating());
+        assertFalse(back.weaponGroups().get(1).autofire());
+
+        CoopShipDetail outer = back.modules().get("MODULE1");
+        assertEquals("Battery", outer.displayName());
+        assertEquals(List.of("dmod_armor"), outer.permaMods());
+        CoopShipDetail inner = outer.modules().get("INNER");
+        assertEquals("Escort", inner.displayName());
+        assertEquals("lightac", inner.weapons().get("WS0009"));
+        assertEquals("", inner.memberId(), "a module is not a fleet member and carries no id");
+    }
+
+    @Test
+    void modularBlobSurvivesTheEnclosingStockLineToo() {
+        // The real transport. Every module level adds another backslash-doubling pass, and the stock
+        // line adds one more on top; if any pass were not exactly inverted this is where it shows.
+        CoopShipDetail detail = modularStation();
+        List<CoopMarketSync.StockItem> back = CoopMarketSync.decodeStock(CoopMarketSync.encodeStock(
+                List.of(new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP,
+                        detail.memberId(), 1, 0f, detail.encode()))));
+
+        assertEquals(detail, CoopShipDetail.decode(back.get(0).detail()));
+    }
+
+    @Test
+    void nastyCharactersSurviveInsideANestedModuleToo() {
+        CoopShipDetail module = new CoopShipDetail("", "", "mod,var|1", "hull\\spec",
+                0f, 0, 0, List.of("a,b", "c=d", "e\\f", "g|h"), List.of(), List.of(), List.of(),
+                List.of(), Map.of("slot|with,pipe=and", "weap\\on,id"), Map.of(),
+                List.of(new WeaponGroup(List.of("slot|with,pipe=and"), true, true)),
+                0.5f, "Na,me=With\\Everything|", Map.of());
+        CoopShipDetail parent = new CoopShipDetail("m|1", "ISS,Nasty", "base|var", "hull",
+                1f, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), Map.of(),
+                List.of(), 1f, "", Map.of("SLOT,1=x", module));
+
+        assertEquals(parent, CoopShipDetail.decode(parent.encode()));
+    }
+
+    @Test
+    void aBlobWithTheNewFieldsEmptyDecodesToEmptiesRatherThanNullsOrAThrow() {
+        // The append-only shape: the first fourteen fields as they always were, then four blanks.
+        String[] parts = battered().encode().split("\\|", -1);
+        String sparse = String.join("|", Arrays.copyOfRange(parts, 0, 14)) + "||||";
+
+        CoopShipDetail back = CoopShipDetail.decode(sparse);
+
+        assertTrue(back.weaponGroups().isEmpty());
+        assertTrue(back.modules().isEmpty());
+        assertEquals("", back.displayName());
+        assertEquals(1f, back.hullFraction(), 1e-6f, "a blank hull fraction reads as undamaged");
+        assertEquals(battered(), back, "every pre-Phase-32 field must still land where it did");
+    }
+
+    @Test
+    void aWeaponGroupWithNoSlotsRoundTrips() {
+        // Encodes as the three-field line "|0|0", whose first field is empty -- the case that would
+        // collapse if the group list were joined with the plain string-list codec's skip-empties rule.
+        CoopShipDetail detail = new CoopShipDetail("m1", "", "hound_Standard", "hound", 1f, 0, 0,
+                List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), Map.of(),
+                List.of(new WeaponGroup(List.of(), false, false),
+                        new WeaponGroup(List.of("WS0001"), true, true)),
+                1f, "", Map.of());
+
+        CoopShipDetail back = CoopShipDetail.decode(detail.encode());
+
+        assertEquals(2, back.weaponGroups().size());
+        assertTrue(back.weaponGroups().get(0).slots().isEmpty());
+        assertEquals(List.of("WS0001"), back.weaponGroups().get(1).slots());
+        assertEquals(detail, back);
+    }
+
+    @Test
+    void hullFractionIsClampedToTheEngineRange() {
+        assertEquals(1f, hulled(4.2f).hullFraction(), 1e-6f);
+        assertEquals(0f, hulled(-0.5f).hullFraction(), 1e-6f);
+        assertEquals(0.25f, hulled(0.25f).hullFraction(), 1e-6f);
+        assertEquals(1f, hulled(Float.NaN).hullFraction(), 1e-6f);
+        // ...and the clamp survives the wire, so a hand-built blob cannot smuggle an out-of-range one.
+        assertEquals(1f, CoopShipDetail.decode(hulled(1f).encode().replace("|1.0000|", "|9.0000|"))
+                .hullFraction(), 1e-6f);
+    }
+
+    /** Base CR is deliberately not 1, so the "1.0000" the clamp test rewrites is the hull fraction. */
+    private static CoopShipDetail hulled(float fraction) {
+        return new CoopShipDetail("m1", "", "hound_Standard", "hound", 0.5f, 0, 0,
+                List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), Map.of(),
+                List.of(), fraction, "", Map.of());
+    }
+
+    @Test
+    void moduleNestingDeeperThanTheLimitIsRejectedRatherThanRecursed() {
+        CoopShipDetail deepest = new CoopShipDetail("", "", "v", "h", 0f, 0, 0, List.of(), List.of(),
+                List.of(), List.of(), List.of(), Map.of(), Map.of(), List.of(), 1f, "", Map.of());
+        CoopShipDetail nested = deepest;
+        for (int i = 0; i <= CoopShipDetail.MAX_MODULE_NESTING; i++) {
+            nested = new CoopShipDetail("", "", "v" + i, "h", 0f, 0, 0, List.of(), List.of(),
+                    List.of(), List.of(), List.of(), Map.of(), Map.of(), List.of(), 1f, "",
+                    Map.of("S", nested));
+        }
+        String tooDeep = nested.encode();
+
+        assertThrows(IllegalArgumentException.class, () -> CoopShipDetail.decode(tooDeep));
     }
 }
