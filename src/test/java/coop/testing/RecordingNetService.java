@@ -252,6 +252,27 @@ public class RecordingNetService extends CoopNetService {
         return connectionGeneration;
     }
 
+    /** Whoever registered for outbound-discard reports; null until somebody does (Phase 32 add. B). */
+    private coop.net.CoopOutboundDiscardListener discardListener;
+
+    @Override
+    public void setOutboundDiscardListener(coop.net.CoopOutboundDiscardListener listener) {
+        super.setOutboundDiscardListener(listener);
+        this.discardListener = listener;
+    }
+
+    /**
+     * Fires the registered discard callback by hand. Messages sent through this fake never reach a
+     * real peer queue, so the transport's own drop sites cannot produce the report here; that half is
+     * covered against the real queue by {@code CoopCreditRefundTest}. What this exercises is the
+     * registration: that the subscriber the production code wired up is the one that gets told.
+     */
+    public void reportOutboundDiscardForTest(CoopMessages.Message message, String cause) {
+        if (discardListener != null) {
+            discardListener.onOutboundDiscarded(message, cause);
+        }
+    }
+
     /** Backdates the one stats field the UDP-fallback tests read. */
     public void noteUdpInboundAt(long atMillis) {
         stats = new CoopDatagramStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,

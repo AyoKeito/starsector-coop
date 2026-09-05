@@ -805,4 +805,29 @@ class CoopMessagesTest {
                 "{\"ledgerId\":\"ledger-1\",\"amount\":9999999999,\"reason\":\"gift\"}");
         assertThrows(IllegalArgumentException.class, () -> CoopMessages.parseCreditsGrant(absurd));
     }
+
+    /**
+     * Credit red-team P2-2. The reason is a wire string the sender picks; nothing downstream reads
+     * past its prefix, so an unbounded one is only a way to fill a frame. Truncated, not rejected:
+     * a caller with a runaway id is a cosmetic bug and dropping the money over it would not be.
+     */
+    @Test
+    void aCreditsGrantReasonIsCappedOnTheWayOutAndOnTheWayIn() {
+        String long_ = "bounty:" + "x".repeat(200);
+
+        CoopMessages.Message message = CoopMessages.creditsGrant("session-a", 1L, 0L,
+                "ledger-1", 100, long_);
+
+        CoopMessages.CreditsGrant sent = CoopMessages.parseCreditsGrant(message);
+        assertEquals(CoopMessages.MAX_CREDITS_REASON_CHARS, sent.reason().length());
+        assertTrue(sent.reason().startsWith("bounty:"), sent.reason());
+
+        // A peer that ignores the cap cannot put an unbounded string in front of the receiver either.
+        CoopMessages.Message fromAPeerThatIgnoredIt = new CoopMessages.Message(
+                CoopMessages.Type.CREDITS_GRANT, "session-a", 1L, 0L,
+                "{\"ledgerId\":\"ledger-1\",\"amount\":100,\"reason\":\"" + "y".repeat(500) + "\"}");
+
+        assertEquals(CoopMessages.MAX_CREDITS_REASON_CHARS,
+                CoopMessages.parseCreditsGrant(fromAPeerThatIgnoredIt).reason().length());
+    }
 }

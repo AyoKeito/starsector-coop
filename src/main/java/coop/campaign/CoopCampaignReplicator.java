@@ -318,6 +318,12 @@ public final class CoopCampaignReplicator
         // BASE_SET are independent messages -- and applyRemote then flags it under the host's id.
         // Learning the mapping is the one moment that flag can be moved onto the local market.
         marketIds.setListener(storageUnlockSync::onMarketIdMapped);
+        // Phase 32 addition B: the transport tells the credit transfer about every queued message it
+        // throws away, so an undelivered grant is refunded rather than deleted. A lambda rather than
+        // the transfer itself, because replaceCreditTransferEngineForTest swaps the instance and the
+        // registration has to follow the swap.
+        service.setOutboundDiscardListener(
+                (message, cause) -> creditTransfer.onOutboundDiscarded(message, cause));
     }
 
     /**
@@ -5897,9 +5903,16 @@ public final class CoopCampaignReplicator
 
         @Override
         public String mintLedgerId() {
-            // Player id plus the transport's own monotonic sequence: unique within the session
-            // without a UUID, and readable in a log line next to the seq of the message carrying it.
-            return session.localPlayerId() + "-" + service.nextSeq();
+            // Session id, player id and the transport's own monotonic sequence: unique without a
+            // UUID, and readable in a log line next to the seq of the message carrying it.
+            //
+            // The session id is not decoration (credit red-team P1-3). nextSeq lives on
+            // CoopNetService, and loading a save builds a fresh one, so the counter restarts at 1 on
+            // the supported rejoin path - while the peer's applied-ledger survives the whole
+            // reconnect grace. Without the session prefix a grant from the rejoined session could
+            // reuse an id the peer had already paid, and the peer would log "already applied" and
+            // credit nothing while the sender showed a "Sent" line.
+            return session.sessionId() + "-" + session.localPlayerId() + "-" + service.nextSeq();
         }
 
         @Override

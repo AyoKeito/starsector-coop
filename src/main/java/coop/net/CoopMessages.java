@@ -1941,6 +1941,15 @@ public final class CoopMessages {
     public static final int MAX_CREDITS_GRANT = 1_000_000_000;
 
     /**
+     * Longest {@code reason} the codec carries. The receiver picks its feed wording from the prefix
+     * before the colon and never echoes the rest, so anything past this is bytes on the wire that no
+     * player will ever read; capping it keeps a caller with a runaway id from filling a frame.
+     * Truncated rather than rejected — a long reason is a cosmetic caller bug, not a reason to drop
+     * money on the floor.
+     */
+    public static final int MAX_CREDITS_REASON_CHARS = 64;
+
+    /**
      * One credit transfer from the sender's wallet to the receiver's (reliable TCP, either
      * direction). See {@link Type#CREDITS_GRANT} for why there is no escrow.
      *
@@ -1957,7 +1966,7 @@ public final class CoopMessages {
         return new Message(Type.CREDITS_GRANT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"ledgerId\":\"" + escapeJson(requireText(ledgerId, "ledgerId")) + "\","
                         + "\"amount\":" + requireGrantAmount(amount) + ","
-                        + "\"reason\":\"" + escapeJson(requireText(reason, "reason")) + "\"}");
+                        + "\"reason\":\"" + escapeJson(requireGrantReason(reason)) + "\"}");
     }
 
     /** Decoded {@link Type#CREDITS_GRANT}. */
@@ -1965,7 +1974,7 @@ public final class CoopMessages {
         public CreditsGrant {
             ledgerId = requireText(ledgerId, "ledgerId");
             amount = requireGrantAmount(amount);
-            reason = requireText(reason, "reason");
+            reason = requireGrantReason(reason);
         }
     }
 
@@ -1988,5 +1997,16 @@ public final class CoopMessages {
             throw new IllegalArgumentException("credits grant amount out of range: " + amount);
         }
         return amount;
+    }
+
+    /**
+     * A non-blank reason, trimmed to {@link #MAX_CREDITS_REASON_CHARS}. Applied on the way out and on
+     * the way in, so a peer that ignores the cap cannot put an unbounded string in front of the
+     * receiver (credit red-team P2-2).
+     */
+    private static String requireGrantReason(String reason) {
+        String text = requireText(reason, "reason");
+        return text.length() <= MAX_CREDITS_REASON_CHARS
+                ? text : text.substring(0, MAX_CREDITS_REASON_CHARS);
     }
 }

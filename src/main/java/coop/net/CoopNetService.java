@@ -499,6 +499,22 @@ public class CoopNetService {
     }
 
     /**
+     * Whether queued credit grants are currently being held on purpose rather than stranded — i.e.
+     * whether the pump's write gate is refusing {@code CREDITS_GRANT} right now, which it does for
+     * exactly the length of a reconnect grace.
+     *
+     * <p>Read by {@link #attachChannelLocked}: a new socket arriving <em>into</em> a grace is the
+     * reconnecting partner, and the grant queued behind it is about to be delivered to the player it
+     * was meant for. A new socket arriving with no grace open is a different session, and the grant is
+     * stale. The transport has no other way to tell those two apart, and getting it wrong either
+     * cancels a good gift or pays a stranger. See {@code CoopPeerLink#dropStaleOutboundForNewSocket}.
+     */
+    boolean grantsHeldForResumeLocked() {
+        java.util.function.Predicate<CoopMessages.Type> gate = outboundWriteGate;
+        return gate != null && !gate.test(CoopMessages.Type.CREDITS_GRANT);
+    }
+
+    /**
      * Sets the full player id stamped onto outbound TCP messages that do not already carry one, and
      * derives the short sender id used in the datagram envelope. Called once per session start; a null
      * clears both (session teardown).
@@ -867,7 +883,44 @@ public class CoopNetService {
                 + QUEUE_DROP_LINK_MESSAGES + "). The socket has not drained for a long time; treating"
                 + " the peer as gone so the reconnect path can run.");
         closeLinkLocked(peer);
-        queueOverflowDrops += peer.discardOutbound();
+        queueOverflowDrops += peer.discardOutbound("queue-cap");
+    }
+
+    /**
+     * Installs the sink told about every queued message that is dropped before reaching a socket
+     * (Phase 32 addition B). One listener per service — the credit transfer is the only subsystem
+     * that has ever needed one, because it is the only one whose messages nobody re-sends.
+     *
+     * <p>See {@link CoopOutboundDiscardListener} for what "discarded" does and does not cover.
+     */
+    public void setOutboundDiscardListener(CoopOutboundDiscardListener listener) {
+        synchronized (lifecycleLock) {
+            for (CoopPeerLink peer : peers) {
+                peer.setOutboundDiscardListener(listener);
+            }
+        }
+    }
+
+    /**
+     * Drops every queued {@code CREDITS_GRANT} on every peer, reporting each one to the discard
+     * listener. Called by the pump when a session ends for good rather than into a reconnect hold:
+     * past that edge the write gate reopens with no session behind it, and the grant would be written
+     * onto whatever socket attaches next (credit red-team P1-1).
+     *
+     * <p>Only grants. The rest of the queue is snapshots and events whose producers reseed after a
+     * reconnect, and widening this to "all campaign traffic" would delete state the resume path is
+     * built to keep.
+     *
+     * @return how many grants were dropped
+     */
+    public int discardOutboundCreditsGrants() {
+        synchronized (lifecycleLock) {
+            int dropped = 0;
+            for (CoopPeerLink peer : peers) {
+                dropped += peer.discardOutboundGrants("session-end");
+            }
+            return dropped;
+        }
     }
 
     /**
@@ -2111,7 +2164,7 @@ public class CoopNetService {
         // sees for the same socket, which is a provenance check that never matches.
         connectionGeneration++;
         peer.attach(channel, pinned, clockMillis.getAsLong(), role == CoopConnectionRole.HOST,
-                connectionGeneration);
+                connectionGeneration, grantsHeldForResumeLocked());
         // A fresh connection earns the fast retry back: only the connection that was rejected is slow.
         connectRetryDelayMillis = CONNECT_RETRY_DELAY_MILLIS;
         refreshConnectedLocked();
