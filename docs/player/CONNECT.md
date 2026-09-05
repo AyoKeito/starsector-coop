@@ -19,27 +19,27 @@ startup and writes what happened to the log.
 Tier 0 cannot fail. If you would rather not spend an evening on router pages, start there.
 
 Before you load anything, find out whether the two of you can reach each other: the host presses
-**Check my connection** in `Coop Launcher.cmd` and stays open, then the guest presses **Test
-connection** with the invite pasted in. Both are described in the next section.
+**Check connection** in `Coop Launcher.cmd` and stays open, then the guest presses **Check connection** with the invite pasted in. Both are described in the next section.
 
 ---
 
-## Before the first session: Check my connection and Test connection
+## Before the first session: Check connection
 
 Both buttons are in `Coop Launcher.cmd`, and the order matters: the host goes first and stays open.
 
-**The host presses Check my connection.** It runs the same UPnP and NAT-PMP request the game runs at
-startup, then the same connection doctor, and shows the result as chips (mapped or not, the external
+**The host presses Check connection.** It runs the same UPnP and NAT-PMP request the game runs at
+startup, then the same connection doctor, and shows the result in the status area. Click the circular
+status icon for **Connection details**, with chips (mapped or not, the external
 address, a carrier-grade NAT warning when it applies), with a sentence under them saying what to do
-next, rather than sending you to a log file to go find. The log drawer opens on its own with the full
+next, rather than sending you to a log file to go find. Open **Logs** for the full
 block; read it the way "Reading the log" at the end of this page reads it: the tier line says which
 of the four routes you are on, and the `next step` line says what to do when the answer is bad. It
 takes a few seconds, and the router mapping is released afterwards so the game can make its own at
 launch. Once it is holding the port for the guest's test a `listening on <port>` chip appears, and
 the launcher keeps the port open, and says so, until you press LAUNCH.
 
-**The guest presses Test connection** while that is up, with the invite already pasted in. Four
-chips come back, green when good, red when failed, grey when not measured:
+**The guest presses Check connection** while that is up, with the invite already pasted in. Click the circular status icon for four
+chips, green when good, red when failed, grey when not measured:
 
 | Chip | Reading it |
 |---|---|
@@ -67,8 +67,8 @@ It is also the only encryption in the picture. Co-op traffic is plaintext JSON; 
 session in its own encryption.
 
 Each tier below is written as `-D` properties on the `vmparams` line. In the launcher they are the
-Port field on the host, the Host address and Port fields on the guest, and Port mapping in the
-Advanced card, hidden behind the footer's Advanced button until you open it.
+Port field in **Edit connection** on the host, the Host address and Port fields in the guest's
+**Edit connection**, and Port mapping in **Settings → General**.
 
 **Tailscale.** Both install from <https://tailscale.com/download> and sign in, either on one account
 or with the host inviting the guest to their tailnet. Open the Tailscale menu on the host and copy

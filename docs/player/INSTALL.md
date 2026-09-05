@@ -8,14 +8,15 @@ connect time.
 
 1. Unzip so `mod_info.json` sits in `<Starsector>\mods\coop`.
 2. Double-click `<Starsector>\mods\coop\Coop Launcher.cmd`.
-3. Press **Fix** on every red row in the Install card. That is the classpath entry in `vmparams` and
+3. Open **Details** beside the installation status and press **Fix** on each repairable problem.
+   That is the classpath entry in `vmparams` and
    the mod tick in `enabled_mods.json`, the two things the mod cannot do for itself once the game is
    running.
-4. Host: press **Host** at the top right, leave **Campaign** on `New campaign`, press **Copy** next
-   to the invite line, send that line to your partner.
-5. Guest: press **Guest**, press **Paste** next to the invite field. Address, port, password, seed,
+4. Host: press **Host a game**, leave **Campaign** on `New campaign`, press **Copy invite**, and
+   send that line to your partner.
+5. Guest: press **Join a game**, then **Paste invite**. Address, port, password, seed,
    sector size and star age all come out of the line.
-6. Both press **LAUNCH**, then **Play** in the vanilla launcher window that follows.
+6. Both press **Launch Starsector**, then **Play** in the vanilla launcher window that follows.
 7. Both start a New Game, or load the save named on the line under the card, whichever that line
    says.
 
@@ -52,7 +53,7 @@ part of the install comparison, so `coop-v1` on one PC and `coop` on the other w
 
 ## 3. Put `coop-forks.jar` on the classpath
 
-**Press Fix in the launcher and it is done.** Start `Coop Launcher.cmd` (section 5). The Install card
+**Press Fix in the launcher and it is done.** Start `Coop Launcher.cmd` (section 5). Installation details
 shows a red row reading `coop-forks.jar first on the JVM classpath`, with a **Fix** button on it. The
 button copies `<Starsector>\vmparams` to `vmparams.backup`, then puts one 33-character entry at the
 front of the classpath. Nothing else on the line changes, the file stays one line, and no newline is
@@ -145,7 +146,7 @@ appears once.
 
 The launcher works out where the game is from its own location, so leave `Coop Launcher.cmd` in
 `<Starsector>\mods\coop`; a shortcut to it is fine, a copy on the desktop is not. If it guesses
-wrong anyway, **Folder** in the Install card sets it straight.
+wrong anyway, open the footer's **Details** and use **Folder** to select the installation.
 
 What it does: it writes your settings into `saves\common\coop_options.json.data`, tells you about
 anything wrong with the install, and starts `starsector.exe`. It does not replace the vanilla
@@ -153,33 +154,24 @@ launcher; that window still comes up and you still press Play in it. The only fi
 `saves\common` are `vmparams` and `mods\enabled_mods.json`, and only when you press **Fix** on the row
 that names one of them. Every other red row is reported with the fix and left to you.
 
-### The host's fields
+### Hosting a game
 
-1. Press **Host**, the button at the top right of the window. That is what makes this install the
-   host.
-2. **Campaign** picks what this session is. It opens on `New campaign (seed ...)`, which is the right
-   answer the first time. Once you have saved a co-op campaign, that campaign appears in the
-   drop-down as its newest save, labelled the way the game's own load screen labels it: character,
-   level, in-game date, and when you saved. Pick one to carry on with it; the folder name shows up
-   under the drop-down, and **Seed**, **Sector size** and **Star age** go grey, because a save
-   already has its sector and those three only do anything for a new game.
-3. Leave **Port** at 7777 unless something else on your PC wants it. It is the TCP and UDP port your
-   partner connects to.
-4. **Password** fills itself in with a generated one when you leave it empty. The eye button next to
-   it reveals what it holds. The invite carries the password, so your partner never types it.
-   Clearing the field is allowed, leaves the port open to anyone who finds it while a session is
-   waiting, and stops the launcher refilling it.
-5. **Seed** is filled in for you when the launcher opens. Press **Generate** for a different one, or
-   type your own. Both games generate the sector locally from this string, and the check at connect
-   compares what came out. It only matters for a new campaign.
-6. **Your address** is looked up for you when the launcher opens with the field empty. That is one
-   HTTPS request to a service that replies with the address your packets came from; **Look up**
-   repeats it. If the two of you connect over a LAN or a VPN, type that address over the answer.
-7. **Sector size** and **Star age** are two drop-downs, defaulting to `normal` and `mixed`. Change
-   them only if you want a different world; the invite carries whatever you pick, so your partner
-   does not have to match them by hand.
-8. Press **Copy** next to **Invite for your partner**, which updates on its own as you fill in the
-   fields above. Send your partner the one line it puts on your clipboard.
+1. Press **Host a game** and choose **Campaign**. Leave it on `New campaign` for a fresh sector,
+   or pick a saved campaign to continue. The advice below the invite names the save to load.
+2. **Customize** opens the new campaign's seed, sector size and star age. A seed is generated for
+   you; **Generate seed** replaces it. Saved campaigns show **Details** instead, with their world
+   settings read-only and the full save advice.
+3. The **Edit connection** pencil beside **Copy invite** opens your address, port, password and full invite. Leave the port at 7777
+   unless another program uses it. The address is looked up automatically; use **Look up** to retry,
+   or enter the address you use over a LAN or VPN.
+4. The password is generated and included in the invite. The reveal button shows it; deliberately
+   clearing it creates an open session and stops the launcher generating another one.
+5. Press **Copy invite** and send the line to your partner. **Copied** confirms the clipboard write.
+   Changing the campaign or connection reminds you to copy a fresh invite.
+
+Settings windows have a **Done** button and close with Escape. Edits stay in the launcher and are
+written to the options file when you press **Launch Starsector**. Opening details does not resize
+the setup screen or move its Launch button.
 
 The invite looks like this, and it carries the password in clear text, so send it the way you would
 send a password:
@@ -212,54 +204,42 @@ never been saved on your PC, which is what a first session looks like from the g
 
 If the launcher cannot read `saves\common\coop_saves.json.data`, or that file was written by a newer
 version of the mod than the launcher, it says so on that same line and stops naming saves. Nothing
-else changes and **LAUNCH** still works.
+else changes and **Launch Starsector** still works.
 
 The mod checks the same thing from inside the game. Load a save belonging to a different campaign
 than the one the launcher was pointed at and a message names the save you meant to load instead. It
 is a warning, not a refusal: it appears, you close it, and the game carries on. Loading an unrelated
 save on purpose is allowed.
 
-### The guest's fields
+### Joining a game
 
-Press **Guest** at the top right, put the host's line on your clipboard, and press **Paste** next to
-**Invite from your host**. Typing or pasting the line into that field fills in the rest by itself:
-address, port, password, seed, sector size and star age. An invite that will not parse says which
-part of it failed rather than clearing the fields. **Seed**, **Sector size** and **Star age** are
-read-only here on purpose: they come from the invite, and they are used only when you start a new
-campaign. Rejoining by loading a co-op save ignores all three. **Sector size** and **Star age** read
-`normal` and `mixed` when the invite does not carry them, the same defaults the host's drop-downs
-open on.
+Press **Join a game**, then **Paste invite**, or paste the host's `coop://` line into the invite
+field. An accepted invite fills the connection and campaign settings and shows a readable session
+summary. The save advice tells you whether to start a New Game or load a matching save.
 
-An accepted invite also puts the save line described above under the guest card, so you know before
-you press **LAUNCH** whether this session starts with **Load Game** or with **New Game**. There is no
-campaign drop-down on the guest side: the host decides which campaign the session is, and the invite
-carries it.
+An invalid invite shows an explanation beside the field and blocks launching with that invite.
+Clear the invite to use a manual connection instead. The **Edit connection** pencil on the session card exposes the host address,
+port, password and seed. Sector size and star age come from the invite and remain read-only;
+invitations without those values use `normal` and `mixed`.
 
-You can also type **Host address** and **Port** in by hand and have the host tell you the password.
-The seed still has to match, which is what the invite is for, and so do sector size and star age. The
-guest's fields for both are read-only, so if the host changed either away from `normal` and `mixed`
-and you are not pasting the invite, the only way to set them is by hand in the settings file, covered
-in section 9.
+### Check connection
 
-### Check my connection, and Test connection
+Both roles use **Check connection**. The host checks first and leaves the launcher open; the guest
+then checks with the invite pasted in. The main screen shows progress and the next action in a
+reserved status area. Click the circular status icon to open **Connection details**, including TCP and UDP pass/fail labels,
+the responding launcher version and the round trip in milliseconds.
 
-Do this once, before the first session, in this order. The host presses **Check my connection**,
-reads the chips it puts up, and leaves the launcher open; the guest then presses **Test connection**
-with the invite pasted in and reads four chips of its own: TCP, `launcher <version>`, UDP and a round
-trip in milliseconds. Green on all four and there is nothing left to check.
-
-`CONNECT.md` reads both sets of chips line by line and says what to do about a red one. If TCP
-connects and no launcher answers, the usual cause is that the host's game is already running instead
-of the host's launcher, and then there is nothing to test: press LAUNCH.
+The temporary router mapping is released before launching. Changing the role or endpoint discards
+the old result. **Launch Starsector** waits for an active check or mapping cleanup to finish.
+`CONNECT.md` explains the results and how to fix a failed connection.
 
 ### The install check
 
-The Install card shows a summary chip (`all N checks passed`, `1 warning`, `2 problems`) and lists
-only the rows that are not `OK`, badged `OK`, `INFO`, `WARN` or `FAIL`; **Show all checks (N
-passed)** reveals the rest. **Refresh** re-runs them after you fix something, **Guide** opens this
-file, and **Folder** points the launcher at your Starsector folder when it could not work out where
-the game is. Whatever a **Fix** button did, or refused to do, is written into the log drawer at the
-bottom of the window.
+The footer shows **Install ready**, or the number of problems and warnings. Its **Details** button
+opens the installation window, initially showing only checks that need attention. **Show all
+checks** reveals passed checks. **Refresh** rechecks the installation, **Guide** opens this file,
+and **Folder** selects a different Starsector folder. **Fix** applies a supported repair and
+rechecks automatically; its result is recorded in **Logs**.
 
 | Row | Fails when |
 |---|---|
@@ -273,7 +253,7 @@ bottom of the window.
 | `no leftover -Dcoop.* in vmparams` | See below. No **Fix** button: these are flags somebody put there deliberately, and the launcher does not delete them. |
 | `co-op enabled in mods\enabled_mods.json` | The mod is not ticked. **Fix** ticks it. |
 | `mod_info.json version matches coop.jar` | Two builds got mixed in one folder. Delete `mods\coop` and unzip once. |
-| `Game version` | Your Starsector is not the one the mod was built for. Part of the mod is compiled against the game's own classes, so the mod refuses to start a session on any other version and says `COOP-GAME`. The version is read out of the `Starting Starsector <version> launcher` line the game writes at the top of `starsector-core\starsector.log`, so before the game has run once here the row reads `unknown until the game has run once`. Ticking **Allow game version mismatch** under Advanced drops it to a `WARN` and lets LAUNCH work. |
+| `Game version` | Your Starsector is not the one the mod was built for. Part of the mod is compiled against the game's own classes, so the mod refuses to start a session on any other version and says `COOP-GAME`. The version is read out of the `Starting Starsector <version> launcher` line the game writes at the top of `starsector-core\starsector.log`, so before the game has run once here the row reads `unknown until the game has run once`. Ticking **Allow game version mismatch** under Settings → Developer drops it to a `WARN` and lets Launch Starsector work. |
 | `settings file saves\common\coop_options.json.data` | The file exists and is not readable as plain JSON. The launcher refuses to overwrite it, because that would throw away every setting in it. |
 | `Update available: <version>` | Not a failure. One request to GitHub's releases API at start, compared against the version baked into your jar, with an **Open release page** button on the row. It reads `Up to date: <version>` when you have the newest release, and `Update check: unavailable` with the reason when the request did not go through. |
 
@@ -283,44 +263,36 @@ launcher: an old port, an old address, a seed from a campaign you finished. The 
 entries to delete. They get left behind by the developer launch scripts, so a normal install will not
 have any.
 
-Every row that says `FAIL` is a reason the session will not work, and LAUNCH refuses while one is
+Every row that says `FAIL` is a reason the session will not work, and Launch Starsector refuses while one is
 outstanding, naming each one. A `WARN` row is a reason it will work differently than you meant.
 
-### Advanced, and LAUNCH
+### Settings, launching and logs
 
-The **Advanced** button in the footer folds open a card holding the settings a normal session never
-needs: **Port mapping** (`auto`/`off`), **Link HUD corner** (`TR`/`TL`/`BR`/`BL`), **Reconnect grace
-(seconds)**, **Agent bridge port (0 = off)**, **Wiretap sample (every Nth)**, **Interaction delay
-(ms)**, and a **Developer flags** group of checkboxes: **Diagnostics**, **Datagram wiretap**, **Frame
-profiler**, **Full-fidelity guest system** (on by default), **Disable shared fast-forward**, **Disable
-clock reconciler**, **Allow game version mismatch**, and **Start over inside the host's campaign
-(guest)**. **Allow game version mismatch** runs the mod on a Starsector it was not built for, which
-is there so a tester can try a new release candidate before the forks are rebuilt for it; nothing on
-that version has been tested and nothing about it is supported. Every field already shows its real
-default rather than a placeholder, which is what the card's own hint says: `Defaults shown. Change
-only with a reason.` Leave the card closed unless you have one.
+**Settings** in the header opens a separate window. **General** contains port mapping, HUD corner
+and reconnect grace. **Developer** contains the bridge port, wiretap sampling, interaction delay,
+diagnostics, frame profiling and the existing developer flags. **Allow game version mismatch** is
+an unsupported testing override; **Start over inside the host's campaign** remains a one-launch
+consent that discards the guest's co-op progress. These controls retain their existing defaults.
 
-**LAUNCH** writes the settings file, closes the launcher's listener so the game can bind the port,
-and starts `starsector.exe`; the button then reads `RUNNING` for as long as the game is up. The
-window stays open afterwards, the log drawer opens on its own, and it tails `starsector.log`: the
-connection doctor block, the `[COOP-DOCTOR]` lines, and every co-op warning. Closing the window does
-not close the game.
+**Launch Starsector** writes the settings, releases the launcher's listener and starts
+`starsector.exe`. Press **Play** in the vanilla launcher that follows, then start or load the
+campaign named on the setup screen. The button reads **Game running** while that process is open.
+Closing the co-op launcher does not close the game.
 
-The **Log** button in the footer opens and closes that same drawer at any time. Inside it,
-**Save a bug report** packs a zip on your Desktop with the logs, your settings, your save and a
-summary, and the **Include my newest save** checkbox next to it leaves the save out when unticked;
-`REPORTING.md` covers what goes in the zip and what to do with it. **Open log folder** opens
-`starsector-core`, and **Clear** empties the pane.
+**Logs** opens a separate, movable and resizable window. It can stay open during play and never
+shrinks the setup screen. The launcher collects co-op log lines after launch even when this window
+is closed. **Save a bug report** writes a ZIP to the Desktop; **Include my newest save** controls
+whether the save is included. **Open log folder** opens `starsector-core`, and **Clear** clears the
+display. `REPORTING.md` explains the report contents.
 
 ## 6. First session
 
 1. Both of you: `vmparams` edited, mod ticked, and every install-check row reading `OK`.
-2. Host: open `Coop Launcher.cmd`, press Host, check the port, seed and address it filled in, press
-   Check my connection and read the chips, press Copy next to Invite for your partner, send the line.
-3. Guest: open the launcher, press Guest, press Paste next to Invite from your host, press Test
-   connection. Four green chips and you are done checking. LAUNCH stays grey until the host address
-   is filled in, and the footer says what is missing.
-4. Both press LAUNCH, then Play in the vanilla launcher window when it appears.
+2. Host: open `Coop Launcher.cmd`, press **Host a game**, select the campaign, and press
+   **Check connection**. Use **Copy invite** to send the invitation to your partner.
+3. Guest: press **Join a game**, **Paste invite**, then **Check connection**. The status area shows
+   the result; **Details** explains any problem. The footer explains anything blocking launch.
+4. Both press **Launch Starsector**, then **Play** in the vanilla launcher window.
 5. Both start New Game. The guest's Continue option names the host it will connect to, and the seed
    is already filled in from the invite.
 6. Both games load paused into the lobby, with the guest's join steps listed as they pass. The host
@@ -564,7 +536,7 @@ campaign already in progress; use the options page for that.
 
 **One-shot and diagnostic keys.** These never appear in the shipped defaults file, and a value for
 one of them in `data\config\coop_options.json` is skipped with a warning. Your own settings file is
-not off limits to them: the launcher's Session and Advanced cards write them there, and at the next
+not off limits to them: the launcher's setup and Settings windows write them there, and at the next
 launch the mod republishes each one it finds as the matching `-D` system property, unless a real `-D`
 for that key is already on the `vmparams` line, which still wins. Editing one in by hand works the
 same way.
@@ -592,14 +564,14 @@ them is caught at connect rather than discovered hours later. Setting host and g
 the same install stops the game at startup with "Configure either host or guest coop startup
 properties, not both".
 
-The launcher's Advanced card sets `coop.portMapping`, `coop.hudCorner`, `coop.reconnectGraceSeconds`,
+The launcher's Settings window sets `coop.portMapping`, `coop.hudCorner`, `coop.reconnectGraceSeconds`,
 `coop.debug.bridge`, `coop.debug.wiretapSample`, `coop.debug.interactionDelayMs` and every Developer
 flag checkbox, writing the key into your settings file only when you move it away from its default.
 `coop.expectedCampaignId` is set by the host's **Campaign** drop-down and by the `cid` part of a
 pasted invite, not by a field you can type into. `coop.password` and `coop.playerName` are Session
-card fields. `coop.hud.disable`, `coop.maxGuests` and the session rules have no launcher field at all.
+launcher fields. `coop.hud.disable`, `coop.maxGuests` and the session rules have no launcher field at all.
 
-**Start over inside the host's campaign** is the Advanced card's form of `coop.adoptCampaignId`, and
+**Start over inside the host's campaign** is the Settings → Developer form of `coop.adoptCampaignId`, and
 it is never remembered between launches: ticking it is one-shot consent for that single launch, and
 it discards the guest's co-op progress. That is the same escape the dev scripts call `-AdoptCampaign`.
 The rejoin path it exists for is the ordinary one: load the co-op autosave the mod wrote, not New

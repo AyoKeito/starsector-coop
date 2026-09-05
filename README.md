@@ -14,14 +14,15 @@ Both players do all of this.
 
 1. Unzip so `mod_info.json` sits in `<Starsector>\mods\coop`.
 2. Double-click `<Starsector>\mods\coop\Coop Launcher.cmd`.
-3. Press **Fix** on every red row in the Install card. That puts `..\mods\coop\jars\coop-forks.jar;`
+3. Open **Details** beside the installation status and press **Fix** on each repairable problem.
+   That puts `..\mods\coop\jars\coop-forks.jar;`
    at the front of the `-classpath` in `<Starsector>\vmparams` and adds `coop` to
    `mods\enabled_mods.json`.
-4. Host: press **Host** at the top right, leave **Campaign** on `New campaign`, press **Copy** next
-   to the invite line, send that line to your partner.
-5. Guest: press **Guest**, press **Paste** next to the invite field. Address, port, password, seed,
+4. Host: press **Host a game**, leave **Campaign** on `New campaign`, press **Copy invite**, and
+   send that line to your partner.
+5. Guest: press **Join a game**, then **Paste invite**. Address, port, password, seed,
    sector size and star age all come out of the line.
-6. Both press **LAUNCH**, then **Play** in the vanilla launcher window that follows.
+6. Both press **Launch Starsector**, then **Play** in the vanilla launcher window that follows.
 7. Both start a New Game, or load the save named on the line under the card.
 
 The full guide is `docs/player/INSTALL.md`.
@@ -43,7 +44,7 @@ The full guide is `docs/player/INSTALL.md`.
 
 ## Reporting a problem
 
-Both players press **Log**, then **Save a bug report**, in the launcher and attach the zip it writes
+Both players press **Logs**, then **Save a bug report**, in the launcher and attach the zip it writes
 to the desktop. Open an issue with the template; it asks for the `[COOP-DOCTOR]` line that any
 session-ending dialog prints.
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**Launcher**
+
+- Compact Host/Join setup keeps the Launch bar in place. Campaign, connection, installation and
+  settings details open separately; Logs is a movable window that can stay open during play.
+- Full-size Copy/Paste actions, stable progress labels, keyboard-accessible controls and explicit
+  connection results replace the small inline actions. Changed invitations prompt a fresh copy;
+  stale connection results are discarded when the role or endpoint changes.
+- Outline icons and aligned header, connection status and Launch action match the UI prototype.
+  The pencil beside Copy invite opens connection settings without adding another row.
+
 **Shared storage and submarkets**
 
 - Storage is shared at every market that has a locker. Either player's 5000-credit unlock opens it

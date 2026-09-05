@@ -129,6 +129,14 @@ execution-policy prompt.
 FlatLaf (Apache-2.0) is fetched by Gradle into `jars/flatlaf.jar` via `copyLauncherLibs` and sits on
 the `.cmd`'s classpath alongside `coop-launcher.jar`.
 
+The main window uses a shared CardLayout for Host/Join and a fixed footer. Campaign, network,
+installation and Settings panels live in owned dialogs; Logs is a modeless window that does not
+consume setup height. `CoopLauncherLayoutTest` checks both roles and log-window stability on a
+desktop (skipped in a headless environment). `COOP_LAUNCHER_PREVIEW=host|guest` stages sample
+connection results without probing the network; `host-logs` also opens Logs and `install` opens
+installation details. Preview skips the update check, public-address lookup and stale-consent write.
+
+
 **Naming the save to load.** `CoopSaveIndexReader` reads `coop_saves.json.data`, refuses a `version`
 above 1 rather than guessing at it, and joins every row to what is on disk: a row naming a folder the
 engine has pruned is dropped, a surviving row gets its folder's `descriptor.xml` parsed (JDK DOM,

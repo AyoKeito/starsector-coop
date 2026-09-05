@@ -50,7 +50,7 @@ final class CoopTheme {
     static final Color CARD_BORDER = hex("#283442");
     static final Color FIELD = hex("#0e141b");
     static final Color TEXT = hex("#e6edf3");
-    static final Color MUTED = hex("#8b98a8");
+    static final Color MUTED = hex("#a0adbc");
     static final Color ACCENT = hex("#4fd1e8");
     static final Color ACCENT_HOVER = hex("#72dcef");
     static final Color ACCENT_PRESSED = hex("#36b9d1");
@@ -80,6 +80,7 @@ final class CoopTheme {
         UIManager.put("TextComponent.arc", 10);
         UIManager.put("ComboBox.arc", 10);
         UIManager.put("Component.focusWidth", 1);
+        UIManager.put("Component.minimumHeight", 32);
         UIManager.put("Component.innerFocusWidth", 0);
         UIManager.put("Component.borderColor", CARD_BORDER);
         UIManager.put("Component.disabledBorderColor", CARD_BORDER);
@@ -117,9 +118,14 @@ final class CoopTheme {
         final JPanel trailing = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
 
         Card(String title) {
+            this(title, false);
+        }
+
+        Card(String title, boolean compact) {
             setOpaque(false);
             setLayout(new GridBagLayout());
-            setBorder(BorderFactory.createEmptyBorder(16, 18, 16, 18));
+            setBorder(compact ? BorderFactory.createEmptyBorder(10, 14, 10, 14)
+                    : BorderFactory.createEmptyBorder(16, 18, 16, 18));
 
             header.setOpaque(false);
             titleLabel = new JLabel(title);
@@ -147,7 +153,7 @@ final class CoopTheme {
             c.gridy = 0;
             c.weightx = 1;
             c.fill = GridBagConstraints.HORIZONTAL;
-            c.insets = new Insets(0, 0, 12, 0);
+            c.insets = new Insets(0, 0, compact ? 6 : 12, 0);
             add(header, c);
             c.gridy = 1;
             c.insets = new Insets(0, 0, 0, 0);
@@ -171,7 +177,24 @@ final class CoopTheme {
         }
     }
 
-    /** A pill with a coloured dot and a short text: the connection results and the install summary. */
+    /** An inline icon and label for the persistent installation status. */
+    static final class StatusLabel extends JLabel {
+        StatusLabel(String text, Color color) {
+            setFont(getFont().deriveFont(getFont().getSize() - 1f));
+            setIconTextGap(com.formdev.flatlaf.util.UIScale.scale(6));
+            set(text, color);
+        }
+
+        void set(String text, Color color) {
+            setText(text);
+            setForeground(color);
+            setIcon(CoopIcons.of(color.equals(OK) ? CoopIcons.Symbol.CHECK
+                    : color.equals(WARN) || color.equals(FAIL) ? CoopIcons.Symbol.ALERT
+                    : CoopIcons.Symbol.MINUS));
+        }
+    }
+
+    /** A pill with a coloured dot and a short connection result. */
     static final class Chip extends JLabel {
 
         private Color dot = INFO;
@@ -256,11 +279,11 @@ final class CoopTheme {
         return label;
     }
 
-    /** Uppercase, muted, letter-spaced: a field label. */
+    /** Sentence-case labels remain readable at the default desktop scale. */
     static JLabel fieldLabel(String text) {
-        JLabel label = new JLabel(text.toUpperCase(java.util.Locale.ROOT));
-        label.setForeground(MUTED);
-        label.setFont(label.getFont().deriveFont(Font.BOLD, (float) label.getFont().getSize() - 2f));
+        JLabel label = new JLabel(text);
+        label.setForeground(TEXT);
+        label.setFont(label.getFont().deriveFont(Font.BOLD));
         return label;
     }
 
@@ -270,6 +293,7 @@ final class CoopTheme {
         field.putClientProperty("JTextField.placeholderText", placeholder);
         field.setForeground(TEXT);
         field.setCaretColor(TEXT);
+        inputHeight(field);
         return field;
     }
 
@@ -279,7 +303,33 @@ final class CoopTheme {
         field.putClientProperty("JTextField.placeholderText", placeholder);
         field.setForeground(TEXT);
         field.setCaretColor(TEXT);
+        inputHeight(field);
         return field;
+    }
+
+    static void inputHeight(JComponent field) {
+        Dimension preferred = field.getPreferredSize();
+        preferred.height = Math.max(preferred.height, com.formdev.flatlaf.util.UIScale.scale(32));
+        field.setPreferredSize(preferred);
+        Dimension minimum = field.getMinimumSize();
+        minimum.height = preferred.height;
+        field.setMinimumSize(minimum);
+    }
+
+    private static Component labelTarget(Component component) {
+        if (component instanceof javax.swing.text.JTextComponent
+                || component instanceof javax.swing.JComboBox<?> || component instanceof javax.swing.JSpinner) {
+            return component;
+        }
+        if (component instanceof java.awt.Container container) {
+            for (Component child : container.getComponents()) {
+                Component target = labelTarget(child);
+                if (target != null) {
+                    return target;
+                }
+            }
+        }
+        return null;
     }
 
     /** The one cyan button: Launch. */
@@ -288,9 +338,9 @@ final class CoopTheme {
         button.putClientProperty("FlatLaf.style",
                 "background: #4fd1e8; foreground: #0b1218; hoverBackground: #72dcef;"
                         + " pressedBackground: #36b9d1; disabledBackground: #2a3644;"
-                        + " disabledText: #6b7785; borderWidth: 0; focusWidth: 0; arc: 999;"
-                        + " margin: 10,28,10,28");
-        button.setFont(button.getFont().deriveFont(Font.BOLD, (float) button.getFont().getSize() + 3f));
+                        + " disabledText: #a0adbc; borderWidth: 0; focusWidth: 1; arc: 8;"
+                        + " margin: 9,20,9,20");
+        button.setFont(button.getFont().deriveFont(Font.BOLD, (float) button.getFont().getSize() + 1f));
         return button;
     }
 
@@ -299,7 +349,7 @@ final class CoopTheme {
         JButton button = new JButton(text);
         button.putClientProperty("FlatLaf.style",
                 "background: #1f2a36; hoverBackground: #283442; pressedBackground: #16202a;"
-                        + " borderColor: #34424f; focusedBorderColor: #4fd1e8; arc: 999;"
+                        + " borderColor: #34424f; focusedBorderColor: #4fd1e8; arc: 8;"
                         + " margin: 6,16,6,16");
         return button;
     }
@@ -310,7 +360,7 @@ final class CoopTheme {
         button.putClientProperty("JButton.buttonType", "toolBarButton");
         button.putClientProperty("FlatLaf.style",
                 "toolbar.hoverBackground: #283442; toolbar.pressedBackground: #16202a;"
-                        + " margin: 6,12,6,12; arc: 999");
+                        + " margin: 6,12,6,12; arc: 8");
         button.setForeground(MUTED);
         return button;
     }
@@ -322,20 +372,19 @@ final class CoopTheme {
         button.putClientProperty("FlatLaf.style",
                 "toolbar.hoverBackground: #283442; margin: 2,8,2,8; arc: 8");
         button.setForeground(ACCENT);
-        button.setFocusable(false);
         return button;
     }
 
     static JToggleButton segment(String text) {
         JToggleButton button = new JToggleButton(text);
         button.putClientProperty("FlatLaf.style",
-                "background: #1a232d; foreground: #8b98a8; hoverBackground: #283442;"
-                        + " selectedBackground: #4fd1e8; selectedForeground: #0b1218;"
-                        + " pressedBackground: #36b9d1; borderWidth: 0; focusWidth: 0; arc: 999;"
-                        + " margin: 6,22,6,22");
+                "background: #0e141b; foreground: #a0adbc; hoverBackground: #283442;"
+                        + " selectedBackground: #233441; selectedForeground: #e6edf3;"
+                        + " pressedBackground: #35495b; borderWidth: 0; focusWidth: 1; arc: 8;"
+                        + " margin: 8,22,8,22");
         button.setFont(button.getFont().deriveFont(Font.BOLD));
         button.setForeground(MUTED);
-        button.addItemListener(event -> button.setForeground(button.isSelected() ? ON_ACCENT : MUTED));
+        button.addItemListener(event -> button.setForeground(button.isSelected() ? TEXT : MUTED));
         return button;
     }
 
@@ -523,7 +572,10 @@ final class CoopTheme {
             c.fill = GridBagConstraints.HORIZONTAL;
             c.insets = new Insets(0, 2, 4, 0);
             if (label != null) {
-                cell.add(fieldLabel(label), c);
+                JLabel fieldLabel = fieldLabel(label);
+                Component target = labelTarget(component);
+                fieldLabel.setLabelFor(target == null ? component : target);
+                cell.add(fieldLabel, c);
                 c.gridy = 1;
             }
             c.insets = new Insets(0, 0, 0, 0);

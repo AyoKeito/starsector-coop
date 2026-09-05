@@ -6,7 +6,7 @@ on both machines.
 
 ## The bug report
 
-Press **Log**, then **Save a bug report**, in the launcher, on both PCs, and attach both files. It writes
+Press **Logs**, then **Save a bug report**, in the launcher, on both PCs, and attach both files. It writes
 `coop-report-host-<date>-<time>.zip` or `coop-report-guest-<date>-<time>.zip` to your Desktop and
 opens the folder it landed in.
 
@@ -103,9 +103,9 @@ campaign's contents into the log:
 | `-Dcoop.debug.wiretap=true` | Sampled message payloads in both directions, plus a size histogram every 60 seconds. |
 | `-Dcoop.debug.wiretapSample=10` | With the wiretap on, log one message in every N. |
 
-The launcher's Advanced card sets these too: **Diagnostics** and **Datagram wiretap** are checkboxes
-in its Developer flags group, and **Wiretap sample (every Nth)** is a spinner next to Reconnect grace
-in the same card. Ticking a box there writes the matching key into your settings file, and the mod
+The launcher's **Settings → Developer** tab sets these too: **Diagnostics** and **Datagram wiretap**
+are checkboxes, and **Wiretap sample (every Nth)** is a spinner. Launching with these options writes
+the matching keys into your settings file, and the mod
 turns it back into the property above at the next launch; `INSTALL.md` section 9 covers the
 mechanism, and shows where to set them as plain `-D` properties on the `vmparams` line instead, for a
 launch without the launcher. Turn them back off, in whichever place you turned them on, when the run
