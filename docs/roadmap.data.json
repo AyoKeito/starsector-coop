@@ -884,13 +884,13 @@
         "observed-state resolution"
       ],
       "residue": [
-        "Part A gate + config + feedback + truth-table test",
-        "Part B FF_INTENT + coordinator AND logic + tests",
-        "two-instance smoke (both-tap FF, one-sided pending, screen-pause wins)",
+        "Part A gate (effectiveBool read, hostPauseHolder gate, drop from INERT_KEYS) + guest feed line + truth-table rows",
+        "Part B FF_INTENT (+ policy-test row) + coordinator AND logic + host Shift interceptor + host effective-FF write + ffPending on TIME_SNAPSHOT + HUD wording + tests",
+        "two-instance smoke (both-tap FF, one-sided pending, core-tab pause wins, reconnect hold clears intents)",
         "commit",
-        "decide whether Part A ships at all"
+        "decide whether Part A ships at all (if dropped, delete the inert key too)"
       ],
-      "note": "Requires Phase 7b (CoopFastForwardLock); wants 20.6 session-intel + Phase 28 config surface"
+      "note": "Spec re-verified against the code 2026-09-05: every prerequisite is built (7b/7c lock + reconciler, 20.6 CoopLinkHud/CoopSessionIntel/CoopFeed, 28 registry with coop.allowGuestPause already registered inert). Formula since sketch gained Phase 20.2 reconnectHold; Phase 28 split the screen pause into a hardwired dialog/menu half and a pauseOnGuestScreens core-tab half, and Part A must not touch either. Host Shift is still vanilla input (TIME_SNAPSHOT reads the field back); Part B turns it into an intent. Stays post-V1 (reviewed for release 2026-09-05: current rules are coherent, Part A has no demand, Part B costs a smoke round-trip)."
     },
     {
       "id": "26",
