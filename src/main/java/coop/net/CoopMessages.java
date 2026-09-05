@@ -715,25 +715,56 @@ public final class CoopMessages {
                         + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
     }
 
+    /**
+     * Phase 32: the {@code submarketId} a guest sends on {@code MARKET_OPEN} when it wants every
+     * shared submarket the host has at that market, which is what a dock always wants.
+     *
+     * <p>The field is required text on all three market messages rather than optional-and-blank, so
+     * a sender that forgets it fails at construction instead of silently addressing the open market.
+     * A concrete spec id here means "re-snapshot only this one" — the shape a targeted re-snapshot
+     * needs, and the reason the request carries a submarket at all.
+     */
+    public static final String SUBMARKET_ALL = "*";
+
     public static Message marketOpen(String sessionId, long seq, long sentAtMillis,
-                                     String marketId, String playerId) {
+                                     String marketId, String submarketId, String playerId) {
         return new Message(Type.MARKET_OPEN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
+                        + "\"submarketId\":\"" + escapeJson(requireText(submarketId, "submarketId")) + "\","
                         + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
     }
 
+    /**
+     * Phase 32: one submarket's canonical stock.
+     *
+     * @param submarketId    the submarket spec id this stock belongs to ({@code open_market},
+     *                       {@code black_market}, {@code generic_military}, {@code storage}). One
+     *                       market has several, and they must never be merged: a storage locker and
+     *                       an open-market shelf are the same {@code CargoAPI} shape carrying
+     *                       completely different meaning.
+     * @param submarketCount how many snapshots this one {@code MARKET_OPEN} produces, so the guest's
+     *                       {@code CoopMarketSyncGate} knows when the market as a whole is canonical
+     *                       and the trade options may open. Always &gt;= 1 — a snapshot that answers
+     *                       nothing is not sent.
+     */
     public static Message marketSnapshot(String sessionId, long seq, long sentAtMillis,
-                                         String marketId, String encodedStock) {
+                                         String marketId, String submarketId, int submarketCount,
+                                         String encodedStock) {
+        if (submarketCount < 1) {
+            throw new IllegalArgumentException("submarketCount must be >= 1, was " + submarketCount);
+        }
         return new Message(Type.MARKET_SNAPSHOT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
+                        + "\"submarketId\":\"" + escapeJson(requireText(submarketId, "submarketId")) + "\","
+                        + "\"submarketCount\":" + submarketCount + ","
                         + "\"stock\":\"" + escapeJson(encodedStock == null ? "" : encodedStock) + "\"}");
     }
 
     public static Message marketTxn(String sessionId, long seq, long sentAtMillis,
-                                    String marketId, String kind, String itemId, int qty, float unitPrice,
-                                    String actingPlayerId) {
-        return marketTxn(sessionId, seq, sentAtMillis, marketId, kind, itemId, qty, unitPrice,
-                actingPlayerId, "");
+                                    String marketId, String submarketId, String kind, String itemId,
+                                    int qty, float unitPrice, String actingPlayerId) {
+        return marketTxn(sessionId, seq, sentAtMillis, marketId, submarketId, kind, itemId, qty,
+                unitPrice, actingPlayerId, "");
     }
 
     /**
@@ -743,10 +774,11 @@ public final class CoopMessages {
      *               delimited structure is the mod's business, not the envelope's.
      */
     public static Message marketTxn(String sessionId, long seq, long sentAtMillis,
-                                    String marketId, String kind, String itemId, int qty, float unitPrice,
-                                    String actingPlayerId, String detail) {
+                                    String marketId, String submarketId, String kind, String itemId,
+                                    int qty, float unitPrice, String actingPlayerId, String detail) {
         return new Message(Type.MARKET_TXN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"marketId\":\"" + escapeJson(requireText(marketId, "marketId")) + "\","
+                        + "\"submarketId\":\"" + escapeJson(requireText(submarketId, "submarketId")) + "\","
                         + "\"kind\":\"" + escapeJson(requireText(kind, "kind")) + "\","
                         + "\"itemId\":\"" + escapeJson(requireText(itemId, "itemId")) + "\","
                         + "\"qty\":" + qty + ","

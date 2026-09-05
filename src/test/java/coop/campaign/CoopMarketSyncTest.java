@@ -1,5 +1,6 @@
 package coop.campaign;
 
+import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import coop.net.CoopMessages;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CoopMarketSyncTest {
 
+    private static final String OPEN = Submarkets.SUBMARKET_OPEN;
+    private static final String STORAGE = Submarkets.SUBMARKET_STORAGE;
+
     private static CoopMarketSync.StockItem commodity(String id, int qty) {
         return new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.COMMODITY, id, qty, 100f);
     }
@@ -21,47 +25,47 @@ class CoopMarketSyncTest {
     @Test
     void guestRendersHostMarketContents() {
         CoopMarketSync sync = new CoopMarketSync();
-        sync.applySnapshot("jangala", List.of(commodity("supplies", 500),
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("supplies", 500),
                 new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP, "ship-1", 1, 50000f)));
 
-        assertEquals(2, sync.contents("jangala").size());
-        assertEquals(500, sync.item("jangala", CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
+        assertEquals(2, sync.contents("jangala", OPEN).size());
+        assertEquals(500, sync.item("jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
     }
 
     @Test
     void buyTransactionDecrementsCanonicalStock() {
         CoopMarketSync sync = new CoopMarketSync();
-        sync.applySnapshot("jangala", List.of(commodity("supplies", 500)));
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("supplies", 500)));
 
         List<CoopMarketSync.StockItem> updated = sync.applyTransaction(
-                new CoopMarketSync.Transaction("jangala", CoopMarketSync.ItemKind.COMMODITY, "supplies", 120, 100f));
+                new CoopMarketSync.Transaction("jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies", 120, 100f));
 
         assertEquals(1, updated.size());
-        assertEquals(380, sync.item("jangala", CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
+        assertEquals(380, sync.item("jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
     }
 
     @Test
     void sellTransactionIncrementsStock() {
         CoopMarketSync sync = new CoopMarketSync();
-        sync.applySnapshot("jangala", List.of(commodity("supplies", 500)));
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("supplies", 500)));
 
         sync.applyTransaction(new CoopMarketSync.Transaction(
-                "jangala", CoopMarketSync.ItemKind.COMMODITY, "supplies", -50, 100f));
+                "jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies", -50, 100f));
 
-        assertEquals(550, sync.item("jangala", CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
+        assertEquals(550, sync.item("jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
     }
 
     @Test
     void buyingUniqueShipRemovesListing() {
         CoopMarketSync sync = new CoopMarketSync();
-        sync.applySnapshot("jangala", List.of(
+        sync.applySnapshot("jangala", OPEN, List.of(
                 new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP, "ship-1", 1, 50000f)));
 
         sync.applyTransaction(new CoopMarketSync.Transaction(
-                "jangala", CoopMarketSync.ItemKind.SHIP, "ship-1", 1, 50000f));
+                "jangala", OPEN, CoopMarketSync.ItemKind.SHIP, "ship-1", 1, 50000f));
 
-        assertNull(sync.item("jangala", CoopMarketSync.ItemKind.SHIP, "ship-1"));
-        assertEquals(0, sync.contents("jangala").size());
+        assertNull(sync.item("jangala", OPEN, CoopMarketSync.ItemKind.SHIP, "ship-1"));
+        assertEquals(0, sync.contents("jangala", OPEN).size());
     }
 
     @Test
@@ -101,12 +105,12 @@ class CoopMarketSyncTest {
     @Test
     void aSoldBackShipCarriesItsDetailIntoTheCanonicalStock() {
         CoopMarketSync sync = new CoopMarketSync();
-        sync.applySnapshot("jangala", List.of());
+        sync.applySnapshot("jangala", OPEN, List.of());
 
-        sync.applyTransaction(new CoopMarketSync.Transaction("jangala",
+        sync.applyTransaction(new CoopMarketSync.Transaction("jangala", OPEN,
                 CoopMarketSync.ItemKind.SHIP, "member-9", -1, 0f, "blob"));
 
-        assertEquals("blob", sync.item("jangala", CoopMarketSync.ItemKind.SHIP, "member-9").detail(),
+        assertEquals("blob", sync.item("jangala", OPEN, CoopMarketSync.ItemKind.SHIP, "member-9").detail(),
                 "the host must shelve the hull the player actually sold, not a pristine reroll");
     }
 
@@ -143,26 +147,97 @@ class CoopMarketSyncTest {
         assertEquals(Set.of(), CoopMarketSync.diffHires(null, Set.of("a")).hired().keySet());
     }
 
+    // ---- Phase 32: two submarkets at one market are two inventories ------------------------------
+
+    @Test
+    void twoSubmarketsAtOneMarketDoNotBleedIntoEachOther() {
+        CoopMarketSync sync = new CoopMarketSync();
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("supplies", 500)));
+        sync.applySnapshot("jangala", STORAGE, List.of(commodity("supplies", 12),
+                new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP, "member-9", 1, 0f, "blob")));
+
+        assertEquals(1, sync.contents("jangala", OPEN).size());
+        assertEquals(2, sync.contents("jangala", STORAGE).size());
+        assertEquals(500, sync.item("jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity(),
+                "the shop's shelf is not the locker's");
+        assertEquals(12, sync.item("jangala", STORAGE, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
+        assertNull(sync.item("jangala", OPEN, CoopMarketSync.ItemKind.SHIP, "member-9"),
+                "a parked hull must not appear on the shop's shelf");
+    }
+
+    @Test
+    void replacingOneSubmarketLeavesTheOthersAlone() {
+        CoopMarketSync sync = new CoopMarketSync();
+        sync.applySnapshot("jangala", STORAGE, List.of(commodity("supplies", 400)));
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("fuel", 50)));
+
+        // A second open-market snapshot is a full replacement of the open market and nothing else.
+        sync.applySnapshot("jangala", OPEN, List.of());
+
+        assertEquals(0, sync.contents("jangala", OPEN).size());
+        assertEquals(400, sync.item("jangala", STORAGE, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity(),
+                "the player's parked cargo must survive a shop reroll");
+    }
+
+    @Test
+    void aTransactionOnlyMovesItsOwnSubmarketsStock() {
+        CoopMarketSync sync = new CoopMarketSync();
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("supplies", 500)));
+        sync.applySnapshot("jangala", STORAGE, List.of(commodity("supplies", 400)));
+
+        // A withdrawal from the locker: 50 leave storage, the shop is untouched.
+        sync.applyTransaction(new CoopMarketSync.Transaction(
+                "jangala", STORAGE, CoopMarketSync.ItemKind.COMMODITY, "supplies", 50, 0f));
+
+        assertEquals(350, sync.item("jangala", STORAGE, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity());
+        assertEquals(500, sync.item("jangala", OPEN, CoopMarketSync.ItemKind.COMMODITY, "supplies").quantity(),
+                "this is the exact bug Phase 32 exists to fix: a locker move used to eat shop stock");
+    }
+
+    @Test
+    void theSameMarketIdAtADifferentSubmarketIsADifferentShop() {
+        CoopMarketSync sync = new CoopMarketSync();
+        sync.applySnapshot("jangala", OPEN, List.of(commodity("supplies", 500)));
+
+        assertEquals(List.of(), sync.contents("jangala", Submarkets.SUBMARKET_BLACK));
+        assertNull(sync.item("jangala", Submarkets.SUBMARKET_BLACK,
+                CoopMarketSync.ItemKind.COMMODITY, "supplies"));
+    }
+
+    @Test
+    void aTransactionWithoutASubmarketIsRejected() {
+        // Fail loudly: a line with no submarket has no target, and picking one for it is how the
+        // open market ended up absorbing storage moves in the first place.
+        assertThrows(IllegalArgumentException.class, () -> new CoopMarketSync.Transaction(
+                "jangala", "", CoopMarketSync.ItemKind.COMMODITY, "supplies", 1, 0f));
+    }
+
     @Test
     void marketMessagesRoundTrip() {
         CoopMessages.Message snapshot = CoopMessages.marketSnapshot("s1", 1L, 10L, "jangala",
-                CoopMarketSync.encodeStock(List.of(commodity("supplies", 500))));
+                STORAGE, 3, CoopMarketSync.encodeStock(List.of(commodity("supplies", 500))));
         CoopMessages.Message decodedSnap = CoopMessages.decode(CoopMessages.encode(snapshot));
         assertEquals(CoopMessages.Type.MARKET_SNAPSHOT, decodedSnap.type());
         assertEquals("jangala", CoopMessages.requiredPayloadString(decodedSnap, "marketId"));
+        assertEquals(STORAGE, CoopMessages.requiredPayloadString(decodedSnap, "submarketId"));
+        assertEquals(3L, CoopMessages.requiredPayloadLong(decodedSnap, "submarketCount"));
         assertEquals(500, CoopMarketSync.decodeStock(
                 CoopMessages.requiredPayloadString(decodedSnap, "stock")).get(0).quantity());
 
-        CoopMessages.Message open = CoopMessages.marketOpen("s1", 5L, 5L, "jangala", "guest");
+        CoopMessages.Message open = CoopMessages.marketOpen("s1", 5L, 5L, "jangala",
+                CoopMessages.SUBMARKET_ALL, "guest");
         CoopMessages.Message decodedOpen = CoopMessages.decode(CoopMessages.encode(open));
         assertEquals(CoopMessages.Type.MARKET_OPEN, decodedOpen.type());
         assertEquals("jangala", CoopMessages.requiredPayloadString(decodedOpen, "marketId"));
+        assertEquals(CoopMessages.SUBMARKET_ALL,
+                CoopMessages.requiredPayloadString(decodedOpen, "submarketId"));
         assertEquals("guest", CoopMessages.requiredPayloadString(decodedOpen, "playerId"));
 
-        CoopMessages.Message txn = CoopMessages.marketTxn("s1", 2L, 20L, "jangala",
+        CoopMessages.Message txn = CoopMessages.marketTxn("s1", 2L, 20L, "jangala", STORAGE,
                 "COMMODITY", "supplies", 120, 105.5f, "guest");
         CoopMessages.Message decodedTxn = CoopMessages.decode(CoopMessages.encode(txn));
         assertEquals(CoopMessages.Type.MARKET_TXN, decodedTxn.type());
+        assertEquals(STORAGE, CoopMessages.requiredPayloadString(decodedTxn, "submarketId"));
         assertEquals("COMMODITY", CoopMessages.requiredPayloadString(decodedTxn, "kind"));
         assertEquals(120, CoopMessages.requiredPayloadLong(decodedTxn, "qty"));
         assertEquals(105.5f, CoopMessages.requiredPayloadFloat(decodedTxn, "unitPrice"));
@@ -171,12 +246,31 @@ class CoopMarketSyncTest {
     }
 
     @Test
+    void aMarketMessageWithoutASubmarketIdIsRejectedAtConstruction() {
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.marketOpen("s1", 1L, 1L, "jangala", "", "guest"));
+        assertThrows(NullPointerException.class,
+                () -> CoopMessages.marketSnapshot("s1", 1L, 1L, "jangala", null, 1, ""));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.marketTxn("s1", 1L, 1L, "jangala", " ",
+                        "COMMODITY", "supplies", 1, 0f, "guest"));
+    }
+
+    @Test
+    void aSnapshotThatCountsNoSubmarketsIsRejected() {
+        // submarketCount is what the guest's gate counts down; zero would release the shop before
+        // anything had applied, and a negative one would never release it at all.
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.marketSnapshot("s1", 1L, 1L, "jangala", OPEN, 0, ""));
+    }
+
+    @Test
     void aShipSellBackTxnCarriesTheDetailBlobThroughTheEnvelope() {
         String blob = new CoopShipDetail("member-4", "ISS Grudge", "hound_Standard", "hound_dhull",
                 0.31f, 3, 2, List.of("dmod_engine"), List.of(), List.of(), List.of(), List.of(),
                 Map.of("WS0001", "lightmg"), Map.of()).encode();
 
-        CoopMessages.Message txn = CoopMessages.marketTxn("s1", 2L, 20L, "jangala",
+        CoopMessages.Message txn = CoopMessages.marketTxn("s1", 2L, 20L, "jangala", STORAGE,
                 "SHIP", "member-4", -1, 0f, "guest", blob);
         CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(txn));
 

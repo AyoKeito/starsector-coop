@@ -119,9 +119,10 @@ class CoopMessagesGoldenTest {
     @Test
     void marketTxnEncodesItsFloatAsAQuotedString() {
         CoopMessages.Message txn = CoopMessages.marketTxn("session-a", 3L, 4L,
-                "jangala_market", "buy", "supplies", 7, 12.5f, "guest-player", "");
+                "jangala_market", "open_market", "buy", "supplies", 7, 12.5f, "guest-player", "");
 
-        assertEquals("{\"marketId\":\"jangala_market\",\"kind\":\"buy\",\"itemId\":\"supplies\","
+        assertEquals("{\"marketId\":\"jangala_market\",\"submarketId\":\"open_market\","
+                        + "\"kind\":\"buy\",\"itemId\":\"supplies\","
                         + "\"qty\":7,\"unitPrice\":\"12.5\",\"actingPlayerId\":\"guest-player\","
                         + "\"detail\":\"\"}",
                 txn.payloadJson());

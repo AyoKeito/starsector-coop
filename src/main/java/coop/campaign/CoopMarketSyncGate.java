@@ -1,6 +1,8 @@
 package coop.campaign;
 
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Phase 20 M6: the guest's "this shop is not canonical yet" gate.
@@ -78,6 +80,13 @@ public final class CoopMarketSyncGate {
     private long armedAtMillis;
     private boolean announced;
     private boolean timedOut;
+    /**
+     * Phase 32: the distinct submarket ids whose snapshots have already applied for this arming. One
+     * {@code MARKET_OPEN} is answered with one snapshot per shared submarket the host has there, and
+     * the shop must stay shut until the <em>last</em> of them has landed — releasing on the first
+     * would put the player in a trade screen whose black market or storage is still the guest's own.
+     */
+    private final Set<String> appliedSubmarkets = new LinkedHashSet<>();
 
     /**
      * The guest just sent {@code MARKET_OPEN} for a market that has stock worth gating.
@@ -94,10 +103,12 @@ public final class CoopMarketSyncGate {
         this.armedAtMillis = nowMillis;
         this.announced = false;
         this.timedOut = false;
+        this.appliedSubmarkets.clear();
     }
 
     /**
-     * The host's snapshot for this market landed (or the dialog closed, or the session ended).
+     * The gate is over for this market whatever the snapshot count says — the dialog closed, the
+     * session ended, or the caller has decided nothing more is coming.
      *
      * @return true when this cleared a live gate, i.e. the caller should re-enable the options.
      */
@@ -107,6 +118,36 @@ public final class CoopMarketSyncGate {
         }
         clear();
         return true;
+    }
+
+    /**
+     * Phase 32: one of this open's snapshots applied.
+     *
+     * <p>Returns true (and clears) exactly when the set of <em>distinct</em> submarket ids applied
+     * for the pending market reaches {@code submarketCount}, which is the host's count of how many
+     * snapshots this open produces. Idempotent on a duplicate id: a re-sent {@code open_market}
+     * snapshot must not be counted as the black market's, or the shop opens a submarket early.
+     *
+     * @param submarketCount how many snapshots the host says this open produces; {@code <= 1} means
+     *                       "this one is the whole answer", which is also the safe reading of a peer
+     *                       that somehow sent a nonsense count.
+     */
+    public boolean onResolved(String marketId, String submarketId, int submarketCount) {
+        if (this.marketId == null || marketId == null || !this.marketId.equals(marketId)
+                || submarketId == null || submarketId.isBlank()) {
+            return false;
+        }
+        appliedSubmarkets.add(submarketId);
+        if (appliedSubmarkets.size() < Math.max(1, submarketCount)) {
+            return false;
+        }
+        clear();
+        return true;
+    }
+
+    /** Phase 32: how many distinct submarket snapshots have applied for the pending market. */
+    public int appliedSubmarketCount() {
+        return appliedSubmarkets.size();
     }
 
     /** True while the trade options should be held disabled. */
@@ -156,5 +197,6 @@ public final class CoopMarketSyncGate {
         armedAtMillis = 0L;
         announced = false;
         timedOut = false;
+        appliedSubmarkets.clear();
     }
 }

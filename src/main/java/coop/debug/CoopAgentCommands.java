@@ -25,6 +25,7 @@ import com.fs.starfarer.api.impl.campaign.econ.impl.Cryorevival;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ItemEffectsRepo;
 import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionIntel;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
@@ -515,11 +516,18 @@ public final class CoopAgentCommands {
         }
 
         boolean host = roleOf(context.pump()) == CoopConnectionRole.HOST;
+        // Phase 32: one market has up to four shared submarkets, so the verb names one. Defaulting to
+        // the open market keeps every existing runbook line working unchanged.
+        String submarketId = optionalString(args, "submarketId");
+        if (submarketId == null || submarketId.isBlank()) {
+            submarketId = Submarkets.SUBMARKET_OPEN;
+        }
         JSONObject out = new JSONObject();
         out.put("marketId", marketId);
+        out.put("submarketId", submarketId);
         out.put("role", roleOf(context.pump()).name());
 
-        if (!host && !replicator.openMarketStockedForBridge(market)) {
+        if (!host && !replicator.submarketStockedForBridge(market, submarketId)) {
             // A guest that has never docked here has no stock at all. Reporting that as an empty
             // shop would read as "host and guest disagree"; it is "there is nothing to compare yet".
             out.put("stocked", false);
@@ -530,7 +538,8 @@ public final class CoopAgentCommands {
         // real dock (and the market snapshot broadcast) runs before capturing, because a market the
         // host has never docked at has never had stock generated. The generation is the point, not a
         // side effect — see CoopCampaignReplicator#captureMarketStockForBridge.
-        List<CoopMarketSync.StockItem> items = replicator.captureMarketStockForBridge(market, host);
+        List<CoopMarketSync.StockItem> items =
+                replicator.captureMarketStockForBridge(market, submarketId, host);
         out.put("stocked", true);
 
         JSONArray stock = new JSONArray();
@@ -551,7 +560,7 @@ public final class CoopAgentCommands {
     /**
      * Every market in the economy: the index the {@code market} verb's {@code marketId} comes from.
      *
-     * <p>Enumeration only — deliberately no {@code ensureOpenMarketStocked}. The {@code market} verb
+     * <p>Enumeration only — deliberately no {@code ensureSubmarketStocked}. The {@code market} verb
      * stocks on the host because a stock dump of an ungenerated market is meaningless; running that
      * over the whole economy would generate stock at ~150 markets as a side effect of asking what
      * exists, which is a world change nobody asked for and a diff nobody could interpret.

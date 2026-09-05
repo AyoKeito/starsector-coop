@@ -13,6 +13,7 @@ import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -102,7 +103,8 @@ class CoopSpecialStackSyncTest {
         RecordingNetService net = new RecordingNetService(CoopConnectionRole.HOST);
 
         new CoopCampaignReplicator(net, activeHostSession(), () -> 1L)
-                .handle(CoopMessages.marketOpen("session-a", 1L, 1L, "sindria", "guest-player"));
+                .handle(CoopMessages.marketOpen("session-a", 1L, 1L, "sindria",
+                        CoopMessages.SUBMARKET_ALL, "guest-player"));
 
         List<CoopMarketSync.StockItem> items = CoopMarketSync.decodeStock(
                 CoopMessages.requiredPayloadString(net.lastOfType(CoopMessages.Type.MARKET_SNAPSHOT), "stock"));
@@ -269,8 +271,9 @@ class CoopSpecialStackSyncTest {
                     MarketAPI.class.getClassLoader(),
                     new Class<?>[]{MarketAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
-                        case "hasSubmarket" -> Boolean.TRUE;
-                        case "getSubmarket" -> submarket;
+                        // Open market only, so this market produces exactly one Phase 32 snapshot.
+                        case "hasSubmarket" -> Submarkets.SUBMARKET_OPEN.equals(args[0]);
+                        case "getSubmarket" -> Submarkets.SUBMARKET_OPEN.equals(args[0]) ? submarket : null;
                         case "getId" -> "sindria";
                         case "toString" -> "FakeMarket[sindria]";
                         case "hashCode" -> System.identityHashCode(proxy);

@@ -17,6 +17,11 @@ import static coop.util.CoopText.requireText;
  * ({@code MARKET_SNAPSHOT}) and the guest renders that snapshot ({@link #applySnapshot}) instead of
  * generating its own, closing the "host and guest see different shop/officer stock" divergence.
  *
+ * <p><b>Phase 32:</b> stock is keyed by (market, submarket), not by market. The open market, the
+ * black market, the military submarket and the player's storage locker are four separate
+ * inventories that happen to share a {@code CargoAPI} shape, and one open produces one snapshot per
+ * submarket the host has there.
+ *
  * <p>Buy/sell/hire applies to the host's canonical market: the acting client sends a
  * {@code MARKET_TXN} ({@link Transaction}); the host applies it ({@link #applyTransaction}) to the
  * authoritative stock and re-broadcasts the resulting snapshot. Credits/cargo/ships/officers land in
@@ -92,17 +97,19 @@ public final class CoopMarketSync {
      * {@link CoopShipDetail} of the hull being handed over, so the ship the host puts back on the
      * shelf is the battered one the player actually sold, not a pristine reroll of its base variant.
      */
-    public record Transaction(String marketId, ItemKind kind, String itemId, int qty, float unitPrice,
-                              String detail) {
+    public record Transaction(String marketId, String submarketId, ItemKind kind, String itemId,
+                              int qty, float unitPrice, String detail) {
         public Transaction {
             marketId = requireText(marketId, "marketId");
+            submarketId = requireText(submarketId, "submarketId");
             kind = Objects.requireNonNull(kind, "kind");
             itemId = requireText(itemId, "itemId");
             detail = CoopDelimited.normalize(detail);
         }
 
-        public Transaction(String marketId, ItemKind kind, String itemId, int qty, float unitPrice) {
-            this(marketId, kind, itemId, qty, unitPrice, "");
+        public Transaction(String marketId, String submarketId, ItemKind kind, String itemId, int qty,
+                           float unitPrice) {
+            this(marketId, submarketId, kind, itemId, qty, unitPrice, "");
         }
     }
 
@@ -136,29 +143,42 @@ public final class CoopMarketSync {
         return data.isEmpty() ? null : data;
     }
 
-    // marketId -> (item key -> stock)
-    private final Map<String, Map<String, StockItem>> stockByMarket = new LinkedHashMap<>();
+    /**
+     * Phase 32: which shop at which market. One market carries up to four shared submarkets
+     * ({@code open_market}, {@code black_market}, {@code generic_military}, {@code storage}), and
+     * they are entirely separate inventories — a per-market key merged a player's storage locker
+     * into the open market's shelf, which is the defect that phase exists to fix.
+     */
+    private record ShopKey(String marketId, String submarketId) {
+        private ShopKey {
+            marketId = requireText(marketId, "marketId");
+            submarketId = requireText(submarketId, "submarketId");
+        }
+    }
 
-    /** Replace a market's stock with the host snapshot. Returns the stored items in order. */
-    public synchronized List<StockItem> applySnapshot(String marketId, List<StockItem> items) {
-        String norm = requireText(marketId, "marketId");
+    // (marketId, submarketId) -> (item key -> stock)
+    private final Map<ShopKey, Map<String, StockItem>> stockByShop = new LinkedHashMap<>();
+
+    /** Replace one submarket's stock with the host snapshot. Returns the stored items in order. */
+    public synchronized List<StockItem> applySnapshot(String marketId, String submarketId,
+                                                     List<StockItem> items) {
         Map<String, StockItem> stock = new LinkedHashMap<>();
         if (items != null) {
             for (StockItem item : items) {
                 stock.put(item.key(), item);
             }
         }
-        stockByMarket.put(norm, stock);
+        stockByShop.put(new ShopKey(marketId, submarketId), stock);
         return new ArrayList<>(stock.values());
     }
 
-    public synchronized List<StockItem> contents(String marketId) {
-        Map<String, StockItem> stock = stockByMarket.get(requireText(marketId, "marketId"));
+    public synchronized List<StockItem> contents(String marketId, String submarketId) {
+        Map<String, StockItem> stock = stockByShop.get(new ShopKey(marketId, submarketId));
         return stock == null ? List.of() : new ArrayList<>(stock.values());
     }
 
-    public synchronized StockItem item(String marketId, ItemKind kind, String itemId) {
-        Map<String, StockItem> stock = stockByMarket.get(requireText(marketId, "marketId"));
+    public synchronized StockItem item(String marketId, String submarketId, ItemKind kind, String itemId) {
+        Map<String, StockItem> stock = stockByShop.get(new ShopKey(marketId, submarketId));
         return stock == null ? null : stock.get(kind.name() + ":" + requireText(itemId, "itemId"));
     }
 
@@ -170,7 +190,8 @@ public final class CoopMarketSync {
      */
     public synchronized List<StockItem> applyTransaction(Transaction txn) {
         Objects.requireNonNull(txn, "txn");
-        Map<String, StockItem> stock = stockByMarket.computeIfAbsent(txn.marketId(), k -> new LinkedHashMap<>());
+        Map<String, StockItem> stock = stockByShop.computeIfAbsent(
+                new ShopKey(txn.marketId(), txn.submarketId()), k -> new LinkedHashMap<>());
         String key = txn.kind().name() + ":" + txn.itemId();
         StockItem existing = stock.get(key);
         int current = existing == null ? 0 : existing.quantity();
@@ -188,7 +209,7 @@ public final class CoopMarketSync {
     }
 
     public synchronized void clear() {
-        stockByMarket.clear();
+        stockByShop.clear();
     }
 
     // ---- Hire detection (Phase 12c gap 2d) ------------------------------------------------------

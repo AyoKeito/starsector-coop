@@ -17,21 +17,25 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Phase 18 storage regression fence.
+ * The submarket boundary, Phase 32 edition (this file was the Phase 18 "never touch storage" fence
+ * and is now its inverse).
  *
- * <p>A market snapshot apply is a full <em>replacement</em> of the open market's stock, so the day
- * the snapshot path is widened past {@code open_market} — the standing Phase 12c follow-up — the
- * failure mode is silent and expensive: the player's parked ships and cargo in
- * {@code SUBMARKET_STORAGE} get wiped and replaced with the host's shop roll. This pins the
- * boundary: applying a snapshot must not so much as read the storage submarket.
+ * <p>Storage <em>is</em> replicated now, which makes the boundary sharper rather than softer: a
+ * snapshot apply is still a full <b>replacement</b>, so the submarket a snapshot names is the only
+ * thing standing between the host's shop roll and the player's parked ships. These tests pin that
+ * naming in every direction — storage writes reach storage and nothing else, shop writes never
+ * reach storage, {@code local_resources} is never read or written at all, and a locked storage
+ * submarket is not snapshotted by the host in the first place.
  */
 class CoopCampaignReplicatorStorageFenceTest {
 
@@ -40,59 +44,213 @@ class CoopCampaignReplicatorStorageFenceTest {
         Global.setSector(null);
     }
 
+    // ---- Snapshot apply: the named submarket, and only it -----------------------------------------
+
     @Test
-    void applyingAMarketSnapshotNeverTouchesStorage() {
+    void aStorageSnapshotIsAppliedToStorageAndNotToTheOpenMarket() {
         FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
         FakeCargo storage = new FakeCargo(Map.of("supplies", 400, "fuel", 250));
         FakeMarket market = new FakeMarket("jangala", openMarket, storage);
         Global.setSector(market.sector());
 
         guestReplicator().handle(CoopMessages.marketSnapshot(
-                "session-a", 7L, 5000L, "jangala",
+                "session-a", 7L, 5000L, "jangala", Submarkets.SUBMARKET_STORAGE, 1,
+                CoopMarketSync.encodeStock(List.of(new CoopMarketSync.StockItem(
+                        CoopMarketSync.ItemKind.COMMODITY, "supplies", 900, 0f)))));
+
+        assertEquals(900, storage.commodities.get("supplies"),
+                "the host's locker is canonical, so the guest's copy takes its quantity");
+        assertEquals(0, storage.commodities.get("fuel"),
+                "a snapshot is a replacement: fuel the host's locker no longer holds is stripped");
+        assertEquals(10, openMarket.commodities.get("fuel"),
+                "and the shop shelf is not touched by a locker snapshot");
+        assertEquals(List.of(), openMarket.calls,
+                "a storage snapshot must not so much as read the open market: " + openMarket.calls);
+    }
+
+    @Test
+    void aStorageSnapshotMaterialisesTheLockerRatherThanGivingUpOnIt() {
+        // getCargoNullOk() is null until something opens the locker on this client. For a shop that
+        // means "never stocked, do not invent one"; for a locker it must mean "make it", or the
+        // partner's deposit lands nowhere.
+        FakeCargo openMarket = new FakeCargo(Map.of());
+        FakeCargo storage = new FakeCargo(Map.of());
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage).storageUnmaterialised();
+        Global.setSector(market.sector());
+
+        guestReplicator().handle(CoopMessages.marketSnapshot(
+                "session-a", 7L, 5000L, "jangala", Submarkets.SUBMARKET_STORAGE, 1,
+                CoopMarketSync.encodeStock(List.of(new CoopMarketSync.StockItem(
+                        CoopMarketSync.ItemKind.COMMODITY, "supplies", 42, 0f)))));
+
+        assertEquals(42, storage.commodities.get("supplies"),
+                "storage is reached with getCargo(), which builds the locker on demand");
+    }
+
+    @Test
+    void anOpenMarketSnapshotNeverTouchesStorage() {
+        FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
+        FakeCargo storage = new FakeCargo(Map.of("supplies", 400, "fuel", 250));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+
+        guestReplicator().handle(CoopMessages.marketSnapshot(
+                "session-a", 7L, 5000L, "jangala", Submarkets.SUBMARKET_OPEN, 1,
                 CoopMarketSync.encodeStock(List.of(new CoopMarketSync.StockItem(
                         CoopMarketSync.ItemKind.COMMODITY, "fuel", 100, 0f)))));
 
+        assertEquals(100, openMarket.commodities.get("fuel"),
+                "the open market must take the host's canonical quantity");
         assertEquals(List.of(), storage.calls,
-                "the snapshot apply reached into storage: " + storage.calls);
+                "the shop's snapshot reached into the player's locker: " + storage.calls);
         assertEquals(400, storage.commodities.get("supplies"), "storage supplies must survive");
         assertEquals(250, storage.commodities.get("fuel"),
                 "storage must keep its own fuel, not the host's open-market quantity");
     }
 
     @Test
-    void theSnapshotStillReplacesTheOpenMarketItself() {
+    void localResourcesIsNeverReadOrWrittenByASnapshot() {
         FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
         FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
         FakeMarket market = new FakeMarket("jangala", openMarket, storage);
         Global.setSector(market.sector());
 
         guestReplicator().handle(CoopMessages.marketSnapshot(
-                "session-a", 7L, 5000L, "jangala",
+                "session-a", 7L, 5000L, "jangala", Submarkets.LOCAL_RESOURCES, 1,
                 CoopMarketSync.encodeStock(List.of(new CoopMarketSync.StockItem(
-                        CoopMarketSync.ItemKind.COMMODITY, "fuel", 100, 0f)))));
+                        CoopMarketSync.ItemKind.COMMODITY, "ore", 100, 0f)))));
 
-        assertEquals(100, openMarket.commodities.get("fuel"),
-                "the open market must take the host's canonical quantity");
+        assertFalse(market.requestedSubmarkets.contains(Submarkets.LOCAL_RESOURCES),
+                "the allowlist refuses local_resources before the market is even asked: "
+                        + market.requestedSubmarkets);
+        assertEquals(List.of(), openMarket.calls,
+                "and it must not silently fall back to the open market: " + openMarket.calls);
+        assertEquals(List.of(), storage.calls);
     }
 
     @Test
-    void onlyTheOpenSubmarketIsEverAskedFor() {
+    void onlyTheSnapshottedSubmarketIsEverAskedFor() {
         FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
         FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
         FakeMarket market = new FakeMarket("jangala", openMarket, storage);
         Global.setSector(market.sector());
 
         guestReplicator().handle(CoopMessages.marketSnapshot(
-                "session-a", 7L, 5000L, "jangala",
+                "session-a", 7L, 5000L, "jangala", Submarkets.SUBMARKET_OPEN, 1,
                 CoopMarketSync.encodeStock(List.of(new CoopMarketSync.StockItem(
                         CoopMarketSync.ItemKind.COMMODITY, "fuel", 100, 0f)))));
 
         assertTrue(market.requestedSubmarkets.stream().allMatch(Submarkets.SUBMARKET_OPEN::equals),
-                "the snapshot path asked for a submarket other than open_market: "
+                "the snapshot path asked for a submarket it was not sent for: "
                         + market.requestedSubmarkets);
     }
 
+    // ---- Transaction apply: same boundary, per line -----------------------------------------------
+
+    @Test
+    void aStorageDepositOnTheHostAddsToStorageOnly() {
+        FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
+        FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+
+        // A deposit is the "sold" direction: negative qty, the item is left behind.
+        hostReplicator().handle(CoopMessages.marketTxn("session-a", 7L, 5000L, "jangala",
+                Submarkets.SUBMARKET_STORAGE, "COMMODITY", "supplies", -60, 0f, "guest-player"));
+
+        assertEquals(460, storage.commodities.get("supplies"), "the deposit lands in the locker");
+        assertEquals(10, openMarket.commodities.get("fuel"));
+        assertEquals(List.of(), openMarket.calls,
+                "a locker deposit must not invent shop stock: " + openMarket.calls);
+    }
+
+    @Test
+    void aStorageWithdrawalOnTheHostRemovesFromStorageOnly() {
+        FakeCargo openMarket = new FakeCargo(Map.of("supplies", 500));
+        FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+
+        hostReplicator().handle(CoopMessages.marketTxn("session-a", 7L, 5000L, "jangala",
+                Submarkets.SUBMARKET_STORAGE, "COMMODITY", "supplies", 60, 0f, "guest-player"));
+
+        assertEquals(340, storage.commodities.get("supplies"));
+        assertEquals(500, openMarket.commodities.get("supplies"),
+                "deleting the host's shop stock on a locker withdrawal is exactly the old bug");
+        assertEquals(List.of(), openMarket.calls);
+    }
+
+    @Test
+    void aLocalResourcesTransactionIsNeverAppliedToAnything() {
+        FakeCargo openMarket = new FakeCargo(Map.of("ore", 100));
+        FakeCargo storage = new FakeCargo(Map.of("ore", 5));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+
+        hostReplicator().handle(CoopMessages.marketTxn("session-a", 7L, 5000L, "jangala",
+                Submarkets.LOCAL_RESOURCES, "COMMODITY", "ore", 30, 0f, "guest-player"));
+
+        assertEquals(100, openMarket.commodities.get("ore"));
+        assertEquals(5, storage.commodities.get("ore"));
+        assertEquals(List.of(), openMarket.calls);
+        assertEquals(List.of(), storage.calls);
+    }
+
+    // ---- Storage is only shared once it is unlocked -----------------------------------------------
+
+    @Test
+    void theHostDoesNotSnapshotALockedStorageSubmarket() {
+        FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
+        FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+
+        new CoopCampaignReplicator(service, TestSessions.activeHostSession(), () -> 5678L)
+                .handle(CoopMessages.marketOpen("session-a", 7L, 5000L, "jangala",
+                        CoopMessages.SUBMARKET_ALL, "guest-player"));
+
+        assertEquals(List.of(Submarkets.SUBMARKET_OPEN), snapshottedSubmarkets(service),
+                "nobody has paid the 5000 credits here, so there is no shared locker to ship");
+        assertEquals(List.of(), storage.calls,
+                "and a locked locker is not even read: " + storage.calls);
+    }
+
+    @Test
+    void theHostSnapshotsStorageOnceTheCoopUnlockFlagIsSet() {
+        FakeCargo openMarket = new FakeCargo(Map.of("fuel", 10));
+        FakeCargo storage = new FakeCargo(Map.of("supplies", 400));
+        FakeMarket market = new FakeMarket("jangala", openMarket, storage);
+        Global.setSector(market.sector());
+        market.persistentData.put(CoopStorageUnlock.flagKey("jangala"), Boolean.TRUE);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+
+        new CoopCampaignReplicator(service, TestSessions.activeHostSession(), () -> 5678L)
+                .handle(CoopMessages.marketOpen("session-a", 7L, 5000L, "jangala",
+                        CoopMessages.SUBMARKET_ALL, "guest-player"));
+
+        assertEquals(List.of(Submarkets.SUBMARKET_OPEN, Submarkets.SUBMARKET_STORAGE),
+                snapshottedSubmarkets(service));
+        for (CoopMessages.Message snapshot : snapshots(service)) {
+            assertEquals(2L, CoopMessages.requiredPayloadLong(snapshot, "submarketCount"),
+                    "every snapshot of one open carries the same count, or the guest's gate never"
+                            + " knows the market is done");
+        }
+    }
+
     // ---- Harness ---------------------------------------------------------------------------------
+
+    private static List<CoopMessages.Message> snapshots(RecordingNetService service) {
+        return service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.MARKET_SNAPSHOT)
+                .toList();
+    }
+
+    private static List<String> snapshottedSubmarkets(RecordingNetService service) {
+        return snapshots(service).stream()
+                .map(m -> CoopMessages.requiredPayloadString(m, "submarketId"))
+                .toList();
+    }
 
     private static CoopCampaignReplicator guestReplicator() {
         return new CoopCampaignReplicator(
@@ -100,17 +258,31 @@ class CoopCampaignReplicatorStorageFenceTest {
                 () -> 5678L);
     }
 
-    /** A market with both an open submarket and a stocked storage submarket. */
+    private static CoopCampaignReplicator hostReplicator() {
+        return new CoopCampaignReplicator(
+                new RecordingNetService(CoopConnectionRole.HOST), TestSessions.activeHostSession(),
+                () -> 5678L);
+    }
+
+    /** A market with an open submarket and a storage submarket, and nothing else. */
     private static final class FakeMarket {
         private final String id;
         private final FakeCargo openMarket;
         private final FakeCargo storage;
         private final List<String> requestedSubmarkets = new ArrayList<>();
+        private final Map<String, Object> persistentData = new HashMap<>();
+        /** Models a locker this client has never opened: getCargoNullOk() is null, getCargo() builds it. */
+        private boolean storageUnmaterialised;
 
         private FakeMarket(String id, FakeCargo openMarket, FakeCargo storage) {
             this.id = id;
             this.openMarket = openMarket;
             this.storage = storage;
+        }
+
+        private FakeMarket storageUnmaterialised() {
+            this.storageUnmaterialised = true;
+            return this;
         }
 
         private SectorAPI sector() {
@@ -119,15 +291,25 @@ class CoopCampaignReplicatorStorageFenceTest {
                     new Class<?>[]{MarketAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "hasSubmarket" -> {
-                            requestedSubmarkets.add(String.valueOf(args[0]));
-                            yield true;
+                            String specId = String.valueOf(args[0]);
+                            boolean present = Submarkets.SUBMARKET_OPEN.equals(specId)
+                                    || Submarkets.SUBMARKET_STORAGE.equals(specId);
+                            if (present) {
+                                requestedSubmarkets.add(specId);
+                            }
+                            yield present;
                         }
                         case "getSubmarket" -> {
-                            requestedSubmarkets.add(String.valueOf(args[0]));
-                            yield Submarkets.SUBMARKET_STORAGE.equals(args[0])
-                                    ? submarket(storage) : submarket(openMarket);
+                            String specId = String.valueOf(args[0]);
+                            requestedSubmarkets.add(specId);
+                            if (Submarkets.SUBMARKET_STORAGE.equals(specId)) {
+                                yield submarket(storage, storageUnmaterialised);
+                            }
+                            yield Submarkets.SUBMARKET_OPEN.equals(specId)
+                                    ? submarket(openMarket, false) : null;
                         }
                         case "getId" -> id;
+                        case "getPeopleCopy" -> List.of();
                         case "toString" -> "FakeMarket[" + id + "]";
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];
@@ -150,6 +332,7 @@ class CoopCampaignReplicatorStorageFenceTest {
                     new Class<?>[]{SectorAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getEconomy" -> economy;
+                        case "getPersistentData" -> persistentData;
                         case "toString" -> "FakeSector";
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];
@@ -157,12 +340,17 @@ class CoopCampaignReplicatorStorageFenceTest {
                     });
         }
 
-        private static SubmarketAPI submarket(FakeCargo cargo) {
+        /**
+         * @param lazyOnly when true {@code getCargoNullOk()} answers null and only {@code getCargo()}
+         *                 hands the cargo back, which is how a never-opened submarket behaves.
+         */
+        private static SubmarketAPI submarket(FakeCargo cargo, boolean lazyOnly) {
             return (SubmarketAPI) Proxy.newProxyInstance(
                     SubmarketAPI.class.getClassLoader(),
                     new Class<?>[]{SubmarketAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
-                        case "getCargo", "getCargoNullOk" -> cargo.proxy();
+                        case "getCargo" -> cargo.proxy();
+                        case "getCargoNullOk" -> lazyOnly ? null : cargo.proxy();
                         case "toString" -> "FakeSubmarket";
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];
