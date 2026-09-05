@@ -3355,6 +3355,57 @@ skip. Deployed to both test profiles. Everything below is unit-verified; the fou
   version reads as unknown, which is the INFO row. **Smoke:** touch the jar's timestamp and expect
   the row to go grey, not red.
 
+## Fourth fix pass (2026-09-05, review findings)
+
+Four review findings, all confirmed against the code before any fix. The transport one was written
+on `main` (`b16747d`); the other three came in from worktree branches merged at `889250e` (freeze
+expiry, `fb69ee9`), `f9dcf22` (submarket fence, `d69701f`, plus `c202b40` for an import the merge
+dropped) and `8f66a8b` (health resend, `ddbb389`). Suite 2966 green, no failures, one pre-existing
+skip. Deployed to both test profiles. Everything below is unit-verified; the items marked **smoke**
+have not been in front of a running game.
+
+**Net (`coop.net`):**
+
+- **The host could write session traffic to a socket that had proved nothing (P1).** The pump's
+  outbound gate keys on its own grace state, which is one frame behind the transport: a half-open
+  replacement attaches inside frame N's inbound drain, and frame N+1's head-of-frame flush runs
+  before `detectPeerDisconnect` opens the window. In that frame a queued `WORLD_DELTA` was written to
+  the replacement, and since the receiver's own whitelist drops session traffic from an unproven
+  generation, the delta was destroyed rather than delivered. `flushOutboundLocked` now holds
+  everything but the connection vocabulary and `PING`/`PONG` while a session token is set and the
+  peer link is not proven (`CoopNetService.allowedBeforeProof`); the backlog goes out in order on the
+  flush after `markProven`. **Smoke:** the same reconnect-mid-purchase run as the third pass; expect
+  one `Coop TCP holding session traffic` line on the host and the held message applied on the guest
+  after its resume line.
+
+**Campaign (`coop.campaign`):**
+
+- **Guest storage, black-market and military transactions landed on the host's open market (P1).**
+  `onPlayerMarketTransaction` never read `getSubmarket()`, and the host applies every `MARKET_TXN`
+  to the open submarket. Withdrawing 50 fuel from storage removed 50 fuel from the host's open-market
+  stock, and a deposit invented stock. Capture is now fenced to `open_market` (another shop logs one
+  INFO line, a null submarket one WARN, nothing is sent either way), and the host's own stats tally
+  skips storage. **Smoke:** the guest deposits and withdraws cargo in storage at a market; the host's
+  open-market stock there must not move (`not reported; only the open market is host-synced` on the
+  guest, no `Coop applied MARKET_TXN` on the host).
+
+**Fleet (`coop.fleet`):**
+
+- **A post-battle mirror freeze could outlast its 60 s timeout for good (P2).** The registry checked
+  the timeout only inside `applySet`, and the host sends a set only when its structural hash changes,
+  so a lost `BATTLE_RESULT` in a quiet sector left the mirror frozen. The registry now keeps the last
+  snapshot the freeze skipped, and `expirePendingReconcile` runs every frame from the pump: past the
+  deadline the mark is dropped and that snapshot applied (its position stamp is skipped as stale,
+  roster and flags land).
+- **NPC CR and hull never reached the guest on their own (P2).** Both are out of `fleetHash` by
+  design (the 2026-08-17 rebuild storm) and the motion datagram carries neither, so a fleet repairing
+  from 30% hull to full shipped nothing until an unrelated field moved. A second, rate-limited
+  trigger: `CoopNpcFleetSetSnapshot.computeHealthHash` (5% buckets) sends at most one health-only
+  set per 10 s. The wire message and both structural hashes are unchanged, and the guest's in-place
+  `updateMemberState` already applied CR/hull in both directions. **Smoke:** watch a damaged NPC
+  fleet from the guest for a minute; its hull and CR should recover in steps, with `trigger=health`
+  set sends in the host log.
+
 
 ## Maybe (Post-V1 Ideas — Not Committed)
 
