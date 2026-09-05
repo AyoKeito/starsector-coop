@@ -130,6 +130,68 @@ class CoopMessagesGoldenTest {
         assertEquals(7L, CoopMessages.requiredPayloadLong(txn, "qty"));
     }
 
+    /**
+     * The only message on the wire that moves money. A round trip cannot catch a field reorder that
+     * both halves agree on; this can, and a grant that decodes into the wrong field pays the wrong
+     * amount to the wrong ledger.
+     */
+    @Test
+    void creditsGrantPayloadIsByteForByteStable() {
+        CoopMessages.Message grant = CoopMessages.creditsGrant("session-a", 3L, 4L,
+                "guest-player-17", 25_000, "gift");
+
+        assertEquals("{\"ledgerId\":\"guest-player-17\",\"amount\":25000,\"reason\":\"gift\"}",
+                grant.payloadJson());
+
+        CoopMessages.CreditsGrant parsed =
+                CoopMessages.parseCreditsGrant(CoopMessages.decode(CoopMessages.encode(grant)));
+        assertEquals("guest-player-17", parsed.ledgerId());
+        assertEquals(25_000, parsed.amount());
+        assertEquals("gift", parsed.reason());
+    }
+
+    /** The amount is a bare number, not a quoted one -- unlike {@code marketTxn}'s float. */
+    @Test
+    void creditsGrantRendersItsAmountAsABareNumberAndEscapesTheLedgerId() {
+        CoopMessages.Message grant = CoopMessages.creditsGrant("session-a", 1L, 1L,
+                "host\"player\\1", 1, "bounty:sys\nbounty");
+
+        assertEquals("{\"ledgerId\":\"host\\\"player\\\\1\",\"amount\":1,"
+                        + "\"reason\":\"bounty:sys\\nbounty\"}",
+                grant.payloadJson());
+        assertEquals("host\"player\\1", CoopMessages.parseCreditsGrant(grant).ledgerId());
+    }
+
+    /** Phase 32: {@code submarketId} is required text and sits between the market and the player. */
+    @Test
+    void marketOpenPayloadIsByteForByteStable() {
+        CoopMessages.Message open = CoopMessages.marketOpen("session-a", 3L, 4L,
+                "jangala_market", CoopMessages.SUBMARKET_ALL, "guest-player");
+
+        assertEquals("{\"marketId\":\"jangala_market\",\"submarketId\":\"*\","
+                        + "\"playerId\":\"guest-player\"}",
+                open.payloadJson());
+        assertEquals("*", CoopMessages.SUBMARKET_ALL);
+    }
+
+    /**
+     * Phase 32: {@code submarketCount} is a bare number and {@code stock} is the escaped blob. The
+     * count is what the guest's sync gate counts down to before it opens the trade screens, so a
+     * reorder that swapped it with anything else would open them onto the guest's own stock.
+     */
+    @Test
+    void marketSnapshotPayloadIsByteForByteStable() {
+        CoopMessages.Message snapshot = CoopMessages.marketSnapshot("session-a", 3L, 4L,
+                "jangala_market", "storage", 3, "supplies|10\nfuel|5");
+
+        assertEquals("{\"marketId\":\"jangala_market\",\"submarketId\":\"storage\","
+                        + "\"submarketCount\":3,\"stock\":\"supplies|10\\nfuel|5\"}",
+                snapshot.payloadJson());
+        assertEquals(3L, CoopMessages.requiredPayloadLong(snapshot, "submarketCount"));
+        assertEquals("supplies|10\nfuel|5",
+                CoopMessages.payload(snapshot).requiredString("stock"));
+    }
+
     /** Every branch of the escaper, in one payload, through a real builder. */
     @Test
     void escaperCoversEveryBranchOnTheWire() {

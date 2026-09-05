@@ -439,9 +439,24 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
         return partnerLabel();
     }
 
-    /** Whether this grant has already been credited. Tests and the bridge dump. */
+    /**
+     * Whether this grant has already been credited. Tests, and the Phase 30 bridge's {@code status}
+     * verb when it is handed a {@code ledgerId} — which is how a money smoke checks from outside the
+     * game that the grant the sender minted actually landed, rather than inferring it from a wallet
+     * total that a dozen other things also move.
+     */
     public boolean hasApplied(String ledgerId) {
         return applied.contains(coop.util.CoopText.requireText(ledgerId, "ledgerId"));
+    }
+
+    /** How many distinct grants this engine has credited this session. Bridge dump. */
+    public int appliedCount() {
+        return applied.size();
+    }
+
+    /** How many grants this engine minted and still considers in flight. Bridge dump. */
+    public int sentCount() {
+        return sent.size();
     }
 
     /**

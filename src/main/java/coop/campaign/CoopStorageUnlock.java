@@ -196,6 +196,28 @@ public final class CoopStorageUnlock {
         }
     }
 
+    /**
+     * Forgets a failed (or successful) handle resolution so the next read tries again.
+     *
+     * <p>The three statics below are JVM-lifetime, and that is too long for a failure. One
+     * unlucky resolve — a classloader that was not ready during an early game load, a transient
+     * {@code LinkageError} — pins {@link #pluginPaid} to {@code false} for the rest of the process:
+     * every game loaded afterwards, every session, with {@link #warnOnce} guaranteeing the reason is
+     * said exactly once and never again. The documented degradation ("the coop flag alone decides")
+     * is meant to be a fallback, not a permanent state, and an unlock paid in that process is never
+     * captured.
+     *
+     * <p>Called from {@code CoopModPlugin}'s pump-teardown window, which is the mod's one
+     * between-campaigns seam — the same window that takes {@code CoopCreditTransfer}'s static handle
+     * down. Public only because that plugin lives in package {@code coop}; nothing else should call
+     * it, and a reset mid-session would only cost one re-resolution.
+     */
+    public static synchronized void resetHandlesForReload() {
+        paidGetter = null;
+        getterResolved = false;
+        getterWarned = false;
+    }
+
     private static synchronized MethodHandle paidGetter() throws Throwable {
         if (!getterResolved) {
             getterResolved = true;

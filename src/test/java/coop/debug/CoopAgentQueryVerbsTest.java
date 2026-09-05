@@ -15,9 +15,11 @@ import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import coop.campaign.CoopCreditTransfer;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorTags;
 import coop.net.CoopConnectionRole;
+import coop.testing.FakeCreditEngine;
 import coop.time.CoopSharedPauseCoordinator;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -70,6 +72,13 @@ class CoopAgentQueryVerbsTest {
         // Misc.getDistanceLY divides by settings.getFloat("unitsPerLightYear"); colonizable is the
         // only verb here that measures anything, and 2000 is the stock value.
         Global.setSettings(proxy(SettingsAPI.class, answers("getFloat", args -> 2000f)));
+    }
+
+    @AfterEach
+    void clearInstalledCreditTransfer() {
+        // The transfer's handle and pending amount are statics; leaving one installed would put the
+        // previous test's ledgers into the next one's status dump.
+        CoopCreditTransfer.uninstall();
     }
 
     @AfterEach
@@ -212,6 +221,82 @@ class CoopAgentQueryVerbsTest {
         JSONObject pause = status.getJSONObject("pause");
         assertFalse(pause.getBoolean("blockingScreenOpen"), "no campaign UI, no blocking screen");
         assertFalse(pause.has("hostIntent"), "role NONE has no intent breakdown");
+    }
+
+    // ---- status: the credits block ---------------------------------------------------------------
+
+    /**
+     * A money smoke has to be checkable from outside the game. A wallet total moves for a dozen
+     * reasons; "the ledger id the sender minted is in the receiver's applied set" is the transfer
+     * itself, and no log line proves it on the receiving side after a restart.
+     */
+    @Test
+    void theCreditsBlockReportsBothLedgersAndAnswersAboutOneGrant() throws JSONException {
+        FakeCreditEngine engine = new FakeCreditEngine(100_000L);
+        CoopCreditTransfer transfer = new CoopCreditTransfer(engine, alwaysSendableLink());
+        CoopCreditTransfer.install(transfer);
+        CoopCreditTransfer.stepPendingAmount(10_000);
+        transfer.send(25_000);
+        transfer.receive("host-player-4", 5_000, "gift");
+
+        JSONObject counts = CoopAgentCommands.creditsBlock("");
+        assertTrue(counts.getBoolean("installed"));
+        assertEquals(1, counts.getInt("appliedCount"));
+        assertEquals(1, counts.getInt("sentCount"));
+        assertEquals(10_000, counts.getInt("pendingAmount"));
+        assertTrue(counts.getBoolean("canSend"));
+        assertFalse(counts.has("applied"), "no ledgerId asked about, no answer invented");
+
+        JSONObject applied = CoopAgentCommands.creditsBlock("host-player-4");
+        assertEquals("host-player-4", applied.getString("ledgerId"));
+        assertTrue(applied.getBoolean("applied"));
+        assertFalse(applied.getBoolean("inFlight"), "this one arrived, it was never sent from here");
+
+        JSONObject unknown = CoopAgentCommands.creditsBlock("no-such-ledger");
+        assertFalse(unknown.getBoolean("applied"));
+        assertFalse(unknown.getBoolean("inFlight"));
+    }
+
+    @Test
+    void theCreditsBlockSaysSoWhenThereIsNoTransferInstalledAtAll() throws JSONException {
+        CoopCreditTransfer.uninstall();
+
+        JSONObject block = CoopAgentCommands.creditsBlock("some-ledger");
+
+        assertFalse(block.getBoolean("installed"));
+        assertEquals(0, block.getInt("pendingAmount"));
+        assertFalse(block.has("appliedCount"), "counts a torn-down transfer cannot answer for");
+        assertFalse(block.has("applied"));
+    }
+
+    @Test
+    void statusCarriesTheCreditsBlock() throws JSONException {
+        SectorAPI sector = proxy(SectorAPI.class, answers("isPaused", args -> Boolean.FALSE));
+        CoopCreditTransfer.uninstall();
+
+        JSONObject status = CoopAgentCommands.status(new JSONObject(), contextFor(sector));
+
+        assertFalse(status.getJSONObject("credits").getBoolean("installed"));
+    }
+
+    private static CoopCreditTransfer.Link alwaysSendableLink() {
+        return new CoopCreditTransfer.Link() {
+            private int minted;
+
+            @Override
+            public boolean canSend() {
+                return true;
+            }
+
+            @Override
+            public String mintLedgerId() {
+                return "local-ledger-" + (++minted);
+            }
+
+            @Override
+            public void sendGrant(String ledgerId, int amount, String reason) {
+            }
+        };
     }
 
     // ---- pause: the verb itself ------------------------------------------------------------------

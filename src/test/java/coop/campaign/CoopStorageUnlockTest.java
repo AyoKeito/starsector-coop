@@ -139,6 +139,42 @@ class CoopStorageUnlockTest {
         assertEquals(List.of(), CoopStorageUnlock.flaggedMarketIds(null));
     }
 
+    @Test
+    void clearFlagRemovesOnlyTheNamedMarketAndReportsWhetherItWasSet() {
+        Map<String, Object> persistent = new HashMap<>();
+        SectorAPI sector = sectorWithPersistentData(persistent);
+        CoopStorageUnlock.setFlag(sector, "market_gone");
+        CoopStorageUnlock.setFlag(sector, "market_kept");
+
+        assertTrue(CoopStorageUnlock.clearFlag(sector, "market_gone"));
+        assertFalse(CoopStorageUnlock.clearFlag(sector, "market_gone"), "already gone");
+        assertFalse(CoopStorageUnlock.clearFlag(sector, ""));
+        assertFalse(CoopStorageUnlock.clearFlag(null, "market_kept"));
+        assertEquals(List.of("market_kept"), CoopStorageUnlock.flaggedMarketIds(sector));
+    }
+
+    /**
+     * The handle statics are JVM-lifetime, so one failed resolve would otherwise pin every later
+     * {@code pluginPaid} read in the process to "not paid" — silently, since {@code warnOnce} says so
+     * exactly once. A reset from the mod plugin's teardown window has to make the getter resolve
+     * again, which this proves by reading a real field through a freshly resolved handle.
+     */
+    @Test
+    void resettingTheHandlesMakesTheGetterResolveAgain() {
+        StoragePlugin plugin = new StoragePlugin();
+        MarketAPI market = marketWithStorage("market_jangala", plugin);
+        plugin.setPlayerPaidToUnlock(true);
+        assertTrue(CoopStorageUnlock.pluginPaid(market), "the handle resolves before the reset");
+
+        CoopStorageUnlock.resetHandlesForReload();
+
+        assertTrue(CoopStorageUnlock.pluginPaid(market), "and again after it");
+        // Idempotent: a second teardown with nothing resolved in between is not a failure.
+        CoopStorageUnlock.resetHandlesForReload();
+        CoopStorageUnlock.resetHandlesForReload();
+        assertTrue(CoopStorageUnlock.pluginPaid(market));
+    }
+
     // ---- Engine fakes --------------------------------------------------------------------------
 
     private static SectorAPI sectorWithPersistentData(Map<String, Object> persistent) {

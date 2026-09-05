@@ -34,6 +34,7 @@ import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManag
 import com.fs.starfarer.api.util.Misc;
 import coop.campaign.CoopBarPoolCapture;
 import coop.campaign.CoopCampaignReplicator;
+import coop.campaign.CoopCreditTransfer;
 import coop.campaign.CoopMarketSync;
 import coop.campaign.CoopMissionBoardSync;
 import coop.campaign.CoopSkeletonMutationWatcher;
@@ -273,6 +274,41 @@ public final class CoopAgentCommands {
         // from outside the game whether a base has been paired. Always empty on the host, where the
         // local ids are the wire ids.
         out.put("baseMarketIds", baseMarketIds(pump == null ? null : pump.campaignReplicatorForBridge()));
+        // Phase 32 addition B: the credit-transfer ledgers, so a money smoke can be verified from
+        // outside the game. Pass a "ledgerId" argument to ask about one specific grant.
+        out.put("credits", creditsBlock(optionalString(args, "ledgerId")));
+        return out;
+    }
+
+    /**
+     * What the credit transfer has moved this session: how many grants this engine credited, how
+     * many it minted and still considers in flight, and what the options page has stepped up to but
+     * not sent. Read off the installed transfer's static handle, the same one the options page uses,
+     * so the bridge needs no path through the pump.
+     *
+     * <p>With {@code ledgerId} in the request the block also answers {@code applied} for that one
+     * grant. That is the check a money smoke actually wants: a wallet total moves for a dozen
+     * reasons, but "the id the sender minted is in the receiver's applied ledger" is the transfer
+     * itself, and it is the one fact neither log line proves on the receiving side after a restart.
+     *
+     * @param ledgerId a grant id to ask about, or {@code ""} for the counts alone
+     */
+    static JSONObject creditsBlock(String ledgerId) throws JSONException {
+        JSONObject out = new JSONObject();
+        CoopCreditTransfer transfer = CoopCreditTransfer.active();
+        out.put("installed", transfer != null);
+        out.put("pendingAmount", CoopCreditTransfer.pendingAmount());
+        if (transfer == null) {
+            return out;
+        }
+        out.put("appliedCount", transfer.appliedCount());
+        out.put("sentCount", transfer.sentCount());
+        out.put("canSend", transfer.canSend());
+        if (!ledgerId.isEmpty()) {
+            out.put("ledgerId", ledgerId);
+            out.put("applied", transfer.hasApplied(ledgerId));
+            out.put("inFlight", transfer.hasSent(ledgerId));
+        }
         return out;
     }
 

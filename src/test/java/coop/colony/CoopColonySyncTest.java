@@ -14,6 +14,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.MarketConditionSpecAPI;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue;
 import com.fs.starfarer.api.impl.campaign.population.PopulationComposition;
+import coop.campaign.CoopStorageUnlock;
 import coop.testing.ApiProxies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -573,6 +574,44 @@ class CoopColonySyncTest {
         assertFalse(market.inEconomy, "an abandoned colony leaves the economy");
     }
 
+    /**
+     * The teardown removes every submarket, storage included, so the coop unlock flag now names a
+     * locker that does not exist. Left behind, the key would only accumulate in persistent data and
+     * ride out again in the host's session-start baseline as a phantom market id.
+     */
+    @Test
+    void abandoningAColonyDropsItsStorageUnlockFlagAndNobodyElses() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        market.becomeColony();
+        market.submarkets.put("storage", submarketProxy("storage"));
+        Global.setSector(sector.proxy());
+        CoopStorageUnlock.setFlag(sector.proxy(), "market_planet_eos");
+        CoopStorageUnlock.setFlag(sector.proxy(), "market_elsewhere");
+
+        CoopColonySync.applyToEngine(CoopColonySync.Event.abandoned(
+                "guest-player:2", "guest-player", "planet_eos", "market_planet_eos"));
+
+        assertFalse(CoopStorageUnlock.flagSet(sector.proxy(), "market_planet_eos"));
+        assertTrue(CoopStorageUnlock.flagSet(sector.proxy(), "market_elsewhere"),
+                "another colony's locker is not this teardown's business");
+    }
+
+    /**
+     * Founding is the mirror image and must go through the one helper: the coop flag has to be set
+     * as well as the plugin field, or the next rebuild of the mirrored colony comes back locked.
+     */
+    @Test
+    void foundingAColonyWithStorageSetsTheCoopUnlockFlag() {
+        FakeSector sector = new FakeSector();
+        sector.addPlanetWithMarket("planet_eos", "market_planet_eos");
+        Global.setSector(sector.proxy());
+
+        CoopColonySync.applyToEngine(foundedEvent("guest-player:1"));
+
+        assertTrue(CoopStorageUnlock.flagSet(sector.proxy(), "market_planet_eos"));
+    }
+
     /** An abandonment for a market that is already torn down must not strip its planet conditions. */
     @Test
     void applyingAnAbandonmentToAPlanetConditionMarketDoesNothing() {
@@ -1021,6 +1060,8 @@ class CoopColonySyncTest {
         private final Map<String, FakeMarket> byMarketId = new LinkedHashMap<>();
         private final Map<String, SectorEntityToken> planets = new LinkedHashMap<>();
         private final Map<String, String> entityFactions = new LinkedHashMap<>();
+        /** Where {@code CoopStorageUnlock}'s per-market flags live. */
+        private final Map<String, Object> persistentData = new LinkedHashMap<>();
         private SectorAPI cached;
 
         FakeMarket addPlanetWithMarket(String planetId, String marketId) {
@@ -1100,6 +1141,7 @@ class CoopColonySyncTest {
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getEconomy" -> economy;
                         case "getEntityById" -> planets.get((String) args[0]);
+                        case "getPersistentData" -> persistentData;
                         case "toString" -> "Sector";
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];

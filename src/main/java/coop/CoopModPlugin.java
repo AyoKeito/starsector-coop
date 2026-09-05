@@ -440,6 +440,12 @@ public class CoopModPlugin extends BaseModPlugin {
         // page's Send button must not be live against the outgoing pump's session, and the pending
         // amount must not carry into the next campaign.
         coop.campaign.CoopCreditTransfer.uninstall();
+        // Same window, different failure: CoopStorageUnlock caches a MethodHandle onto vanilla's
+        // private StoragePlugin.playerPaidToUnlock in a JVM-lifetime static, and a single failed
+        // resolve (a classloader not ready during an early load) would otherwise pin every later
+        // read to "not paid" for the rest of the process, warning about it exactly once. Between two
+        // campaigns is the right place to let it try again.
+        coop.campaign.CoopStorageUnlock.resetHandlesForReload();
         // Phase 28: same window, same argument. The policy belongs to the campaign the outgoing pump
         // was playing, and the options page must not edit it into the next one.
         CoopOptionsPolicy.uninstall();
