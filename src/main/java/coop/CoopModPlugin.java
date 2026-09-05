@@ -3,6 +3,7 @@ package coop;
 import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
+import coop.campaign.CoopStoryChainGate;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopGuestPresence;
@@ -284,18 +285,18 @@ public class CoopModPlugin extends BaseModPlugin {
 
     /**
      * Runs before the sector is generated, which is the only reason this override exists: the
-     * process-wide statics below are read by the forked spawners <em>during</em> procgen, and
+     * process-wide statics cleared below are read by the forked spawners <em>during</em> procgen, and
      * {@code onGameLoad} is too late for a new game (the engine calls it after procgen and the
      * initial time pass).
      */
     @Override
     public void onNewGame() {
-        clearPreviousGameStatics();
+        beginGameSession();
     }
 
     @Override
     public void onGameLoad(boolean newGame) {
-        clearPreviousGameStatics();
+        beginGameSession();
         if (netService != null) {
             // Graceful session end: loading another game tears this session's transport down, so the
             // partner gets a last notice before the socket closes (the send is flushed inline). There
@@ -382,6 +383,22 @@ public class CoopModPlugin extends BaseModPlugin {
             CoopLog.warn(CoopModPlugin.class,
                     "Coop could not check this game against the invite's campaign id", ex);
         }
+    }
+
+    /**
+     * The prologue both campaign-entry hooks share. {@code onNewGame} runs before procgen and
+     * {@code onGameLoad} runs after it (and is also the one the engine calls for a new game, with
+     * {@code newGame} true), so this is the earliest point at which either kind of entry is known to
+     * have a sector — and it is before the first campaign frame, which is what the rules engine needs
+     * for {@link CoopStoryChainGate}: a rule fired against a stale flag would be reading the role of
+     * the previous game.
+     *
+     * <p>Package-private and static so a test can run the whole prologue without an engine; both
+     * halves of it are static for the same reason.
+     */
+    static void beginGameSession() {
+        clearPreviousGameStatics();
+        CoopStoryChainGate.publish(Global.getSector());
     }
 
     /**
