@@ -13,6 +13,7 @@ import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.loading.WeaponGroupSpec;
 import com.fs.starfarer.api.loading.WeaponGroupType;
 import coop.campaign.CoopShipDetail.WeaponGroup;
+import coop.testing.LogCapture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -113,10 +114,53 @@ class CoopShipDetailRebuildTest {
         assertEquals(5, detail.modules().get("MODULE2").vents());
     }
 
+    /**
+     * The fence that moved. {@code CoopShipDetail}'s compact constructor stopped rejecting a blank
+     * member id when modules arrived (a module is a variant with no fleet member behind it), and its
+     * javadoc moved the guarantee to the two callers that need a real id. This is the capture half of
+     * that promise: a listing nobody can name cannot be delta-removed later, so it is dropped rather
+     * than shipped, and it says so.
+     */
     @Test
     void captureDropsAMemberWithNoIdRatherThanShippingANamelessListing() {
-        assertNull(CoopCampaignReplicator.captureShipDetail(
-                member("  ", "ISS Anonymous", new FakeVariant("hound_Standard", "hound", ""), 1f, 1f)));
+        LogCapture log = LogCapture.attach(CoopCampaignReplicator.class);
+        try {
+            assertNull(CoopCampaignReplicator.captureShipDetail(member("  ", "ISS Anonymous",
+                    new FakeVariant("hound_Standard", "hound", ""), 1f, 1f)));
+
+            assertEquals(List.of("Coop ship listing skipped: mothballed member has no id"),
+                    log.warnings(), "dropping a ship silently is what this fence is against");
+        } finally {
+            log.detach();
+        }
+    }
+
+    /**
+     * The rebuild half of the same promise. A detail that arrives with no member id must not stamp an
+     * empty one onto the local member: that would make the very next capture drop the listing as
+     * "no id", and every later per-member delta would address a ship that cannot be found.
+     */
+    @Test
+    void rebuildKeepsTheLocallyGeneratedIdWhenTheWireCarriesNone() {
+        FakeVariant pristine = new FakeVariant("conquest_Elite", "conquest", "");
+        FakeMember member = new FakeMember("local-generated-id", "Unnamed", pristine);
+        CoopShipDetail nameless = new CoopShipDetail("", "ISS Fortress", "conquest_Elite",
+                "conquest", 0.5f, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(),
+                Map.of(), Map.of(), List.of(), 1f, "", Map.of());
+
+        LogCapture log = LogCapture.attach(CoopCampaignReplicator.class);
+        try {
+            CoopCampaignReplicator.applyShipDetail(member.proxy(), nameless);
+
+            assertEquals("local-generated-id", member.id,
+                    "an empty id would make the next capture drop this listing entirely");
+            assertEquals(1, log.warnings().size(), "and the rename that did not happen is named");
+            assertTrue(log.warnings().get(0).contains("arrived with no member id"),
+                    log.warnings().toString());
+        } finally {
+            log.detach();
+        }
+        assertEquals("ISS Fortress", member.shipName, "the rest of the detail still applies");
     }
 
     @Test

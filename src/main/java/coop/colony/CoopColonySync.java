@@ -11,7 +11,6 @@ import com.fs.starfarer.api.campaign.econ.SubmarketAPI;
 import com.fs.starfarer.api.campaign.listeners.PlayerColonizationListener;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
-import com.fs.starfarer.api.impl.campaign.submarkets.StoragePlugin;
 import coop.campaign.CoopDelimited;
 import coop.campaign.CoopStorageUnlock;
 import coop.util.CoopLog;
@@ -769,10 +768,10 @@ public final class CoopColonySync {
      * run this same recipe for the same colony.
      */
     private static void unlockStorage(MarketAPI market) {
-        SubmarketAPI storage = market.getSubmarket(Submarkets.SUBMARKET_STORAGE);
-        if (storage != null && storage.getPlugin() instanceof StoragePlugin plugin) {
-            plugin.setPlayerPaidToUnlock(true);
-        }
+        // One call, not two: CoopStorageUnlock.unlock sets the coop flag and then calls
+        // unlockPlugin, which is the same setPlayerPaidToUnlock(true) this method used to make
+        // directly. The direct write was left behind when the flag was added and did nothing but run
+        // the same setter twice.
         CoopStorageUnlock.unlock(Global.getSector(), market);
     }
 
@@ -804,8 +803,16 @@ public final class CoopColonySync {
                     + " is already a planet-condition market; nothing to do");
             return;
         }
+        String marketId = market.getId();
         step(event, "teardown", () -> DecivTracker.removeColony(market, false));
-        CoopLog.info(CoopColonySync.class, "Coop tore down mirrored colony " + market.getId()
+        // The teardown removes every submarket, storage included, so the coop unlock flag now names
+        // a locker that does not exist. Left behind it would only grow the persistent-data set and
+        // ride out again in the host's session-start baseline as a phantom market id.
+        if (CoopStorageUnlock.clearFlag(Global.getSector(), marketId)) {
+            CoopLog.info(CoopColonySync.class, "Coop cleared storage unlock flag for abandoned colony "
+                    + marketId);
+        }
+        CoopLog.info(CoopColonySync.class, "Coop tore down mirrored colony " + marketId
                 + " on " + event.planetId());
     }
 

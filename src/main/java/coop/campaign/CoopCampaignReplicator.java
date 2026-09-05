@@ -73,8 +73,6 @@ import coop.session.CoopSessionState;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
-import java.awt.Color;
-
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -524,6 +522,11 @@ public final class CoopCampaignReplicator
         // The table names this campaign's live base markets; CoopBaseAuthority refills it from the
         // host's post-reconnect BASE_SET.
         marketIds.clear();
+        // Before the reset, and for the same reason clearMirroredExpeditionWarnings runs above: the
+        // mirrored commission is a write into the campaign's saved character memory, so leaving it
+        // would hand the guest permanent military-submarket access to a faction it never signed with.
+        // No-op unless this engine is the one that mirrored it.
+        commissionSync.clearMirrored();
         commissionSync.reset();
         lastBarPoolPollMillis = 0L;
         barPoolCapture.reset();
@@ -1422,17 +1425,14 @@ public final class CoopCampaignReplicator
                 + marketId + " submarket=" + specId + " items=" + itemCount + " encodes to " + bytes
                 + " bytes, past the " + SNAPSHOT_MAX_BYTES + " byte frame cap. It is not sent, so"
                 + " the partner's copy of this inventory stays their own until it shrinks.");
-        // A literal colour rather than Misc.getNegativeHighlightColor(): Misc's static initializer
-        // reads a dozen values out of Global.getSettings(), so the first touch of that class outside
-        // a live game leaves it permanently unusable for the rest of the JVM. Nothing on a snapshot
-        // path is worth that.
+        // CoopColors rather than Misc: Misc's static initializer reads a dozen values out of
+        // Global.getSettings(), so the first touch of that class outside a live game leaves it
+        // permanently unusable for the rest of the JVM. Nothing on a snapshot path is worth that.
         CoopFeed.post("Coop: " + specId + " at " + marketDisplayName(market)
-                + " is too large to share (" + (bytes / 1024) + " KB)", FEED_WARNING_COLOR);
+                + " is too large to share (" + (bytes / 1024) + " KB)",
+                coop.ui.CoopColors.negativeHighlight());
         return false;
     }
-
-    /** Vanilla's negative-highlight red, spelled out; see {@link #snapshotFitsAFrame}. */
-    private static final Color FEED_WARNING_COLOR = new Color(255, 110, 110);
 
     /** The market's display name for a player-facing line, falling back to its id. Total. */
     private static String marketDisplayName(MarketAPI market) {
@@ -1726,7 +1726,8 @@ public final class CoopCampaignReplicator
                     + " could not be undone (no live mission handle); the local player keeps whatever"
                     + " the offer already gave them");
         }
-        CoopFeed.post(partnerName() + " already took that offer.", negativeColor());
+        CoopFeed.post(partnerName() + " already took that offer.",
+                coop.ui.CoopColors.negativeHighlight());
     }
 
     /** Removes an accepted mission's intel, script and setup changes. True when it was undone. */
@@ -1786,16 +1787,6 @@ public final class CoopCampaignReplicator
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class,
                     "Coop could not consume local bar offer id=" + id, ex);
-        }
-    }
-
-    /** The feed's "bad news" colour, or null (plain text) outside a running game. */
-    private static Color negativeColor() {
-        try {
-            return Misc.getNegativeHighlightColor();
-        } catch (RuntimeException | LinkageError ex) {
-            // Misc reads it out of Global.getSettings(); a message without a colour still lands.
-            return null;
         }
     }
 
@@ -3822,8 +3813,9 @@ public final class CoopCampaignReplicator
                 payload.requiredString("newStateJson"),
                 payload.requiredString("actingPlayerId"));
         // Direction check, ahead of the ledger so a refused delta leaves no trace that would make a
-        // later legitimate one look like a duplicate. Only DECIV is host-only, and the host is the
-        // only side that can enforce it (a guest must still apply the host's).
+        // later legitimate one look like a duplicate. Which kinds are host-only is CoopWorldDelta's
+        // to say (DECIV and COMMISSION today), and the host is the only side that can enforce it —
+        // a guest must still apply the host's.
         if (isHost() && delta.kind().hostOnly()) {
             CoopLog.warn(CoopCampaignReplicator.class, "Coop refused host-only WORLD_DELTA "
                     + delta.kind() + " entity=" + delta.entityId() + " from "
@@ -4020,6 +4012,13 @@ public final class CoopCampaignReplicator
             return false;
         }
         DecivTracker.decivilize(market, fullDestroy, true);
+        // Decivilization strips every submarket, storage included, and drops the market from the
+        // economy. The coop unlock flag now names nothing; leaving it would grow the persistent-data
+        // set and ship a phantom market id out again in the host's session-start baseline.
+        if (CoopStorageUnlock.clearFlag(sector, marketId)) {
+            CoopLog.info(CoopCampaignReplicator.class,
+                    "Coop cleared storage unlock flag for decivilized market=" + marketId);
+        }
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied deciv market=" + marketId
                 + " via " + source);
         return true;

@@ -18,6 +18,7 @@ import static coop.testing.ProxyDefaults.defaultValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The host's commission poll and the guest's one-key apply.
@@ -134,6 +135,65 @@ class CoopCommissionSyncTest {
         assertEquals(1, engine.reads, "and the poll still read the engine to find that out");
     }
 
+    // ---- Teardown: the mirrored key must not outlive the session -------------------------------
+
+    @Test
+    void teardownUnsetsAKeyThisEngineMirrored() {
+        FakeEngine engine = new FakeEngine();
+        CoopCommissionSync sync = new CoopCommissionSync(engine);
+
+        sync.applyRemote("hegemony");
+        assertEquals("hegemony", engine.written);
+
+        assertTrue(sync.clearMirrored(), "the guest wrote it, so the guest takes it back down");
+        assertEquals("", engine.written, "an empty write is what unsets $fcm_faction");
+        assertFalse(sync.clearMirrored(), "and only once: there is nothing left to clear");
+        assertEquals(2, engine.writes);
+    }
+
+    @Test
+    void teardownLeavesAGuestsOwnCommissionAlone() {
+        // Nothing was mirrored onto this engine -- the commission in its character memory is its own,
+        // signed in its own campaign, and tearing it off would be the mod destroying player state.
+        FakeEngine engine = new FakeEngine();
+        engine.factionId = "tritachyon";
+        CoopCommissionSync sync = new CoopCommissionSync(engine);
+
+        assertEquals("tritachyon", sync.poll(T0), "a host holding its own commission still reports");
+
+        assertFalse(sync.clearMirrored());
+        assertEquals(0, engine.writes, "the key is never touched");
+        assertNull(engine.written);
+    }
+
+    @Test
+    void aMirrorThatAlreadyEndedLeavesNothingToClear() {
+        // The host's commission ended mid-session: applyRemote("") already unset the key, so the
+        // teardown has no write to make.
+        FakeEngine engine = new FakeEngine();
+        CoopCommissionSync sync = new CoopCommissionSync(engine);
+
+        sync.applyRemote("hegemony");
+        sync.applyRemote("");
+
+        assertFalse(sync.clearMirrored());
+        assertEquals(2, engine.writes, "the two applies, and nothing from the teardown");
+    }
+
+    @Test
+    void theLiveEngineTeardownRemovesTheKeyFromCharacterMemory() {
+        Map<String, Object> memory = new HashMap<>();
+        Global.setSector(sectorWithCharacterMemory(memory));
+        CoopCommissionSync sync = new CoopCommissionSync(CoopCommissionSync.liveEngine());
+
+        sync.applyRemote("hegemony");
+        assertEquals("hegemony", memory.get(MemFlags.FCM_FACTION));
+
+        assertTrue(sync.clearMirrored());
+        assertFalse(memory.containsKey(MemFlags.FCM_FACTION),
+                "the key is saved with the character data, so leaving it would be permanent");
+    }
+
     @Test
     void describeNamesTheFactionOrNone() {
         assertEquals("none", CoopCommissionSync.describe(null));
@@ -241,6 +301,7 @@ class CoopCommissionSyncTest {
         private String factionId;
         private String written;
         private int reads;
+        private int writes;
 
         @Override
         public String commissionFactionId() {
@@ -251,6 +312,7 @@ class CoopCommissionSyncTest {
         @Override
         public void writeCommissionFactionId(String factionId) {
             written = factionId;
+            writes++;
         }
     }
 }

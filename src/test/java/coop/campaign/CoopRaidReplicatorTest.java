@@ -255,6 +255,58 @@ class CoopRaidReplicatorTest {
                 "the memory flag the outcome carries still rides");
     }
 
+    /**
+     * Decivilization strips every submarket and drops the market from the economy, so the coop
+     * storage-unlock flag would be left naming nothing — and {@code takeBaseline()} reads the whole
+     * flag set, so the phantom would be broadcast to the guest at the start of every later session
+     * instead of dying with the colony.
+     */
+    @Test
+    void decivilizingAMarketDropsItsStorageUnlockFlagAndNobodyElses() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addMarket("market_agreus", 3);
+        market.hasPrimaryEntity = true;
+        Global.setSector(sector.proxy());
+        CoopStorageUnlock.setFlag(sector.proxy(), "market_agreus");
+        CoopStorageUnlock.setFlag(sector.proxy(), "market_jangala");
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        replicator.handle(decivMessage("guest-player:1"));
+
+        assertEquals(1, market.decivilizeEntries);
+        assertFalse(CoopStorageUnlock.flagSet(sector.proxy(), "market_agreus"));
+        assertTrue(CoopStorageUnlock.flagSet(sector.proxy(), "market_jangala"),
+                "another market's locker is not this teardown's business");
+    }
+
+    /**
+     * The refusal branch must not clear anything either: a deciv that was skipped left the colony
+     * standing, and its locker with it.
+     */
+    @Test
+    void aSkippedDecivLeavesTheStorageUnlockFlagAlone() {
+        FakeSector sector = new FakeSector();
+        FakeMarket market = sector.addMarket("market_agreus", 3);
+        market.hasPrimaryEntity = true;
+        market.decivilized = true;
+        Global.setSector(sector.proxy());
+        CoopStorageUnlock.setFlag(sector.proxy(), "market_agreus");
+
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(
+                service, activeHostSession(), () -> 1_000_000L);
+        replicator.registerOn(sector.proxy());
+
+        replicator.handle(decivMessage("guest-player:1"));
+
+        assertEquals(0, market.decivilizeEntries);
+        assertTrue(CoopStorageUnlock.flagSet(sector.proxy(), "market_agreus"));
+    }
+
     /** The host's rebroadcast comes straight back at it; the raid ledger makes that a no-op. */
     @Test
     void aSecondApplyOfTheSameBombardmentDecivilizesNothing() {
@@ -497,6 +549,8 @@ class CoopRaidReplicatorTest {
         private final Map<String, FakeMarket> markets = new LinkedHashMap<>();
         private final List<Object> listeners = new ArrayList<>();
         private final FakeMemory memory = new FakeMemory();
+        /** Where {@code CoopStorageUnlock}'s per-market flags live. */
+        private final Map<String, Object> persistentData = new LinkedHashMap<>();
         private SectorAPI cached;
 
         FakeMarket addMarket(String id, int size) {
@@ -542,6 +596,7 @@ class CoopRaidReplicatorTest {
                         case "getListenerManager" -> listenerManager;
                         case "getEconomy" -> economy;
                         case "getMemoryWithoutUpdate" -> memoryProxy;
+                        case "getPersistentData" -> persistentData;
                         case "getAllLocations" -> List.of();
                         case "toString" -> "Sector";
                         case "hashCode" -> System.identityHashCode(proxy);

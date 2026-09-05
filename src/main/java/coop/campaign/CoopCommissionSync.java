@@ -68,6 +68,14 @@ public final class CoopCommissionSync {
     private long lastPollMillis;
     private boolean pollSeeded;
 
+    /**
+     * True when <em>this</em> engine wrote {@link #MEMORY_KEY} from a remote delta and has not
+     * cleared it since. Deliberately not reset by {@link #reset()}: it describes a write that landed
+     * in the campaign's character memory, not a field of this session, and {@link #clearMirrored()}
+     * is what takes both back down together.
+     */
+    private boolean mirrored;
+
     public CoopCommissionSync(Engine engine) {
         this.engine = Objects.requireNonNull(engine, "engine");
     }
@@ -127,8 +135,39 @@ public final class CoopCommissionSync {
         // poll does not re-report a value it was handed.
         seeded = true;
         lastSeen = normalized;
+        // An empty payload is the host's commission ending: the key is now unset, so there is
+        // nothing left for the teardown to take back down.
+        mirrored = !normalized.isEmpty();
         CoopLog.info(CoopCommissionSync.class,
                 "Coop applied COMMISSION faction=" + describe(normalized));
+    }
+
+    /**
+     * Session teardown: unsets {@link #MEMORY_KEY} when this engine is the one that wrote it.
+     *
+     * <p><b>Why this is not optional.</b> {@code $fcm_faction} lives in
+     * {@code getCharacterData().getMemoryWithoutUpdate()}, which is saved with the game. A guest that
+     * mirrored the host's commission and then ended the session would carry that faction's
+     * military-submarket access, commission rules and commission dialogue into every later save
+     * forever, with no path back: the guest never gets a {@code FactionCommissionIntel} to end (see
+     * the class javadoc), and the host's poll is silent about a commission that was already over
+     * before the next session started. Same argument, same shape and the same teardown as
+     * {@code clearMirroredExpeditionWarnings} — coop-owned state has no meaning outside a session.
+     *
+     * <p>The {@link #mirrored} guard is the whole point: a guest that signed its own commission in
+     * its own campaign never had one mirrored onto it and must not have it torn off.
+     *
+     * @return true when the key was actually unset
+     */
+    public boolean clearMirrored() {
+        if (!mirrored) {
+            return false;
+        }
+        mirrored = false;
+        engine.writeCommissionFactionId("");
+        CoopLog.info(CoopCommissionSync.class,
+                "Coop cleared mirrored COMMISSION " + MEMORY_KEY + " on teardown");
+        return true;
     }
 
     /** A faction id for a log line, or {@code "none"} for the empty payload. */
