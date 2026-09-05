@@ -38,7 +38,7 @@
     }
   ],
   "hereHead": "You are here: V1 code complete; outstanding: two-instance smoke for the launcher (deferred into Phase 19) and for the 2026-09-04 fix pass, the listing URL and the Ziggurat test start (Phase 23), then Phase 19 sign-off",
-  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is built (5cc5303: dark FlatLaf window, invite string with seed and world settings, install checks incl. the game version, host pre-flight and guest test connection, bug-report zip, update check, every -Dcoop flag in Advanced, COOP-GAME refusal). <b>Its two-instance smoke is deferred</b> (user, 2026-09-03) and runs as part of the Phase 19 checklist; until then the sandbox's acceptance of <code>System.setProperty</code> for the republished launcher flags is unverified in-game. A second fix pass merged 2026-09-04 (<code>755b587</code>, 2787 tests green): its reconnect message-loss fix, the guest saturation-bombardment deciv, stable-location construction (ticked in the plan since 2026-06-10 but never built) and guest gate scanning are unit-verified only and need the same session, as does the mission-board claim trigger merged later the same day (b8b8e4b): the first-come arbitration had no trigger since Phase 12c, so both players could accept the same bar offer. A third pass the same evening (<code>7d7e553</code>, 2943 green) closed nine review findings, one of them a P0 in the reconnect grace (replacement-socket traffic tagged as the dead partner's); its four smoke items are listed under ATTENTION. A fourth pass on 2026-09-05 (<code>8f66a8b</code>, 2966 green) closed four more: the transport now holds session traffic from an unproven replacement socket, guest storage and black-market trades no longer land on the host's open market, post-battle mirror freezes expire on a per-frame clock, and NPC CR/hull reach the guest through a rate-limited health resend; its three smoke items are listed under ATTENTION. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist plus the launcher smoke, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
+  "here": "<b>Outstanding for V1.</b> <span class=\"rp\" data-jump=\"31\">Phase 31</span>, the coop launcher, is built (5cc5303: dark FlatLaf window, invite string with seed and world settings, install checks incl. the game version, host pre-flight and guest test connection, bug-report zip, update check, every -Dcoop flag in Advanced, COOP-GAME refusal). <b>Its two-instance smoke is deferred</b> (user, 2026-09-03) and runs as part of the Phase 19 checklist; until then the sandbox's acceptance of <code>System.setProperty</code> for the republished launcher flags is unverified in-game. A second fix pass merged 2026-09-04 (<code>755b587</code>, 2787 tests green): its reconnect message-loss fix, the guest saturation-bombardment deciv, stable-location construction (ticked in the plan since 2026-06-10 but never built) and guest gate scanning are unit-verified only and need the same session, as does the mission-board claim trigger merged later the same day (b8b8e4b): the first-come arbitration had no trigger since Phase 12c, so both players could accept the same bar offer. A third pass the same evening (<code>7d7e553</code>, 2943 green) closed nine review findings, one of them a P0 in the reconnect grace (replacement-socket traffic tagged as the dead partner's); its four smoke items are listed under ATTENTION. A fourth pass on 2026-09-05 (<code>8f66a8b</code>, 2966 green) closed four more: the transport now holds session traffic from an unproven replacement socket, guest storage and black-market trades no longer land on the host's open market, post-battle mirror freezes expire on a per-frame clock, and NPC CR/hull reach the guest through a rate-limited health resend; its three smoke items are listed under ATTENTION. <b>Phase 32</b> (shared storage, black market and military submarket) was researched and specced 2026-09-05 on user decisions (all storage markets, no migration) and is next in the build order, before the Phase 19 sign-off. <span class=\"rp\" data-jump=\"23\">Phase 23</span> still needs the forum-thread URL for the listing text and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance QA checklist plus the launcher smoke, with fixes limited to what the checklist fails. Carried over: the <span class=\"rp\" data-jump=\"12c\">Phase 12c</span> manual residue (claim race, sell-back and hire click-throughs, feel pass).",
   "attention": [
     {
       "sev": "action",
@@ -1014,6 +1014,29 @@
         "no external reachability probe"
       ],
       "note": "Created, decided AND built 2026-09-03 (2275 -> 2445 tests, five commits b1372f7..5cc5303): launcher core, dark FlatLaf redesign, bug-report zip, update check, default password, every -Dcoop flag in Advanced, invite with world settings, launch gate, COOP-GAME game-version check, package-release.ps1, Version Checker file, docs rewrite, README, issue forms. Two more landed 2026-09-04. The Fix button (8c22624, 3a85328) moved the two install edits from report-only into scope: the launcher writes the coop-forks.jar classpath entry into vmparams (backup first, ISO-8859-1, one line) and adds coop to enabled_mods.json, and offers an elevated relaunch when Windows refuses the write under Program Files. The save finder (2faeb2b mod side, f43b63f launcher side, 2678 -> 2722 tests) closes the \"which of my saves is this invite for\" gap: the mod indexes every save by campaign id into saves/common/coop_saves.json.data, the launcher joins that index to the folders on disk, the host picks the campaign from a drop-down, the invite carries the id as cid, both cards say which save to load, and coop.expectedCampaignId lets the mod repeat the answer in-game when the wrong save is loaded anyway. Two-instance smoke still DEFERRED into Phase 19 (user, 2026-09-03), and it now has to cover both."
+    },
+    {
+      "id": "32",
+      "num": 32,
+      "title": "Shared Submarkets + Storage",
+      "theme": "economy",
+      "track": "v1",
+      "status": "not-built",
+      "summary": "Host-canonical storage, black market and military submarket on the same snapshot-on-open plus guest-delta path the open market uses today. Shared storage at every market is the two players' way to park and exchange ships until a direct transfer exists; ship listings gain weapon groups, hull damage, display name and module loadouts so a refitted ship survives the round trip.",
+      "introduces": [
+        "submarketId on MARKET_OPEN / MARKET_SNAPSHOT / MARKET_TXN",
+        "submarketCargo allowlist accessor (open, black, military, storage; local_resources denied)",
+        "storage apply that never drops a deposit",
+        "CoopShipDetail weapon groups + hull + display name + modules",
+        "STORAGE_UNLOCK and COMMISSION world deltas"
+      ],
+      "residue": [
+        "smuggling suspicion, blueprint learn-from-sale and price impact stay per engine",
+        "both engines bill their own monthly storage fee",
+        "commission salary and bounties host-only",
+        "direct player-to-player transfer stays a Maybe"
+      ],
+      "note": "Specced 2026-09-05 after a two-worker feasibility pass; user decisions the same day: all storage markets, black + military included, no migration (no ongoing games). Not built."
     }
   ],
   "buildOrderFallback": [
@@ -1037,6 +1060,7 @@
     "28",
     "23",
     "31",
+    "32",
     "19"
   ],
   "acceptance": [
