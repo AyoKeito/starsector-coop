@@ -55,6 +55,22 @@ import static coop.util.CoopText.requireText;
  * group is encoded the same way — its own little {@code |} line inside a level-3 cell. Decoding
  * refuses to recurse past {@link #MAX_MODULE_NESTING} rather than let a malformed blob walk the
  * stack down.
+ *
+ * <h2>Accepted limitations</h2>
+ *
+ * <ul>
+ *   <li><b>An s-modded built-in hull mod gains a {@code permaMods} entry after one round trip.</b>
+ *       {@code addPermaMod(modId, true)} is the only public way to set the s-mod flag and it also
+ *       inserts the id into {@code getPermaMods()}, so the rebuilt member re-captures with that id
+ *       in {@code permaMods} where the deposited one did not have it. The value is stable after that
+ *       one cycle (the id lands in {@code permaMods} + {@code sMods} + {@code sModdedBuiltIns} and
+ *       stays), so this is drift-by-one rather than unbounded — but an s-mod counter that reads
+ *       {@code getPermaMods()} sees one extra entry on a withdrawn ship.</li>
+ *   <li><b>Only a module hanging directly off the member carries its hull damage.</b> Per-module
+ *       hull fractions live on {@code FleetMemberStatusAPI} by index and a module of a module has no
+ *       index of its own, so a nested-nested module always rebuilds undamaged. Vanilla's deepest
+ *       modular hull is one level, so nothing in the base game reaches this.</li>
+ * </ul>
  */
 public record CoopShipDetail(String memberId,
                              String shipName,
@@ -82,6 +98,13 @@ public record CoopShipDetail(String memberId,
      * How deep {@link #decode(String)} will follow module references. Vanilla's deepest modular hull
      * is one level (a station and its weapon platforms); anything past this is a malformed or hostile
      * blob, and recursing on it would be a stack overflow inside the snapshot apply.
+     *
+     * <p>The bound is also a size fence in disguise: every nesting level escapes the level below it
+     * in full, so one backslash in a slot id at level <i>n</i> costs 2<sup>n</sup> characters before
+     * the enclosing stock line and {@code CoopJson.escape} double it twice more, and a branching
+     * module tree multiplies that by its own fan-out. Encoded size is therefore geometric in depth
+     * rather than linear, and 4 is where that stops mattering for a payload that rides one TCP
+     * message. Any byte cap added later belongs on the encoded blob, not on the field count.
      */
     public static final int MAX_MODULE_NESTING = 4;
 
@@ -167,7 +190,7 @@ public record CoopShipDetail(String memberId,
             throw new IllegalArgumentException("Expected " + FIELD_COUNT + " ship detail fields, got " + f.size());
         }
         return new CoopShipDetail(f.get(0), f.get(1), f.get(2), f.get(3),
-                Float.parseFloat(f.get(4).trim()),
+                parseFloat(f.get(4), 0f),
                 Integer.parseInt(f.get(5).trim()),
                 Integer.parseInt(f.get(6).trim()),
                 splitList(f.get(7)), splitList(f.get(8)), splitList(f.get(9)),
@@ -208,8 +231,10 @@ public record CoopShipDetail(String memberId,
             Objects.requireNonNull(encoded, "encoded");
             List<String> f = CoopDelimited.split(encoded);
             if (f.size() != FIELD_COUNT) {
+                // Deliberately without the blob: this exception is logged as a WARN and the encoded
+                // group is a whole loadout, which the other decode failures here do not dump either.
                 throw new IllegalArgumentException("Expected " + FIELD_COUNT
-                        + " weapon group fields, got " + f.size() + " in: " + encoded);
+                        + " weapon group fields, got " + f.size());
             }
             return new WeaponGroup(splitList(f.get(0)),
                     "1".equals(f.get(1).trim()),
@@ -464,8 +489,21 @@ public record CoopShipDetail(String memberId,
 
     /** A field written by an older or hand-built blob may be empty; that reads as "undamaged". */
     private static float parseFraction(String text) {
+        return parseFloat(text, 1f);
+    }
+
+    /**
+     * A float cell that an older or hand-built blob may have left empty, read as {@code whenEmpty}
+     * rather than as a {@code NumberFormatException} that takes the whole listing with it.
+     *
+     * <p>Both float fields go through here so they agree on what an empty cell means. Hull fraction's
+     * neutral value is 1 ("undamaged"); base CR's is 0, because a mothballed hull that arrives with
+     * no CR on the wire must not be handed back combat-ready — vanilla lets a stored ship climb its
+     * CR back on withdrawal anyway, so 0 is the recoverable answer and 1 would be a free one.
+     */
+    private static float parseFloat(String text, float whenEmpty) {
         String trimmed = text == null ? "" : text.trim();
-        return trimmed.isEmpty() ? 1f : Float.parseFloat(trimmed);
+        return trimmed.isEmpty() ? whenEmpty : Float.parseFloat(trimmed);
     }
 
     /** Locale-independent, so a comma-decimal locale cannot corrupt the wire format. */

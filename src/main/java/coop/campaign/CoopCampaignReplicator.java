@@ -30,6 +30,7 @@ import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.fleet.FleetMemberStatusAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
 import com.fs.starfarer.api.impl.campaign.CargoPodsEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
@@ -2229,11 +2230,23 @@ public final class CoopCampaignReplicator
 
     /**
      * Storage fallback for a hull whose full-fidelity rebuild threw: the plain base member, with the
-     * CR from the detail if that much of it was readable. Refit, D-mods and name are gone — the
-     * player gets a pristine hull back instead of their battered one — but the ship is still there,
-     * which is the property a locker has to keep.
+     * CR and hull damage from the detail if that much of it was readable. Refit, D-mods, weapon
+     * groups, modules and name are gone — the player gets a base-loadout hull back instead of their
+     * refitted one — but the ship is still there, at the CR and hull it went in with, which is the
+     * property a locker has to keep.
+     *
+     * <p>Hull fraction rides this path as well as the full rebuild: it is one setter on the status
+     * the factory already derived, and leaving it out returned a battered ship at full hull, which is
+     * a silent gift rather than a documented loss. No stats update is run because there is nothing to
+     * run one for — the base member comes out of {@code createFleetMember} with its variant already
+     * installed and its statuses already counted, so unlike the full rebuild there is no
+     * {@code setVariant} call whose ordering the hull write has to follow.
+     *
+     * <p>Static and package-private for the same reason {@link #applyShipDetail} is: it uses no
+     * instance state, and the failure policy it implements is worth pinning in a unit test against a
+     * stubbed factory rather than only through a whole snapshot apply.
      */
-    private void addBaseVariantToStorage(FleetDataAPI ships, CoopShipDetail detail) {
+    static void addBaseVariantToStorage(FleetDataAPI ships, CoopShipDetail detail) {
         try {
             FleetMemberAPI member = createBaseMember(detail);
             if (member == null) {
@@ -2242,10 +2255,22 @@ public final class CoopCampaignReplicator
                         + " the deposit is lost");
                 return;
             }
-            member.setId(detail.memberId());
+            if (detail.memberId().isEmpty()) {
+                // Same guard as applyShipDetail, and for a worse reason on this path: stamping an
+                // empty id here makes the very next captureShipDetail drop the member as "no id",
+                // which deletes the deposit from the other engine's locker outright.
+                CoopLog.warn(CoopCampaignReplicator.class, "Stored ship variant="
+                        + detail.baseVariantId() + " arrived with no member id; keeping the locally"
+                        + " generated one, so a later per-member delta cannot address this listing");
+            } else {
+                member.setId(detail.memberId());
+            }
             if (member.getRepairTracker() != null) {
                 member.getRepairTracker().setMothballed(true);
                 member.getRepairTracker().setCR(detail.baseCR());
+            }
+            if (member.getStatus() != null) {
+                member.getStatus().setHullFraction(detail.hullFraction());
             }
             ships.addFleetMember(member);
         } catch (RuntimeException | LinkageError ex) {
@@ -2271,12 +2296,11 @@ public final class CoopCampaignReplicator
      * every field that makes the listing itself — hull spec, perma/s/refit/suppressed mods, weapons,
      * wings, vents, caps, CR — is re-applied on top by the caller regardless of what it starts from.
      */
-    private FleetMemberAPI createBaseMember(CoopShipDetail detail) {
+    static FleetMemberAPI createBaseMember(CoopShipDetail detail) {
         if (Global.getSettings().doesVariantExist(detail.baseVariantId())) {
             return Global.getFactory().createFleetMember(FleetMemberType.SHIP, detail.baseVariantId());
         }
-        ShipHullSpecAPI hull = detail.hullSpecId().isEmpty()
-                ? null : Global.getSettings().getHullSpec(detail.hullSpecId());
+        ShipHullSpecAPI hull = hullSpecOrNull(detail.hullSpecId());
         if (hull == null) {
             CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member=" + detail.memberId()
                     + " names neither a known variant (" + detail.baseVariantId()
@@ -2288,6 +2312,49 @@ public final class CoopCampaignReplicator
                 + detail.baseVariantId() + " is not a spec on this client)");
         return Global.getFactory().createFleetMember(FleetMemberType.SHIP,
                 Global.getSettings().createEmptyVariant(detail.baseVariantId(), hull));
+    }
+
+    /**
+     * The hull spec for {@code hullId}, or null when this client does not have it.
+     *
+     * <p>{@code SettingsAPI.getHullSpec} <em>throws</em> for an unknown id rather than returning
+     * null, so every one of this file's "the hull did not resolve" branches — the one that names the
+     * hull in a WARN, the D-hull swap that leaves the spec alone, the module fallback that keeps the
+     * base variant's module — was unreachable: the throw escaped past them into the caller's blanket
+     * catch, and the diagnostic that says which hull is missing never printed. Catching here is what
+     * makes those branches the ones that actually run. An empty id is "no hull named", not a lookup.
+     */
+    private static ShipHullSpecAPI hullSpecOrNull(String hullId) {
+        if (hullId == null || hullId.isEmpty()) {
+            return null;
+        }
+        try {
+            return Global.getSettings().getHullSpec(hullId);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.debug(CoopCampaignReplicator.class, "Coop ship listing names hull " + hullId
+                    + ", which this client cannot resolve");
+            return null;
+        }
+    }
+
+    /**
+     * The stock variant for {@code variantId}, or null when this client cannot resolve it. Same
+     * argument as {@link #hullSpecOrNull}: {@code doesVariantExist} is asked first, but the lookup
+     * itself is not documented to be total, and a modded spec loader that throws must degrade to the
+     * next fallback rather than sink the listing.
+     */
+    private static ShipVariantAPI stockVariantOrNull(String variantId) {
+        if (variantId == null || variantId.isEmpty()) {
+            return null;
+        }
+        try {
+            return Global.getSettings().doesVariantExist(variantId)
+                    ? Global.getSettings().getVariant(variantId) : null;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.debug(CoopCampaignReplicator.class, "Coop ship listing names variant " + variantId
+                    + ", which this client cannot resolve");
+            return null;
+        }
     }
 
     /**
@@ -2334,6 +2401,54 @@ public final class CoopCampaignReplicator
             // Phase 32: a locker has to hand a damaged ship back damaged. Base CR is the repair
             // tracker's; hull damage is the status's, and nothing else on the wire carries it.
             member.getStatus().setHullFraction(detail.hullFraction());
+            applyModuleHullFractions(member, variant, detail);
+        }
+    }
+
+    /**
+     * Writes each module's hull damage back onto the member's indexed statuses.
+     *
+     * <p>The index-to-slot mapping is not documented on {@code FleetMemberStatusAPI}, but the engine's
+     * own callers pin it down and all agree: status 0 is the ship's own hull and status {@code i > 0}
+     * is {@code member.getVariant().getModuleSlots().get(i - 1)}
+     * ({@code api_src/.../BattleAutoresolverPluginImpl.java:482-486}, which also throws when
+     * {@code getNumStatuses() - 1} exceeds the module-slot count;
+     * {@code api_src/.../econ/impl/OrbitalStation.java:499-503};
+     * {@code api_src/.../FleetEncounterContext.java:1853}). So the mapping is determinable and a
+     * stored station's battered modules can come back battered instead of pristine.
+     *
+     * <p>Runs after {@code setVariant(v, false, true)} because that is what re-counts the statuses
+     * for the modules this rebuild just hung on. Only modules directly on the member have an index;
+     * a module of a module does not, and stays at full hull (accepted limitation, and vanilla's
+     * deepest modular hull is one level). A throw here is caught rather than propagated: losing the
+     * per-module damage is a fidelity gap, while letting it escape would send the whole listing into
+     * the storage fallback and lose the refit as well.
+     */
+    private static void applyModuleHullFractions(FleetMemberAPI member, ShipVariantAPI variant,
+                                                 CoopShipDetail detail) {
+        if (detail.modules().isEmpty()) {
+            return;
+        }
+        try {
+            List<String> slots = orEmptyList(variant.getModuleSlots());
+            int statuses = member.getStatus().getNumStatuses();
+            for (int i = 0; i < slots.size(); i++) {
+                CoopShipDetail module = detail.modules().get(slots.get(i));
+                if (module == null) {
+                    continue;
+                }
+                if (i + 1 >= statuses) {
+                    CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member="
+                            + detail.memberId() + " module slot=" + slots.get(i) + " has no status"
+                            + " index (" + statuses + " status(es) for " + slots.size()
+                            + " module slot(s)); its hull damage is lost");
+                    continue;
+                }
+                member.getStatus().setHullFraction(i + 1, module.hullFraction());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Could not restore module hull damage for"
+                    + " listing member=" + detail.memberId(), ex);
         }
     }
 
@@ -2341,22 +2456,42 @@ public final class CoopCampaignReplicator
      * The variant half of the rebuild, applied in place to a variant the caller already cloned and
      * marked REFIT. Recurses for module slots, which is why it takes a variant rather than a member:
      * a module is a {@code ShipVariantAPI} hanging off its parent, with no fleet member of its own.
+     *
+     * <p><b>The apply is total, not additive.</b> Everything the blob owns — hull mods in all four
+     * flavours, weapons and fighter bays — is cleared off the base variant first. It has to be:
+     * {@link #createBaseMember} hands back the <em>stock</em> variant whenever the captured variant
+     * id is a real spec, and a stock variant arrives with its own hull mods and wings already fitted
+     * ({@code drover_Strike} carries {@code missleracks} and two wings). That id survives a refit —
+     * {@code DModManager.setDHull} swaps the hull spec and sets VariantSource.REFIT but leaves
+     * {@code hullVariantId} alone — so the stock branch is reachable for a ship that is anything but
+     * pristine, and an additive apply handed the owner back a hull mod they had stripped and a wing
+     * they had sold.
      */
     private static void applyVariantDetail(ShipVariantAPI variant, CoopShipDetail detail) {
         if (!detail.hullSpecId().isEmpty() && variant.getHullSpec() != null
                 && !detail.hullSpecId().equals(variant.getHullSpec().getHullId())) {
             // The D-hull swap: DModManager.setDHull replaces the hull spec outright, so a listing
             // whose id says "hound" but whose spec says "hound_dhull" only survives if we do too.
-            variant.setHullSpecAPI(Global.getSettings().getHullSpec(detail.hullSpecId()));
+            ShipHullSpecAPI swapped = hullSpecOrNull(detail.hullSpecId());
+            if (swapped == null) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member="
+                        + detail.memberId() + " names hull spec " + detail.hullSpecId()
+                        + ", which this client cannot resolve; keeping "
+                        + variant.getHullSpec().getHullId());
+            } else {
+                variant.setHullSpecAPI(swapped);
+            }
+        }
+        clearVariantForRebuild(variant);
+        for (String modId : detail.permaMods()) {
+            variant.addPermaMod(modId, detail.sMods().contains(modId));
         }
         for (String modId : detail.suppressedMods()) {
+            // After the perma-mods, not before: the two lists are disjoint in vanilla
+            // (DModManager.removeDMod does removePermaMod + addSuppressedMod), but a third-party mod
+            // can produce an overlap, and a mod the owner had suppressed must come back suppressed.
+            // Resolving the overlap the other way handed back a live hull mod.
             variant.addSuppressedMod(modId);
-        }
-        for (String modId : detail.permaMods()) {
-            // Vanilla's DModManager order: a perma-mod is un-suppressed first, or the hull mod is
-            // installed and inert.
-            variant.removeSuppressedMod(modId);
-            variant.addPermaMod(modId, detail.sMods().contains(modId));
         }
         for (String modId : detail.refitMods()) {
             variant.addMod(modId);
@@ -2366,15 +2501,17 @@ public final class CoopCampaignReplicator
             // (there is no dedicated setter, and the returned set is not documented as live). Best
             // effort: a built-in that fails to read back as s-modded is a small stat difference on
             // a shop hull, not a broken listing.
+            //
+            // Accepted limitation: addPermaMod also inserts the id into getPermaMods(), so the next
+            // capture of this member carries it in permaMods where the deposited one did not. Stable
+            // after one cycle, but the mod set on the wire is not byte-identical to the deposit; see
+            // the accepted-limitations list on CoopShipDetail.
             try {
                 variant.addPermaMod(modId, true);
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.debug(CoopCampaignReplicator.class,
                         "Could not mark built-in hull mod as s-modded: " + modId);
             }
-        }
-        for (String slotId : new ArrayList<>(orEmptyList(variant.getNonBuiltInWeaponSlots()))) {
-            variant.clearSlot(slotId);
         }
         for (Map.Entry<String, String> weapon : detail.weapons().entrySet()) {
             variant.addWeapon(weapon.getKey(), weapon.getValue());
@@ -2393,15 +2530,54 @@ public final class CoopCampaignReplicator
     }
 
     /**
+     * Empties everything {@link #applyVariantDetail} is about to write, so the blob is the whole
+     * answer rather than an overlay on whatever the base variant happened to carry.
+     *
+     * <p>All three mod clears are needed and none of them subsumes another:
+     * {@code clearHullMods()} is documented not to touch built-ins <em>or</em> perma-mods
+     * ({@code ShipVariantAPI.java:31-33}), so D-mods survive it, and suppressed mods are a third
+     * list again. Built-in hull mods come off the hull spec rather than the variant, so nothing here
+     * can strip them — which is what we want, since the blob does not carry them either.
+     *
+     * <p>Fighter bays are cleared with {@code setWingId(i, null)} across every bay index, which is
+     * vanilla's own idiom and is safe on a built-in bay: {@code FleetEncounterContext.java:1841}
+     * calls it in a loop with the comment "won't clear out built-in wings". The capture skips a
+     * built-in bay for the same reason ({@code captureVariantDetail}), so the two sides agree on
+     * which bays the blob owns.
+     */
+    private static void clearVariantForRebuild(ShipVariantAPI variant) {
+        variant.clearHullMods();
+        variant.clearPermaMods();
+        variant.clearSuppressedMods();
+        int bays = orEmptyList(variant.getWings()).size();
+        for (int i = 0; i < bays; i++) {
+            variant.setWingId(i, null);
+        }
+        for (String slotId : new ArrayList<>(orEmptyList(variant.getNonBuiltInWeaponSlots()))) {
+            variant.clearSlot(slotId);
+        }
+    }
+
+    /**
      * Restores the owner's firing groups, or leaves vanilla's autogenerated ones when the blob has
      * none (an older listing, or a hull whose owner never touched the groups).
      *
-     * <p>Slots that hold no weapon on this client are dropped and a group left with no slots is not
-     * added, which is exactly what {@code CoreAutofitPlugin.doFit} does when it copies groups between
-     * variants ({@code api_src/.../CoreAutofitPlugin.java:524-535}). That case only arises when a
-     * weapon id did not resolve here — a mod mismatch, where the listing is already degraded — and an
-     * empty group is a shape vanilla never builds, so it is not worth risking on the receiving side.
-     * If everything drops out we fall back to autogeneration rather than ship a group-less variant.
+     * <p><b>A group index is part of the loadout.</b> Groups are what the player's 1-5 keys are bound
+     * to, so a group that loses every slot is still added — empty — rather than skipped, because
+     * skipping it shifts every later group down one and silently rebinds the owner's firing keys.
+     * Vanilla drops such a group ({@code api_src/.../CoreAutofitPlugin.java:534}), but vanilla is
+     * autofitting, where the player expects a new loadout; here they stored a ship and withdrew the
+     * same ship. Each drop is WARNed with the group index so the divergence is visible in the log.
+     *
+     * <p>A slot survives when it holds a weapon <em>or</em> the hull spec lists it as a built-in one.
+     * The built-in half matters because {@code getNonBuiltInWeaponSlots} never captures built-ins
+     * ({@code ShipVariantAPI.java:45-49}) while vanilla's own variant data puts them in groups —
+     * {@code onslaught_Standard} group 0 is the two built-in TPCs — so filtering on
+     * {@code getWeaponId} alone dropped the entire TPC group off an Onslaught rebuilt from an empty
+     * hull variant.
+     *
+     * <p>If every group came out empty the blob told us nothing usable (a wholesale mod mismatch), so
+     * we fall back to autogeneration rather than ship a variant of nothing but empty groups.
      */
     private static void applyWeaponGroups(ShipVariantAPI variant, CoopShipDetail detail) {
         List<CoopShipDetail.WeaponGroup> groups = detail.weaponGroups();
@@ -2416,22 +2592,28 @@ public final class CoopCampaignReplicator
             variant.autoGenerateWeaponGroups();
             return;
         }
-        int added = 0;
+        int nonEmpty = 0;
         try {
             live.clear();
-            for (CoopShipDetail.WeaponGroup group : groups) {
+            for (int index = 0; index < groups.size(); index++) {
+                CoopShipDetail.WeaponGroup group = groups.get(index);
                 WeaponGroupSpec spec = new WeaponGroupSpec(group.alternating()
                         ? WeaponGroupType.ALTERNATING : WeaponGroupType.LINKED);
                 spec.setAutofireOnByDefault(group.autofire());
                 for (String slotId : group.slots()) {
-                    if (variant.getWeaponId(slotId) != null) {
+                    if (slotHoldsAWeapon(variant, slotId)) {
                         spec.addSlot(slotId);
                     }
                 }
-                if (!spec.getSlots().isEmpty()) {
-                    variant.addWeaponGroup(spec);
-                    added++;
+                if (spec.getSlots().isEmpty()) {
+                    CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member="
+                            + detail.memberId() + " weapon group " + index + " of " + groups.size()
+                            + ": none of its " + group.slots().size() + " slot(s) hold a weapon on"
+                            + " this client; adding it empty so the later groups keep their indices");
+                } else {
+                    nonEmpty++;
                 }
+                variant.addWeaponGroup(spec);
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Could not apply weapon groups to listing member="
@@ -2439,12 +2621,26 @@ public final class CoopCampaignReplicator
             variant.autoGenerateWeaponGroups();
             return;
         }
-        if (added == 0) {
+        if (nonEmpty == 0) {
             CoopLog.warn(CoopCampaignReplicator.class, "Coop ship listing member=" + detail.memberId()
                     + " carried " + groups.size() + " weapon group(s) but none of their slots hold a"
                     + " weapon on this client; autogenerating instead");
+            live.clear();
             variant.autoGenerateWeaponGroups();
         }
+    }
+
+    /**
+     * Whether {@code slotId} is a slot the rebuilt variant can put in a firing group: one that holds
+     * a fitted weapon, or one the hull spec fills itself ({@code ShipHullSpecAPI.java:224}).
+     */
+    private static boolean slotHoldsAWeapon(ShipVariantAPI variant, String slotId) {
+        if (variant.getWeaponId(slotId) != null) {
+            return true;
+        }
+        ShipHullSpecAPI hull = variant.getHullSpec();
+        Map<String, String> builtIn = hull == null ? null : hull.getBuiltInWeapons();
+        return builtIn != null && builtIn.containsKey(slotId);
     }
 
     /**
@@ -2502,17 +2698,14 @@ public final class CoopCampaignReplicator
         if (existing != null && module.baseVariantId().equals(existing.getHullVariantId())) {
             return existing.clone();
         }
-        if (Global.getSettings().doesVariantExist(module.baseVariantId())) {
-            ShipVariantAPI stock = Global.getSettings().getVariant(module.baseVariantId());
-            if (stock != null) {
-                return stock.clone();
-            }
+        ShipVariantAPI stock = stockVariantOrNull(module.baseVariantId());
+        if (stock != null) {
+            return stock.clone();
         }
         if (existing != null) {
             return existing.clone();
         }
-        ShipHullSpecAPI hull = module.hullSpecId().isEmpty()
-                ? null : Global.getSettings().getHullSpec(module.hullSpecId());
+        ShipHullSpecAPI hull = hullSpecOrNull(module.hullSpecId());
         return hull == null ? null
                 : Global.getSettings().createEmptyVariant(module.baseVariantId(), hull);
     }
@@ -4797,11 +4990,12 @@ public final class CoopCampaignReplicator
                 return null;
             }
             float baseCR = member.getRepairTracker() == null ? 0f : member.getRepairTracker().getBaseCR();
-            // Modules have their own indexed hull fractions (getHullFraction(int)) but no documented
-            // index-to-slot mapping, so only the ship's own hull rides the wire.
+            // Status 0 is the ship's own hull; the module slots follow it in getModuleSlots() order,
+            // which is what lets captureModules read each module's damage off the same status object
+            // (see applyModuleHullFractions for the engine callers that pin that mapping down).
             float hullFraction = member.getStatus() == null ? 1f : member.getStatus().getHullFraction();
             return captureVariantDetail(member.getVariant(), memberId, member.getShipName(),
-                    baseCR, hullFraction, 0);
+                    baseCR, hullFraction, 0, member.getStatus());
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to capture ship detail for member "
                     + (member.getId() == null ? "?" : member.getId()), ex);
@@ -4813,14 +5007,21 @@ public final class CoopCampaignReplicator
      * The variant half of the capture, which a module re-enters with {@code depth + 1}.
      *
      * <p>A module is a variant with no fleet member behind it, so it carries no member id, no ship
-     * name, no base CR and no hull fraction of its own; those four are the caller's to supply and are
-     * empty/zero/undamaged for a module. Recursion stops at
+     * name and no base CR of its own; those are the caller's to supply and are empty/zero for a
+     * module. Its hull fraction does exist, on the parent member's indexed statuses, which is why
+     * {@code status} rides down one level. Recursion stops at
      * {@link CoopShipDetail#MAX_MODULE_NESTING} so a mod that manages to make a module cycle costs a
      * warning rather than the whole snapshot.
+     *
+     * @param status the member's status when {@code variant} is the member's own variant, null for a
+     *               module — only the top level has indexed statuses to read module damage from, so a
+     *               module of a module is captured undamaged (accepted limitation; vanilla nests one
+     *               level).
      */
     private static CoopShipDetail captureVariantDetail(ShipVariantAPI variant, String memberId,
                                                        String shipName, float baseCR,
-                                                       float hullFraction, int depth) {
+                                                       float hullFraction, int depth,
+                                                       FleetMemberStatusAPI status) {
         List<String> permaMods = new ArrayList<>(orEmpty(variant.getPermaMods()));
         List<String> sMods = new ArrayList<>(orEmpty(variant.getSMods()));
         List<String> refitMods = new ArrayList<>();
@@ -4851,7 +5052,7 @@ public final class CoopCampaignReplicator
             wings.put(Integer.toString(i), wingId);
         }
         List<CoopShipDetail.WeaponGroup> weaponGroups = captureWeaponGroups(variant);
-        Map<String, CoopShipDetail> modules = captureModules(variant, memberId, depth);
+        Map<String, CoopShipDetail> modules = captureModules(variant, memberId, depth, status);
         return new CoopShipDetail(memberId,
                 shipName,
                 variant.getHullVariantId(),
@@ -4897,9 +5098,19 @@ public final class CoopCampaignReplicator
         return groups;
     }
 
-    /** Each module slot's variant as a nested detail; empty for the overwhelmingly common hull. */
+    /**
+     * Each module slot's variant as a nested detail; empty for the overwhelmingly common hull.
+     *
+     * <p>Each module's hull damage comes off {@code status.getHullFraction(slotIndex + 1)}: the
+     * member's status list is the ship's own hull followed by the module slots in
+     * {@code getModuleSlots()} order (see {@link #applyModuleHullFractions} for the engine callers
+     * that establish it). The index is the slot's position in the full list, not a running counter,
+     * so a blank slot id or a slot with no variant does not shift the ones after it. A module with no
+     * status of its own — {@code status} is null below the top level, or the engine reports fewer
+     * statuses than slots — is captured undamaged, which is the pre-Phase-32 behaviour.
+     */
     private static Map<String, CoopShipDetail> captureModules(ShipVariantAPI variant, String memberId,
-                                                              int depth) {
+                                                              int depth, FleetMemberStatusAPI status) {
         Map<String, CoopShipDetail> modules = new LinkedHashMap<>();
         List<String> slots = orEmptyList(variant.getModuleSlots());
         if (slots.isEmpty()) {
@@ -4911,7 +5122,9 @@ public final class CoopCampaignReplicator
                     + " levels; the rest are captured as their base variants");
             return modules;
         }
-        for (String slotId : slots) {
+        int statuses = status == null ? 0 : status.getNumStatuses();
+        for (int i = 0; i < slots.size(); i++) {
+            String slotId = slots.get(i);
             if (slotId == null || slotId.isBlank()) {
                 continue;
             }
@@ -4919,7 +5132,9 @@ public final class CoopCampaignReplicator
             if (moduleVariant == null) {
                 continue;
             }
-            modules.put(slotId, captureVariantDetail(moduleVariant, "", "", 0f, 1f, depth + 1));
+            float moduleHull = i + 1 < statuses ? status.getHullFraction(i + 1) : 1f;
+            modules.put(slotId, captureVariantDetail(moduleVariant, "", "", 0f, moduleHull,
+                    depth + 1, null));
         }
         return modules;
     }

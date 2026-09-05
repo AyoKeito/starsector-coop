@@ -266,6 +266,33 @@ class CoopShipDetailTest {
     }
 
     @Test
+    void anEmptyBaseCrCellReadsAsZeroRatherThanThrowingTheWayAnEmptyHullFractionDoesNot() {
+        // The two float fields have to agree on what an empty cell means. Hull fraction's neutral
+        // value is "undamaged"; base CR's is 0, because a hand-built blob must not be able to hand
+        // back a mothballed hull at full combat readiness.
+        String[] parts = battered().encode().split("\\|", -1);
+        parts[4] = "";
+        parts[15] = "";
+
+        CoopShipDetail back = CoopShipDetail.decode(String.join("|", parts));
+
+        assertEquals(0f, back.baseCR(), 1e-6f);
+        assertEquals(1f, back.hullFraction(), 1e-6f);
+    }
+
+    @Test
+    void aMalformedWeaponGroupIsRejectedWithoutDumpingTheWholeLoadoutIntoTheMessage() {
+        // The exception is logged as a WARN; the other decode failures do not print the blob and
+        // neither should this one - a ship's full loadout is not a diagnostic.
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> CoopShipDetail.WeaponGroup.decode("WS0001,WS0002|1"));
+
+        assertFalse(ex.getMessage().contains("WS0001"),
+                "the encoded group must not be echoed back: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("got 2"));
+    }
+
+    @Test
     void moduleNestingDeeperThanTheLimitIsRejectedRatherThanRecursed() {
         CoopShipDetail deepest = new CoopShipDetail("", "", "v", "h", 0f, 0, 0, List.of(), List.of(),
                 List.of(), List.of(), List.of(), Map.of(), Map.of(), List.of(), 1f, "", Map.of());
