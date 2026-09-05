@@ -1,12 +1,25 @@
 package coop.fleet;
 
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
+import com.fs.starfarer.api.fleet.FleetMemberStatusAPI;
+import com.fs.starfarer.api.fleet.RepairTrackerAPI;
+import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.net.CoopStreamClock;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
+import coop.testing.ProxyDefaults;
+import coop.testing.RecordingNetService;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.Test;
+import org.lwjgl.util.vector.Vector2f;
 
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -21,6 +34,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Phase 20 M4: the host-side motion range filter's arithmetic and the MTU-safe chunk packer. The
  * packer is exercised through the real encoders and the real compose path, because the acceptance
  * criterion is a byte count on the wire, not a property of an estimate.
+ *
+ * <p>Also the two {@code NPC_FLEET_SET} send triggers (2026-09-05): the structural hash and the
+ * rate-limited health hash. Those run against a narrow one-fleet engine stub rather than the pure
+ * decision alone, because the defect was never in the arithmetic — it was that nothing ever asked
+ * about CR and hull.
  */
 class CoopNpcFleetReplicatorTest {
 
@@ -263,5 +281,153 @@ class CoopNpcFleetReplicatorTest {
         assertTrue(CoopNpcFleetReplicator.withinRange(0f, 0f, 3000f, 0f, 3000f));
         assertFalse(CoopNpcFleetReplicator.withinRange(0f, 0f, 3000.5f, 0f, 3000f));
         assertFalse(CoopNpcFleetReplicator.withinRange(-1000f, -1000f, 20000f, 20000f, 3000f));
+    }
+
+    // ---- set send triggers -----------------------------------------------------------------------
+
+    @Test
+    void aStructuralChangeSendsRegardlessOfTheHealthFloor() {
+        // Phase 9's contract: spawn/despawn/rename/roster edits reconcile on arrival, and the guest's
+        // post-battle freeze release waits on one. Rate-limiting those would be a regression.
+        assertTrue(CoopNpcFleetReplicator.shouldSendSet(true, false, 0L, 10_000L));
+        assertTrue(CoopNpcFleetReplicator.shouldSendSet(true, true, 0L, 10_000L));
+    }
+
+    @Test
+    void aHealthOnlyChangeWaitsForTheFloorAndThenSends() {
+        assertFalse(CoopNpcFleetReplicator.shouldSendSet(false, true, 9_999L, 10_000L));
+        assertTrue(CoopNpcFleetReplicator.shouldSendSet(false, true, 10_000L, 10_000L));
+        assertTrue(CoopNpcFleetReplicator.shouldSendSet(false, true, 60_000L, 10_000L));
+    }
+
+    @Test
+    void nothingMovingSendsNothingEvenLongAfterTheFloor() {
+        assertFalse(CoopNpcFleetReplicator.shouldSendSet(false, false, 10_000L, 10_000L));
+        assertFalse(CoopNpcFleetReplicator.shouldSendSet(false, false, 999_000L, 0L));
+    }
+
+    /**
+     * The defect this trigger exists for, end to end: a fleet whose only change is member CR. The
+     * structural hash deliberately excludes CR (the 2026-08-17 rebuild storm) and the 10 Hz motion
+     * datagram does not carry it, so before the health trigger this fleet produced no wire traffic at
+     * all and the guest's mirror showed the damage indefinitely.
+     */
+    @Test
+    void aCrOnlyChangeResendsTheSetOnceTheFloorHasPassed() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableHealth health = new MutableHealth(0.20f, 0.30f);
+        SectorAPI sector = sectorWithOneDamagedFleet(health);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(sector, 0L);
+        assertEquals(1, service.sent.size(), "the first set is always structural");
+        assertEquals(CoopMessages.Type.NPC_FLEET_SET, service.sent.get(0).type());
+
+        health.cr = 0.70f;
+        replicator.sendSetIfChanged(sector, 9_999L);
+        assertEquals(1, service.sent.size(), "a health-only change must respect the 10 s floor");
+
+        replicator.sendSetIfChanged(sector, 10_000L);
+        assertEquals(2, service.sent.size(), "past the floor the repaired CR has to reach the guest");
+
+        replicator.sendSetIfChanged(sector, 90_000L);
+        assertEquals(2, service.sent.size(), "health settled: no further sends, floor or not");
+    }
+
+    @Test
+    void aHullOnlyChangeAlsoResendsAndTheSetCarriesTheNewValue() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableHealth health = new MutableHealth(0.90f, 0.30f);
+        SectorAPI sector = sectorWithOneDamagedFleet(health);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(sector, 0L);
+        health.hullFraction = 1.0f;
+        replicator.sendSetIfChanged(sector, 10_000L);
+
+        assertEquals(2, service.sent.size());
+        CoopNpcFleetSetSnapshot decoded = decodeSet(service.sent.get(1));
+        assertEquals(1, decoded.fleets().size());
+        assertEquals(1.0f,
+                decoded.fleets().get(0).members().get(0).hullFraction(), 0.002f);
+        // ...and the structural hash the guest's roster rebuild watches did not move.
+        assertEquals(decodeSet(service.sent.get(0)).fleets().get(0).fleetHash(),
+                decoded.fleets().get(0).fleetHash(),
+                "repair must never look like a roster change to the guest");
+    }
+
+    /** The {@code set} blob out of an {@code NPC_FLEET_SET} payload. */
+    private static CoopNpcFleetSetSnapshot decodeSet(CoopMessages.Message message) {
+        return CoopNpcFleetSetSnapshot.decode(
+                String.valueOf(CoopMessages.decodePayload(message).getOrDefault("set", "")));
+    }
+
+    // ---- one-fleet engine stub -------------------------------------------------------------------
+
+    /** The CR and hull the stubbed ship reports; a test moves these between sends. */
+    private static final class MutableHealth {
+        private float cr;
+        private float hullFraction;
+
+        private MutableHealth(float cr, float hullFraction) {
+            this.cr = cr;
+            this.hullFraction = hullFraction;
+        }
+    }
+
+    /**
+     * A sector holding exactly one location holding exactly one one-ship NPC fleet. Everything the
+     * replicator asks that this does not answer falls through to {@link ProxyDefaults}; the capture
+     * path is defensive about all of it, which is what makes a stub this narrow viable.
+     */
+    private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health) {
+        Object repairTracker = stub(RepairTrackerAPI.class, (name, args) ->
+                "getCR".equals(name) ? health.cr : null);
+        Object status = stub(FleetMemberStatusAPI.class, (name, args) ->
+                "getHullFraction".equals(name) ? health.hullFraction : null);
+        FleetMemberAPI member = (FleetMemberAPI) stub(FleetMemberAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "member-1";
+            case "getShipName" -> "ISS Stub";
+            case "isFighterWing" -> false;
+            case "getRepairTracker" -> repairTracker;
+            case "getStatus" -> status;
+            default -> null;
+        });
+        Object fleetData = stub(FleetDataAPI.class, (name, args) ->
+                "getMembersListCopy".equals(name) ? new ArrayList<>(List.of(member)) : null);
+
+        Object[] location = new Object[1];
+        CampaignFleetAPI fleet = (CampaignFleetAPI) stub(CampaignFleetAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "fleet-1";
+            case "getName" -> "Patrol";
+            case "getContainingLocation" -> location[0];
+            case "getLocation" -> new Vector2f(100f, 200f);
+            case "getVelocity" -> new Vector2f(0f, 0f);
+            case "getFleetData" -> fleetData;
+            default -> null;
+        });
+        location[0] = stub(LocationAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "corvus";
+            case "getFleets" -> new ArrayList<>(List.of(fleet));
+            default -> null;
+        });
+
+        return (SectorAPI) stub(SectorAPI.class, (name, args) -> switch (name) {
+            // Same object as the fleet's location, so the motion smoother is bypassed and the
+            // position on the wire is the raw one - this test is about health, not interpolation.
+            case "getCurrentLocation" -> location[0];
+            case "getAllLocations" -> new ArrayList<>(List.of(location[0]));
+            default -> null;
+        });
+    }
+
+    private static Object stub(Class<?> type, java.util.function.BiFunction<String, Object[], Object> answers) {
+        return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                (proxy, method, args) -> {
+                    Object answer = answers.apply(method.getName(), args);
+                    return answer == null ? ProxyDefaults.defaultValue(method.getReturnType()) : answer;
+                });
     }
 }

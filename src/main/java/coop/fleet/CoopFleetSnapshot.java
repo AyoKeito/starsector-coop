@@ -131,7 +131,12 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * ship crosses a percent boundary every real second or two, and a loaded save full of
      * battle-damaged NPC fleets turned every one-second {@code NPC_FLEET_SET} into ~10 full roster
      * rebuilds (guest at 39 fps with rubber-banding, 2026-08-17). The mirror now applies CR/hull
-     * in place on the existing members instead ({@code CoopFleetMirror#updateMemberState}).
+     * in place on the existing members instead ({@code CoopFleetMirror#updateMemberState}). Health
+     * still has to reach the guest for that to be worth anything, and since 2026-09-05 it does:
+     * {@code CoopNpcFleetReplicator} sends the same set on a second trigger keyed to
+     * {@code CoopNpcFleetSetSnapshot#computeHealthHash} (CR/hull in 5% buckets, at most one set every
+     * 10 s), so a repairing fleet reaches the guest without any hash the roster rebuild watches ever
+     * moving.
      */
     public static String computeFleetHash(List<Member> members) {
         List<Member> safe = members == null ? List.of() : members;

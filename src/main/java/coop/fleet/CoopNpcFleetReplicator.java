@@ -31,7 +31,9 @@ import java.util.function.LongSupplier;
  *
  * <ul>
  *   <li>emits the full {@code NPC_FLEET_SET} over reliable TCP whenever its order-independent set hash
- *       changes (existence/identity/roster parity sector-wide, including off-screen fleets);</li>
+ *       changes (existence/identity/roster parity sector-wide, including off-screen fleets), and at
+ *       most once every {@link #HEALTH_RESYNC_INTERVAL_MILLIS} when only member CR/hull moved
+ *       ({@link CoopNpcFleetSetSnapshot#computeHealthHash});</li>
  *   <li>emits {@code NPC_FLEET_MOTION} over UDP at 10 Hz for fleets in a location where either player
  *       currently is (bounded bandwidth; off-screen mirrors keep their last set position).</li>
  * </ul>
@@ -51,6 +53,15 @@ public final class CoopNpcFleetReplicator {
     public static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
     private static final long SET_SYNC_INTERVAL_MILLIS = 1000L;
     private static final long MOTION_INTERVAL_MILLIS = 100L;
+    /**
+     * Floor between two sends that only the health hash asked for. CR and hull are the one piece of
+     * replicated fleet state with no carrier of its own — they are out of {@code fleetHash} by design
+     * (the 2026-08-17 rebuild storm) and out of the 10 Hz motion datagram — so without a second
+     * trigger a fleet that repairs from 30% hull to full ships nothing and the guest keeps rendering
+     * the damage. Ten seconds is the compromise: health is display state, and one extra full set every
+     * 10 s is bounded traffic no matter how many fleets in the sector are repairing at once.
+     */
+    static final long HEALTH_RESYNC_INTERVAL_MILLIS = 10_000L;
 
     /**
      * Phase 20 M4 motion range filter. A fleet gets 10 Hz motion only while it is within
@@ -129,6 +140,10 @@ public final class CoopNpcFleetReplicator {
     private final coop.net.CoopStreamCadence motionCadence =
             new coop.net.CoopStreamCadence(MOTION_INTERVAL_MILLIS);
     private String lastSetHash = "";
+    /** Health hash ({@link CoopNpcFleetSetSnapshot#computeHealthHash}) of the last set actually sent. */
+    private String lastHealthHash = "";
+    /** Earliest wall-clock time a health-only change may cause a send; see the interval constant. */
+    private long nextHealthResendAtMillis;
     private int lastFleetCount;
     /** Per-fleet {@code fleetHash} last printed by the {@link CoopDebug} roster diagnostic. */
     private final Map<String, String> loggedFleetHashes = new HashMap<>();
@@ -245,6 +260,8 @@ public final class CoopNpcFleetReplicator {
     /** Forget the last-sent hash so the next tick rebroadcasts the full set (session (re)start). */
     public void reset() {
         lastSetHash = "";
+        lastHealthHash = "";
+        nextHealthResendAtMillis = 0L;
         lastFleetCount = 0;
         loggedFleetHashes.clear();
         guestPresence.reset();
@@ -279,7 +296,8 @@ public final class CoopNpcFleetReplicator {
         return lastFleetCount;
     }
 
-    private void sendSetIfChanged(SectorAPI sector, long now) {
+    /** Package-private, like the motion packer beside it, so the send triggers are testable. */
+    void sendSetIfChanged(SectorAPI sector, long now) {
         List<CoopNpcFleetSnapshot> fleets = new ArrayList<>();
         LocationAPI hostLocation = hostCurrentLocation(sector);
         // Resolved once per send, not per fleet: the two fleets the captured action text has to
@@ -291,17 +309,37 @@ public final class CoopNpcFleetReplicator {
         forEachReplicatedFleet(sector, fleet -> fleets.add(
                 toSnapshot(fleet, hostLocation, hostPlayerFleet, guestMirror, hostPlayerLabel)));
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
-        if (set.setHash().equals(lastSetHash)) {
+        String healthHash = CoopNpcFleetSetSnapshot.computeHealthHash(fleets);
+        boolean structuralChanged = !set.setHash().equals(lastSetHash);
+        boolean healthChanged = !healthHash.equals(lastHealthHash);
+        if (!shouldSendSet(structuralChanged, healthChanged, now, nextHealthResendAtMillis)) {
             return;
         }
         service.send(CoopMessages.npcFleetSet(
                 sessionState.sessionId(), service.nextSeq(), now,
                 streamClock.gameTimeMillis(), set.encode()));
         lastSetHash = set.setHash();
+        lastHealthHash = healthHash;
+        // Every send resets the floor, structural or not: the set that just went out carried the
+        // current health, so the next health-only send is a full interval away either way.
+        nextHealthResendAtMillis = now + HEALTH_RESYNC_INTERVAL_MILLIS;
         lastFleetCount = fleets.size();
         CoopLog.info(CoopNpcFleetReplicator.class,
-                "Coop sent NPC_FLEET_SET fleets=" + fleets.size());
+                "Coop sent NPC_FLEET_SET fleets=" + fleets.size()
+                        + " trigger=" + (structuralChanged ? "structural" : "health"));
         reportRosterChanges(fleets);
+    }
+
+    /**
+     * The send decision, split out pure so it is testable without an engine. A structural change goes
+     * out immediately (that is the Phase 9 contract the guest's add/dispose reconciliation and the
+     * freeze release depend on); a health-only change waits for the
+     * {@link #HEALTH_RESYNC_INTERVAL_MILLIS} floor, because a sector full of repairing fleets would
+     * otherwise put a full set on the wire every single tick.
+     */
+    static boolean shouldSendSet(boolean structuralChanged, boolean healthChanged, long now,
+                                 long nextHealthResendAtMillis) {
+        return structuralChanged || (healthChanged && now >= nextHealthResendAtMillis);
     }
 
     /**
