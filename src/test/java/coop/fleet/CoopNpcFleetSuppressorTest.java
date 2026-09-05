@@ -120,7 +120,6 @@ class CoopNpcFleetSuppressorTest {
                 "SlipstreamManager",
                 "OfficerManagerEvent",
                 "FieldRepairsScript",
-                "HostileActivityManager",
                 "HTFactorTracker",
                 "GenericMissionManager",
                 "SmugglingScanScript",
@@ -131,6 +130,17 @@ class CoopNpcFleetSuppressorTest {
             assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName(name),
                     name + " is not a spawner and must keep running on the guest");
         }
+    }
+
+    /**
+     * The colony-crisis meter. Not a fleet spawner, but a second divergent simulation: on the guest
+     * every fleet it would produce is suppressed, so the meter predicts nothing while the real threats
+     * arrive as CoopExpeditionWarningIntel.
+     */
+    @Test
+    void suppressesTheHostileActivityManager() {
+        assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("HostileActivityManager"),
+                "the guest's hostile-activity meter must not be advanced");
     }
 
     // ---- Phase 13: cached sector-memory handles -------------------------------------------------
@@ -165,6 +175,16 @@ class CoopNpcFleetSuppressorTest {
     void scriptsWithoutACachedHandleHaveNone() {
         assertNull(CoopNpcFleetSuppressor.managerHandle("MercFleetManagerV2"));
         assertNull(CoopNpcFleetSuppressor.managerHandle(null));
+    }
+
+    /**
+     * The hostile-activity manager is stateless and vanilla caches nothing for it: the only key is the
+     * intel's own {@code $hae_ref}, which is cleared by the intel cleanup rather than by the
+     * backfill/clear handle policy. A handle entry here would backfill the removed manager instead.
+     */
+    @Test
+    void theHostileActivityManagerHasNoCachedHandle() {
+        assertNull(CoopNpcFleetSuppressor.managerHandle("HostileActivityManager"));
     }
 
     @Test
@@ -268,6 +288,105 @@ class CoopNpcFleetSuppressorTest {
         FakeIntelCleanup cleanup = new FakeIntelCleanup();
         cleanup.nullLists = true;
         assertEquals(0, CoopNpcFleetSuppressor.endGuestBaseIntel(cleanup));
+    }
+
+    // ---- Guest session-start hostile-activity cleanup ------------------------------------------
+
+    @Test
+    void endsTheGuestHostileActivityIntelAndClearsItsHandle() {
+        FakeHostileActivityCleanup cleanup = new FakeHostileActivityCleanup();
+        Object intel = "hostileActivityEventIntel";
+        cleanup.intel.add(intel);
+
+        assertEquals(1, CoopNpcFleetSuppressor.endGuestHostileActivityIntel(cleanup));
+        assertEquals(List.of(intel), cleanup.ended);
+        assertTrue(cleanup.handleCleared, "$hae_ref must not survive the intel it resolves to");
+    }
+
+    /**
+     * A save can carry a dangling {@code $hae_ref} whose intel is already gone. Clearing regardless is
+     * safe because every vanilla reader null-checks the handle -- the three that dereference it
+     * without an inline check each abort first.
+     */
+    @Test
+    void clearsTheHandleEvenWhenThereIsNoIntel() {
+        FakeHostileActivityCleanup cleanup = new FakeHostileActivityCleanup();
+
+        assertEquals(0, CoopNpcFleetSuppressor.endGuestHostileActivityIntel(cleanup));
+        assertTrue(cleanup.ended.isEmpty());
+        assertTrue(cleanup.handleCleared);
+    }
+
+    @Test
+    void toleratesANullHostileActivityIntelList() {
+        FakeHostileActivityCleanup cleanup = new FakeHostileActivityCleanup();
+        cleanup.nullList = true;
+
+        assertEquals(0, CoopNpcFleetSuppressor.endGuestHostileActivityIntel(cleanup));
+        assertTrue(cleanup.handleCleared);
+    }
+
+    /** The intel manager and {@code $hae_ref} can disagree in a save; both entries get ended. */
+    @Test
+    void endsEveryHostileActivityIntelTheSaveHolds() {
+        FakeHostileActivityCleanup cleanup = new FakeHostileActivityCleanup();
+        cleanup.intel.add("registered");
+        cleanup.intel.add("cachedInMemory");
+
+        assertEquals(2, CoopNpcFleetSuppressor.endGuestHostileActivityIntel(cleanup));
+        assertEquals(List.of("registered", "cachedInMemory"), cleanup.ended);
+    }
+
+    @Test
+    void suppressionRemovesTheHostileActivityManagerScript() {
+        RecordingSector sector = new RecordingSector();
+        sector.scripts.add(new HostileActivityManager());
+        sector.scripts.add(new SlipstreamManager());
+
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 0L);
+
+        assertEquals(1, sector.removed.size());
+        assertEquals("HostileActivityManager", sector.removed.get(0).getClass().getSimpleName());
+        assertEquals(1, sector.scripts.size(), "unrelated scripts keep running on the guest");
+        // No backfilled handle: the manager is stateless, so nothing should have been written.
+        assertTrue(sector.memory.isEmpty(), "the hostile-activity manager has no handle to preserve");
+    }
+
+    /**
+     * Save-load shape: vanilla's {@code CoreLifecyclePluginImpl.addScriptsIfNeeded()} re-registers
+     * {@code HostileActivityManager} on every {@code onGameLoad}, and the intel deserialises with it.
+     * The pump calls {@link CoopNpcFleetSuppressor#reset()} at session (re)start, so the loaded save
+     * must be cleaned again rather than once ever.
+     */
+    @Test
+    void aReloadedGuestSaveIsCleanedAgain() {
+        CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+        RecordingSector sector = new RecordingSector();
+        sector.scripts.add(new HostileActivityManager());
+
+        suppressor.tick(sector.proxy(), 0L);
+        assertEquals(1, sector.removed.size());
+
+        // The save is loaded again: vanilla puts the manager back.
+        sector.scripts.add(new HostileActivityManager());
+        suppressor.tick(sector.proxy(), 1L);
+        assertEquals(1, sector.removed.size(), "without a reset the suppression stays spent");
+
+        suppressor.reset();
+        suppressor.tick(sector.proxy(), 2L);
+        assertEquals(2, sector.removed.size(), "reset() re-arms the cleanup for the loaded save");
+        assertTrue(sector.scripts.isEmpty());
+    }
+
+    /**
+     * The host keeps vanilla's colony-crisis simulation: its NPC fleets are real, its meter predicts
+     * them, and the guest's warning intel is derived from it.
+     */
+    @Test
+    void theHostKeepsItsHostileActivitySimulation() {
+        assertFalse(CoopNpcFleetSuppressor.activeForRole(CoopConnectionRole.HOST),
+                "the suppressor -- and so the hostile-activity cleanup -- never runs on the host");
+        assertFalse(CoopNpcFleetSuppressor.activeForRole(CoopConnectionRole.NONE));
     }
 
     // ---- The sweep gate ------------------------------------------------------------------------
@@ -386,6 +505,29 @@ class CoopNpcFleetSuppressorTest {
         }
     }
 
+    private static final class FakeHostileActivityCleanup
+            implements CoopNpcFleetSuppressor.HostileActivityCleanup {
+        private final List<Object> intel = new ArrayList<>();
+        private final List<Object> ended = new ArrayList<>();
+        private boolean handleCleared;
+        private boolean nullList;
+
+        @Override
+        public List<Object> hostileActivityIntel() {
+            return nullList ? null : intel;
+        }
+
+        @Override
+        public void endAndRemove(Object item) {
+            ended.add(item);
+        }
+
+        @Override
+        public void clearHandle() {
+            handleCleared = true;
+        }
+    }
+
     /** Named to match the vanilla classes: the matcher keys off {@code getSimpleName()}. */
     private static class NoOpScript implements EveryFrameScript {
         @Override
@@ -410,6 +552,9 @@ class CoopNpcFleetSuppressorTest {
     }
 
     private static final class SlipstreamManager extends NoOpScript {
+    }
+
+    private static final class HostileActivityManager extends NoOpScript {
     }
 
     /** A fleet the sweep either culls or preserves, depending on its coop memory tag. */

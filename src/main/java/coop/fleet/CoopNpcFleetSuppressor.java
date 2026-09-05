@@ -24,7 +24,7 @@ import java.util.Set;
  * Guest-side Phase 9 enforcement that the guest runs <b>no</b> native NPC simulation; the only fleets
  * that may exist on the guest are the local player fleet, the Phase 8 remote-player mirror
  * ({@code $coopMirrorFleet}), the host NPC mirrors ({@code $coopNpcFleetId}), and stations
- * (deterministic worldgen tied to markets). Three layers:
+ * (deterministic worldgen tied to markets). Four layers:
  *
  * <ol>
  *   <li><b>Spawner suppression (once per session):</b> removes the known sector-level NPC fleet
@@ -35,6 +35,11 @@ import java.util.Set;
  *   <li><b>Session-start base-intel cleanup (Phase 13):</b> the guest spawned its own pirate/Pather
  *       bases before the base managers joined the suppression set; any that survive in a loaded save
  *       are ended and removed here.</li>
+ *   <li><b>Session-start hostile-activity cleanup:</b> vanilla's colony-crisis meter is a second
+ *       divergent simulation rather than a fleet source, and since Phase 24's shared faction the guest
+ *       qualifies for it. {@code HostileActivityManager} joins the suppression set above and any
+ *       {@code HostileActivityEventIntel} a save carries is ended here, so the guest's only
+ *       colony-threat readout is the mirrored {@code coop.colony.CoopExpeditionWarningIntel}.</li>
  *   <li><b>Periodic sweep (the robust net):</b> removes any fleet that is not protected by the rules
  *       above — robust because enumerating every spawner is fragile, so anything that slips through is
  *       still culled. Runs on a {@link #SWEEP_INTERVAL_MILLIS} timer rather than every frame.</li>
@@ -82,7 +87,15 @@ public final class CoopNpcFleetSuppressor {
             "SDFHegemony",
             "SDFLeague",
             "SDFTriTachyon",
-            "SDFLuddicChurch");
+            "SDFLuddicChurch",
+
+            // The colony-crisis simulation. Since Phase 24 both players share one faction, so the
+            // guest has colonies and vanilla hands it its own HostileActivityEventIntel — a meter that
+            // predicts nothing, because every fleet it would spawn (raids, expeditions, inspections,
+            // blockades) is either on this list or culled by the sweep, and the real threats arrive
+            // as CoopExpeditionWarningIntel. Removing the manager stops the meter being recreated;
+            // endGuestHostileActivityIntel() ends the one a save already carries.
+            "HostileActivityManager");
 
     /**
      * Sector-memory handles vanilla caches for the managers we remove, keyed by class simple name.
@@ -110,6 +123,11 @@ public final class CoopNpcFleetSuppressor {
             Map.entry("DecivTracker", new ManagerHandle("$core_decivTracker", false)),
             Map.entry("FactionHostilityManager", new ManagerHandle("$core_factionHostilityManager", false)),
             Map.entry("PunitiveExpeditionManager", new ManagerHandle("$core_punitiveExpeditionManager", false)));
+    // Deliberately absent: HostileActivityManager. It is stateless and vanilla caches no handle to it
+    // — the only key in play is the intel's own {@code $hae_ref}, which the manager reads through
+    // HostileActivityEventIntel.get() rather than owning. That key is handled by
+    // endGuestHostileActivityIntel() instead, which is a clear (every reader null-checks it) and not
+    // a backfill.
 
     /**
      * How often the per-frame net actually sweeps. The sweep is a backstop for fleets that slip past
@@ -185,9 +203,11 @@ public final class CoopNpcFleetSuppressor {
         int removed = removeSpawnerScripts(sector.getScripts(), sector, "persistent", coverage);
         removed += removeSpawnerScripts(sector.getTransientScripts(), sector, "transient", coverage);
         int endedIntel = endGuestBaseIntel(sector);
+        int endedHostileActivity = endGuestHostileActivityIntel(sector);
         CoopLog.info(CoopNpcFleetSuppressor.class,
                 "Coop guest suppressed " + removed + " NPC spawner script(s), ended " + endedIntel
-                        + " guest-spawned base intel item(s)");
+                        + " guest-spawned base intel item(s), ended " + endedHostileActivity
+                        + " hostile-activity event intel item(s)");
         logCoverage(coverage);
     }
 
@@ -268,6 +288,28 @@ public final class CoopNpcFleetSuppressor {
             return endGuestBaseIntel(new SectorBaseIntelCleanup(manager));
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNpcFleetSuppressor.class, "Failed to end guest-spawned base intel", ex);
+            return 0;
+        }
+    }
+
+    /**
+     * Ends the guest's vanilla hostile-activity meter. Runs alongside the spawner removal, once per
+     * session, which is also the on-load path: vanilla's {@code CoreLifecyclePluginImpl} re-registers
+     * {@code HostileActivityManager} on every {@code onGameLoad}, so a guest save that already holds
+     * the intel gets it ended on the first tick after the load, before the re-registered manager has
+     * had a chance to advance its 0.5-1.5 day interval.
+     */
+    private int endGuestHostileActivityIntel(SectorAPI sector) {
+        // Same self-contained failure handling as endGuestBaseIntel: a cleanup failure must not leave
+        // the once-per-session flag unset and turn this into per-frame retry spam.
+        try {
+            IntelManagerAPI manager = sector.getIntelManager();
+            if (manager == null) {
+                return 0;
+            }
+            return endGuestHostileActivityIntel(new SectorHostileActivityCleanup(sector, manager));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNpcFleetSuppressor.class, "Failed to end guest hostile-activity intel", ex);
             return 0;
         }
     }
@@ -388,6 +430,32 @@ public final class CoopNpcFleetSuppressor {
         return ended;
     }
 
+    /**
+     * Ends every hostile-activity event intel the guest holds and clears the {@code $hae_ref} handle
+     * vanilla resolves it through.
+     *
+     * <p>The handle is cleared even when nothing was ended, which is the opposite of the
+     * {@link ManagerHandle} backfill policy and safe for the same reason that policy is not: every
+     * vanilla reader of {@code HostileActivityEventIntel.get()} null-checks it. The three that
+     * dereference it without an inline check —{@code HostileActivityManager} (removed on the guest),
+     * {@code PerseanLeagueBlockade.periodicUpdate} and
+     * {@code KnightsOfLuddTakeoverExpedition.periodicUpdate} — each open with an
+     * {@code if (get() == null) { abort(); return; }}, so a cleared handle retires an in-flight
+     * blockade instead of crashing it. A save can also carry a dangling handle whose intel is gone,
+     * and clearing unconditionally is what covers that.
+     *
+     * @return the number of intel items ended.
+     */
+    static int endGuestHostileActivityIntel(HostileActivityCleanup cleanup) {
+        int ended = 0;
+        for (Object intel : nonNull(cleanup.hostileActivityIntel())) {
+            cleanup.endAndRemove(intel);
+            ended++;
+        }
+        cleanup.clearHandle();
+        return ended;
+    }
+
     private static List<Object> nonNull(Collection<?> source) {
         List<Object> result = new ArrayList<>();
         if (source == null) {
@@ -439,6 +507,100 @@ public final class CoopNpcFleetSuppressor {
 
         /** {@code endImmediately()} + {@code removeIntel()} + despawn of the base's station entity. */
         void endAndRemove(Object intel);
+    }
+
+    /**
+     * Seam over the guest's hostile-activity intel so
+     * {@link #endGuestHostileActivityIntel(HostileActivityCleanup)} stays a pure, unit-testable
+     * decision function. The engine-typed implementation is {@code SectorHostileActivityCleanup};
+     * tests drive a fake. The seam also keeps {@code HostileActivityEventIntel} off the unit-test
+     * classpath: its static initialiser reads {@code Global.getSettings()}, which no test has.
+     */
+    interface HostileActivityCleanup {
+        /**
+         * Live {@code HostileActivityEventIntel} items. Vanilla keeps at most one, but this is
+         * collected from the intel manager <em>and</em> the {@code $hae_ref} handle so a save where
+         * the two disagree still ends both.
+         */
+        List<Object> hostileActivityIntel();
+
+        /** {@code endImmediately()} + {@code removeIntel()}. */
+        void endAndRemove(Object intel);
+
+        /** Unsets the {@code $hae_ref} sector-memory handle. */
+        void clearHandle();
+    }
+
+    /**
+     * Engine-typed {@link HostileActivityCleanup}; loaded only when the guest actually runs the
+     * cleanup.
+     */
+    private static final class SectorHostileActivityCleanup implements HostileActivityCleanup {
+        private final SectorAPI sector;
+        private final IntelManagerAPI manager;
+
+        private SectorHostileActivityCleanup(SectorAPI sector, IntelManagerAPI manager) {
+            this.sector = sector;
+            this.manager = manager;
+        }
+
+        @Override
+        public List<Object> hostileActivityIntel() {
+            Set<Object> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            List<Object> result = new ArrayList<>();
+            List<IntelInfoPlugin> registered = manager.getIntel(
+                    com.fs.starfarer.api.impl.campaign.intel.events.HostileActivityEventIntel.class);
+            if (registered != null) {
+                for (IntelInfoPlugin intel : registered) {
+                    if (intel != null && seen.add(intel)) {
+                        result.add(intel);
+                    }
+                }
+            }
+            Object cached = handleValue();
+            if (cached != null && seen.add(cached)) {
+                result.add(cached);
+            }
+            return result;
+        }
+
+        @Override
+        public void endAndRemove(Object intel) {
+            // Per-item defensiveness, matching SectorBaseIntelCleanup: a throw here must not abort
+            // the pass or leave the once-per-session flag unset.
+            try {
+                if (intel instanceof com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin) {
+                    // Synchronous: endAfterDelay(0) runs notifyEnding() -- which drops the economy
+                    // listener, retires the factors and strips the HOSTILE_ACTIVITY market condition
+                    // the guest's own simulation put on the shared faction's colonies -- and then
+                    // notifyEnded(), which unsets $hae_ref.
+                    ((com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin) intel).endImmediately();
+                }
+                if (intel instanceof IntelInfoPlugin) {
+                    // The guest's managers are suppressed, so nothing drains ended intel.
+                    manager.removeIntel((IntelInfoPlugin) intel);
+                }
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopNpcFleetSuppressor.class, "Failed to end guest hostile-activity intel", ex);
+            }
+        }
+
+        @Override
+        public void clearHandle() {
+            MemoryAPI memory = sector.getMemoryWithoutUpdate();
+            if (memory != null) {
+                memory.unset(com.fs.starfarer.api.impl.campaign.intel.events.HostileActivityEventIntel.KEY);
+            }
+        }
+
+        private Object handleValue() {
+            MemoryAPI memory = sector.getMemoryWithoutUpdate();
+            if (memory == null) {
+                return null;
+            }
+            return memory.get(
+                    com.fs.starfarer.api.impl.campaign.intel.events.HostileActivityEventIntel.KEY);
+        }
     }
 
     /** Engine-typed {@link BaseIntelCleanup}; loaded only when the guest actually runs the cleanup. */
