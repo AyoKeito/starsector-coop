@@ -4068,7 +4068,7 @@ public class CoopNetPump implements EveryFrameScript {
      * ({@link #endHostWaitForReturningPartner}). {@code LOBBY_CHALLENGE} below is what makes the
      * proof round possible in both directions.
      */
-    private static boolean allowedDuringReconnectGrace(CoopMessages.Type type) {
+    static boolean allowedDuringReconnectGrace(CoopMessages.Type type) {
         return type == CoopMessages.Type.SESSION_RESUME_REQUEST
                 || type == CoopMessages.Type.SESSION_RESUME_ACCEPT
                 || type == CoopMessages.Type.SESSION_RESUME_REJECT
@@ -4109,7 +4109,7 @@ public class CoopNetPump implements EveryFrameScript {
      * <p>Enumerated in full, with no {@code default -> true}: a message type added later must be
      * argued onto this list rather than inherit a pass.
      */
-    private static boolean survivesTheDropEdge(CoopMessages.Type type) {
+    static boolean survivesTheDropEdge(CoopMessages.Type type) {
         return switch (type) {
             // Campaign deltas and events: the world moved, and it stays moved.
             case WORLD_DELTA, MARKET_OPEN, MARKET_SNAPSHOT, MARKET_TXN,
@@ -4407,7 +4407,7 @@ public class CoopNetPump implements EveryFrameScript {
      * is owed. The seed and handshake rejects have no such ordering to protect - what they owe is a
      * doctor marker carrying the session id, and that only exists before the teardown.
      */
-    private static boolean isTerminalRejectType(CoopMessages.Type type) {
+    static boolean isTerminalRejectType(CoopMessages.Type type) {
         return type == CoopMessages.Type.SEED_LOCK_REJECT
                 || type == CoopMessages.Type.HANDSHAKE_RESULT;
     }
@@ -8293,7 +8293,7 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     /** Lobby / handshake / seed lock / resume: the pre-session control plane. */
-    private static boolean isControlPlane(CoopMessages.Type type) {
+    static boolean isControlPlane(CoopMessages.Type type) {
         return switch (type) {
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
@@ -8353,7 +8353,7 @@ public class CoopNetPump implements EveryFrameScript {
     private record DelayedInteractionClaim(CoopMessages.Message message, long releaseAtMillis) {
     }
 
-    private static boolean isHighFrequency(CoopMessages.Type type) {
+    static boolean isHighFrequency(CoopMessages.Type type) {
         return type == CoopMessages.Type.PING
                 || type == CoopMessages.Type.PONG
                 || type == CoopMessages.Type.LINK_STATUS
