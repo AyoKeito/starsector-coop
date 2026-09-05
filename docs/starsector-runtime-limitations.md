@@ -312,6 +312,8 @@ Runtime randomness cannot be fixed by seeding or forking an RNG. A shared seed o
 
 Accepted: a storm strike only hits the fleet inside its cell. Own fleets are owner-authoritative and NPC mirrors are position-forced echoes, so a strike never touches shared state. Each player just sees their own weather.
 
+Correction and deferred fix (2026-09-05, Phase 26 milestone 4, open decision): "not suppressible" is true of the script suppressor only. The plugin is registered by class name in `data/campaign/terrain.json`, `auto`/`activeCells`/`tiles` are `protected`, and `advance`/`readResolve` are overridable, so a mod-side subclass can take its place without a classpath fork. The committed generation (`cells`) only changes at the 1.5-2.5 day interval boundary and already has a deflate codec (`encodeTiles`), so it replicates as a one-shot capture per generation, like a slipstream polyline. Trackers (`CellStateTracker`) are per-client by construction: they exist only within ±10000 su of the local player and take their durations from `Math.random()` at creation, so they are keyed off `(generation, i, j)` with an elapsed catch-up instead of being shipped. Strike timing and damage stay local per fleet. Also worth knowing for the "cosmetic" claim: a storm strike grants a 1.25 s burn burst (`HyperStormBoost`) and CR damage, so two fleets travelling together do get different boosts and hits today.
+
 ### Star-corona / pulsar flares
 
 `FlareManager`, `new Random()` at line ~307. Same ownership argument as storm cells — a flare only affects the fleet it hits, no shared state involved. Accepted.

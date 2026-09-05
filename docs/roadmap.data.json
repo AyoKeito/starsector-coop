@@ -899,7 +899,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "not-built",
-      "summary": "Replicates slipstreams as outcome polylines and abyssal temporary systems via keyed EPEC re-execution so both players share hyperspace ambient content.",
+      "summary": "Replicates slipstreams as outcome polylines, abyssal temporary systems via keyed EPEC re-execution, and (M4, open) hyperspace storm grids as per-generation captures so both players share hyperspace ambient content.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopEncounterAuthority",
@@ -909,17 +909,20 @@
         "AbyssalRogueStellarObjectDireHintsEPEC fork",
         "$coopStreamId / $coopEncId / $coopEncOrdinal",
         "segment polyline + fade-state replication",
-        "bridge stream table + temp-system manifest"
+        "bridge stream table + temp-system manifest",
+        "M4: CoopHyperspaceTerrainPlugin / CoopHyperspaceAutomaton subclasses via terrain.json (no fork)",
+        "M4: CoopStormAuthority + STORM_GRID/STORM_SET + keyed trackers + bridge storm table"
       ],
       "residue": [
         "M1 slipstream capture/apply/reconcile incl. fade state + bridge-gated smoke",
         "M2 (after M1 smoke) abyssal re-execution + four corrections + dire-hint override + ordinal keys + fingerprint exclusion + bridge-gated smoke",
         "M3 abyssal lights/dire hints (open, user 2026-09-05)",
         "stretch guest-proximity triggering (open, user 2026-09-05)",
+        "M4 hyperspace storm replication: grid per generation + keyed trackers, option B recommended (open, user 2026-09-05)",
         "document residual divergences + retire v1 accept-divergence entries",
         "commit"
       ],
-      "note": "Requires Phase 13 (suppressor + coop-forks.jar); builds on Phase 9 NPC mirrors + Phase 8 hyper position. Review pass 2026-09-05 corrected four points against the API source: slipstream fades scale travel intensity (despawn fades run up to 27 days), so fade state is replicated instead of drawn locally; the dire-hints draw is filtered by per-install UniqueEncounterData, so the host ships its resolved choice; entities inside a generated system take Sector.genUID() ids that differ per client, so they are keyed by creation ordinal; and acceptance is gated on bridge diffs, not unit tests. Ordered first post-V1 (after 19, before 33/22) by user decision the same day; scope M1 + M2, M3 and stretch open."
+      "note": "Requires Phase 13 (suppressor + coop-forks.jar); builds on Phase 9 NPC mirrors + Phase 8 hyper position. Review pass 2026-09-05 corrected four points against the API source: slipstream fades scale travel intensity (despawn fades run up to 27 days), so fade state is replicated instead of drawn locally; the dire-hints draw is filtered by per-install UniqueEncounterData, so the host ships its resolved choice; entities inside a generated system take Sector.genUID() ids that differ per client, so they are keyed by creation ordinal; and acceptance is gated on bridge diffs, not unit tests. Ordered first post-V1 (after 19, before 33/22) by user decision the same day; scope M1 + M2, M3 and stretch open. M4 (storms) added the same evening after a source read: the automaton's committed grid only changes at the 1.5-2.5 day interval and has a deflate codec already, trackers are local-player-centric (±10000 su) and get keyed durations instead of being shipped, and the plugin is replaceable through terrain.json so no classpath fork is needed. Open like M3; independent of M1-M3."
     },
     {
       "id": "27",
