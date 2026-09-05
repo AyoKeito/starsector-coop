@@ -1,5 +1,6 @@
 package coop.campaign;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -77,6 +78,16 @@ public final class CoopStorageUnlockSync {
     private long lastPollMillis;
     private boolean pollSeeded;
     private boolean baselineTaken;
+    /**
+     * The market the rebuilt-plugin repair was last applied to, so it runs once per market per
+     * dialog rather than once a second (red-team P2-7). The repair normally sticks and the next poll
+     * reads {@code paid}; it does not stick when {@code StoragePlugin.playerPaidToUnlock} cannot be
+     * read at all, or when the storage submarket's plugin is not a {@code StoragePlugin} and
+     * {@code unlockPlugin} is a silent no-op. In that state the old code emitted one INFO line per
+     * second for as long as the dialog stayed open. Cleared when the dialog closes, so the next dock
+     * gets its one attempt.
+     */
+    private String repairedMarketId;
 
     public CoopStorageUnlockSync(Engine engine) {
         this.engine = Objects.requireNonNull(engine, "engine");
@@ -87,13 +98,20 @@ public final class CoopStorageUnlockSync {
         lastPollMillis = 0L;
         pollSeeded = false;
         baselineTaken = false;
+        repairedMarketId = null;
     }
 
     /**
      * The host's once-per-session baseline: every market the coop flag is already set for, so a
      * guest that joins a campaign with unlocks already paid inherits them instead of finding every
-     * locker shut. Returns the list exactly once per session; the receiver's ledger dedups it
-     * against anything it already knows.
+     * locker shut. Returns the list exactly once per session, and {@link #reset()} — which a
+     * reconnect resume now calls — is what makes the next session's first poll say it all again.
+     *
+     * <p>Two things the caller owns rather than this class. It <b>prunes</b>: a flag whose market
+     * this engine cannot resolve is not broadcast (red-team P2-6/P1-3), because the receiver would
+     * add its own copy of a dead key and both saves would grow forever. And it sends each surviving
+     * entry <b>past the world ledger</b> (red-team P0-1), because after a resume the ledger holds
+     * exactly the entries whose sends went into a dead link.
      */
     public List<String> takeBaseline() {
         if (baselineTaken) {
@@ -125,7 +143,13 @@ public final class CoopStorageUnlockSync {
         MarketAPI market = engine.dialogMarket();
         String marketId = market == null ? null : market.getId();
         if (marketId == null || marketId.isEmpty()) {
+            // The dialog is gone (or its target has no market), so the next dock is a fresh chance
+            // to repair whatever it lands on.
+            repairedMarketId = null;
             return null;
+        }
+        if (!marketId.equals(repairedMarketId)) {
+            repairedMarketId = null;
         }
         boolean flagged = engine.flagSet(marketId);
         boolean paid = engine.pluginPaid(market);
@@ -133,10 +157,16 @@ public final class CoopStorageUnlockSync {
             engine.setFlag(marketId);
             return marketId;
         }
-        if (flagged && !paid) {
+        if (flagged && !paid && repairedMarketId == null) {
             // The coop crew paid for this locker, but this engine's plugin instance does not know:
             // either the delta arrived while the market did not exist here yet, or the market was
             // rebuilt (mirrored colony / hidden base) and came back with a fresh plugin.
+            //
+            // Once per market per dialog (P2-7). When the repair works the next poll reads paid and
+            // never comes back here; when it cannot work -- an unreadable playerPaidToUnlock, or a
+            // storage submarket whose plugin is not a StoragePlugin, both of which make unlockPlugin
+            // a no-op -- retrying every second only bought one log line per second.
+            repairedMarketId = marketId;
             engine.unlockPlugin(market);
             CoopLog.info(CoopStorageUnlockSync.class,
                     "Coop re-opened rebuilt storage plugin market=" + marketId);
@@ -179,23 +209,55 @@ public final class CoopStorageUnlockSync {
      * flag is actually parked, which is the normal case.
      */
     public void onMarketIdMapped(String hostMarketId, String localMarketId) {
-        if (hostMarketId == null || localMarketId == null
-                || hostMarketId.isEmpty() || localMarketId.isEmpty()
-                || hostMarketId.equals(localMarketId)) {
+        onMarketIdMapped(hostMarketId, localMarketId, null);
+    }
+
+    /**
+     * The full form, which also takes the local id this mapping displaced (red-team P1-4).
+     *
+     * <p>A hidden base destroyed and rebuilt in the same system keeps its {@code (kind, systemId)}
+     * identity, so {@link CoopMarketIds#learn} takes its remap branch and hands the same host id a
+     * <em>new</em> local id. The flag for that base is by then parked under the <em>old local</em>
+     * id, not under the host's — it was moved there the first time the mapping was learned.
+     * Migrating only from the host id therefore did nothing: the rebuilt base's locker stayed shut,
+     * a dead {@code coop.storageUnlocked:<old local>} key stayed in the save, and the 1 Hz repair
+     * branch in {@link #pollDockedUnlock(long)} could not help because it reads the flag under the
+     * new id. Nothing short of a fresh session healed it.
+     *
+     * @param previousLocalMarketId the local id this mapping displaced, or null when it displaced
+     *                              none
+     */
+    public void onMarketIdMapped(String hostMarketId, String localMarketId,
+                                 String previousLocalMarketId) {
+        if (localMarketId == null || localMarketId.isEmpty()) {
             return;
         }
-        if (!engine.flagSet(hostMarketId)) {
+        List<String> parked = new ArrayList<>(2);
+        addParkedFlag(parked, hostMarketId, localMarketId);
+        addParkedFlag(parked, previousLocalMarketId, localMarketId);
+        if (parked.isEmpty()) {
             return;
         }
-        engine.clearFlag(hostMarketId);
+        for (String stale : parked) {
+            engine.clearFlag(stale);
+        }
         engine.setFlag(localMarketId);
         MarketAPI market = engine.findMarket(localMarketId);
         if (market != null) {
             engine.unlockPlugin(market);
         }
-        CoopLog.info(CoopStorageUnlockSync.class, "Coop moved STORAGE_UNLOCK flag from host market="
-                + hostMarketId + " to local market=" + localMarketId
+        CoopLog.info(CoopStorageUnlockSync.class, "Coop moved STORAGE_UNLOCK flag from market="
+                + String.join(",", parked) + " to local market=" + localMarketId
                 + (market == null ? " (no local market to open yet)" : ""));
+    }
+
+    /** Adds {@code candidate} when it is a real, different id this engine really holds a flag for. */
+    private void addParkedFlag(List<String> parked, String candidate, String localMarketId) {
+        if (candidate == null || candidate.isEmpty() || candidate.equals(localMarketId)
+                || parked.contains(candidate) || !engine.flagSet(candidate)) {
+            return;
+        }
+        parked.add(candidate);
     }
 
     /** The engine seam wired to {@code Global}; every read is null-safe at each step. */

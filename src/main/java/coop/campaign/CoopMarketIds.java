@@ -47,10 +47,21 @@ import coop.util.CoopLog;
  */
 public final class CoopMarketIds {
 
-    /** Notified once for every mapping this table newly learns. */
+    /**
+     * Notified once for every mapping this table newly learns.
+     *
+     * @param hostMarketId          the host's id for the base's market
+     * @param localMarketId         the id this engine now knows that market by
+     * @param previousLocalMarketId the local id this mapping displaced, or null when it displaced
+     *                              nothing. A base destroyed and rebuilt in the same system keeps
+     *                              its {@code (kind, systemId)} identity but gets a fresh
+     *                              {@code Misc.genUID()} market, so the listener's state may be
+     *                              parked under the dead id rather than under the host's (red-team
+     *                              P1-4: a storage flag stranded there left the rebuilt base locked).
+     */
     @FunctionalInterface
     public interface Listener {
-        void onMapped(String hostMarketId, String localMarketId);
+        void onMapped(String hostMarketId, String localMarketId, String previousLocalMarketId);
     }
 
     /** Insertion-ordered so {@link #mappings()} and the bridge dump read the same way twice. */
@@ -76,12 +87,20 @@ public final class CoopMarketIds {
      * The id this engine knows a wire id by. The wire id itself when unmapped — on the host that is
      * always, and on the guest that is every market except a mirrored hidden base.
      *
-     * <p>Idempotent for a local id: local ids are never keys of the host-to-local direction (they
-     * are its values), so translating an already-local id is a no-op and callers may translate
-     * defensively without having to know where their id came from.
+     * <p>Idempotent for a local id, and explicitly so: the reverse direction is consulted first and
+     * an id this table already knows as local is returned untouched. Per-mapping the two keyspaces
+     * cannot collide, but across the table they can — base A's local id and base B's host id are
+     * independent {@code Misc.genUID()} draws from two engines' counters, so nothing rules out the
+     * same string appearing as a value of one mapping and a key of another. The probability is
+     * negligible and the consequence was not (red-team P2-8: a message about base A silently
+     * resolving onto base B's market, because {@code findMarket} translates defensively on ids that
+     * are already local), so the short-circuit makes the invariant real instead of merely likely.
      */
     public String toLocal(String wireId) {
-        return wireId == null ? null : hostToLocal.getOrDefault(wireId, wireId);
+        if (wireId == null || localToHost.containsKey(wireId)) {
+            return wireId;
+        }
+        return hostToLocal.getOrDefault(wireId, wireId);
     }
 
     /**
@@ -115,11 +134,21 @@ public final class CoopMarketIds {
         localToHost.put(localMarketId, hostMarketId);
         CoopLog.info(CoopMarketIds.class,
                 "Coop learned base market id host=" + hostMarketId + " local=" + localMarketId);
-        notifyMapped(hostMarketId, localMarketId);
+        notifyMapped(hostMarketId, localMarketId, previous);
         return true;
     }
 
-    /** Session teardown: the table describes one live campaign and must not outlive it. */
+    /**
+     * Session teardown: the table describes one live campaign and must not outlive it.
+     *
+     * <p><b>One owner.</b> {@code CoopCampaignReplicator.dispose()} is the only caller (red-team
+     * P2-10). {@code CoopBaseAuthority.reset()} used to clear it too, and its edge is
+     * {@code isConnected()} alone while the replicator's is
+     * {@code isConnected() || reconnect.active()} — so every session edge and every reconnect resume
+     * wiped a table the replicator was still translating against, opening a multi-second window in
+     * which a hidden base's traffic went out under an id the host could not resolve. A stale entry
+     * for a base that is gone costs nothing: {@code findMarket} returns null for it and says so.
+     */
     public void clear() {
         hostToLocal.clear();
         localToHost.clear();
@@ -139,13 +168,13 @@ public final class CoopMarketIds {
         return hostToLocal.size();
     }
 
-    private void notifyMapped(String hostMarketId, String localMarketId) {
+    private void notifyMapped(String hostMarketId, String localMarketId, String previousLocalMarketId) {
         Listener target = listener;
         if (target == null) {
             return;
         }
         try {
-            target.onMapped(hostMarketId, localMarketId);
+            target.onMapped(hostMarketId, localMarketId, previousLocalMarketId);
         } catch (RuntimeException | LinkageError ex) {
             // The table is the load-bearing part; a failing side effect must not cost us the mapping.
             CoopLog.warn(CoopMarketIds.class, "Market-id mapping listener failed for host="

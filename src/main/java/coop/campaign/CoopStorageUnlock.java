@@ -88,6 +88,11 @@ public final class CoopStorageUnlock {
      * joining a campaign where unlocks were paid before it arrived has no other way to learn about
      * them, since nothing in the save carries them across the wire.
      *
+     * <p>Every key, including dead ones — pirate bases are destroyed routinely and colonies
+     * decivilize, and a market rebuilt under the same id is still worth opening, so nothing is
+     * removed here. The <em>broadcast</em> is what gets pruned, against this engine's own economy,
+     * in {@code CoopCampaignReplicator.tickStorageUnlock} (red-team P2-6).
+     *
      * <p>Snapshots the key set before walking it, so a poll running in the same frame as a write
      * cannot throw {@code ConcurrentModificationException} out of a baseline.
      */
@@ -136,9 +141,19 @@ public final class CoopStorageUnlock {
         }
         try {
             MethodHandle getter = paidGetter();
-            return getter != null && (boolean) getter.invoke(storagePlugin);
+            if (getter == null) {
+                // Resolution already failed once and warned; every later call is silent.
+                return false;
+            }
+            return (boolean) getter.invoke(storagePlugin);
         } catch (Throwable ex) {
-            warnOnce("Could not read StoragePlugin.playerPaidToUnlock", ex);
+            // One WARN, and it says what actually breaks rather than "degrades gracefully"
+            // (red-team P2-7). A permanently false read kills the CAPTURE side outright: the
+            // "paid && !flagged" branch in CoopStorageUnlockSync can never fire, so neither engine
+            // ever reports an unlock again and only unlocks already in persistent data survive.
+            warnOnce("Coop cannot read StoragePlugin.playerPaidToUnlock: storage-unlock CAPTURE is"
+                    + " dead on this client, so a fee paid here will never reach the partner."
+                    + " Existing coop flags still open lockers on both engines.", ex);
             return false;
         }
     }

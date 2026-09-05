@@ -81,6 +81,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -222,7 +223,8 @@ public final class CoopCampaignReplicator
      * Phase 32 addition A: the hidden-base {@code hostMarketId <-> localMarketId} table. Empty (and
      * therefore the identity function in both directions) on the host and for every market whose id
      * already agrees across the two engines, which is every market except a mirrored pirate or
-     * Luddic-Path base. {@code CoopBaseAuthority} is the only writer.
+     * Luddic-Path base. {@code CoopBaseAuthority} is the only writer, and {@link #dispose()} is the
+     * only clearer (red-team P2-10).
      */
     private final CoopMarketIds marketIds = new CoopMarketIds();
 
@@ -260,6 +262,43 @@ public final class CoopCampaignReplicator
             new CoopStorageUnlockSync(CoopStorageUnlockSync.liveEngine());
     private final CoopCommissionSync commissionSync =
             new CoopCommissionSync(CoopCommissionSync.liveEngine());
+
+    /**
+     * Guest {@code MARKET_TXN}s for a hidden base this engine has not been paired with yet, held
+     * until it is (red-team P0-2).
+     *
+     * <p>A mirrored base's market id is a local {@code Misc.genUID()} draw the host's economy cannot
+     * resolve, so a transaction sent during the unmapped window was <em>refused</em> by the host
+     * ({@code applyItemDeltaToEngine} logs and returns false) while the guest's own engine had
+     * already moved the goods. The first snapshot after the mapping landed then full-replaced the
+     * guest's locker with the host's, which never saw the deposit — the cargo was gone from both
+     * engines. Holding is the only safe answer: a transaction is a delta, so it cannot be re-derived
+     * later from state the way a snapshot can.
+     */
+    private final List<HeldMarketTxn> heldMarketTxns = new ArrayList<>();
+    /**
+     * Bound on the above. The window is one {@code BASE_SET} wide, so a handful is the realistic
+     * worst case; the cap only exists so a mapping that never lands cannot grow this without limit.
+     */
+    static final int MAX_HELD_MARKET_TXNS = 256;
+    /**
+     * Storage unlocks captured at a hidden base this engine has not been paired with yet, retried on
+     * every poll until it is (red-team P1-3). Sending one under the local id put a permanent phantom
+     * {@code coop.storageUnlocked:<guest genUID>} key into the host's save — a market the host does
+     * not have and never will, re-broadcast in its baseline every session forever — and left the
+     * host's own locker at that base shut, so the shared fee bought one side's access.
+     */
+    private final Set<String> pendingUnlockReports = new LinkedHashSet<>();
+
+    /** One held {@code MARKET_TXN}, in the local ids its caller passed. */
+    private record HeldMarketTxn(String marketId, String submarketId, CoopMarketSync.ItemKind kind,
+                                 String itemId, int qty, String detail) {
+        @Override
+        public String toString() {
+            return kind + ":" + itemId + " qty=" + qty + " market=" + marketId
+                    + " submarket=" + submarketId;
+        }
+    }
 
     // Phase 24 milestone 1: player raids/bombardments against colonies. Bidirectional -- whoever
     // performs the act captures the vanilla outcome and reports it; the host canonicalizes and
@@ -346,16 +385,29 @@ public final class CoopCampaignReplicator
         this.service = Objects.requireNonNull(service, "service");
         this.session = Objects.requireNonNull(session, "session");
         this.clock = Objects.requireNonNull(clock, "clock");
-        // A STORAGE_UNLOCK for a base can arrive before the base is mapped -- the world delta and the
-        // BASE_SET are independent messages -- and applyRemote then flags it under the host's id.
-        // Learning the mapping is the one moment that flag can be moved onto the local market.
-        marketIds.setListener(storageUnlockSync::onMarketIdMapped);
+        // Learning a mapping is the moment everything that was waiting on this base can proceed.
+        marketIds.setListener(this::onMarketIdMapped);
         // Phase 32 addition B: the transport tells the credit transfer about every queued message it
         // throws away, so an undelivered grant is refunded rather than deleted. A lambda rather than
         // the transfer itself, because replaceCreditTransferEngineForTest swaps the instance and the
         // registration has to follow the swap.
         service.setOutboundDiscardListener(
                 (message, cause) -> creditTransfer.onOutboundDiscarded(message, cause));
+    }
+
+    /**
+     * A hidden base has just been paired with the host's copy of it. Two things were waiting.
+     *
+     * <p>A {@code STORAGE_UNLOCK} for the base can arrive before the pairing — the world delta and
+     * the {@code BASE_SET} are independent messages — and {@code applyRemote} then flags it under an
+     * id this engine has no market for; this is the one moment that flag can be moved. And a
+     * {@code MARKET_TXN} the local player made in the same window was held rather than sent under an
+     * id the host cannot resolve; this is the moment it can go.
+     */
+    private void onMarketIdMapped(String hostMarketId, String localMarketId,
+                                  String previousLocalMarketId) {
+        storageUnlockSync.onMarketIdMapped(hostMarketId, localMarketId, previousLocalMarketId);
+        flushHeldMarketTxns(localMarketId, previousLocalMarketId);
     }
 
     /**
@@ -521,8 +573,10 @@ public final class CoopCampaignReplicator
         lastPlayerRepSyncMillis = 0L;
         lastSkeletonPollMillis = 0L;
         storageUnlockSync.reset();
+        reportUnflushedBaseTraffic();
         // The table names this campaign's live base markets; CoopBaseAuthority refills it from the
-        // host's post-reconnect BASE_SET.
+        // host's post-reconnect BASE_SET. This is the ONLY place it is cleared (red-team P2-10):
+        // CoopBaseAuthority.reset() runs on a narrower edge and used to wipe it mid-session.
         marketIds.clear();
         commissionSync.reset();
         lastBarPoolPollMillis = 0L;
@@ -1044,6 +1098,17 @@ public final class CoopCampaignReplicator
                 }
             }
             appliedHireables.remove(market.getId());
+            if (holdUntilBasePaired(market.getId())) {
+                // An unpaired hidden base: the only id this engine has for it is a local genUID the
+                // host's economy resolves nothing by, so the request would be answered with a debug
+                // line and no snapshot (red-team P0-2). Say nothing rather than name a market that
+                // does not exist over there, and leave the gate disarmed so the shop opens on this
+                // engine's own stock instead of greying out for the full timeout. The next dock
+                // after CoopBaseAuthority pairs the base asks normally.
+                CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_OPEN skipped: hidden base"
+                        + " not paired yet market=" + market.getId());
+                return;
+            }
             // Phase 32 addition A: a mirrored hidden base is the one market whose local id the
             // host's economy cannot resolve, so the request names the host's id for it. Identity for
             // everything else.
@@ -1981,12 +2046,89 @@ public final class CoopCampaignReplicator
      */
     private void sendMarketTxn(String marketId, String submarketId, CoopMarketSync.ItemKind kind,
                                String itemId, int qty, String detail) {
+        if (holdUntilBasePaired(marketId)) {
+            holdMarketTxn(new HeldMarketTxn(marketId, submarketId, kind, itemId, qty, detail));
+            return;
+        }
         String wireMarketId = marketIds.toWire(marketId);
         send(CoopMessages.marketTxn(session.sessionId(), service.nextSeq(), now(),
                 wireMarketId, submarketId, kind.name(), itemId, qty, 0f, session.localPlayerId(), detail));
         CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_TXN sent market=" + wireMarketId
                 + localSuffix(marketId, wireMarketId)
                 + " submarket=" + submarketId + " " + kind + ":" + itemId + " qty=" + qty);
+    }
+
+    /**
+     * Whether traffic naming this local market must wait for {@code CoopBaseAuthority} to pair the
+     * base it belongs to (red-team P0-2).
+     *
+     * <p>The same predicate the market sync gate arms on: a hidden market this guest holds no
+     * mapping for. Its id is a local {@code Misc.genUID()} draw and the host's economy resolves
+     * nothing by it, so anything sent under it is refused on arrival. False on the host, where the
+     * table is empty and every id is already the wire id.
+     */
+    private boolean holdUntilBasePaired(String localMarketId) {
+        if (!isGuest() || localMarketId == null || marketIds.isMappedLocal(localMarketId)) {
+            return false;
+        }
+        return isHiddenMarket(localMarket(localMarketId));
+    }
+
+    /** This engine's market with this exact local id, without any translation. */
+    private static MarketAPI localMarket(String localMarketId) {
+        try {
+            SectorAPI sector = Global.getSector();
+            if (sector == null || sector.getEconomy() == null || localMarketId == null) {
+                return null;
+            }
+            return sector.getEconomy().getMarket(localMarketId);
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private void holdMarketTxn(HeldMarketTxn held) {
+        if (heldMarketTxns.size() >= MAX_HELD_MARKET_TXNS) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop MARKET_TXN DROPPED: the hold queue for"
+                    + " unpaired hidden bases is full (" + MAX_HELD_MARKET_TXNS + "); the partner"
+                    + " will not see " + held);
+            return;
+        }
+        heldMarketTxns.add(held);
+        CoopLog.info(CoopCampaignReplicator.class, "Coop MARKET_TXN held until the base is paired: "
+                + held + " (held=" + heldMarketTxns.size() + ")");
+    }
+
+    /**
+     * Sends every held transaction for a base that has just been paired. Called from the market-id
+     * mapping hook, so the delay is one {@code BASE_SET} rather than the reconcile interval.
+     *
+     * @param localMarketId         the id the base now answers to here
+     * @param previousLocalMarketId the id it answered to before a rebuild, or null; transactions
+     *                              parked under it belong to the same base and are re-stamped
+     */
+    private void flushHeldMarketTxns(String localMarketId, String previousLocalMarketId) {
+        if (heldMarketTxns.isEmpty() || localMarketId == null) {
+            return;
+        }
+        List<HeldMarketTxn> ready = new ArrayList<>();
+        for (Iterator<HeldMarketTxn> it = heldMarketTxns.iterator(); it.hasNext(); ) {
+            HeldMarketTxn held = it.next();
+            if (localMarketId.equals(held.marketId())
+                    || (previousLocalMarketId != null && previousLocalMarketId.equals(held.marketId()))) {
+                it.remove();
+                ready.add(held);
+            }
+        }
+        if (ready.isEmpty()) {
+            return;
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop flushing held MARKET_TXNs market="
+                + localMarketId + " count=" + ready.size());
+        for (HeldMarketTxn held : ready) {
+            sendMarketTxn(localMarketId, held.submarketId(), held.kind(), held.itemId(),
+                    held.qty(), held.detail());
+        }
     }
 
     /** {@code " (local=<id>)"} when a translation happened, empty when the two ids are the same. */
@@ -4443,6 +4585,65 @@ public final class CoopCampaignReplicator
     }
 
     /**
+     * Teardown: say loudly what the hidden-base hold queues never got to send, and empty them.
+     *
+     * <p>A pairing that never lands means the host destroyed the base, or the guest never
+     * reconciled it, and the traffic parked behind it is now unsendable. It describes goods that
+     * moved on this engine and did not move on the other, so it belongs in the log by name rather
+     * than being dropped quietly.
+     */
+    private void reportUnflushedBaseTraffic() {
+        if (!heldMarketTxns.isEmpty()) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop session ended with " + heldMarketTxns.size()
+                    + " MARKET_TXN(s) still held for unpaired hidden bases; the partner never saw: "
+                    + heldMarketTxns);
+            heldMarketTxns.clear();
+        }
+        if (!pendingUnlockReports.isEmpty()) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Coop session ended with "
+                    + pendingUnlockReports.size() + " storage unlock(s) still unreported for"
+                    + " unpaired hidden bases; the partner's locker stays shut at: "
+                    + pendingUnlockReports);
+            pendingUnlockReports.clear();
+        }
+    }
+
+    /**
+     * The same, for a <em>baseline</em>: records the ledger entry idempotently and sends regardless
+     * of whether the ledger already held it (red-team P0-1).
+     *
+     * <p>A reconnect grace is not a teardown — {@code campaignReplicatorShouldBeActive()} keeps this
+     * replicator alive across it — so the pollers kept running with no peer attached and
+     * {@link #emitWorldDelta} kept burning ledger entries on sends that
+     * {@code CoopNetService.send} dropped into an empty peer list. The resume's
+     * {@link #rearmSessionBaselines()} re-arms the two pollers, but their first send would then be
+     * <em>refused</em> by the ledger for exactly the deltas that were lost. Clearing the ledger
+     * instead is not an option: it also holds the CONSUME set, and re-consuming a salvage entity is
+     * a double-loot.
+     */
+    private void emitWorldDeltaBaseline(CoopWorldDelta.Kind kind, String entityId, String payload) {
+        CoopWorldDelta delta = new CoopWorldDelta(entityId, kind, false, payload,
+                session.localPlayerId());
+        worldLedger.apply(delta);
+        reportWorldDelta(delta);
+    }
+
+    /**
+     * Re-arms the two once-per-session Phase 32 channels for a resume (red-team P0-1). Called from
+     * the pump's forced full rebroadcast, alongside the NPC set, the base set and the roster.
+     *
+     * <p>Neither channel heals on its own. The storage-unlock baseline is taken once per session and
+     * the commission's first poll is likewise once per session, so a fee paid or a commission signed
+     * or ended while the peer was away simply never reached it: the guest's locker stayed shut for
+     * the rest of the session (and it could be charged the fee a second time), and its
+     * military-submarket access clause read the wrong answer until the host's next commission change.
+     */
+    public void rearmSessionBaselines() {
+        storageUnlockSync.reset();
+        commissionSync.reset();
+    }
+
+    /**
      * Phase 32: storage unlocks. Both roles poll, because either player can pay the fee; the host
      * additionally ships a once-per-session baseline of everything already unlocked, which is the
      * only way a guest joining an older campaign learns about unlocks paid before it arrived.
@@ -4451,22 +4652,61 @@ public final class CoopCampaignReplicator
         try {
             if (isHost()) {
                 for (String marketId : storageUnlockSync.takeBaseline()) {
-                    emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, marketId, "true");
+                    if (findMarket(marketId) == null) {
+                        // A flag for a market this engine cannot resolve (red-team P2-6/P1-3):
+                        // a pirate base destroyed campaigns ago, a decivilized colony, or a phantom
+                        // some earlier version wrote under a guest-local id. Sending it makes the
+                        // receiver add its own copy of the dead key, so both saves grow and the
+                        // baseline burst grows with them, forever. The key itself is kept -- a
+                        // market that gets rebuilt under the same id is still worth opening.
+                        CoopLog.warn(CoopCampaignReplicator.class, "Coop STORAGE_UNLOCK baseline"
+                                + " skipped: no market here for id=" + marketId);
+                        continue;
+                    }
+                    emitWorldDeltaBaseline(CoopWorldDelta.Kind.STORAGE_UNLOCK, marketId, "true");
                 }
             }
             String unlocked = storageUnlockSync.pollDockedUnlock(now());
+            if (unlocked != null) {
+                pendingUnlockReports.add(unlocked);
+            }
+            flushPendingUnlockReports();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Storage-unlock poll failed", ex);
+        }
+    }
+
+    /**
+     * Reports every captured unlock whose market this engine can name to the peer.
+     *
+     * <p>An unlock paid at a hidden base the guest has not been paired with yet stays in the queue
+     * (red-team P1-3). Reporting it under the local id wrote
+     * {@code coop.storageUnlocked:<guest genUID>} into the <em>host's</em> persistent data — a
+     * market the host does not have and never will, which its own baseline then re-broadcast every
+     * session forever — while the host's actual locker at that base stayed shut. Nothing could clean
+     * that up either: the flag migration runs on the side that <em>learns</em> a mapping, and the
+     * host never learns one. The local flag is already set, so the paying player's own locker is
+     * open either way; only the report waits.
+     */
+    private void flushPendingUnlockReports() {
+        if (pendingUnlockReports.isEmpty()) {
+            return;
+        }
+        for (Iterator<String> it = pendingUnlockReports.iterator(); it.hasNext(); ) {
+            String unlocked = it.next();
+            if (holdUntilBasePaired(unlocked)) {
+                continue;
+            }
+            it.remove();
             // Phase 32 addition A: the poll reads the local market behind the dialog, so a hidden
             // base's unlock must be reported under the host's id or the far side flags a market that
             // does not exist there.
             String wireUnlocked = marketIds.toWire(unlocked);
-            if (unlocked != null
-                    && emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, wireUnlocked, "true")) {
+            if (emitWorldDelta(CoopWorldDelta.Kind.STORAGE_UNLOCK, wireUnlocked, "true")) {
                 CoopLog.info(CoopCampaignReplicator.class,
                         "Coop captured STORAGE_UNLOCK market=" + wireUnlocked
                                 + localSuffix(unlocked, wireUnlocked));
             }
-        } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopCampaignReplicator.class, "Storage-unlock poll failed", ex);
         }
     }
 
@@ -4477,7 +4717,21 @@ public final class CoopCampaignReplicator
         }
         try {
             String factionId = commissionSync.poll(now());
-            if (factionId != null && emitWorldDelta(CoopWorldDelta.Kind.COMMISSION,
+            if (factionId == null) {
+                return;
+            }
+            if (commissionSync.lastPollWasSessionBaseline()) {
+                // The session's first read, and it goes out whatever it says and whatever the ledger
+                // already holds (red-team P0-1/P1-5). After a resume the ledger's COMMISSION entry
+                // is whatever the pre-outage host last polled, which is exactly the value the
+                // returning peer may be wrong about.
+                emitWorldDeltaBaseline(CoopWorldDelta.Kind.COMMISSION,
+                        CoopCommissionSync.ENTITY_ID, factionId);
+                CoopLog.info(CoopCampaignReplicator.class, "Coop sending COMMISSION baseline faction="
+                        + CoopCommissionSync.describe(factionId));
+                return;
+            }
+            if (emitWorldDelta(CoopWorldDelta.Kind.COMMISSION,
                     CoopCommissionSync.ENTITY_ID, factionId)) {
                 CoopLog.info(CoopCampaignReplicator.class,
                         "Coop captured COMMISSION faction=" + CoopCommissionSync.describe(factionId));

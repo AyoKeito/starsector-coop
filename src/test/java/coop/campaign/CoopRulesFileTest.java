@@ -42,6 +42,20 @@ class CoopRulesFileTest {
     /** Every academy root entry, mapped to vanilla conditions that must have survived the copy. */
     private static final Map<String, List<String>> ACADEMY_GATE = academyGate();
 
+    /**
+     * The two commission entries, same shape. They are the only {@code PopulateOptions} rows in
+     * vanilla that offer {@code cmsn_askCommission} / {@code cmsn_resignCommission}, so replacing
+     * them removes the whole branch on a guest; every other {@code cmsn_*} row is a
+     * {@code DialogOptionSelected} on an option that is never shown.
+     */
+    private static final Map<String, List<String>> COMMISSION_GATE = Map.of(
+            "cmsn_askForCommissionOpt",
+            List.of("$isPerson", "Commission personCanGiveCommission",
+                    "!Commission hasFactionCommission"),
+            "cmsn_resignCommissionOpt",
+            List.of("$isPerson", "Commission personCanGiveCommission",
+                    "Commission hasFactionCommission"));
+
     private static Map<String, List<String>> academyGate() {
         Map<String, List<String>> gate = new LinkedHashMap<>();
         gate.put("goToTheGABarEventOption",
@@ -96,12 +110,41 @@ class CoopRulesFileTest {
 
     @Test
     void everyAcademyRootEntryIsGatedOnTheGuestFlag() throws IOException {
+        assertGated(ACADEMY_GATE);
+    }
+
+    /**
+     * Red-team P1-5. The commission mirror's whole model is "the host signs, the guest reads one
+     * memory key"; nothing enforced it, so a guest could dock at any faction market and take a
+     * commission through vanilla, giving it a private salary, private bounties, and an
+     * {@code $fcm_faction} its own intel would later clear out from under the mirrored value.
+     */
+    @Test
+    void bothCommissionOptionsAreGatedOnTheGuestFlag() throws IOException {
+        assertGated(COMMISSION_GATE);
+    }
+
+    @Test
+    void theGatedOptionIdsTheLogNamesAreTheOnesTheCsvActuallyWithholds() throws IOException {
+        Map<String, String> optionsById = new LinkedHashMap<>();
+        for (List<String> row : rows()) {
+            optionsById.put(row.get(0), row.get(5));
+        }
+        for (String optionId : CoopStoryChainGate.GUEST_GATED_OPTIONS) {
+            assertTrue(optionsById.values().stream().anyMatch(o -> o.contains(optionId + ":")),
+                    "the log names " + optionId + " but no replaced row offers it");
+        }
+        assertTrue(optionsById.get("cmsn_askForCommissionOpt").contains("cmsn_askCommission:"));
+        assertTrue(optionsById.get("cmsn_resignCommissionOpt").contains("cmsn_resignCommission:"));
+    }
+
+    private static void assertGated(Map<String, List<String>> gate) throws IOException {
         Map<String, String> conditionsById = new LinkedHashMap<>();
         for (List<String> row : rows()) {
             conditionsById.put(row.get(0), row.get(2));
         }
 
-        for (Map.Entry<String, List<String>> entry : ACADEMY_GATE.entrySet()) {
+        for (Map.Entry<String, List<String>> entry : gate.entrySet()) {
             String id = entry.getKey();
             String conditions = conditionsById.get(id);
             assertNotNull(conditions, "no row replaces vanilla rule " + id);

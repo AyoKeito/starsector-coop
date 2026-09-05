@@ -48,6 +48,18 @@ import static coop.testing.TestSessions.activeHostSession;
  */
 class CoopSkeletonMutationReplicatorTest {
 
+    /**
+     * {@code Misc} builds static {@code Color} fields from {@code Global.getSettings()} in its
+     * {@code <clinit>}, and a class whose static init throws is broken for the life of the JVM. The
+     * host's {@code tickWorldDeltas()} now reaches {@code Misc.getCommissionFactionId} through the
+     * Phase 32 commission poll, so this class installs settings rather than leaving it to whichever
+     * test class happens to run first.
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void stubSettings() {
+        com.fs.starfarer.api.Global.setSettings(ApiProxies.whiteSettings());
+    }
+
     @AfterEach
     void clearGlobalSector() {
         Global.setSector(null);
@@ -67,7 +79,7 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeHostSession(), clock);
 
         replicator.tickWorldDeltas();
-        assertTrue(service.sent.isEmpty(), "the seeding poll reports nothing");
+        assertTrue(skeletonSends(service.sent).isEmpty(), "the seeding poll reports nothing");
 
         relay.factionId = "pirates";
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
@@ -100,7 +112,7 @@ class CoopSkeletonMutationReplicatorTest {
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS - 1);
         replicator.tickWorldDeltas();
 
-        assertTrue(service.sent.isEmpty());
+        assertTrue(skeletonSends(service.sent).isEmpty());
     }
 
     @Test
@@ -116,12 +128,13 @@ class CoopSkeletonMutationReplicatorTest {
 
         replicator.tickWorldDeltas();
 
-        assertEquals(1, service.sent.size());
-        assertEquals("GATE_ACTIVATED", CoopMessages.requiredPayloadString(service.sent.get(0), "kind"));
+        List<CoopMessages.Message> sent = skeletonSends(service.sent);
+        assertEquals(1, sent.size());
+        assertEquals("GATE_ACTIVATED", CoopMessages.requiredPayloadString(sent.get(0), "kind"));
         assertEquals("gate-galatia",
-                CoopMessages.requiredPayloadString(service.sent.get(0), "entityId"));
+                CoopMessages.requiredPayloadString(sent.get(0), "entityId"));
         assertEquals(CoopSkeletonMutationWatcher.encodeGateState(true, false, false, false),
-                CoopMessages.requiredPayloadString(service.sent.get(0), "newStateJson"));
+                CoopMessages.requiredPayloadString(sent.get(0), "newStateJson"));
     }
 
     /**
@@ -227,7 +240,7 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeHostSession(), clock);
 
         replicator.tickWorldDeltas(); // seed silently
-        assertTrue(service.sent.isEmpty());
+        assertTrue(skeletonSends(service.sent).isEmpty());
 
         replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L, "gate-tia", "GATE_ACTIVATED",
                 false, CoopSkeletonMutationWatcher.encodeGateState(true, false, false, false),
@@ -236,12 +249,13 @@ class CoopSkeletonMutationReplicatorTest {
         assertTrue(gate.memory.getBoolean(GateEntityPlugin.GATE_SCANNED));
         assertEquals(1, sector.memory.values.get(GateEntityPlugin.NUM_GATES_SCANNED),
                 "vanilla's own counter is bumped alongside the flag");
-        assertEquals(1, service.sent.size(), "rebroadcast exactly once");
+        assertEquals(1, skeletonSends(service.sent).size(), "rebroadcast exactly once");
 
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
         replicator.tickWorldDeltas();
 
-        assertEquals(1, service.sent.size(), "the host's poll must not re-report what it just applied");
+        assertEquals(1, skeletonSends(service.sent).size(),
+                "the host's poll must not re-report what it just applied");
     }
 
     /**
@@ -287,7 +301,7 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeHostSession(), clock);
 
         replicator.tickWorldDeltas(); // reports the already-scanned gate
-        assertEquals(1, service.sent.size());
+        assertEquals(1, skeletonSends(service.sent).size());
         int writes = gate.memory.writes;
 
         replicator.handle(CoopMessages.worldDelta("session-a", 2L, 0L, "gate-tia", "GATE_ACTIVATED",
@@ -361,7 +375,7 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeHostSession(), clock);
 
         replicator.tickWorldDeltas(); // seed the host baseline at "hegemony"
-        assertTrue(service.sent.isEmpty());
+        assertTrue(skeletonSends(service.sent).isEmpty());
 
         replicator.handle(CoopMessages.worldDelta("session-a", 1L, 0L, "relay-1",
                 "OBJECTIVE_OWNERSHIP", false, "player", "guest-player"));
@@ -372,7 +386,8 @@ class CoopSkeletonMutationReplicatorTest {
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
         replicator.tickWorldDeltas();
 
-        assertEquals(1, service.sent.size(), "the host's poll must not re-report what it just applied");
+        assertEquals(1, skeletonSends(service.sent).size(),
+                "the host's poll must not re-report what it just applied");
     }
 
     // ---- Survey levels + ruins (Phase 12c build task D) ----------------------------------------
@@ -390,7 +405,8 @@ class CoopSkeletonMutationReplicatorTest {
                 service, activeHostSession(), clock);
 
         replicator.tickWorldDeltas();
-        assertTrue(service.sent.isEmpty(), "hundreds of identical planets must not seed the wire");
+        assertTrue(skeletonSends(service.sent).isEmpty(),
+                "hundreds of identical planets must not seed the wire");
 
         planet.level = MarketAPI.SurveyLevel.SEEN;
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
@@ -405,10 +421,11 @@ class CoopSkeletonMutationReplicatorTest {
         replicator.tickWorldDeltas();
 
         assertEquals(List.of("SEEN", "PRELIMINARY", "FULL"), payloadsOfKind(service.sent, "SURVEY"));
-        assertEquals("planet-1", CoopMessages.requiredPayloadString(service.sent.get(0), "entityId"));
+        List<CoopMessages.Message> sent = skeletonSends(service.sent);
+        assertEquals("planet-1", CoopMessages.requiredPayloadString(sent.get(0), "entityId"));
         // SEEN is replicated too: the system map colours a system by its minimum survey level, so
         // filtering it out would leave the two maps visibly different.
-        assertEquals(3, service.sent.size(), "the star has no survey state of its own");
+        assertEquals(3, sent.size(), "the star has no survey state of its own");
     }
 
     /** Both players survey, so the guest polls and reports its own surveys upward. */
@@ -462,7 +479,8 @@ class CoopSkeletonMutationReplicatorTest {
 
         clock.advance(CoopCampaignReplicator.SKELETON_POLL_INTERVAL_MILLIS);
         replicator.tickWorldDeltas();
-        assertEquals(1, service.sent.size(), "the host's poll must not re-report what it just applied");
+        assertEquals(1, skeletonSends(service.sent).size(),
+                "the host's poll must not re-report what it just applied");
     }
 
     @Test
@@ -742,6 +760,27 @@ class CoopSkeletonMutationReplicatorTest {
     }
 
     // ---- Helpers -------------------------------------------------------------------------------
+
+    /**
+     * Everything sent except the Phase 32 commission baseline.
+     *
+     * <p>The host's first {@code tickWorldDeltas()} of a session now reports the current commission
+     * unconditionally, empty payload included (red-team P1-5): a guest returning from a reconnect
+     * may be carrying a mirrored faction the host no longer holds, and nothing else on the wire ever
+     * corrects that. It rides the same tick as every capture in this file and is one extra
+     * {@code WORLD_DELTA} in front of them, so the counts here strip it rather than absorbing it
+     * into numbers that no longer say what they mean.
+     */
+    private static List<CoopMessages.Message> skeletonSends(List<CoopMessages.Message> sent) {
+        List<CoopMessages.Message> filtered = new ArrayList<>();
+        for (CoopMessages.Message message : sent) {
+            if (!CoopWorldDelta.Kind.COMMISSION.name()
+                    .equals(CoopMessages.requiredPayloadString(message, "kind"))) {
+                filtered.add(message);
+            }
+        }
+        return filtered;
+    }
 
     private static List<String> ownershipPayloads(List<CoopMessages.Message> sent) {
         return payloadsOfKind(sent, "OBJECTIVE_OWNERSHIP");

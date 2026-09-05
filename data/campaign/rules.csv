@@ -223,3 +223,36 @@ hamatsu_PostShipRecoverySpecial,PostShipRecoverySpecial,"$srs_memberId == hamats
 gaDevMenuOption,PopulateOptions,"$id == station_galatia_academy
 $global.isDevMode
 !$global.coopIsGuest",SetOptionColor gaDev_optionsMenu gray,,200:gaDev_optionsMenu:>> (dev) GA test options,
+,,,,,,
+"# (5) FACTION COMMISSIONS, OFF ON THE GUEST. Same flag, same mechanism as section (4).",,,,,,
+"# A commission is run by a FactionCommissionIntel: it is registered as a sector script and a",,,,,,
+"# listener, it pays the monthly salary, it posts and settles commission bounties, and it undoes",,,,,,
+"# its own reputation changes when the commission ends. None of that is on the wire, and a",,,,,,
+"# second copy on the guest would pay a second salary and terminate twice. So the host signs",,,,,,
+"# and coop.campaign.CoopCommissionSync mirrors the ONE key vanilla actually reads for shared",,,,,,
+"# submarket access -- $fcm_faction -- onto the guest, which is what makes the guest's military",,,,,,
+"# submarket agree with the host's. That model assumed the guest would never sign one. Nothing",,,,,,
+"# enforced it: the guest could dock at any faction market and take a commission through",,,,,,
+"# vanilla, giving it a private salary, private bounties, and an $fcm_faction its own intel",,,,,,
+"# would later CLEAR out from under the mirrored value.",,,,,,
+,,,,,,
+"# Two rows, both PopulateOptions, both copied verbatim with the guest condition appended.",,,,,,
+"# They are the only entries in vanilla rules.csv that offer these two options, so gating them",,,,,,
+"# removes the whole conversation branch rather than stopping it halfway; every cmsn_* row",,,,,,
+"# downstream is a DialogOptionSelected on an option the guest is never shown.",,,,,,
+"#   - cmsn_askForCommissionOpt: offers cmsn_askCommission, the only way into Commission accept.",,,,,,
+"#   - cmsn_resignCommissionOpt: offers cmsn_resignCommission, the only way into Commission",,,,,,
+"#     resign. Gated for the mirror's sake, not the host's: its vanilla condition is",,,,,,
+"#     'Commission hasFactionCommission', which reads the very $fcm_faction the mirror writes,",,,,,,
+"#     so on a guest it is TRUE for the host's commission. Vanilla would have offered the guest",,,,,,
+"#     the option to resign a commission that belongs to the other client's intel, and unset the",,,,,,
+"#     mirrored key on the way out.",,,,,,
+,,,,,,
+cmsn_askForCommissionOpt,PopulateOptions,"$isPerson
+Commission personCanGiveCommission
+!Commission hasFactionCommission
+!$global.coopIsGuest",,,"20:cmsn_askCommission:""I'd like to be commissioned by $theFaction""",
+cmsn_resignCommissionOpt,PopulateOptions,"$isPerson
+Commission personCanGiveCommission
+Commission hasFactionCommission
+!$global.coopIsGuest",,,"20:cmsn_resignCommission:""I'd like to resign my $faction commission""",

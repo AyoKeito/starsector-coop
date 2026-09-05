@@ -89,7 +89,7 @@ class CoopMarketIdsTest {
     void relearningTheSamePairChangesNothingAndFiresNoListener() {
         CoopMarketIds ids = new CoopMarketIds();
         List<String> mapped = new ArrayList<>();
-        ids.setListener((host, local) -> mapped.add(host + "->" + local));
+        ids.setListener((host, local, previousLocal) -> mapped.add(host + "->" + local));
 
         assertTrue(ids.learn(HOST_BASE, LOCAL_BASE));
         assertFalse(ids.learn(HOST_BASE, LOCAL_BASE), "the guest reconcile re-pairs every 5 seconds");
@@ -113,6 +113,43 @@ class CoopMarketIdsTest {
     }
 
     @Test
+    void aRemapTellsTheListenerWhichLocalIdItDisplaced() {
+        // Red-team P1-4: the listener's state (a storage flag) is parked under the OLD local id
+        // after the first mapping, not under the host's, so a remap that does not name the displaced
+        // id leaves it stranded and the rebuilt base locked.
+        CoopMarketIds ids = new CoopMarketIds();
+        List<String> mapped = new ArrayList<>();
+        ids.setListener((host, local, previousLocal) ->
+                mapped.add(host + "->" + local + " was=" + previousLocal));
+
+        ids.learn(HOST_BASE, LOCAL_BASE);
+        ids.learn(HOST_BASE, "market_REBUILT");
+
+        assertEquals(List.of(
+                HOST_BASE + "->" + LOCAL_BASE + " was=null",
+                HOST_BASE + "->market_REBUILT was=" + LOCAL_BASE), mapped);
+    }
+
+    @Test
+    void toLocalShortCircuitsAnIdThisTableAlreadyKnowsAsLocal() {
+        // Red-team P2-8. Base A's local id and base B's host id are independent Misc.genUID() draws
+        // from two engines' counters, so nothing rules out the same string being a value of one
+        // mapping and a key of another -- and findMarket translates defensively on ids that are
+        // already local, so a collision would silently resolve a message about A onto B's market.
+        CoopMarketIds ids = new CoopMarketIds();
+        ids.learn("host-A", "collision");
+        ids.learn("host-B", "local-B");
+        // ...and now the same string turns up as base C's host id.
+        ids.learn("collision", "local-C");
+
+        assertEquals("collision", ids.toLocal("collision"),
+                "an id this table knows as local comes back untouched; it used to resolve to local-B");
+        assertEquals("collision", ids.toLocal(ids.toLocal("collision")), "and stays idempotent");
+        assertEquals("local-B", ids.toLocal("host-B"), "a genuine host id still translates");
+        assertEquals("unmapped", ids.toLocal("unmapped"), "and an unknown id is still the identity");
+    }
+
+    @Test
     void clearForgetsEverything() {
         CoopMarketIds ids = new CoopMarketIds();
         ids.learn(HOST_BASE, LOCAL_BASE);
@@ -128,7 +165,7 @@ class CoopMarketIdsTest {
         // The table is the load-bearing part. A failing storage-unlock migration must not take the
         // mapping down with it, or every market message for that base stays broken.
         CoopMarketIds ids = new CoopMarketIds();
-        ids.setListener((host, local) -> {
+        ids.setListener((host, local, previousLocal) -> {
             throw new IllegalStateException("boom");
         });
 
