@@ -488,6 +488,10 @@ public class CoopNetService {
      * order and go out once the resume completes; the resume request itself travels through this same
      * queue, which is why the gate is per message rather than per peer.
      *
+     * <p>Not the only guard: {@link #allowedBeforeProof} is the transport's own copy of the rule, keyed
+     * on the socket's {@link CoopPeerLink#proven()} flag rather than on the pump's grace state, and it
+     * covers the one frame between a replacement attaching and the pump noticing.
+     *
      * @param gate null restores "write everything", which is the state before a pump installs one
      */
     public void setOutboundWriteGate(java.util.function.Predicate<CoopMessages.Type> gate) {
@@ -1001,6 +1005,26 @@ public class CoopNetService {
                  SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT -> true;
             default -> false;
         };
+    }
+
+    /**
+     * What a socket that has not proved itself may be sent while a session token is set (net-fix-8):
+     * the connection vocabulary above plus the keepalive pair. Everything else is session traffic
+     * and waits in the queue for {@link CoopPeerLink#proven()}.
+     *
+     * <p>The pump's {@link #setOutboundWriteGate} covers the same ground from the far side of the
+     * drop edge, and it is one frame late by construction: the half-open replacement attaches inside
+     * the previous frame's inbound drain, and the next frame's head-of-frame flush runs before
+     * {@code detectPeerDisconnect} opens the grace window. In that frame the pump's gate reads
+     * "no grace, write everything" while the socket in the slot has authenticated nothing, and a
+     * {@code WORLD_DELTA} written to it is not delivered - the receiver's own whitelist drops
+     * session traffic from an unproven generation - it is destroyed. The transport knows the
+     * socket is fresh the instant it attaches, so the rule lives here too.
+     */
+    static boolean allowedBeforeProof(CoopMessages.Type type) {
+        return isConnectionScopedControl(type)
+                || type == CoopMessages.Type.PING
+                || type == CoopMessages.Type.PONG;
     }
 
     /**
@@ -2280,6 +2304,9 @@ public class CoopNetService {
         }
 
         java.util.function.Predicate<CoopMessages.Type> gate = outboundWriteGate;
+        // net-fix-8: a session is live (token set) and the socket in this slot has not proved itself
+        // - a fresh attach into a slot whose previous occupant had. See allowedBeforeProof.
+        boolean holdSessionTraffic = expectedSessionToken != null && !peer.proven();
         CoopMessages.Message inFlight = null;
         try {
             if (peer.pendingWrite() != null && !writePendingLocked(peer, channel)) {
@@ -2294,6 +2321,14 @@ public class CoopNetService {
             while (cursor.hasNext()) {
                 CoopMessages.Message message = cursor.next();
                 if (gate != null && !gate.test(message.type())) {
+                    continue;
+                }
+                if (holdSessionTraffic && !allowedBeforeProof(message.type())) {
+                    if (peer.notePreProofHold()) {
+                        CoopLog.info(CoopNetService.class, "Coop TCP holding session traffic (first "
+                                + message.type() + ") on peer slot " + peer.slot()
+                                + " until the new connection proves itself");
+                    }
                     continue;
                 }
                 cursor.remove();

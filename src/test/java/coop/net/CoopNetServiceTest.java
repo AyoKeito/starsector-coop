@@ -2264,6 +2264,128 @@ class CoopNetServiceTest {
         }
     }
 
+    /**
+     * net-fix-8: the transport's own half of that rule, with no pump gate installed at all. A session
+     * token is set (the partner authenticated on the previous socket) and the socket now in the slot
+     * has proved nothing: session traffic waits, the connection vocabulary and the keepalive pair go
+     * out, and the backlog flushes the instant the socket is marked proven.
+     */
+    @Test
+    void sessionTrafficIsHeldForAnUnprovenSocketWhileASessionTokenIsSet() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService stranger = new CoopNetService();
+        try {
+            host.startHost(port);
+            // The partner's session is still live when a fresh socket lands in the slot.
+            host.setExpectedSessionToken(TOKEN);
+            stranger.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, stranger), "a fresh socket took the slot");
+
+            host.send(new CoopMessages.Message(
+                    CoopMessages.Type.WORLD_DELTA, SESSION_ID, 1L, 1000L, "{}"));
+            host.send(CoopMessages.ping(SESSION_ID, 2L, 1000L));
+            host.send(CoopMessages.sessionResumeAccept(SESSION_ID, 3L, 1000L));
+            host.send(new CoopMessages.Message(
+                    CoopMessages.Type.MARKET_TXN, SESSION_ID, 4L, 1000L, "{}"));
+
+            List<CoopMessages.Message> drained = new ArrayList<>();
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                stranger.beginFrame();
+                stranger.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = stranger.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return drained.size() >= 2;
+            }, "the keepalive and the resume verdict crossed");
+
+            assertEquals(List.of(CoopMessages.Type.PING, CoopMessages.Type.SESSION_RESUME_ACCEPT),
+                    List.of(drained.get(0).type(), drained.get(1).type()),
+                    "only the pre-proof vocabulary reaches an unproven socket");
+            assertEquals(2, host.outboundQueueDepth(), "session traffic is held, not dropped");
+
+            // The resume was accepted for this socket: same token, re-set, marks it proven.
+            host.setExpectedSessionToken(TOKEN);
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                stranger.beginFrame();
+                stranger.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = stranger.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return drained.size() == 4;
+            }, "the backlog flushed once the socket was proven");
+            assertEquals(List.of(1L, 4L), List.of(drained.get(2).seq(), drained.get(3).seq()),
+                    "the held messages keep their order");
+        } finally {
+            stranger.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The scenario behind net-fix-8, end to end on real sockets: the proven partner's link dies, a
+     * replacement attaches into the slot before anyone has cleared the session token, and a
+     * {@code WORLD_DELTA} queued for the partner is flushed. It must not be written to the
+     * replacement - the proof belonged to the dead socket - and it must still be there for the
+     * socket that does prove itself.
+     */
+    @Test
+    void aReplacementSocketDoesNotInheritTheDeadConnectionsProof() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService partner = new CoopNetService();
+        CoopNetService replacement = new CoopNetService();
+        try {
+            host.startHost(port);
+            partner.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, partner), "the partner connected");
+            // The handshake was accepted on this socket.
+            host.setExpectedSessionToken(TOKEN);
+
+            host.send(new CoopMessages.Message(
+                    CoopMessages.Type.WORLD_DELTA, SESSION_ID, 1L, 1000L, "{}"));
+            // The partner's link dies before the flush; nothing has cleared the token yet.
+            partner.shutdown();
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                return !host.isConnected();
+            }, "the host noticed the dead link");
+            assertEquals(1, host.outboundQueueDepth(), "the delta survives the drop, queued");
+
+            replacement.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, replacement), "a replacement took the slot");
+            host.send(CoopMessages.ping(SESSION_ID, 2L, 1000L));
+
+            List<CoopMessages.Message> drained = new ArrayList<>();
+            waitUntil(() -> {
+                host.beginFrame();
+                host.flushOutbound();
+                replacement.beginFrame();
+                replacement.flushOutbound();
+                CoopMessages.Message message;
+                while ((message = replacement.pollInbound()) != null) {
+                    drained.add(message);
+                }
+                return !drained.isEmpty();
+            }, "the keepalive crossed to the replacement");
+            assertEquals(1, drained.size(), "the keepalive is all the replacement gets");
+            assertEquals(CoopMessages.Type.PING, drained.get(0).type());
+            assertEquals(1, host.outboundQueueDepth(),
+                    "the partner's delta is still queued for whoever proves itself");
+        } finally {
+            replacement.shutdown();
+            partner.shutdown();
+            host.shutdown();
+        }
+    }
+
     // ---- net-fix-3: the inbound budgets are per campaign frame -----------------------------------
 
     /**

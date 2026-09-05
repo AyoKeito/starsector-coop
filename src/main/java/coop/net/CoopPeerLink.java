@@ -134,6 +134,8 @@ public final class CoopPeerLink {
     private boolean candidateTimeoutLogged;
     private boolean queueDepthWarned;
     private boolean datagramSendFailureLogged;
+    /** One "held until proven" line per socket; see {@code CoopNetService#flushOutboundLocked}. */
+    private boolean preProofHoldLogged;
     /**
      * One oversized-frame line per connection. It used to be one per megabyte of garbage, which is a
      * log-writing primitive handed to whoever opens the socket (net-fix-3).
@@ -201,6 +203,7 @@ public final class CoopPeerLink {
         this.queueDepthWarned = false;
         this.datagramSendFailureLogged = false;
         this.oversizedFrameWarned = false;
+        this.preProofHoldLogged = false;
         forgetCandidate();
         dropConnectionScopedOutbound();
         if (clearValidatedUdpAddress) {
@@ -286,6 +289,15 @@ public final class CoopPeerLink {
      */
     void markProven() {
         this.proven = true;
+    }
+
+    /** True the first time per socket; the flush logs its pre-proof hold once, not per frame. */
+    boolean notePreProofHold() {
+        if (preProofHoldLogged) {
+            return false;
+        }
+        preProofHoldLogged = true;
+        return true;
     }
 
     /** Bytes carried over from a poll that hit its frame ceiling, or null. */
