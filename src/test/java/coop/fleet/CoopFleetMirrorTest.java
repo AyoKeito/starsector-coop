@@ -3,6 +3,8 @@ package coop.fleet;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import coop.util.CoopDebug;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -251,6 +253,61 @@ class CoopFleetMirrorTest {
 
         CoopFleetMirror.assertIgnoresOtherFleets(throwing);
         CoopFleetMirror.assertIgnoresOtherFleets(null);
+    }
+
+    // ---- The ally pull-in spike (-Dcoop.debug.allyPullIn) -----------------------------------------
+
+    @AfterEach
+    void disarmTheSpike() {
+        CoopDebug.setAllyPullInForTesting(false, false);
+    }
+
+    @Test
+    void theShippedPlayerMirrorIsUnjoinableAtCreationAndStaysThatWay() {
+        FakeMemory created = new FakeMemory();
+        CoopFleetMirror.stampPlayerMirrorMemory(created.proxy());
+
+        assertEquals(Boolean.TRUE, created.values.get(MemFlags.FLEET_IGNORES_OTHER_FLEETS));
+        assertEquals(Boolean.TRUE, created.values.get(CoopMirrorTags.PLAYER_MIRROR_TAG));
+
+        // And the per-apply re-assert puts it back if anything drops it mid-session.
+        FakeMemory dropped = new FakeMemory();
+        CoopFleetMirror.assertIgnoresOtherFleets(fleetWith(dropped), true);
+        assertEquals(Boolean.TRUE, dropped.values.get(MemFlags.FLEET_IGNORES_OTHER_FLEETS));
+    }
+
+    @Test
+    void theArmedSpikeLeavesThePlayerMirrorJoinableAtCreationAndOnEveryApply() {
+        // Being joinable is the point: FLEET_IGNORES_OTHER_FLEETS is the only thing pullInNearbyFleets
+        // consults, so the re-assert would put the mirror back out of reach on the next snapshot.
+        CoopDebug.setAllyPullInForTesting(true, false);
+
+        FakeMemory created = new FakeMemory();
+        CoopFleetMirror.stampPlayerMirrorMemory(created.proxy());
+        assertFalse(created.values.containsKey(MemFlags.FLEET_IGNORES_OTHER_FLEETS));
+        assertEquals(Boolean.TRUE, created.values.get(CoopMirrorTags.PLAYER_MIRROR_TAG),
+                "it is still the partner's mirror, and everything else keys off that tag");
+
+        FakeMemory live = new FakeMemory();
+        CoopFleetMirror.assertIgnoresOtherFleets(fleetWith(live), true);
+        assertEquals(0, live.writes, "the per-apply re-assert must not put the flag back");
+    }
+
+    @Test
+    void theArmedSpikeDoesNotTouchNpcMirrors() {
+        // Only the partner's own fleet is being exposed. An NPC mirror joining a host battle would be
+        // a second, unrelated failure mode in the same log.
+        CoopDebug.setAllyPullInForTesting(true, true);
+
+        FakeMemory created = new FakeMemory();
+        CoopFleetMirror.stampNpcMirrorMemory(created.proxy(), "fleet-7");
+        assertEquals(Boolean.TRUE, created.values.get(MemFlags.FLEET_IGNORES_OTHER_FLEETS));
+        assertEquals("fleet-7", created.values.get(CoopMirrorTags.NPC_MIRROR_TAG));
+
+        FakeMemory live = new FakeMemory();
+        CoopFleetMirror.assertIgnoresOtherFleets(fleetWith(live));
+        assertEquals(Boolean.TRUE, live.values.get(MemFlags.FLEET_IGNORES_OTHER_FLEETS));
+        assertEquals(1, live.writes);
     }
 
     /** Just the two MemoryAPI calls the shield assert makes, with a write counter. */

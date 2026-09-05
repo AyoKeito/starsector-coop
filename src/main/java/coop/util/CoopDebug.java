@@ -46,6 +46,23 @@ public final class CoopDebug {
      */
     public static final int MAX_INTERACTION_DELAY_MILLIS = 60_000;
 
+    /**
+     * Live spike: {@code -Dcoop.debug.allyPullIn=true} stops the <em>player</em> mirror from carrying
+     * {@code FLEET_IGNORES_OTHER_FLEETS} and stops the host's per-frame battle eject, so the engine is
+     * allowed to drag the partner's mirror into a battle as an ally and the log can record what it
+     * then does. Off in every shipped session; on, the mirror is unprotected and can be shot at.
+     */
+    public static final String ALLY_PULL_IN_PROPERTY = CoopOptionsRegistry.DEBUG_ALLY_PULL_IN;
+
+    /**
+     * Second run of the same spike: {@code -Dcoop.debug.allyPullInDropShield=true} additionally drops
+     * the player mirror's {@code setNoEngaging} shield. Only meaningful together with
+     * {@link #ALLY_PULL_IN_PROPERTY}, which is why {@link #allyPullInDropShieldEnabled()} ands the two
+     * — the point of keeping them separate is being able to tell the two effects apart in one log.
+     */
+    public static final String ALLY_PULL_IN_DROP_SHIELD_PROPERTY =
+            CoopOptionsRegistry.DEBUG_ALLY_PULL_IN_DROP_SHIELD;
+
     /** How often {@link #pollFrame()} re-reads the toggle, in pump frames (~5 s at 60 fps). */
     static final int TOGGLE_POLL_FRAMES = 300;
 
@@ -62,6 +79,15 @@ public final class CoopDebug {
      * on the same poll as {@link #enabled} (so it can also be flipped from the console mid-session).
      */
     private static volatile int interactionClaimDelayMillis = readInteractionClaimDelayMillis();
+    /**
+     * The ally pull-in spike switches. Seeded once at class init and never polled: unlike the
+     * diagnostics toggle there is no in-game flag for them, and both are read from paths that must
+     * cost a field access — {@code assertIgnoresOtherFleets} runs on every snapshot apply and the
+     * host's battle eject runs on every frame.
+     */
+    private static volatile boolean allyPullIn = Boolean.getBoolean(ALLY_PULL_IN_PROPERTY);
+    private static volatile boolean allyPullInDropShield =
+            Boolean.getBoolean(ALLY_PULL_IN_DROP_SHIELD_PROPERTY);
     private static int pollFrames;
 
     private CoopDebug() {
@@ -78,6 +104,23 @@ public final class CoopDebug {
      */
     public static int interactionClaimDelayMillis() {
         return interactionClaimDelayMillis;
+    }
+
+    /**
+     * True when the ally pull-in spike is armed on this instance: the player mirror is created
+     * joinable and the host's battle eject only observes. See {@link #ALLY_PULL_IN_PROPERTY}.
+     */
+    public static boolean allyPullInEnabled() {
+        return allyPullIn;
+    }
+
+    /**
+     * True when the spike's second run is armed: the player mirror's {@code setNoEngaging} shield is
+     * left down as well. False unless {@link #allyPullInEnabled()} is also true — dropping the shield
+     * on its own is not a scenario anyone asked for and would silently open PvP.
+     */
+    public static boolean allyPullInDropShieldEnabled() {
+        return allyPullIn && allyPullInDropShield;
     }
 
     /**
@@ -149,6 +192,17 @@ public final class CoopDebug {
     /** Test seam for the latency lever; production only sets it from the JVM property. */
     static void setInteractionClaimDelayMillisForTesting(int value) {
         interactionClaimDelayMillis = Math.max(0, value);
+    }
+
+    /**
+     * Test seam for the ally pull-in spike, set as a pair because the second switch is only defined
+     * relative to the first. {@code public}, unlike the seams above, because the switch is read from
+     * {@code coop.fleet} and {@code coop.combat} and their tests cannot reach a package-private one;
+     * production only ever seeds these from the JVM properties at class init.
+     */
+    public static void setAllyPullInForTesting(boolean pullIn, boolean dropShield) {
+        allyPullIn = pullIn;
+        allyPullInDropShield = dropShield;
     }
 
     /** Test seam: resets the frame counter so a test starts a poll window from a known point. */

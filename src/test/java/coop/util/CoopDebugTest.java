@@ -38,6 +38,7 @@ class CoopDebugTest {
         CoopDebug.setEnabledForTesting(false);
         CoopDebug.setInteractionClaimDelayMillisForTesting(0);
         CoopDebug.resetPollCounterForTesting();
+        CoopDebug.setAllyPullInForTesting(false, false);
     }
 
     private static void restore(String key, String saved) {
@@ -121,6 +122,41 @@ class CoopDebugTest {
         CoopDebug.refresh();
 
         assertEquals(CoopDebug.MAX_INTERACTION_DELAY_MILLIS, CoopDebug.interactionClaimDelayMillis());
+    }
+
+    // ---- ally pull-in spike ---------------------------------------------------------------------
+
+    @Test
+    void bothAllyPullInSwitchesAreOffInAShippedSession() {
+        assertFalse(CoopDebug.allyPullInEnabled());
+        assertFalse(CoopDebug.allyPullInDropShieldEnabled());
+    }
+
+    @Test
+    void theShieldDropIsMeaninglessWithoutTheSpikeItself() {
+        // Dropping setNoEngaging on its own would open PvP without answering the pull-in question,
+        // which is nobody's scenario; the two are read as one gesture.
+        CoopDebug.setAllyPullInForTesting(false, true);
+
+        assertFalse(CoopDebug.allyPullInEnabled());
+        assertFalse(CoopDebug.allyPullInDropShieldEnabled());
+    }
+
+    @Test
+    void theFirstRunArmsThePullInWithoutDroppingTheShield() {
+        CoopDebug.setAllyPullInForTesting(true, false);
+
+        assertTrue(CoopDebug.allyPullInEnabled());
+        assertFalse(CoopDebug.allyPullInDropShieldEnabled(),
+                "run 1 and run 2 have to be tellable apart in the same log");
+    }
+
+    @Test
+    void theSecondRunArmsBoth() {
+        CoopDebug.setAllyPullInForTesting(true, true);
+
+        assertTrue(CoopDebug.allyPullInEnabled());
+        assertTrue(CoopDebug.allyPullInDropShieldEnabled());
     }
 
     @Test

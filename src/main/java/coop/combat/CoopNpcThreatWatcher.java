@@ -16,6 +16,7 @@ import com.fs.starfarer.api.campaign.ai.StrategicModulePlugin;
 import com.fs.starfarer.api.campaign.ai.TacticalModulePlugin;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import coop.fleet.CoopAllyPullInSpike;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopMirrorTags;
 import coop.net.CoopMessages;
@@ -676,6 +677,7 @@ public final class CoopNpcThreatWatcher {
         lastHandoffAtMillis = Long.MIN_VALUE;
         ejectCount = 0;
         graceAppliedCount = 0;
+        CoopAllyPullInSpike.reset();
     }
 
     public int ejectCount() {
@@ -769,7 +771,14 @@ public final class CoopNpcThreatWatcher {
      * host battle without ever consulting {@code canBeEngaged()}; leaving it there means silent
      * autoresolve rounds against a fleet whose owner is not in a battle.
      */
-    private void ejectFromBattleIfNeeded(CampaignFleetAPI mirror) {
+    void ejectFromBattleIfNeeded(CampaignFleetAPI mirror) {
+        if (CoopDebug.allyPullInEnabled()) {
+            // Debug-only spike (-Dcoop.debug.allyPullIn): the recovery is exactly what makes the
+            // question unanswerable, so it stands down and the observer records the battle instead.
+            // Edge-logged, so a battle that lasts a thousand frames still prints two lines.
+            CoopAllyPullInSpike.observe(mirror);
+            return;
+        }
         BattleAPI battle;
         try {
             battle = mirror.getBattle();

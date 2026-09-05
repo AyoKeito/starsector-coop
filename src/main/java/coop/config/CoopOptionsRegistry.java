@@ -280,6 +280,8 @@ public final class CoopOptionsRegistry {
     public static final String DEBUG_WIRETAP_SAMPLE = "coop.debug.wiretapSample";
     public static final String DEBUG_FRAME_PROFILE = "coop.debug.frameProfile";
     public static final String DEBUG_INTERACTION_DELAY_MS = "coop.debug.interactionDelayMs";
+    public static final String DEBUG_ALLY_PULL_IN = "coop.debug.allyPullIn";
+    public static final String DEBUG_ALLY_PULL_IN_DROP_SHIELD = "coop.debug.allyPullInDropShield";
 
     private static final Map<String, Option> BY_KEY;
     private static final List<Option> ORDERED;
@@ -444,6 +446,16 @@ public final class CoopOptionsRegistry {
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Makes the host hold every inbound INTERACTION_CLAIM this many ms, widening the"
                         + " claim race to something a human can hit. A test instrument."));
+        // Deliberately absent from the launcher's Advanced card: this one takes a protection off
+        // the partner's fleet, and it is a two-instance dev spike driven from -ExtraJvmProps.
+        options.add(dOnly(DEBUG_ALLY_PULL_IN, Type.BOOL, "false", "Ally pull-in spike",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
+                "Live spike: lets the engine pull the partner's mirror into a battle as an ally"
+                        + " (no FLEET_IGNORES_OTHER_FLEETS, no battle eject) and logs what happens."));
+        options.add(dOnly(DEBUG_ALLY_PULL_IN_DROP_SHIELD, Type.BOOL, "false", "Ally pull-in spike",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
+                "Second run of the ally pull-in spike: also leaves the partner mirror's setNoEngaging"
+                        + " shield down. Does nothing unless coop.debug.allyPullIn is on too."));
 
         Map<String, Option> byKey = new LinkedHashMap<>();
         for (Option option : options) {

@@ -14,3 +14,6 @@
 
 # Agent worktrees created by Claude Code.
 /.claude/worktrees/
+
+# Investigation scratch: spike runbooks, log captures, QA matrices. Never committed.
+/tmp_ff_analysis/

@@ -101,7 +101,9 @@ class CoopOptionsRegistryTest {
                 "coop.debug.wiretap",
                 "coop.debug.wiretapSample",
                 "coop.debug.frameProfile",
-                "coop.debug.interactionDelayMs"), dOnly);
+                "coop.debug.interactionDelayMs",
+                "coop.debug.allyPullIn",
+                "coop.debug.allyPullInDropShield"), dOnly);
     }
 
     /**

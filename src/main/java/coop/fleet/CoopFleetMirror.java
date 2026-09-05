@@ -83,6 +83,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private float speedProbeSampleY;
 
     private CampaignFleetAPI mirrorFleet;
+    /**
+     * True once this instance has built the Phase 8 <em>player</em> mirror, false for an NPC mirror.
+     * Only the ally pull-in spike reads it: the two roles share this class, and the spike must move
+     * exactly one of them ({@link CoopAllyPullInSpike}).
+     */
+    private boolean playerMirror;
     private String lastFleetHash;
     /**
      * A structural hash whose roster could not be built completely (an unresolvable variant/hull), kept
@@ -322,7 +328,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private void ensurePlayerFleet(CoopFleetSnapshot snapshot, String localPlayerFactionId) {
         if (mirrorFleet != null && mirrorFleet.isAlive()) {
-            assertIgnoresOtherFleets(mirrorFleet);
+            assertIgnoresOtherFleets(mirrorFleet, true);
             return;
         }
         String factionId = CoopPresenceIndicator.presenceFactionId(localPlayerFactionId);
@@ -342,8 +348,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // Player-faction fleets get a 700 su join radius, so without it the guest mirror is dragged
         // into host battles in ordinary play. Costs nothing: it only affects the mirror's own target
         // selection, which the snapshot driving overrides anyway.
-        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
-        mirrorFleet.getMemoryWithoutUpdate().set(PLAYER_MIRROR_TAG, true);
+        playerMirror = true;
+        stampPlayerMirrorMemory(mirrorFleet.getMemoryWithoutUpdate());
         // This is the only thing in the mod that creates a player mirror, so publishing it here is
         // what lets the host's per-frame consumers stop scanning the sector for it. See
         // CoopGuestMirrorHandle.
@@ -355,6 +361,9 @@ public class CoopFleetMirror implements CoopNpcMirror {
         CoopLog.info(CoopFleetMirror.class,
                 "Created coop mirror fleet for playerId=" + snapshot.playerId()
                         + " username=" + label + " faction=" + factionId);
+        // Once per session (the mirror is built once), so the log proves the switch took on this
+        // instance rather than only on the other one. Silent unless the spike is armed.
+        CoopAllyPullInSpike.announce();
     }
 
     private void ensureNpcFleet(CoopNpcFleetSnapshot snapshot) {
@@ -372,10 +381,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // in Phase 14 (it gates AI target selection, never battle formation).
         // See the player-mirror path: only this flag is honored by the dialog battle pull-in
         // (FleetInteractionDialogPluginImpl.pullInNearbyFleets), which never calls canBeEngaged().
-        mirrorFleet.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
-        // Store the host-side fleet id so the per-frame guest suppressor recognizes this as a sanctioned
-        // mirror and never sweeps it (see CoopNpcFleetSuppressor).
-        mirrorFleet.getMemoryWithoutUpdate().set(NPC_MIRROR_TAG, snapshot.coopFleetId());
+        stampNpcMirrorMemory(mirrorFleet.getMemoryWithoutUpdate(), snapshot.coopFleetId());
         resetTracking();
         coopFleetId = snapshot.coopFleetId();
         appliedName = label;
@@ -383,6 +389,51 @@ public class CoopFleetMirror implements CoopNpcMirror {
         CoopLog.info(CoopFleetMirror.class,
                 "Created coop NPC mirror fleet coopFleetId=" + snapshot.coopFleetId()
                         + " name=" + label + " faction=" + factionId);
+    }
+
+    /**
+     * The memory a freshly created <em>player</em> mirror carries.
+     *
+     * <p>{@code FLEET_IGNORES_OTHER_FLEETS} is the load-bearing half. The battle PULL-IN path bypasses
+     * {@code canBeEngaged()} entirely: {@code FleetInteractionDialogPluginImpl.pullInNearbyFleets} runs
+     * whenever the host opens any fleet dialog and joins nearby fleets honoring only this flag.
+     * Player-faction fleets get a 700 su join radius, so without it the guest mirror is dragged into
+     * host battles in ordinary play. It costs nothing: it only affects the mirror's own target
+     * selection, which the snapshot driving overrides anyway.
+     *
+     * <p>The one case where it is <em>not</em> set is the debug-only ally pull-in spike
+     * ({@code -Dcoop.debug.allyPullIn}), where being joinable is the whole point — see
+     * {@link CoopAllyPullInSpike}.
+     *
+     * <p>(Phase 14 removed 12b's interim {@code FLEET_IGNORED_BY_OTHER_FLEETS} from here. That flag
+     * only suppresses other fleets' AI target SELECTION and is never consulted by battle formation, so
+     * it bought no protection against autoresolve while costing the mirror all hostile attention. The
+     * real protections are the per-frame engagement shield — {@code assertEngagementShield} ->
+     * {@code canBeEngaged()} false — plus this flag, with {@code CoopNpcThreatWatcher}'s battle-eject
+     * as the recovery for the pull-in path.)
+     */
+    static void stampPlayerMirrorMemory(MemoryAPI memory) {
+        if (memory == null) {
+            return;
+        }
+        if (!CoopDebug.allyPullInEnabled()) {
+            memory.set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+        }
+        memory.set(PLAYER_MIRROR_TAG, true);
+    }
+
+    /**
+     * The memory a freshly created NPC mirror carries: the same pull-in flag, unconditionally (the
+     * spike moves the player mirror only), plus the host-side fleet id, which is what tells the guest's
+     * per-frame suppressor this is a sanctioned mirror and not to sweep it (see
+     * {@code CoopNpcFleetSuppressor}).
+     */
+    static void stampNpcMirrorMemory(MemoryAPI memory, String coopFleetId) {
+        if (memory == null) {
+            return;
+        }
+        memory.set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+        memory.set(NPC_MIRROR_TAG, coopFleetId);
     }
 
     /**
@@ -396,7 +447,22 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * actually gone.
      */
     static void assertIgnoresOtherFleets(CampaignFleetAPI fleet) {
+        assertIgnoresOtherFleets(fleet, false);
+    }
+
+    /**
+     * As above, told which mirror it is looking at. The distinction exists for one reason: the ally
+     * pull-in spike ({@code -Dcoop.debug.allyPullIn}) has to leave the <em>player</em> mirror joinable
+     * while NPC mirrors keep the flag, and this re-assert would otherwise put it straight back on the
+     * next snapshot apply. With the spike off the parameter changes nothing.
+     *
+     * @param playerMirror true for the Phase 8 partner mirror, false for a Phase 9 NPC mirror
+     */
+    static void assertIgnoresOtherFleets(CampaignFleetAPI fleet, boolean playerMirror) {
         if (fleet == null) {
+            return;
+        }
+        if (playerMirror && CoopDebug.allyPullInEnabled()) {
             return;
         }
         try {
@@ -588,6 +654,18 @@ public class CoopFleetMirror implements CoopNpcMirror {
     public void assertEngagementShield(long nowMillis) {
         if (mirrorFleet == null) {
             return;
+        }
+        if (playerMirror && CoopDebug.allyPullInEnabled()) {
+            // The spike's observation point on BOTH roles: the host's battle eject lives in
+            // CoopNpcThreatWatcher, but a guest has no threat watcher and this pass is the only thing
+            // that touches the partner mirror every frame there. CoopAllyPullInSpike logs on the
+            // edges only, and shares that state with the watcher, so the host still logs once.
+            CoopAllyPullInSpike.observe(mirrorFleet);
+            if (CoopDebug.allyPullInDropShieldEnabled()) {
+                // Spike run 2: leave canBeEngaged() true as well, for the case where run 1 shows the
+                // mirror never being pulled in at all.
+                return;
+            }
         }
         shieldReleased = false;
         if (!shouldReassertShield(shieldAssertedAtMillis, nowMillis)) {
