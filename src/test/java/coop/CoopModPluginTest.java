@@ -1,7 +1,9 @@
 package coop;
 
+import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.thoughtworks.xstream.XStream;
+import coop.campaign.CoopStoryChainGate;
 import coop.config.CoopOptionsStore;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.net.CoopNetStartupConfig;
@@ -9,11 +11,14 @@ import coop.net.CoopStallNotice;
 import coop.presence.CoopPresenceRegistry;
 import coop.rng.CoopRandom;
 import coop.stats.CoopSessionStats;
+import coop.testing.ApiProxies;
 import coop.ui.CoopSessionIntelFeed;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -38,6 +43,10 @@ class CoopModPluginTest {
         CoopStallNotice.setActive(null);
         CoopFullFidelitySystemDriver.endSave();
         CoopPresenceRegistry.clear();
+        Global.setSector(null);
+        System.clearProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.clearProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
+        System.clearProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
     }
 
     // ---- config-plugin-1: the save that failed -------------------------------------------------
@@ -78,6 +87,46 @@ class CoopModPluginTest {
         // tick, and quitting to the title screen produces no campaign frame at all: the dead sector's
         // mirror stayed published to the forked spawners through the next game's procgen.
         assertNull(CoopPresenceRegistry.get());
+    }
+
+    // ---- the shared new-game/load prologue -----------------------------------------------------
+
+    @Test
+    void theLoadPathPublishesTheStoryChainFlagBeforeAnythingElseRuns() {
+        // onGameLoad opens sockets and installs frame scripts, so what is exercised here is the whole
+        // of what it does before any of that: the prologue it shares with onNewGame.
+        Map<String, Object> memory = new HashMap<>();
+        Global.setSector(ApiProxies.sectorWithMemory(ApiProxies.memory(memory)));
+        System.setProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, "127.0.0.1");
+        System.setProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, "7777");
+
+        CoopModPlugin.beginGameSession();
+
+        assertEquals(Boolean.TRUE, memory.get(CoopStoryChainGate.GUEST_MEMORY_FLAG));
+    }
+
+    @Test
+    void loadingASaveAsTheHostClearsAGuestFlagThatSaveCarried() {
+        // The guest rejoins by loading the host's coordinated autosave, and the host loads the same
+        // file. Whichever role opens it, the flag has to describe the client opening it.
+        Map<String, Object> memory = new HashMap<>();
+        memory.put(CoopStoryChainGate.GUEST_MEMORY_FLAG, Boolean.TRUE);
+        Global.setSector(ApiProxies.sectorWithMemory(ApiProxies.memory(memory)));
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "7777");
+
+        CoopModPlugin.beginGameSession();
+
+        assertFalse(memory.containsKey(CoopStoryChainGate.GUEST_MEMORY_FLAG));
+    }
+
+    @Test
+    void thePrologueStillClearsTheStaticsItAlwaysDid() {
+        // Publishing the flag was added to the prologue, not put in place of it.
+        CoopFullFidelitySystemDriver.beginSave();
+
+        CoopModPlugin.beginGameSession();
+
+        assertFalse(CoopFullFidelitySystemDriver.isSaveInProgress());
     }
 
     // ---- save-seed-handshake-1 / forks-1: the forked Misc.random -------------------------------

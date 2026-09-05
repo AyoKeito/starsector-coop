@@ -102,3 +102,124 @@ initNewGameChoicesDev,AddNewGameChoices,$coopDevStartsDisabled,,,,
 initNewGameChoicesDev2,AddNewGameChoices,$coopDevStartsDisabled,,,,
 ngcDevStartOption,NewGameOptionSelected,$coopDevStartsDisabled,,,,
 ngcDevStartOption2,NewGameOptionSelected,$coopDevStartsDisabled,,,,
+,,,,,,
+"# (4) GALATIA ACADEMY STORY CHAIN, OFF ON THE GUEST. The ga* missions (GAIntro, GAIntro2,",,,,,,
+"# GATalkToBaird, GATalkToSebestyen, GAKallichore, GAFindingCoureuse, GAProjectZiggurat,",,,,,,
+"# GAAtTheGates, GADetectHyperspaceOddity, and the Sebestyen contact jobs in",,,,,,
+"# person_missions.csv) run entirely inside one engine. Their state is per-client memory --",,,,,,
+"# $player.metBaird, $global.gaKA_completed, the mission handles under $global.ga*_ref -- and",,,,,,
+"# the places they use are generated locally by whichever mission needs them. None of that is",,,,,,
+"# on the wire. A guest who starts the chain therefore gets a private second storyline the host",,,,,,
+"# never sees, in a world the two clients no longer agree on. Until a phase replicates story",,,,,,
+"# state, the host plays the chain and the guest rides along in the shared world.",,,,,,
+,,,,,,
+"# The flag is $coopIsGuest on sector memory, published by coop.campaign.CoopStoryChainGate",,,,,,
+"# from the prologue CoopModPlugin runs for both onNewGame and onGameLoad, so it is in place",,,,,,
+"# before the rules engine can fire anything. It is SET on a guest launch and UNSET on every",,,,,,
+"# other launch, never written as false: sector memory rides the save, the same save changes",,,,,,
+"# hands between the two roles (a guest rejoins by loading the host autosave), and false would",,,,,,
+"# leave the answer to whoever wrote it last. A missing key evaluates false, so the host reads",,,,,,
+"# !$global.coopIsGuest as true and takes the vanilla path unchanged.",,,,,,
+,,,,,,
+"# Every row below is the vanilla row copied verbatim with that one condition appended,",,,,,,
+"# replacing the vanilla row by id (see the merge notes at the top of this file). They are the",,,,,,
+"# ROOT entries: the points the chain can be reached from with no prior academy state at all.",,,,,,
+"# Everything downstream tests state only a root entry can write, so gating these keeps the",,,,,,
+"# chain from ever starting rather than stopping it halfway:",,,,,,
+"#   - goToTheGABarEventOption / goToGA_barEvent: the day-180 bar academician. The first adds",,,,,,
+"#     the bar offer, the second answers it, runs GenGAIntroAcademician and opens the",,,,,,
+"#     ga_recruiter conversation that ends in BeginMission gaIntro. Both, so an offer that is",,,,,,
+"#     already on a bar screen cannot be taken either.",,,,,,
+"#   - gaAddOptionMeetProvost: the Request a meeting with the provost option while docked at",,,,,,
+"#     station_galatia_academy. It is what sets $player.metBaird, unhides Baird and Sebestyen",,,,,,
+"#     and leads to BeginMission gaTTS. The other two academy dock options (the infodump and",,,,,,
+"#     Leave) are untouched, so the guest can still dock there and get out.",,,,,,
+"#   - gaIntro2surveyOpen: the instrument package a planet survey can turn up on its own",,,,,,
+"#     (RollProbability 0.3), which starts gaIntro2 with no academy contact anywhere in it.",,,,,,
+"#   - gaDHOhookStart / gaDHOhookStartDev: the comm-relay message from Academician Elek on",,,,,,
+"#     docking after day 365. Vanilla leaves the $player.metBaird condition on this rule",,,,,,
+"#     commented out, so it really is an independent way in, not a continuation.",,,,,,
+"#   - gaDHOjustFoundArrayStart: finding the modified sensor array yourself, the other way",,,,,,
+"#     into gaDHO.",,,,,,
+"#   - hamatsu_PostShipRecoverySpecial: recovering the Hamatsu, which begins gaRH.",,,,,,
+"#   - gaDevMenuOption: the dev-mode GA test menu at the academy, whose options start gaTTB,",,,,,,
+"#     gaDHO and gaATG outright.",,,,,,
+,,,,,,
+"# Deliberately NOT replaced. The tutorial-only academy rows and gaMeetHegLieutenantOnCoatl",,,,,,
+"# cannot fire at all: section (2) above forces the tutorial skip, so $global.isInTutorial and",,,,,,
+"# $global.metTseenKeDuringTutorial are never set on either client. The academy shuttle-fleet",,,,,,
+"# conversation (academyFleetConv*) is flavour text that starts nothing. GS_ACADEMY_* is a",,,,,,
+"# salvage encounter that sets $global.foundGAabyssExpedition, which no rule reads as a",,,,,,
+"# precondition. And the repeatable Sebestyen jobs need him as a contact, which only the",,,,,,
+"# meeting above can arrange.",,,,,,
+,,,,,,
+goToTheGABarEventOption,AddBarEvents,"!$market.isHidden
+$global.daysSinceStart > 180
+!$player.metBaird
+!$global.interactedWithGABarEvent
+RollProbability 0.2
+!$global.isInTutorial
+!$global.coopIsGuest","AddBarEvent goToGA_barEvent ""Talk to the distinguished academician"" ""A distinguished, uniformed academician seems to be holding court with a handful of successful-looking ship officers."" highlight",,,
+goToGA_barEvent,DialogOptionSelected,"$option == goToGA_barEvent
+GenGAIntroAcademician
+!$global.coopIsGuest",BeginConversation ga_recruiter,"As you approach, he looks over and says ""Captain $playerName! Don't look so surprised, you've got a fascinating reputation to, shall we say, movers and shakers the Sector over."" 
+
+He dismisses the other officers with a promise to join them in a moment, then catches your eye, ""Dilettantes. Compared to yourself, I mean. I trust you've heard of the academy's new provost?""","goToGA_barEvent1a:""The new what?""
+goToGA_barEvent1b:""Oh, the Galatia Academy has a new chief executive?""",
+gaAddOptionMeetProvost,PopulateOptions,"$id == station_galatia_academy
+!$player.metBaird
+!$global.coopIsGuest",,,1:gaRequestMeeting:Request a meeting with the provost,
+gaIntro2surveyOpen,DialogOptionSelected,"$option == surveyPerform
+!$global.gaIntro2found
+!$market.isSurveyed
+!$tag:not_random_mission_target
+!$player.locTag:theme_hidden
+!$player.locTag:theme_core
+RollProbability 0.3 score:1000
+!$global.coopIsGuest","$global.gaIntro2found = true
+$option = gaIntro2_start1 0
+FireBest DialogOptionSelected","Your sensors officer frowns at a blinking indicator. ""Captain, there appears to be a faint signal coming from low orbit.""
+
+They pull a detailed scan of the transmission source to the primary bridge display, an orbital nav grid overlaid with icons and telemetry.
+
+""The transmission is very weak. We only picked it up as the survey array ran through its calibration cycle. It looks like an automated instrument package deployed in low orbit. Power source is degraded. It's got to have been here for a while.""","gaIntro2_start2:""And the signal?""","# hop in and interrupt a standard survey interaction, insert stuff about GA etc"
+gaDHOhookStart,MarketPostDock,"!$global.foundOneslaught
+$marketSize > 3
+$faction.id != pirates
+$faction.id != luddic_path
+$faction.id != luddic_church
+!$global.gaDHO_didInvite
+$player.transponderOn
+$market.mc:comm_relay
+$market.daysExisted > 60
+$global.daysSinceStart > 365
+$player.ability:fracture_jump
+RollProbability 0.3
+#$player.metBaird
+!$global.coopIsGuest","Highlight ""message for you""","As your $shipOrFleet trades pings with local traffic control, your comms officer calls for your attention. ""$PlayerSirOrMadam, there's a message for you. It was stored in the comm network until our transponder code was registered to the local authorities.""","gaDHO_hook0:""Patch it through to my TriPad.""",
+gaDHOhookStartDev,MarketPostDock,"!$global.foundOneslaught
+$faction.id != pirates
+$faction.id != luddic_path
+$faction.id != luddic_church
+!$global.gaDHO_didInvite
+$player.transponderOn
+$global.isDevMode
+$global.gaDHO_didInviteDEV
+!$global.coopIsGuest","Highlight ""message for you""","As your $shipOrFleet trades pings with local traffic control, your comms officer calls for your attention. ""$PlayerSirOrMadam, there's a message for you. It was stored in the comm network until our transponder code was registered to the local authorities.""","gaDHO_hook0:""Patch it through to my TriPad.""",
+gaDHOjustFoundArrayStart,OpenInteractionDialog,"!$global.foundOneslaught
+$oneslaughtSensorArray score:100
+!$global.gaDHO_inProgress
+!$global.coopIsGuest","ShowDefaultVisual
+PrintDescription 1
+AddText ""A routine scan shows that this sensor array has been modified.""","
+
+
+
+","gaDHO_justFoundArray0:Investigate the modifications
+100:defaultLeave:Leave",
+hamatsu_PostShipRecoverySpecial,PostShipRecoverySpecial,"$srs_memberId == hamatsu score:1000
+#$global.metCallisto
+!$global.coopIsGuest",BeginMission gaRH,,,
+gaDevMenuOption,PopulateOptions,"$id == station_galatia_academy
+$global.isDevMode
+!$global.coopIsGuest",SetOptionColor gaDev_optionsMenu gray,,200:gaDev_optionsMenu:>> (dev) GA test options,
