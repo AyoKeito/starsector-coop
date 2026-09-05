@@ -779,7 +779,7 @@
     {
       "id": "33",
       "num": 33,
-      "title": "AI-Ally Battles",
+      "title": "AI-Ally Battles (Phase 22 track, step 1)",
       "theme": "combat",
       "track": "post-v1",
       "status": "not-built",
@@ -795,12 +795,12 @@
         "allied wrecks unrecoverable (vanilla)",
         "owner cannot direct or retreat its ships"
       ],
-      "note": "Specced 2026-09-05 on user decisions (real losses, owner-side toggle, deploy everything, no spoils split). Live pull-in spike switch is on main (-Dcoop.debug.allyPullIn, runbook in tmp_ff_analysis); the run was deferred by the user the same day and is the first step when the phase starts."
+      "note": "Step 1 of the Phase 22 track (tied 2026-09-05): Phase 22 starts only when this is built and smoke-passed. Specced 2026-09-05 on user decisions (real losses, owner-side toggle, deploy everything, no spoils split). Live pull-in spike switch is on main (-Dcoop.debug.allyPullIn, runbook in tmp_ff_analysis); the run was deferred by the user the same day and is the first step when the phase starts."
     },
     {
       "id": "22",
       "num": 22,
-      "title": "Tactical Orders for Your Own Joined Ships",
+      "title": "Tactical Orders for Your Own Joined Ships (Phase 22 track, step 2)",
       "theme": "combat",
       "track": "post-v1",
       "status": "not-built",
@@ -818,7 +818,7 @@
         "unordered allied ships stay with the allied admiral",
         "ally fidelity (officers, skills) only in M4 if needed"
       ],
-      "note": "Requires Phase 33. Feasibility pass 2026-09-05 (docs/PHASE22_TACTICAL_FEASIBILITY.md): every engine surface exists via public API; seven live checks remain. Decisions: fighting side's fog, free orders, keep the allied admiral."
+      "note": "Step 2 of the Phase 22 track (tied 2026-09-05): entry gate is Phase 33 built and smoke-passed. Feasibility pass 2026-09-05 (docs/PHASE22_TACTICAL_FEASIBILITY.md): every engine surface exists via public API; seven live checks remain. Decisions: fighting side's fog, free orders, keep the allied admiral."
     },
     {
       "id": "23",
