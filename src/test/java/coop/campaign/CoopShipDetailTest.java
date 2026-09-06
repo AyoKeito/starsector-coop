@@ -3,7 +3,9 @@ package coop.campaign;
 import coop.campaign.CoopShipDetail.WeaponGroup;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -11,6 +13,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -83,6 +86,163 @@ class CoopShipDetailTest {
                 List.of(new CoopMarketSync.StockItem(CoopMarketSync.ItemKind.SHIP, "k", 1, 0f,
                         nasty.encode()))));
         assertEquals(nasty, CoopShipDetail.decode(back.get(0).detail()));
+    }
+
+    // ---- sameShip: the comparison the storage reconcile uses ---------------------------------------
+
+    @Test
+    void twoDetailsDifferingOnlyInWeaponSlotOrderAreTheSameShip() {
+        // The 0.1.1 defect: joinMap writes the weapon map in the map's iteration order, which is the
+        // order the *engine* handed over getNonBuiltInWeaponSlots(), and the two engines do not agree
+        // on it. The encoded blobs differ; the ships do not.
+        CoopShipDetail forwards = battered();
+        CoopShipDetail backwards = withWeapons(battered(), reversed(battered().weapons()));
+
+        assertNotEquals(forwards.encode(), backwards.encode(),
+                "the premise: the wire blobs really are different strings");
+        assertTrue(forwards.sameShip(backwards), "same loadout, different slot order");
+        assertTrue(backwards.sameShip(forwards), "and it is symmetric");
+        assertEquals(forwards.canonicalKey(), backwards.canonicalKey());
+    }
+
+    @Test
+    void twoDetailsDifferingOnlyInWingOrderAreTheSameShip() {
+        Map<String, String> wings = new LinkedHashMap<>();
+        wings.put("0", "talon_wing");
+        wings.put("1", "broadsword_wing");
+        CoopShipDetail forwards = withWings(battered(), wings);
+        CoopShipDetail backwards = withWings(battered(), reversed(wings));
+
+        assertNotEquals(forwards.encode(), backwards.encode());
+        assertTrue(forwards.sameShip(backwards));
+    }
+
+    @Test
+    void twoDetailsDifferingOnlyInHullModSetOrderAreTheSameShip() {
+        // Same root cause on a different field: permaMods and friends are read off Set accessors on
+        // the variant, so their order is equally free to differ per engine and means nothing.
+        CoopShipDetail forwards = battered();
+        CoopShipDetail backwards = new CoopShipDetail("member-77", "ISS Regret", "enforcer_Assault",
+                "enforcer_dhull", 0.42f, 12, 8,
+                List.of("heavyarmor", "dmod_armor", "dmod_engine"),
+                forwards.sMods(), forwards.sModdedBuiltIns(), forwards.refitMods(),
+                forwards.suppressedMods(), forwards.weapons(), forwards.wings());
+
+        assertNotEquals(forwards.encode(), backwards.encode());
+        assertTrue(forwards.sameShip(backwards));
+    }
+
+    @Test
+    void aDifferentWeaponIsADifferentShip() {
+        Map<String, String> swapped = new LinkedHashMap<>(battered().weapons());
+        swapped.put("WS0002", "harpoonpod");
+
+        assertFalse(battered().sameShip(withWeapons(battered(), swapped)),
+                "canonicalizing the order must not canonicalize away the contents");
+    }
+
+    @Test
+    void anExtraWeaponSlotIsADifferentShip() {
+        Map<String, String> extra = new LinkedHashMap<>(battered().weapons());
+        extra.put("WS0003", "lightmg");
+
+        assertFalse(battered().sameShip(withWeapons(battered(), extra)));
+    }
+
+    @Test
+    void anExtraHullModIsADifferentShip() {
+        // This is the documented one-cycle s-mod instability: an s-modded built-in gains a permaMods
+        // entry after one round trip. It is a difference in the set's *contents*, not its order, so
+        // it still reads unequal for exactly one rebuild -- the same answer the old string
+        // comparison gave, deliberately left alone here.
+        CoopShipDetail extraMod = new CoopShipDetail("member-77", "ISS Regret", "enforcer_Assault",
+                "enforcer_dhull", 0.42f, 12, 8,
+                List.of("dmod_engine", "dmod_armor", "heavyarmor", "converted_hangar"),
+                battered().sMods(), battered().sModdedBuiltIns(), battered().refitMods(),
+                battered().suppressedMods(), battered().weapons(), battered().wings());
+
+        assertFalse(battered().sameShip(extraMod));
+    }
+
+    @Test
+    void aDifferentCRIsADifferentShipButFloatNoisePastTheWireIsNot() {
+        // canonicalKey re-encodes, so it inherits encode()'s %.4f rounding: two captures that differ
+        // only past the fourth decimal were the same ship under the old string compare too, and
+        // comparing raw float components instead would have turned that noise into a rebuild.
+        assertTrue(battered().sameShip(withBaseCR(battered(), 0.42000001f)));
+        assertFalse(battered().sameShip(withBaseCR(battered(), 0.9f)));
+    }
+
+    @Test
+    void aModulesSlotOrderIsCanonicalizedRecursively() {
+        Map<String, CoopShipDetail> forwards = new LinkedHashMap<>();
+        forwards.put("MODULE_1", withWeapons(battered(), battered().weapons()));
+        forwards.put("MODULE_2", battered());
+        Map<String, CoopShipDetail> backwards = new LinkedHashMap<>();
+        // Reversed slot order, and one module's own weapon map reversed inside it.
+        backwards.put("MODULE_2", withWeapons(battered(), reversed(battered().weapons())));
+        backwards.put("MODULE_1", battered());
+
+        assertNotEquals(withModules(forwards).encode(), withModules(backwards).encode());
+        assertTrue(withModules(forwards).sameShip(withModules(backwards)));
+    }
+
+    @Test
+    void nullIsNeverTheSameShip() {
+        assertFalse(battered().sameShip(null));
+    }
+
+    @Test
+    void canonicalKeyDoesNotChangeWhatGoesOnTheWire() {
+        // encode() is the wire format and a hundred tests pin it; canonicalKey is a comparison-only
+        // view that must never leak into it.
+        String before = battered().encode();
+        battered().canonicalKey();
+
+        assertEquals(before, battered().encode());
+    }
+
+    private static CoopShipDetail withWeapons(CoopShipDetail base, Map<String, String> weapons) {
+        return new CoopShipDetail(base.memberId(), base.shipName(), base.baseVariantId(),
+                base.hullSpecId(), base.baseCR(), base.vents(), base.caps(), base.permaMods(),
+                base.sMods(), base.sModdedBuiltIns(), base.refitMods(), base.suppressedMods(),
+                weapons, base.wings(), base.weaponGroups(), base.hullFraction(), base.displayName(),
+                base.modules());
+    }
+
+    private static CoopShipDetail withWings(CoopShipDetail base, Map<String, String> wings) {
+        return new CoopShipDetail(base.memberId(), base.shipName(), base.baseVariantId(),
+                base.hullSpecId(), base.baseCR(), base.vents(), base.caps(), base.permaMods(),
+                base.sMods(), base.sModdedBuiltIns(), base.refitMods(), base.suppressedMods(),
+                base.weapons(), wings, base.weaponGroups(), base.hullFraction(), base.displayName(),
+                base.modules());
+    }
+
+    private static CoopShipDetail withBaseCR(CoopShipDetail base, float baseCR) {
+        return new CoopShipDetail(base.memberId(), base.shipName(), base.baseVariantId(),
+                base.hullSpecId(), baseCR, base.vents(), base.caps(), base.permaMods(),
+                base.sMods(), base.sModdedBuiltIns(), base.refitMods(), base.suppressedMods(),
+                base.weapons(), base.wings(), base.weaponGroups(), base.hullFraction(),
+                base.displayName(), base.modules());
+    }
+
+    private static CoopShipDetail withModules(Map<String, CoopShipDetail> modules) {
+        CoopShipDetail base = battered();
+        return new CoopShipDetail(base.memberId(), base.shipName(), base.baseVariantId(),
+                base.hullSpecId(), base.baseCR(), base.vents(), base.caps(), base.permaMods(),
+                base.sMods(), base.sModdedBuiltIns(), base.refitMods(), base.suppressedMods(),
+                base.weapons(), base.wings(), base.weaponGroups(), base.hullFraction(),
+                base.displayName(), modules);
+    }
+
+    private static <V> Map<String, V> reversed(Map<String, V> values) {
+        List<String> keys = new ArrayList<>(values.keySet());
+        Collections.reverse(keys);
+        Map<String, V> out = new LinkedHashMap<>();
+        for (String key : keys) {
+            out.put(key, values.get(key));
+        }
+        return out;
     }
 
     @Test

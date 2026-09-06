@@ -36,6 +36,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -81,6 +82,82 @@ class CoopCampaignReplicatorStorageReconcileTest {
                 "the depositor's own ship must survive its own snapshot as the same object");
         assertEquals("8f9a", mine.id,
                 "and keep its local identity; nothing rewrites a live member's id");
+    }
+
+    @Test
+    void aStoredHullWhoseListingSpellsTheSameLoadoutInAnotherOrderIsAlsoLeftAlone() {
+        // 0.1.1 smoke, "reconcileStoredHulls kept=0 replaced=1" on every storage open. The two
+        // engines hand over getNonBuiltInWeaponSlots() in different orders for the same ship, so the
+        // encoded weapon map came out as a different string and the string comparison called an
+        // untouched hull "changed" -- destroying the depositor's own member and rebuilding it from
+        // its own lossy blob, every dock, forever.
+        Map<String, String> loadout = new LinkedHashMap<>();
+        loadout.put("WS0001", "heavymauler");
+        loadout.put("WS0002", "annihilator");
+        FakeMarket market = storageMarket();
+        FakeShip mine = market.storage().store(new FakeShip("8f9a", "ISS Grudge", "hound_Standard",
+                "hound_dhull", 0.31f, 0.62f).withWeapons(loadout));
+        Global.setSector(market.sector());
+        installRebuildFactory();
+        FleetMemberAPI original = mine.api();
+        attachAppender();
+
+        // The far engine's listing: same ship, slots in the other order.
+        CoopShipDetail asHostSpellsIt = CoopCampaignReplicator.captureShipDetail(original)
+                .withMemberId(CoopMemberIds.wireId("guest-player", "8f9a"));
+        Map<String, String> reordered = new LinkedHashMap<>();
+        reordered.put("WS0002", "annihilator");
+        reordered.put("WS0001", "heavymauler");
+        CoopShipDetail reorderedListing = new CoopShipDetail(asHostSpellsIt.memberId(),
+                asHostSpellsIt.shipName(), asHostSpellsIt.baseVariantId(),
+                asHostSpellsIt.hullSpecId(), asHostSpellsIt.baseCR(), asHostSpellsIt.vents(),
+                asHostSpellsIt.caps(), asHostSpellsIt.permaMods(), asHostSpellsIt.sMods(),
+                asHostSpellsIt.sModdedBuiltIns(), asHostSpellsIt.refitMods(),
+                asHostSpellsIt.suppressedMods(), reordered, asHostSpellsIt.wings(),
+                asHostSpellsIt.weaponGroups(), asHostSpellsIt.hullFraction(),
+                asHostSpellsIt.displayName(), asHostSpellsIt.modules());
+        assertNotEquals(asHostSpellsIt.encode(), reorderedListing.encode(),
+                "the premise: the two blobs really are different strings");
+
+        applyStorageSnapshot(market, shipItem(reorderedListing));
+
+        assertEquals(1, market.storage().mothballed.size());
+        assertSame(original, market.storage().mothballed.get(0),
+                "slot order is the engine's business, not a difference between two ships");
+        assertTrue(appender.messages().stream()
+                        .anyMatch(m -> m.contains("kept=1") && m.contains("replaced=0")),
+                "and the reconcile says so: " + appender.messages());
+    }
+
+    @Test
+    void aStoredHullWhoseListingChangesAWeaponIsStillReplaced() {
+        Map<String, String> loadout = new LinkedHashMap<>();
+        loadout.put("WS0001", "heavymauler");
+        loadout.put("WS0002", "annihilator");
+        FakeMarket market = storageMarket();
+        FakeShip mine = market.storage().store(new FakeShip("8f9a", "ISS Grudge", "hound_Standard",
+                "hound_dhull", 0.31f, 0.62f).withWeapons(loadout));
+        Global.setSector(market.sector());
+        installRebuildFactory();
+        FleetMemberAPI original = mine.api();
+
+        CoopShipDetail listed = CoopCampaignReplicator.captureShipDetail(original)
+                .withMemberId(CoopMemberIds.wireId("guest-player", "8f9a"));
+        Map<String, String> refitted = new LinkedHashMap<>();
+        refitted.put("WS0002", "harpoonpod");
+        refitted.put("WS0001", "heavymauler");
+        CoopShipDetail refit = new CoopShipDetail(listed.memberId(), listed.shipName(),
+                listed.baseVariantId(), listed.hullSpecId(), listed.baseCR(), listed.vents(),
+                listed.caps(), listed.permaMods(), listed.sMods(), listed.sModdedBuiltIns(),
+                listed.refitMods(), listed.suppressedMods(), refitted, listed.wings(),
+                listed.weaponGroups(), listed.hullFraction(), listed.displayName(),
+                listed.modules());
+
+        applyStorageSnapshot(market, shipItem(refit));
+
+        assertEquals(1, market.storage().mothballed.size());
+        assertNotSame(original, market.storage().mothballed.get(0),
+                "canonicalizing the order must not canonicalize away a real refit");
     }
 
     @Test
@@ -395,6 +472,7 @@ class CoopCampaignReplicatorStorageReconcileTest {
         private float baseCR;
         private float hullFraction;
         private boolean unreadableHullMods;
+        private Map<String, String> weapons = new LinkedHashMap<>();
         private FleetMemberAPI api;
 
         private FakeShip(String id, String name, String variantId, String hullId, float baseCR,
@@ -410,6 +488,15 @@ class CoopCampaignReplicatorStorageReconcileTest {
         /** A variant whose hull-mod accessor raises, which is what a modded hull looks like here. */
         private FakeShip withUnreadableHullMods() {
             this.unreadableHullMods = true;
+            return this;
+        }
+
+        /**
+         * A fitted loadout, handed over in <em>this</em> order. The order is the whole point: the
+         * engine decides it, the two engines disagree, and the reconcile must not care.
+         */
+        private FakeShip withWeapons(Map<String, String> slots) {
+            this.weapons = new LinkedHashMap<>(slots);
             return this;
         }
 
@@ -439,6 +526,8 @@ class CoopCampaignReplicatorStorageReconcileTest {
                             }
                             yield null;
                         }
+                        case "getNonBuiltInWeaponSlots" -> new ArrayList<>(weapons.keySet());
+                        case "getWeaponId" -> weapons.get(String.valueOf(args[0]));
                         case "clone" -> proxy;
                         case "toString" -> "FakeVariant[" + variantId + "]";
                         case "hashCode" -> System.identityHashCode(proxy);

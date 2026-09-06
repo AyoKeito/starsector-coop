@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 import static coop.util.CoopText.requireText;
 
@@ -166,6 +167,81 @@ public record CoopShipDetail(String memberId,
         return new CoopShipDetail(newMemberId, shipName, baseVariantId, hullSpecId, baseCR, vents,
                 caps, permaMods, sMods, sModdedBuiltIns, refitMods, suppressedMods, weapons, wings,
                 weaponGroups, hullFraction, displayName, modules);
+    }
+
+    /**
+     * Is {@code other} the same ship as this one, ignoring the order each engine happened to iterate
+     * its slots and its hull-mod sets in?
+     *
+     * <p><b>Why this is not {@code encode().equals(other.encode())}.</b> That is what the Phase 32
+     * storage reconcile used, and it made an unchanged stored hull compare <em>unequal</em> on every
+     * dock ("reconcileStoredHulls kept=0 replaced=1" in the 0.1.1 smoke), so the depositor's own
+     * ship was destroyed and rebuilt from its own blob every time the locker was opened. The cause
+     * is that {@link #joinMap} writes the weapon and wing maps in the map's iteration order, which
+     * is the order the <em>engine</em> handed the slots over in {@code getNonBuiltInWeaponSlots()},
+     * and the two engines do not agree on it for the same ship. Nothing about the ship differed —
+     * only the order two identical sets were spelled in.
+     *
+     * <p>So the comparison canonicalizes first: the weapon, wing and module maps are compared as
+     * maps (sorted by key), and the five hull-mod fields are sorted too, because every one of them
+     * is read off a {@code Set} accessor on the variant ({@code getPermaMods}, {@code getSMods},
+     * {@code getSModdedBuiltIns}, {@code getSuppressedMods}, and {@code getNonBuiltInHullmods} for
+     * {@code refitMods}) where order carries no meaning and is equally free to differ per engine.
+     * Weapon groups stay an ordered list, and so do the slots inside one: a group's index is its
+     * number in the refit screen and an ALTERNATING group fires its slots in the order they are
+     * listed, so re-ordering those would be a real difference hidden.
+     *
+     * <p>{@link #encode()} itself is untouched — the wire format and every test that pins it are
+     * byte-identical. This is a comparison-only view.
+     *
+     * <p>The one-cycle s-mod instability in the class javadoc above is deliberately <em>not</em>
+     * papered over here: an s-modded built-in that gains a {@code permaMods} entry after a round
+     * trip is a genuine difference in the set's contents, not in its order, so it still compares
+     * unequal for exactly one rebuild and equal from then on — the same behaviour the old string
+     * comparison had.
+     */
+    public boolean sameShip(CoopShipDetail other) {
+        return other != null && canonicalKey().equals(other.canonicalKey());
+    }
+
+    /**
+     * This ship's identity as one string, with every order-free collection put in a fixed order.
+     *
+     * <p>Built by re-encoding a canonicalized copy rather than by hand, so it inherits
+     * {@link #encode()}'s float rounding ({@code %.4f}) exactly. That matters: the old comparison
+     * compared encoded text, so two captures whose {@code baseCR} differed only past the fourth
+     * decimal counted as the same ship, and comparing the raw {@code float} components instead
+     * would have quietly turned float noise into a rebuild. Not a wire format; never sent.
+     */
+    public String canonicalKey() {
+        return canonical().encode();
+    }
+
+    private CoopShipDetail canonical() {
+        return new CoopShipDetail(memberId, shipName, baseVariantId, hullSpecId, baseCR, vents, caps,
+                sortedList(permaMods), sortedList(sMods), sortedList(sModdedBuiltIns),
+                sortedList(refitMods), sortedList(suppressedMods),
+                sortedMap(weapons), sortedMap(wings), weaponGroups, hullFraction, displayName,
+                canonicalModules(modules));
+    }
+
+    private static List<String> sortedList(List<String> values) {
+        List<String> copy = new ArrayList<>(values);
+        Collections.sort(copy);
+        return copy;
+    }
+
+    private static Map<String, String> sortedMap(Map<String, String> values) {
+        return new TreeMap<>(values);
+    }
+
+    /** Module slots sorted, and each module canonicalized in turn, all the way down. */
+    private static Map<String, CoopShipDetail> canonicalModules(Map<String, CoopShipDetail> values) {
+        Map<String, CoopShipDetail> out = new TreeMap<>();
+        for (Map.Entry<String, CoopShipDetail> entry : values.entrySet()) {
+            out.put(entry.getKey(), entry.getValue().canonical());
+        }
+        return out;
     }
 
     public String encode() {

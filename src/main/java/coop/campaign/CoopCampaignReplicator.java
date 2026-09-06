@@ -47,6 +47,7 @@ import com.fs.starfarer.api.impl.campaign.intel.bar.events.BarEventManager;
 import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
 import com.fs.starfarer.api.impl.campaign.missions.hub.HubMission;
 import com.fs.starfarer.api.impl.campaign.missions.hub.HubMissionBarEventWrapper;
+import com.fs.starfarer.api.impl.campaign.submarkets.BaseSubmarketPlugin;
 import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.loading.WeaponGroupSpec;
 import com.fs.starfarer.api.loading.WeaponGroupType;
@@ -2463,12 +2464,65 @@ public final class CoopCampaignReplicator
                             + item.kind() + ":" + item.itemId(), ex);
                 }
             }
+            spendRestockWindow(market, submarketId);
             return true;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Failed to apply market snapshot to engine", ex);
             return false;
         } finally {
             replayGuard.end();
+        }
+    }
+
+    /**
+     * Guest, immediately after a snapshot apply: spend that submarket plugin's own restock windows,
+     * so vanilla does not run its update on top of the host's canonical numbers.
+     *
+     * <p><b>The drift this closes.</b> The host stocks, captures whole-number stack sizes and ships
+     * them; the guest replaces its stacks with exactly those numbers. Then the guest opens the trade
+     * tab, the core UI calls {@code updateCargoPrePlayerInteraction()} on the way in, and the
+     * plugin's {@code sinceLastCargoUpdate} has been counting campaign days since this client last
+     * touched this submarket — so {@code addAndRemoveStockpiledResources} runs for that whole
+     * interval and nudges every stack that sits above its stockpile limit down by the decay step.
+     * The guest showed 100 where the host showed 101, on every decaying commodity, after every dock
+     * (proven off paired save files in the 0.1.1 smoke). Zeroing both windows makes that call a
+     * no-op: the decay and the add are both proportional to the elapsed days, and vanilla's own
+     * sub-one-unit guard refuses the rest.
+     *
+     * <p><b>Only the guest, and only after an apply.</b> The host is canonical and its plugin
+     * already ran — in {@link #ensureSubmarketStocked}, before the capture — so nothing here touches
+     * it; a host whose windows were zeroed would simply stop restocking. And the guest's windows are
+     * spent only once its stock has actually been replaced by the host's, so a submarket that never
+     * got a snapshot still rolls its own the way vanilla would.
+     *
+     * <p><b>Storage is included, deliberately.</b> {@code StoragePlugin} is a
+     * {@code BaseSubmarketPlugin} whose {@code updateCargoPrePlayerInteraction} is empty — a locker
+     * has nothing to restock — so zeroing its windows changes nothing either way. It is done anyway
+     * rather than special-cased out, because "which of the four shared submarkets rolls stock" is
+     * exactly the kind of per-submarket exception that goes stale, and a no-op is cheaper than a
+     * branch that has to stay true.
+     *
+     * <p>Anything whose plugin is not a {@code BaseSubmarketPlugin} (a modded submarket, a null
+     * plugin on a market this client has not materialized) is skipped silently: there are no windows
+     * to spend and no vanilla update to pre-empt. The public setters are all this needs — no
+     * reflection, which the mod classloader blocks anyway.
+     */
+    private void spendRestockWindow(MarketAPI market, String specId) {
+        if (market == null || !market.hasSubmarket(specId)) {
+            return;
+        }
+        SubmarketAPI submarket = market.getSubmarket(specId);
+        SubmarketPlugin plugin = submarket == null ? null : submarket.getPlugin();
+        if (!(plugin instanceof BaseSubmarketPlugin base)) {
+            return;
+        }
+        try {
+            base.setSinceLastCargoUpdate(0f);
+            base.setSinceSWUpdate(0f);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopCampaignReplicator.class, "Failed to spend the restock window for"
+                    + " market=" + market.getId() + " submarket=" + specId
+                    + "; the vanilla update may re-roll on top of the host's stock", ex);
         }
     }
 
@@ -2571,6 +2625,16 @@ public final class CoopCampaignReplicator
      * capture against the incoming blob with the listing's wire id stamped on, so the origin
      * namespace is not read as a difference. False on any failure — an unreadable local object is
      * replaced by the host's copy rather than kept on a guess.
+     *
+     * <p><b>Compared as ships, not as strings.</b> This used to be
+     * {@code local.withMemberId(id).encode().equals(blob)}, and that made the answer depend on the
+     * order each engine happened to hand over the ship's weapon slots: the encoded weapon/wing maps
+     * came out in a different order for the same loadout, so an untouched stored hull read as
+     * "changed" and was destroyed and rebuilt on every single storage open ("kept=0 replaced=1" in
+     * the 0.1.1 smoke), running the whole lossy round trip again each time. {@link
+     * CoopShipDetail#sameShip} compares the two details with the order-free collections
+     * canonicalized; see its javadoc for what stays ordered and why, including that an s-modded
+     * built-in still reads unequal for exactly one cycle, as it did before.
      */
     private boolean storedHullMatchesListing(FleetMemberAPI member, CoopMarketSync.StockItem listing) {
         try {
@@ -2579,7 +2643,10 @@ public final class CoopCampaignReplicator
                 return false;
             }
             CoopShipDetail local = captureShipDetail(member);
-            return local != null && local.withMemberId(listing.itemId()).encode().equals(blob);
+            // decode() throws on a malformed blob; the catch below turns that into "replace it",
+            // which is the same answer the string compare gave for a blob it could not match.
+            return local != null
+                    && local.withMemberId(listing.itemId()).sameShip(CoopShipDetail.decode(blob));
         } catch (RuntimeException | LinkageError ex) {
             return false;
         }
