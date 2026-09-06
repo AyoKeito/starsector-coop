@@ -13,6 +13,7 @@ import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
+import com.fs.starfarer.api.impl.campaign.submarkets.BaseSubmarketPlugin;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.testing.LogCapture;
@@ -327,6 +328,73 @@ class CoopCampaignReplicatorSharedSubmarketsTest {
                         + appender.messages());
     }
 
+    // ---- The guest's own plugin never runs on top of the host's numbers ---------------------------
+
+    @Test
+    void aGuestSnapshotSpendsThatSubmarketsRestockWindow() {
+        // 0.1.1 smoke: the guest applied the host's whole-number stock and then, when the trade tab
+        // opened, its own BaseSubmarketPlugin ran updateCargoPrePlayerInteraction for however many
+        // campaign days had piled up since this client last touched the submarket -- and decayed
+        // every over-limit stack by a step. The guest showed 100 where the host showed 101, every
+        // dock. Zeroing both windows makes that call a no-op.
+        FakeMarket market = new FakeMarket("sindria").withVanillaPlugin(Submarkets.SUBMARKET_OPEN);
+        Global.setSector(market.sector());
+        BaseSubmarketPlugin plugin = market.vanillaPlugin(Submarkets.SUBMARKET_OPEN);
+        plugin.setSinceLastCargoUpdate(9.5f);
+        plugin.setSinceSWUpdate(44f);
+
+        guestReplicator(new RecordingNetService(CoopConnectionRole.GUEST)).handle(
+                CoopMessages.marketSnapshot("session-a", 8L, 5100L, "sindria",
+                        Submarkets.SUBMARKET_OPEN, 1, CoopMarketSync.encodeStock(List.of())));
+
+        assertEquals(0f, plugin.getSinceLastCargoUpdate(), 0f,
+                "the commodity restock/decay window has to be spent, or vanilla decays the host's"
+                        + " numbers the moment the trade tab opens");
+        assertEquals(0f, plugin.getSinceSWUpdate(), 0f,
+                "and the ship/weapon window with it, or the guest re-rolls its own shelf on top");
+    }
+
+    @Test
+    void aStorageSnapshotSpendsTheLockersWindowsToo() {
+        // Deliberate: StoragePlugin's updateCargoPrePlayerInteraction is empty, so this is a no-op
+        // in the engine. It is done anyway rather than special-cased out -- "which of the four
+        // shared submarkets rolls stock" is exactly the kind of exception that goes stale.
+        FakeMarket market = new FakeMarket("sindria")
+                .withVanillaPlugin(Submarkets.SUBMARKET_STORAGE)
+                .storageUnlocked();
+        Global.setSector(market.sector());
+        BaseSubmarketPlugin plugin = market.vanillaPlugin(Submarkets.SUBMARKET_STORAGE);
+        plugin.setSinceLastCargoUpdate(12f);
+        plugin.setSinceSWUpdate(31f);
+
+        guestReplicator(new RecordingNetService(CoopConnectionRole.GUEST)).handle(
+                CoopMessages.marketSnapshot("session-a", 8L, 5100L, "sindria",
+                        Submarkets.SUBMARKET_STORAGE, 1, CoopMarketSync.encodeStock(List.of())));
+
+        assertEquals(0f, plugin.getSinceLastCargoUpdate(), 0f);
+        assertEquals(0f, plugin.getSinceSWUpdate(), 0f);
+    }
+
+    @Test
+    void aSubmarketWhosePluginIsNotABaseSubmarketPluginIsSkippedWithoutError() {
+        // A modded submarket has no such windows to spend. The apply must still land and the gate
+        // must still open, with nothing shouted about it.
+        FakeMarket market = new FakeMarket("sindria").with(Submarkets.SUBMARKET_OPEN);
+        Global.setSector(market.sector());
+        CoopCampaignReplicator replicator = guestReplicator(
+                new RecordingNetService(CoopConnectionRole.GUEST));
+        attachAppender();
+
+        replicator.onPlayerOpenedMarket(market.api(), false);
+        replicator.handle(CoopMessages.marketSnapshot("session-a", 8L, 5100L, "sindria",
+                Submarkets.SUBMARKET_OPEN, 1, CoopMarketSync.encodeStock(List.of())));
+
+        assertNull(replicator.marketSyncGate().pendingMarketId(),
+                "the snapshot applied, so the trade screens open");
+        assertTrue(appender.messages().stream().noneMatch(m -> m.contains("restock window")),
+                "a plugin with no windows is not a failure: " + appender.messages());
+    }
+
     // ---- Harness ---------------------------------------------------------------------------------
 
     private void attachAppender() {
@@ -430,6 +498,7 @@ class CoopCampaignReplicatorSharedSubmarketsTest {
     private static final class FakeMarket {
         private final String id;
         private final Map<String, FakeCargo> cargos = new LinkedHashMap<>();
+        private final Map<String, BaseSubmarketPlugin> vanillaPlugins = new LinkedHashMap<>();
         private final List<String> stockUpdates = new ArrayList<>();
         private final Map<String, Object> persistentData = new HashMap<>();
         private MarketAPI api;
@@ -441,6 +510,23 @@ class CoopCampaignReplicatorSharedSubmarketsTest {
         private FakeMarket with(String specId) {
             cargos.put(specId, new FakeCargo());
             return this;
+        }
+
+        /**
+         * The same submarket, but backed by a real {@code BaseSubmarketPlugin} rather than a
+         * recording proxy — the restock windows are vanilla's own fields, so a test that asserts on
+         * them has to hold the real object.
+         */
+        private FakeMarket withVanillaPlugin(String specId) {
+            with(specId);
+            vanillaPlugins.put(specId, new BaseSubmarketPlugin());
+            return this;
+        }
+
+        private BaseSubmarketPlugin vanillaPlugin(String specId) {
+            BaseSubmarketPlugin plugin = vanillaPlugins.get(specId);
+            assertNotNull(plugin, "no vanilla plugin for " + specId);
+            return plugin;
         }
 
         private FakeMarket storageUnlocked() {
@@ -492,6 +578,10 @@ class CoopCampaignReplicatorSharedSubmarketsTest {
         }
 
         private com.fs.starfarer.api.campaign.SubmarketPlugin plugin(String specId) {
+            BaseSubmarketPlugin vanilla = vanillaPlugins.get(specId);
+            if (vanilla != null) {
+                return vanilla;
+            }
             return (com.fs.starfarer.api.campaign.SubmarketPlugin) Proxy.newProxyInstance(
                     com.fs.starfarer.api.campaign.SubmarketPlugin.class.getClassLoader(),
                     new Class<?>[]{com.fs.starfarer.api.campaign.SubmarketPlugin.class},
