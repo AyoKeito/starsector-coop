@@ -48,6 +48,36 @@ public final class CoopPeerLink {
     /** Outbound UDP payloads, drained to {@link #validatedUdpAddress} once per flush. */
     private final Queue<String> outboundDatagrams = new ArrayDeque<>();
 
+    /**
+     * Reliable messages written whole to a socket and not yet acknowledged, keyed by envelope seq,
+     * in the order they went out (0.1.1 reliable delivery).
+     *
+     * <p><b>The defect this holds the fix for.</b> The queue survives a socket replacement; the
+     * bytes already handed to the dead socket do not. A frame written in full seconds before a link
+     * death that the far side never read was simply gone, and the resume handshake carried no
+     * acknowledgement information, so nothing resent it — a fuel purchase, two credit gifts and a
+     * storage deposit died that way in one live session. Everything on
+     * {@link CoopMessages#isReliableOneShot} lands here on its way out and leaves on the peer's
+     * {@code RELIABLE_ACK}; whatever is still here when the link comes back is replayed.
+     *
+     * <p>A {@link java.util.LinkedHashMap} rather than a deque because both operations are
+     * by-identity: acks arrive out of order relative to sends, and the replay needs send order.
+     */
+    private final java.util.LinkedHashMap<Long, CoopMessages.Message> unacked =
+            new java.util.LinkedHashMap<>();
+
+    /**
+     * Hard bound on {@link #unacked}. Reached only when a peer applies nothing for thousands of
+     * events, which means the session is already broken; past it the oldest is evicted so a wedged
+     * link cannot grow the heap. One warn per link, because the eviction repeats per message.
+     */
+    static final int MAX_UNACKED_MESSAGES = 1024;
+
+    /** Cause reported for a grant evicted by {@link #MAX_UNACKED_MESSAGES}; refunded like any loss. */
+    static final String CAUSE_UNACKED_CAP = "unacked-cap";
+
+    private boolean unackedCapWarned;
+
     private final int slot;
 
     /**
@@ -438,10 +468,108 @@ public final class CoopPeerLink {
         this.pendingWriteMessage = message;
     }
 
-    /** The frame went out whole; nothing is owed a resend. */
+    /**
+     * The frame went out whole. Nothing is owed a <em>resend on this socket</em> — but a reliable
+     * one-shot is owed an acknowledgement, so it moves into {@link #unacked} here and stays until
+     * the peer says it applied it (0.1.1). This is the one call site that knows a message reached
+     * the kernel in full, which is exactly the boundary the old design mistook for delivery.
+     */
     void clearPendingWrite() {
+        CoopMessages.Message written = pendingWriteMessage;
         this.pendingWrite = null;
         this.pendingWriteMessage = null;
+        if (written != null && CoopMessages.isReliableOneShot(written.type())) {
+            noteAwaitingAck(written);
+        }
+    }
+
+    /** Records one written reliable message and enforces {@link #MAX_UNACKED_MESSAGES}. */
+    private void noteAwaitingAck(CoopMessages.Message message) {
+        unacked.put(message.seq(), message);
+        while (unacked.size() > MAX_UNACKED_MESSAGES) {
+            java.util.Iterator<java.util.Map.Entry<Long, CoopMessages.Message>> oldest =
+                    unacked.entrySet().iterator();
+            CoopMessages.Message evicted = oldest.next().getValue();
+            oldest.remove();
+            if (!unackedCapWarned) {
+                unackedCapWarned = true;
+                coop.util.CoopLog.warn(CoopPeerLink.class, "Coop peer slot " + slot + " is holding "
+                        + MAX_UNACKED_MESSAGES + " unacknowledged reliable messages; evicting the"
+                        + " oldest (" + evicted.type() + " seq=" + evicted.seq() + "). The peer is"
+                        + " not acknowledging anything, so this session is already diverging.");
+            }
+            reportDiscarded(java.util.List.of(evicted), CAUSE_UNACKED_CAP);
+        }
+    }
+
+    /** The peer applied these; stop owing them a resend. Unknown seqs are ignored. */
+    void acknowledgeReliable(java.util.Collection<Long> seqs) {
+        if (seqs == null) {
+            return;
+        }
+        for (Long seq : seqs) {
+            if (seq != null) {
+                unacked.remove(seq);
+            }
+        }
+    }
+
+    /** How many reliable messages this link is still waiting to hear about. */
+    int unackedCount() {
+        return unacked.size();
+    }
+
+    /**
+     * Puts every unacknowledged reliable message back on the outbound queue, oldest first, ahead of
+     * whatever is queued behind it — the resume's replay (0.1.1). The history is cleared because the
+     * entries re-enter it through {@link #clearPendingWrite} as they are written again.
+     *
+     * <p><b>Not at index 0.</b> Anything connection-scoped already queued for <em>this</em> socket
+     * is the {@code SESSION_RESUME_ACCEPT} that makes the peer treat the rest as session traffic;
+     * written after the replay, the replay arrives while the peer's grace gate is still shut and is
+     * dropped as coming from an unproven connection. So the replay goes behind that leading run and
+     * ahead of everything else.
+     *
+     * @return the replayed messages in send order; empty when nothing was owed
+     */
+    java.util.List<CoopMessages.Message> requeueUnackedForResend() {
+        if (unacked.isEmpty()) {
+            return java.util.List.of();
+        }
+        java.util.List<CoopMessages.Message> replayed = new java.util.ArrayList<>(unacked.values());
+        unacked.clear();
+        int at = 0;
+        while (at < outbound.size()
+                && CoopNetService.isConnectionScopedControl(outbound.get(at).type())) {
+            at++;
+        }
+        outbound.addAll(at, replayed);
+        return replayed;
+    }
+
+    /**
+     * Empties the history for a session that is over: every {@code CREDITS_GRANT} in it is reported
+     * to the discard listener (so it is refunded like any other transport loss) and the rest is
+     * handed back for the caller to log.
+     *
+     * @return the non-grant entries, in send order
+     */
+    java.util.List<CoopMessages.Message> drainUnacked(String cause) {
+        if (unacked.isEmpty()) {
+            return java.util.List.of();
+        }
+        java.util.List<CoopMessages.Message> grants = new java.util.ArrayList<>(0);
+        java.util.List<CoopMessages.Message> rest = new java.util.ArrayList<>(0);
+        for (CoopMessages.Message message : unacked.values()) {
+            if (message.type() == CoopMessages.Type.CREDITS_GRANT) {
+                grants.add(message);
+            } else {
+                rest.add(message);
+            }
+        }
+        unacked.clear();
+        reportDiscarded(grants, cause);
+        return rest;
     }
 
     /**
@@ -795,10 +923,14 @@ public final class CoopPeerLink {
         queueDepthWarned = false;
         datagramSendFailureLogged = false;
         oversizedFrameWarned = false;
+        unackedCapWarned = false;
         invalidFrames = 0;
         // Reported rather than cleared outright: shutdown is the "session ends forever" case, and it
         // is still the sender's money sitting in that queue (credit red-team P1-4).
         discardOutbound("shutdown");
+        // ...and the same for money that reached a socket but was never acknowledged (0.1.1). There
+        // is no session left to resume, so the replay that would have delivered it is never coming.
+        drainUnacked("shutdown");
         outboundDatagrams.clear();
     }
 

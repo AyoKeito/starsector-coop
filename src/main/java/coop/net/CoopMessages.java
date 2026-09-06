@@ -177,16 +177,102 @@ public final class CoopMessages {
          * already debited itself when it hands this to the transport, and the receiver adds exactly
          * {@code amount} to the local player's cargo the first time it sees {@code ledgerId}.
          *
-         * <p>Reliable TCP, either direction, session-only. There is no escrow and none is needed:
-         * the debit happens on send, TCP guarantees the message eventually lands (a transfer queued
-         * during a reconnect hold goes with the rest of the stream), and the sender-minted
-         * {@code ledgerId} makes a duplicate or a rebroadcast a no-op rather than a second payment.
+         * <p>Session-only, either direction, and on the {@link #isReliableOneShot} set. There is no
+         * escrow and none is needed: the debit happens on send, the ack/resend layer redelivers the
+         * grant across a socket replacement, and the sender-minted {@code ledgerId} makes a duplicate
+         * or a rebroadcast a no-op rather than a second payment.
+         *
+         * <p><b>Corrected 0.1.1.</b> This javadoc used to say "TCP guarantees the message eventually
+         * lands". It does not, and four live losses proved it: TCP guarantees delivery <em>on one
+         * socket</em>, and the coop transport replaces the socket on every reconnect. Bytes written
+         * into a dying connection that the far side never read are gone, and until the
+         * {@link Type#RELIABLE_ACK} layer existed nothing resent them. What makes the claim true now
+         * is the acknowledgement, not the wire.
          *
          * <p>{@code reason} is deliberately generic. Phase 32 sends {@code "gift"} from the options
          * page; Phase 34 reuses this same message and ledger for bounty payouts with
          * {@code "bounty:<bountyId>"}, and the receiver only reads it to choose the feed wording.
          */
-        CREDITS_GRANT
+        CREDITS_GRANT,
+        /**
+         * 0.1.1 reliable delivery: "I have applied (or recognised as a duplicate) these envelope
+         * seqs." Either direction, one per frame per peer that had reliable traffic to acknowledge,
+         * carrying up to {@link #MAX_RELIABLE_ACK_SEQS} seqs — the sender chunks past that.
+         *
+         * <p>It exists because a session outlives its sockets. Everything on the
+         * {@link #isReliableOneShot} set is a campaign event no producer will ever send again, so a
+         * frame written whole into a socket that died before the peer read it was lost with no trace:
+         * the live smoke lost a fuel purchase, two credit gifts and a storage deposit that way. The
+         * sender now keeps written-but-unacknowledged reliable messages per link and replays them on
+         * the resume, and this message is what lets it stop.
+         *
+         * <p>Connection-scoped ({@code CoopNetService#isConnectionScopedControl}): an ack queued for
+         * a socket that died proves nothing to the socket that replaces it, and dropping it costs
+         * only one redundant resend, which the receiver's dedup absorbs.
+         */
+        RELIABLE_ACK
+    }
+
+    /**
+     * Whether losing this message loses a fact: a campaign event with no producer that would ever
+     * send it again, so the transport owes it an acknowledgement and a resend across a socket
+     * replacement (0.1.1 reliable delivery).
+     *
+     * <p>Exhaustive, with no {@code default}: a type added to {@link Type} must be argued onto or off
+     * this list, because inheriting a "no" here is exactly how the four live losses would have been
+     * shipped again.
+     *
+     * <p><b>On the list</b> — one-shot campaign events. A {@code MARKET_TXN}, a {@code WORLD_DELTA},
+     * a colony lifecycle event, a reputation delta, a {@code CREDITS_GRANT}: each is sent once by a
+     * producer that has already moved on, and the receiver has no way to notice one is missing.
+     *
+     * <p><b>Deliberately off it</b>, each for a reason, not by omission:
+     * <ul>
+     *   <li><b>Snapshots and periodic streams</b> ({@code TIME_SNAPSHOT}, {@code NPC_FLEET_SET},
+     *   {@code ORBIT_SNAPSHOT}, {@code FLEET_*}, {@code BASE_SET}, {@code PLAYER_REP_SNAPSHOT},
+     *   {@code MISSION_POOL_SNAPSHOT}, {@code LOBBY_STATUS}, {@code SESSION_STATS},
+     *   {@code COLONY_INCOME}, {@code EXPEDITION_WARNING}, {@code STATE_DATAGRAM}) — the producer
+     *   sends another one, and the resume forces a full rebroadcast. Replaying a stale copy behind
+     *   the fresh one would be strictly worse than losing it.</li>
+     *   <li><b>{@code MARKET_OPEN} / {@code MARKET_SNAPSHOT}</b> — scoped to one open of one market.
+     *   A resend after the screen closed describes a market nobody is looking at.</li>
+     *   <li><b>{@code MISSION_CLAIM_*}</b> — a request/response pair with local timeouts. A request
+     *   resent minutes later could be accepted after the requester gave up, handing out a claim
+     *   nobody is holding.</li>
+     *   <li><b>{@code ABILITY_ACTIVATE}, {@code BATTLE_*}, {@code ENGAGE_GUEST},
+     *   {@code DIALOG_BEGIN}, {@code INTERACTION_*}</b> — they describe a moment (a transponder
+     *   toggle, a battle, an open dialog) that the drop edge has already ended and reset.</li>
+     *   <li><b>{@code SAVE_CHECKPOINT}, {@code STALL_NOTICE}, {@code RESPAWN_PLAYER}</b> — orders
+     *   about right now; obeying one late is worse than never hearing it.</li>
+     *   <li><b>{@code OPTIONS_SNAPSHOT} / {@code OPTIONS_APPLIED}</b> — version-based, so the
+     *   comparison that produced them runs again and re-sends whatever is still out of date.</li>
+     *   <li><b>The lobby/handshake/resume vocabulary, the keepalives, and {@code RELIABLE_ACK}
+     *   itself</b> — connection-scoped; a resend on a later socket answers a question nobody
+     *   asked. An ack that dies with its socket is re-earned by the resend/dedup path.</li>
+     * </ul>
+     */
+    public static boolean isReliableOneShot(Type type) {
+        return switch (type) {
+            case MARKET_TXN, CREDITS_GRANT, WORLD_DELTA, RAID_RESULT, SHIP_LOST,
+                 COLONY_FOUNDED, COLONY_ABANDONED, COLONY_MGMT,
+                 REP_DELTA, GUEST_REP_DELTA, FACTION_REL_DELTA -> true;
+            case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
+                 HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
+                 SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
+                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
+                 READY_STATE, FLEET_ROSTER_REQUEST, RELIABLE_ACK,
+                 TIME_SNAPSHOT, PAUSE_INTENT, FLEET_SNAPSHOT, FLEET_ROSTER, GUEST_SNAPSHOT,
+                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, STATE_DATAGRAM,
+                 PLAYER_REP_SNAPSHOT, MISSION_POOL_SNAPSHOT,
+                 MISSION_CLAIM_REQUEST, MISSION_CLAIM_ACCEPT, MISSION_CLAIM_REJECT,
+                 MARKET_OPEN, MARKET_SNAPSHOT, COLONY_INCOME, EXPEDITION_WARNING,
+                 INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
+                 ABILITY_ACTIVATE, DIALOG_BEGIN,
+                 BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
+                 SAVE_CHECKPOINT, RESPAWN_PLAYER, STALL_NOTICE,
+                 OPTIONS_SNAPSHOT, OPTIONS_APPLIED, SESSION_STATS, LINK_STATUS,
+                 PING, PONG, UDP_PROBE, PATH_PROBE -> false;
+        };
     }
 
     /**
@@ -2008,5 +2094,71 @@ public final class CoopMessages {
         String text = requireText(reason, "reason");
         return text.length() <= MAX_CREDITS_REASON_CHARS
                 ? text : text.substring(0, MAX_CREDITS_REASON_CHARS);
+    }
+
+    // ---- 0.1.1 reliable delivery -----------------------------------------------------------------
+
+    /**
+     * Envelope seqs per {@link Type#RELIABLE_ACK}. The sender chunks past this rather than growing
+     * one frame without bound: a peer that has been away for a whole grace window can owe hundreds of
+     * acks at once, and the frame cap is a transport limit, not a thing to gamble against.
+     */
+    public static final int MAX_RELIABLE_ACK_SEQS = 256;
+
+    /**
+     * "I have applied these envelope seqs, or already had them." See {@link Type#RELIABLE_ACK}.
+     *
+     * @param seqs the acknowledged envelope seqs; at least one, at most
+     *             {@link #MAX_RELIABLE_ACK_SEQS}. Both bounds are caller bugs rather than wire
+     *             states, so both throw.
+     */
+    public static Message reliableAck(String sessionId, long seq, long sentAtMillis,
+                                      List<Long> seqs) {
+        Objects.requireNonNull(seqs, "seqs");
+        if (seqs.isEmpty()) {
+            throw new IllegalArgumentException("reliable ack with no seqs");
+        }
+        if (seqs.size() > MAX_RELIABLE_ACK_SEQS) {
+            throw new IllegalArgumentException("reliable ack carries " + seqs.size()
+                    + " seqs, cap " + MAX_RELIABLE_ACK_SEQS);
+        }
+        StringBuilder json = new StringBuilder(16 + seqs.size() * 8);
+        json.append("{\"seqs\":[");
+        for (int i = 0; i < seqs.size(); i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append(Objects.requireNonNull(seqs.get(i), "seq").longValue());
+        }
+        json.append("]}");
+        return new Message(Type.RELIABLE_ACK, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                json.toString());
+    }
+
+    /**
+     * The seqs a {@link Type#RELIABLE_ACK} acknowledges, in wire order.
+     *
+     * <p>Throws on anything that is not an array of integers, and on an oversized array: an ack is
+     * the one message that tells a sender to <em>forget</em> something, so a malformed one must not
+     * be half-read, and the cap is enforced on the way in too because a peer that ignores it is
+     * handing us an unbounded allocation.
+     */
+    public static List<Long> parseReliableAckSeqs(Message message) {
+        Object raw = payload(message).raw().get("seqs");
+        if (!(raw instanceof List<?> values)) {
+            throw new IllegalArgumentException("Missing array field: seqs");
+        }
+        if (values.size() > MAX_RELIABLE_ACK_SEQS) {
+            throw new IllegalArgumentException("reliable ack carries " + values.size()
+                    + " seqs, cap " + MAX_RELIABLE_ACK_SEQS);
+        }
+        List<Long> seqs = new ArrayList<>(values.size());
+        for (Object value : values) {
+            if (!(value instanceof Long longValue)) {
+                throw new IllegalArgumentException("reliable ack seq is not an integer: " + value);
+            }
+            seqs.add(longValue);
+        }
+        return seqs;
     }
 }

@@ -7592,4 +7592,290 @@ class CoopNetPumpTest {
                 "the consumed gesture must not silently re-adopt onto the next save");
         assertEquals(CoopLobbyState.REJECTED, secondSession.connectionState());
     }
+
+    // ---- 0.1.1 reliable delivery: the receiver half ----------------------------------------------
+    //
+    // The sender half (the per-link history, the replay, the write-off) is CoopPeerLinkTest's and
+    // CoopReliableDeliveryTest's. What lives here is what the pump owns: acknowledging what it
+    // applied, refusing to apply the same thing twice when the sender replays it, asking the
+    // transport to replay on a resume, and telling the player about whatever never made it.
+
+    /** Records the transport calls the reliable layer makes, which the fake has no queue to show. */
+    private static final class ReliableNetService extends RecordingNetService {
+        private final List<List<Long>> acknowledged = new ArrayList<>();
+        private final List<String> requeuedFor = new ArrayList<>();
+        private final List<String> drainCauses = new ArrayList<>();
+        private java.util.Map<CoopMessages.Type, Integer> owed = java.util.Map.of();
+
+        private ReliableNetService(CoopConnectionRole role) {
+            super(role);
+        }
+
+        @Override
+        public void acknowledgeReliable(String senderId, java.util.Collection<Long> seqs) {
+            acknowledged.add(new ArrayList<>(seqs));
+        }
+
+        @Override
+        public java.util.Map<CoopMessages.Type, Integer> requeueUnackedReliable(String senderId) {
+            requeuedFor.add(senderId == null ? "" : senderId);
+            return owed;
+        }
+
+        @Override
+        public java.util.Map<CoopMessages.Type, Integer> drainUnackedReliable(String cause) {
+            drainCauses.add(cause);
+            return owed;
+        }
+    }
+
+    private static CoopMessages.Message reliableFrom(String senderId, long seq) {
+        return CoopMessages.marketTxn("session-a", seq, 1000L, "market-a", "open_market", "buy",
+                "fuel", 10, 5f, "guest-player").withSenderId(senderId);
+    }
+
+    private static List<Long> ackedSeqs(RecordingNetService service) {
+        List<Long> seqs = new ArrayList<>();
+        for (CoopMessages.Message message : service.sent) {
+            if (message.type() == CoopMessages.Type.RELIABLE_ACK) {
+                seqs.addAll(CoopMessages.parseReliableAckSeqs(message));
+            }
+        }
+        return seqs;
+    }
+
+    /**
+     * The frame acknowledges what it applied, once, in one message - not one per transaction. A
+     * market screen produces a burst of these and one ack frame carries the same information.
+     */
+    @Test
+    void everyReliableMessageAppliedInAFrameIsAcknowledgedInOneMessage() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        service.inbound.add(reliableFrom("guest-player", 11L));
+        service.inbound.add(reliableFrom("guest-player", 12L));
+        service.inbound.add(CoopMessages.ping("session-a", 13L, 1000L));
+
+        pump.advance(0f);
+
+        assertEquals(1, countOf(service, CoopMessages.Type.RELIABLE_ACK),
+                "one ack per peer per frame: " + service.sent);
+        assertEquals(List.of(11L, 12L), ackedSeqs(service),
+                "the keepalive is not reliable and owes nobody an acknowledgement");
+    }
+
+    /**
+     * The duplicate the whole layer exists to make safe: the sender replays what it never heard
+     * about, and a replay of something that DID land must not be applied a second time - that is a
+     * gift paid twice or a purchase booked twice.
+     */
+    @Test
+    void aReplayedReliableMessageIsDroppedAndAcknowledgedAgain() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        service.inbound.add(reliableFrom("guest-player", 11L));
+        pump.advance(0f);
+        assertEquals(0L, pump.reliableDuplicatesDroppedForTest());
+        service.sent.clear();
+
+        // The sender never saw the first ack, so it replays.
+        service.inbound.add(reliableFrom("guest-player", 11L));
+        pump.advance(0f);
+
+        assertEquals(1L, pump.reliableDuplicatesDroppedForTest());
+        assertEquals(List.of(11L), ackedSeqs(service),
+                "and it is acknowledged again - a sender whose ack went missing replays forever"
+                        + " until it is told");
+    }
+
+    /** Two peers, two counters: the same seq from a different sender is a different message. */
+    @Test
+    void theDedupIsPerSender() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+
+        service.inbound.add(reliableFrom("guest-a", 11L));
+        service.inbound.add(reliableFrom("guest-b", 11L));
+        pump.advance(0f);
+
+        assertEquals(0L, pump.reliableDuplicatesDroppedForTest());
+        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-a"));
+        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-b"));
+    }
+
+    /** Nothing about a snapshot goes through any of this; its producer sends another one. */
+    @Test
+    void aNonReliableMessageIsNeitherRememberedNorAcknowledged() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 4L, false, false, 5_000L, 3L,
+                1000L, "").withSenderId("host-player"));
+        service.inbound.add(CoopMessages.timeSnapshot("session-a", 4L, false, false, 6_000L, 4L,
+                1000L, "").withSenderId("host-player"));
+        pump.advance(0f);
+
+        assertEquals(0, countOf(service, CoopMessages.Type.RELIABLE_ACK));
+        assertEquals(0, pump.appliedReliableSeqCountForTest("host-player"));
+        assertEquals(0L, pump.reliableDuplicatesDroppedForTest(),
+                "a repeated snapshot seq is a resend, not a duplicate to suppress");
+    }
+
+    /** An inbound acknowledgement is what stops the sender owing those seqs. */
+    @Test
+    void anInboundAcknowledgementReachesTheTransport() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+
+        service.inbound.add(CoopMessages.reliableAck("session-a", 7L, 1000L, List.of(3L, 4L))
+                .withSenderId("host-player"));
+        pump.advance(0f);
+
+        assertEquals(List.of(List.of(3L, 4L)), service.acknowledged);
+    }
+
+    /** Host half of the replay: the returning guest is owed everything it never acknowledged. */
+    @Test
+    void anAcceptedResumeRequestReplaysWhatTheGuestNeverAcknowledged() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        service.owed = java.util.Map.of(CoopMessages.Type.MARKET_TXN, 2);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+
+        service.connected = true;
+        now.addAndGet(4_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(),
+                "guest-player").withSenderId("guest-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "the resume was accepted");
+        assertEquals(List.of("guest-player"), service.requeuedFor);
+    }
+
+    /** ...and the guest half, on the accept. */
+    @Test
+    void anAcceptedResumeReplaysTheGuestsOwnUnacknowledgedMessages() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        service.owed = java.util.Map.of(CoopMessages.Type.CREDITS_GRANT, 1);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+
+        service.connected = true;
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 9L, now.get())
+                .withSenderId("host-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(List.of("host-player"), service.requeuedFor);
+    }
+
+    /** A rejected resume request is not a resume, so nothing is replayed onto a stranger. */
+    @Test
+    void aRejectedResumeRequestReplaysNothing() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        service.owed = java.util.Map.of(CoopMessages.Type.MARKET_TXN, 1);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+
+        service.connected = true;
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, 2000L, "someone-else")
+                .withSenderId("someone-else"));
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+        assertEquals(List.of(), service.requeuedFor);
+    }
+
+    /**
+     * The end of the road: the session is over, so the messages that reached a socket and were never
+     * acknowledged are never going to be. The money in them is refunded by the transport's discard
+     * listener; the rest is the divergence the two campaigns now carry, and the player is told.
+     */
+    @Test
+    void aSessionEndWritesOffWhatWasNeverAcknowledgedAndSaysSo() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        service.owed = java.util.Map.of(CoopMessages.Type.MARKET_TXN, 2);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+
+        pump.reconnectCoordinatorForTest().end("the grace ran out");
+        pump.advance(0f);
+
+        assertEquals(List.of("session-end"), service.drainCauses);
+        assertTrue(intelEventContaining("never reached"),
+                "the player is owed the count: " + intelEvents());
+    }
+
+    /**
+     * The seqs are one session's envelope counter, so a fresh session must not inherit them - the
+     * next session's first MARKET_TXN would read as a duplicate of the last one's. A resume is not a
+     * fresh session and must keep them, which is the whole reason the replay is safe.
+     */
+    @Test
+    void theAppliedSeqsAreClearedOnANewSessionButNotOnAResume() {
+        ReliableNetService service = new ReliableNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, activeHostSession(), now::get);
+        service.inbound.add(reliableFrom("guest-player", 11L));
+        pump.advance(0f);
+        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-player"));
+
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(), "the window opened");
+        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-player"),
+                "a grace window is not a session end");
+        service.connected = true;
+        now.addAndGet(4_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(),
+                "guest-player").withSenderId("guest-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-player"),
+                "a resume is the same session; forgetting here would re-apply the replay");
+
+        // ...and the session ending IS the edge: the next one mints a new session id and starts its
+        // envelope counter over, so its first MARKET_TXN must not read as a duplicate of this one's.
+        service.connected = false;
+        pump.advance(0f);
+        pump.reconnectCoordinatorForTest().end("the grace ran out");
+        pump.advance(0f);
+
+        assertEquals(0, pump.appliedReliableSeqCountForTest("guest-player"));
+    }
+
+    private static List<String> intelEvents() {
+        List<String> lines = new ArrayList<>();
+        coop.ui.CoopSessionIntelModel model = coop.ui.CoopSessionIntelFeed.currentModel();
+        if (model != null) {
+            for (coop.ui.CoopSessionIntelModel.Event event : model.events()) {
+                lines.add(event.line());
+            }
+        }
+        return lines;
+    }
+
+    private static boolean intelEventContaining(String fragment) {
+        return intelEvents().stream().anyMatch(line -> line.contains(fragment));
+    }
 }

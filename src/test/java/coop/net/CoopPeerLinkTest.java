@@ -362,6 +362,176 @@ class CoopPeerLinkTest {
                 "net-fix-3: one oversized-frame line per connection, not one per megabyte");
     }
 
+    // ---- 0.1.1: the unacknowledged-reliable history ----------------------------------------------
+
+    /**
+     * The defect, stated as a test. A frame written whole to a socket that then died was treated as
+     * delivered, and nothing on either side could ever notice it was not.
+     */
+    @Test
+    void aWrittenReliableMessageIsHeldUntilThePeerAcknowledgesIt() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+
+        write(link, semantic(7L));
+
+        assertEquals(1, link.unackedCount(), "written is not delivered");
+        assertEquals(0, link.outboundDepth(), "and it is not queued twice");
+
+        link.acknowledgeReliable(List.of(7L));
+
+        assertEquals(0, link.unackedCount());
+    }
+
+    @Test
+    void anAcknowledgementForSomethingElseChangesNothing() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+        write(link, semantic(7L));
+
+        link.acknowledgeReliable(List.of(8L, 9L));
+        link.acknowledgeReliable(null);
+
+        assertEquals(1, link.unackedCount());
+    }
+
+    /** Only the reliable set is held; a snapshot's producer sends another one. */
+    @Test
+    void aWrittenSnapshotIsNotHeldForAnAcknowledgement() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+
+        write(link, snapshot(3L));
+
+        assertEquals(0, link.unackedCount());
+    }
+
+    /**
+     * The replay's placement, and the reason it is not simply {@code addFirst}: the resume accept is
+     * already queued for this socket and is what makes the peer treat everything behind it as session
+     * traffic. Ahead of it, the replay lands while the peer's grace gate is still shut.
+     */
+    @Test
+    void theReplayGoesAheadOfQueuedTrafficButBehindTheResumeAccept() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+        write(link, semantic(1L));
+        write(link, semantic(2L));
+        CoopMessages.Message accept = CoopMessages.sessionResumeAccept(SESSION, 50L, 1_000L);
+        CoopMessages.Message queuedAfter = semantic(60L);
+        link.enqueue(accept);
+        link.enqueue(queuedAfter);
+
+        List<CoopMessages.Message> replayed = link.requeueUnackedForResend();
+
+        assertEquals(List.of(1L, 2L), replayed.stream().map(CoopMessages.Message::seq).toList());
+        assertEquals(0, link.unackedCount(), "they re-enter the history as they are written again");
+        assertEquals(List.of(50L, 1L, 2L, 60L),
+                link.outbound().stream().map(CoopMessages.Message::seq).toList(),
+                "accept first, then the replay oldest-first, then what was already waiting");
+    }
+
+    @Test
+    void aReplayWithNothingOwedIsANoOp() {
+        CoopPeerLink link = link();
+
+        assertEquals(List.of(), link.requeueUnackedForResend());
+        assertEquals(0, link.outboundDepth());
+    }
+
+    /**
+     * The history is exactly what the new socket exists to carry, so unlike the queue's
+     * connection-scoped entries it must survive an attach untouched.
+     */
+    @Test
+    void aNewSocketKeepsTheUnacknowledgedHistory() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+        write(link, semantic(7L));
+        link.enqueue(CoopMessages.handshakeResultReject(8L, 0L, "mods differ"));
+
+        link.detach();
+        link.attach(null, InetAddress.getByName("127.0.0.2"), 5_000L, false, 2L);
+
+        assertEquals(0, link.outboundDepth(), "the dead connection's verdict still goes");
+        assertEquals(1, link.unackedCount(), "the unacknowledged event does not");
+    }
+
+    /** Past the cap the oldest is evicted, refunded if it was money, and warned about once. */
+    @Test
+    void theHistoryCapEvictsTheOldestAndRefundsAGrant() throws Exception {
+        CoopPeerLink link = link();
+        List<String> causes = new ArrayList<>();
+        List<CoopMessages.Message> reported = new ArrayList<>();
+        link.setOutboundDiscardListener((message, cause) -> {
+            reported.add(message);
+            causes.add(cause);
+        });
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+
+        write(link, grant(1L, "ledger-1"));
+        for (long seq = 2; seq <= CoopPeerLink.MAX_UNACKED_MESSAGES + 1; seq++) {
+            write(link, semantic(seq));
+        }
+
+        assertEquals(CoopPeerLink.MAX_UNACKED_MESSAGES, link.unackedCount());
+        assertEquals(1, reported.size(), "the oldest was the grant");
+        assertEquals(CoopMessages.Type.CREDITS_GRANT, reported.get(0).type());
+        assertEquals(List.of(CoopPeerLink.CAUSE_UNACKED_CAP), causes);
+    }
+
+    /** Session end: the money goes back, the rest is handed to the caller to explain. */
+    @Test
+    void drainingTheHistoryRefundsGrantsAndReturnsTheRest() throws Exception {
+        CoopPeerLink link = link();
+        List<CoopMessages.Message> reported = new ArrayList<>();
+        List<String> causes = new ArrayList<>();
+        link.setOutboundDiscardListener((message, cause) -> {
+            reported.add(message);
+            causes.add(cause);
+        });
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+        write(link, semantic(1L));
+        write(link, grant(2L, "ledger-2"));
+        write(link, semantic(3L));
+
+        List<CoopMessages.Message> rest = link.drainUnacked("session-end");
+
+        assertEquals(List.of(1L, 3L), rest.stream().map(CoopMessages.Message::seq).toList());
+        assertEquals(1, reported.size());
+        assertEquals(CoopMessages.Type.CREDITS_GRANT, reported.get(0).type());
+        assertEquals(List.of("session-end"), causes);
+        assertEquals(0, link.unackedCount());
+        assertEquals(List.of(), link.drainUnacked("session-end"), "and it is idempotent");
+    }
+
+    /** A transport shutdown is "the session ends forever", so the history goes the way the queue does. */
+    @Test
+    void resettingTheLinkDrainsTheHistoryAsShutdown() throws Exception {
+        CoopPeerLink link = link();
+        List<String> causes = new ArrayList<>();
+        link.setOutboundDiscardListener((message, cause) -> causes.add(cause));
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+        write(link, grant(1L, "ledger-1"));
+        link.enqueue(grant(2L, "ledger-2"));
+
+        link.reset();
+
+        assertEquals(0, link.unackedCount());
+        assertEquals(List.of("shutdown", "shutdown"), causes,
+                "the queued grant and the written-but-unacknowledged one both come back");
+    }
+
+    /** Models the flush: park the encoded frame, then report that the kernel took all of it. */
+    private static void write(CoopPeerLink link, CoopMessages.Message message) {
+        link.setPendingWrite(java.nio.ByteBuffer.wrap(new byte[]{1}), message);
+        link.clearPendingWrite();
+    }
+
+    private static CoopMessages.Message grant(long seq, String ledgerId) {
+        return CoopMessages.creditsGrant(SESSION, seq, 1000L, ledgerId, 1_000, "gift");
+    }
+
     /** A semantic event: nothing coalesces it and nothing is allowed to lose it. */
     private static CoopMessages.Message semantic(long seq) {
         return new CoopMessages.Message(CoopMessages.Type.MARKET_TXN, SESSION, seq, 1000L, "{}");

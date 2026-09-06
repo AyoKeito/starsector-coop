@@ -830,4 +830,81 @@ class CoopMessagesTest {
         assertEquals(CoopMessages.MAX_CREDITS_REASON_CHARS,
                 CoopMessages.parseCreditsGrant(fromAPeerThatIgnoredIt).reason().length());
     }
+
+    // ---- 0.1.1 reliable delivery -----------------------------------------------------------------
+
+    @Test
+    void aReliableAckRoundTripsItsSeqsInOrder() {
+        CoopMessages.Message ack = CoopMessages.reliableAck("session-a", 12L, 4_000L,
+                List.of(9L, 3L, 3_000_000_000L));
+
+        assertEquals("{\"seqs\":[9,3,3000000000]}", ack.payloadJson());
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(ack));
+
+        assertEquals(CoopMessages.Type.RELIABLE_ACK, decoded.type());
+        assertEquals(List.of(9L, 3L, 3_000_000_000L), CoopMessages.parseReliableAckSeqs(decoded),
+                "order is the sender's, and a seq past 2^31 must survive as a long");
+    }
+
+    @Test
+    void aReliableAckRefusesToCarryMoreThanTheChunkCapOrNothingAtAll() {
+        List<Long> tooMany = new ArrayList<>();
+        for (long seq = 0; seq <= CoopMessages.MAX_RELIABLE_ACK_SEQS; seq++) {
+            tooMany.add(seq);
+        }
+
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.reliableAck("session-a", 1L, 0L, tooMany));
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.reliableAck("session-a", 1L, 0L, List.of()));
+
+        // Exactly at the cap is fine - that is the chunk size the sender aims for.
+        List<Long> atTheCap = tooMany.subList(0, CoopMessages.MAX_RELIABLE_ACK_SEQS);
+        assertEquals(CoopMessages.MAX_RELIABLE_ACK_SEQS, CoopMessages.parseReliableAckSeqs(
+                CoopMessages.reliableAck("session-a", 1L, 0L, atTheCap)).size());
+    }
+
+    /** A peer that ignores the cap, and one that sends something that is not a list of integers. */
+    @Test
+    void aMalformedReliableAckThrowsRatherThanBeingHalfRead() {
+        StringBuilder oversized = new StringBuilder("{\"seqs\":[0");
+        for (int i = 1; i <= CoopMessages.MAX_RELIABLE_ACK_SEQS; i++) {
+            oversized.append(',').append(i);
+        }
+        oversized.append("]}");
+        CoopMessages.Message tooMany = new CoopMessages.Message(CoopMessages.Type.RELIABLE_ACK,
+                "session-a", 1L, 0L, oversized.toString());
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseReliableAckSeqs(tooMany));
+
+        CoopMessages.Message notAList = new CoopMessages.Message(CoopMessages.Type.RELIABLE_ACK,
+                "session-a", 1L, 0L, "{\"seqs\":7}");
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseReliableAckSeqs(notAList));
+
+        CoopMessages.Message notIntegers = new CoopMessages.Message(CoopMessages.Type.RELIABLE_ACK,
+                "session-a", 1L, 0L, "{\"seqs\":[\"3\"]}");
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopMessages.parseReliableAckSeqs(notIntegers));
+    }
+
+    /**
+     * The membership is pinned type-by-type in {@code CoopMessageTypePolicyTest}. What this asserts
+     * is the answer at the ends that cost real money and real cargo in the live smoke, so a reader
+     * of this file sees the point of the set without opening another one.
+     */
+    @Test
+    void theReliableSetCoversTheEventsTheLiveSmokeLost() {
+        assertTrue(CoopMessages.isReliableOneShot(CoopMessages.Type.MARKET_TXN));
+        assertTrue(CoopMessages.isReliableOneShot(CoopMessages.Type.CREDITS_GRANT));
+        assertTrue(CoopMessages.isReliableOneShot(CoopMessages.Type.WORLD_DELTA));
+
+        assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.TIME_SNAPSHOT),
+                "a snapshot's producer sends another one");
+        assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.MISSION_CLAIM_REQUEST),
+                "a request resent after its local timeout would be accepted by nobody's rules");
+        assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.MARKET_SNAPSHOT),
+                "scoped to one open of one market");
+    }
 }

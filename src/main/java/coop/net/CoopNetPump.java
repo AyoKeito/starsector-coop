@@ -101,6 +101,8 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_RECONNECT_ENDED = "reconnectEnded";
     private static final String FEED_RECONNECT_EXTENDED = "reconnectExtended";
     private static final String FEED_RECONNECT_RELAUNCHED = "reconnectRelaunched";
+    /** 0.1.1: reliable one-shots that reached a socket but were never acknowledged; see endSessionAfterDrop. */
+    private static final String FEED_RELIABLE_LOST = "reliableLost";
     /**
      * How long a guest that has just sent a deterministic reject holds its socket open so the reject
      * can leave it. Two seconds is far past any local flush and still short enough that a player
@@ -401,6 +403,30 @@ public class CoopNetPump implements EveryFrameScript {
     /** net-fix-2 counters: pre-drop messages the grace window let through, and ones it discarded. */
     private long preDropMessagesApplied;
     private long preDropMessagesDiscarded;
+    /**
+     * 0.1.1 reliable delivery, receiver half: the envelope seqs of reliable one-shots this side has
+     * applied, per sender. The sender replays anything it has not heard about after a resume, so a
+     * message that <em>did</em> land before the socket died arrives a second time; without this set
+     * that replay pays a gift twice or books a purchase twice.
+     *
+     * <p>Session-scoped: cleared by {@link #endSessionAfterDrop()} and nowhere else, so a resume —
+     * which is the same session, and whose whole point is that these ids still mean something —
+     * keeps them.
+     */
+    private final java.util.Map<String, java.util.LinkedHashSet<Long>> appliedReliableSeqs =
+            new java.util.LinkedHashMap<>();
+    /**
+     * Per-sender cap on {@link #appliedReliableSeqs}, oldest evicted first. Generous: the window a
+     * duplicate can arrive in is one resume replay, which is bounded by
+     * {@code CoopPeerLink.MAX_UNACKED_MESSAGES}, so this is twice the worst case the sender can
+     * produce.
+     */
+    private static final int MAX_APPLIED_RELIABLE_SEQS = 2048;
+    /** Seqs acknowledged at the end of this frame's drain, per sender; see {@link #flushReliableAcks}. */
+    private final java.util.Map<String, java.util.List<Long>> pendingReliableAcks =
+            new java.util.LinkedHashMap<>();
+    /** How many replayed reliable messages the dedup above has swallowed this session. */
+    private long reliableDuplicatesDropped;
     /**
      * net-fix-7: every snapshot type this pump has forced a producer to re-send after the transport's
      * queue cap discarded one. Bounded by the number of message types, and read by tests — the forced
@@ -885,6 +911,17 @@ public class CoopNetPump implements EveryFrameScript {
     /** Test read: pre-drop messages the drop edge had already invalidated. */
     long preDropMessagesDiscardedForTest() {
         return preDropMessagesDiscarded;
+    }
+
+    /** Test read: replayed reliable messages this side had already applied; see {@link #appliedReliableSeqs}. */
+    long reliableDuplicatesDroppedForTest() {
+        return reliableDuplicatesDropped;
+    }
+
+    /** Test read: how many applied reliable seqs are remembered for {@code senderId}. */
+    int appliedReliableSeqCountForTest(String senderId) {
+        java.util.LinkedHashSet<Long> applied = appliedReliableSeqs.get(reliableSenderKey(senderId));
+        return applied == null ? 0 : applied.size();
     }
 
     /** Test read: snapshot types re-sent after a queue-cap drop; see {@link #resendSnapshotsDroppedByQueueOverflow}. */
@@ -3114,6 +3151,9 @@ public class CoopNetPump implements EveryFrameScript {
         maybeSendLobbyHello();
         t = profiler.split(SECTION_LOBBY_HELLO, t);
         drainInbound();
+        // 0.1.1: one acknowledgement per peer for everything reliable this frame applied, before the
+        // frame's closing flush writes it. Until the peer sees this it keeps owing us those messages.
+        flushReliableAcks();
         // Immediately after the real drain, so a message released from the debug latency queue takes
         // the exact frame path a just-arrived one would: claims before the interaction gate runs,
         // pause intents before syncSharedPause computes the effective pause.
@@ -3888,12 +3928,40 @@ public class CoopNetPump implements EveryFrameScript {
         // for the reconnect are down. The next socket to attach would be written a grant belonging to
         // a session that no longer exists. Drop them here instead; each one is refunded to the sender.
         int refundedGrants = service.discardOutboundCreditsGrants();
+        // 0.1.1: and the same edge for reliable messages that DID reach a socket but were never
+        // acknowledged. There is no session left to replay them into, so the grants among them are
+        // refunded through the same listener (which writes its own line and feed entry per refund)
+        // and the rest - returned here - is written off loudly, because a MARKET_TXN that never
+        // landed is a divergence the two saves now carry.
+        java.util.Map<CoopMessages.Type, Integer> lost =
+                service.drainUnackedReliable("session-end");
         if (refundedGrants > 0) {
             CoopLog.warn(CoopNetPump.class, "Coop dropped " + refundedGrants
                     + " undelivered credit grant(s) with the session; they were returned to the sender");
         }
+        int lostActions = CoopNetService.totalOf(lost);
+        if (lostActions > 0) {
+            String types = CoopNetService.describeTypeCounts(lost);
+            CoopLog.warn(CoopNetPump.class, "Coop lost " + lostActions + " reliable message(s) that"
+                    + " reached the socket but were never acknowledged before the session ended ("
+                    + types + "); the two campaigns have diverged by exactly those actions");
+            postFeed(FEED_RELIABLE_LOST, clockMillis.getAsLong(), "Co-op: " + lostActions
+                    + " action(s) never reached " + remoteDisplayName() + " before the session"
+                    + " ended (" + types + ").", FEED_WARN_COLOR);
+        }
         // The slot is free, so the next guest owes its own seed-lock ack before it counts as one.
         guestSeedLockAcked = false;
+        // 0.1.1: and the receiver's dedup ids go with the session that minted them. They are seqs
+        // from ONE session's envelope counter, which the next session starts over, so carrying them
+        // across would let a new session's first MARKET_TXN read as a duplicate of the old one's.
+        //
+        // This edge rather than the link-supervision edge, which looks like a session edge and is
+        // not: detectPeerDisconnect disarms supervision on every drop, so re-arming happens on the
+        // frame a link dies - in the middle of the window the dedup ids exist to survive. Session
+        // end is the only edge a resume does not cross.
+        appliedReliableSeqs.clear();
+        pendingReliableAcks.clear();
+        reliableDuplicatesDropped = 0L;
         // Phase 20.6: drop every live reading but keep the event log, so the page still explains what
         // happened after the session it described is gone.
         intelFeed.endSession();
@@ -4029,6 +4097,10 @@ public class CoopNetPump implements EveryFrameScript {
         // Only after the accept is queued: the resume re-sets the datagram token and forces the
         // rebroadcast, and both belong strictly after the guest has been told it may keep the session.
         reconnect.resume();
+        // 0.1.1: and only after the resume, which is what marks this connection proven — the flush
+        // holds session traffic until then, so a replay queued before it would sit in a pre-proof
+        // hold rather than go out. It lands behind the accept above; see requeueUnackedForResend.
+        resendUnackedReliable(message.senderId());
     }
 
     /** Guest: the host gave the session back. */
@@ -4056,6 +4128,9 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         reconnect.resume();
+        // 0.1.1, guest half: everything this guest wrote into the socket that died and never heard
+        // back about goes out again on the connection that just proved itself.
+        resendUnackedReliable(message.senderId());
     }
 
     /** Guest: the host will not take us back, so the session is over now rather than at expiry. */
@@ -4141,7 +4216,11 @@ public class CoopNetPump implements EveryFrameScript {
                  ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, FLEET_SNAPSHOT,
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
-                 OPTIONS_SNAPSHOT, OPTIONS_APPLIED -> true;
+                 OPTIONS_SNAPSHOT, OPTIONS_APPLIED,
+                 // 0.1.1, and the one member of isConnectionScopedControl that survives: a pre-drop
+                 // ack is the partner saying it applied those seqs, which stays true after the drop.
+                 // Honouring it is what stops the resume replaying messages that already landed.
+                 RELIABLE_ACK -> true;
             // Scoped to the connection the drop edge just tore down, or to state it just reset.
             case INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
                  DIALOG_BEGIN,
@@ -4442,6 +4521,104 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    // ---- 0.1.1 reliable delivery, receiver half ---------------------------------------------------
+
+    /**
+     * Remembers that this reliable message has been handled and queues its seq for this frame's ack.
+     *
+     * <p>Marked <em>before</em> the handler runs, deliberately. A handler that throws is caught and
+     * logged by {@link #dispatchOneInbound} and the message is gone either way; treating it as
+     * applied means a replay of the same broken message is dropped rather than thrown again on every
+     * resume. The ack is queued in both branches, including the duplicate one — a sender whose ack
+     * went missing must be told again or it replays forever.
+     *
+     * @return false when this seq has already been applied, i.e. the caller must not dispatch it
+     */
+    private boolean noteReliableApplied(CoopMessages.Message message) {
+        String sender = reliableSenderKey(message.senderId());
+        java.util.LinkedHashSet<Long> applied =
+                appliedReliableSeqs.computeIfAbsent(sender, key -> new java.util.LinkedHashSet<>());
+        boolean fresh = applied.add(message.seq());
+        while (applied.size() > MAX_APPLIED_RELIABLE_SEQS) {
+            java.util.Iterator<Long> oldest = applied.iterator();
+            oldest.next();
+            oldest.remove();
+        }
+        pendingReliableAcks.computeIfAbsent(sender, key -> new java.util.ArrayList<>())
+                .add(message.seq());
+        return fresh;
+    }
+
+    /**
+     * Sends this frame's acknowledgements, one message per peer per {@link
+     * CoopMessages#MAX_RELIABLE_ACK_SEQS} seqs. Batched per frame rather than per message because a
+     * single market screen produces a burst of {@code MARKET_TXN}s and one ack frame for the burst is
+     * the same information.
+     *
+     * <p>Runs after the drain rather than inside it so an ack cannot be written for a message the
+     * rest of the drain has not been given a chance to see.
+     */
+    private void flushReliableAcks() {
+        if (pendingReliableAcks.isEmpty()) {
+            return;
+        }
+        String sessionId = sessionState.sessionId();
+        long now = clockMillis.getAsLong();
+        for (java.util.Map.Entry<String, java.util.List<Long>> entry
+                : pendingReliableAcks.entrySet()) {
+            String sender = entry.getKey();
+            java.util.List<Long> seqs = entry.getValue();
+            for (int from = 0; from < seqs.size(); from += CoopMessages.MAX_RELIABLE_ACK_SEQS) {
+                int to = Math.min(seqs.size(), from + CoopMessages.MAX_RELIABLE_ACK_SEQS);
+                try {
+                    CoopMessages.Message ack = CoopMessages.reliableAck(sessionId,
+                            service.nextSeq(), now, seqs.subList(from, to));
+                    service.sendTo(sender.isEmpty() ? null : sender, ack);
+                } catch (RuntimeException ex) {
+                    // A session that has no id cannot stamp an ack. The sender keeps owing the
+                    // message and replays it on the resume, where the dedup above absorbs it: the
+                    // failure mode is a redundant resend, which is the one this whole layer is
+                    // built to prefer.
+                    CoopLog.warn(CoopNetPump.class, "Coop could not acknowledge "
+                            + (to - from) + " reliable message(s) from " + describeSender(sender), ex);
+                }
+            }
+        }
+        pendingReliableAcks.clear();
+    }
+
+    /**
+     * Replays whatever this side still owes {@code senderId} after an accepted resume, and says so.
+     * Called from both halves of the resume exchange; see {@link CoopPeerLink#requeueUnackedForResend}
+     * for why the replay lands behind the accept rather than in front of it.
+     */
+    private void resendUnackedReliable(String senderId) {
+        java.util.Map<CoopMessages.Type, Integer> replayed;
+        try {
+            replayed = service.requeueUnackedReliable(senderId);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not replay unacknowledged reliable messages"
+                    + " after the resume", ex);
+            return;
+        }
+        int total = CoopNetService.totalOf(replayed);
+        if (total <= 0) {
+            return;
+        }
+        CoopLog.info(CoopNetPump.class, "Coop resending " + total
+                + " unacknowledged reliable message(s) after the resume: "
+                + CoopNetService.describeTypeCounts(replayed));
+    }
+
+    /** The key {@link #appliedReliableSeqs} is bucketed by; "" stands in for an unstamped sender. */
+    private static String reliableSenderKey(String senderId) {
+        return senderId == null ? "" : senderId;
+    }
+
+    private static String describeSender(String senderId) {
+        return senderId == null || senderId.isEmpty() ? "an unnamed peer" : senderId;
+    }
+
     /** Anything the pre-drain set aside comes first, so the peer's order is the order we apply. */
     private DeferredInbound nextInbound() {
         DeferredInbound deferred = deferredInbound.poll();
@@ -4510,6 +4687,20 @@ public class CoopNetPump implements EveryFrameScript {
                 return;
             }
         }
+        // 0.1.1 reliable delivery, after the grace gate on purpose: a message the gate refuses is
+        // neither remembered nor acknowledged, so the sender keeps owing it and replays it once the
+        // peer has proved itself. Note the pre-drop path a few lines up leads here too — that ack
+        // dies with the socket, the sender replays, and this dedup absorbs the copy. That sequence
+        // is the design, not a wasted round trip.
+        if (CoopMessages.isReliableOneShot(message.type())) {
+            if (!noteReliableApplied(message)) {
+                reliableDuplicatesDropped++;
+                CoopLog.info(CoopNetPump.class, "Coop dropping duplicate reliable type="
+                        + message.type() + " seq=" + message.seq() + " from "
+                        + describeSender(message.senderId()));
+                return;
+            }
+        }
         switch (message.type()) {
             case LOBBY_HELLO -> handleLobbyHello(message);
             case LOBBY_CHALLENGE -> handleLobbyChallenge(message);
@@ -4558,6 +4749,9 @@ public class CoopNetPump implements EveryFrameScript {
             case LOBBY_STATUS -> handleLobbyStatus(message);
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
+            case RELIABLE_ACK ->
+                    service.acknowledgeReliable(message.senderId(),
+                            CoopMessages.parseReliableAckSeqs(message));
             case STATE_DATAGRAM -> {
                 // Same session gate the UDP path gets from its token check: pre-session state must
                 // never reach the mirrors, whichever wire carried it.

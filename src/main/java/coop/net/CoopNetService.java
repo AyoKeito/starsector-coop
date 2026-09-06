@@ -923,6 +923,121 @@ public class CoopNetService {
         }
     }
 
+    // ---- 0.1.1 reliable delivery ------------------------------------------------------------------
+    //
+    // The queue is not the whole story: a reliable one-shot written in full into a socket that then
+    // died was lost with no trace, because the resume handshake carried no acknowledgement
+    // information. CoopPeerLink now keeps the written-but-unacknowledged ones; these three methods
+    // are how the pump acknowledges, replays and finally writes them off. See
+    // CoopMessages#isReliableOneShot.
+
+    /**
+     * The peer named by {@code senderId} has applied these envelope seqs, so stop owing them a
+     * resend. Routed like {@link #sendTo}: an unknown or null id means every peer, which with the v1
+     * capacity of 1 is the same link and, at higher capacities, is still safe — a seq the peer never
+     * sent is simply not in that peer's history.
+     */
+    public void acknowledgeReliable(String senderId, java.util.Collection<Long> seqs) {
+        if (seqs == null || seqs.isEmpty()) {
+            return;
+        }
+        synchronized (lifecycleLock) {
+            CoopPeerLink target = peerBySenderIdLocked(senderId);
+            if (target != null) {
+                target.acknowledgeReliable(seqs);
+                return;
+            }
+            for (CoopPeerLink peer : peers) {
+                peer.acknowledgeReliable(seqs);
+            }
+        }
+    }
+
+    /**
+     * Replays everything that peer is still owed, at the head of its queue. Called on both sides of
+     * an accepted resume; see {@link CoopPeerLink#requeueUnackedForResend()} for why "at the head"
+     * means "behind the resume accept".
+     *
+     * @return how many of each type were requeued, for the caller's log line; empty when nothing was
+     *         owed, which is the ordinary case
+     */
+    public java.util.Map<CoopMessages.Type, Integer> requeueUnackedReliable(String senderId) {
+        synchronized (lifecycleLock) {
+            CoopPeerLink target = peerBySenderIdLocked(senderId);
+            if (target != null) {
+                return countByType(target.requeueUnackedForResend());
+            }
+            java.util.Map<CoopMessages.Type, Integer> counts = new java.util.LinkedHashMap<>();
+            for (CoopPeerLink peer : peers) {
+                mergeCounts(counts, peer.requeueUnackedForResend());
+            }
+            return counts;
+        }
+    }
+
+    /**
+     * Writes off every unacknowledged reliable message on every peer, because the session that could
+     * have redelivered them is over. Credit grants are refunded through the discard listener; the
+     * rest is counted so the pump can tell the player what did not make it.
+     *
+     * @return how many of each non-grant type were lost; empty when nothing was owed
+     */
+    public java.util.Map<CoopMessages.Type, Integer> drainUnackedReliable(String cause) {
+        synchronized (lifecycleLock) {
+            java.util.Map<CoopMessages.Type, Integer> counts = new java.util.LinkedHashMap<>();
+            for (CoopPeerLink peer : peers) {
+                mergeCounts(counts, peer.drainUnacked(cause));
+            }
+            return counts;
+        }
+    }
+
+    /** Total reliable messages awaiting an acknowledgement across the table; tests and the bridge. */
+    public int unackedReliableCount() {
+        synchronized (lifecycleLock) {
+            int total = 0;
+            for (CoopPeerLink peer : peers) {
+                total += peer.unackedCount();
+            }
+            return total;
+        }
+    }
+
+    /** Renders a {@link #drainUnackedReliable} tally as {@code MARKET_TXN×2, CREDITS_GRANT×1}. */
+    public static String describeTypeCounts(java.util.Map<CoopMessages.Type, Integer> counts) {
+        StringBuilder text = new StringBuilder();
+        for (java.util.Map.Entry<CoopMessages.Type, Integer> entry : counts.entrySet()) {
+            if (text.length() > 0) {
+                text.append(", ");
+            }
+            text.append(entry.getKey()).append('×').append(entry.getValue());
+        }
+        return text.toString();
+    }
+
+    /** Sum of a {@link #drainUnackedReliable} tally. */
+    public static int totalOf(java.util.Map<CoopMessages.Type, Integer> counts) {
+        int total = 0;
+        for (int count : counts.values()) {
+            total += count;
+        }
+        return total;
+    }
+
+    private static java.util.Map<CoopMessages.Type, Integer> countByType(
+            java.util.List<CoopMessages.Message> messages) {
+        java.util.Map<CoopMessages.Type, Integer> counts = new java.util.LinkedHashMap<>();
+        mergeCounts(counts, messages);
+        return counts;
+    }
+
+    private static void mergeCounts(java.util.Map<CoopMessages.Type, Integer> counts,
+                                    java.util.List<CoopMessages.Message> messages) {
+        for (CoopMessages.Message message : messages) {
+            counts.merge(message.type(), 1, Integer::sum);
+        }
+    }
+
     /**
      * Takes the set of snapshot types the queue cap has discarded since the last call, and forgets
      * them (net-fix-7). Empty on almost every frame; the pump asks once per frame and forces a resend
@@ -1050,12 +1165,20 @@ public class CoopNetService {
      * from scratch — the pump gates all of these on {@code isConnected()} — so a copy left over from a
      * socket that died before flushing is never an answer to anything the new peer asked, and
      * {@link CoopPeerLink#attach} drops it.
+     *
+     * <p>{@code RELIABLE_ACK} joins them for the same reason from the other direction (0.1.1): an
+     * acknowledgement queued for a socket that died tells the socket that replaces it nothing, and
+     * dropping it costs exactly one redundant resend, which the receiver's dedup absorbs. It is the
+     * one member of this set that is <em>not</em> lobby vocabulary, which is why
+     * {@code CoopNetPump#survivesTheDropEdge} and {@code CoopNetPump#isControlPlane} answer
+     * differently for it than for the other nine.
      */
     static boolean isConnectionScopedControl(CoopMessages.Type type) {
         return switch (type) {
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
-                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT -> true;
+                 SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
+                 RELIABLE_ACK -> true;
             default -> false;
         };
     }
