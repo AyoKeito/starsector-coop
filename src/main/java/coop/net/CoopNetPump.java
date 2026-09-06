@@ -6833,6 +6833,9 @@ public class CoopNetPump implements EveryFrameScript {
             CoopMessages.Message leave = CoopMessages.sessionLeave(sessionState.sessionId(),
                     service.nextSeq(), clockMillis.getAsLong(), reason);
             service.send(leave);
+            // Same one-line wire trace every other sender writes, so a support log reads the same
+            // way for this one. log() only touches statics and the role, which is safe off-thread.
+            log("outbound", leave);
             service.flushOutbound();
             CoopLog.info(CoopNetPump.class, "Coop told the partner this player is leaving ("
                     + reason + "); no reconnect grace is owed on the far side");
