@@ -7864,6 +7864,182 @@ class CoopNetPumpTest {
         assertEquals(0, pump.appliedReliableSeqCountForTest("guest-player"));
     }
 
+    // ---- 0.1.1: the coordinated save reports back --------------------------------------------------
+    // Live smoke: the host pressed F5 while the guest sat in a dock screen for more than the old 30 s
+    // cap. No guest save, and nothing on the host's screen ever said so.
+
+    @Test
+    void aGuestBehindAScreenTellsTheHostItsSaveIsDeferredAndFlushesItInline() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.advance(0f);
+
+        // No sector, so CoopSaveCheckpoint.engineTarget refuses every frame - the same answer the
+        // engine gives while a dialog is up, which is the case being modelled.
+        service.inbound.add(CoopMessages.saveCheckpoint("session-a", 4L, 1_000L, 11L, "host save"));
+        pump.advance(0f);
+        assertEquals(0, countOfType(service, CoopMessages.Type.SAVE_CHECKPOINT_RESULT),
+                "a screen that closes inside five seconds is nobody's business");
+
+        now.addAndGet(coop.save.CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        pump.advance(0f);
+
+        CoopMessages.Message result = onlyOf(service, CoopMessages.Type.SAVE_CHECKPOINT_RESULT);
+        assertEquals(11L, CoopMessages.parseCheckpointResultId(result));
+        assertEquals(CoopMessages.CHECKPOINT_RESULT_DEFERRED,
+                CoopMessages.parseCheckpointResultOutcome(result));
+        assertTrue(service.flushed.stream()
+                        .anyMatch(m -> m.type() == CoopMessages.Type.SAVE_CHECKPOINT_RESULT),
+                "flushed inline: the frames around a coordinated save are the ones where neither"
+                        + " process is pumping, so a queued report is a report the host reads late");
+
+        // And it stays one message however long the screen stays open.
+        for (int i = 1; i <= 20; i++) {
+            now.addAndGet(1_000L);
+            pump.advance(0f);
+        }
+        assertEquals(1, countOfType(service, CoopMessages.Type.SAVE_CHECKPOINT_RESULT));
+    }
+
+    @Test
+    void theHostPostsAFeedLineForEachSaveCheckpointOutcome() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.saveCheckpointResult("session-a", 4L, now.get(), 3L,
+                CoopMessages.CHECKPOINT_RESULT_DEFERRED, 5_000L));
+        pump.advance(0f);
+        assertTrue(intelEvents().contains(
+                "Co-op: Guest A has a screen open; their save will run when it closes."),
+                intelEvents().toString());
+
+        service.inbound.add(CoopMessages.saveCheckpointResult("session-a", 5L, now.get(), 3L,
+                CoopMessages.CHECKPOINT_RESULT_SAVED, 42_000L));
+        pump.advance(0f);
+        assertTrue(intelEvents().contains("Co-op: Guest A's save caught up."),
+                intelEvents().toString());
+
+        service.inbound.add(CoopMessages.saveCheckpointResult("session-a", 6L, now.get(), 4L,
+                CoopMessages.CHECKPOINT_RESULT_ABANDONED, 600_000L));
+        pump.advance(0f);
+        assertTrue(intelEvents().contains(
+                "Co-op: Guest A never saved for checkpoint 4; the two saves are out of step."),
+                intelEvents().toString());
+    }
+
+    /**
+     * The three outcomes are a closed set precisely so the host never renders one it does not
+     * understand. A peer on a later build that invents a fourth gets a log line, not a feed banner
+     * about a save state this build cannot describe.
+     */
+    @Test
+    void anUnknownSaveCheckpointOutcomeIsLoggedRatherThanRendered() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNetPump pump = activeHostPump(service, () -> 1_000L);
+        pump.advance(0f);
+        int before = intelEvents().size();
+
+        service.inbound.add(new CoopMessages.Message(CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
+                "session-a", 4L, 1_000L,
+                "{\"checkpointId\":1,\"outcome\":\"pondering\",\"waitedMillis\":0}"));
+        pump.advance(0f);
+
+        assertEquals(before, intelEvents().size());
+    }
+
+    // ---- 0.1.1: a deliberate quit ends the session instead of holding the world --------------------
+
+    @Test
+    void aPartnerThatLeavesOnPurposeEndsTheSessionWithNoGraceWindow() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+        assertTrue(pump.gameplaySessionActiveForBridge());
+
+        service.inbound.add(CoopMessages.sessionLeave("session-a", 9L, now.get(),
+                CoopMessages.LEAVE_REASON_MENU));
+        pump.advance(0f);
+
+        assertFalse(pump.gameplaySessionActiveForBridge(), "the session is over on the same frame");
+        assertFalse(pump.reconnectCoordinatorForTest().active(),
+                "no window: the partner is at their title screen and is not coming back");
+        assertTrue(intelEvents().contains("Co-op: Guest A left the game."), intelEvents().toString());
+
+        // And the socket closing behind the departing process must not open one either.
+        service.connected = false;
+        pump.advance(0f);
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(CoopHudState.STATUS_WAITING_FOR_GUEST, pump.hudState(true).status());
+    }
+
+    /**
+     * The pre-drop case, and the reason {@code SESSION_LEAVE} survives the drop edge. The leave was
+     * written a frame before the socket died, so this side runs its drop edge first and opens the
+     * grace window; the leave is then read out of the same queue, stamped with the connection that
+     * carried the session, and turns a sixty-second hold into an immediate ending.
+     */
+    @Test
+    void aPreDropLeaveConvertsAnOpenGraceWindowIntoAnImmediateEnd() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = activeHostPump(service, now::get);
+        pump.advance(0f);
+
+        // The partner's last word and the FIN in one poll: the drop edge runs, then the drain.
+        service.inbound.add(CoopMessages.sessionLeave("session-a", 9L, now.get(),
+                CoopMessages.LEAVE_REASON_EXIT));
+        service.connected = false;
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(),
+                "the window opened on the drop edge and the leave closed it on the same frame");
+        assertFalse(pump.gameplaySessionActiveForBridge());
+        assertTrue(intelEvents().contains("Co-op: Guest A left the game."), intelEvents().toString());
+        assertFalse(intelEventContaining("session ended - the partner left the game"),
+                "one banner per event: the grace-expiry line would say the same thing twice");
+    }
+
+    /** A stranger who dialled the freed slot mid-grace must not be able to end a held session. */
+    @Test
+    void aLeaveFromAnUnprovenPeerDuringTheGraceWindowIsIgnored() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopNetPump pump = hostInGraceWindow(service, activeHostSession(), now);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting());
+
+        // Stamped with the generation of whatever socket holds the slot now, not the dead one.
+        service.connectionGeneration = 7L;
+        service.inboundGenerations.add(7L);
+        service.inbound.add(CoopMessages.sessionLeave("session-a", 3L, now.get(),
+                CoopMessages.LEAVE_REASON_MENU));
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(),
+                "only the connection that carried the session may end it with one frame");
+    }
+
+    @Test
+    void theLocalLeaveIsWrittenAndFlushedOnceHoweverManyProducersAskForIt() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1_000L);
+        pump.advance(0f);
+        service.sent.clear();
+        service.flushed.clear();
+
+        // The watchdog notices a quit to the title screen; onGameLoad then runs on the way out.
+        pump.sendSessionLeaveInline(CoopMessages.LEAVE_REASON_MENU);
+        pump.sendSessionLeaveInline(CoopMessages.LEAVE_REASON_EXIT);
+
+        CoopMessages.Message leave = onlyOf(service, CoopMessages.Type.SESSION_LEAVE);
+        assertEquals(CoopMessages.LEAVE_REASON_MENU, CoopMessages.parseSessionLeaveReason(leave));
+        assertTrue(service.flushed.stream().anyMatch(m -> m.type() == CoopMessages.Type.SESSION_LEAVE),
+                "a leave still sitting in the outbound queue when the process exits is no leave");
+    }
+
     private static List<String> intelEvents() {
         List<String> lines = new ArrayList<>();
         coop.ui.CoopSessionIntelModel model = coop.ui.CoopSessionIntelFeed.currentModel();

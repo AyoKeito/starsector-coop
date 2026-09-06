@@ -304,6 +304,19 @@ class CoopDesyncReasonTest {
                 classifyResume(CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER).sessionCause());
         assertEquals(CoopDesyncReason.SessionCause.HOST_IN_GRACE,
                 classifyResume(CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE).sessionCause());
+        // 0.1.1: the only ending in this set that is not a failure of anything. It gets its own
+        // cause so the dialog does not tell a player to check their link over somebody else's
+        // deliberate choice to quit.
+        assertEquals(CoopDesyncReason.SessionCause.PARTNER_LEFT,
+                classifyResume(CoopReconnectCoordinator.REASON_PARTNER_LEFT).sessionCause());
+    }
+
+    @Test
+    void aPartnerWhoLeftOnPurposeIsNotOfferedARetry() {
+        assertFalse(classifyResume(CoopReconnectCoordinator.REASON_PARTNER_LEFT).retryable(),
+                "there is nobody on the other end to retry against");
+        assertEquals(CoopDesyncReason.Kind.SESSION,
+                classifyResume(CoopReconnectCoordinator.REASON_PARTNER_LEFT).kind());
     }
 
     @Test

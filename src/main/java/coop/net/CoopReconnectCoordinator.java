@@ -100,6 +100,13 @@ public final class CoopReconnectCoordinator {
      * marker for it.
      */
     public static final String REASON_PARTNER_RELAUNCHED = "the partner returned through a relaunch";
+    /**
+     * Terminal reason (0.1.1): the partner said {@code SESSION_LEAVE} — it quit to the menu or the
+     * process is exiting. The one ending this machine does not have to guess at, and the reason the
+     * window closes on the spot rather than running its full length for somebody who is already
+     * looking at the title screen.
+     */
+    public static final String REASON_PARTNER_LEFT = "the partner left the game";
 
     /**
      * Reject text a {@code LOBBY_HELLO} used to get while a window is open.

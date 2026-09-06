@@ -442,6 +442,46 @@ class CoopNetServiceTest {
         }
     }
 
+    /**
+     * 0.1.1: the inline write a departing player's watchdog makes, over real sockets and from a
+     * thread the campaign knows nothing about.
+     *
+     * <p>Both halves matter. The thread, because there is no engine hook for quitting to the menu —
+     * the campaign thread has already stopped, so the only code that can speak is off to one side,
+     * and {@code send} + {@code flushOutbound} taking the transport's lifecycle lock is the whole
+     * reason that is safe. And the inline flush, because the process is about to stop existing: a
+     * leave still sitting in the outbound queue is a leave the partner never gets, and the partner
+     * then spends 15 s calling the link dead and 60 more holding the world.
+     */
+    @Test
+    void aSessionLeaveWrittenInlineFromAnotherThreadReachesThePeer() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> bothConnected(host, guest), "host and guest connected");
+
+            Thread departing = new Thread(() -> {
+                guest.send(CoopMessages.sessionLeave(SESSION_ID, guest.nextSeq(), 1_000L,
+                        CoopMessages.LEAVE_REASON_MENU));
+                guest.flushOutbound();
+            }, "test-departing-player");
+            departing.start();
+            departing.join(5_000L);
+            assertFalse(departing.isAlive(), "the inline write must not block on the campaign thread");
+
+            CoopMessages.Message leave = waitForMessage(host, "host inbound session leave");
+            assertEquals(CoopMessages.Type.SESSION_LEAVE, leave.type());
+            assertEquals(CoopMessages.LEAVE_REASON_MENU,
+                    CoopMessages.parseSessionLeaveReason(leave));
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
     private int reserveLocalPort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             socket.setReuseAddress(true);

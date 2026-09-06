@@ -104,16 +104,16 @@ class CoopSaveCheckpointTest {
     }
 
     @Test
-    void aFoldedInCheckpointDoesNotExtendTheGiveUpDeadline() {
-        // One autosave, one 30-second budget: a stream of checkpoints while the player sits in a
-        // dialog must not keep the retry loop alive indefinitely.
+    void aSupersedingCheckpointDoesNotExtendTheSafetyCap() {
+        // One autosave, one episode clock: a host saving on a timer while the player sits in a
+        // dialog must not be able to push the cap out forever.
         CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
         ScriptedTarget target = new ScriptedTarget();
         target.canAutosave = false;
 
         checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
         checkpoint.onCheckpointReceived(2L, "host save", 20_000L);
-        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.GIVE_UP_MILLIS);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.SAFETY_CAP_MILLIS);
 
         assertFalse(checkpoint.isAutosavePending());
     }
@@ -195,7 +195,7 @@ class CoopSaveCheckpointTest {
     // ---- Guest: give up -------------------------------------------------------------------------
 
     @Test
-    void aCheckpointIsAbandonedWithAWarningAfterTheGiveUpWindow() {
+    void aCheckpointIsAbandonedWithAWarningAfterTheSafetyCap() {
         CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
         ScriptedTarget target = new ScriptedTarget();
         target.canAutosave = false;
@@ -204,11 +204,11 @@ class CoopSaveCheckpointTest {
             checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
 
             // One millisecond short of the window: still trying.
-            assertFalse(checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.GIVE_UP_MILLIS - 1L));
+            assertFalse(checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.SAFETY_CAP_MILLIS - 1L));
             assertTrue(checkpoint.isAutosavePending());
             assertFalse(log.hasWarning());
 
-            assertFalse(checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.GIVE_UP_MILLIS));
+            assertFalse(checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.SAFETY_CAP_MILLIS));
 
             assertFalse(checkpoint.isAutosavePending());
             assertEquals(0, target.autosaves);
@@ -319,6 +319,168 @@ class CoopSaveCheckpointTest {
                 throw new IllegalStateException("save failed");
             }
             autosaves++;
+        }
+    }
+
+    // ---- 0.1.1: the host is told what became of the save ----------------------------------------
+    // The live smoke: the host pressed F5 while the guest sat in a dock screen for more than thirty
+    // seconds. No guest save happened and nothing on the host's screen ever said so. These four pin
+    // the report protocol that closes that.
+
+    @Test
+    void aParkedCheckpointReportsItselfDeferredExactlyOnce() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = false;
+        RecordingReporter reporter = new RecordingReporter();
+        checkpoint.setResultReporter(reporter);
+
+        checkpoint.onCheckpointReceived(7L, "host save", 1_000L);
+
+        // Below the threshold the wire stays quiet: an autosave behind a one-second screen
+        // transition is the common case and is nobody's business.
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS - 1L);
+        assertEquals(List.of(), reporter.outcomes);
+
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        assertEquals(List.of(coop.net.CoopMessages.CHECKPOINT_RESULT_DEFERRED), reporter.outcomes);
+        assertEquals(List.of(7L), reporter.ids);
+        assertEquals(List.of(CoopSaveCheckpoint.DEFER_REPORT_MILLIS), reporter.waits);
+
+        // Sixty more frames behind the same screen add nothing.
+        for (int i = 1; i <= 60; i++) {
+            checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS + i * 16L);
+        }
+        assertEquals(1, reporter.outcomes.size(), "one deferral report per parked episode, not one per frame");
+    }
+
+    @Test
+    void aDeferredCheckpointReportsTheSaveWhenTheScreenClosesAndAnImmediateOneStaysSilent() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        RecordingReporter reporter = new RecordingReporter();
+        checkpoint.setResultReporter(reporter);
+
+        // Case one: no screen, saves on the next tick. The host hears nothing at all, because
+        // nothing happened that it did not already assume.
+        target.canAutosave = true;
+        checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
+        assertTrue(checkpoint.tick(target, 1_016L));
+        assertEquals(List.of(), reporter.outcomes);
+
+        // Case two: parked long enough to be announced, then saved. Both ends of that get a line.
+        target.canAutosave = false;
+        checkpoint.onCheckpointReceived(2L, "host save", 2_000L);
+        checkpoint.tick(target, 2_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        target.canAutosave = true;
+        assertTrue(checkpoint.tick(target, 20_000L));
+
+        assertEquals(List.of(coop.net.CoopMessages.CHECKPOINT_RESULT_DEFERRED,
+                coop.net.CoopMessages.CHECKPOINT_RESULT_SAVED), reporter.outcomes);
+        assertEquals(List.of(2L, 2L), reporter.ids);
+        assertEquals(18_000L, reporter.waits.get(1), "the report states the whole wait, not the last frame");
+    }
+
+    @Test
+    void theSafetyCapReportsTheCheckpointAbandoned() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = false;
+        RecordingReporter reporter = new RecordingReporter();
+        checkpoint.setResultReporter(reporter);
+
+        checkpoint.onCheckpointReceived(4L, "host save", 1_000L);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.SAFETY_CAP_MILLIS);
+
+        assertFalse(checkpoint.isAutosavePending());
+        assertEquals(List.of(coop.net.CoopMessages.CHECKPOINT_RESULT_DEFERRED,
+                coop.net.CoopMessages.CHECKPOINT_RESULT_ABANDONED), reporter.outcomes);
+        assertEquals(List.of(4L, 4L), reporter.ids);
+        assertEquals(CoopSaveCheckpoint.SAFETY_CAP_MILLIS, reporter.waits.get(1));
+    }
+
+    /**
+     * Supersession is what makes the reports name a checkpoint the host still cares about. The parked
+     * autosave keeps its episode clock — so the cap cannot be pushed out by a host saving on a timer
+     * — but it takes the newest id, because reporting "checkpoint 1 saved" to a host that has since
+     * ordered checkpoints 2 and 3 answers a question nobody is still asking.
+     */
+    @Test
+    void aNewerCheckpointSupersedesTheParkedOneWithoutRestartingItsClock() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = false;
+        RecordingReporter reporter = new RecordingReporter();
+        checkpoint.setResultReporter(reporter);
+
+        checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
+        checkpoint.onCheckpointReceived(2L, "host save", 3_000L);
+        checkpoint.onCheckpointReceived(3L, "host save", 4_000L);
+
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        assertEquals(List.of(3L), reporter.ids, "the newest checkpoint is the one the host is waiting on");
+        assertEquals(List.of(CoopSaveCheckpoint.DEFER_REPORT_MILLIS), reporter.waits,
+                "the wait is measured from the start of the episode, not from the newest checkpoint");
+
+        target.canAutosave = true;
+        assertTrue(checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS + 16L));
+        assertEquals(1, target.autosaves, "three checkpoints behind one screen are still one autosave");
+        assertEquals(List.of(3L, 3L), reporter.ids);
+    }
+
+    @Test
+    void aReportThatDidNotReachTheWireIsRetriedOnTheNextFrame() {
+        // The one thing worse than a deferral the host never hears about is one that was swallowed
+        // by a single bad frame and then considered told.
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = false;
+        RecordingReporter reporter = new RecordingReporter();
+        reporter.accept = false;
+        checkpoint.setResultReporter(reporter);
+
+        checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS + 16L);
+        assertEquals(2, reporter.outcomes.size(), "a refused report is still owed");
+
+        reporter.accept = true;
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS + 32L);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS + 48L);
+        assertEquals(3, reporter.outcomes.size(), "and stops being owed the moment it lands");
+    }
+
+    @Test
+    void aThrowingReporterDoesNotTakeTheAutosaveDownWithIt() {
+        CoopSaveCheckpoint checkpoint = new CoopSaveCheckpoint();
+        ScriptedTarget target = new ScriptedTarget();
+        target.canAutosave = false;
+        checkpoint.setResultReporter((id, outcome, waited) -> {
+            throw new IllegalStateException("transport is on fire");
+        });
+
+        checkpoint.onCheckpointReceived(1L, "host save", 1_000L);
+        checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS);
+        assertTrue(checkpoint.isAutosavePending(), "losing a save to a failed report about it would be absurd");
+
+        target.canAutosave = true;
+        assertTrue(checkpoint.tick(target, 1_000L + CoopSaveCheckpoint.DEFER_REPORT_MILLIS + 16L));
+        assertEquals(1, target.autosaves);
+    }
+
+    private static final class RecordingReporter implements CoopSaveCheckpoint.ResultReporter {
+        private final List<Long> ids = new ArrayList<>();
+        private final List<String> outcomes = new ArrayList<>();
+        private final List<Long> waits = new ArrayList<>();
+        private boolean accept = true;
+
+        @Override
+        public boolean sendCheckpointResult(long checkpointId, String outcome, long waitedMillis) {
+            ids.add(checkpointId);
+            outcomes.add(outcome);
+            waits.add(waitedMillis);
+            return accept;
         }
     }
 

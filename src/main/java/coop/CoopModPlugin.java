@@ -309,6 +309,13 @@ public class CoopModPlugin extends BaseModPlugin {
             // "session end" checkpoint (CoopSaveCheckpoint.onCheckpointReceived): doing so would put
             // its save ahead of the host's last real one, and the guest rejoins by loading that file.
             CoopSaveCheckpoint.notifySessionEnding();
+            // 0.1.1, after the checkpoint and before the shutdown, so the existing order is
+            // untouched and the last thing the partner reads is why the silence is about to start.
+            // The watchdog latches, so if it already spoke (a quit to the title screen on the way
+            // here) this is a no-op rather than a second leave.
+            if (netPump != null) {
+                netPump.sendSessionLeaveInline(coop.net.CoopMessages.LEAVE_REASON_MENU);
+            }
             netService.shutdown();
         }
         if (netPump != null) {
@@ -430,6 +437,9 @@ public class CoopModPlugin extends BaseModPlugin {
             // Releasing the router mapping for a port we are about to re-open would undo the new
             // session's own mapping (Phase 20.3), so this must run before the new pump is built.
             previous.shutdownPortMapper();
+            // 0.1.1: the outgoing pump's watchdog thread. Its work is done - onGameLoad has already
+            // sent the leave - and a per-game-load thread leak is not a thing to ship.
+            previous.shutdownSessionLeaveWatchdog();
         }
         // Red-team B6: the intel page's feed handle is installed by every pump and was never taken
         // down, so the page kept rendering the previous game's session - role, partner name, RTT and

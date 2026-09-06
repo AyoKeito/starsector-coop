@@ -287,7 +287,8 @@ class CoopDesyncDialogTest {
                         + CoopReconnectCoordinator.rejectReason(
                         CoopReconnectCoordinator.ResumeDecision.REJECT_PLAYER_MISMATCH),
                 CoopReconnectCoordinator.LOBBY_REJECT_IN_GRACE,
-                CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER)) {
+                CoopReconnectCoordinator.REASON_ENDED_BY_PLAYER,
+                CoopReconnectCoordinator.REASON_PARTNER_LEFT)) {
             RecordingDialog panel = show(dialogFor(
                     CoopDesyncReason.classify(raw, CoopDesyncReason.Source.SESSION_RESUME)));
             titles.add(panel.text.paragraphs.get(0));
@@ -295,6 +296,25 @@ class CoopDesyncDialogTest {
 
         assertEquals(titles.size(), titles.stream().distinct().count(),
                 "one dialog with a swappable reason string is exactly what this phase forbids: " + titles);
+    }
+
+    /**
+     * 0.1.1. A deliberate quit is the one session ending that is nobody's fault, and the surfaces
+     * that describe it must not send the reader looking for a problem: the feed banner beside the
+     * dialog says what happened rather than "session not resumed", and the body says so too.
+     */
+    @Test
+    void aPartnerWhoLeftOnPurposeIsDescribedAsThatAndNotAsAFailedResume() {
+        CoopDesyncReason reason = CoopDesyncReason.classify(
+                CoopReconnectCoordinator.REASON_PARTNER_LEFT, CoopDesyncReason.Source.SESSION_RESUME);
+
+        assertEquals("partner left the game", CoopDesyncDialog.shortCause(reason));
+        assertTrue(CoopDesyncDialog.feedLine(reason).startsWith("Co-op: partner left the game"),
+                CoopDesyncDialog.feedLine(reason));
+
+        String body = String.join("\n", show(dialogFor(reason)).text.paragraphs);
+        assertTrue(body.contains("left the game"), body);
+        assertTrue(body.contains("Nothing went wrong"), body);
     }
 
     @Test

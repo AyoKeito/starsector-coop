@@ -162,7 +162,10 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
             case SEED -> value.campaignIdMismatch() ? "campaign mismatch" : "seed mismatch";
             case MODS -> "mod mismatch";
             case GAME -> "game version mismatch";
-            case SESSION -> "session not resumed";
+            // 0.1.1: the one session ending that is not a failure to resume anything, and the feed
+            // banner beside the dialog must not call a deliberate quit one.
+            case SESSION -> value.sessionCause() == CoopDesyncReason.SessionCause.PARTNER_LEFT
+                    ? "partner left the game" : "session not resumed";
             case UNMAPPED -> "session ended";
         };
     }
@@ -650,6 +653,7 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
                 case HOST_IN_GRACE -> partner() + " is still holding the session for the player who"
                         + " dropped.";
                 case ENDED_BY_PLAYER -> "The co-op session was ended by hand.";
+                case PARTNER_LEFT -> partner() + " left the game.";
                 case OTHER -> "The co-op session ended.";
             };
         }
@@ -694,6 +698,14 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
                             + " waiting the window out.");
                     body.add("The host can load its co-op save and start a new session whenever you"
                             + " are both ready.");
+                }
+                case PARTNER_LEFT -> {
+                    body.add("They quit to the menu or closed the game, and said so on the way out,"
+                            + " so co-op ended the session straight away instead of holding your"
+                            + " world open waiting for them.");
+                    body.add("Nothing went wrong and nothing was lost. Start a fresh session"
+                            + " whenever you are both ready: load your co-op saves and connect"
+                            + " again.");
                 }
                 case OTHER -> {
                     body.add("The link is down and the session was released.");

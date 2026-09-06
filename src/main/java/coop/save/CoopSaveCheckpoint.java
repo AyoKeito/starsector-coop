@@ -18,8 +18,19 @@ import coop.util.CoopLog;
  *
  * <p><b>Deferred execution on the guest is mandatory, not a nicety.</b> {@code autosave()} silently
  * does nothing while a dialog is open, so a checkpoint that lands mid-dialog is parked and retried
- * every frame until the screen clears, then abandoned with a log after {@link #GIVE_UP_MILLIS}. The
- * same shape as {@code CoopPreBattleAutosave}, for the same engine reason.
+ * every frame until the screen clears. The same shape as {@code CoopPreBattleAutosave}, for the same
+ * engine reason.
+ *
+ * <p><b>0.1.1: the checkpoint waits for the screen, and the host is told.</b> The 0.1.0 build gave
+ * the parked autosave thirty seconds and then cancelled it with a warning in the guest's own log.
+ * The live smoke found both halves of that wrong. Thirty seconds is nothing — a player reading a
+ * market, an outfitting screen, a conversation all outlast it — so the host's save silently went
+ * unpaired for the ordinary case rather than the wedged one. And the host, which is the machine that
+ * ordered the save, had no way to know: the only trace was on the other player's disk. So the cap is
+ * now {@link #SAFETY_CAP_MILLIS}, ten minutes, which is a backstop against a genuinely stuck UI
+ * rather than a budget for a player who is reading something; and each parked episode reports itself
+ * back over {@link coop.net.CoopMessages.Type#SAVE_CHECKPOINT_RESULT} — once when it has been
+ * waiting {@link #DEFER_REPORT_MILLIS}, once when it finally saves, once if the cap runs out.
  *
  * <p>Static plumbing exists because the host's trigger is {@code CoopModPlugin.afterGameSave()} — a
  * {@code ModPlugin} callback with no handle on the campaign pump. The pump registers the live
@@ -30,8 +41,23 @@ public final class CoopSaveCheckpoint {
     /** Two saves closer together than this are one event (autosave chasing a manual save). */
     static final long SEND_DEBOUNCE_MILLIS = 2_000L;
 
-    /** How long the guest keeps retrying a checkpoint behind a dialog before giving up. */
-    static final long GIVE_UP_MILLIS = 30_000L;
+    /**
+     * The backstop, not a budget: how long a parked autosave may keep retrying before it is written
+     * off. Ten minutes because the thing it guards against is a UI that never closes — a modded
+     * screen that swallowed its own exit, a dialog left open by a script that threw — and every
+     * ordinary reason a screen stays open (reading a market, refitting, a long conversation, walking
+     * away from the keyboard) has to fit comfortably underneath it. The 0.1.0 value was 30 s, which
+     * did not, and the live smoke lost a save to a dock screen because of it.
+     */
+    public static final long SAFETY_CAP_MILLIS = 600_000L;
+
+    /**
+     * How long a parked autosave waits before it tells the host it is parked. Long enough that the
+     * common case — a checkpoint that lands during a one-second screen transition — stays silent,
+     * short enough that a player who is going to be a while is announced while the host still
+     * remembers pressing save.
+     */
+    public static final long DEFER_REPORT_MILLIS = 5_000L;
 
     /** Reason string for the checkpoint sent as a session ends. */
     public static final String REASON_SESSION_END = "session end";
@@ -45,6 +71,19 @@ public final class CoopSaveCheckpoint {
         boolean sendCheckpoint(long checkpointId, String reason);
     }
 
+    /**
+     * How the guest tells the host what became of a checkpoint (0.1.1). Role and session gating live
+     * on the pump side, exactly as they do for {@link Sender}.
+     */
+    public interface ResultReporter {
+        /**
+         * @param outcome one of {@code CoopMessages.CHECKPOINT_RESULT_*}
+         * @return true when the report actually reached the wire; false makes this class try again
+         *         on a later frame, which is what keeps a report from being lost to one bad frame
+         */
+        boolean sendCheckpointResult(long checkpointId, String outcome, long waitedMillis);
+    }
+
     /** The engine surface the deferred autosave needs, behind a seam so the deferral is testable. */
     public interface AutosaveTarget {
         /** True when {@code autosave()} would actually be honoured this frame. */
@@ -56,12 +95,21 @@ public final class CoopSaveCheckpoint {
     private static volatile CoopSaveCheckpoint active;
 
     private Sender sender;
+    private ResultReporter resultReporter;
     private long nextCheckpointId;
     private long lastSentAtMillis = Long.MIN_VALUE;
 
     private boolean autosavePending;
     private String pendingReason = "";
     private long pendingSinceMillis;
+    private long pendingCheckpointId;
+    /**
+     * Per parked <em>episode</em>, not per checkpoint id: a newer checkpoint that supersedes a
+     * parked one is the same screen still being open, and telling the host twice about one open
+     * screen is noise. It is also what makes the "saved" report conditional — an autosave that never
+     * had to be announced does not need to announce that it stopped being announced.
+     */
+    private boolean deferralReported;
     private long lastHandledCheckpointId = Long.MIN_VALUE;
 
     /** The instance the {@code ModPlugin} save callbacks route to; the newest pump wins. */
@@ -98,6 +146,11 @@ public final class CoopSaveCheckpoint {
         this.sender = sender;
     }
 
+    /** Guest side of 0.1.1: where the deferred/saved/abandoned reports go. Null disables them. */
+    public void setResultReporter(ResultReporter resultReporter) {
+        this.resultReporter = resultReporter;
+    }
+
     /**
      * Sends a checkpoint unless one went out inside the debounce window.
      *
@@ -132,8 +185,13 @@ public final class CoopSaveCheckpoint {
      * Guest: the host saved. Parks an autosave for the first frame the engine will honour it.
      *
      * <p>Duplicates collapse two ways: a checkpoint id already handled is dropped outright (a resend
-     * on a flaky link), and a <em>new</em> checkpoint arriving while one is still parked keeps the
-     * original deadline rather than extending it — one autosave, one 30-second budget.
+     * on a flaky link), and a <em>new</em> checkpoint arriving while one is still parked
+     * <b>supersedes</b> it — the park now carries the newest id and reason, because that is the
+     * checkpoint the host is waiting to hear about and reporting against a stale id would name a
+     * save the host has already moved past. What it does not move is the deadline: the wait is
+     * measured from the start of the parked episode, so a host saving on a timer cannot push
+     * {@link #SAFETY_CAP_MILLIS} out forever and the reported {@code waitedMillis} is how long the
+     * screen has actually been open.
      *
      * <p><b>{@link #REASON_SESSION_END} is the one checkpoint that must not save.</b> It is sent from
      * {@code CoopModPlugin.onGameLoad}, after the engine has already swapped the sector out, and the
@@ -160,14 +218,22 @@ public final class CoopSaveCheckpoint {
                             + " untouched and will still run." : ""));
             return;
         }
+        String parkedReason =
+                reason == null || reason.trim().isEmpty() ? REASON_HOST_SAVE : reason.trim();
         if (autosavePending) {
+            // Supersede, not fold: same single autosave, same episode clock, newest identity.
+            pendingCheckpointId = checkpointId;
+            pendingReason = parkedReason;
             CoopLog.debug(CoopSaveCheckpoint.class, "Coop save checkpoint " + checkpointId
-                    + " folded into the autosave already waiting for a clear screen");
+                    + " superseded the one already waiting for a clear screen; the wait keeps"
+                    + " running from " + pendingSinceMillis);
             return;
         }
         autosavePending = true;
-        pendingReason = reason == null || reason.trim().isEmpty() ? REASON_HOST_SAVE : reason.trim();
+        pendingCheckpointId = checkpointId;
+        pendingReason = parkedReason;
         pendingSinceMillis = nowMillis;
+        deferralReported = false;
         CoopLog.info(CoopSaveCheckpoint.class, "Coop save checkpoint " + checkpointId
                 + " received (" + pendingReason + "); autosaving as soon as no screen is open");
     }
@@ -177,10 +243,17 @@ public final class CoopSaveCheckpoint {
         return autosavePending;
     }
 
-    /** Drops a parked autosave without performing it (session end, disconnect, game load). */
+    /**
+     * Drops a parked autosave without performing it (session end, disconnect, game load).
+     *
+     * <p>Deliberately silent: every caller is a path where the link is going away, so there is
+     * nobody left to report to and a report queued against a dying socket is worse than none.
+     */
     public void cancel() {
         autosavePending = false;
         pendingReason = "";
+        pendingCheckpointId = 0L;
+        deferralReported = false;
     }
 
     /** Forgets everything, including the debounce and duplicate history. */
@@ -193,7 +266,7 @@ public final class CoopSaveCheckpoint {
 
     /**
      * Performs a parked autosave once the engine will honour it, or abandons it after
-     * {@link #GIVE_UP_MILLIS}. Never throws.
+     * {@link #SAFETY_CAP_MILLIS}. Also owns the three reports the host gets (0.1.1). Never throws.
      *
      * @return true when an autosave was performed this call.
      */
@@ -204,8 +277,13 @@ public final class CoopSaveCheckpoint {
         try {
             if (target.canAutosaveNow()) {
                 String reason = pendingReason;
+                long checkpointId = pendingCheckpointId;
+                long waited = Math.max(0L, nowMillis - pendingSinceMillis);
+                boolean owedAReport = deferralReported;
                 autosavePending = false;
                 pendingReason = "";
+                pendingCheckpointId = 0L;
+                deferralReported = false;
                 // The save index cannot otherwise tell an autosave from a manual one - the engine
                 // keeps its autosave flag to itself and hands the mod hooks nothing - and this is one
                 // of the two autosaves the mod asks for itself. autosave() runs the whole save inline,
@@ -218,19 +296,61 @@ public final class CoopSaveCheckpoint {
                 }
                 CoopLog.info(CoopSaveCheckpoint.class,
                         "Coop coordinated autosave performed (" + reason + ")");
+                // Only if the host was told to expect a wait. An autosave that ran on the frame it
+                // was ordered is the ordinary case, and the ordinary case says nothing.
+                if (owedAReport) {
+                    report(checkpointId, coop.net.CoopMessages.CHECKPOINT_RESULT_SAVED, waited);
+                }
                 return true;
             }
-            if (nowMillis - pendingSinceMillis >= GIVE_UP_MILLIS) {
+            long waited = Math.max(0L, nowMillis - pendingSinceMillis);
+            if (waited >= SAFETY_CAP_MILLIS) {
                 CoopLog.warn(CoopSaveCheckpoint.class, "Coop coordinated autosave (" + pendingReason
-                        + ") gave up after " + (nowMillis - pendingSinceMillis)
-                        + " ms: a screen stayed open the whole time. The two saves are out of step"
-                        + " until the next host save.");
+                        + ") gave up after " + waited + " ms: a screen stayed open the whole time."
+                        + " The two saves are out of step until the next host save.");
+                report(pendingCheckpointId, coop.net.CoopMessages.CHECKPOINT_RESULT_ABANDONED,
+                        waited);
                 cancel();
+                return false;
+            }
+            if (!deferralReported && waited >= DEFER_REPORT_MILLIS) {
+                // Set only on a successful send, so a frame where the transport refused is retried
+                // rather than swallowed - the point of the message is that the host learns.
+                deferralReported = report(pendingCheckpointId,
+                        coop.net.CoopMessages.CHECKPOINT_RESULT_DEFERRED, waited);
+                if (deferralReported) {
+                    CoopLog.info(CoopSaveCheckpoint.class, "Coop coordinated autosave ("
+                            + pendingReason + ") has been waiting " + waited
+                            + " ms for a clear screen; told the host it is deferred");
+                }
             }
             return false;
         } catch (RuntimeException | LinkageError ex) {
             cancel();
             CoopLog.warn(CoopSaveCheckpoint.class, "Coop coordinated autosave failed", ex);
+            return false;
+        }
+    }
+
+    /**
+     * One report to the host, swallowing whatever the transport throws.
+     *
+     * <p>Total by design: this is bookkeeping about a save, and a reporter that fails must never be
+     * able to take the autosave down with it — {@link #tick}'s own catch cancels the checkpoint, and
+     * losing a save to a failed <em>notification</em> about that save would be absurd.
+     *
+     * @return true when the report reached the wire
+     */
+    private boolean report(long checkpointId, String outcome, long waitedMillis) {
+        ResultReporter reporter = resultReporter;
+        if (reporter == null) {
+            return false;
+        }
+        try {
+            return reporter.sendCheckpointResult(checkpointId, outcome, waitedMillis);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopSaveCheckpoint.class,
+                    "Coop could not report save checkpoint " + checkpointId + " as " + outcome, ex);
             return false;
         }
     }

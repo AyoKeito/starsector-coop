@@ -103,6 +103,13 @@ public final class CoopDesyncReason {
         HOST_IN_GRACE,
         /** A player pressed the end/give-up option. */
         ENDED_BY_PLAYER,
+        /**
+         * 0.1.1: the partner quit to the menu or closed the game, and said so. The only ending in
+         * this list that is not a failure of anything — which is why it gets its own cause rather
+         * than {@link #OTHER}'s "the link is down and the session was released", a sentence that
+         * would have the reader checking their router over somebody else's deliberate choice.
+         */
+        PARTNER_LEFT,
         /** Session-shaped but not one of the above. */
         OTHER
     }
@@ -687,6 +694,9 @@ public final class CoopDesyncReason {
             cause = SessionCause.SLOT_TAKEN;
         } else if (lower.contains("ended by player")) {
             cause = SessionCause.ENDED_BY_PLAYER;
+        } else if (lower.contains("left the game")) {
+            // CoopReconnectCoordinator.REASON_PARTNER_LEFT, raised by a SESSION_LEAVE (0.1.1).
+            cause = SessionCause.PARTNER_LEFT;
         } else if (lower.contains("host rejected the resume")) {
             cause = SessionCause.OTHER;
         }
