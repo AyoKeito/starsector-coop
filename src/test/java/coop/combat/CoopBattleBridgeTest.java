@@ -524,6 +524,87 @@ class CoopBattleBridgeTest {
                 CoopBattleBridge.splitIds(CoopMessages.requiredPayloadString(begin, "npcFleetIds")));
     }
 
+    // ---- 2026-09-06 smoke: nothing engages a paused player ----------------------------------------
+
+    @Test
+    void aHandoffThatLandsOnAPausedGuestWaitsForTheWorldToRunAgain() {
+        // The reported defect: a hostile "next to" the guest opened an encounter while the guest had
+        // the game paused. The host's watcher holds its own handoffs now, but one already in flight
+        // crosses the link while the guest's pause intent is still travelling the other way.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.paused = true;
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+
+        assertTrue(engine.dialogsOpened.isEmpty(), "a paused world gets no unasked-for encounter");
+        assertEquals(0, engine.battlesStarted);
+
+        engine.paused = false;
+        fixture.bridge.tickCampaign(engine.sector, true, 3000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened,
+                "deferred, not dropped: the chaser is still where it was when the world stopped");
+    }
+
+    @Test
+    void aPauseHoweverLongNeverAgesOutTheParkedHandoff() {
+        // The pause is not a wedged state, so it must not be measured by the wedged-state timeout —
+        // otherwise a guest who pauses to think for a minute loses the encounter entirely and the
+        // host, which has already stamped its cooldown and its handoff grace, sends nothing more.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.paused = true;
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        for (long now = 2000L; now <= 3 * CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS; now += 5000L) {
+            fixture.bridge.tickCampaign(engine.sector, true, now);
+        }
+        engine.paused = false;
+        fixture.bridge.tickCampaign(engine.sector, true,
+                3 * CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS + 1000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened);
+    }
+
+    @Test
+    void aCustomsStopAlsoWaitsForAWorldThatIsActuallyRunning() {
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.paused = true;
+
+        fixture.bridge.handle(dialogBegin("npc-7", CoopMessages.DialogKind.CUSTOMS));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        assertTrue(engine.dialogsOpened.isEmpty());
+
+        engine.paused = false;
+        fixture.bridge.tickCampaign(engine.sector, true, 2000L);
+
+        assertEquals(List.of("Pirate Raiders"), engine.dialogsOpened);
+    }
+
+    @Test
+    void aWedgedGuestIsStillTimedOutOnceItsWorldIsRunning() {
+        // The pause hold must not swallow the real escape hatch: a guest whose world runs but never
+        // reaches a clear frame still drops the handoff rather than opening it minutes later.
+        Fixture fixture = Fixture.guest();
+        Engine engine = new Engine("npc-7");
+        engine.dialogOpen = true;
+
+        fixture.bridge.handle(engageGuest("npc-7", "Pirate Raiders"));
+        fixture.bridge.tickCampaign(engine.sector, true, 1000L);
+        fixture.bridge.tickCampaign(engine.sector, true,
+                CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS + 2000L);
+        engine.dialogOpen = false;
+        fixture.bridge.tickCampaign(engine.sector, true,
+                CoopBattleBridge.PENDING_ACTION_TIMEOUT_MILLIS + 3000L);
+
+        assertTrue(engine.dialogsOpened.isEmpty());
+    }
+
     // ---- Phase 14: DIALOG_BEGIN staging and the shield it borrows ---------------------------------
 
     @Test
@@ -865,6 +946,8 @@ class CoopBattleBridgeTest {
         private int battlesStarted;
         /** Flipped by the test to model the encounter being on screen across frames. */
         private boolean dialogOpen;
+        /** The guest's own campaign clock: a host-pushed encounter waits for a world that is running. */
+        private boolean paused;
         /** Makes {@code showInteractionDialog} refuse, which is the fallback's trigger. */
         private boolean dialogRefuses;
 
@@ -922,6 +1005,7 @@ class CoopBattleBridgeTest {
                     case "getCampaignUI" -> ui;
                     case "getPlayerFleet" -> engine.playerFleet;
                     case "getAllLocations" -> List.of(location);
+                    case "isPaused" -> engine.paused;
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
                     case "toString" -> "sectorProxy";

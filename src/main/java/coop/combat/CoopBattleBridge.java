@@ -969,6 +969,17 @@ public final class CoopBattleBridge {
         if (pendingEngage == null || sector == null) {
             return;
         }
+        if (isCampaignPaused(sector)) {
+            // Nothing engages a paused player (2026-09-06 smoke). The host's watcher holds its own
+            // handoffs while the shared clock is stopped, but the guest's key press reaches the host
+            // a round trip late, so a handoff already in flight can land on a guest that has just
+            // stopped its world. Park it — with the clock renewed, exactly like an open dialog above,
+            // because a pause is not a wedged state however long the guest sits in it — and open the
+            // encounter on the first running frame, when the chaser is still exactly where it was.
+            pendingEngage = new PendingEngage(pendingEngage.coopFleetId(), pendingEngage.fleetName(),
+                    nowMillis);
+            return;
+        }
         if (nowMillis - pendingEngage.queuedAtMillis() > PENDING_ACTION_TIMEOUT_MILLIS) {
             CoopLog.warn(CoopBattleBridge.class, "Coop ENGAGE_GUEST dropped (timed out waiting for a"
                     + " clear campaign frame) coopFleetId=" + pendingEngage.coopFleetId());
@@ -1084,6 +1095,13 @@ public final class CoopBattleBridge {
 
     private void drivePendingDialog(SectorAPI sector, long nowMillis) {
         if (pendingDialog == null || sector == null) {
+            return;
+        }
+        if (isCampaignPaused(sector)) {
+            // Same rule as the handoff above: a synthesized patrol stop is an encounter the guest did
+            // not ask for, and it waits for a world that is actually running. Renewed, not aged out.
+            pendingDialog = new PendingDialog(pendingDialog.coopFleetId(), pendingDialog.kind(),
+                    nowMillis);
             return;
         }
         if (nowMillis - pendingDialog.queuedAtMillis() > PENDING_ACTION_TIMEOUT_MILLIS) {
@@ -1497,6 +1515,21 @@ public final class CoopBattleBridge {
             return Global.getCurrentState();
         } catch (RuntimeException | LinkageError ex) {
             return GameState.CAMPAIGN;
+        }
+    }
+
+    /**
+     * Is this client's own campaign clock stopped? Read live off the sector rather than off the
+     * shared-pause coordinator on purpose: what matters to a host-pushed encounter is whether the
+     * world the guest is looking at is moving, and on the guest that is the applied host snapshot
+     * (the guest never drives {@code setPaused} from its own intent). An unreadable clock counts as
+     * paused, so the failure is a late encounter rather than an unasked-for one.
+     */
+    private static boolean isCampaignPaused(SectorAPI sector) {
+        try {
+            return sector.isPaused();
+        } catch (RuntimeException | LinkageError ex) {
+            return true;
         }
     }
 
