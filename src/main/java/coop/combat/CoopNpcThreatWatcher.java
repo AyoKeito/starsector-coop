@@ -113,6 +113,32 @@ import java.util.function.IntSupplier;
  * ordinary host play and a silently autoresolved mirror corrupts a fleet whose owner was never in a
  * battle. It runs every frame; everything else runs on {@link #SCAN_INTERVAL_MILLIS}.
  *
+ * <h2>Pause: the world stops, so the handoff stops (2026-09-06 smoke)</h2>
+ * A paused {@code CampaignEngine} still advances every {@code EveryFrameScript} with {@code amount=0},
+ * so the pump — and this watcher with it — keeps running while the shared world is frozen. Every
+ * timing rule here is wall-clock ({@link #SCAN_INTERVAL_MILLIS}, {@link #ENGAGE_COOLDOWN_MILLIS},
+ * {@link #HANDOFF_GRACE_MILLIS}, {@link #PENDING_GRACE_TTL_MILLIS}), so a pause used to keep burning
+ * them: the guest pressed pause next to a hostile, fifteen seconds of a cooldown or a handoff grace
+ * lapsed against a frozen geometry, and {@code ENGAGE_GUEST} went out at a player whose world was not
+ * running. The engine's own rule is the opposite — nothing engages a paused player, because the AI
+ * that would decide to is not being advanced — and the coop layer has to give the same guarantee.
+ *
+ * <p>{@link #tick} therefore reads {@code sector.isPaused()} and does two things with it. It holds the
+ * scan (the battle eject above it is unaffected; that recovery is per-frame for a reason), and it
+ * <em>freezes</em> the watcher's clock for the duration, so the cooldowns, the handoff grace and the
+ * queued post-defeat window measure running time only. The pause is a <b>defer, not a drop</b>: the
+ * chaser is still adjacent when the world resumes, so the next scan hands it off on exactly the terms
+ * it would have had. Freezing rather than merely gating is what keeps a two-minute pause from
+ * silently expiring the {@link #PENDING_GRACE_TTL_MILLIS} window a fleet the guest just beat depends
+ * on.
+ *
+ * <p>The host's clock is the right thing to read because the pause is shared and host-authoritative:
+ * {@code CoopSharedPauseCoordinator.effectivePaused()} ORs the guest's key and screen intents into it
+ * and {@code syncHostSharedPause} applies that to this sector, so "the guest is paused" is visible
+ * here as "our own clock is stopped". The one gap it cannot close is the ~1 RTT between the guest's
+ * key press and the intent landing; that half is closed guest-side, where {@code CoopBattleBridge}
+ * parks an inbound handoff while its own engine is paused.
+ *
  * <h2>Customs: a synthesized inspection chase</h2>
  * A patrol that detects a transponder-off guest mirror now closes on it and pushes
  * {@code DIALOG_BEGIN} on contact; the guest resolves the stop locally against its own cargo
@@ -250,6 +276,15 @@ public final class CoopNpcThreatWatcher {
     static final long DIAGNOSTIC_INTERVAL_MILLIS = 5000L;
 
     /**
+     * The largest gap between two ticks that a paused frame may credit to the pause (see the class
+     * doc's pause section). Paused campaign frames arrive at frame rate, so a real pause is thousands
+     * of 16 ms steps; a gap this long is not a pause, it is the campaign pump not having run at all —
+     * the host in its own battle, a save, an alt-tabbed process. Crediting those would push the
+     * cooldowns arbitrarily far into the future on the strength of time nobody spent paused.
+     */
+    static final long PAUSE_STEP_CAP_MILLIS = 1000L;
+
+    /**
      * How long a queued post-battle do-not-attack stays queued before it is dropped. The fleet has to
      * be in the mirror's location for the next scan to reach it; if the guest jumped out first there is
      * nothing left to protect.
@@ -360,6 +395,12 @@ public final class CoopNpcThreatWatcher {
     private final Set<String> loggedDerivedMargin = new HashSet<>();
     private long nextScanAtMillis;
     private long lastHandoffAtMillis = Long.MIN_VALUE;
+    /** Wall-clock millis this watcher has spent with the shared world paused (class doc: Pause). */
+    private long pausedMillisTotal;
+    /** Wall clock of the previous {@link #tick}; the pause accumulator's other endpoint. */
+    private long lastFrameAtMillis = Long.MIN_VALUE;
+    /** Edge latch so the pause hold logs once per pause rather than once per frame. */
+    private boolean pauseHoldLogged;
     private int ejectCount;
     private int graceAppliedCount;
 
@@ -675,6 +716,11 @@ public final class CoopNpcThreatWatcher {
         loggedDerivedMargin.clear();
         nextScanAtMillis = 0L;
         lastHandoffAtMillis = Long.MIN_VALUE;
+        // The freeze is session state like everything else above: a resumed session's deadlines are
+        // all cleared here, so carrying the offset that produced them would only skew the next one.
+        pausedMillisTotal = 0L;
+        lastFrameAtMillis = Long.MIN_VALUE;
+        pauseHoldLogged = false;
         ejectCount = 0;
         graceAppliedCount = 0;
         CoopAllyPullInSpike.reset();
@@ -713,15 +759,18 @@ public final class CoopNpcThreatWatcher {
         if (coopFleetId == null || coopFleetId.isEmpty()) {
             return;
         }
-        cooldowns.mark(cooldownKey(coopFleetId, Action.ENGAGE_GUEST), nowMillis);
-        pendingPostDefeatGrace.put(coopFleetId, nowMillis + PENDING_GRACE_TTL_MILLIS);
+        // Both deadlines are stored in the pause-frozen clock (class doc: Pause), so a battle that
+        // ends into a paused world still gets its full cooldown and its full window to be applied.
+        long now = activeMillis(nowMillis);
+        cooldowns.mark(cooldownKey(coopFleetId, Action.ENGAGE_GUEST), now);
+        pendingPostDefeatGrace.put(coopFleetId, now + PENDING_GRACE_TTL_MILLIS);
         CoopLog.debug(CoopNpcThreatWatcher.class, "Coop restarted the ENGAGE_GUEST cooldown and queued a"
                 + " post-defeat do-not-attack window at battle end coopFleetId=" + coopFleetId);
     }
 
     /** True when this fleet may be handed off again (test seam for {@link #noteBattleConcluded}). */
     public boolean isEngageReady(String coopFleetId, long nowMillis) {
-        return cooldowns.isReady(cooldownKey(coopFleetId, Action.ENGAGE_GUEST), nowMillis,
+        return cooldowns.isReady(cooldownKey(coopFleetId, Action.ENGAGE_GUEST), activeMillis(nowMillis),
                 ENGAGE_COOLDOWN_MILLIS);
     }
 
@@ -746,6 +795,8 @@ public final class CoopNpcThreatWatcher {
             return;
         }
         try {
+            boolean paused = worldPaused(sector);
+            long now = noteFrame(nowMillis, paused);
             // O(1) handle rather than a sector-wide scan (see CoopGuestMirrorHandle). This used to be
             // the first statement of every frame — a full location+fleet walk, above the scan throttle
             // below, with no early exit on a host whose guest had not connected yet. It stays above the
@@ -755,15 +806,85 @@ public final class CoopNpcThreatWatcher {
                 return;
             }
             ejectFromBattleIfNeeded(mirror);
-            if (nowMillis < nextScanAtMillis) {
+            if (paused) {
+                // Nothing engages a paused player. The eject above still runs (it is a recovery, not a
+                // decision), the clock is frozen by noteFrame, and the scan resumes where it left off.
+                logPauseHoldEdge(true);
                 return;
             }
-            nextScanAtMillis = nowMillis + SCAN_INTERVAL_MILLIS;
-            expirePendingGrace(nowMillis);
-            scan(sector, mirror, nowMillis, coopBattleActive);
+            logPauseHoldEdge(false);
+            if (now < nextScanAtMillis) {
+                return;
+            }
+            nextScanAtMillis = now + SCAN_INTERVAL_MILLIS;
+            expirePendingGrace(now);
+            scan(sector, mirror, now, coopBattleActive);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNpcThreatWatcher.class, "Coop NPC threat watcher pass failed", ex);
         }
+    }
+
+    /**
+     * Is the shared world stopped this frame? An unreadable clock counts as paused: the failure mode
+     * of guessing "running" is an unasked-for battle on the guest, and the failure mode of guessing
+     * "paused" is a handoff one scan late.
+     */
+    private static boolean worldPaused(SectorAPI sector) {
+        try {
+            return sector.isPaused();
+        } catch (RuntimeException | LinkageError ex) {
+            return true;
+        }
+    }
+
+    /**
+     * Advances the pause accumulator and returns the watcher's own clock: wall clock minus every
+     * millisecond the shared world has spent paused. Every deadline this class stores — the scan
+     * throttle, the per-fleet cooldowns, the handoff grace, the queued post-defeat window — is in
+     * that clock, so a pause defers them instead of expiring them (class doc: Pause).
+     *
+     * <p>Package private as the test seam: it is the whole of the freeze, and it needs no engine.
+     */
+    long noteFrame(long nowMillis, boolean worldPaused) {
+        long previous = lastFrameAtMillis;
+        lastFrameAtMillis = nowMillis;
+        if (worldPaused && previous != Long.MIN_VALUE) {
+            long delta = nowMillis - previous;
+            if (delta > 0L) {
+                pausedMillisTotal += Math.min(delta, PAUSE_STEP_CAP_MILLIS);
+            }
+        }
+        return activeMillis(nowMillis);
+    }
+
+    /** A wall-clock stamp from outside this class, translated into the pause-frozen clock. */
+    private long activeMillis(long wallMillis) {
+        return wallMillis - pausedMillisTotal;
+    }
+
+    /**
+     * The inverse, for the one thing that must stay on wall clock: the {@code sentAtMillis} stamped
+     * on an outbound message, which is a transport fact and not one of this class's deadlines.
+     */
+    private long wallMillis(long activeMillis) {
+        return activeMillis + pausedMillisTotal;
+    }
+
+    /** How long the shared world has been paused under this watcher, in millis (test seam). */
+    long pausedMillisTotal() {
+        return pausedMillisTotal;
+    }
+
+    private void logPauseHoldEdge(boolean held) {
+        if (held == pauseHoldLogged) {
+            return;
+        }
+        pauseHoldLogged = held;
+        CoopLog.info(CoopNpcThreatWatcher.class, held
+                ? "Coop threat watcher HELD: the shared world is paused; no ENGAGE_GUEST or customs"
+                        + " stop goes out and every cooldown is frozen until it runs again"
+                : "Coop threat watcher RESUMED after " + pausedMillisTotal
+                        + " ms of shared pause; any threat still at contact is handed off now");
     }
 
     /**
@@ -926,8 +1047,8 @@ public final class CoopNpcThreatWatcher {
     private void fireEngageGuest(FleetView view, long nowMillis) {
         cooldowns.mark(cooldownKey(view.coopFleetId(), Action.ENGAGE_GUEST), nowMillis);
         lastHandoffAtMillis = nowMillis;
-        service.send(CoopMessages.engageGuest(session.sessionId(), service.nextSeq(), nowMillis,
-                view.coopFleetId(), view.fleetName(), view.factionId()));
+        service.send(CoopMessages.engageGuest(session.sessionId(), service.nextSeq(),
+                wallMillis(nowMillis), view.coopFleetId(), view.fleetName(), view.factionId()));
         CoopLog.info(CoopNpcThreatWatcher.class, "Coop ENGAGE_GUEST sent coopFleetId=" + view.coopFleetId()
                 + " fleet=" + view.fleetName() + " faction=" + view.factionId()
                 + " dist=" + String.format("%.1f", view.distance())
@@ -1078,8 +1199,9 @@ public final class CoopNpcThreatWatcher {
 
     private void fireCustomsDialog(FleetView view, long nowMillis) {
         cooldowns.mark(cooldownKey(view.coopFleetId(), Action.CUSTOMS_DIALOG), nowMillis);
-        service.send(CoopMessages.dialogBegin(session.sessionId(), service.nextSeq(), nowMillis,
-                view.coopFleetId(), view.factionId(), CoopMessages.DialogKind.CUSTOMS));
+        service.send(CoopMessages.dialogBegin(session.sessionId(), service.nextSeq(),
+                wallMillis(nowMillis), view.coopFleetId(), view.factionId(),
+                CoopMessages.DialogKind.CUSTOMS));
         CoopLog.info(CoopNpcThreatWatcher.class, "Coop DIALOG_BEGIN sent (customs, transponder-off guest)"
                 + " coopFleetId=" + view.coopFleetId() + " fleet=" + view.fleetName()
                 + " faction=" + view.factionId() + " dist=" + String.format("%.1f", view.distance()));
