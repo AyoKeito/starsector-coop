@@ -7,12 +7,16 @@ import com.fs.starfarer.api.campaign.TextPanelAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.EngagementResultAPI;
 import coop.net.CoopConnectionRole;
+import coop.save.CoopCampaignGuard;
+import coop.save.CoopSaveIndex;
+import coop.save.CoopSaveIndexSchema;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * The Phase 21 desync dialogs: one per detectable cause, never one dialog with a swappable reason
@@ -50,6 +54,20 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
     /** The log file the player is told to search; stated by name because nothing can copy it there. */
     public static final String LOG_FILE = "starsector.log";
 
+    /**
+     * The launcher checkbox that sets the adopt-campaign override, quoted verbatim.
+     *
+     * <p>The dialog used to say "relaunch with launch-guest.ps1 -AdoptCampaign", which is a script
+     * almost nobody runs: the shipped way in is the launcher. Naming a control the player can find
+     * only works if the string here is the string on the control, so
+     * {@code CoopLauncherAppTest} pins the two together - the launcher cannot use this constant
+     * directly, because its source set is compiled without the game API this class extends.
+     */
+    public static final String ADOPT_CAMPAIGN_CHECKBOX = "Start over inside the host's campaign (guest)";
+
+    /** Where {@link #ADOPT_CAMPAIGN_CHECKBOX} lives, so the player knows where to look for it. */
+    public static final String ADOPT_CAMPAIGN_LOCATION = "the launcher's Advanced section";
+
     static final String OPTION_CLOSE_TEXT = "Close";
     static final String OPTION_RETRY_TEXT = "Try again";
     static final String OPTION_SUPPORT_TEXT = "Open support thread";
@@ -64,6 +82,16 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
      * browser on the machine running the suite.
      */
     static Consumer<String> urlOpener = url -> org.lwjgl.Sys.openURL(url);
+
+    /**
+     * How the campaign-mismatch dialog finds the save it should name. A seam for the same reason
+     * {@link #urlOpener} is one: the real read goes to the engine's common folder, and these dialogs
+     * are tested without a running game.
+     *
+     * <p>Returns {@code null} when the index was not there to read at all - see
+     * {@link CoopSaveIndex#readRowsOrNull()}. That is a third case, not an empty list.
+     */
+    static Supplier<List<CoopSaveIndexSchema.Row>> saveIndexReader = CoopSaveIndex::readRowsOrNull;
 
     final CoopDesyncReason reason;
     final CoopConnectionRole role;
@@ -342,6 +370,49 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
         return value == null || value.trim().isEmpty() ? "not reported" : value.trim();
     }
 
+    /** The index behind {@link #saveToLoadParagraph}; null when it could not be read. Never throws. */
+    static List<CoopSaveIndexSchema.Row> readSaveIndex() {
+        try {
+            return saveIndexReader.get();
+        } catch (Throwable ex) {
+            CoopLog.warn(CoopDesyncDialog.class,
+                    "Coop could not read the save index to name the save for the host's campaign", ex);
+            return null;
+        }
+    }
+
+    /**
+     * The guest's "which save" sentence for a campaign-id reject.
+     *
+     * <p>The reject already knows the host's campaign id, and this machine's save index knows which
+     * local save carries it, so the dialog can name the save instead of leaving the player to guess
+     * which of several characters was the co-op one - the guess the index was built to end.
+     *
+     * <p>Three cases, three different next steps:
+     * <ul>
+     *   <li>a row for that campaign exists - name it, in {@link CoopCampaignGuard#describe} 's
+     *   wording, so this reads the same as the launcher-written notice for the same mistake;</li>
+     *   <li>the index was read and holds nothing for that campaign - there is no save to load, so the
+     *   way in is a fresh campaign on the host's seed;</li>
+     *   <li>the index could not be read at all ({@code index == null}) - say so rather than claim
+     *   there is no save, which would send the player to start a game they may already have.</li>
+     * </ul>
+     *
+     * <p>Pure: rows in, one sentence out, so every branch is testable with no game running.
+     */
+    static String saveToLoadParagraph(String hostCampaignId, List<CoopSaveIndexSchema.Row> index) {
+        if (index == null) {
+            return "The co-op save list on this machine could not be read, so the save cannot be named"
+                    + " here. Load the save you last played in a session with the host.";
+        }
+        CoopSaveIndexSchema.Row row = CoopSaveIndex.newestForCampaign(index, hostCampaignId);
+        if (row == null) {
+            return "No save on this machine belongs to the host's campaign. The way in from here is a"
+                    + " New Game on the host's seed, launched with the checkbox below ticked.";
+        }
+        return "Most likely fix: load the save " + CoopCampaignGuard.describe(row) + ".";
+    }
+
     // ------------------------------------------------------------ the three
 
     /**
@@ -376,19 +447,20 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
                     body.add("Most likely fix: the guest loads the co-op save from this campaign - the"
                             + " one written while you were in a session together. Your lobby is"
                             + " already waiting.");
-                    body.add("If the guest meant to start over inside your campaign instead, they"
-                            + " relaunch with launch-guest.ps1 -AdoptCampaign. That gives them a fresh"
-                            + " world and leaves their old save's progress behind.");
+                    body.add("If the guest meant to start over inside your campaign instead, they tick"
+                            + " \"" + ADOPT_CAMPAIGN_CHECKBOX + "\" in " + ADOPT_CAMPAIGN_LOCATION
+                            + " and launch again. That gives them a fresh world and leaves their old"
+                            + " save's progress behind.");
                     return body;
                 }
                 body.add("Co-op stamps a campaign with an id the first time a session runs in it. The"
                         + " save loaded here carries a different id, so it is a different campaign even"
                         + " when the seed matches.");
-                body.add("Most likely fix: load the co-op save from this campaign - the one written"
-                        + " while you were in a session together.");
-                body.add("If you meant to start over inside the host's campaign instead,"
-                        + " relaunch with launch-guest.ps1 -AdoptCampaign. That accepts a fresh world"
-                        + " on this side and leaves this save's progress behind.");
+                body.add(saveToLoadParagraph(reason.hostCampaignId(), readSaveIndex()));
+                body.add("If you meant to start over inside the host's campaign instead, tick \""
+                        + ADOPT_CAMPAIGN_CHECKBOX + "\" in " + ADOPT_CAMPAIGN_LOCATION
+                        + " and launch again. That accepts a fresh world on this side and leaves this"
+                        + " save's progress behind.");
                 return body;
             }
             body.add("A co-op session needs both players in a sector built from the same seed. These"

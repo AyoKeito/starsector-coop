@@ -8,6 +8,7 @@ import coop.handshake.CoopHandshakeDiff;
 import coop.handshake.CoopHandshakeManifest;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopReconnectCoordinator;
+import coop.save.CoopSaveIndexSchema;
 import coop.seed.CoopSeedSync;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -17,9 +18,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -37,11 +40,13 @@ class CoopDesyncDialogTest {
     private static final String GUEST_FP = "f00dcafe11223344556677889900aabbccddeeff00112233445566778899aabb";
 
     private final Consumer<String> realOpener = CoopDesyncDialog.urlOpener;
+    private final Supplier<List<CoopSaveIndexSchema.Row>> realSaveIndex = CoopDesyncDialog.saveIndexReader;
     private final List<String> openedUrls = new ArrayList<>();
 
     @AfterEach
     void restoreUrlOpener() {
         CoopDesyncDialog.urlOpener = realOpener;
+        CoopDesyncDialog.saveIndexReader = realSaveIndex;
     }
 
     // -------------------------------------------------------------- dispatch
@@ -104,11 +109,15 @@ class CoopDesyncDialogTest {
 
     @Test
     void theCampaignIdDialogNamesTheAdoptOverrideRatherThanTheSeed() {
+        CoopDesyncDialog.saveIndexReader = () -> List.of(row("camp-7f3a", "Ayo", 12));
         RecordingDialog panel = show(dialogFor(campaignIdReason()));
         String body = String.join("\n", panel.text.paragraphs);
 
         assertTrue(body.contains("not from the host's co-op campaign"), body);
-        assertTrue(body.contains("-AdoptCampaign"), body);
+        assertTrue(body.contains("\"" + CoopDesyncDialog.ADOPT_CAMPAIGN_CHECKBOX + "\""), body);
+        assertTrue(body.contains(CoopDesyncDialog.ADOPT_CAMPAIGN_LOCATION), body);
+        assertFalse(body.contains("launch-guest.ps1"),
+                "the shipped way in is the launcher checkbox, not a script: " + body);
         assertTrue(body.contains("camp-7f3a"), body);
     }
 
@@ -120,9 +129,74 @@ class CoopDesyncDialogTest {
 
         assertTrue(body.contains("The guest's save is not from this co-op campaign."), body);
         assertTrue(body.contains("the guest loads the co-op save from this campaign"), body);
-        assertTrue(body.contains("they relaunch with launch-guest.ps1 -AdoptCampaign"), body);
+        assertTrue(body.contains("they tick \"" + CoopDesyncDialog.ADOPT_CAMPAIGN_CHECKBOX + "\""), body);
+        assertFalse(body.contains("launch-guest.ps1"), body);
         assertFalse(body.contains("This save is not from"), "the host did not load a wrong save: " + body);
         assertTrue(body.contains("camp-7f3a"), body);
+    }
+
+    // ------------------------------------- naming the save to load (2026-09-06 smoke, item A)
+
+    @Test
+    void theGuestDialogNamesTheSaveThatBelongsToTheHostsCampaign() {
+        CoopDesyncDialog.saveIndexReader = () -> List.of(
+                row("some-other-campaign", "Nobody", 3),
+                row("camp-7f3a", "Ayo", 12));
+
+        RecordingDialog panel = show(dialogFor(campaignIdReason()));
+        String body = String.join("\n", panel.text.paragraphs);
+
+        assertTrue(body.contains("\"Ayo\""), body);
+        assertTrue(body.contains("level 12"), body);
+        assertTrue(body.contains("Cycle 206, Kerenth 12"), body);
+        assertTrue(body.contains("folder saves\\save_Ayo"), body);
+    }
+
+    @Test
+    void withNoSaveForThatCampaignTheGuestIsSentToANewGameOnTheHostsSeed() {
+        String text = CoopDesyncDialog.saveToLoadParagraph("camp-7f3a",
+                List.of(row("some-other-campaign", "Nobody", 3)));
+
+        assertTrue(text.contains("No save on this machine belongs to the host's campaign"), text);
+        assertTrue(text.contains("New Game on the host's seed"), text);
+        assertFalse(text.contains("launch-guest.ps1"), text);
+    }
+
+    @Test
+    void anUnreadableSaveIndexSaysSoRatherThanClaimingThereIsNoSave() {
+        // The two are different next steps: "you have no save for this" sends the player off to
+        // start a campaign they may already have on disk.
+        String text = CoopDesyncDialog.saveToLoadParagraph("camp-7f3a", null);
+
+        assertTrue(text.contains("could not be read"), text);
+        assertFalse(text.contains("No save on this machine belongs"), text);
+        assertFalse(text.contains("launch-guest.ps1"), text);
+    }
+
+    @Test
+    void theNamedSaveIsSpelledTheSameWayTheLauncherWrittenNoticeSpellsIt() {
+        // One formatter, so a player who sees the load-time notice and then this dialog reads them
+        // as the same save rather than two.
+        CoopSaveIndexSchema.Row row = row("camp-7f3a", "Ayo", 12);
+
+        assertTrue(CoopDesyncDialog.saveToLoadParagraph("camp-7f3a", List.of(row))
+                .contains(coop.save.CoopCampaignGuard.describe(row)));
+    }
+
+    @Test
+    void aSaveIndexReadThatThrowsIsTheSameAsNoIndex() {
+        CoopDesyncDialog.saveIndexReader = () -> {
+            throw new IllegalStateException("no engine");
+        };
+
+        assertNull(CoopDesyncDialog.readSaveIndex(),
+                "a dialog explaining a failed session must not fail itself");
+    }
+
+    private static CoopSaveIndexSchema.Row row(String campaignId, String character, int level) {
+        return new CoopSaveIndexSchema.Row(campaignId, "save_" + character + "_1234", character,
+                level, 4_100_000L, "Cycle 206, Kerenth 12", 1_757_000_000_000L, Boolean.TRUE,
+                "GUEST", "MN-4030", "medium", "average");
     }
 
     // ------------------------------------------------------------- mods body
@@ -489,8 +563,10 @@ class CoopDesyncDialogTest {
         return CoopDesyncReason.classify(
                 "campaignId: host=camp-7f3a guest=<none>; this campaign is already in flight and this"
                         + " guest campaign is brand new (a fresh same-seed roll cannot silently rejoin"
-                        + " it). To join anyway with a fresh start, relaunch the guest with"
-                        + " -Dcoop.adoptCampaignId=true (launch-guest.ps1 -AdoptCampaign)",
+                        + " it). To join anyway with a fresh start, tick \""
+                        + CoopDesyncDialog.ADOPT_CAMPAIGN_CHECKBOX + "\" in "
+                        + CoopDesyncDialog.ADOPT_CAMPAIGN_LOCATION
+                        + " (-Dcoop.adoptCampaignId=true for script launches)",
                 CoopDesyncReason.Source.SEED_LOCK);
     }
 

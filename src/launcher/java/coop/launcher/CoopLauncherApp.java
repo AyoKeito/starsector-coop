@@ -89,6 +89,17 @@ public final class CoopLauncherApp {
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     /**
+     * The adopt-campaign checkbox's label. Public and named because the mod quotes it back at the
+     * player: the seed-lock desync dialog tells a guest whose save is from another campaign to tick
+     * this exact box, and advice that names a control the player cannot find is worse than none.
+     *
+     * <p>The mod cannot import this class (the launcher source set is compiled without the game API,
+     * so the dependency only goes one way), so {@code coop.ui.CoopDesyncDialog} keeps its own copy and
+     * {@code CoopLauncherAppTest} fails if the two ever drift.
+     */
+    public static final String ADOPT_CAMPAIGN_LABEL = "Start over inside the host's campaign (guest)";
+
+    /**
      * Star ages, spelled out because {@code StarAge} lives in {@code starfarer.api.jar} and the
      * launcher is compiled without it. The mod validates the value again
      * ({@code CoopNewGameChoices.parseStarAge}) and warns rather than crashing if this list ever
@@ -741,7 +752,7 @@ public final class CoopLauncherApp {
         // ticking it turns that row from a Launch-blocking FAIL into a WARN, and a row that only
         // caught up on the next Refresh would leave the button dead with no visible reason.
         allowGameVersionMismatchBox.addActionListener(event -> refreshInstallRows());
-        adoptCampaignBox = flag("Start over inside the host's campaign (guest)", "Overrides the seed"
+        adoptCampaignBox = flag(ADOPT_CAMPAIGN_LABEL, "Overrides the seed"
                 + " lock and adopts the host's in-flight campaign id. Discards this guest's co-op"
                 + " progress. Never remembered between launches.");
         form.pair(null, allowGameVersionMismatchBox, null, adoptCampaignBox);

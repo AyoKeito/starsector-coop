@@ -193,8 +193,15 @@ public final class CoopCampaignGuard {
         }
     }
 
-    /** One row as a player reads it: who, how far, when, and where the folder is. */
-    static String describe(CoopSaveIndexSchema.Row row) {
+    /**
+     * One row as a player reads it: who, how far, when, and where the folder is.
+     *
+     * <p>Public because the seed-lock desync dialog names the save to load as well. The two notices
+     * are the same mistake caught at different moments - the launcher-written expected id here, the
+     * host's own id at the seed lock - so they have to spell a save the same way. A player who sees
+     * both reads two differently-formatted lines as two different saves.
+     */
+    public static String describe(CoopSaveIndexSchema.Row row) {
         StringBuilder text = new StringBuilder();
         text.append('"')
                 .append(row.characterName().isEmpty() ? "unnamed character" : row.characterName())
