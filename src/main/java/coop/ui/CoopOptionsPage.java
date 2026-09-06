@@ -10,6 +10,7 @@ import com.fs.starfarer.api.ui.ButtonAPI;
 import com.fs.starfarer.api.ui.CustomPanelAPI;
 import com.fs.starfarer.api.ui.IntelUIAPI;
 import com.fs.starfarer.api.ui.SectorMapAPI;
+import com.fs.starfarer.api.ui.TextFieldAPI;
 import com.fs.starfarer.api.ui.TooltipMakerAPI;
 import com.fs.starfarer.api.util.Misc;
 import coop.config.CoopOptionsPolicy;
@@ -23,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Phase 28 milestone 3: the "Coop Options" intel entry - the in-campaign editor for everything in
@@ -31,16 +33,19 @@ import java.util.Set;
  * <p>Third coop page, on the same transient lifecycle as the other two ({@link CoopSessionIntel},
  * {@link CoopSessionStatsIntel}): removed in {@code beforeGameSave}, recreated in
  * {@code afterGameSave} and {@code onGameLoad}, so no instance of this class ever reaches XStream.
- * It holds no state at all - every value is read live from {@link CoopOptionsPolicy} and
- * {@link CoopOptionsStore} on render, and the one piece of state the page's own widgets own (the
- * pending credit-transfer amount) lives in a static on {@link coop.campaign.CoopCreditTransfer},
- * where the save cycle cannot reach it either.
+ * It holds no persistent state - every value is read live from {@link CoopOptionsPolicy} and
+ * {@link CoopOptionsStore} on render, and the two things the page's own widgets own (the handle on
+ * the credit-amount field and the last refusal shown under it) are rebuilt by the next render, so
+ * the save cycle has nothing of this page's to reach.
  *
  * <p><b>The intel surface is buttons, not a settings menu.</b> {@code TooltipMakerAPI.addButton}
- * with a {@code buttonPressConfirmed} callback is the whole vocabulary, so booleans get a toggle,
- * enums get a cycle, bounded integers get a {@code -}/{@code +} pair, and free text cannot be edited
- * here at all (see {@link CoopOptionsView}). The title screen has no mod API, so this page plus the
- * settings file is the complete surface - there is no pre-campaign UI to add one to.
+ * with a {@code buttonPressConfirmed} callback is the whole vocabulary for the option rows, so
+ * booleans get a toggle, enums get a cycle, bounded integers get a {@code -}/{@code +} pair, and free
+ * text cannot be edited here at all (see {@link CoopOptionsView}). The one exception is the credit
+ * amount, which is a {@code TooltipMakerAPI.addTextField} - the first text input the mod puts on an
+ * intel page, added because stepping to an arbitrary number with fixed-size buttons is a dozen
+ * presses. The title screen has no mod API, so this page plus the settings file is the complete
+ * surface - there is no pre-campaign UI to add one to.
  *
  * <p><b>Nothing here may take the intel screen down.</b> Every engine call is wrapped and a failure
  * degrades to one line plus one log warning, exactly like its two sibling pages: an exception out of
@@ -57,14 +62,17 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     /** Button id for "put everything back the way it shipped". */
     public static final Object BUTTON_RESET = new Object();
 
-    /** Button id for "hand the pending amount to the partner" (Phase 32 addition B). */
+    /** Button id for "hand the typed amount to the partner" (Phase 32 addition B). */
     public static final Object BUTTON_SEND_CREDITS = new Object();
-
-    /** Button id for "back to nothing pending". */
-    public static final Object BUTTON_CLEAR_CREDITS = new Object();
 
     /** Heading of the credit-transfer block. */
     static final String CREDITS_HEADING = "Send credits";
+
+    /**
+     * Characters the amount field takes. {@code 1,000,000,000} is thirteen, which is the largest
+     * amount {@code CoopMessages.MAX_CREDITS_GRANT} allows written the way this page prints numbers.
+     */
+    static final int AMOUNT_FIELD_MAX_CHARS = 13;
 
     /** Rendered instead of the page when anything at all goes wrong building it. */
     static final String UNAVAILABLE_LINE = CoopOptionsView.UNAVAILABLE_LINE;
@@ -72,29 +80,60 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     /** Log-once guard for a broken render. Static: one warning per process, not one per open. */
     private static boolean renderFailureLogged;
 
+    /**
+     * Reads the amount field. Rebound by every render to the widget that render built, and left
+     * answering "" when there is no widget - a page that has never been drawn, or an engine that
+     * refused to build the field.
+     *
+     * <p>Transient by nature rather than by keyword: this class is removed before every save (see the
+     * class doc), so no instance of it, and no widget behind this lambda, ever reaches XStream.
+     */
+    Supplier<String> amountText = () -> "";
+
+    /** Empties the widget behind {@link #amountText}; a no-op when there is no widget. */
+    private Runnable amountClear = () -> { };
+
+    /**
+     * Why the last Send press did nothing, shown under the field until the next press.
+     *
+     * <p>Instance state, unlike the old pending amount: it is one page's transient feedback, it means
+     * nothing to any other part of the mod, and it must not outlive the entry across a save.
+     */
+    private String lastCreditRefusal = "";
+
     /** One button press: which key, and which way. */
     record Press(String key, int direction) {
-    }
-
-    /** One press of a credit step button: how many credits to add to the pending amount. */
-    record CreditStep(int delta) {
     }
 
     /**
      * Everything the "Send credits" block renders, decided without touching the engine so it can be
      * unit-tested. See {@link #creditRow}.
      *
-     * @param amountText  the pending amount, always shown, so the player can read what Send will do
+     * <p>The amount is not in here: it is whatever is in the text field, which only the widget knows
+     * and only a press reads. What this decides is whether sending is possible at all.
+     *
      * @param walletText  what the local player has, or "" when there is no wallet to read
-     * @param note        the one-line reason Send is disabled, or "" when it is not
+     * @param note        the one-line reason Send is dead, or "" when it is live
      * @param sendEnabled whether the Send button is live
-     * @param canStep     whether the amount buttons are worth drawing at all
-     * @param canClear    whether "Clear amount" is worth drawing; true whenever something is pending,
-     *                    independent of {@code canStep}, so an amount stepped up before the link died
-     *                    can still be put away (credit red-team P2-5)
      */
-    record CreditRow(String amountText, String walletText, String note, boolean sendEnabled,
-                     boolean canStep, boolean canClear) {
+    record CreditRow(String walletText, String note, boolean sendEnabled) {
+    }
+
+    /**
+     * One reading of the amount field: the amount, or the sentence saying why it is not one.
+     *
+     * @param amount  the parsed amount; meaningless unless {@link #ok()}
+     * @param refusal the sentence shown under the field, or "" when the amount is good
+     */
+    record TypedAmount(int amount, String refusal) {
+
+        TypedAmount {
+            refusal = refusal == null ? "" : refusal;
+        }
+
+        boolean ok() {
+            return refusal.isEmpty();
+        }
     }
 
     // ---- registration ----------------------------------------------------------------------------
@@ -459,99 +498,200 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     /**
      * The credit-transfer block's whole model, engine-free.
      *
-     * <p>Send is live only when a session is up and the peer is connected — the button must not
-     * promise something {@link coop.campaign.CoopCreditTransfer#send} would refuse — and, on top of
-     * that, only when the pending amount is something the local wallet can actually cover.
+     * <p>Send is live only when a session is up and the peer is connected: the button must not
+     * promise something {@link coop.campaign.CoopCreditTransfer#send} would refuse. Whether the
+     * amount itself is sendable is not decided here, because the amount is in the text field and
+     * only a press reads it - see {@link #parseAmount}.
      *
      * <p>An unreadable wallet ({@code credits < 0}) disables Send and says so (credit red-team P2-4).
      * It used to leave the button live on the reasoning that the real cover check is in {@code send};
-     * that is true, but {@code send} answers it with "not enough credits — 25,000 needed, 0
+     * that is true, but {@code send} answers it with "not enough credits, 25,000 needed, 0
      * available" on a page that shows no balance at all, so the player got an enabled button that
      * always failed with a message contradicting what was in front of them.
      *
-     * @param canSend  the transfer's own answer for "is there a session with a connected peer"
-     * @param pending  the amount the step buttons have accumulated
-     * @param credits  the local player's credits, negative when unreadable
+     * @param canSend the transfer's own answer for "is there a session with a connected peer"
+     * @param credits the local player's credits, negative when unreadable
      */
-    static CreditRow creditRow(boolean canSend, int pending, long credits) {
-        String amountText = coop.campaign.CoopCreditTransfer.format(Math.max(0, pending));
+    static CreditRow creditRow(boolean canSend, long credits) {
         String walletText = credits < 0 ? ""
                 : coop.campaign.CoopCreditTransfer.format(credits);
-        boolean canClear = pending > 0;
         if (!canSend) {
-            return new CreditRow(amountText, walletText,
-                    "No co-op session; there is nobody to send credits to.", false, false, canClear);
+            return new CreditRow(walletText,
+                    "No co-op session; there is nobody to send credits to.", false);
         }
         if (credits < 0) {
-            return new CreditRow(amountText, walletText,
-                    "Your wallet could not be read; credits cannot be sent right now.",
-                    false, true, canClear);
+            return new CreditRow(walletText,
+                    "Your wallet could not be read; credits cannot be sent right now.", false);
         }
-        if (pending <= 0) {
-            return new CreditRow(amountText, walletText,
-                    "Step the amount up, then press Send.", false, true, canClear);
-        }
-        if (credits < pending) {
-            return new CreditRow(amountText, walletText,
-                    "You do not have that many credits.", false, true, canClear);
-        }
-        return new CreditRow(amountText, walletText, "", true, true, canClear);
+        return new CreditRow(walletText, "", true);
     }
 
-    /** The live model: the installed transfer's session state, wallet and pending amount. */
+    /** The live model: the installed transfer's session state and wallet. */
     static CreditRow liveCreditRow() {
         try {
             coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
             return creditRow(transfer != null && transfer.canSend(),
-                    coop.campaign.CoopCreditTransfer.pendingAmount(),
                     transfer == null ? -1L : transfer.credits());
         } catch (RuntimeException | LinkageError ex) {
             logRenderFailureOnce(ex);
-            return creditRow(false, 0, -1L);
+            return creditRow(false, -1L);
         }
     }
 
     /**
-     * One heading, one line naming the pending amount, one line naming the wallet, the step buttons
-     * and Send. Drawn even with no session so the feature is discoverable before one starts - it is
-     * the Send button that is dead then, not the block.
+     * Reads the amount the player typed.
+     *
+     * <p>Accepts what a player actually types at a number this size: plain digits, or digits grouped
+     * with commas or spaces, because the page prints every other amount as {@code 25,000} and typing
+     * back what you just read has to work. A decimal point gets its own sentence rather than being
+     * silently swallowed - stripping it would turn {@code 1.5} into {@code 15}, which is the kind of
+     * quiet mangling that ends with the wrong amount leaving the wallet.
+     *
+     * <p>Pure, and the whole reason the field is testable: text and a balance in, an amount or a
+     * refusal out, no widget and no engine. {@code CoopCreditTransfer.send} still checks all of this
+     * again - this only decides what the page says before it gets there.
+     *
+     * @param typed   the raw field text
+     * @param credits the local balance, or negative when the wallet could not be read (no cover check)
+     */
+    static TypedAmount parseAmount(String typed, long credits) {
+        String text = typed == null ? "" : typed.trim();
+        if (text.isEmpty()) {
+            return new TypedAmount(0, "Type an amount into the field, then press Send credits.");
+        }
+        if (text.startsWith("-")) {
+            return new TypedAmount(0, "Credits can only be sent in positive amounts.");
+        }
+        if (text.indexOf('.') >= 0) {
+            return new TypedAmount(0, "Credits are whole numbers; leave the decimal point out.");
+        }
+        StringBuilder digits = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == ',' || c == ' ' || c == '\t') {
+                continue;
+            }
+            if (c < '0' || c > '9') {
+                return new TypedAmount(0, "\"" + text + "\" is not an amount of credits.");
+            }
+            digits.append(c);
+        }
+        if (digits.length() == 0) {
+            return new TypedAmount(0, "Type an amount into the field, then press Send credits.");
+        }
+        long value;
+        try {
+            value = Long.parseLong(digits.toString());
+        } catch (NumberFormatException ex) {
+            // 19+ digits. Not a real amount, and the ceiling sentence is the useful answer.
+            value = Long.MAX_VALUE;
+        }
+        if (value <= 0L) {
+            return new TypedAmount(0, "Type an amount above zero.");
+        }
+        if (value > coop.campaign.CoopCreditTransfer.MAX_AMOUNT) {
+            return new TypedAmount(0, "The most that can be sent at once is "
+                    + coop.campaign.CoopCreditTransfer.format(
+                            coop.campaign.CoopCreditTransfer.MAX_AMOUNT) + " credits.");
+        }
+        if (credits >= 0L && value > credits) {
+            return new TypedAmount(0, "You have only "
+                    + coop.campaign.CoopCreditTransfer.format(credits) + " credits.");
+        }
+        return new TypedAmount((int) value, "");
+    }
+
+    /**
+     * One heading, the wallet line, one field to type the amount into and one Send button.
+     *
+     * <p>It used to be six fixed-step buttons plus Clear, which meant an odd amount took a dozen
+     * presses and a bounty share could not be typed at all. Drawn even with no session so the feature
+     * is discoverable before one starts - it is the Send button that is dead then, not the block.
      */
     private void addCreditsBlock(TooltipMakerAPI info, float width) {
         CreditRow row = liveCreditRow();
         Color highlight = Misc.getHighlightColor();
         Color gray = Misc.getGrayColor();
+        Color warn = Misc.getNegativeHighlightColor();
         info.addSectionHeading(CREDITS_HEADING, Alignment.MID, 12f);
         info.addPara("Hands credits straight to your partner. The amount leaves your account when you"
-                + " press Send; it arrives once, even across a reconnect; and if it cannot be"
+                + " press Send credits; it arrives once, even across a reconnect; and if it cannot be"
                 + " delivered at all, it comes back to you.", gray, 6f);
-        info.addPara("Amount to send: " + row.amountText() + " credits",
-                row.sendEnabled() ? highlight : gray, 6f);
         if (!row.walletText().isEmpty()) {
-            info.addPara(BULLET + "You have " + row.walletText() + " credits", gray, 2f);
+            info.addPara(BULLET + "You have " + row.walletText() + " credits", gray, 6f);
         }
+        info.addPara("Amount to send:", row.sendEnabled() ? highlight : gray, 6f);
+        addAmountField(info, width);
         if (!row.note().isEmpty()) {
             info.addPara(BULLET + row.note(), gray, 2f);
         }
-        if (row.canStep()) {
-            for (int step : coop.campaign.CoopCreditTransfer.STEPS) {
-                addButton(info, "+ " + coop.campaign.CoopCreditTransfer.format(step),
-                        new CreditStep(step), width);
-            }
-            for (int step : coop.campaign.CoopCreditTransfer.STEPS) {
-                addButton(info, "- " + coop.campaign.CoopCreditTransfer.format(step),
-                        new CreditStep(-step), width);
-            }
+        if (!lastCreditRefusal.isEmpty()) {
+            // The reason the last press did nothing. Without it the button looked broken: an amount
+            // the wallet cannot cover, or a typo, produced no dialog and no change on the page.
+            info.addPara(BULLET + lastCreditRefusal, warn, 2f);
         }
-        if (row.canClear()) {
-            // Outside the canStep block on purpose: an amount stepped up before the link dropped has
-            // to be clearable without waiting for the session to come back.
-            addButton(info, "Clear amount", BUTTON_CLEAR_CREDITS, width);
-        }
-        ButtonAPI send = addButton(info, "Send " + row.amountText() + " credits",
-                BUTTON_SEND_CREDITS, width);
+        ButtonAPI send = addButton(info, "Send credits", BUTTON_SEND_CREDITS, width);
         if (send != null && !row.sendEnabled()) {
             send.setEnabled(false);
         }
+    }
+
+    /**
+     * The amount field, and the handle a press reads it through.
+     *
+     * <p>{@code addTextField} is the first text input the mod has put on an intel page; every other
+     * editable value on this page is a button, because the registry's free-text keys are edited in
+     * the settings file. An engine that refuses to build the widget leaves {@link #amountText}
+     * answering "" , which reads as "nothing typed" and refuses the send politely.
+     */
+    private void addAmountField(TooltipMakerAPI info, float width) {
+        amountText = () -> "";
+        amountClear = () -> { };
+        try {
+            TextFieldAPI field = info.addTextField(Math.min(width, 200f), 4f);
+            if (field == null) {
+                return;
+            }
+            field.setMaxChars(AMOUNT_FIELD_MAX_CHARS);
+            field.setUndoOnEscape(true);
+            field.setHandleCtrlV(true);
+            amountClear = field::deleteAll;
+            amountText = () -> {
+                try {
+                    return field.getText();
+                } catch (RuntimeException | LinkageError ex) {
+                    logRenderFailureOnce(ex);
+                    return "";
+                }
+            };
+        } catch (RuntimeException | LinkageError ex) {
+            logRenderFailureOnce(ex);
+        }
+    }
+
+    /** Why the last Send press did nothing, or "" when it worked. Rendered under the field. */
+    String lastCreditRefusal() {
+        return lastCreditRefusal;
+    }
+
+    /** What is in the field right now, run through {@link #parseAmount} against the live wallet. */
+    TypedAmount typedAmount() {
+        String typed;
+        try {
+            typed = amountText.get();
+        } catch (RuntimeException | LinkageError ex) {
+            logRenderFailureOnce(ex);
+            typed = "";
+        }
+        long credits;
+        try {
+            coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
+            credits = transfer == null ? -1L : transfer.credits();
+        } catch (RuntimeException | LinkageError ex) {
+            logRenderFailureOnce(ex);
+            credits = -1L;
+        }
+        return parseAmount(typed, credits);
     }
 
     private void addResetButton(TooltipMakerAPI info, float width) {
@@ -574,9 +714,16 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     @Override
     public boolean doesButtonHaveConfirmDialog(Object buttonId) {
         try {
-            if (buttonId == BUTTON_RESET || buttonId == BUTTON_SEND_CREDITS) {
-                // Money, and irreversible: there is no take-back message and no escrow to cancel.
+            if (buttonId == BUTTON_RESET) {
                 return true;
+            }
+            if (buttonId == BUTTON_SEND_CREDITS) {
+                // Money, and irreversible: there is no take-back message and no escrow to cancel, so
+                // a good amount always gets the confirm step. A bad one skips it and goes straight to
+                // buttonPressConfirmed, which is what puts the refusal on the page - there is nothing
+                // to confirm about a typo, and a confirm dialog for one would be a worse way to say
+                // no than a line under the field.
+                return typedAmount().ok();
             }
             return buttonId instanceof Press press
                     && CoopOptionsView.CONFIRM_REQUIRED.contains(press.key());
@@ -602,7 +749,7 @@ public class CoopOptionsPage extends BaseIntelPlugin {
             if (buttonId == BUTTON_RESET) {
                 text = CoopOptionsView.resetPrompt(role() == CoopConnectionRole.GUEST);
             } else if (buttonId == BUTTON_SEND_CREDITS) {
-                text = sendCreditsPrompt();
+                text = sendCreditsPrompt(typedAmount().amount());
             } else if (buttonId instanceof Press press) {
                 text = CoopOptionsView.confirmPrompt(press.key(), currentValue(press.key()));
             } else {
@@ -627,11 +774,7 @@ public class CoopOptionsPage extends BaseIntelPlugin {
             if (buttonId == BUTTON_RESET) {
                 resetToDefaults();
             } else if (buttonId == BUTTON_SEND_CREDITS) {
-                sendPendingCredits();
-            } else if (buttonId == BUTTON_CLEAR_CREDITS) {
-                coop.campaign.CoopCreditTransfer.clearPendingAmount();
-            } else if (buttonId instanceof CreditStep step) {
-                coop.campaign.CoopCreditTransfer.stepPendingAmount(step.delta());
+                sendTypedCredits();
             } else if (buttonId instanceof Press press) {
                 apply(press);
             }
@@ -689,10 +832,9 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     }
 
     /** The confirmation text for Send: what leaves, to whom, and that there is no undo. */
-    static String sendCreditsPrompt() {
+    static String sendCreditsPrompt(int typedAmount) {
         coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
-        String amount = coop.campaign.CoopCreditTransfer.format(
-                coop.campaign.CoopCreditTransfer.pendingAmount());
+        String amount = coop.campaign.CoopCreditTransfer.format(Math.max(0, typedAmount));
         String partner = transfer == null ? "your co-op partner" : transfer.partnerLabelForUi();
         return "Send " + amount + " credits to " + partner + "?\n"
                 + "The credits leave your account now and arrive on the other side once, even if the"
@@ -702,19 +844,50 @@ public class CoopOptionsPage extends BaseIntelPlugin {
     }
 
     /**
-     * One Send press. The transfer owns every rule (cover check, debit, wire, feed line); this only
-     * clears the pending amount on a success, so a second press cannot repeat a gift by accident.
+     * One Send press. The transfer owns every rule (cover check, debit, wire, feed line); this reads
+     * the field, refuses in writing rather than in silence, and empties the field on a success so a
+     * second press cannot repeat a gift by accident.
      */
-    private void sendPendingCredits() {
+    private void sendTypedCredits() {
+        TypedAmount typed = typedAmount();
+        if (!typed.ok()) {
+            lastCreditRefusal = typed.refusal();
+            return;
+        }
         coop.campaign.CoopCreditTransfer transfer = coop.campaign.CoopCreditTransfer.active();
         if (transfer == null) {
+            lastCreditRefusal = "No co-op session; there is nobody to send credits to.";
             CoopLog.warn(CoopOptionsPage.class,
                     "Coop credits cannot be sent: no session is installed");
             return;
         }
-        if (transfer.send(coop.campaign.CoopCreditTransfer.pendingAmount())
-                == coop.campaign.CoopCreditTransfer.Result.SENT) {
-            coop.campaign.CoopCreditTransfer.clearPendingAmount();
+        coop.campaign.CoopCreditTransfer.Result result = transfer.send(typed.amount());
+        if (result == coop.campaign.CoopCreditTransfer.Result.SENT) {
+            lastCreditRefusal = "";
+            clearAmountField();
+            return;
+        }
+        // send() has already put the exact reason in the campaign feed; this is the same news on the
+        // page the player is looking at, so a refused press is never a button that just did nothing.
+        lastCreditRefusal = switch (result) {
+            case NO_SESSION -> "No co-op session; there is nobody to send credits to.";
+            case INSUFFICIENT_FUNDS -> "You do not have that many credits.";
+            case BAD_AMOUNT -> "That is not an amount of credits that can be sent.";
+            default -> "The credits could not be sent; nothing left your account.";
+        };
+    }
+
+    /**
+     * Empties the field after a successful send. The next render rebuilds it empty anyway, but the
+     * widget is still on screen while that render is queued, and a field still showing 25,000 next to
+     * a "Sent 25,000 credits" feed line reads as a send that did not happen.
+     */
+    private void clearAmountField() {
+        amountText = () -> "";
+        try {
+            amountClear.run();
+        } catch (RuntimeException | LinkageError ex) {
+            logRenderFailureOnce(ex);
         }
     }
 

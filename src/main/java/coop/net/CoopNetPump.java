@@ -5380,9 +5380,10 @@ public class CoopNetPump implements EveryFrameScript {
             return rejectCampaignId(message,
                     "campaignId: host=" + hostCampaignId + " guest=<none>"
                             + "; this campaign is already in flight and this guest campaign is brand new"
-                            + " (a fresh same-seed roll cannot silently rejoin it). To join anyway with a"
-                            + " fresh start, relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY
-                            + "=true (launch-guest.ps1 -AdoptCampaign)");
+                            + " (a fresh same-seed roll cannot silently rejoin it). To join anyway with"
+                            + " a fresh start, tick \"" + coop.ui.CoopDesyncDialog.ADOPT_CAMPAIGN_CHECKBOX
+                            + "\" in " + coop.ui.CoopDesyncDialog.ADOPT_CAMPAIGN_LOCATION
+                            + " (-D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true for script launches)");
         }
         if (adoptCampaignIdSupplier.getAsBoolean()) {
             campaignIdStore.accept(hostCampaignId);
@@ -5394,8 +5395,10 @@ public class CoopNetPump implements EveryFrameScript {
         }
         return rejectCampaignId(message,
                 "campaignId: host=" + hostCampaignId + " guest=" + stored
-                        + "; guest save is not from this coop campaign. To adopt the host campaign anyway,"
-                        + " relaunch the guest with -D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true");
+                        + "; guest save is not from this coop campaign. To adopt the host campaign"
+                        + " anyway, tick \"" + coop.ui.CoopDesyncDialog.ADOPT_CAMPAIGN_CHECKBOX
+                        + "\" in " + coop.ui.CoopDesyncDialog.ADOPT_CAMPAIGN_LOCATION
+                        + " (-D" + ADOPT_CAMPAIGN_ID_PROPERTY + "=true for script launches)");
     }
 
     /**

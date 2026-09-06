@@ -379,11 +379,27 @@ public final class CoopSaveIndex {
 
     /** Every row on this machine, newest first. Never throws; an unreadable file yields no rows. */
     public static List<Row> readRows() {
+        List<Row> rows = readRowsOrNull();
+        return rows == null ? List.of() : rows;
+    }
+
+    /**
+     * Every row on this machine, newest first, or {@code null} when the index itself was not there to
+     * read - no engine, no file, or a file that will not parse.
+     *
+     * <p>{@link #readRows} folds all three into "no rows", which is right for a caller that only wants
+     * to search. A caller that has to <em>tell the player</em> why it cannot name a save needs the
+     * difference: "no save of yours belongs to that campaign" and "this machine has no save list at
+     * all" are different sentences with different next steps, and saying the first when the second is
+     * true sends the player off to start a new game they may not need.
+     */
+    public static List<Row> readRowsOrNull() {
         try {
-            return rows(readIndex());
+            JSONObject index = readIndex();
+            return index == null ? null : rows(index);
         } catch (Exception | LinkageError ex) {
             CoopLog.warn(CoopSaveIndex.class, "Coop could not read the save index " + COMMON_PATH, ex);
-            return List.of();
+            return null;
         }
     }
 

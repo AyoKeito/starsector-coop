@@ -22,6 +22,7 @@ class CoopOptionsPageTest {
     void clearProperties() {
         System.clearProperty(CoopOptionsRegistry.HUD_CORNER);
         System.clearProperty(CoopOptionsRegistry.PLAYER_NAME);
+        coop.campaign.CoopCreditTransfer.uninstall();
         CoopOptionsPage.ensureRegistered(null);
     }
 
@@ -71,32 +72,21 @@ class CoopOptionsPageTest {
     // ---- Phase 32 addition B: the "Send credits" block -------------------------------------------
 
     @Test
-    void theSendCreditsRowShowsThePendingAmountAndIsDeadWithoutASession() {
+    void theSendCreditsBlockIsDeadWithoutASession() {
         coop.campaign.CoopCreditTransfer.uninstall();
-        coop.campaign.CoopCreditTransfer.stepPendingAmount(25_000);
 
         CoopOptionsPage.CreditRow row = CoopOptionsPage.liveCreditRow();
 
-        assertEquals("25,000", row.amountText(), "the amount Send would move must be on the page");
         assertFalse(row.sendEnabled(), "no session, nobody to send to");
-        assertFalse(row.canStep());
         assertTrue(row.note().contains("No co-op session"));
-
-        coop.campaign.CoopCreditTransfer.uninstall();
     }
 
     @Test
-    void theSendButtonIsLiveOnlyForAnAmountTheWalletCoversInALiveSession() {
-        assertFalse(CoopOptionsPage.creditRow(true, 0, 100_000L).sendEnabled(),
-                "nothing pending is nothing to send");
-        assertTrue(CoopOptionsPage.creditRow(true, 0, 100_000L).canStep());
+    void theSendButtonIsLiveWheneverThereIsASessionAndAWalletToReadFrom() {
+        // The amount is no longer part of this decision: it lives in the field, and only a press can
+        // read it. What the row still decides is whether sending is possible at all.
+        CoopOptionsPage.CreditRow ready = CoopOptionsPage.creditRow(true, 100_000L);
 
-        assertFalse(CoopOptionsPage.creditRow(true, 100_001, 100_000L).sendEnabled(),
-                "the button must not promise what send() would refuse");
-        assertEquals("You do not have that many credits.",
-                CoopOptionsPage.creditRow(true, 100_001, 100_000L).note());
-
-        CoopOptionsPage.CreditRow ready = CoopOptionsPage.creditRow(true, 100_000, 100_000L);
         assertTrue(ready.sendEnabled());
         assertEquals("", ready.note());
         assertEquals("100,000", ready.walletText());
@@ -107,105 +97,142 @@ class CoopOptionsPageTest {
         // Credit red-team P2-4: this used to leave Send enabled on the reasoning that the real cover
         // check is in send(). It is - and it answers "not enough credits, 0 available" on a page that
         // shows no balance at all, so the button always failed with a line contradicting the page.
-        CoopOptionsPage.CreditRow row = CoopOptionsPage.creditRow(true, 5_000, -1L);
+        CoopOptionsPage.CreditRow row = CoopOptionsPage.creditRow(true, -1L);
 
         assertFalse(row.sendEnabled());
         assertEquals("", row.walletText(), "no wallet line rather than a fake zero");
         assertEquals("Your wallet could not be read; credits cannot be sent right now.", row.note());
-        assertTrue(row.canStep(), "the amount buttons still work; it is Send that cannot promise");
+    }
+
+    // ---- the typed amount -------------------------------------------------------------------------
+
+    @Test
+    void aTypedAmountTakesPlainDigitsAndTheGroupingThePageItselfPrints() {
+        // The wallet line above the field says "You have 250,000 credits"; typing that back has to
+        // work, or the page teaches a format it then refuses.
+        assertEquals(25_000, CoopOptionsPage.parseAmount("25000", 250_000L).amount());
+        assertEquals(25_000, CoopOptionsPage.parseAmount("25,000", 250_000L).amount());
+        assertEquals(25_000, CoopOptionsPage.parseAmount("25 000", 250_000L).amount());
+        assertEquals(25_000, CoopOptionsPage.parseAmount("  25,000  ", 250_000L).amount());
+        assertTrue(CoopOptionsPage.parseAmount("25,000", 250_000L).ok());
     }
 
     @Test
-    void clearAmountIsDrawnWheneverSomethingIsPendingEvenWithNoSession() {
-        // Credit red-team P2-5: "Clear amount" hung off canStep, which is false without a session, so
-        // an amount stepped up before the link died could not be put away at all.
-        assertTrue(CoopOptionsPage.creditRow(false, 500_000, 900_000L).canClear());
-        assertFalse(CoopOptionsPage.creditRow(false, 500_000, 900_000L).canStep());
+    void anEmptyOrZeroOrNegativeOrNonNumericAmountIsRefusedInWriting() {
+        assertFalse(CoopOptionsPage.parseAmount("", 250_000L).ok());
+        assertFalse(CoopOptionsPage.parseAmount("   ", 250_000L).ok());
+        assertTrue(CoopOptionsPage.parseAmount("", 250_000L).refusal().contains("Type an amount"));
 
-        assertFalse(CoopOptionsPage.creditRow(false, 0, 900_000L).canClear(),
-                "nothing pending, nothing to clear");
-        assertTrue(CoopOptionsPage.creditRow(true, 5_000, 900_000L).canClear());
+        assertFalse(CoopOptionsPage.parseAmount("0", 250_000L).ok());
+        assertTrue(CoopOptionsPage.parseAmount("0", 250_000L).refusal().contains("above zero"));
+
+        assertFalse(CoopOptionsPage.parseAmount("-500", 250_000L).ok());
+        assertTrue(CoopOptionsPage.parseAmount("-500", 250_000L).refusal().contains("positive"));
+
+        assertFalse(CoopOptionsPage.parseAmount("lots", 250_000L).ok());
+        assertTrue(CoopOptionsPage.parseAmount("lots", 250_000L).refusal().contains("not an amount"));
+
+        // Stripping the point would turn 1.5 into 15 and send fifteen credits without a word.
+        assertFalse(CoopOptionsPage.parseAmount("1.5", 250_000L).ok());
+        assertTrue(CoopOptionsPage.parseAmount("1.5", 250_000L).refusal().contains("whole numbers"));
     }
 
     @Test
-    void theSendConfirmationNamesTheAmountAndSaysWhatCanAndCannotBeUndone() {
+    void anAmountOverTheCapOrOverTheBalanceIsRefusedWithTheNumberThatWouldNotBe() {
+        String overCap = CoopOptionsPage.parseAmount("2,000,000,000", Long.MAX_VALUE).refusal();
+        assertTrue(overCap.contains(coop.campaign.CoopCreditTransfer.format(
+                coop.campaign.CoopCreditTransfer.MAX_AMOUNT)), overCap);
+
+        // 19+ digits overflow a long; the useful answer is still the ceiling, not a stack trace.
+        assertFalse(CoopOptionsPage.parseAmount("99999999999999999999", Long.MAX_VALUE).ok());
+
+        String overBalance = CoopOptionsPage.parseAmount("100,001", 100_000L).refusal();
+        assertTrue(overBalance.contains("only 100,000 credits"), overBalance);
+
+        assertTrue(CoopOptionsPage.parseAmount("100,000", 100_000L).ok(), "the whole wallet is fine");
+        assertTrue(CoopOptionsPage.parseAmount("100,001", -1L).ok(),
+                "an unreadable wallet cannot cover-check; send() still will");
+    }
+
+    @Test
+    void theSendConfirmationNamesTheTypedAmountAndSaysWhatCanAndCannotBeUndone() {
         coop.campaign.CoopCreditTransfer.uninstall();
-        coop.campaign.CoopCreditTransfer.stepPendingAmount(7_500);
 
-        String prompt = CoopOptionsPage.sendCreditsPrompt();
+        String prompt = CoopOptionsPage.sendCreditsPrompt(7_500);
 
         assertTrue(prompt.contains("7,500"), prompt);
         assertTrue(prompt.contains("they come back to you"),
                 "the refund path is the honest half of the promise (credit red-team P1-4): " + prompt);
         assertTrue(prompt.contains("Once they arrive there is no way to take them back"), prompt);
-        assertTrue(page.doesButtonHaveConfirmDialog(CoopOptionsPage.BUTTON_SEND_CREDITS));
+    }
 
-        coop.campaign.CoopCreditTransfer.uninstall();
+    @Test
+    void aGoodAmountGetsTheConfirmStepAndABadOneGoesStraightToTheReasonUnderTheField() {
+        installTransfer(100_000L);
+        page.amountText = () -> "25,000";
+        assertTrue(page.doesButtonHaveConfirmDialog(CoopOptionsPage.BUTTON_SEND_CREDITS),
+                "money, and irreversible");
+
+        page.amountText = () -> "banana";
+        assertFalse(page.doesButtonHaveConfirmDialog(CoopOptionsPage.BUTTON_SEND_CREDITS),
+                "there is nothing to confirm about a typo");
+
+        page.buttonPressConfirmed(CoopOptionsPage.BUTTON_SEND_CREDITS, null);
+        assertTrue(page.lastCreditRefusal().contains("not an amount"),
+                "a refused press has to say why: " + page.lastCreditRefusal());
+    }
+
+    @Test
+    void aSendTheWalletCannotCoverSaysSoOnThePageRatherThanDoingNothing() {
+        installTransfer(1_000L);
+        page.amountText = () -> "25,000";
+
+        page.buttonPressConfirmed(CoopOptionsPage.BUTTON_SEND_CREDITS, null);
+
+        assertEquals("You have only 1,000 credits.", page.lastCreditRefusal());
     }
 
     // ---- P3-1: button routing ---------------------------------------------------------------------
 
     @Test
-    void theClearButtonAndTheStepButtonsRouteToThePendingAmount() {
-        coop.campaign.CoopCreditTransfer.uninstall();
-
-        page.buttonPressConfirmed(new CoopOptionsPage.CreditStep(10_000), null);
-        page.buttonPressConfirmed(new CoopOptionsPage.CreditStep(1_000), null);
-        assertEquals(11_000, coop.campaign.CoopCreditTransfer.pendingAmount());
-
-        page.buttonPressConfirmed(new CoopOptionsPage.CreditStep(-1_000), null);
-        assertEquals(10_000, coop.campaign.CoopCreditTransfer.pendingAmount());
-
-        page.buttonPressConfirmed(CoopOptionsPage.BUTTON_CLEAR_CREDITS, null);
-        assertEquals(0, coop.campaign.CoopCreditTransfer.pendingAmount());
-    }
-
-    @Test
-    void aSuccessfulSendClearsThePendingAmountSoASecondPressCannotRepeatTheGift() {
+    void aSuccessfulSendEmptiesTheFieldSoASecondPressCannotRepeatTheGift() {
         coop.testing.FakeCreditEngine engine = new coop.testing.FakeCreditEngine(100_000L);
         RecordingLink link = new RecordingLink();
         coop.campaign.CoopCreditTransfer.install(new coop.campaign.CoopCreditTransfer(engine, link));
-        coop.campaign.CoopCreditTransfer.stepPendingAmount(25_000);
+        page.amountText = () -> "25,000";
 
         page.buttonPressConfirmed(CoopOptionsPage.BUTTON_SEND_CREDITS, null);
 
         assertEquals(1, link.sent, "one press, one grant");
         assertEquals(75_000L, engine.credits);
-        assertEquals(0, coop.campaign.CoopCreditTransfer.pendingAmount());
+        assertEquals("", page.amountText.get(), "the field is emptied, not left showing the gift");
+        assertEquals("", page.lastCreditRefusal());
 
-        // The second press has nothing pending, so it is a BAD_AMOUNT refusal rather than a re-gift.
+        // The second press has an empty field, so it is refused rather than re-gifting.
         page.buttonPressConfirmed(CoopOptionsPage.BUTTON_SEND_CREDITS, null);
         assertEquals(1, link.sent);
         assertEquals(75_000L, engine.credits);
+        assertTrue(page.lastCreditRefusal().contains("Type an amount"));
 
         coop.campaign.CoopCreditTransfer.uninstall();
     }
 
     @Test
-    void aRefusedSendLeavesThePendingAmountWhereItWasSoThePlayerCanRetry() {
-        coop.testing.FakeCreditEngine engine = new coop.testing.FakeCreditEngine(1_000L);
-        RecordingLink link = new RecordingLink();
-        coop.campaign.CoopCreditTransfer.install(new coop.campaign.CoopCreditTransfer(engine, link));
-        coop.campaign.CoopCreditTransfer.stepPendingAmount(25_000);
+    void sendingWithNoTransferInstalledSaysSoRatherThanThrowing() {
+        coop.campaign.CoopCreditTransfer.uninstall();
+        page.amountText = () -> "5,000";
 
         page.buttonPressConfirmed(CoopOptionsPage.BUTTON_SEND_CREDITS, null);
 
-        assertEquals(0, link.sent);
-        assertEquals(25_000, coop.campaign.CoopCreditTransfer.pendingAmount());
-
-        coop.campaign.CoopCreditTransfer.uninstall();
+        assertTrue(page.lastCreditRefusal().contains("No co-op session"), page.lastCreditRefusal());
+        assertEquals("5,000", page.amountText.get(),
+                "no session to send into, so what the player typed stays put");
     }
 
-    @Test
-    void sendingWithNoTransferInstalledDoesNothingAtAllRatherThanThrowing() {
-        coop.campaign.CoopCreditTransfer.uninstall();
-        coop.campaign.CoopCreditTransfer.stepPendingAmount(5_000);
-
-        page.buttonPressConfirmed(CoopOptionsPage.BUTTON_SEND_CREDITS, null);
-
-        assertEquals(5_000, coop.campaign.CoopCreditTransfer.pendingAmount(),
-                "no session to send into, so the amount stays where the player put it");
-        coop.campaign.CoopCreditTransfer.uninstall();
+    /** A live transfer with a wallet of {@code credits}, for the press-routing tests. */
+    private static void installTransfer(long credits) {
+        coop.campaign.CoopCreditTransfer.install(new coop.campaign.CoopCreditTransfer(
+                new coop.testing.FakeCreditEngine(credits), new RecordingLink()));
     }
 
     /** A link that records rather than sends; the page tests only care that send() reached it. */

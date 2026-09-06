@@ -231,4 +231,15 @@ class CoopLauncherAppTest {
         assertTrue(script.contains("-WorkingDirectory 'D:\\Bob''s Games\\Starsector'"), script);
         assertFalse(script.contains("Bob's"), script);
     }
+
+    /**
+     * The seed-lock desync dialog quotes the adopt-campaign checkbox by name, and the launcher cannot
+     * import that class (its source set has no game API), so the string is written twice. This is the
+     * only thing stopping the two from drifting into advice that names a control nobody can find.
+     */
+    @Test
+    void theAdoptCampaignCheckboxLabelIsTheOneTheDesyncDialogQuotes() {
+        assertEquals(CoopLauncherApp.ADOPT_CAMPAIGN_LABEL,
+                coop.ui.CoopDesyncDialog.ADOPT_CAMPAIGN_CHECKBOX);
+    }
 }
