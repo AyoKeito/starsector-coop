@@ -23,20 +23,28 @@ import java.util.Set;
  * options page, a debit here, a {@code CREDITS_GRANT} on the wire, a credit there.
  *
  * <p><b>Why there is no escrow.</b> The debit happens on send and the money exists only as a
- * message in flight until the peer applies it. That is safe because the message is reliable TCP —
- * it is queued with the rest of the stream through a reconnect hold and delivered when the link
- * comes back — and because every grant carries a sender-minted ledger id, so a re-delivery or a
- * rebroadcast credits nothing. An escrow protocol would trade that for a two-phase handshake that
- * can wedge instead, which is the worse failure.
+ * message in flight until the peer applies it. That is safe because a {@code CREDITS_GRANT} is on
+ * the transport's reliable set ({@code CoopMessages#isReliableOneShot}) — it is queued with the rest
+ * of the stream through a reconnect hold, held by the sending link until the peer acknowledges it,
+ * and replayed on a resume if that acknowledgement never came — and because every grant carries a
+ * sender-minted ledger id, so a re-delivery or a rebroadcast credits nothing. An escrow protocol
+ * would trade that for a two-phase handshake that can wedge instead, which is the worse failure.
  *
  * <p><b>What happens when it cannot be delivered: a refund, not a loss.</b> Every site in the
- * transport that throws a queued message away before it reaches a socket reports it back through
+ * transport that gives up on a grant reports it back through
  * {@link coop.net.CoopOutboundDiscardListener}, and {@link #onOutboundDiscarded} pays the amount
- * back into the sender's wallet with a feed line. The four sites are the outbound queue cap, a new
- * socket attaching over a stale queue, the reconnect grace expiring, and transport shutdown. The one
- * case that is <em>not</em> refunded is a grant already handed to the OS socket: TCP owns it from
- * there, this engine cannot know whether the far side credited it, and refunding one the peer
- * applied would mint money. See {@link coop.net.CoopOutboundDiscardListener} for that boundary.
+ * back into the sender's wallet with a feed line. The sites are the outbound queue cap, a new socket
+ * attaching over a stale queue, the unacknowledged-history cap, the reconnect grace expiring, and
+ * transport shutdown.
+ *
+ * <p><b>Corrected in 0.1.1.</b> This used to say that a grant already handed to the OS socket is
+ * never refunded, because "TCP owns it from there". It does not: TCP guarantees delivery on one
+ * socket, and this transport replaces the socket on every reconnect, so two live gifts were debited
+ * from the sender and never credited to anybody. A written grant is now refunded too when the
+ * session ends with it still unacknowledged. The accepted risk is the mirror image — a grant the
+ * partner banked whose ack died with the socket is refunded as well — and it is the better trade
+ * because the ledger dedup makes a replay free while a lost gift is unrecoverable. See
+ * {@link coop.net.CoopOutboundDiscardListener} for the boundary as it now stands.
  *
  * <p><b>Conservation is exact in this class and approximate in the engine.</b> Every figure here is a
  * {@code long}, but the campaign's wallet is a {@code float} ({@code MutableValue}); past 2^24
@@ -345,12 +353,15 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
     // ---- refunds ---------------------------------------------------------------------------------
 
     /**
-     * The transport telling this engine that a message it queued will never be written. A
-     * {@code CREDITS_GRANT} this engine sent is paid straight back into the local wallet; everything
-     * else is somebody else's problem and is ignored here.
+     * The transport telling this engine that a message it handed over will never be delivered —
+     * either it was never written, or it was written and never acknowledged before the session ended
+     * (0.1.1). A {@code CREDITS_GRANT} this engine sent is paid straight back into the local wallet;
+     * everything else is somebody else's problem and is ignored here.
      *
-     * <p>See {@link coop.net.CoopOutboundDiscardListener} for why a message already handed to the
-     * socket never reaches this method.
+     * <p>No cause is privileged: {@code queue-cap}, {@code attach}, {@code unacked-cap},
+     * {@code session-end} and {@code shutdown} all refund, and the string only reaches the log. The
+     * dedup that makes this safe is {@link #refund}'s own — a ledger id that is not in {@code sent}
+     * pays nothing, so a second notification for the same grant cannot double it.
      */
     @Override
     public void onOutboundDiscarded(coop.net.CoopMessages.Message message, String cause) {

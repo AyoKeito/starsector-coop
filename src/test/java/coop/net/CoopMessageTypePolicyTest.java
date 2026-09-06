@@ -63,7 +63,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.FLEET_ROSTER_REQUEST, CoopMessages.Type.READY_STATE,
             CoopMessages.Type.LOBBY_STATUS, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.SHIP_LOST, CoopMessages.Type.OPTIONS_SNAPSHOT,
-            CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT);
+            CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT,
+            CoopMessages.Type.RELIABLE_ACK);
 
     // ---- table: CoopNetService.coalesceKey(Message) ------------------------------------------
     // Whitelist of whole-state snapshots that may supersede a queued copy of themselves; every
@@ -83,7 +84,39 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.LOBBY_ACCEPT, CoopMessages.Type.LOBBY_REJECT,
             CoopMessages.Type.HANDSHAKE_MANIFEST, CoopMessages.Type.HANDSHAKE_RESULT,
             CoopMessages.Type.SESSION_RESUME_REQUEST, CoopMessages.Type.SESSION_RESUME_ACCEPT,
-            CoopMessages.Type.SESSION_RESUME_REJECT);
+            CoopMessages.Type.SESSION_RESUME_REJECT,
+            // 0.1.1: not lobby vocabulary, same scope. An ack queued for a socket that died proves
+            // nothing to its replacement, and losing it costs one redundant resend.
+            CoopMessages.Type.RELIABLE_ACK);
+
+    /**
+     * The lobby round proper: {@link #CONNECTION_SCOPED_CONTROL} minus {@code RELIABLE_ACK}. The two
+     * cross-table rules at the bottom of this file were written when those two sets were the same
+     * one, and they are rules about the <em>lobby vocabulary</em> - "a leftover copy answers a
+     * question the new peer never asked, and it is pre-session control-plane chatter". Neither claim
+     * is true of an acknowledgement, which is why it is subtracted here rather than the rules being
+     * weakened for everybody.
+     */
+    private static final EnumSet<CoopMessages.Type> CONNECTION_SCOPED_LOBBY_VOCABULARY =
+            lobbyVocabulary();
+
+    private static EnumSet<CoopMessages.Type> lobbyVocabulary() {
+        EnumSet<CoopMessages.Type> vocabulary = EnumSet.copyOf(CONNECTION_SCOPED_CONTROL);
+        vocabulary.remove(CoopMessages.Type.RELIABLE_ACK);
+        return vocabulary;
+    }
+
+    // ---- table: CoopMessages.isReliableOneShot(Type) ------------------------------------------
+    // 0.1.1: campaign events with no producer that would ever send them again, so the transport
+    // acknowledges and replays them across a socket replacement. Everything else is either resent
+    // by its producer, scoped to a connection or a moment, or version-based.
+    private static final EnumSet<CoopMessages.Type> RELIABLE_ONE_SHOT = EnumSet.of(
+            CoopMessages.Type.MARKET_TXN, CoopMessages.Type.CREDITS_GRANT,
+            CoopMessages.Type.WORLD_DELTA, CoopMessages.Type.RAID_RESULT,
+            CoopMessages.Type.SHIP_LOST, CoopMessages.Type.COLONY_FOUNDED,
+            CoopMessages.Type.COLONY_ABANDONED, CoopMessages.Type.COLONY_MGMT,
+            CoopMessages.Type.REP_DELTA, CoopMessages.Type.GUEST_REP_DELTA,
+            CoopMessages.Type.FACTION_REL_DELTA);
 
     // ---- table: CoopNetPump.allowedDuringReconnectGrace(Type) --------------------------------
     // The only vocabulary an unproven peer may speak while a reconnect grace window is open: the
@@ -124,7 +157,10 @@ class CoopMessageTypePolicyTest {
             // Phase 32 addition B: the sender debited itself before this was queued, so dropping it
             // on the drop edge would destroy the money. Reliable TCP either side of the edge, and
             // the receiver's grant ledger absorbs a duplicate.
-            CoopMessages.Type.CREDITS_GRANT);
+            CoopMessages.Type.CREDITS_GRANT,
+            // 0.1.1: a pre-drop ack is the partner saying it applied those seqs, which is as true
+            // after the drop as before it, and honouring it saves a needless resend.
+            CoopMessages.Type.RELIABLE_ACK);
 
     // ---- table: CoopNetPump.isTerminalRejectType(Type) ---------------------------------------
     // The peer's verdicts on a join, dispatched a few lines early out of the pre-drop drain so
@@ -238,22 +274,86 @@ class CoopMessageTypePolicyTest {
     // coalesce key), so it is deliberately not asserted here.
 
     @Test
-    void connectionScopedControlNeverSurvivesTheDropEdge() {
+    void theLobbyVocabularyNeverSurvivesTheDropEdge() {
         // isConnectionScopedControl's javadoc: a copy of these left over from a dead connection is
         // "never an answer to anything the new peer asked". survivesTheDropEdge should agree.
-        for (CoopMessages.Type type : CONNECTION_SCOPED_CONTROL) {
+        for (CoopMessages.Type type : CONNECTION_SCOPED_LOBBY_VOCABULARY) {
             assertFalse(CoopNetPump.survivesTheDropEdge(type),
-                    type + " is connection-scoped control and must not survive the drop edge");
+                    type + " is connection-scoped lobby control and must not survive the drop edge");
         }
     }
 
     @Test
-    void connectionScopedControlIsAlwaysControlPlane() {
+    void theLobbyVocabularyIsAlwaysControlPlane() {
         // Both tables describe the same lobby/handshake/resume vocabulary from different angles;
-        // isConnectionScopedControl's set should be a subset of isControlPlane's.
-        for (CoopMessages.Type type : CONNECTION_SCOPED_CONTROL) {
+        // that vocabulary should be a subset of isControlPlane's.
+        for (CoopMessages.Type type : CONNECTION_SCOPED_LOBBY_VOCABULARY) {
             assertTrue(CONTROL_PLANE.contains(type),
-                    type + " is connection-scoped control and should also be control-plane");
+                    type + " is connection-scoped lobby control and should also be control-plane");
+        }
+    }
+
+    /**
+     * The deliberate exception to both rules above, pinned so it reads as a decision rather than as
+     * drift. {@code RELIABLE_ACK} shares the connection scope (a leftover ack is written off with its
+     * socket) without sharing either consequence: it is not pre-session chatter, and a pre-drop ack
+     * is a fact about what the partner applied, which the drop edge does not undo.
+     */
+    @Test
+    void theReliableAckIsTheOneConnectionScopedTypeThatSurvivesAndIsNotControlPlane() {
+        assertTrue(CoopNetService.isConnectionScopedControl(CoopMessages.Type.RELIABLE_ACK));
+        assertTrue(CoopNetPump.survivesTheDropEdge(CoopMessages.Type.RELIABLE_ACK));
+        assertFalse(CoopNetPump.isControlPlane(CoopMessages.Type.RELIABLE_ACK));
+        assertFalse(CoopNetPump.allowedDuringReconnectGrace(CoopMessages.Type.RELIABLE_ACK));
+        assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.RELIABLE_ACK),
+                "acknowledging an acknowledgement is a loop with no bottom");
+    }
+
+    // ---- 0.1.1 reliable delivery ----------------------------------------------------------------
+
+    @Test
+    void reliableOneShotMatchesTheSet() {
+        for (CoopMessages.Type type : ALL_KNOWN_TYPES) {
+            assertEquals(RELIABLE_ONE_SHOT.contains(type),
+                    CoopMessages.isReliableOneShot(type), type.name());
+        }
+    }
+
+    /**
+     * The two queue behaviours that would silently defeat the resend layer. A reliable message that
+     * coalesces would be replaced in the queue by a newer one carrying different facts, and
+     * {@code enforceQueueCapLocked} drops exactly the coalescable ones - so "keys as null" is the
+     * single property that keeps both hands off it.
+     */
+    @Test
+    void aReliableOneShotIsNeverCoalescedAndNeverDroppedByTheQueueCap() {
+        for (CoopMessages.Type type : RELIABLE_ONE_SHOT) {
+            assertNull(CoopNetService.coalesceKey(message(type)),
+                    type + " is reliable and must never be superseded or dropped by the queue cap");
+        }
+    }
+
+    /**
+     * A reliable message must not be connection-scoped, or the attach that follows a link death
+     * would throw the replay away at exactly the moment it is needed.
+     */
+    @Test
+    void aReliableOneShotIsNeverConnectionScoped() {
+        for (CoopMessages.Type type : RELIABLE_ONE_SHOT) {
+            assertFalse(CoopNetService.isConnectionScopedControl(type),
+                    type + " is reliable, so a new socket must carry it rather than drop it");
+        }
+    }
+
+    /**
+     * ...and it must survive the drop edge, for the same reason it is reliable at all: the fact it
+     * carries stays true after the connection that carried it is gone.
+     */
+    @Test
+    void everyReliableOneShotSurvivesTheDropEdge() {
+        for (CoopMessages.Type type : RELIABLE_ONE_SHOT) {
+            assertTrue(CoopNetPump.survivesTheDropEdge(type),
+                    type + " is reliable and must still apply after the drop edge");
         }
     }
 

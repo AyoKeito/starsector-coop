@@ -192,11 +192,19 @@ class CoopCreditRefundTest {
     }
 
     /**
-     * The boundary the whole design rests on: once the frame is on the socket the peer owns it, and a
-     * refund here would mint a duplicate of a gift the partner already banked.
+     * <b>Reversed in 0.1.1.</b> This test used to assert the opposite: that a grant already handed to
+     * the socket is never refunded, because "once the frame is on the socket the peer owns it". That
+     * boundary was wrong. TCP guarantees delivery on <em>one</em> socket and this transport replaces
+     * the socket on every reconnect, so a written frame the far side never read is simply gone — and
+     * a live session lost two gifts exactly that way, debited from the sender and credited to nobody.
+     *
+     * <p>What owns a written grant now is the acknowledgement: the link holds it until the peer says
+     * it applied it, and a shutdown with it still unacknowledged pays it back. The receiver having
+     * read the frame does not change that — this side has not been told, and being told is the whole
+     * point. The accepted cost is the case below.
      */
     @Test
-    void aGrantThatReachedTheSocketIsNotRefundedWhenTheTransportShutsDown() throws Exception {
+    void aGrantThatReachedTheSocketButWasNeverAcknowledgedIsRefundedOnShutdown() throws Exception {
         int port = reserveLocalPort();
         CoopNetService host = new CoopNetService();
         CoopNetService guest = new CoopNetService();
@@ -214,11 +222,49 @@ class CoopCreditRefundTest {
 
             CoopMessages.Message delivered = waitForMessage(host);
             assertEquals(CoopMessages.Type.CREDITS_GRANT, delivered.type());
+            assertEquals(1, guest.unackedReliableCount(),
+                    "written, read by the peer, and this side still has not been told");
 
             guest.shutdown();
 
+            assertEquals(100_000L, engine.credits,
+                    "no acknowledgement ever came back, so the sender gets its money instead of"
+                            + " losing it the way the live smoke did");
+            assertEquals(1, refundLines(), engine.feed.toString());
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The other half, and the one that keeps the reversal above from minting money in the ordinary
+     * case: an acknowledged grant is nobody's debt. The pump sends that acknowledgement for every
+     * reliable message it applies; here it is delivered by hand, because this test has no pump.
+     */
+    @Test
+    void anAcknowledgedGrantIsNotRefundedWhenTheTransportShutsDown() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            host.startHost(port);
+            guest.connect("127.0.0.1", port);
+            waitUntil(() -> host.isConnected() && guest.isConnected(), "host and guest connected");
+
+            CoopCreditTransfer transfer = transferOn(guest);
+            transfer.send(25_000);
+            waitUntil(() -> {
+                guest.flushOutbound();
+                return guest.outboundQueueDepth() == 0;
+            }, "the guest wrote the grant to its socket");
+            CoopMessages.Message delivered = waitForMessage(host);
+
+            guest.acknowledgeReliable(delivered.senderId(), java.util.List.of(delivered.seq()));
+            guest.shutdown();
+
             assertEquals(75_000L, engine.credits,
-                    "the partner has these credits; refunding them would create a second copy");
+                    "the partner has these credits and said so; refunding would create a second copy");
             assertEquals(0, refundLines(), engine.feed.toString());
         } finally {
             guest.shutdown();
