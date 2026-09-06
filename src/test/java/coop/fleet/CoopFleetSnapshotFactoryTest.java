@@ -2,6 +2,7 @@ package coop.fleet;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
+import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.loading.HullModSpecAPI;
@@ -154,32 +155,100 @@ class CoopFleetSnapshotFactoryTest {
     // ---- D-mod capture ---------------------------------------------------------------------------
 
     @Test
-    void aHullsOwnBuiltInDmodIsNotStreamedAsAcquiredDamage() {
-        // vanilla colossus2 builds in ill_advised, which carries the dmod tag. Streaming it made the
-        // receiver run DModManager.setDHull on a pristine ship: the mirror wore the _D hull, sprite
-        // and "(D)" designation its owner's ship does not, baked into the structural hash.
-        Global.setSettings(hullModSpecs("ill_advised", "compromised_storage"));
+    void anAcquiredDmodIsStreamedEvenThoughItIsAPermaMod() {
+        // The 2026-09-06 live smoke's "visible differences in fleet d-mods between host and guest".
+        // Capture read getNonBuiltInHullmods(), which drops every perma-mod as well as every built-in
+        // (HullVariantSpec: `isBuiltInMod(id) || getPermaMods().contains(id)`), and DModManager only
+        // ever installs a d-mod as addPermaMod(id, false) — so the field was empty for every ship in
+        // the game and every mirror rendered pristine. The engine's own predicate
+        // (DModManager.getNumNonBuiltInDMods) walks getHullMods() and subtracts the hull's built-ins.
+        Global.setSettings(hullModSpecs("ill_advised", "compromised_storage", "damagedengines"));
         try {
-            assertEquals("", CoopFleetSnapshotFactory.captureDmodIds(
-                    variantWhoseNonBuiltInModsAre(List.of())));
-            assertEquals("compromised_storage", CoopFleetSnapshotFactory.captureDmodIds(
-                    variantWhoseNonBuiltInModsAre(List.of("compromised_storage", "augmented_drive"))),
-                    "a d-mod the ship actually acquired still travels");
+            assertEquals("compromised_storage,damagedengines", CoopFleetSnapshotFactory.captureDmodIds(
+                    variant(List.of("compromised_storage", "damagedengines", "augmented_drive"),
+                            List.of("compromised_storage", "damagedengines"), List.of())),
+                    "d-mods are perma-mods; a capture that skips perma-mods captures nothing");
         } finally {
             Global.setSettings(null);
         }
     }
 
-    /** A variant that answers for its non-built-in mods and fails the test if the built-ins are read. */
-    private static ShipVariantAPI variantWhoseNonBuiltInModsAre(List<String> ids) {
+    @Test
+    void aHullsOwnBuiltInDmodIsNotStreamedAsAcquiredDamage() {
+        // vanilla colossus2 builds in ill_advised, which carries the dmod tag (the only stock hull
+        // that does). Streaming it made the receiver run DModManager.setDHull on a pristine ship: the
+        // mirror wore the _D hull, sprite and "(D)" designation its owner's ship does not, baked into
+        // the structural hash. The hull's built-ins reach the receiver through hullId/variantId.
+        Global.setSettings(hullModSpecs("ill_advised", "compromised_storage"));
+        try {
+            assertEquals("", CoopFleetSnapshotFactory.captureDmodIds(
+                    variant(List.of("ill_advised", "heavyarmor"), List.of(), List.of("ill_advised"))));
+            assertEquals("compromised_storage", CoopFleetSnapshotFactory.captureDmodIds(
+                    variant(List.of("ill_advised", "compromised_storage"),
+                            List.of("compromised_storage"), List.of("ill_advised"))),
+                    "a d-mod the ship actually acquired still travels alongside a built-in one");
+        } finally {
+            Global.setSettings(null);
+        }
+    }
+
+    @Test
+    void aVariantThatCannotReportItsHullSpecCapturesAsClean() {
+        // Failing open would put the hull's built-ins back on the wire, which is the bug above.
+        Global.setSettings(hullModSpecs("ill_advised"));
+        try {
+            assertEquals("", CoopFleetSnapshotFactory.captureDmodIds(throwingVariant()));
+            assertEquals("", CoopFleetSnapshotFactory.captureDmodIds(null));
+        } finally {
+            Global.setSettings(null);
+        }
+    }
+
+    /**
+     * A variant whose hull mods are {@code hullMods} (perma-mods included, as the engine's own
+     * {@code getHullMods()} reports them) and whose hull spec builds in {@code builtIns}.
+     */
+    private static ShipVariantAPI variant(List<String> hullMods, List<String> permaMods,
+                                          List<String> builtIns) {
+        Object hullSpec = Proxy.newProxyInstance(
+                ShipHullSpecAPI.class.getClassLoader(),
+                new Class<?>[] {ShipHullSpecAPI.class},
+                (spec, method, args) -> switch (method.getName()) {
+                    case "getBuiltInMods" -> builtIns;
+                    case "isBuiltInMod" -> builtIns.contains((String) args[0]);
+                    case "toString" -> "FakeHullSpec";
+                    case "hashCode" -> System.identityHashCode(spec);
+                    case "equals" -> spec == args[0];
+                    default -> null;
+                });
         return (ShipVariantAPI) Proxy.newProxyInstance(
                 ShipVariantAPI.class.getClassLoader(),
                 new Class<?>[] {ShipVariantAPI.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "getNonBuiltInHullmods" -> ids;
-                    case "getHullMods" -> throw new AssertionError(
-                            "getHullMods() includes the hull's built-ins; capture the acquired set");
+                    case "getHullMods" -> hullMods;
+                    case "getPermaMods" -> new HashSet<>(permaMods);
+                    case "getHullSpec" -> hullSpec;
+                    // The engine's own filter, so a capture that reaches for the convenient-looking
+                    // method gets the empty answer that shipped the bug rather than a passing test.
+                    case "getNonBuiltInHullmods" -> hullMods.stream()
+                            .filter(id -> !builtIns.contains(id) && !permaMods.contains(id))
+                            .toList();
                     case "toString" -> "FakeVariant";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+    }
+
+    /** A variant that throws the moment its hull spec is read. */
+    private static ShipVariantAPI throwingVariant() {
+        return (ShipVariantAPI) Proxy.newProxyInstance(
+                ShipVariantAPI.class.getClassLoader(),
+                new Class<?>[] {ShipVariantAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getHullMods" -> List.of("ill_advised");
+                    case "getHullSpec" -> throw new IllegalStateException("no hull spec");
+                    case "toString" -> "ThrowingVariant";
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
                     default -> null;

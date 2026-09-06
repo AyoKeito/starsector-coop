@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
@@ -13,6 +14,7 @@ import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -279,24 +281,47 @@ public final class CoopFleetSnapshotFactory {
      *
      * <p><b>Non-built-in only (2026-09-04).</b> {@code getHullMods()} includes the hull spec's own
      * built-ins, and a handful of stock hulls build in a {@code dmod}-tagged mod (vanilla
-     * {@code colossus2} builds in {@code ill_advised}). Streaming those made a pristine hull arrive as
-     * a damaged one: {@code CoopShipMods.apply} sees a non-empty d-mod list, runs
-     * {@code DModManager.setDHull} and the mirror wears the {@code _D} hull, sprite and "(D)"
-     * designation its owner's ship does not — baked into the structural hash, so it persists. The
-     * engine draws the same distinction for the same reason
-     * ({@code DModManager.getNumNonBuiltInDMods} skips {@code getHullSpec().getBuiltInMods()}), and
-     * the hull's own built-ins already reach the receiver through {@code hullId}/{@code variantId}.
+     * {@code colossus2} builds in {@code ill_advised} — the only one in 0.98a stock data). Streaming
+     * those made a pristine hull arrive as a damaged one: the receiver saw a non-empty d-mod list,
+     * ran {@code DModManager.setDHull} and the mirror wore the {@code _D} hull, sprite and "(D)"
+     * designation its owner's ship does not — baked into the structural hash, so it persisted. The
+     * hull's own built-ins already reach the receiver through {@code hullId}/{@code variantId}.
+     *
+     * <p><b>The filter is the engine's, not {@code getNonBuiltInHullmods()} (2026-09-07).</b> That
+     * method looks like the right one and is the wrong one: it drops every <em>perma-mod</em> as well
+     * as every built-in ({@code HullVariantSpec.getNonBuiltInHullmods} skips an id when
+     * {@code getHullSpec().isBuiltInMod(id) || getPermaMods().contains(id)}), and a d-mod is always a
+     * perma-mod — {@code DModManager} only ever installs one through {@code addPermaMod(id, false)}.
+     * So between 2026-09-04 and this fix the field was empty for every ship in the game and every
+     * mirrored fleet, player and NPC alike, rendered pristine while its owner saw a battered "(D)"
+     * hull. What this needs is the predicate {@code DModManager.getNumNonBuiltInDMods} itself uses:
+     * walk {@code getHullMods()} and drop only what the hull spec builds in.
      */
     static String captureDmodIds(ShipVariantAPI variant) {
         if (variant == null) {
             return "";
         }
         try {
-            return CoopShipMods.encode(variant.getNonBuiltInHullmods(),
-                    CoopFleetSnapshotFactory::isDmodHullMod);
+            Set<String> builtIn = builtInModIds(variant);
+            return CoopShipMods.encode(variant.getHullMods(),
+                    id -> !builtIn.contains(id) && isDmodHullMod(id));
         } catch (RuntimeException | LinkageError ignored) {
             return "";
         }
+    }
+
+    /**
+     * The hull spec's own built-in hullmod ids, which {@link #captureDmodIds} subtracts.
+     *
+     * <p>Deliberately not defensive: a throw here propagates to {@link #captureDmodIds}'s catch and
+     * the ship replicates clean. Swallowing it and carrying on with an empty set would be the worse
+     * failure — the built-ins would ride the wire and re-open the pristine-hull-arrives-damaged bug
+     * above. A variant with no hull spec at all has no built-ins by definition.
+     */
+    private static Set<String> builtInModIds(ShipVariantAPI variant) {
+        ShipHullSpecAPI hull = variant.getHullSpec();
+        List<String> builtIns = hull == null ? null : hull.getBuiltInMods();
+        return builtIns == null || builtIns.isEmpty() ? Set.of() : new HashSet<>(builtIns);
     }
 
     /**
