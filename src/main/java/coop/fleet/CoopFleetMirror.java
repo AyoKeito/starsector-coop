@@ -9,6 +9,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
+import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import com.fs.starfarer.api.impl.campaign.DModManager;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.loading.VariantSource;
@@ -126,9 +127,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
      */
     private boolean emptyRosterSkipLogged;
     /**
+     * Whether this mirror has already logged that the sender could not read one of its ships' CR
+     * ({@link CoopFleetSnapshot#CR_UNKNOWN}). One line per mirror per session, not per apply.
+     */
+    private boolean unknownCrLogged;
+    /**
      * Per-slot CR reference for the {@link #updateMemberState} invalidation gate: the value that last
      * <em>fired</em> the gate, not the value last written. {@code NaN} means "no gate has fired for this
-     * slot yet", and the first apply seats it from the member's live CR. Indexed by list position
+     * slot yet", and the first known reading always fires it ({@link #shouldInvalidateStrength}).
+     * Indexed by list position
      * because that is the axis the CR write itself pairs on — a reference that followed the ship while
      * the write followed the slot would be wrong in exactly the transient-order case the write tolerates.
      * Null until the first apply after a rebuild; {@link #rebuildRoster} drops it so a new ship set never
@@ -961,6 +968,13 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * without bound. Holding the reference still until the gate fires keeps the storm protection —
      * per-tick noise around a stable CR still moves no reference and still invalidates nothing — while
      * making a slow monotonic recovery fire once per 0.005 of real movement.
+     *
+     * <p><b>A member whose wire CR is {@link CoopFleetSnapshot#CR_UNKNOWN} is skipped entirely
+     * (2026-09-07)</b> — hull fraction still applies, but the mirror keeps its own CR and the slot's
+     * gate reference stays unseated, so the first real reading to arrive fires the invalidation no
+     * matter how small its step is. Writing the sentinel would be worse than writing nothing: it is
+     * negative, and the pre-sentinel behaviour (a fabricated {@code 0f}) is the 0-CR mirror the
+     * 2026-09-06 smoke reported.
      */
     private void updateMemberState(List<FleetMemberAPI> current,
                                    List<CoopFleetSnapshot.Member> members) {
@@ -974,12 +988,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 FleetMemberAPI member = current.get(i);
                 CoopFleetSnapshot.Member state = members.get(pairing == null ? i : pairing[i]);
                 float cr = state.cr();
-                if (Float.isNaN(references[i])) {
-                    references[i] = member.getRepairTracker().getCR();
-                }
-                boolean crChanged = crDiffers(references[i], cr);
-                member.getRepairTracker().setCR(cr);
                 member.getStatus().setHullFraction(state.hullFraction());
+                if (!CoopFleetSnapshot.isKnownCr(cr)) {
+                    // Unreadable on the sender: hold the mirror's own CR and leave the slot unseated,
+                    // so the first real reading fires the gate below however small its step is.
+                    noteUnknownCr(state);
+                    continue;
+                }
+                boolean crChanged = shouldInvalidateStrength(references[i], cr);
+                writeCr(member.getRepairTracker(), cr);
                 if (crChanged) {
                     member.setStatUpdateNeeded(true);
                     references[i] = cr;
@@ -1014,7 +1031,55 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * instead of chasing the value that just arrived.
      */
     static float nextCrReference(float reference, float incoming) {
-        return crDiffers(reference, incoming) ? incoming : reference;
+        return shouldInvalidateStrength(reference, incoming) ? incoming : reference;
+    }
+
+    /**
+     * The gate proper: fire on a real move, and <b>always fire on the first known reading a slot ever
+     * gets</b> ({@code NaN} reference = "nothing has been seated here yet").
+     *
+     * <p>The unseated case used to be filled from the member's <em>live</em> CR and then compared, on
+     * the theory that a slot rebuilt from this same wire value cannot have moved. That stopped being
+     * true once a member could be built without a CR at all ({@link CoopFleetSnapshot#CR_UNKNOWN}):
+     * such a ship carries the engine's own default and drifts toward {@code maxCR} under the mirror's
+     * AI-mode recovery, so the live value can land within the 0.005 epsilon of the first real reading
+     * by luck and leave {@code cachedStrength} pinned to the wrong number. One extra
+     * {@code setStatUpdateNeeded(true)} per roster rebuild is not a cost worth defending against.
+     */
+    static boolean shouldInvalidateStrength(float reference, float incoming) {
+        return Float.isNaN(reference) || crDiffers(reference, incoming);
+    }
+
+    /**
+     * The single CR write both the roster build and the per-apply update go through, so "the sender
+     * did not know" is handled identically on the path that <em>creates</em> a mirror ship and the one
+     * that updates it. A mirror that starts life without a CR keeps the engine's own default and, being
+     * AI mode, recovers toward {@code maxCR} — visibly wrong by a little, instead of the 0% the
+     * fabricated value used to pin it at for as long as the host's structural hash stood still.
+     *
+     * @return true when a real reading was written, false when the sentinel was refused
+     */
+    static boolean writeCr(RepairTrackerAPI tracker, float wireCr) {
+        if (tracker == null || !CoopFleetSnapshot.isKnownCr(wireCr)) {
+            return false;
+        }
+        tracker.setCR(wireCr);
+        return true;
+    }
+
+    /**
+     * One line per mirror per episode of unreadable CR. Rate-limited by an edge flag rather than a
+     * clock because the interesting fact is "this started happening", and the roster apply runs at
+     * set rate for every mirrored fleet in the sector.
+     */
+    private void noteUnknownCr(CoopFleetSnapshot.Member member) {
+        if (unknownCrLogged) {
+            return;
+        }
+        unknownCrLogged = true;
+        CoopLog.warn(CoopFleetMirror.class, "Coop mirror kept its own CR: the sender could not read"
+                + " combat readiness coopFleetId=" + coopFleetId
+                + " fleetMemberId=" + member.fleetMemberId() + " hull=" + member.hullId());
     }
 
     /**
@@ -1116,7 +1181,14 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 created.setShipName(member.shipName());
             }
             applyReplicatedHullMods(created, member);
-            created.getRepairTracker().setCR(member.cr());
+            // CR_UNKNOWN means the sender could not read this ship's CR, not that it has none. Pinning
+            // the sentinel (or the 0 that used to stand in for it) would seat a brand-new mirror ship
+            // at zero strength and leave it there until the host's own structural hash moved; leaving
+            // the engine's default lets the AI-mode mirror recover toward maxCR while the next set
+            // that carries a real reading takes over.
+            if (!writeCr(created.getRepairTracker(), member.cr())) {
+                noteUnknownCr(member);
+            }
             created.getStatus().setHullFraction(member.hullFraction());
             return true;
         } catch (RuntimeException ex) {
@@ -1393,6 +1465,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         appliedActionText = "";
         loggedActionTextPath = false;
         emptyRosterSkipLogged = false;
+        unknownCrLogged = false;
     }
 
     /**
