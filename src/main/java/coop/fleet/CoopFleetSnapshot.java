@@ -44,6 +44,31 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      */
     public static final int WIRE_HASH_CHARS = 16;
 
+    /**
+     * The {@code cr} a sender puts on the wire when it could not read a ship's combat readiness at
+     * all (2026-09-07). Negative, so it can never collide with a real 0..1 fraction, and it survives
+     * {@link CoopFleetCodec#parseFiniteFloat} because it is finite.
+     *
+     * <p><b>Why a sentinel and not a zero.</b> The capture used to fall back to {@code 0f} on any
+     * engine read failure, and a zero on this field is indistinguishable from a genuinely
+     * combat-ineffective ship. The receiver applied it with {@code RepairTracker.setCR(0)} and the
+     * mirror then sat at 0% CR until the <em>host's</em> structural or health hash moved — the same
+     * latch {@code CoopFleetSnapshotFactory#captureMembers} documents for a truncated roster, because
+     * {@link #computeFleetHash} is a function of structure only and a stable wrong value re-sends
+     * identically forever. That is the 2026-09-06 smoke observation: a mirror engaging the guest at
+     * 0 CR whose strength snapped back the moment the host made contact with the real fleet (contact
+     * runs {@code inflateIfNeeded}, whose variant swap is what finally flipped the structural hash).
+     *
+     * <p>Receivers must treat it as "leave this ship's CR alone", never as a value: on creation the
+     * engine's own default stands, and on update the mirror keeps whatever it had.
+     */
+    public static final float CR_UNKNOWN = -1f;
+
+    /** True when a wire {@code cr} is a real reading rather than {@link #CR_UNKNOWN} or garbage. */
+    public static boolean isKnownCr(float cr) {
+        return Float.isFinite(cr) && cr >= 0f;
+    }
+
     public CoopFleetSnapshot {
         playerId = normalize(playerId);
         username = normalize(username);

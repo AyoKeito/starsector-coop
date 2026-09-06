@@ -257,7 +257,7 @@ public final class CoopFleetSnapshotFactory {
             captainName = "";
         }
 
-        float cr = readFloat(() -> member.getRepairTracker().getCR(), 0f);
+        float cr = captureCr(member);
         float hullFraction = readFloat(() -> member.getStatus().getHullFraction(), 1f);
 
         return new CoopFleetSnapshot.Member(
@@ -526,5 +526,56 @@ public final class CoopFleetSnapshotFactory {
         } catch (RuntimeException ignored) {
             return fallback;
         }
+    }
+
+    /** {@link #readFloat} that reports "could not read" instead of substituting a value. */
+    private static Float readOptionalFloat(FloatRead read) {
+        try {
+            return read.read();
+        } catch (RuntimeException | LinkageError ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * One ship's combat readiness for the wire, from the two readings the engine offers.
+     *
+     * <p><b>Both, because they are not the same number.</b> {@code RepairTracker.getCR()} is the
+     * <em>effective</em> reading — {@code baseCR * FleetMember.getCrewFraction()} — while the
+     * receiver applies it with {@code RepairTracker.setCR(float)}, which writes the <em>base</em>
+     * field. On an AI-mode fleet the two agree by definition ({@code getCrewFraction} short-circuits
+     * to 1.0 for one), and every NPC fleet is AI mode: {@code createEmptyFleet}'s third argument is
+     * {@code aiMode}, and {@code FleetData.recrewFleetMembersV2} fills such a fleet's crew from
+     * {@code getMinCrew()} rather than from cargo. They diverge only in the states where the
+     * short-circuit cannot fire — a member whose {@code fleetData} back-link is not seated, or an
+     * empty {@code CrewComposition} on a fleet that has not synced — and there the effective reading
+     * is a <b>0 for a perfectly healthy ship</b>, which is exactly the value that must never reach a
+     * mirror. So: prefer the effective reading, fall back to the base one when the effective one is
+     * zero and the base one is not, and only then trust a real zero.
+     *
+     * <p>When neither can be read (a member whose {@code getRepairTracker()} is still null — the
+     * engine itself tests for that state in {@code FleetData.isInInvalidStateDueToGameLoadOrder}) the
+     * answer is {@link CoopFleetSnapshot#CR_UNKNOWN}, not a fabricated number.
+     */
+    static float captureCr(FleetMemberAPI member) {
+        return resolveCr(readOptionalFloat(() -> member.getRepairTracker().getCR()),
+                readOptionalFloat(() -> member.getRepairTracker().getBaseCR()));
+    }
+
+    /** The pure half of {@link #captureCr}, so the precedence is unit-tested without an engine. */
+    static float resolveCr(Float effective, Float base) {
+        boolean effectiveUsable = usableCr(effective);
+        boolean baseUsable = usableCr(base);
+        if (effectiveUsable && (effective > 0f || !baseUsable || base <= 0f)) {
+            return effective;
+        }
+        if (baseUsable) {
+            return base;
+        }
+        return CoopFleetSnapshot.CR_UNKNOWN;
+    }
+
+    private static boolean usableCr(Float value) {
+        return value != null && Float.isFinite(value) && value >= 0f;
     }
 }
