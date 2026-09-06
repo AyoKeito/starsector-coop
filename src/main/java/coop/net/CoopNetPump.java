@@ -118,6 +118,10 @@ public class CoopNetPump implements EveryFrameScript {
     private static final String FEED_LOBBY_CANCELLED = "lobbyCancelled";
     private static final String FEED_LOBBY_STARTED = "lobbyStarted";
     private static final String FEED_LOBBY_CANCELLED_JOIN = "lobbyCancelledJoin";
+    private static final String FEED_SAVE_DEFERRED = "saveDeferred";
+    private static final String FEED_SAVE_CAUGHT_UP = "saveCaughtUp";
+    private static final String FEED_SAVE_ABANDONED = "saveAbandoned";
+    private static final String FEED_PARTNER_LEFT = "partnerLeft";
     private static final String FEED_DESYNC = "desync";
     private static final String FEED_OPTIONS = "options";
     private static final java.awt.Color FEED_WARN_COLOR = new java.awt.Color(255, 220, 120);
@@ -517,6 +521,24 @@ public class CoopNetPump implements EveryFrameScript {
     private int lobbyNoUiFrames;
     /** Wall clock of the last SAVE_CHECKPOINT sent or received; exemption (b) of the death rule. */
     private long lastSaveCheckpointAtMillis;
+    /**
+     * 0.1.1: the thread that notices this player quitting to the menu, or null while no gameplay
+     * session is live. Started and stopped on the session-active edge in
+     * {@link #tickSessionLeaveWatchdog()} rather than being kept alive for the process: there is
+     * nothing to report outside a session, and a thread polling the engine's state for a mod that
+     * currently has no partner is a thread that exists for no reason.
+     */
+    private CoopSessionLeaveWatchdog leaveWatchdog;
+    /** Mirrors the watchdog's lifetime so the edge is one boolean rather than a null check. */
+    private boolean leaveWatchdogArmed;
+    /**
+     * 0.1.1: the partner said {@code SESSION_LEAVE}, so the next drop edge owes no grace window.
+     * Consumed at that edge — it describes one departure and must never survive into a later
+     * session's link blip, where refusing the grace would end a session the players could have kept.
+     */
+    private boolean partnerLeftDeliberately;
+    /** 0.1.1: one leave per process; the watchdog latches too, this covers the onGameLoad path. */
+    private boolean sessionLeaveSent;
     /** Log-once flag for traffic dropped while an unproven peer is on the line during a grace window. */
     private boolean graceTrafficDropWarned;
     /** Host: the router mapping negotiated for this session's port, or null when not hosting. */
@@ -847,6 +869,8 @@ public class CoopNetPump implements EveryFrameScript {
         // this pump; the static registration is how they reach it. The newest pump wins, so a game
         // load replaces the previous session's instance.
         this.saveCheckpoint.setSender(this::sendSaveCheckpoint);
+        // 0.1.1: and the answer, so a host that ordered a save learns whether it happened.
+        this.saveCheckpoint.setResultReporter(this::sendSaveCheckpointResult);
         CoopSaveCheckpoint.setActive(this.saveCheckpoint);
         // Red-team B4: the other half of the save exemption, which both roles send.
         CoopStallNotice.setActive(this::sendStallNotice);
@@ -3214,6 +3238,10 @@ public class CoopNetPump implements EveryFrameScript {
         t = profiler.split(SECTION_GUEST_SNAPSHOT_SEND, t);
         tickSaveCheckpoint();
         t = profiler.split(SECTION_SAVE_CHECKPOINT, t);
+        // 0.1.1: right behind the save checkpoint, because both are "what happens when this process
+        // stops being the one driving the campaign". Two field reads on the frames that are not an
+        // edge, so it is deliberately not given its own profiler section.
+        tickSessionLeaveWatchdog();
         syncNpcReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();
@@ -3333,6 +3361,25 @@ public class CoopNetPump implements EveryFrameScript {
             // Drop it rather than log every frame; the host stays reachable by manual forwarding.
             portMapper = null;
             CoopLog.warn(CoopNetPump.class, "Coop port mapper failed; giving up on automatic mapping", ex);
+        }
+    }
+
+    /**
+     * Stops the outgoing pump's session-leave watchdog (0.1.1). Called from the same teardown as
+     * {@link #shutdownPortMapper()}: without it every game load would leave another daemon thread
+     * polling the campaign state on behalf of a pump whose transport is already shut down.
+     */
+    public void shutdownSessionLeaveWatchdog() {
+        CoopSessionLeaveWatchdog watchdog = leaveWatchdog;
+        leaveWatchdog = null;
+        leaveWatchdogArmed = false;
+        if (watchdog == null) {
+            return;
+        }
+        try {
+            watchdog.stop();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not stop the session-leave watchdog", ex);
         }
     }
 
@@ -3772,6 +3819,10 @@ public class CoopNetPump implements EveryFrameScript {
                 }
                 endSessionAfterDrop();
             }
+            // 0.1.1: consumed here whichever branch ran. It describes the departure that produced
+            // THIS edge; leaving it set would let a later session's ordinary link blip inherit
+            // "no grace is owed" and end a session the players could still have saved.
+            partnerLeftDeliberately = false;
         }
         if (connected && !channelWasConnected) {
             noteChannelConnected();
@@ -3976,9 +4027,18 @@ public class CoopNetPump implements EveryFrameScript {
      * resume has to be matched against still exists. A drop before the session went live keeps the
      * pre-20.2 behaviour exactly: there is nothing to hold.
      *
+     * <p>0.1.1 adds one more refusal: a partner that said {@code SESSION_LEAVE} is not coming back,
+     * and a window held for it is sixty seconds of a stopped world followed by a dialog explaining
+     * something the players already know.
+     *
      * @return true when a window opened and the session record must be kept
      */
     private boolean beginReconnectGrace() {
+        if (partnerLeftDeliberately) {
+            CoopLog.info(CoopNetPump.class, "Coop opening no reconnect grace window as "
+                    + service.role() + ": the partner said it was leaving the game");
+            return false;
+        }
         if (!peerDroppedAfterLiveSession || reconnect.graceMillis() <= 0L || reconnect.active()) {
             return false;
         }
@@ -4207,7 +4267,14 @@ public class CoopNetPump implements EveryFrameScript {
                  REP_DELTA, GUEST_REP_DELTA, PLAYER_REP_SNAPSHOT, FACTION_REL_DELTA,
                  ABILITY_ACTIVATE,
                  BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
-                 SAVE_CHECKPOINT, RESPAWN_PLAYER, STALL_NOTICE,
+                 SAVE_CHECKPOINT, SAVE_CHECKPOINT_RESULT, RESPAWN_PLAYER, STALL_NOTICE,
+                 // 0.1.1, and the second member of isConnectionScopedControl that survives. The two
+                 // questions are opposites: "may a leftover copy be written to the NEXT socket" is
+                 // no, and "does a copy the partner wrote to the LAST one still mean something" is
+                 // emphatically yes. A leave written a frame before the socket died, read after the
+                 // grace window opened, is precisely the case this feature exists for - it turns a
+                 // sixty second hold into an immediate, explained ending.
+                 SESSION_LEAVE,
                  // The sender already debited itself; dropping this on the drop edge would burn the
                  // money. The receiver's grant ledger absorbs the duplicate if it also arrives again.
                  CREDITS_GRANT,
@@ -4440,7 +4507,13 @@ public class CoopNetPump implements EveryFrameScript {
             }
             CoopLog.warn(CoopNetPump.class, "Coop reconnect grace closed without a resume as "
                     + service.role() + " (" + reason + "); the session is over");
-            postFeed(FEED_RECONNECT_ENDED, now, "Co-op: session ended - " + reason + ".", FEED_BAD_COLOR);
+            // 0.1.1: handleSessionLeave has already posted "<name> left the game", which is the same
+            // event said better. A second banner reading "session ended - the partner left the game"
+            // is the shape of a mod that tells you everything twice.
+            if (!CoopReconnectCoordinator.REASON_PARTNER_LEFT.equals(reason)) {
+                postFeed(FEED_RECONNECT_ENDED, now, "Co-op: session ended - " + reason + ".",
+                        FEED_BAD_COLOR);
+            }
             // Phase 21: the two terminal ends a player did not choose get a dialog. "Ended by player"
             // does not — that one is somebody pressing the reconnect dialog's own give-up option, and
             // answering a button press with a second modal explaining what the button did is the
@@ -4724,6 +4797,8 @@ public class CoopNetPump implements EveryFrameScript {
             case BATTLE_RESULT -> handleBattleResult(message);
             case GUEST_SNAPSHOT -> handleGuestSnapshot(message);
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
+            case SAVE_CHECKPOINT_RESULT -> handleSaveCheckpointResult(message);
+            case SESSION_LEAVE -> handleSessionLeave(message);
             case RESPAWN_PLAYER -> handleRespawnPlayer(message);
             case PING -> {
                 // Red-team A4: a connected stranger must not get a free reply channel.
@@ -6617,6 +6692,75 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    /**
+     * Guest &rarr; host (0.1.1): what became of the checkpoint the host ordered. Flushed inline for
+     * the same reason the checkpoint itself is — the frames around a coordinated save are exactly
+     * the frames where both processes stop pumping, and a report sitting in the outbound queue
+     * behind a save is a report the host reads a second and a half late, if at all.
+     *
+     * @return true when the report reached the wire, which is what {@link CoopSaveCheckpoint} reads
+     *         to decide whether it still owes one
+     */
+    private boolean sendSaveCheckpointResult(long checkpointId, String outcome, long waitedMillis) {
+        if (service.role() != CoopConnectionRole.GUEST || !service.isConnected()
+                || !peerProvenForOutbound() || !isGameplaySessionActive()) {
+            return false;
+        }
+        try {
+            CoopMessages.Message message = CoopMessages.saveCheckpointResult(
+                    sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
+                    checkpointId, outcome, waitedMillis);
+            service.send(message);
+            log("outbound", message);
+            service.flushOutbound();
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to send SAVE_CHECKPOINT_RESULT", ex);
+            return false;
+        }
+    }
+
+    /**
+     * Host: the guest's answer to a checkpoint. Feed lines rather than a dialog — the coordinated
+     * save is a background arrangement and none of the three outcomes is worth a modal — but they
+     * are on the intel page's event log too (see {@link #postFeed}), which is where a host looks
+     * afterwards to work out whether the two saves are paired.
+     */
+    private void handleSaveCheckpointResult(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST || !isGameplaySessionActive()) {
+            return;
+        }
+        long checkpointId = CoopMessages.parseCheckpointResultId(message);
+        String outcome = CoopMessages.parseCheckpointResultOutcome(message);
+        long waited = CoopMessages.parseCheckpointResultWaitedMillis(message);
+        long now = clockMillis.getAsLong();
+        String name = remoteDisplayName();
+        switch (outcome) {
+            case CoopMessages.CHECKPOINT_RESULT_DEFERRED -> {
+                CoopLog.info(CoopNetPump.class, "Coop save checkpoint " + checkpointId
+                        + " is parked on the guest behind an open screen (" + waited
+                        + " ms so far); it runs when the screen closes");
+                postFeed(FEED_SAVE_DEFERRED, now, "Co-op: " + name + " has a screen open; their save"
+                        + " will run when it closes.", FEED_WARN_COLOR);
+            }
+            case CoopMessages.CHECKPOINT_RESULT_SAVED -> {
+                CoopLog.info(CoopNetPump.class, "Coop save checkpoint " + checkpointId
+                        + " finally saved on the guest after " + waited + " ms behind a screen");
+                postFeed(FEED_SAVE_CAUGHT_UP, now, "Co-op: " + name + "'s save caught up.",
+                        FEED_GOOD_COLOR);
+            }
+            case CoopMessages.CHECKPOINT_RESULT_ABANDONED -> {
+                CoopLog.warn(CoopNetPump.class, "Coop save checkpoint " + checkpointId
+                        + " was never saved on the guest: a screen stayed open for " + waited
+                        + " ms. The two saves are out of step until the next host save.");
+                postFeed(FEED_SAVE_ABANDONED, now, "Co-op: " + name + " never saved for checkpoint "
+                        + checkpointId + "; the two saves are out of step.", FEED_WARN_COLOR);
+            }
+            default -> CoopLog.warn(CoopNetPump.class, "Coop ignoring SAVE_CHECKPOINT_RESULT with an"
+                    + " unknown outcome '" + outcome + "' for checkpoint " + checkpointId);
+        }
+    }
+
     /** Guest: retry the parked coordinated autosave until a frame the engine will honour it. */
     private void tickSaveCheckpoint() {
         if (!saveCheckpoint.isAutosavePending()) {
@@ -6627,6 +6771,118 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         saveCheckpoint.tick(CoopSaveCheckpoint.engineTarget(sectorOrNull()), clockMillis.getAsLong());
+    }
+
+    // ---- 0.1.1: a deliberate quit, told rather than guessed ---------------------------------------
+
+    /**
+     * Starts and stops {@link CoopSessionLeaveWatchdog} on the session-active edge.
+     *
+     * <p>Same shape as {@link #tickClockReconciler}'s arming flag, and for the same reason: there is
+     * no session-start callback, only a predicate that changes value on some frame.
+     */
+    private void tickSessionLeaveWatchdog() {
+        boolean active = isGameplaySessionActive();
+        if (active == leaveWatchdogArmed) {
+            return;
+        }
+        leaveWatchdogArmed = active;
+        try {
+            if (leaveWatchdog != null) {
+                leaveWatchdog.stop();
+                leaveWatchdog = null;
+            }
+            if (active) {
+                // A fresh one per session rather than a restarted one: the departure latch is what
+                // stops a watchdog sending twice, and re-arming a latched instance would give the
+                // next session a watchdog that can never fire.
+                leaveWatchdog = new CoopSessionLeaveWatchdog(this::sendSessionLeaveInline);
+                leaveWatchdog.start();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not " + (active ? "start" : "stop")
+                    + " the session-leave watchdog; a quit to the menu will look like a dropped"
+                    + " link to the partner", ex);
+        }
+    }
+
+    /**
+     * Tells the partner this player is leaving on purpose, written and flushed on the calling
+     * thread. Public because {@code CoopModPlugin.onGameLoad} is the other producer: the watchdog
+     * catches a quit to the title screen, {@code onGameLoad} catches loading a different save, and
+     * whichever notices first is the only one that speaks.
+     *
+     * <p><b>Called off the campaign thread.</b> The watchdog's poll thread and a JVM shutdown hook
+     * both reach this, so it touches the transport and the session record and nothing else — no
+     * sector, no UI, no engine call of any kind. {@link CoopNetService#send} and
+     * {@link CoopNetService#flushOutbound} take the transport's own lifecycle lock, which is what
+     * makes an inline write from another thread safe; this is the same inline-flush path
+     * {@link #sendStallNotice} uses from {@code beforeGameSave}.
+     */
+    public void sendSessionLeaveInline(String reason) {
+        synchronized (this) {
+            if (sessionLeaveSent) {
+                return;
+            }
+            sessionLeaveSent = true;
+        }
+        try {
+            if (service.role() == CoopConnectionRole.NONE || !service.isConnected()) {
+                return;
+            }
+            CoopMessages.Message leave = CoopMessages.sessionLeave(sessionState.sessionId(),
+                    service.nextSeq(), clockMillis.getAsLong(), reason);
+            service.send(leave);
+            // Same one-line wire trace every other sender writes, so a support log reads the same
+            // way for this one. log() only touches statics and the role, which is safe off-thread.
+            log("outbound", leave);
+            service.flushOutbound();
+            CoopLog.info(CoopNetPump.class, "Coop told the partner this player is leaving ("
+                    + reason + "); no reconnect grace is owed on the far side");
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop could not announce a deliberate departure", ex);
+        }
+    }
+
+    /**
+     * Peer: it left on purpose. Ends the session now, with an explanation, instead of letting the
+     * silence run into a link-death verdict and then a full grace window held for somebody who is
+     * standing at their title screen.
+     *
+     * <p>Two shapes, one outcome. If a grace window is already open — the pre-drop case, where the
+     * leave was written just before the socket died and is read on the frame after the window opened
+     * — {@link CoopReconnectCoordinator#end} runs the whole teardown through the listener, dialog
+     * included. Otherwise the socket is still up and there is no window to close, so the same
+     * teardown runs here: {@link #endSessionAfterDrop()} (which is where the unacknowledged-reliable
+     * drain and the credit refunds live) and then the dialog.
+     */
+    private void handleSessionLeave(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            return;
+        }
+        String reason = CoopMessages.parseSessionLeaveReason(message);
+        String name = remoteDisplayName();
+        long now = clockMillis.getAsLong();
+        CoopLog.warn(CoopNetPump.class, "Coop partner left the game on purpose (" + reason
+                + ") as " + service.role() + "; ending the session now rather than holding the world"
+                + " for a reconnect that is not coming");
+        postFeed(FEED_PARTNER_LEFT, now, "Co-op: " + name + " left the game.", FEED_WARN_COLOR);
+        // Refuse the grace for the drop edge that follows this frame: the socket is about to close
+        // behind the partner's process, and without this the ordinary edge would open a window.
+        partnerLeftDeliberately = true;
+        if (reconnect.active()) {
+            // The listener runs releaseReconnectHold, endSessionAfterDrop and the dialog.
+            reconnect.end(CoopReconnectCoordinator.REASON_PARTNER_LEFT);
+            return;
+        }
+        String correlationId = desyncCorrelationId();
+        // Read before endSessionAfterDrop, exactly as ReconnectListener.onEnded does: that call
+        // rewinds the session record and the correlation id goes with it.
+        peerDroppedAfterLiveSession = false;
+        service.setExpectedSessionToken(null);
+        endSessionAfterDrop();
+        noteDesync(CoopReconnectCoordinator.REASON_PARTNER_LEFT,
+                coop.ui.CoopDesyncReason.Source.SESSION_RESUME, correlationId);
     }
 
     private void drainFleetDatagrams() {

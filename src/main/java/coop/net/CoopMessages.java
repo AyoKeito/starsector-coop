@@ -210,7 +210,52 @@ public final class CoopMessages {
          * a socket that died proves nothing to the socket that replaces it, and dropping it costs
          * only one redundant resend, which the receiver's dedup absorbs.
          */
-        RELIABLE_ACK
+        RELIABLE_ACK,
+        /**
+         * 0.1.1: guest &rarr; host, "here is what became of the coordinated autosave you ordered."
+         * Carries the {@code checkpointId} it answers, an {@code outcome} of
+         * {@link #CHECKPOINT_RESULT_SAVED}, {@link #CHECKPOINT_RESULT_DEFERRED} or
+         * {@link #CHECKPOINT_RESULT_ABANDONED}, and how long the guest had been waiting when it said
+         * so.
+         *
+         * <p>It exists because the coordinated save was a one-way order with no answer. The guest
+         * parks the autosave while a screen is open ({@code CampaignUIAPI.autosave()} silently does
+         * nothing behind a dialog), and the 0.1.0 build gave up after thirty seconds with a line in
+         * the guest's own log. The live smoke found the consequence: the host pressed F5 while its
+         * partner sat in a dock screen, no guest save happened, and nothing on the host's screen ever
+         * said so. The two saves were out of step and only one player could have known.
+         *
+         * <p>Deliberately quiet. Nothing is sent for the ordinary case - a checkpoint that saves on
+         * the next frame says nothing at all - and the deferral report is sent once per parked
+         * episode rather than per frame, so a player who spends ten minutes in a market screen costs
+         * the wire three messages.
+         *
+         * <p>Informational, so not on {@link #isReliableOneShot}: losing one costs a feed line about
+         * a save state the next checkpoint will describe again, and the guest's own log has the
+         * whole story either way.
+         */
+        SAVE_CHECKPOINT_RESULT,
+        /**
+         * 0.1.1: either direction, "I am leaving on purpose." Carries a {@code reason} of
+         * {@link #LEAVE_REASON_MENU} or {@link #LEAVE_REASON_EXIT}.
+         *
+         * <p>The engine gives a mod no quit-to-menu and no exit callback (see
+         * {@code CoopNetPump.shutdownPortMapper}), so a player who picks "Exit to main menu" simply
+         * stops sending. The partner cannot tell that from a router dying: it waits out fifteen
+         * seconds of silence, declares the link dead, and then holds the whole world for the sixty
+         * second reconnect grace waiting for somebody who is standing at the title screen. This
+         * message is the missing word. It is produced by a watchdog thread that polls
+         * {@code Global.getCurrentState()} and by {@code CoopModPlugin.onGameLoad}, and it is written
+         * and flushed inline so it leaves before the process does.
+         *
+         * <p>Connection-scoped ({@code CoopNetService#isConnectionScopedControl}): a leave queued for
+         * a socket that died describes a departure the far side has already seen as a drop, and
+         * replaying it onto the next socket would end a session that just came back. It does survive
+         * the drop edge, which is the opposite question and the whole point - a leave written just
+         * before the socket closed, read on the frame after the grace window opened, is exactly the
+         * case that turns a sixty second wait into an immediate, explained ending.
+         */
+        SESSION_LEAVE
     }
 
     /**
@@ -244,6 +289,11 @@ public final class CoopMessages {
      *   toggle, a battle, an open dialog) that the drop edge has already ended and reset.</li>
      *   <li><b>{@code SAVE_CHECKPOINT}, {@code STALL_NOTICE}, {@code RESPAWN_PLAYER}</b> — orders
      *   about right now; obeying one late is worse than never hearing it.</li>
+     *   <li><b>{@code SAVE_CHECKPOINT_RESULT}</b> — informational. It describes a save state that
+     *   the next checkpoint describes again, and the guest's log carries the whole story regardless,
+     *   so a lost copy costs one feed line rather than a fact.</li>
+     *   <li><b>{@code SESSION_LEAVE}</b> — connection-scoped, and self-defeating if replayed: the
+     *   only socket a leave could be resent on is one the departed player is no longer holding.</li>
      *   <li><b>{@code OPTIONS_SNAPSHOT} / {@code OPTIONS_APPLIED}</b> — version-based, so the
      *   comparison that produced them runs again and re-sends whatever is still out of date.</li>
      *   <li><b>The lobby/handshake/resume vocabulary, the keepalives, and {@code RELIABLE_ACK}
@@ -269,7 +319,8 @@ public final class CoopMessages {
                  INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
                  ABILITY_ACTIVATE, DIALOG_BEGIN,
                  BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
-                 SAVE_CHECKPOINT, RESPAWN_PLAYER, STALL_NOTICE,
+                 SAVE_CHECKPOINT, SAVE_CHECKPOINT_RESULT, RESPAWN_PLAYER, STALL_NOTICE,
+                 SESSION_LEAVE,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED, SESSION_STATS, LINK_STATUS,
                  PING, PONG, UDP_PROBE, PATH_PROBE -> false;
         };
@@ -2160,5 +2211,88 @@ public final class CoopMessages {
             seqs.add(longValue);
         }
         return seqs;
+    }
+
+    // ---- 0.1.1 coordinated-save feedback ---------------------------------------------------------
+
+    /** {@link Type#SAVE_CHECKPOINT_RESULT}: the parked autosave ran. */
+    public static final String CHECKPOINT_RESULT_SAVED = "saved";
+
+    /** {@link Type#SAVE_CHECKPOINT_RESULT}: a screen is open and the autosave is still waiting. */
+    public static final String CHECKPOINT_RESULT_DEFERRED = "deferred";
+
+    /** {@link Type#SAVE_CHECKPOINT_RESULT}: the safety cap ran out and the autosave never happened. */
+    public static final String CHECKPOINT_RESULT_ABANDONED = "abandoned";
+
+    /**
+     * Guest &rarr; host: what became of the coordinated autosave for {@code checkpointId}. See
+     * {@link Type#SAVE_CHECKPOINT_RESULT}.
+     *
+     * @param outcome      one of {@link #CHECKPOINT_RESULT_SAVED},
+     *                     {@link #CHECKPOINT_RESULT_DEFERRED} or
+     *                     {@link #CHECKPOINT_RESULT_ABANDONED}. An unknown value throws: the
+     *                     receiver picks a feed line off this field, and silently rendering "the
+     *                     save caught up" for a save that never happened is the exact failure this
+     *                     message exists to end.
+     * @param waitedMillis how long the checkpoint had been parked, floored at zero
+     */
+    public static Message saveCheckpointResult(String sessionId, long seq, long sentAtMillis,
+                                               long checkpointId, String outcome,
+                                               long waitedMillis) {
+        String value = outcome == null ? "" : outcome.trim();
+        if (!CHECKPOINT_RESULT_SAVED.equals(value)
+                && !CHECKPOINT_RESULT_DEFERRED.equals(value)
+                && !CHECKPOINT_RESULT_ABANDONED.equals(value)) {
+            throw new IllegalArgumentException("unknown save checkpoint outcome: " + outcome);
+        }
+        return new Message(Type.SAVE_CHECKPOINT_RESULT, requireText(sessionId, "sessionId"), seq,
+                sentAtMillis,
+                "{\"checkpointId\":" + checkpointId
+                        + ",\"outcome\":\"" + escapeJson(value) + "\""
+                        + ",\"waitedMillis\":" + Math.max(0L, waitedMillis) + "}");
+    }
+
+    /** The checkpoint a {@link Type#SAVE_CHECKPOINT_RESULT} answers. */
+    public static long parseCheckpointResultId(Message message) {
+        return requiredPayloadLong(message, "checkpointId");
+    }
+
+    /** The outcome carried by a {@link Type#SAVE_CHECKPOINT_RESULT}; never null, possibly unknown. */
+    public static String parseCheckpointResultOutcome(Message message) {
+        return requiredPayloadString(message, "outcome");
+    }
+
+    /** How long the guest had been waiting when it sent the result, in milliseconds. */
+    public static long parseCheckpointResultWaitedMillis(Message message) {
+        return payload(message).optionalLong("waitedMillis", 0L);
+    }
+
+    // ---- 0.1.1 deliberate departure --------------------------------------------------------------
+
+    /** {@link Type#SESSION_LEAVE}: the player quit to the main menu. */
+    public static final String LEAVE_REASON_MENU = "menu";
+
+    /** {@link Type#SESSION_LEAVE}: the process is exiting. */
+    public static final String LEAVE_REASON_EXIT = "exit";
+
+    /**
+     * Either direction: "I am leaving on purpose, do not hold the world for me." See
+     * {@link Type#SESSION_LEAVE}.
+     *
+     * <p>The session id is nullable, unlike most session traffic. The exit path writes this from a
+     * JVM shutdown hook, on a process that may already have torn its session record down, and a
+     * leave with no id is still worth more to the partner than sixty seconds of silence.
+     *
+     * @param reason {@link #LEAVE_REASON_MENU} or {@link #LEAVE_REASON_EXIT}; anything else is
+     *               carried verbatim and read by the receiver only for its log line
+     */
+    public static Message sessionLeave(String sessionId, long seq, long sentAtMillis, String reason) {
+        return new Message(Type.SESSION_LEAVE, trimToNullable(sessionId), seq, sentAtMillis,
+                "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+    }
+
+    /** Why the peer left, or "" when it did not say. */
+    public static String parseSessionLeaveReason(Message message) {
+        return optionalPayloadString(message, "reason", "");
     }
 }

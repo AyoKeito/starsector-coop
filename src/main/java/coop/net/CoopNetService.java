@@ -1178,7 +1178,13 @@ public class CoopNetService {
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
                  SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
-                 RELIABLE_ACK -> true;
+                 RELIABLE_ACK,
+                 // 0.1.1: a leave is about the socket it was written to. The player who queued one
+                 // onto a link that then died has, by the time a replacement attaches, either
+                 // stopped existing (in which case the partner saw a drop and needs no help) or
+                 // come back - and delivering "I left" over the socket they came back on would end
+                 // the session they just resumed.
+                 SESSION_LEAVE -> true;
             default -> false;
         };
     }

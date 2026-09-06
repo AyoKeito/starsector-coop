@@ -64,7 +64,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.LOBBY_STATUS, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.SHIP_LOST, CoopMessages.Type.OPTIONS_SNAPSHOT,
             CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT,
-            CoopMessages.Type.RELIABLE_ACK);
+            CoopMessages.Type.RELIABLE_ACK, CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
+            CoopMessages.Type.SESSION_LEAVE);
 
     // ---- table: CoopNetService.coalesceKey(Message) ------------------------------------------
     // Whitelist of whole-state snapshots that may supersede a queued copy of themselves; every
@@ -87,15 +88,18 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.SESSION_RESUME_REJECT,
             // 0.1.1: not lobby vocabulary, same scope. An ack queued for a socket that died proves
             // nothing to its replacement, and losing it costs one redundant resend.
-            CoopMessages.Type.RELIABLE_ACK);
+            CoopMessages.Type.RELIABLE_ACK,
+            // 0.1.1: same again. A leave queued onto a link that then died would, on the socket that
+            // replaces it, end the very session the partner just came back to.
+            CoopMessages.Type.SESSION_LEAVE);
 
     /**
-     * The lobby round proper: {@link #CONNECTION_SCOPED_CONTROL} minus {@code RELIABLE_ACK}. The two
+     * The lobby round proper: {@link #CONNECTION_SCOPED_CONTROL} minus the two 0.1.1 types. The two
      * cross-table rules at the bottom of this file were written when those two sets were the same
      * one, and they are rules about the <em>lobby vocabulary</em> - "a leftover copy answers a
      * question the new peer never asked, and it is pre-session control-plane chatter". Neither claim
-     * is true of an acknowledgement, which is why it is subtracted here rather than the rules being
-     * weakened for everybody.
+     * is true of an acknowledgement or of a departure notice, which is why they are subtracted here
+     * rather than the rules being weakened for everybody.
      */
     private static final EnumSet<CoopMessages.Type> CONNECTION_SCOPED_LOBBY_VOCABULARY =
             lobbyVocabulary();
@@ -103,6 +107,7 @@ class CoopMessageTypePolicyTest {
     private static EnumSet<CoopMessages.Type> lobbyVocabulary() {
         EnumSet<CoopMessages.Type> vocabulary = EnumSet.copyOf(CONNECTION_SCOPED_CONTROL);
         vocabulary.remove(CoopMessages.Type.RELIABLE_ACK);
+        vocabulary.remove(CoopMessages.Type.SESSION_LEAVE);
         return vocabulary;
     }
 
@@ -160,7 +165,13 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.CREDITS_GRANT,
             // 0.1.1: a pre-drop ack is the partner saying it applied those seqs, which is as true
             // after the drop as before it, and honouring it saves a needless resend.
-            CoopMessages.Type.RELIABLE_ACK);
+            CoopMessages.Type.RELIABLE_ACK,
+            // 0.1.1: informational, and its subject (whether the guest's save happened) outlives the
+            // socket that carried the answer.
+            CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
+            // 0.1.1: the whole point. A leave written a frame before the socket died, read after the
+            // grace window opened, is what turns a 60 s hold into an immediate, explained ending.
+            CoopMessages.Type.SESSION_LEAVE);
 
     // ---- table: CoopNetPump.isTerminalRejectType(Type) ---------------------------------------
     // The peer's verdicts on a join, dispatched a few lines early out of the pre-drop drain so
@@ -300,13 +311,56 @@ class CoopMessageTypePolicyTest {
      * is a fact about what the partner applied, which the drop edge does not undo.
      */
     @Test
-    void theReliableAckIsTheOneConnectionScopedTypeThatSurvivesAndIsNotControlPlane() {
+    void theReliableAckIsAConnectionScopedTypeThatSurvivesAndIsNotControlPlane() {
         assertTrue(CoopNetService.isConnectionScopedControl(CoopMessages.Type.RELIABLE_ACK));
         assertTrue(CoopNetPump.survivesTheDropEdge(CoopMessages.Type.RELIABLE_ACK));
         assertFalse(CoopNetPump.isControlPlane(CoopMessages.Type.RELIABLE_ACK));
         assertFalse(CoopNetPump.allowedDuringReconnectGrace(CoopMessages.Type.RELIABLE_ACK));
         assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.RELIABLE_ACK),
                 "acknowledging an acknowledgement is a loop with no bottom");
+    }
+
+    /**
+     * The second exception, and the more load-bearing one. {@code SESSION_LEAVE} shares the ack's
+     * shape - connection-scoped, survives the drop edge, not control plane - for its own reasons,
+     * and the combination is what the feature is made of: never replayed onto a socket the departed
+     * player is not holding, always honoured when it came off the socket that died.
+     *
+     * <p>It is deliberately <b>not</b> on {@code allowedDuringReconnectGrace}. That table is "what an
+     * unproven peer may say while a window is open", and a leave is the one message that ends a held
+     * session outright - handing it to whoever dialled the freed slot would be a one-packet session
+     * kill. The proven path is the pre-drop generation stamp instead: a leave off the connection that
+     * carried the session is applied by {@code dispatchInbound}'s {@code preDropProven &&
+     * survivesTheDropEdge} branch, and one from a stranger is dropped.
+     */
+    @Test
+    void theSessionLeaveIsHonouredOnlyFromTheConnectionThatCarriedTheSession() {
+        assertTrue(CoopNetService.isConnectionScopedControl(CoopMessages.Type.SESSION_LEAVE));
+        assertTrue(CoopNetPump.survivesTheDropEdge(CoopMessages.Type.SESSION_LEAVE));
+        assertFalse(CoopNetPump.isControlPlane(CoopMessages.Type.SESSION_LEAVE));
+        assertFalse(CoopNetPump.allowedDuringReconnectGrace(CoopMessages.Type.SESSION_LEAVE),
+                "a stranger on the freed slot must not be able to end a held session with one frame");
+        assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.SESSION_LEAVE),
+                "the only socket a leave could be replayed on is one its sender is not holding");
+    }
+
+    /**
+     * The coordinated-save answer is ordinary session traffic in every table but one: it survives the
+     * drop edge, because whether the guest's save happened is a fact about two files on disk and not
+     * about the socket that reported it.
+     */
+    @Test
+    void theSaveCheckpointResultIsOrdinarySessionTrafficThatOutlivesItsSocket() {
+        assertFalse(CoopNetService.isConnectionScopedControl(
+                CoopMessages.Type.SAVE_CHECKPOINT_RESULT));
+        assertTrue(CoopNetPump.survivesTheDropEdge(CoopMessages.Type.SAVE_CHECKPOINT_RESULT));
+        assertFalse(CoopNetPump.isControlPlane(CoopMessages.Type.SAVE_CHECKPOINT_RESULT));
+        assertFalse(CoopNetPump.isHighFrequency(CoopMessages.Type.SAVE_CHECKPOINT_RESULT),
+                "three messages per parked save is not a stream");
+        assertFalse(CoopNetPump.allowedDuringReconnectGrace(
+                CoopMessages.Type.SAVE_CHECKPOINT_RESULT));
+        assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.SAVE_CHECKPOINT_RESULT),
+                "informational: the next checkpoint describes the same save state again");
     }
 
     // ---- 0.1.1 reliable delivery ----------------------------------------------------------------

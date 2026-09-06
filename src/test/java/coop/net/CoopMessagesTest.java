@@ -907,4 +907,92 @@ class CoopMessagesTest {
         assertFalse(CoopMessages.isReliableOneShot(CoopMessages.Type.MARKET_SNAPSHOT),
                 "scoped to one open of one market");
     }
+
+    // ---- 0.1.1: the coordinated save answers back -------------------------------------------------
+
+    @Test
+    void aSaveCheckpointResultRoundTripsAllThreeOutcomes() {
+        for (String outcome : List.of(CoopMessages.CHECKPOINT_RESULT_SAVED,
+                CoopMessages.CHECKPOINT_RESULT_DEFERRED,
+                CoopMessages.CHECKPOINT_RESULT_ABANDONED)) {
+            CoopMessages.Message result = CoopMessages.saveCheckpointResult("session-a", 3L, 500L,
+                    42L, outcome, 7_500L);
+
+            assertEquals("{\"checkpointId\":42,\"outcome\":\"" + outcome
+                    + "\",\"waitedMillis\":7500}", result.payloadJson());
+
+            CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(result));
+            assertEquals(CoopMessages.Type.SAVE_CHECKPOINT_RESULT, decoded.type());
+            assertEquals(42L, CoopMessages.parseCheckpointResultId(decoded));
+            assertEquals(outcome, CoopMessages.parseCheckpointResultOutcome(decoded));
+            assertEquals(7_500L, CoopMessages.parseCheckpointResultWaitedMillis(decoded));
+        }
+    }
+
+    /**
+     * The receiver picks a feed line off {@code outcome}, so an unknown value must not reach the
+     * wire: rendering "their save caught up" for a save that never happened is the exact failure the
+     * message exists to end.
+     */
+    @Test
+    void aSaveCheckpointResultRefusesAnOutcomeNobodyCanRender() {
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.saveCheckpointResult(
+                "session-a", 1L, 0L, 1L, "maybe", 0L));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.saveCheckpointResult(
+                "session-a", 1L, 0L, 1L, null, 0L));
+    }
+
+    @Test
+    void aSaveCheckpointResultFloorsANegativeWaitAndSurvivesAPeerThatOmitsIt() {
+        assertEquals(0L, CoopMessages.parseCheckpointResultWaitedMillis(
+                CoopMessages.saveCheckpointResult("session-a", 1L, 0L, 1L,
+                        CoopMessages.CHECKPOINT_RESULT_SAVED, -5L)));
+
+        CoopMessages.Message withoutTheField = CoopMessages.decode(CoopMessages.encode(
+                new CoopMessages.Message(CoopMessages.Type.SAVE_CHECKPOINT_RESULT, "session-a", 1L,
+                        0L, "{\"checkpointId\":9,\"outcome\":\"saved\"}")));
+        assertEquals(0L, CoopMessages.parseCheckpointResultWaitedMillis(withoutTheField));
+        assertEquals(9L, CoopMessages.parseCheckpointResultId(withoutTheField));
+    }
+
+    // ---- 0.1.1: a deliberate departure ------------------------------------------------------------
+
+    @Test
+    void aSessionLeaveRoundTripsItsReason() {
+        CoopMessages.Message leave = CoopMessages.sessionLeave("session-a", 5L, 900L,
+                CoopMessages.LEAVE_REASON_MENU);
+
+        assertEquals("{\"reason\":\"menu\"}", leave.payloadJson());
+
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(leave));
+        assertEquals(CoopMessages.Type.SESSION_LEAVE, decoded.type());
+        assertEquals("session-a", decoded.sessionId());
+        assertEquals(CoopMessages.LEAVE_REASON_MENU,
+                CoopMessages.parseSessionLeaveReason(decoded));
+    }
+
+    /**
+     * The exit path writes this from a JVM shutdown hook, on a process that may already have torn its
+     * session record down. A leave with no session id is still worth more to the partner than sixty
+     * seconds of silence, so this is the one session message whose id is nullable.
+     */
+    @Test
+    void aSessionLeaveIsAllowedWithoutASessionId() {
+        CoopMessages.Message leave = CoopMessages.sessionLeave(null, 1L, 0L,
+                CoopMessages.LEAVE_REASON_EXIT);
+
+        assertNull(leave.sessionId());
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(leave));
+        assertEquals(CoopMessages.LEAVE_REASON_EXIT,
+                CoopMessages.parseSessionLeaveReason(decoded));
+    }
+
+    @Test
+    void aSessionLeaveFromAPeerThatNamedNoReasonStillParses() {
+        CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(
+                new CoopMessages.Message(CoopMessages.Type.SESSION_LEAVE, "session-a", 1L, 0L,
+                        "{}")));
+
+        assertEquals("", CoopMessages.parseSessionLeaveReason(decoded));
+    }
 }
