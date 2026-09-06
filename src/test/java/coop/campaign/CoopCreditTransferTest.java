@@ -286,35 +286,6 @@ class CoopCreditTransferTest {
         assertEquals(100_000L, engine.credits);
     }
 
-    // ---- the page's pending amount ----------------------------------------------------------------
-
-    @Test
-    void thePendingAmountStepsAndClampsAtZero() {
-        CoopCreditTransfer.uninstall();
-
-        assertEquals(0, CoopCreditTransfer.pendingAmount());
-        assertEquals(10_000, CoopCreditTransfer.stepPendingAmount(10_000));
-        assertEquals(11_000, CoopCreditTransfer.stepPendingAmount(1_000));
-        assertEquals(1_000, CoopCreditTransfer.stepPendingAmount(-10_000));
-        assertEquals(0, CoopCreditTransfer.stepPendingAmount(-10_000), "never negative");
-        assertEquals(CoopCreditTransfer.MAX_AMOUNT,
-                CoopCreditTransfer.stepPendingAmount(Integer.MAX_VALUE), "and never past the codec");
-
-        CoopCreditTransfer.clearPendingAmount();
-        assertEquals(0, CoopCreditTransfer.pendingAmount());
-    }
-
-    @Test
-    void uninstallingClearsBothTheHandleAndTheAmount() {
-        CoopCreditTransfer.install(transfer);
-        CoopCreditTransfer.stepPendingAmount(5_000);
-
-        CoopCreditTransfer.uninstall();
-
-        assertEquals(null, CoopCreditTransfer.active());
-        assertEquals(0, CoopCreditTransfer.pendingAmount());
-    }
-
     @Test
     void amountsAreFormattedTheSameOnEveryInstall() {
         assertEquals("1,000", CoopCreditTransfer.format(1_000));

@@ -75,9 +75,6 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
      */
     public static final String REASON_BOUNTY = "bounty";
 
-    /** Step sizes the options page offers, smallest first. */
-    public static final int[] STEPS = {1_000, 10_000, 100_000};
-
     /** Ceiling on the pending amount, matching the codec's. */
     public static final int MAX_AMOUNT = coop.net.CoopMessages.MAX_CREDITS_GRANT;
 
@@ -165,9 +162,6 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
 
     private static volatile CoopCreditTransfer active;
 
-    /** The amount the options page has stepped up to, in credits. Survives the page's re-creation. */
-    private static volatile int pendingAmount;
-
     public static void install(CoopCreditTransfer transfer) {
         active = transfer;
     }
@@ -175,29 +169,11 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
     /** Session teardown: the options page's Send button goes back to being disabled. */
     public static void uninstall() {
         active = null;
-        pendingAmount = 0;
     }
 
     /** The installed transfer, or null in solo play and between pumps. */
     public static CoopCreditTransfer active() {
         return active;
-    }
-
-    /** What the Send button would send right now. */
-    public static int pendingAmount() {
-        return pendingAmount;
-    }
-
-    /** Steps the pending amount by {@code delta}, clamped to {@code [0, MAX_AMOUNT]}. */
-    public static int stepPendingAmount(int delta) {
-        long stepped = (long) pendingAmount + delta;
-        pendingAmount = (int) Math.max(0L, Math.min((long) MAX_AMOUNT, stepped));
-        return pendingAmount;
-    }
-
-    /** Back to nothing pending, after a send or a Clear press. */
-    public static void clearPendingAmount() {
-        pendingAmount = 0;
     }
 
     // ---- instance --------------------------------------------------------------------------------

@@ -236,7 +236,6 @@ class CoopAgentQueryVerbsTest {
         FakeCreditEngine engine = new FakeCreditEngine(100_000L);
         CoopCreditTransfer transfer = new CoopCreditTransfer(engine, alwaysSendableLink());
         CoopCreditTransfer.install(transfer);
-        CoopCreditTransfer.stepPendingAmount(10_000);
         transfer.send(25_000);
         transfer.receive("host-player-4", 5_000, "gift");
 
@@ -244,7 +243,6 @@ class CoopAgentQueryVerbsTest {
         assertTrue(counts.getBoolean("installed"));
         assertEquals(1, counts.getInt("appliedCount"));
         assertEquals(1, counts.getInt("sentCount"));
-        assertEquals(10_000, counts.getInt("pendingAmount"));
         assertTrue(counts.getBoolean("canSend"));
         assertFalse(counts.has("applied"), "no ledgerId asked about, no answer invented");
 
@@ -265,7 +263,6 @@ class CoopAgentQueryVerbsTest {
         JSONObject block = CoopAgentCommands.creditsBlock("some-ledger");
 
         assertFalse(block.getBoolean("installed"));
-        assertEquals(0, block.getInt("pendingAmount"));
         assertFalse(block.has("appliedCount"), "counts a torn-down transfer cannot answer for");
         assertFalse(block.has("applied"));
     }

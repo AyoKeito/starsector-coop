@@ -286,11 +286,6 @@ public final class CoopAgentCommands {
      * many it minted and still considers in flight. Read off the installed transfer's static handle,
      * so the bridge needs no path through the pump.
      *
-     * <p>{@code pendingAmount} is vestigial and reads 0. It used to be the amount the options page's
-     * step buttons had accumulated; the page now takes the amount in a text field that only a Send
-     * press reads, so there is no queued amount for the bridge to report. Do not read it during a
-     * money smoke - {@code sentCount} and the per-{@code ledgerId} answers are the facts.
-     *
      * <p>With {@code ledgerId} in the request the block also answers {@code applied} for that one
      * grant. That is the check a money smoke actually wants: a wallet total moves for a dozen
      * reasons, but "the id the sender minted is in the receiver's applied ledger" is the transfer
@@ -302,7 +297,6 @@ public final class CoopAgentCommands {
         JSONObject out = new JSONObject();
         CoopCreditTransfer transfer = CoopCreditTransfer.active();
         out.put("installed", transfer != null);
-        out.put("pendingAmount", CoopCreditTransfer.pendingAmount());
         if (transfer == null) {
             return out;
         }
