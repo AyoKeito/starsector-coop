@@ -1130,10 +1130,17 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * Re-applies the sender's d-mods and S-mods on the freshly built stock ship (Phase 16). Never
      * fatal: a mirror that stays cosmetically clean is exactly the pre-Phase-16 behaviour and is
      * strictly better than a roster short by one ship.
+     *
+     * <p>The damaged-hull decision comes off the streamed {@code hullId}, not off the d-mod list —
+     * see {@link CoopShipMods#damagedHull}. The ship this is applied to is on a clean hull whichever
+     * branch {@link #resolveCreationId} took: the stock variant the sender was autofit from carries
+     * the undamaged hull, and a generated {@code _default_D} hull has no {@code "_Hull"} variant to
+     * build from, so the fallback lands on the base hull's.
      */
     private void applyReplicatedHullMods(FleetMemberAPI created, CoopFleetSnapshot.Member member) {
         try {
             CoopShipMods.apply(member.dmodIds(), member.sModIds(), member.sModdedBuiltInIds(),
+                    CoopShipMods.damagedHull(member.hullId(), member.dmodIds()),
                     engineVariantOps(created));
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop mirror hullmods (dmods="

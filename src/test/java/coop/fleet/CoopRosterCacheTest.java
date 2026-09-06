@@ -6,6 +6,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -191,5 +192,30 @@ class CoopRosterCacheTest {
         CoopFleetRoster roster = CoopFleetRoster.of(source);
         assertEquals(roster, CoopFleetRoster.decode(roster.encode()));
         assertEquals(16, roster.fleetHash16().length());
+
+        // The same shape with no permanent hullmods at all: three empty fields must survive the trip
+        // as three empty fields, not as one phantom id the receiver would then look up.
+        CoopFleetRoster clean = CoopFleetRoster.of(snapshot(List.of(member("m1", "wolf", 0.7f))));
+        assertEquals(clean, CoopFleetRoster.decode(clean.encode()));
+        assertEquals("", CoopFleetRoster.decode(clean.encode()).members().get(0).dmodIds());
+    }
+
+    @Test
+    void repairingAHullAtADockMovesTheRosterHashTheResendGateWatches() {
+        // CoopNetPump.maybeSendFleetRoster returns early on an unchanged hash, so restoring a ship
+        // has to move it or the partner keeps seeing the battered hull for the rest of the session.
+        // Both halves of a restore move: the d-mod list empties and the hull loses its _default_D.
+        String battered = CoopFleetRoster.of(snapshot(List.of(
+                new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault", "Fang", "",
+                        0.4f, 0.6f, "compromised_storage,damagedengines", "", "")))).fleetHash16();
+        String restored = CoopFleetRoster.of(snapshot(List.of(
+                new CoopFleetSnapshot.Member("m1", "falcon", "falcon_Assault", "Fang", "",
+                        0.4f, 0.6f, "", "", "")))).fleetHash16();
+        String oneDmodLeft = CoopFleetRoster.of(snapshot(List.of(
+                new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault", "Fang", "",
+                        0.4f, 0.6f, "compromised_storage", "", "")))).fleetHash16();
+
+        assertNotEquals(battered, restored);
+        assertNotEquals(battered, oneDmodLeft, "losing one d-mod of two is still a new ship set");
     }
 }

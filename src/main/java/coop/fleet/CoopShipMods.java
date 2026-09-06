@@ -117,6 +117,31 @@ final class CoopShipMods {
     }
 
     /**
+     * Whether the mirror ship has to wear the generated damaged hull, decided from the streamed
+     * {@code hullId} rather than inferred from the d-mod list (2026-09-07).
+     *
+     * <p>The two are not the same question. {@code DModManager.addDMods} adds perma-mods and never
+     * touches the hull spec; the {@code setDHull} call is the <em>caller's</em>
+     * ({@code DefaultFleetInflater:297}, {@code ShipRecoverySpecial}), so "has d-mods" and "is on a
+     * {@code _default_D} hull" can come apart in both directions. Inferring the swap from a non-empty
+     * d-mod list therefore stamps a "(D)" designation, sprite and name on a mirror whose owner's ship
+     * has none — visible fleet-to-fleet divergence for free. The sender already tells us the answer:
+     * {@code CoopFleetSnapshotFactory#streamableHullId} puts the ship's live hull id on the wire, and
+     * {@code Misc.getDHullId} is exactly {@code hullId + "_default_D"}, so the suffix <em>is</em> the
+     * flag. No new wire field.
+     *
+     * <p>The d-mod list is the fallback for a sender that could not name a hull at all, which is the
+     * pre-2026-09-07 rule and still better than a battered ship arriving on a clean hull.
+     */
+    static boolean damagedHull(String hullId, String dmodIds) {
+        String hull = hullId == null ? "" : hullId;
+        if (hull.isEmpty()) {
+            return !decode(dmodIds).isEmpty();
+        }
+        return hull.endsWith(CoopFleetSnapshotFactory.D_HULL_SUFFIX);
+    }
+
+    /**
      * The engine operations {@link #apply} needs, behind a seam so the clone-before-mutate invariant
      * is unit-testable without an engine. Implementations must never let {@link #copyOf} return the
      * argument itself.
@@ -155,17 +180,24 @@ final class CoopShipMods {
      * {@code DModManager.setDHull} does <em>not</em> replace the variant object — it only calls
      * {@code setSource(REFIT)} and {@code setHullSpecAPI(dHull)}
      * ({@code api_pristine/.../DModManager.java:39-50}), leaving {@code permaMods}/{@code sMods}/
-     * {@code sModdedBuiltIns} untouched. The swap is skipped entirely when there are no d-mods: an
-     * S-modded but undamaged ship must not arrive wearing a damaged hull.
+     * {@code sModdedBuiltIns} untouched. It runs when, and only when, {@code damagedHull} says the
+     * owner's ship is on one (see {@link #damagedHull}): an S-modded but undamaged ship must not
+     * arrive wearing a damaged hull, and neither must a d-modded one whose owner's hull is clean.
+     *
+     * <p><b>Nothing here rolls anything.</b> Every id installed is one the sender named; the receiver
+     * has no {@code DModManager.addDMods} call and no {@code FleetInflater} on the mirror fleet
+     * ({@code CoopFleetMirror} builds it with {@code createEmptyFleet}, which attaches none), so a
+     * mirror can be missing a d-mod but can never invent one.
      *
      * @return true when a modified variant was installed.
      */
     static <V> boolean apply(String dmodIds, String sModIds, String sModdedBuiltInIds,
-                             VariantOps<V> ops) {
+                             boolean damagedHull, VariantOps<V> ops) {
         List<String> dmods = decode(dmodIds);
         List<String> sMods = decode(sModIds);
         List<String> sModdedBuiltIns = decode(sModdedBuiltInIds);
-        if (ops == null || (dmods.isEmpty() && sMods.isEmpty() && sModdedBuiltIns.isEmpty())) {
+        if (ops == null
+                || (!damagedHull && dmods.isEmpty() && sMods.isEmpty() && sModdedBuiltIns.isEmpty())) {
             return false;
         }
         V source = ops.currentVariant();
@@ -182,7 +214,7 @@ final class CoopShipMods {
                     + " mutate the shared variant spec. The mirror ship stays clean.");
             return false;
         }
-        if (!dmods.isEmpty()) {
+        if (damagedHull) {
             ops.setDamagedHull(copy);
         }
         for (String id : dmods) {
