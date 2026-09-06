@@ -106,7 +106,9 @@ const TOOLS = [
       'give{commodityId?, qty?, credits?}, addship{variantId, count?} (adds combat-ready ships to the ' +
       'local player fleet; an unknown variant is refused by name and count is capped at 20), ' +
       'objective{entityId, factionId}, surveyset{planetId, level}, ' +
-      'expedition{factionId?} (host only: forces a punitive expedition against a player colony). ' +
+      'expedition{factionId?} (host only: forces a punitive expedition against a player colony), ' +
+      'rep{factionId, value|points} (host only: sets the player faction\'s standing with factionId; ' +
+      'value is -1..1 in API units, points is -100..100 as shown in the UI, exactly one is required). ' +
       'Market buy/sell, officer hire, bar-offer accept and market open/close are deliberately absent.',
     inputSchema: {
       type: 'object',

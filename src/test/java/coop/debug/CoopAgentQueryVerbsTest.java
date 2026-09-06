@@ -3,6 +3,7 @@ package coop.debug;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
@@ -531,6 +532,133 @@ class CoopAgentQueryVerbsTest {
     private static CoopAgentCommands.ExpeditionCandidate candidate(String factionId, int reasonCount,
                                                                    boolean freePort, boolean ongoing) {
         return new CoopAgentCommands.ExpeditionCandidate(factionId, reasonCount, freePort, ongoing);
+    }
+
+    // ---- rep: player-faction standing with an NPC faction -------------------------------------------
+
+    @Test
+    void repSetsTheValueDirectlyAndReportsBeforeAndAfter() throws JSONException {
+        float[] relationship = {0.1f};
+        CoopAgentCommands.Context context = repContext("hegemony", relationship);
+
+        JSONObject out = CoopAgentCommands.rep(args("factionId", "hegemony", "value", 0.4), context);
+
+        assertEquals("hegemony", out.getString("factionId"));
+        assertEquals(0.1d, out.getDouble("before"), 1e-6);
+        assertEquals(0.4d, out.getDouble("after"), 1e-6);
+        assertEquals(0.4f, relationship[0], 1e-6f, "the engine call must actually have landed");
+    }
+
+    @Test
+    void repAcceptsPointsAsTheUiScaleInsteadOfTheRawApiValue() throws JSONException {
+        float[] relationship = {0f};
+        CoopAgentCommands.Context context = repContext("hegemony", relationship);
+
+        JSONObject out = CoopAgentCommands.rep(args("factionId", "hegemony", "points", -50), context);
+
+        assertEquals(0d, out.getDouble("before"), 1e-6);
+        assertEquals(-0.5d, out.getDouble("after"), 1e-6);
+        assertEquals(-0.5f, relationship[0], 1e-6f);
+    }
+
+    @Test
+    void repRefusesWhenNeitherOrBothOfValueAndPointsAreGiven() throws JSONException {
+        CoopAgentCommands.Context context = repContext("hegemony", new float[]{0f});
+
+        String neither = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.rep(args("factionId", "hegemony"), context)).getMessage();
+        assertTrue(neither.contains("\"value\": -1..1") && neither.contains("\"points\": -100..100"),
+                "the refusal must name both accepted forms: " + neither);
+
+        JSONObject both = args("factionId", "hegemony", "value", 0.2);
+        both.put("points", 20);
+        String bothMessage = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.rep(both, context)).getMessage();
+        assertTrue(bothMessage.contains("\"value\": -1..1") && bothMessage.contains("\"points\": -100..100"),
+                bothMessage);
+    }
+
+    @Test
+    void repRejectsAnUnknownFaction() {
+        CoopAgentCommands.Context context = repContext("hegemony", new float[]{0f});
+
+        String message = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.rep(args("factionId", "no_such_faction", "points", 10), context))
+                .getMessage();
+
+        assertTrue(message.contains("no_such_faction"), message);
+    }
+
+    @Test
+    void repRejectsAValueOrPointsOutOfRange() {
+        CoopAgentCommands.Context context = repContext("hegemony", new float[]{0f});
+
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.rep(args("factionId", "hegemony", "value", 1.5), context))
+                .getMessage().contains("between -1 and 1"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.rep(args("factionId", "hegemony", "points", 150), context))
+                .getMessage().contains("between -100 and 100"));
+    }
+
+    @Test
+    void repIsRefusedOnTheGuestAndAllowedWithNoSessionOrOnTheHost() {
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.requireRepAuthority(CoopConnectionRole.GUEST));
+        assertTrue(refused.getMessage().contains("host-only")
+                        && refused.getMessage().contains("PLAYER_REP_SNAPSHOT"),
+                "standings are host-authoritative; the refusal has to say what would overwrite a guest"
+                        + " edit: " + refused.getMessage());
+
+        CoopAgentCommands.requireRepAuthority(CoopConnectionRole.HOST);
+        CoopAgentCommands.requireRepAuthority(CoopConnectionRole.NONE);
+    }
+
+    @Test
+    void repViaDispatchIsRefusedOnAGuestSessionRatherThanReachingTheEngine() throws JSONException {
+        float[] relationship = {0f};
+        SectorAPI sector = repSector("hegemony", relationship);
+        coop.net.CoopNetPump pump = sessionPump(CoopConnectionRole.GUEST);
+        Map<String, CoopAgentCommands.Handler> handlers = new LinkedHashMap<>();
+        handlers.put("rep", CoopAgentCommands::rep);
+        CoopAgentCommands commands = new CoopAgentCommands(handlers);
+
+        JSONObject response = new JSONObject(commands.dispatch(
+                "{\"id\":20,\"cmd\":\"rep\",\"args\":{\"factionId\":\"hegemony\",\"points\":50}}",
+                contextFor(sector, pump)));
+
+        assertFalse(response.getBoolean("ok"));
+        assertTrue(response.getString("error").contains("host-only"), response.getString("error"));
+        assertEquals(0f, relationship[0], "a refused call must never have touched the engine");
+    }
+
+    private static CoopAgentCommands.Context repContext(String factionId, float[] relationship) {
+        return contextFor(repSector(factionId, relationship));
+    }
+
+    private static SectorAPI repSector(String factionId, float[] relationship) {
+        FactionAPI faction = proxy(FactionAPI.class, answers());
+        FactionAPI player = proxy(FactionAPI.class, answers(
+                "getRelationship", args -> relationship[0],
+                "setRelationship", args -> {
+                    relationship[0] = ((Number) args[1]).floatValue();
+                    return null;
+                }));
+        return proxy(SectorAPI.class, answers(
+                "getFaction", args -> factionId.equals(args[0]) ? faction : null,
+                "getPlayerFaction", args -> player));
+    }
+
+    private static JSONObject args(String key, Object value) throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put(key, value);
+        return out;
+    }
+
+    private static JSONObject args(String k1, Object v1, String k2, Object v2) throws JSONException {
+        JSONObject out = args(k1, v1);
+        out.put(k2, v2);
+        return out;
     }
 
     // ---- colonizable: which planets count, and in what order ---------------------------------------

@@ -28,7 +28,8 @@ export const ACTION_VERBS = [
   'addship',
   'objective',
   'surveyset',
-  'expedition'
+  'expedition',
+  'rep'
 ];
 
 /**

@@ -226,6 +226,7 @@ public final class CoopAgentCommands {
         map.put("objective", CoopAgentCommands::objective);
         map.put("surveyset", CoopAgentCommands::surveyset);
         map.put("expedition", CoopAgentCommands::expedition);
+        map.put("rep", CoopAgentCommands::rep);
         return map;
     }
 
@@ -2064,6 +2065,78 @@ public final class CoopAgentCommands {
         out.put("level", market == null || market.getSurveyLevel() == null
                 ? "" : market.getSurveyLevel().name());
         return out;
+    }
+
+    // ---- rep: player-faction standing with an NPC faction ----------------------------------------
+
+    /**
+     * Sets the player faction's standing with {@code factionId} directly through the public API, for
+     * smoke checks that need a specific relationship without waiting out the drift it would otherwise
+     * take to get there.
+     *
+     * <p>Accepts either {@code value} (the raw {@code -1..1} float the API itself carries) or
+     * {@code points} (the {@code -100..100} integer the game's UI shows) — exactly one of the two, so
+     * the caller is never left guessing which one would win if both were given.
+     *
+     * <p><b>Host-only.</b> {@code PLAYER_REP_SNAPSHOT} (see {@code CoopCampaignReplicator}) is a
+     * periodic full overwrite of the guest's standings from the host's, so a value set on the guest
+     * would last only until the next one lands.
+     */
+    static JSONObject rep(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CoopConnectionRole role = roleOf(context.pump());
+        requireRepAuthority(role);
+
+        String factionId = requiredString(args, "factionId");
+        if (sector.getFaction(factionId) == null) {
+            throw new IllegalArgumentException("no faction with id " + factionId);
+        }
+        FactionAPI player = sector.getPlayerFaction();
+        if (player == null) {
+            throw new IllegalStateException("no player faction");
+        }
+
+        boolean hasValue = args.has("value");
+        boolean hasPoints = args.has("points");
+        if (hasValue == hasPoints) {
+            throw new IllegalArgumentException("rep needs exactly one of {\"value\": -1..1} or"
+                    + " {\"points\": -100..100}, got " + (hasValue ? "both" : "neither"));
+        }
+
+        float value;
+        if (hasValue) {
+            value = (float) requiredDouble(args, "value");
+            if (value < -1f || value > 1f) {
+                throw new IllegalArgumentException("value must be between -1 and 1, got " + value);
+            }
+        } else {
+            int points = optionalInt(args, "points", 0);
+            if (points < -100 || points > 100) {
+                throw new IllegalArgumentException("points must be between -100 and 100, got " + points);
+            }
+            value = points / 100f;
+        }
+
+        float before = player.getRelationship(factionId);
+        player.setRelationship(factionId, value);
+        float after = player.getRelationship(factionId);
+
+        CoopLog.info(CoopAgentCommands.class, "Coop agent bridge rep: " + factionId + " "
+                + round(before) + " -> " + round(after));
+
+        JSONObject out = new JSONObject();
+        out.put("factionId", factionId);
+        out.put("before", round(before));
+        out.put("after", round(after));
+        return out;
+    }
+
+    /** Refuses the guest: standings are host-authoritative and a guest edit would not survive a sync. */
+    static void requireRepAuthority(CoopConnectionRole role) {
+        if (role == CoopConnectionRole.GUEST) {
+            throw new IllegalStateException("rep is host-only: standings are host-authoritative and the"
+                    + " next PLAYER_REP_SNAPSHOT would overwrite a guest edit");
+        }
     }
 
     // ---- expedition: forcing the Phase 24 milestone-3 warning ------------------------------------
