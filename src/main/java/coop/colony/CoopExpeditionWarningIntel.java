@@ -10,10 +10,13 @@ import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
 import com.fs.starfarer.api.ui.SectorMapAPI;
 import com.fs.starfarer.api.ui.TooltipMakerAPI;
 import com.fs.starfarer.api.util.Misc;
+import coop.util.CoopIntelFacts;
 import coop.util.CoopLog;
 
 import java.awt.Color;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -41,7 +44,7 @@ import java.util.Set;
  * outright; the timer is the backstop for the case teardown never happened (a crash, a save taken
  * mid-session and loaded alone).
  */
-public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
+public class CoopExpeditionWarningIntel extends BaseIntelPlugin implements CoopIntelFacts {
 
     /**
      * In-game days without a coop update before the entry ends itself. Ten days is far longer than
@@ -190,6 +193,24 @@ public class CoopExpeditionWarningIntel extends BaseIntelPlugin {
 
     public String targetMarketId() {
         return targetMarketId == null ? "" : targetMarketId;
+    }
+
+    /**
+     * What the bridge's {@code intel} verb reports about this entry: the same five facts the page
+     * renders, so a smoke run can check "the guest sees the same warning, with the same ETA" without
+     * a screenshot. Fields only, no engine call, so nothing here can throw.
+     */
+    @Override
+    public Map<String, Object> intelFacts() {
+        Map<String, Object> facts = new LinkedHashMap<>();
+        facts.put("kind", kind().name());
+        facts.put("status", status().name());
+        facts.put("factionId", factionId == null ? "" : factionId);
+        facts.put("targetMarketId", targetMarketId());
+        facts.put("targetName", targetName == null ? "" : targetName);
+        facts.put("etaDays", etaDays);
+        facts.put("goal", goalText());
+        return facts;
     }
 
     static CoopExpeditionWarning.Kind parseKind(String raw) {

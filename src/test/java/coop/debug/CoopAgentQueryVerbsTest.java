@@ -3,13 +3,19 @@ package coop.debug;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.CoreUITabId;
 import com.fs.starfarer.api.campaign.FactionAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
 import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
+import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
+import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
@@ -35,6 +41,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -80,6 +87,13 @@ class CoopAgentQueryVerbsTest {
         // The transfer's handle and pending amount are statics; leaving one installed would put the
         // previous test's ledgers into the next one's status dump.
         CoopCreditTransfer.uninstall();
+    }
+
+    @AfterEach
+    void clearSector() {
+        // hostileActivityBlock reads Global.getSector(); a fake left installed would follow the next
+        // test class into its own sector-memory assertions.
+        Global.setSector(null);
     }
 
     @AfterEach
@@ -1985,6 +1999,451 @@ class CoopAgentQueryVerbsTest {
         Global.setSettings(proxy(SettingsAPI.class, answers(
                 "getFloat", args -> 2000f,
                 "doesVariantExist", args -> variantId.equals(args[0]))));
+    }
+
+    // ---- entities: the verb that makes a hidden base addressable ----------------------------------
+
+    /**
+     * The classification, and the point of the whole verb: the hidden base is a {@code base} even
+     * though it also carries the station tag, and the id it emits is one {@code teleport} takes.
+     */
+    @Test
+    void entitiesClassifiesEveryKindAndTeleportAcceptsTheHiddenBaseItNames() throws JSONException {
+        EntityWorld world = new EntityWorld();
+
+        JSONObject listed = CoopAgentCommands.entities(new JSONObject(), world.context());
+
+        assertEquals("corvus", listed.getString("locationId"));
+        assertFalse(listed.getBoolean("truncated"));
+        Map<String, String> kinds = new LinkedHashMap<>();
+        JSONArray rows = listed.getJSONArray("entities");
+        for (int i = 0; i < rows.length(); i++) {
+            kinds.put(rows.getJSONObject(i).getString("id"), rows.getJSONObject(i).getString("kind"));
+        }
+        assertEquals(Map.of(
+                        "corvus_i", "planet",
+                        "corvus_station", "station",
+                        "corvus_jump", "jumpPoint",
+                        "corvus_relay", "relay",
+                        "pirate_base", "base",
+                        "fleet_1", "fleet",
+                        "corvus_rock", "other"),
+                kinds);
+
+        JSONObject base = rowById(rows, "pirate_base");
+        assertTrue(base.getBoolean("hidden"), "a hidden market is what makes it a base");
+        assertEquals("market_pirate", base.getString("marketId"),
+                "the key to look up in status.baseMarketIds to see whether the guest paired it");
+        assertTrue(base.getBoolean("discoverable"), "vanilla's not-found-yet flag");
+        assertEquals(500d, base.getDouble("x"));
+
+        // The whole reason the verb exists: an id from this list has to be a teleport argument.
+        JSONObject teleported =
+                CoopAgentCommands.teleport(args("entityId", "pirate_base"), world.context());
+        assertEquals("corvus", teleported.getString("locationId"));
+        assertEquals("local", teleported.getString("transition"));
+        assertEquals("pirate_base", teleported.getString("entityId"));
+    }
+
+    @Test
+    void entitiesFiltersByKindAndRefusesAKindItDoesNotKnow() throws JSONException {
+        EntityWorld world = new EntityWorld();
+
+        JSONObject basesOnly = CoopAgentCommands.entities(
+                args("kinds", new JSONArray(List.of("base", "relay"))), world.context());
+
+        assertEquals(2, basesOnly.getInt("count"));
+        assertEquals(List.of("relay", "base"), kindsOf(basesOnly),
+                "output order is the registry's, whatever order the request used");
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.entities(args("kinds", "bases"), world.context()));
+        assertTrue(refused.getMessage().startsWith("unknown entity kind bases; known kinds:"),
+                refused.getMessage());
+    }
+
+    /**
+     * A star system can be named by its generated id or by its name, and hyperspace by the keyword —
+     * the same widening {@code teleport}'s coordinate mode now shares, so an argument that works in
+     * one works in the other.
+     */
+    @Test
+    void entitiesResolvesASystemByIdByNameAndByTheHyperspaceKeyword() throws JSONException {
+        EntityWorld world = new EntityWorld();
+
+        assertEquals("corvus",
+                CoopAgentCommands.entities(args("system", "corvus"), world.context())
+                        .getString("locationId"));
+        assertEquals("corvus",
+                CoopAgentCommands.entities(args("system", "Corvus Star System"), world.context())
+                        .getString("locationId"));
+        assertEquals("hyperspace",
+                CoopAgentCommands.entities(args("system", "hyperspace"), world.context())
+                        .getString("locationId"));
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.entities(args("system", "nowhere"), world.context()));
+        assertTrue(refused.getMessage().contains("no location with id or name nowhere"),
+                refused.getMessage());
+    }
+
+    /** The {system, x, y} form, which is the escape hatch when an entity id is not what you have. */
+    @Test
+    void teleportTakesASystemNameWithCoordinates() throws JSONException {
+        EntityWorld world = new EntityWorld();
+
+        JSONObject out = CoopAgentCommands.teleport(
+                teleportArgs("Corvus Star System", 1_200d, -300d), world.context());
+
+        assertEquals("corvus", out.getString("locationId"));
+        assertEquals(1_200d, out.getDouble("x"));
+        assertEquals(-300d, out.getDouble("y"));
+        assertEquals("local", out.getString("transition"));
+    }
+
+    @Test
+    void teleportStillRefusesBothArgumentModesAtOnce() {
+        EntityWorld world = new EntityWorld();
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.teleport(
+                        args("entityId", "pirate_base", "system", "corvus"), world.context()));
+        assertTrue(refused.getMessage().contains("not both; got entityId and system"),
+                refused.getMessage());
+    }
+
+    // ---- intel ------------------------------------------------------------------------------------
+
+    /**
+     * The shape, over an entry that answers {@link coop.util.CoopIntelFacts}.
+     *
+     * <p><b>No Hostile Activity fixture.</b> {@code HostileActivityEventIntel} cannot be built
+     * outside a running engine — its constructor registers listeners and walks the economy, and its
+     * static initialiser reads a settings key — so the row shape is exercised on the coop-facts
+     * branch instead, and the {@code hostileActivity} block is tested for the two answers it can give
+     * without one: absent, and unreadable.
+     */
+    @Test
+    void intelReportsFlagsTitleTagsAndACoopEntrysOwnFacts() throws JSONException {
+        Object entry = intelEntry("Coop Stats", Set.of("coop", "info"),
+                Map.of("fleetsDestroyedTeam", 12L, "daysElapsed", 3.5f));
+        CoopAgentCommands.Context context = intelContext(List.of(entry));
+
+        JSONObject out = CoopAgentCommands.intel(new JSONObject(), context);
+
+        assertEquals(1, out.getInt("total"));
+        assertEquals(1, out.getInt("count"));
+        JSONObject row = out.getJSONArray("intel").getJSONObject(0);
+        assertEquals("Coop Stats", row.getString("title"));
+        assertEquals(List.of("coop", "info"), stringsOf(row.getJSONArray("tags")),
+                "tags are sorted so two clients emit the same row");
+        assertTrue(row.getBoolean("isNew"));
+        assertFalse(row.getBoolean("isEnded"));
+        assertEquals("independent", row.getString("factionId"));
+        assertEquals(12L, row.getJSONObject("extra").getLong("fleetsDestroyedTeam"));
+        assertEquals(3.5d, row.getJSONObject("extra").getDouble("daysElapsed"), 0.0001d);
+    }
+
+    @Test
+    void intelFiltersOnClassOrTitleAndValidatesItsLimit() throws JSONException {
+        CoopAgentCommands.Context context = intelContext(List.of(
+                intelEntry("Coop Stats", Set.of(), Map.of()),
+                intelEntry("Hostile Activity", Set.of(), Map.of())));
+
+        assertEquals(1, CoopAgentCommands.intel(args("filter", "hostile"), context).getInt("count"));
+        assertEquals(2, CoopAgentCommands.intel(args("filter", ""), context).getInt("count"));
+        assertEquals(0, CoopAgentCommands.intel(args("filter", "nothing"), context).getInt("count"));
+        assertEquals(1, CoopAgentCommands.intel(args("limit", 1), context).getInt("count"),
+                "the cap trims after the match count is recorded");
+        assertEquals(2, CoopAgentCommands.intel(args("limit", 1), context).getInt("matched"));
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.intel(args("limit", 0), context));
+        assertTrue(refused.getMessage().startsWith("limit must be between 1 and 300"),
+                refused.getMessage());
+    }
+
+    /**
+     * The block step 30 of the smoke reads. With no Hostile Activity in sector memory the answer is
+     * a positive "not present", not a missing row — and with something unreadable under the key it
+     * says so rather than throwing, because the class is touched through a cast.
+     */
+    @Test
+    void theHostileActivityBlockAnswersAbsentAndUnreadableWithoutTakingTheVerbDown()
+            throws JSONException {
+        Map<String, Object> memory = new LinkedHashMap<>();
+        Global.setSector(coop.testing.ApiProxies.sectorWithMemory(
+                coop.testing.ApiProxies.memory(memory)));
+
+        JSONObject absent = CoopAgentCommands.hostileActivityBlock();
+        assertFalse(absent.getBoolean("present"));
+        assertFalse(absent.has("unreadable"));
+
+        memory.put("$hae_ref", "not an intel entry");
+        JSONObject unreadable = CoopAgentCommands.hostileActivityBlock();
+        assertFalse(unreadable.getBoolean("present"));
+        assertEquals("ClassCastException", unreadable.getString("unreadable"));
+    }
+
+    // ---- feed -------------------------------------------------------------------------------------
+
+    /**
+     * The verb reads the static handle when there is no pump, which is the case that matters: the
+     * pump's feed is gone by the time a tester asks what the screen said.
+     */
+    @Test
+    void feedReturnsTheRingNewestLastAndSaysTheSessionEnded() throws JSONException {
+        coop.ui.CoopSessionIntelFeed feed = new coop.ui.CoopSessionIntelFeed(() -> 5_000L);
+        feed.publishSession(CoopConnectionRole.GUEST, "connected", "Ayo");
+        feed.noteEvent("fallback", "Co-op: fell back to TCP.", new java.awt.Color(1, 2, 3));
+        feed.noteEvent("partner-left", "Co-op: Ayo left the game.", null);
+        feed.endSession();
+        coop.ui.CoopSessionIntelFeed.install(feed);
+        try {
+            JSONObject out = CoopAgentCommands.feed(new JSONObject(), contextFor(null));
+
+            assertTrue(out.getBoolean("installed"));
+            assertTrue(out.getBoolean("sessionEnded"));
+            assertEquals("NONE", out.getString("role"), "endSession drops the role, on purpose");
+            assertEquals(2, out.getInt("count"));
+            JSONArray lines = out.getJSONArray("lines");
+            assertEquals("Co-op: fell back to TCP.", lines.getJSONObject(0).getString("text"));
+            assertEquals("fallback", lines.getJSONObject(0).getString("kind"));
+            assertEquals("#010203", lines.getJSONObject(0).getString("color"));
+            assertEquals(5_000L, lines.getJSONObject(0).getLong("atMillis"));
+            assertEquals("Co-op: Ayo left the game.", lines.getJSONObject(1).getString("text"));
+
+            assertEquals(1, CoopAgentCommands.feed(args("limit", 1), contextFor(null)).getInt("count"));
+        } finally {
+            coop.ui.CoopSessionIntelFeed.uninstall();
+        }
+    }
+
+    @Test
+    void feedValidatesItsLimitAgainstTheRingDepth() {
+        IllegalArgumentException tooSmall = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.feed(args("limit", 0), contextFor(null)));
+        assertEquals("limit must be between 1 and 200, got 0", tooSmall.getMessage());
+
+        IllegalArgumentException tooBig = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.feed(args("limit", 201), contextFor(null)));
+        assertEquals("limit must be between 1 and 200, got 201", tooBig.getMessage());
+    }
+
+    // ---- screen -----------------------------------------------------------------------------------
+
+    @Test
+    void screenReportsTheDialogTheTabAndTheInteractionTarget() throws JSONException {
+        SectorEntityToken target = proxy(SectorEntityToken.class, answers(
+                "getId", args -> "jangala",
+                "getName", args -> "Jangala"));
+        InteractionDialogPluginStub plugin = new InteractionDialogPluginStub();
+        InteractionDialogAPI dialog = proxy(InteractionDialogAPI.class, answers(
+                "getPlugin", args -> plugin,
+                "getInteractionTarget", args -> target));
+        CampaignUIAPI ui = proxy(CampaignUIAPI.class, answers(
+                "isShowingDialog", args -> true,
+                "isShowingMenu", args -> false,
+                "getCurrentCoreTab", args -> CoreUITabId.CARGO,
+                "getCurrentInteractionDialog", args -> dialog));
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getCampaignUI", args -> ui,
+                "isPaused", args -> true));
+
+        JSONObject out = CoopAgentCommands.screen(new JSONObject(), contextFor(sector));
+
+        assertTrue(out.getBoolean("paused"));
+        assertTrue(out.getBoolean("uiAvailable"));
+        assertTrue(out.getBoolean("dialogOpen"));
+        assertFalse(out.getBoolean("menuOpen"));
+        assertEquals("InteractionDialogPluginStub", out.getString("interactionDialog"),
+                "the plugin names the dialog; the engine's own dialog class says nothing");
+        assertEquals("jangala", out.getString("interactionTargetId"));
+        assertEquals("Jangala", out.getString("interactionTargetName"));
+        assertEquals("CARGO", out.getString("coreTab"));
+        assertTrue(out.isNull("coopDialog"), "no pump means no coop dialog can be requested");
+        assertTrue(out.getJSONObject("pause").getBoolean("blockingScreenOpen"),
+                "the same predicate the guest ships as PAUSE_INTENT(SCREEN); an open dialog is one");
+    }
+
+    /** A campaign with no UI yet is a state, not a failure: every other field still answers. */
+    @Test
+    void screenDegradesFieldByFieldWhenTheUiIsNotThere() throws JSONException {
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getCampaignUI", args -> null,
+                "isPaused", args -> false));
+
+        JSONObject out = CoopAgentCommands.screen(new JSONObject(), contextFor(sector));
+
+        assertFalse(out.getBoolean("uiAvailable"));
+        assertFalse(out.getBoolean("dialogOpen"));
+        assertTrue(out.isNull("interactionDialog"));
+        assertTrue(out.isNull("coreTab"));
+        assertEquals("", out.getString("interactionTargetId"));
+    }
+
+    // ---- fixtures for the 0.1.1 smoke verbs -------------------------------------------------------
+
+    private static JSONObject teleportArgs(String system, double x, double y) throws JSONException {
+        JSONObject out = args("system", system, "x", x);
+        out.put("y", y);
+        return out;
+    }
+
+    private static JSONObject rowById(JSONArray rows, String id) throws JSONException {
+        for (int i = 0; i < rows.length(); i++) {
+            if (id.equals(rows.getJSONObject(i).optString("id", ""))) {
+                return rows.getJSONObject(i);
+            }
+        }
+        throw new AssertionError("no row with id " + id + " in " + rows);
+    }
+
+    private static List<String> kindsOf(JSONObject listed) throws JSONException {
+        List<String> kinds = new ArrayList<>();
+        JSONArray rows = listed.getJSONArray("entities");
+        for (int i = 0; i < rows.length(); i++) {
+            kinds.add(rows.getJSONObject(i).getString("kind"));
+        }
+        return kinds;
+    }
+
+    /**
+     * One star system carrying one of every entity kind, plus hyperspace, plus a player fleet in it.
+     * The location is handed to the entities through a holder because they refer to each other.
+     */
+    private static final class EntityWorld {
+        private final LocationAPI[] here = new LocationAPI[1];
+        private final SectorAPI sector;
+
+        private EntityWorld() {
+            SectorEntityToken planet = proxy(PlanetAPI.class, entityAnswers(here, "corvus_i", "Jangala",
+                    "planet", 0f, 0f, Set.of(), null));
+            SectorEntityToken station = proxy(SectorEntityToken.class, entityAnswers(here, "corvus_station",
+                    "Jangala Station", "station", 100f, 0f, Set.of("station"), null));
+            SectorEntityToken jump = proxy(JumpPointAPI.class, entityAnswers(here, "corvus_jump",
+                    "Jump Point", "", 200f, 0f, Set.of(), null));
+            SectorEntityToken relay = proxy(SectorEntityToken.class, entityAnswers(here, "corvus_relay",
+                    "Comm Relay", "comm_relay", 300f, 0f, Set.of("objective"), null));
+            SectorEntityToken rock = proxy(SectorEntityToken.class, entityAnswers(here, "corvus_rock",
+                    "Asteroid", "", 400f, 0f, Set.of(), null));
+            // A hidden base is a station with a hidden market; the market is what decides.
+            MarketAPI hidden = proxy(MarketAPI.class, answers(
+                    "getId", args -> "market_pirate",
+                    "isHidden", args -> true));
+            SectorEntityToken base = proxy(SectorEntityToken.class, entityAnswers(here, "pirate_base",
+                    "Pirate Base", "station", 500f, 0f, Set.of("station"), hidden));
+            CampaignFleetAPI fleet = proxy(CampaignFleetAPI.class, entityAnswers(here, "fleet_1",
+                    "Pirate Armada", "", 600f, 0f, Set.of(), null));
+
+            Map<String, Answer> corvus = answers();
+            corvus.put("getId", args -> "corvus");
+            corvus.put("getName", args -> "Corvus Star System");
+            corvus.put("getAllEntities", args -> List.of(planet, station, jump, relay, rock, base));
+            corvus.put("getFleets", args -> List.of(fleet));
+            corvus.put("getEntityById", args -> "pirate_base".equals(args[0]) ? base : null);
+            here[0] = proxy(StarSystemAPI.class, corvus);
+
+            LocationAPI hyper = proxy(LocationAPI.class, answers(
+                    "getId", args -> "hyperspace",
+                    "getName", args -> "Hyperspace",
+                    "isHyperspace", args -> true,
+                    "getAllEntities", args -> List.of(),
+                    "getFleets", args -> List.of()));
+
+            CampaignFleetAPI player = proxy(CampaignFleetAPI.class, answers(
+                    "getContainingLocation", args -> here[0],
+                    "getLocation", args -> new Vector2f(0f, 0f)));
+
+            Map<String, Answer> answers = answers();
+            answers.put("getPlayerFleet", args -> player);
+            answers.put("getAllLocations", args -> List.of(here[0], hyper));
+            answers.put("getStarSystems", args -> List.of(here[0]));
+            answers.put("getStarSystem",
+                    args -> "Corvus Star System".equals(args[0]) ? here[0] : null);
+            answers.put("getHyperspace", args -> hyper);
+            answers.put("getEntityById", args -> "pirate_base".equals(args[0]) ? base : null);
+            sector = proxy(SectorAPI.class, answers);
+        }
+
+        private CoopAgentCommands.Context context() {
+            return contextFor(sector);
+        }
+    }
+
+    private static Map<String, Answer> entityAnswers(LocationAPI[] here, String id, String name,
+                                                     String type, float x, float y, Set<String> tags,
+                                                     MarketAPI market) {
+        Map<String, Answer> answers = answers();
+        answers.put("getContainingLocation", args -> here[0]);
+        answers.put("getId", args -> id);
+        answers.put("getName", args -> name);
+        answers.put("getCustomEntityType", args -> type);
+        answers.put("getLocation", args -> new Vector2f(x, y));
+        answers.put("getTags", args -> tags);
+        answers.put("hasTag", args -> tags.contains(args[0]));
+        answers.put("getMarket", args -> market);
+        answers.put("isDiscoverable", args -> true);
+        answers.put("getRadius", args -> 0f);
+        return answers;
+    }
+
+    /** An intel entry that is also one of ours, so the {@code extra} branch has something to read. */
+    private static Object intelEntry(String title, Set<String> tags, Map<String, Object> facts) {
+        FactionAPI faction = proxy(FactionAPI.class, answers("getId", args -> "independent"));
+        return java.lang.reflect.Proxy.newProxyInstance(
+                CoopAgentQueryVerbsTest.class.getClassLoader(),
+                new Class<?>[]{IntelInfoPlugin.class, coop.util.CoopIntelFacts.class},
+                (p, method, args) -> switch (method.getName()) {
+                    case "getSmallDescriptionTitle" -> title;
+                    case "getIntelTags" -> tags;
+                    case "isNew" -> true;
+                    case "getFactionForUIColors" -> faction;
+                    case "intelFacts" -> facts;
+                    case "toString" -> "Intel[" + title + "]";
+                    case "hashCode" -> System.identityHashCode(p);
+                    case "equals" -> p == args[0];
+                    default -> zeroFor(method.getReturnType());
+                });
+    }
+
+    private static CoopAgentCommands.Context intelContext(List<Object> entries) {
+        IntelManagerAPI manager = proxy(IntelManagerAPI.class, answers(
+                "getIntel", args -> args.length == 0 ? entries : List.of()));
+        return contextFor(proxy(SectorAPI.class, answers("getIntelManager", args -> manager)));
+    }
+
+    /** Named rather than a lambda: {@code screen} reports the plugin by its class. */
+    private static final class InteractionDialogPluginStub implements InteractionDialogPlugin {
+        @Override
+        public void init(com.fs.starfarer.api.campaign.InteractionDialogAPI dialog) {
+        }
+
+        @Override
+        public void optionSelected(String optionText, Object optionData) {
+        }
+
+        @Override
+        public void optionMousedOver(String optionText, Object optionData) {
+        }
+
+        @Override
+        public void advance(float amount) {
+        }
+
+        @Override
+        public void backFromEngagement(com.fs.starfarer.api.combat.EngagementResultAPI battleResult) {
+        }
+
+        @Override
+        public Object getContext() {
+            return null;
+        }
+
+        @Override
+        public Map<String, com.fs.starfarer.api.campaign.rules.MemoryAPI> getMemoryMap() {
+            return Map.of();
+        }
     }
 
     // ---- Proxy plumbing -------------------------------------------------------------------------------

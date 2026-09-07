@@ -237,6 +237,96 @@ class CoopSessionIntelFeedTest {
         assertTrue(reach.cgnatVerdict().startsWith("yes - 100.72.1.9 is private"));
     }
 
+    // ---- the agent bridge's ring -------------------------------------------------------------------
+
+    /**
+     * The property the {@code feed} verb is built on: the transcript outlives the session, because
+     * "what did the screen say when it ended" is asked after it ended.
+     */
+    @Test
+    void theBridgeRingSurvivesEndSessionAndCarriesKindAndColour() {
+        feed.publishSession(CoopConnectionRole.GUEST, "connected", "Ayo");
+        feed.noteEvent("fallback", "Co-op: state stream fell back to TCP.",
+                new java.awt.Color(255, 220, 120));
+        clock.addAndGet(5_000L);
+        feed.noteEvent("reconnect-wait", "Co-op: connection to the host lost.", null);
+
+        assertFalse(feed.sessionEnded(), "the session is still up");
+        feed.endSession();
+        assertTrue(feed.sessionEnded());
+
+        List<CoopSessionIntelFeed.BridgeEvent> events = feed.bridgeEvents(20);
+        assertEquals(2, events.size(), "endSession() must not have taken the transcript with it");
+        assertEquals("fallback", events.get(0).kind(), "oldest first");
+        assertEquals("Co-op: state stream fell back to TCP.", events.get(0).text());
+        assertEquals("#FFDC78", events.get(0).color());
+        assertEquals(1_000_000L, events.get(0).atMillis());
+        assertEquals("reconnect-wait", events.get(1).kind());
+        assertEquals("", events.get(1).color(), "no colour is the feed's default, not black");
+        assertEquals(1_005_000L, events.get(1).atMillis());
+    }
+
+    @Test
+    void aNewSessionClearsTheEndedFlagButKeepsTheTranscript() {
+        feed.noteEvent("partner-left", "Co-op: Ayo left the game.", null);
+        feed.endSession();
+
+        feed.publishSession(CoopConnectionRole.HOST, "waiting", "");
+
+        assertFalse(feed.sessionEnded());
+        assertEquals(1, feed.bridgeEvents(20).size());
+    }
+
+    @Test
+    void onlyAFullResetClearsTheRing() {
+        feed.noteEvent("degraded", "Co-op: connection degraded.", null);
+        feed.reset();
+
+        assertTrue(feed.bridgeEvents(20).isEmpty());
+        assertFalse(feed.sessionEnded(), "a reset feed has not had a session end, it has had none");
+    }
+
+    @Test
+    void theRingIsBoundedAndTheLimitTakesTheNewestLines() {
+        for (int i = 0; i < CoopSessionIntelFeed.MAX_BRIDGE_EVENTS + 25; i++) {
+            feed.noteEvent("kind", "line " + i, null);
+        }
+
+        List<CoopSessionIntelFeed.BridgeEvent> all = feed.bridgeEvents(1_000);
+        assertEquals(CoopSessionIntelFeed.MAX_BRIDGE_EVENTS, all.size());
+        assertEquals("line 25", all.get(0).text(), "the oldest 25 fell off the front");
+        assertEquals("line 224", all.get(all.size() - 1).text());
+
+        List<CoopSessionIntelFeed.BridgeEvent> last3 = feed.bridgeEvents(3);
+        assertEquals(3, last3.size());
+        assertEquals("line 222", last3.get(0).text());
+        assertEquals("line 224", last3.get(2).text());
+        assertTrue(feed.bridgeEvents(0).isEmpty());
+    }
+
+    /** The page's twenty-row list is untouched by the wider ring; they are different questions. */
+    @Test
+    void thePageStillShowsOnlyItsOwnTwentyRows() {
+        for (int i = 0; i < 30; i++) {
+            feed.noteEvent("kind", "line " + i, null);
+        }
+
+        assertEquals(CoopSessionIntelModel.MAX_EVENTS, feed.snapshot().events().size());
+        assertEquals(30, feed.bridgeEvents(1_000).size());
+    }
+
+    /** The one-argument form is what non-pump callers use; it must still fill the ring. */
+    @Test
+    void theOneArgumentFormRecordsAnUnkindedUncolouredLine() {
+        feed.noteEvent("just a line");
+
+        List<CoopSessionIntelFeed.BridgeEvent> events = feed.bridgeEvents(20);
+        assertEquals(1, events.size());
+        assertEquals("", events.get(0).kind());
+        assertEquals("", events.get(0).color());
+        assertEquals("just a line", events.get(0).text());
+    }
+
     // ---- snapshot isolation ----------------------------------------------------------------------
 
     @Test

@@ -1,17 +1,24 @@
 package coop.debug;
 
+import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
+import com.fs.starfarer.api.campaign.CoreUITabId;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
 import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
+import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
+import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
@@ -27,6 +34,9 @@ import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.intel.events.BaseEventIntel;
+import com.fs.starfarer.api.impl.campaign.intel.events.EventFactor;
+import com.fs.starfarer.api.impl.campaign.intel.events.HostileActivityEventIntel;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionIntel;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager;
 import com.fs.starfarer.api.impl.campaign.intel.punitive.PunitiveExpeditionManager.PunExData;
@@ -38,6 +48,7 @@ import coop.campaign.CoopCreditTransfer;
 import coop.campaign.CoopMarketSync;
 import coop.campaign.CoopMissionBoardSync;
 import coop.campaign.CoopSkeletonMutationWatcher;
+import coop.combat.CoopPreBattleAutosave;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopFleetVisibilityProbe;
@@ -219,6 +230,10 @@ public final class CoopAgentCommands {
         map.put("visibility", CoopAgentCommands::visibility);
         map.put("colonizable", CoopAgentCommands::colonizable);
         map.put("landmarks", CoopAgentCommands::landmarks);
+        map.put("entities", CoopAgentCommands::entities);
+        map.put("intel", CoopAgentCommands::intel);
+        map.put("feed", CoopAgentCommands::feed);
+        map.put("screen", CoopAgentCommands::screen);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("ability", CoopAgentCommands::ability);
@@ -230,6 +245,8 @@ public final class CoopAgentCommands {
         map.put("expedition", CoopAgentCommands::expedition);
         map.put("rep", CoopAgentCommands::rep);
         map.put("netfault", CoopAgentCommands::netfault);
+        map.put("save", CoopAgentCommands::save);
+        map.put("mark", CoopAgentCommands::mark);
         return map;
     }
 
@@ -283,6 +300,31 @@ public final class CoopAgentCommands {
         out.put("credits", creditsBlock(optionalString(args, "ledgerId")));
         // 0.1.1: always present, so a netfault someone forgot to clear can never be read as a bug.
         out.put("netfault", netFaultBlock(netFaultStatusOf(pump)));
+        // 0.1.1: the reliable-delivery layer's three counters, which are the only evidence outside a
+        // log that a replay after a link drop landed exactly once.
+        out.put("reliable", reliableBlock(pump));
+        return out;
+    }
+
+    /**
+     * What the reliable-delivery layer owes and what it has already seen.
+     *
+     * <p>{@code unacked} is the sender's side — actions written but not yet acknowledged, the queue
+     * the replay walks. {@code duplicatesDropped} and {@code appliedSeqs} are the receiver's:
+     * a replayed message this side had already applied, and how many applied sequence numbers it
+     * still remembers across every sender. Together they are the whole check a {@code netfault} run
+     * makes — the queue drains, the duplicate counter moves, and nothing is applied twice — and none
+     * of it is visible from the outside otherwise.
+     *
+     * <p>Every field is zero with no pump rather than absent: a smoke script reads the same shape
+     * before a session as during one.
+     */
+    static JSONObject reliableBlock(CoopNetPump pump) throws JSONException {
+        JSONObject out = new JSONObject();
+        CoopNetService service = pump == null ? null : pump.netServiceForBridge();
+        out.put("unacked", service == null ? 0 : service.unackedReliableCount());
+        out.put("duplicatesDropped", pump == null ? 0L : pump.reliableDuplicatesDropped());
+        out.put("appliedSeqs", pump == null ? 0 : pump.appliedReliableSeqTotal());
         return out;
     }
 
@@ -777,6 +819,26 @@ public final class CoopAgentCommands {
             return byName;
         }
         return CoopLocations.byId(sector, systemId);
+    }
+
+    /** The literal every verb that takes a location accepts for the hyperspace map. */
+    static final String HYPERSPACE_KEYWORD = "hyperspace";
+
+    /**
+     * {@link #resolveSurveyScope} plus the {@code "hyperspace"} keyword, which is the one location a
+     * caller cannot name without knowing the engine's generated id for it. Used by {@code entities}
+     * and by {@code teleport}'s coordinate mode, so an id, a system name and the keyword all work in
+     * either.
+     */
+    static LocationAPI resolveLocation(SectorAPI sector, String locationId) {
+        if (sector == null || locationId == null || locationId.trim().isEmpty()) {
+            return null;
+        }
+        String wanted = locationId.trim();
+        if (HYPERSPACE_KEYWORD.equalsIgnoreCase(wanted)) {
+            return sector.getHyperspace();
+        }
+        return resolveSurveyScope(sector, wanted);
     }
 
     /**
@@ -1613,7 +1675,7 @@ public final class CoopAgentCommands {
     static final float TELEPORT_ENTITY_CLEARANCE = 200f;
 
     /** The x/y-mode arguments {@code entityId} replaces; naming them is how the refusal reads. */
-    static final List<String> TELEPORT_COORDINATE_ARGS = List.of("x", "y", "locationId");
+    static final List<String> TELEPORT_COORDINATE_ARGS = List.of("x", "y", "locationId", "system");
 
     /** Where a teleport is going, after either argument mode has been resolved. */
     record TeleportTarget(LocationAPI location, float x, float y, String entityId, String entityName) {
@@ -1697,10 +1759,17 @@ public final class CoopAgentCommands {
      */
     static TeleportTarget teleportTarget(SectorAPI sector, JSONObject args) {
         if (!args.has("entityId")) {
-            String locationId = requiredString(args, "locationId");
+            // {system, x, y} is the same mode under the name the `entities` verb answers to, so a
+            // caller who just listed a system's contents can teleport into it without translating
+            // the argument name. Both spellings resolve the same widened way (see resolveLocation),
+            // which is what lets a system *name* or "hyperspace" be passed where only a generated id
+            // used to work.
+            String locationId = args.has("system")
+                    ? requiredString(args, "system")
+                    : requiredString(args, "locationId");
             float x = (float) requiredDouble(args, "x");
             float y = (float) requiredDouble(args, "y");
-            LocationAPI location = CoopLocations.byId(sector, locationId);
+            LocationAPI location = resolveLocation(sector, locationId);
             if (location == null) {
                 throw new IllegalArgumentException("no location with id " + locationId);
             }
@@ -2161,6 +2230,804 @@ public final class CoopAgentCommands {
             throw new IllegalStateException("rep is host-only: standings are host-authoritative and the"
                     + " next PLAYER_REP_SNAPSHOT would overwrite a guest edit");
         }
+    }
+
+    // ---- feed: the campaign notices this instance has actually shown ------------------------------
+
+    /** Feed lines returned when the caller does not say. One screenful. */
+    static final int FEED_DEFAULT_LIMIT = 20;
+
+    /** The ring's own depth; asking for more than exists is not an error, it just returns fewer. */
+    static final int FEED_MAX_LIMIT = coop.ui.CoopSessionIntelFeed.MAX_BRIDGE_EVENTS;
+
+    /**
+     * The co-op feed lines the local player has seen on screen, oldest first.
+     *
+     * <p><b>Why this is not readable any other way.</b> The banners are the mod's own account of what
+     * it thought was happening — the link fell back to TCP, the partner left, the checkpoint was
+     * deferred — and each one scrolls off the campaign feed in seconds. A tester who was looking at
+     * the other window has no way back to them, and the log line beside a banner is not the same
+     * sentence.
+     *
+     * <p><b>It survives the session ending, deliberately.</b> The lines come out of a 200-deep ring
+     * inside {@code CoopSessionIntelFeed} that only a full {@code reset()} clears
+     * ({@code endSession()} does not), which is what makes "what did the guest's screen say when the
+     * session ended" answerable afterwards — the moment worth asking about. That ring is separate
+     * from the intel page's twenty-row event list rather than a widening of it: the page is a screen
+     * a player reads and twenty rows is what fits, while this is a transcript.
+     *
+     * <p>The feed is read off <em>this pump's</em> instance, not the static handle, because the
+     * static handle is uninstalled at teardown and the transcript is wanted after teardown. With no
+     * pump at all the static handle is the fallback, and with neither the answer is
+     * {@code installed:false} rather than a refusal — an instance that has never run a session has an
+     * empty feed, which is a fact, not an error.
+     */
+    static JSONObject feed(JSONObject args, Context context) throws JSONException {
+        int limit = optionalInt(args, "limit", FEED_DEFAULT_LIMIT);
+        if (limit < 1 || limit > FEED_MAX_LIMIT) {
+            throw new IllegalArgumentException("limit must be between 1 and " + FEED_MAX_LIMIT
+                    + ", got " + limit);
+        }
+        CoopNetPump pump = context == null ? null : context.pump();
+        coop.ui.CoopSessionIntelFeed feed = pump == null
+                ? coop.ui.CoopSessionIntelFeed.active()
+                : pump.intelFeedForBridge();
+
+        JSONObject out = new JSONObject();
+        out.put("limit", limit);
+        out.put("installed", feed != null);
+        JSONArray lines = new JSONArray();
+        if (feed == null) {
+            out.put("count", 0);
+            out.put("lines", lines);
+            return out;
+        }
+        out.put("sessionEnded", feed.sessionEnded());
+        CoopConnectionRole role = feed.currentRole();
+        out.put("role", role == null ? CoopConnectionRole.NONE.name() : role.name());
+        for (coop.ui.CoopSessionIntelFeed.BridgeEvent event : feed.bridgeEvents(limit)) {
+            JSONObject row = new JSONObject();
+            row.put("atMillis", event.atMillis());
+            row.put("kind", event.kind());
+            row.put("text", event.text());
+            row.put("color", event.color());
+            lines.put(row);
+        }
+        out.put("count", lines.length());
+        out.put("lines", lines);
+        return out;
+    }
+
+    // ---- screen: what the UI is doing right now ----------------------------------------------------
+
+    /**
+     * The local UI's current state, in one object.
+     *
+     * <p>Every field here is something a smoke run currently establishes by asking the person driving
+     * the game to look, and half of them are things that silently invalidate another verb: an open
+     * dialog makes {@code save} a no-op, an open blocking screen holds the shared clock, and a coop
+     * dialog waiting for the slot means the instance is not where the tester thinks it is.
+     *
+     * <p><b>Degrades field by field.</b> Each engine read is wrapped, so a UI that will not answer one
+     * accessor still reports the rest — the alternative is a verb that refuses entirely at exactly
+     * the moment (a torn-down UI, a load in progress) it is most worth asking.
+     *
+     * <p>{@code pause} is the same block {@code status} carries, from the same coordinator, so the two
+     * verbs can never disagree about who is holding the clock.
+     */
+    static JSONObject screen(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CoopNetPump pump = context.pump();
+        CampaignUIAPI ui = campaignUiOrNull(sector);
+
+        JSONObject out = new JSONObject();
+        out.put("state", currentStateName());
+        out.put("paused", sector.isPaused());
+        out.put("uiAvailable", ui != null);
+        out.put("dialogOpen", ui != null && safeBoolean(ui::isShowingDialog));
+        out.put("menuOpen", ui != null && safeBoolean(ui::isShowingMenu));
+        out.put("fastForward", ui != null && safeBoolean(ui::isFastForward));
+
+        InteractionDialogAPI dialog = null;
+        if (ui != null) {
+            try {
+                dialog = ui.getCurrentInteractionDialog();
+            } catch (RuntimeException | LinkageError ignored) {
+                dialog = null;
+            }
+        }
+        // The plugin's class rather than the dialog's: the dialog object is an obfuscated engine
+        // class and says nothing, while the plugin is the thing that decides what is on screen and
+        // is what the mod's own dialogs are identified by everywhere else.
+        out.put("interactionDialog", dialog == null ? JSONObject.NULL : interactionDialogName(dialog));
+        SectorEntityToken target = interactionTarget(dialog);
+        out.put("interactionTargetId", target == null ? "" : nullSafe(target.getId()));
+        out.put("interactionTargetName", target == null ? "" : nullSafe(target.getName()));
+
+        String coreTab = coreTabName(ui);
+        out.put("coreTab", coreTab.isEmpty() ? JSONObject.NULL : coreTab);
+
+        JSONObject coopDialog = coopDialogBlock(pump);
+        out.put("coopDialog", coopDialog == null ? JSONObject.NULL : coopDialog);
+
+        out.put("pause", pauseBlock(roleOf(pump),
+                pump == null ? null : pump.pauseCoordinatorForBridge(),
+                CoopNetPump.blockingScreenOpenForBridge(sector)));
+        return out;
+    }
+
+    /**
+     * The coop-owned dialog that is on screen or waiting for the slot, or null when there is none.
+     *
+     * <p>Walked in {@code CoopDialogArbiter}'s precedence order (reconnect, desync, lobby,
+     * connecting), so the one reported is the one that would win the slot. {@code shown} is the
+     * distinction that matters when something else holds it: a coop dialog can be requested for
+     * minutes while a market screen is open, and "requested but not shown" is a state a tester
+     * otherwise cannot see at all.
+     */
+    static JSONObject coopDialogBlock(CoopNetPump pump) throws JSONException {
+        if (pump == null) {
+            return null;
+        }
+        for (coop.ui.CoopDialogController controller : pump.coopDialogsForBridge()) {
+            if (controller == null || !controller.isRequested()) {
+                continue;
+            }
+            JSONObject out = new JSONObject();
+            out.put("kind", controller.kind());
+            out.put("title", controller.pendingTitle());
+            out.put("shown", controller.isShown());
+            return out;
+        }
+        return null;
+    }
+
+    /** {@code CAMPAIGN}, {@code TITLE}, {@code COMBAT}, or {@code ""} when the engine will not say. */
+    static String currentStateName() {
+        try {
+            GameState state = Global.getCurrentState();
+            return state == null ? "" : state.name();
+        } catch (RuntimeException | LinkageError ex) {
+            return "";
+        }
+    }
+
+    private static CampaignUIAPI campaignUiOrNull(SectorAPI sector) {
+        try {
+            return sector.getCampaignUI();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private static String interactionDialogName(InteractionDialogAPI dialog) {
+        try {
+            InteractionDialogPlugin plugin = dialog.getPlugin();
+            return plugin == null ? dialog.getClass().getSimpleName()
+                    : plugin.getClass().getSimpleName();
+        } catch (RuntimeException | LinkageError ex) {
+            return dialog.getClass().getSimpleName();
+        }
+    }
+
+    private static SectorEntityToken interactionTarget(InteractionDialogAPI dialog) {
+        if (dialog == null) {
+            return null;
+        }
+        try {
+            return dialog.getInteractionTarget();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    private static String coreTabName(CampaignUIAPI ui) {
+        if (ui == null) {
+            return "";
+        }
+        try {
+            CoreUITabId tab = ui.getCurrentCoreTab();
+            return tab == null ? "" : tab.name();
+        } catch (RuntimeException | LinkageError ex) {
+            return "";
+        }
+    }
+
+    /** A boolean engine read that must not be able to take the whole verb down. */
+    private static boolean safeBoolean(java.util.function.BooleanSupplier read) {
+        try {
+            return read.getAsBoolean();
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    // ---- entities: everything in one location, addressable ----------------------------------------
+
+    /** Rows one {@code entities} call may return. A busy core system is well under this. */
+    static final int ENTITIES_MAX_ROWS = 300;
+
+    /**
+     * The kinds, in output order. {@code other} is a real kind, not a leftover bucket to be ashamed
+     * of: asteroids, wrecks, debris fields, derelict probes and station terrain all land in it, and a
+     * caller who wants "everything else in this system" has to be able to ask for it.
+     */
+    static final List<String> ENTITY_KINDS =
+            List.of("planet", "station", "jumpPoint", "relay", "base", "fleet", "other");
+
+    /**
+     * Everything in one location, so a hidden base or a comm relay can be named instead of hunted for
+     * on the map.
+     *
+     * <p><b>This is the verb that makes {@code teleport} usable against a hidden base.</b> Nothing
+     * refused those before — {@code teleport}'s entity mode walks every location's own
+     * {@code getEntityById} and a pirate base is an ordinary {@code SectorEntityToken} in that walk —
+     * but nothing <em>emitted</em> their ids either, and an id you cannot obtain is not an argument
+     * you can pass. {@code landmarks} covers worldgen one-offs by tag and {@code markets} covers the
+     * economy, and a hidden base is in neither: it is minted at runtime by a timer and its market is
+     * excluded from the economy index. So the ids this verb returns are exactly the set
+     * {@code teleport} accepts, hidden bases included, and the {@code marketId} on a base row is the
+     * key to look up in {@code status}'s {@code baseMarketIds} to see whether the guest has paired it.
+     *
+     * <p><b>Fleets are unioned in.</b> {@code LocationAPI.getAllEntities()} and
+     * {@code getFleets()} are separate lists in the engine, so a walk of the first alone would report
+     * a system with no fleets in it. De-duped by identity, because a modded location that puts a
+     * fleet in both must not produce two rows.
+     *
+     * <p>Args: {@code system} (star system id or name, or {@code "hyperspace"}; default is wherever
+     * the local player fleet is), {@code kinds} (array or comma-separated; default all). Sorted by
+     * kind then id, so {@code ss_diff} on it is a real comparison, and capped at
+     * {@value #ENTITIES_MAX_ROWS} with a {@code truncated} flag rather than silently short.
+     */
+    static JSONObject entities(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        List<String> kinds = requestedEntityKinds(args);
+        String requested = optionalString(args, "system");
+
+        LocationAPI location;
+        if (requested.isEmpty()) {
+            LocationAPI here = requirePlayerFleet(sector).getContainingLocation();
+            if (here == null) {
+                throw new IllegalStateException("the player fleet is in no location; pass a system id");
+            }
+            location = here;
+        } else {
+            location = resolveLocation(sector, requested);
+            if (location == null) {
+                throw new IllegalArgumentException("no location with id or name " + requested
+                        + "; pass \"" + HYPERSPACE_KEYWORD + "\" for the hyperspace map");
+            }
+        }
+
+        List<JSONObject> rows = new ArrayList<>();
+        Set<String> seen = new TreeSet<>();
+        for (SectorEntityToken entity : locationEntities(location)) {
+            if (entity == null) {
+                continue;
+            }
+            String id = nullSafe(entity.getId());
+            if (!id.isEmpty() && !seen.add(id)) {
+                continue;
+            }
+            String kind = entityKind(entity);
+            if (!kinds.contains(kind)) {
+                continue;
+            }
+            rows.add(entityRow(entity, kind));
+        }
+        rows.sort(Comparator
+                .comparingInt((JSONObject row) -> ENTITY_KINDS.indexOf(row.optString("kind", "other")))
+                .thenComparing(row -> row.optString("id", "")));
+
+        JSONObject out = new JSONObject();
+        out.put("locationId", nullSafe(location.getId()));
+        out.put("locationName", nullSafe(location.getName()));
+        out.put("kinds", new JSONArray(kinds));
+        out.put("candidateCount", rows.size());
+        boolean truncated = rows.size() > ENTITIES_MAX_ROWS;
+        if (truncated) {
+            rows = new ArrayList<>(rows.subList(0, ENTITIES_MAX_ROWS));
+        }
+        out.put("truncated", truncated);
+        out.put("count", rows.size());
+        out.put("entities", new JSONArray(rows));
+        return out;
+    }
+
+    /** {@code getAllEntities()} plus {@code getFleets()}; either may be null on a bare location. */
+    private static List<SectorEntityToken> locationEntities(LocationAPI location) {
+        List<SectorEntityToken> all = new ArrayList<>();
+        List<SectorEntityToken> entities = location.getAllEntities();
+        if (entities != null) {
+            all.addAll(entities);
+        }
+        List<CampaignFleetAPI> fleets = location.getFleets();
+        if (fleets != null) {
+            all.addAll(fleets);
+        }
+        return all;
+    }
+
+    /**
+     * {@code kinds} as an array or a comma-separated string; absent means all of them. Same contract
+     * as {@code landmarks}: an unknown key is a refusal naming the valid set, because "no entities of
+     * that kind" and "you misspelled the kind" have to read differently.
+     */
+    static List<String> requestedEntityKinds(JSONObject args) throws JSONException {
+        List<String> requested = new ArrayList<>();
+        JSONArray array = args.optJSONArray("kinds");
+        if (array != null) {
+            for (int i = 0; i < array.length(); i++) {
+                requested.add(array.getString(i).trim());
+            }
+        } else {
+            for (String part : optionalString(args, "kinds").split(",")) {
+                if (!part.trim().isEmpty()) {
+                    requested.add(part.trim());
+                }
+            }
+        }
+        if (requested.isEmpty()) {
+            return ENTITY_KINDS;
+        }
+        List<String> kinds = new ArrayList<>();
+        for (String known : ENTITY_KINDS) {
+            for (String want : requested) {
+                if (known.equalsIgnoreCase(want) && !kinds.contains(known)) {
+                    kinds.add(known);
+                }
+            }
+        }
+        for (String want : requested) {
+            boolean known = false;
+            for (String kind : ENTITY_KINDS) {
+                known |= kind.equalsIgnoreCase(want);
+            }
+            if (!known) {
+                throw new IllegalArgumentException("unknown entity kind " + want + "; known kinds: "
+                        + String.join(", ", ENTITY_KINDS));
+            }
+        }
+        return kinds;
+    }
+
+    /**
+     * One kind per entity, first match wins.
+     *
+     * <p>The order is the interesting part. {@code base} is tested before {@code station} because a
+     * hidden pirate/Path base <em>is</em> a station with a hidden market, and the hidden market is
+     * the discriminator the mod itself uses everywhere else ({@code CoopCampaignReplicator}'s
+     * {@code isHiddenMarket}, {@code CoopSectorFingerprint}'s market filter) — matching it here means
+     * the bridge and the replicator can never disagree about what a base is. {@code relay} is
+     * {@link Tags#OBJECTIVE}, which is the comm relay / sensor array / nav buoy set and exactly what
+     * the {@code objective} verb acts on, so an id from this list is an {@code objective} argument.
+     */
+    static String entityKind(SectorEntityToken entity) {
+        if (entity instanceof CampaignFleetAPI) {
+            return "fleet";
+        }
+        if (isHiddenBaseEntity(entity)) {
+            return "base";
+        }
+        if (entity instanceof JumpPointAPI || hasTag(entity, Tags.JUMP_POINT)) {
+            return "jumpPoint";
+        }
+        if (hasTag(entity, Tags.OBJECTIVE)) {
+            return "relay";
+        }
+        if (entity instanceof PlanetAPI) {
+            return "planet";
+        }
+        if (hasTag(entity, Tags.STATION)) {
+            return "station";
+        }
+        return "other";
+    }
+
+    /** The mod's own definition of a hidden base: an entity whose market is hidden. Total. */
+    static boolean isHiddenBaseEntity(SectorEntityToken entity) {
+        try {
+            MarketAPI market = entity.getMarket();
+            return market != null && market.isHidden();
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    private static boolean hasTag(SectorEntityToken entity, String tag) {
+        try {
+            return entity.hasTag(tag);
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
+    }
+
+    private static JSONObject entityRow(SectorEntityToken entity, String kind) throws JSONException {
+        JSONObject row = new JSONObject();
+        row.put("id", nullSafe(entity.getId()));
+        row.put("name", nullSafe(entity.getName()));
+        row.put("kind", kind);
+        row.put("type", entityType(entity));
+        FactionAPI faction = safeRead(entity::getFaction);
+        row.put("faction", faction == null ? "" : nullSafe(faction.getId()));
+        Vector2f at = safeRead(entity::getLocation);
+        row.put("x", round(at == null ? 0f : at.x));
+        row.put("y", round(at == null ? 0f : at.y));
+        row.put("tags", new JSONArray(entityTags(entity)));
+        SectorEntityToken focus = safeRead(entity::getOrbitFocus);
+        row.put("orbitFocus", focus == null ? "" : nullSafe(focus.getId()));
+        row.put("hidden", isHiddenBaseEntity(entity));
+        // isDiscoverable() is vanilla's "not found yet" flag, not "cannot be found": it goes false the
+        // moment the player discovers the entity, so true here means undiscovered.
+        row.put("discoverable", safeBoolean(entity::isDiscoverable));
+        MarketAPI market = safeRead(entity::getMarket);
+        row.put("marketId", market == null ? "" : nullSafe(market.getId()));
+        return row;
+    }
+
+    /** The custom entity spec id where there is one, otherwise the entity's class. */
+    private static String entityType(SectorEntityToken entity) {
+        String custom = safeRead(entity::getCustomEntityType);
+        if (custom != null && !custom.isEmpty()) {
+            return custom;
+        }
+        return entity.getClass().getSimpleName();
+    }
+
+    private static List<String> entityTags(SectorEntityToken entity) {
+        java.util.Collection<String> tags = safeRead(entity::getTags);
+        if (tags == null) {
+            return List.of();
+        }
+        // Sorted: the engine's tag set has no defined iteration order and two clients must emit the
+        // same row for the same entity or every diff is noise.
+        return new ArrayList<>(new TreeSet<>(tags));
+    }
+
+    /** An object-valued engine read that must not be able to take the whole row down. */
+    private static <T> T safeRead(java.util.function.Supplier<T> read) {
+        try {
+            return read.get();
+        } catch (RuntimeException | LinkageError ex) {
+            return null;
+        }
+    }
+
+    // ---- intel: the player's intel entries ---------------------------------------------------------
+
+    static final int INTEL_DEFAULT_LIMIT = 50;
+    static final int INTEL_MAX_LIMIT = 300;
+
+    /**
+     * The local player's intel entries, so "the guest has a Hostile Activity entry the host does not"
+     * is a query rather than a screenshot.
+     *
+     * <p><b>The check this exists for.</b> Colony crises are host-authoritative; a Hostile Activity
+     * entry on the guest means a suppressed manager ran anyway, and the smoke has to be able to say
+     * so after a reload as well as during play. The {@code hostileActivity} block answers that
+     * directly off {@code HostileActivityEventIntel.get()} — present or not, and if present its
+     * progress out of {@link com.fs.starfarer.api.impl.campaign.intel.events.HostileActivityEventIntel#MAX_PROGRESS}
+     * and the factors driving it — rather than leaving the caller to infer absence from a missing row,
+     * which would also be what a mis-spelled filter produced.
+     *
+     * <p>Every row carries the flags an entry's visibility turns on ({@code isNew}, {@code isEnding},
+     * {@code isEnded}, {@code important}) plus an {@code extra} object: progress and factor names for
+     * anything descending from {@code BaseEventIntel}, and for the mod's own pages whatever
+     * {@link coop.util.CoopIntelFacts} says their key numbers are — asked of the entry rather than
+     * reached into, so a page that grows a field answers with it here for free.
+     *
+     * <p>Args: {@code filter} (case-insensitive substring of the class name or the title),
+     * {@code limit} (default {@value #INTEL_DEFAULT_LIMIT}). Sorted by class then title.
+     */
+    static JSONObject intel(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String filter = optionalString(args, "filter").toLowerCase(Locale.ROOT);
+        int limit = optionalInt(args, "limit", INTEL_DEFAULT_LIMIT);
+        if (limit < 1 || limit > INTEL_MAX_LIMIT) {
+            throw new IllegalArgumentException("limit must be between 1 and " + INTEL_MAX_LIMIT
+                    + ", got " + limit);
+        }
+        IntelManagerAPI manager = sector.getIntelManager();
+        if (manager == null) {
+            throw new IllegalStateException("no intel manager; this campaign has no intel screen yet");
+        }
+        List<IntelInfoPlugin> all = manager.getIntel();
+        if (all == null) {
+            all = List.of();
+        }
+
+        List<JSONObject> rows = new ArrayList<>();
+        for (IntelInfoPlugin entry : all) {
+            if (entry == null) {
+                continue;
+            }
+            JSONObject row = intelRow(entry);
+            if (!filter.isEmpty()
+                    && !row.optString("class", "").toLowerCase(Locale.ROOT).contains(filter)
+                    && !row.optString("title", "").toLowerCase(Locale.ROOT).contains(filter)) {
+                continue;
+            }
+            rows.add(row);
+        }
+        rows.sort(Comparator.comparing((JSONObject row) -> row.optString("class", ""))
+                .thenComparing(row -> row.optString("title", "")));
+
+        JSONObject out = new JSONObject();
+        out.put("filter", filter);
+        out.put("limit", limit);
+        out.put("total", all.size());
+        out.put("matched", rows.size());
+        if (rows.size() > limit) {
+            rows = new ArrayList<>(rows.subList(0, limit));
+        }
+        out.put("count", rows.size());
+        out.put("intel", new JSONArray(rows));
+        out.put("hostileActivity", hostileActivityBlock());
+        return out;
+    }
+
+    private static JSONObject intelRow(IntelInfoPlugin entry) throws JSONException {
+        JSONObject row = new JSONObject();
+        row.put("class", entry.getClass().getSimpleName());
+        row.put("title", intelTitle(entry));
+        row.put("tags", new JSONArray(intelTags(entry)));
+        row.put("isNew", safeBoolean(entry::isNew));
+        row.put("isEnding", safeBoolean(entry::isEnding));
+        row.put("isEnded", safeBoolean(entry::isEnded));
+        row.put("important", safeBoolean(entry::isImportant));
+        row.put("hidden", safeBoolean(entry::isHidden));
+        FactionAPI faction = safeRead(entry::getFactionForUIColors);
+        row.put("factionId", faction == null ? "" : nullSafe(faction.getId()));
+        row.put("extra", intelExtra(entry));
+        return row;
+    }
+
+    /**
+     * {@code getSmallDescriptionTitle()}, falling back to the class name.
+     *
+     * <p>That accessor <em>is</em> the entry's name for anything descending from
+     * {@code BaseIntelPlugin}, which is everything the mod and vanilla register:
+     * {@code BaseIntelPlugin.getSmallDescriptionTitle()} returns {@code getName()}. Going through it
+     * rather than {@code getName()} directly is not a workaround — {@code getName()} is
+     * {@code protected} and unreachable from here, and the sandbox forbids the reflection that would
+     * open it, so the public accessor that delegates to it is the only honest route to the string
+     * the intel list row shows.
+     */
+    static String intelTitle(IntelInfoPlugin entry) {
+        String title = safeRead(entry::getSmallDescriptionTitle);
+        if (title != null && !title.trim().isEmpty()) {
+            return title.trim();
+        }
+        return entry.getClass().getSimpleName();
+    }
+
+    /**
+     * {@code getIntelTags(null)} first, because that is the set the intel screen filters on; several
+     * vanilla implementations touch the map argument, so a null map is a real throw risk and
+     * {@code getTagsForSort()} is the fallback. Sorted, for the same diff reason entity tags are.
+     */
+    static List<String> intelTags(IntelInfoPlugin entry) {
+        Set<String> tags = safeRead(() -> entry.getIntelTags(null));
+        if (tags == null) {
+            tags = safeRead(entry::getTagsForSort);
+        }
+        if (tags == null) {
+            return List.of();
+        }
+        TreeSet<String> sorted = new TreeSet<>();
+        for (String tag : tags) {
+            if (tag != null) {
+                sorted.add(tag);
+            }
+        }
+        return new ArrayList<>(sorted);
+    }
+
+    /** Progress and factors for an event intel, plus whatever a coop page says about itself. */
+    static JSONObject intelExtra(IntelInfoPlugin entry) throws JSONException {
+        JSONObject extra = new JSONObject();
+        if (entry instanceof BaseEventIntel event) {
+            extra.put("progress", event.getProgress());
+            extra.put("maxProgress", event.getMaxProgress());
+            extra.put("factors", new JSONArray(eventFactors(event)));
+        }
+        if (entry instanceof coop.util.CoopIntelFacts facts) {
+            Map<String, Object> values = safeRead(facts::intelFacts);
+            if (values != null) {
+                for (Map.Entry<String, Object> value : values.entrySet()) {
+                    extra.put(value.getKey(), value.getValue());
+                }
+            }
+        }
+        return extra;
+    }
+
+    /**
+     * The active factors' names and their contributions. {@code getDesc} is the sentence the event
+     * page renders for each one ("Hostile activity in the Askonia system"), which is what names the
+     * cause; a factor whose description throws is reported by its class rather than dropped, because
+     * a factor existing at all is itself the finding.
+     */
+    static List<JSONObject> eventFactors(BaseEventIntel event) throws JSONException {
+        List<EventFactor> factors = safeRead(event::getFactors);
+        if (factors == null) {
+            return List.of();
+        }
+        List<JSONObject> rows = new ArrayList<>();
+        for (EventFactor factor : factors) {
+            if (factor == null) {
+                continue;
+            }
+            JSONObject row = new JSONObject();
+            String desc = safeRead(() -> factor.getDesc(event));
+            row.put("name", desc == null || desc.trim().isEmpty()
+                    ? factor.getClass().getSimpleName() : desc.trim());
+            Integer progress = safeRead(() -> factor.getProgress(event));
+            row.put("progress", progress == null ? 0 : progress);
+            rows.add(row);
+        }
+        rows.sort(Comparator.comparing(row -> row.optString("name", "")));
+        return rows;
+    }
+
+    /**
+     * Whether this engine has a Hostile Activity event at all, and where it stands.
+     *
+     * <p>Read off the vanilla static handle rather than by scanning the intel list, so "no entry" is
+     * a positive answer instead of the absence of a row: the entry can be present and hidden, and a
+     * scan would report that as absent, which is precisely backwards for a check whose finding is
+     * "the guest has one and should not".
+     *
+     * <p>Totally wrapped, including {@code LinkageError}: touching the class runs its static
+     * initialiser, which reads a settings key, and an instance with no settings loaded must report
+     * {@code present:false} rather than take the verb down.
+     */
+    static JSONObject hostileActivityBlock() throws JSONException {
+        JSONObject out = new JSONObject();
+        HostileActivityEventIntel event;
+        try {
+            event = HostileActivityEventIntel.get();
+        } catch (RuntimeException | LinkageError ex) {
+            out.put("present", false);
+            out.put("unreadable", ex.getClass().getSimpleName());
+            return out;
+        }
+        out.put("present", event != null);
+        if (event == null) {
+            return out;
+        }
+        out.put("progress", safeInt(event::getProgress));
+        out.put("maxProgress", safeInt(event::getMaxProgress));
+        out.put("factors", new JSONArray(eventFactors(event)));
+        return out;
+    }
+
+    private static int safeInt(java.util.function.IntSupplier read) {
+        try {
+            return read.getAsInt();
+        } catch (RuntimeException | LinkageError ex) {
+            return 0;
+        }
+    }
+
+    // ---- save: this instance takes its own vanilla autosave ---------------------------------------
+
+    /**
+     * Runs {@code CampaignUIAPI.autosave()} here, which is an F5 in everything but the keypress.
+     *
+     * <p><b>The hooks are the point.</b> Autosave is a real save: the engine fires
+     * {@code ModPlugin.beforeGameSave()} and {@code afterGameSave()} around it, and the mod's
+     * {@code afterGameSave} is where {@code CoopSaveCheckpoint.notifyLocalGameSaved} sends the guest
+     * its {@code SAVE_CHECKPOINT}. So a host {@code save} produces the coordinated pair exactly as a
+     * manual save does. That is not an assumption about the engine: {@code CoopPreBattleAutosave} is
+     * built on the same call for the same reason and the checkpoint has ridden it since Phase 16.
+     * {@code CoopSaveIndex.beginCoopAutosave()} brackets it, as it does there, so the row this writes
+     * is tagged an autosave rather than guessed at afterwards.
+     *
+     * <p><b>Guest saves are refused by default.</b> The guest's save is supposed to be the one the
+     * host's checkpoint ordered — that is what keeps the two temporally aligned and what a rejoin
+     * loads — and a guest-side save taken at some unrelated moment is a save no host state matches.
+     * {@code force:true} takes it anyway, because a tester sometimes wants exactly that.
+     *
+     * <p><b>It runs inline and does not defer.</b> The bridge dispatches inside its own
+     * {@code advance()}, on the campaign thread, so the save happens before this returns; there is no
+     * queue to park it in and nothing to wait for. What it will not do is pretend: {@code autosave()}
+     * is silently a no-op while any dialog is open or outside the campaign state, so those are
+     * refusals naming the screen to close rather than a {@code requested:true} for a save that never
+     * happened. The precondition is {@code CoopPreBattleAutosave.canAutosaveNow}, the same predicate
+     * the pre-battle path parks on.
+     */
+    static JSONObject save(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        boolean force = optionalBoolean(args, "force", false);
+        CoopConnectionRole role = roleOf(context.pump());
+        requireSaveAuthority(role, force);
+
+        CampaignUIAPI ui = campaignUiOrNull(sector);
+        if (ui == null) {
+            throw new IllegalStateException("no campaign UI; there is nothing to save through");
+        }
+        // Both halves, exactly as CoopPreBattleAutosave reads them: isShowingDialog covers the core
+        // screens, getCurrentInteractionDialog covers a conversation, and either one makes the call
+        // a no-op.
+        boolean dialogOpen = safeBoolean(ui::isShowingDialog)
+                || safeRead(ui::getCurrentInteractionDialog) != null;
+        String state = currentStateName();
+        if (!CoopPreBattleAutosave.canAutosaveNow(true, dialogOpen, "CAMPAIGN".equals(state))) {
+            throw new IllegalStateException("autosave() is silently skipped unless the campaign is on"
+                    + " screen with no dialog open (state=" + (state.isEmpty() ? "unknown" : state)
+                    + ", dialogOpen=" + dialogOpen + "); close the screen and try again");
+        }
+
+        coop.save.CoopSaveIndex.beginCoopAutosave();
+        try {
+            ui.autosave();
+        } finally {
+            coop.save.CoopSaveIndex.endCoopAutosave();
+        }
+        String reason = role == CoopConnectionRole.GUEST
+                ? "forced guest-side autosave"
+                : "bridge autosave on " + role.name();
+        CoopLog.info(CoopAgentCommands.class, "Coop agent bridge save: " + reason);
+
+        JSONObject out = new JSONObject();
+        out.put("requested", true);
+        out.put("performed", true);
+        out.put("role", role.name());
+        out.put("forced", force);
+        out.put("reason", reason);
+        return out;
+    }
+
+    /**
+     * Refuses an unforced guest save: a save the host did not order is one no host save is aligned
+     * with, which is the whole property the coordinated pair exists for.
+     */
+    static void requireSaveAuthority(CoopConnectionRole role, boolean force) {
+        if (role == CoopConnectionRole.GUEST && !force) {
+            throw new IllegalStateException("guest saves are coordinated by the host's checkpoint; use"
+                    + " save on the host (pass {\"force\":true} to save on the guest anyway)");
+        }
+    }
+
+    // ---- mark: one line in this instance's log, on demand -----------------------------------------
+
+    /** Longest {@code mark} text. Long enough for a step description, short enough to stay one line. */
+    static final int MARK_MAX_LENGTH = 200;
+
+    /** The prefix every mark carries, so two logs can be lined up with one grep. */
+    static final String MARK_PREFIX = "Coop MARK ";
+
+    /**
+     * Writes one {@code Coop MARK <text>} line at INFO and returns the wall clock it was written at.
+     *
+     * <p>Two logs from two instances have no shared reference point: the campaign clock is shared but
+     * a log line is stamped in wall time, and the two JVMs started minutes apart. A mark on both sides
+     * at the top of a step gives every line after it a known offset, which is the difference between
+     * reading two logs and correlating them.
+     *
+     * <p>Needs no sector and no session — it works at the title screen and before a session exists,
+     * which is when a smoke run is setting up and most wants to timestamp what it just did. Newlines
+     * are refused rather than stripped: a mark that silently became two log lines would break the very
+     * grep it exists for.
+     */
+    static JSONObject mark(JSONObject args, Context context) throws JSONException {
+        String text = requiredString(args, "text");
+        if (text.length() > MARK_MAX_LENGTH) {
+            throw new IllegalArgumentException("text must be at most " + MARK_MAX_LENGTH
+                    + " characters, got " + text.length());
+        }
+        if (text.indexOf('\n') >= 0 || text.indexOf('\r') >= 0) {
+            throw new IllegalArgumentException("text must be a single line; it contains a newline");
+        }
+
+        long atMillis = System.currentTimeMillis();
+        CoopLog.info(CoopAgentCommands.class, MARK_PREFIX + text);
+
+        JSONObject out = new JSONObject();
+        out.put("atMillis", atMillis);
+        out.put("text", text);
+        return out;
     }
 
     // ---- netfault: a deliberate inbound outage on this instance -----------------------------------

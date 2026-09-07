@@ -5,6 +5,7 @@ import coop.net.CoopLinkQuality;
 import coop.net.CoopMessages;
 import coop.net.CoopPortMapper;
 
+import java.awt.Color;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -55,6 +56,9 @@ public final class CoopSessionIntelFeed {
 
     private final Deque<CoopSessionIntelModel.HistoryPoint> history = new ArrayDeque<>();
     private final Deque<EventEntry> events = new ArrayDeque<>();
+    /** The agent bridge's ring; see {@link #MAX_BRIDGE_EVENTS} for why it is not the page's list. */
+    private final Deque<BridgeEvent> bridgeEvents = new ArrayDeque<>();
+    private boolean sessionEnded;
 
     private CoopConnectionRole localRole = CoopConnectionRole.NONE;
     private String sessionState = "";
@@ -66,6 +70,26 @@ public final class CoopSessionIntelFeed {
 
     /** Wall-clock timestamp plus the line; the display age is derived at snapshot time. */
     private record EventEntry(long atMillis, String line) {
+    }
+
+    /**
+     * How many feed lines the agent bridge's {@code feed} verb can look back over.
+     *
+     * <p>Deliberately ten times {@link CoopSessionIntelModel#MAX_EVENTS} and in its own ring rather
+     * than a widening of the page's: the page is a screen a player reads top-down and twenty rows is
+     * as much of it as fits, while the question the bridge exists to answer — "what did this
+     * instance's screen say over the minute the link died" — is a transcript, and a flapping link
+     * writes through twenty rows in seconds.
+     */
+    public static final int MAX_BRIDGE_EVENTS = 200;
+
+    /**
+     * One feed line as the bridge reports it: the wall clock it was posted at, the pump's rate-limit
+     * kind, the text the player saw and the colour it was drawn in ({@code #RRGGBB}, or {@code ""}
+     * for the feed's default). The page's {@link CoopSessionIntelModel.Event} keeps neither the kind
+     * nor the colour, because it renders a relative age and a line and has no use for either.
+     */
+    public record BridgeEvent(long atMillis, String kind, String text, String color) {
     }
 
     public CoopSessionIntelFeed() {
@@ -114,6 +138,9 @@ public final class CoopSessionIntelFeed {
 
     /** Role, session wording and partner name. Safe to call every frame; nothing accumulates. */
     public synchronized void publishSession(CoopConnectionRole role, String state, String partner) {
+        if (role != null && role != CoopConnectionRole.NONE) {
+            this.sessionEnded = false;
+        }
         this.localRole = role == null ? CoopConnectionRole.NONE : role;
         this.sessionState = state == null ? "" : state;
         this.partnerName = partner == null ? "" : partner;
@@ -216,6 +243,16 @@ public final class CoopSessionIntelFeed {
      * wait/resume/expiry. Blank lines are dropped rather than recorded as empty rows.
      */
     public synchronized void noteEvent(String line) {
+        noteEvent("", line, null);
+    }
+
+    /**
+     * The form the pump calls, carrying the two things the page throws away and the bridge needs: the
+     * rate-limit {@code kind} that names which transition this was, and the colour the line was drawn
+     * in. Both go only into the bridge ring; the page's list is byte-for-byte what it was, so nothing
+     * about what a player sees moved.
+     */
+    public synchronized void noteEvent(String kind, String line, Color color) {
         if (line == null) {
             return;
         }
@@ -223,10 +260,22 @@ public final class CoopSessionIntelFeed {
         if (trimmed.isEmpty()) {
             return;
         }
-        events.addLast(new EventEntry(now(), trimmed));
+        long at = now();
+        events.addLast(new EventEntry(at, trimmed));
         while (events.size() > CoopSessionIntelModel.MAX_EVENTS) {
             events.removeFirst();
         }
+        bridgeEvents.addLast(new BridgeEvent(at, kind == null ? "" : kind, trimmed, hex(color)));
+        while (bridgeEvents.size() > MAX_BRIDGE_EVENTS) {
+            bridgeEvents.removeFirst();
+        }
+    }
+
+    /** {@code #RRGGBB}, or {@code ""} for the feed's own default colour. */
+    private static String hex(Color color) {
+        return color == null
+                ? ""
+                : String.format("#%02X%02X%02X", color.getRed(), color.getGreen(), color.getBlue());
     }
 
     /**
@@ -235,6 +284,7 @@ public final class CoopSessionIntelFeed {
      * a dead session cannot keep showing a stale RTT.
      */
     public synchronized void endSession() {
+        this.sessionEnded = true;
         this.localRole = CoopConnectionRole.NONE;
         this.sessionState = "";
         this.partnerName = "";
@@ -249,9 +299,37 @@ public final class CoopSessionIntelFeed {
     public synchronized void reset() {
         endSession();
         events.clear();
+        bridgeEvents.clear();
+        sessionEnded = false;
     }
 
     // ---- reading ---------------------------------------------------------------------------------
+
+    /**
+     * The last {@link #MAX_BRIDGE_EVENTS} feed lines, oldest first, capped at {@code limit}.
+     *
+     * <p>Survives {@link #endSession()} — only {@link #reset()} clears it — which is the point: "what
+     * did the screen show when the session ended" is a question asked after the session ended.
+     *
+     * @param limit how many of the most recent lines to return; anything below 1 returns none
+     */
+    public synchronized List<BridgeEvent> bridgeEvents(int limit) {
+        if (limit < 1) {
+            return List.of();
+        }
+        List<BridgeEvent> all = new ArrayList<>(bridgeEvents);
+        return new ArrayList<>(all.subList(Math.max(0, all.size() - limit), all.size()));
+    }
+
+    /**
+     * True once a session this feed was publishing for has ended, until another one starts.
+     * Deliberately not the same as {@code currentRole() == NONE}, which is also true before the first
+     * session of the game — "there has never been one" and "there was one and it is over" are the two
+     * answers a smoke run needs to tell apart.
+     */
+    public synchronized boolean sessionEnded() {
+        return sessionEnded;
+    }
 
     /** The role as last published; used by {@link #roleActive()} without building a whole model. */
     public synchronized CoopConnectionRole currentRole() {

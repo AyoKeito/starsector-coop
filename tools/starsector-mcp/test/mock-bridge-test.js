@@ -16,7 +16,17 @@ import {
   READ_ONLY_COMMANDS
 } from '../lib/bridge-client.js';
 import { DEFAULT_IGNORE_KEYS, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
-import { Bridges, ssAct, ssAdvanceDays, ssDiff, ssDump, MS_PER_GAME_DAY } from '../lib/tools.js';
+import {
+  ACTION_VERBS,
+  Bridges,
+  NON_VERBS,
+  QUERY_VERBS,
+  ssAct,
+  ssAdvanceDays,
+  ssDiff,
+  ssDump,
+  MS_PER_GAME_DAY
+} from '../lib/tools.js';
 
 // --------------------------------------------------------------------------
 // Mock bridge
@@ -212,14 +222,27 @@ test('does not retry a mutating command after a mid-request drop; throws BridgeO
   assert.equal(bridge.requests[0].cmd, 'give');
 });
 
-test('READ_ONLY_COMMANDS is exactly the ten read verbs and none of the mutations', () => {
+test('READ_ONLY_COMMANDS is exactly the fourteen read verbs and none of the mutations', () => {
   assert.deepEqual(
     [...READ_ONLY_COMMANDS].sort(),
-    ['barpool', 'cargo', 'colonizable', 'fleets', 'landmarks', 'market', 'markets', 'status', 'survey', 'visibility']
+    [
+      'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'intel', 'landmarks',
+      'market', 'markets', 'screen', 'status', 'survey', 'visibility'
+    ]
   );
-  for (const mutation of ['teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset', 'expedition', 'rep', 'netfault']) {
+  // save and mark are actions even though neither changes the campaign: save writes a file and
+  // fires the checkpoint, mark writes a log line, and neither is safe to replay on a dropped socket.
+  for (const mutation of [
+    'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
+    'expedition', 'rep', 'netfault', 'save', 'mark'
+  ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
+});
+
+test('the read-only allowlist and the ss_dump verb table are the same set', () => {
+  assert.deepEqual([...READ_ONLY_COMMANDS].sort(), [...QUERY_VERBS].sort(),
+    'a verb ss_dump accepts but the client will not retry, or vice versa, is a wiring slip');
 });
 
 test('reuses one connection across sequential requests', async (t) => {
@@ -1042,6 +1065,161 @@ test('netfault is an action verb on either instance, and its refusals are the mo
     /must be discard\|loss\|clear/
   );
   await assert.rejects(() => ssDump(bridges, 'host', 'netfault', {}), /unknown query verb "netfault"/);
+});
+
+test('the 0.1.1 smoke verbs are split read vs action, and save is no longer a non-verb', async (t) => {
+  for (const verb of ['entities', 'intel', 'feed', 'screen']) {
+    assert.ok(QUERY_VERBS.includes(verb), `${verb} must be an ss_dump verb`);
+    assert.ok(!ACTION_VERBS.includes(verb), `${verb} reads state; it must not be an ss_act verb`);
+  }
+  for (const verb of ['save', 'mark']) {
+    assert.ok(ACTION_VERBS.includes(verb), `${verb} must be an ss_act verb`);
+    assert.ok(!QUERY_VERBS.includes(verb), `${verb} does something; it must not be an ss_dump verb`);
+  }
+  assert.ok(!('save' in NON_VERBS), 'save is implemented now; the by-design refusal would be a lie');
+  assert.ok('load' in NON_VERBS, 'there is still no programmatic load');
+
+  const bridge = new MockBridge((request) => ({ ok: true, data: { saw: request.cmd } }));
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await bridge.stop();
+  });
+
+  await assert.rejects(() => ssDump(bridges, 'host', 'save', {}), /unknown query verb "save"/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'entities', {}), /unknown action verb "entities"/);
+  await assert.rejects(
+    () => ssAct(bridges, 'host', 'load', {}),
+    /"load" is not a bridge verb by design: there is no programmatic load/
+  );
+});
+
+test('entities, intel, feed and screen relay their args and diff across instances', async (t) => {
+  const ENTITIES = {
+    locationId: 'corvus',
+    locationName: 'Corvus Star System',
+    count: 2,
+    truncated: false,
+    entities: [
+      { id: 'corvus_i', name: 'Jangala', kind: 'planet', x: 0, y: 0, hidden: false, marketId: 'jangala' },
+      { id: 'pirate_base', name: 'Pirate Base', kind: 'base', x: 500, y: 0, hidden: true, marketId: 'market_pirate' }
+    ]
+  };
+  const respond = (request) => {
+    if (request.cmd === 'entities') return { ok: true, data: ENTITIES };
+    if (request.cmd === 'intel') {
+      return { ok: true, data: { count: 0, intel: [], hostileActivity: { present: false } } };
+    }
+    if (request.cmd === 'feed') {
+      return {
+        ok: true,
+        data: {
+          installed: true,
+          sessionEnded: true,
+          count: 1,
+          lines: [{ atMillis: 5000, kind: 'partner-left', text: 'Co-op: Ayo left the game.', color: '' }]
+        }
+      };
+    }
+    if (request.cmd === 'screen') {
+      return { ok: true, data: { state: 'CAMPAIGN', paused: true, dialogOpen: false, coreTab: null } };
+    }
+    return { ok: false, error: 'IllegalArgumentException: unknown command' };
+  };
+  const hostBridge = new MockBridge(respond);
+  const guestBridge = new MockBridge(respond);
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssDump(bridges, 'host', 'entities', { system: 'corvus', kinds: ['base'] }),
+    ENTITIES);
+  assert.deepEqual(hostBridge.requests[0].args, { system: 'corvus', kinds: ['base'] });
+
+  // The base's id is the thing the verb exists to produce, and ss_act teleport takes it.
+  assert.equal(ENTITIES.entities[1].id, 'pirate_base');
+
+  const feed = await ssDump(bridges, 'guest', 'feed', { limit: 5 });
+  assert.equal(feed.sessionEnded, true, 'the transcript outlives the session it describes');
+  assert.equal(feed.lines[0].kind, 'partner-left');
+
+  assert.equal((await ssDump(bridges, 'host', 'intel', {})).hostileActivity.present, false);
+  assert.equal((await ssDump(bridges, 'host', 'screen', {})).paused, true);
+
+  // Two engines listing the same system have to compare equal, keyed by entity id.
+  assert.equal((await ssDiff(bridges, 'entities')).equal, true);
+});
+
+test('entities diffs are keyed by id, so two walks in different orders are not a divergence', async (t) => {
+  const rows = [
+    { id: 'corvus_i', kind: 'planet', hidden: false },
+    { id: 'pirate_base', kind: 'base', hidden: true }
+  ];
+  const hostBridge = new MockBridge(() => ({ ok: true, data: { count: 2, entities: rows } }));
+  const guestBridge = new MockBridge(() => ({
+    ok: true,
+    data: { count: 2, entities: [rows[1], { ...rows[0], hidden: true }] }
+  }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  const diff = await ssDiff(bridges, 'entities');
+  assert.equal(diff.equal, false);
+  assert.deepEqual(diff.differences, [
+    { path: '$.entities[id=corvus_i].hidden', host: false, guest: true }
+  ]);
+});
+
+test('save and mark are action verbs, and the guest refusal is the mod\'s to make', async (t) => {
+  const respond = (request, instance) => {
+    if (request.cmd === 'mark') {
+      return { ok: true, data: { atMillis: 1_700_000_000_000, text: request.args.text } };
+    }
+    if (request.cmd !== 'save') return { ok: false, error: 'IllegalArgumentException: unknown command' };
+    if (instance === 'guest' && request.args.force !== true) {
+      return {
+        ok: false,
+        error: 'IllegalStateException: guest saves are coordinated by the host\'s checkpoint;'
+          + ' use save on the host (pass {"force":true} to save on the guest anyway)'
+      };
+    }
+    return { ok: true, data: { requested: true, performed: true, role: instance.toUpperCase() } };
+  };
+  const hostBridge = new MockBridge((request) => respond(request, 'host'));
+  const guestBridge = new MockBridge((request) => respond(request, 'guest'));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssAct(bridges, 'host', 'save', {}),
+    { requested: true, performed: true, role: 'HOST' });
+  await assert.rejects(
+    () => ssAct(bridges, 'guest', 'save', {}),
+    /guest saves are coordinated by the host's checkpoint/
+  );
+  assert.deepEqual(await ssAct(bridges, 'guest', 'save', { force: true }),
+    { requested: true, performed: true, role: 'GUEST' });
+
+  const marked = await ssAct(bridges, 'host', 'mark', { text: 'step 12 begins' });
+  assert.equal(marked.text, 'step 12 begins');
+  assert.equal(typeof marked.atMillis, 'number', 'the stamp is what lines the two logs up');
 });
 
 test('addship is an action verb, relaying the count and the refusals the mod makes', async (t) => {

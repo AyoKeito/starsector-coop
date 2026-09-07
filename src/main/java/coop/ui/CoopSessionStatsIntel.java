@@ -13,10 +13,13 @@ import com.fs.starfarer.api.ui.SectorMapAPI;
 import com.fs.starfarer.api.ui.TooltipMakerAPI;
 import com.fs.starfarer.api.util.Misc;
 import coop.stats.CoopSessionStats;
+import coop.util.CoopIntelFacts;
 import coop.util.CoopLog;
 
 import java.awt.Color;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -67,7 +70,7 @@ import java.util.function.Supplier;
  * CoopSessionStatsIntel.clearSource();
  * }</pre>
  */
-public class CoopSessionStatsIntel extends BaseIntelPlugin {
+public class CoopSessionStatsIntel extends BaseIntelPlugin implements CoopIntelFacts {
 
     /** The entry's title, and its sort string. Sorts after "Coop Session" in the same bucket. */
     public static final String NAME = "Coop Stats";
@@ -122,6 +125,31 @@ public class CoopSessionStatsIntel extends BaseIntelPlugin {
             logRenderFailureOnce(ex);
             return null;
         }
+    }
+
+    /**
+     * What the bridge's {@code intel} verb reports about this entry: the team totals the page's own
+     * header renders, plus how many players the tally knows about. Read through
+     * {@link #currentStats()}, which is the same accessor the render path uses, so a bridge dump and
+     * the open page can never disagree; with no source installed the block is {@code installed:false}
+     * rather than a row of zeroes that would read as a session with nothing in it.
+     */
+    @Override
+    public Map<String, Object> intelFacts() {
+        Map<String, Object> facts = new LinkedHashMap<>();
+        CoopSessionStats stats = currentStats();
+        facts.put("installed", stats != null);
+        if (stats == null) {
+            return facts;
+        }
+        facts.put("players", stats.playerIds().size());
+        facts.put("fleetsDestroyedTeam", stats.fleetsDestroyedTeam());
+        facts.put("salvageEventsTeam", stats.salvageEventsTeam());
+        facts.put("coloniesHeldTeam", stats.coloniesHeldTeam());
+        facts.put("daysElapsed", stats.daysElapsed());
+        facts.put("timeFlownTogetherSeconds", stats.timeFlownTogetherSeconds());
+        facts.put("awayPlayers", currentAwayPlayerIds().size());
+        return facts;
     }
 
     /** Player ids currently disconnected; never null. */

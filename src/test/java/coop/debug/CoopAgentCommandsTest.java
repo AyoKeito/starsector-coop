@@ -194,10 +194,10 @@ class CoopAgentCommandsTest {
     @Test
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
-                java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "expedition",
-                        "fleets", "give", "landmarks", "market", "markets", "netfault", "objective",
-                        "pause", "rep", "setcr", "status", "survey", "surveyset", "teleport",
-                        "visibility"),
+                java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "entities",
+                        "expedition", "feed", "fleets", "give", "intel", "landmarks", "mark", "market",
+                        "markets", "netfault", "objective", "pause", "rep", "save", "screen", "setcr",
+                        "status", "survey", "surveyset", "teleport", "visibility"),
                 new CoopAgentCommands().verbs());
     }
 
@@ -369,6 +369,115 @@ class CoopAgentCommandsTest {
         assertEquals(37L, running.getLong("remainingSeconds"));
         assertEquals(8_192L, running.getLong("discardedBytes"));
         assertEquals(3L, running.getLong("droppedDatagrams"));
+    }
+
+    // ---- 0.1.1 smoke verbs: registry membership and the refusals that need no campaign -----------
+
+    /**
+     * The four campaign-reading smoke verbs must fail on the sector check, not as unknown verbs. The
+     * distinction matters at 2am: "no campaign loaded" means the mod is fine and the game is at the
+     * title screen, "unknown command" means the jar on disk is not the one you built.
+     */
+    @Test
+    void theSmokeQueryVerbsAreWiredAndRefuseForTheMissingCampaign() throws JSONException {
+        for (String verb : java.util.List.of("screen", "entities", "intel", "save")) {
+            JSONObject response = new JSONObject(new CoopAgentCommands()
+                    .dispatch("{\"id\":30,\"cmd\":\"" + verb + "\"}", EMPTY_CONTEXT));
+
+            assertFalse(response.getBoolean("ok"), verb + " should have been refused");
+            assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
+                    verb + " must be registered and refuse for the same reason every other verb does");
+        }
+    }
+
+    /**
+     * {@code feed} and {@code mark} are the two that deliberately need no campaign at all: the feed
+     * transcript is most wanted after a session has ended, and a mark timestamps a step that may be
+     * happening at the launcher.
+     */
+    @Test
+    void feedAnswersWithNoCampaignRatherThanRefusing() throws JSONException {
+        coop.ui.CoopSessionIntelFeed.uninstall();
+
+        JSONObject response = new JSONObject(new CoopAgentCommands()
+                .dispatch("{\"id\":31,\"cmd\":\"feed\"}", EMPTY_CONTEXT));
+
+        assertTrue(response.getBoolean("ok"), response.toString());
+        JSONObject data = response.getJSONObject("data");
+        assertFalse(data.getBoolean("installed"),
+                "no pump and no static handle is an empty feed, which is a fact and not an error");
+        assertEquals(0, data.getInt("count"));
+        assertEquals(20, data.getInt("limit"), "the default is one screenful");
+    }
+
+    @Test
+    void markWritesOneLineAndNeedsNothingButItsText() throws JSONException {
+        coop.testing.LogCapture log = coop.testing.LogCapture.attach(CoopAgentCommands.class);
+        try {
+            long before = System.currentTimeMillis();
+            JSONObject response = new JSONObject(new CoopAgentCommands().dispatch(
+                    "{\"id\":32,\"cmd\":\"mark\",\"args\":{\"text\":\"step 12 begins\"}}",
+                    EMPTY_CONTEXT));
+            long after = System.currentTimeMillis();
+
+            assertTrue(response.getBoolean("ok"), response.toString());
+            JSONObject data = response.getJSONObject("data");
+            assertEquals("step 12 begins", data.getString("text"));
+            long at = data.getLong("atMillis");
+            assertTrue(at >= before && at <= after,
+                    "the stamp has to be the one the log line got, or the two logs cannot be aligned");
+            assertTrue(log.messages.contains("Coop MARK step 12 begins"),
+                    "actual log lines: " + log.messages);
+        } finally {
+            log.detach();
+        }
+    }
+
+    @Test
+    void markRefusesAnythingThatWouldNotStayOneGreppableLine() throws JSONException {
+        assertEquals("IllegalArgumentException: missing required argument text",
+                markErrorOf("{}"));
+        assertEquals("IllegalArgumentException: text must be a single line; it contains a newline",
+                markErrorOf("{\"text\":\"first\\nsecond\"}"));
+        assertEquals("IllegalArgumentException: text must be at most 200 characters, got 201",
+                markErrorOf("{\"text\":\"" + "x".repeat(201) + "\"}"));
+    }
+
+    /**
+     * The guest refusal, as its own predicate. Extracted for the same reason {@code rep}'s is: the
+     * verb behind it needs a live campaign UI, and this rule is the part worth pinning.
+     */
+    @Test
+    void anUnforcedGuestSaveIsRefusedAndAForcedOneIsNot() {
+        IllegalStateException refused = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class,
+                () -> CoopAgentCommands.requireSaveAuthority(coop.net.CoopConnectionRole.GUEST, false));
+        assertTrue(refused.getMessage().startsWith("guest saves are coordinated by the host's"
+                + " checkpoint"), refused.getMessage());
+
+        CoopAgentCommands.requireSaveAuthority(coop.net.CoopConnectionRole.GUEST, true);
+        CoopAgentCommands.requireSaveAuthority(coop.net.CoopConnectionRole.HOST, false);
+        CoopAgentCommands.requireSaveAuthority(coop.net.CoopConnectionRole.NONE, false);
+    }
+
+    /**
+     * The {@code status} block a link-drop run reads. Zeroes rather than absent fields with no pump,
+     * so a script reads the same shape before a session as during one.
+     */
+    @Test
+    void theStatusReliableBlockAlwaysCarriesEveryField() throws JSONException {
+        JSONObject idle = CoopAgentCommands.reliableBlock(null);
+
+        assertEquals(0, idle.getInt("unacked"));
+        assertEquals(0L, idle.getLong("duplicatesDropped"));
+        assertEquals(0, idle.getInt("appliedSeqs"));
+    }
+
+    private static String markErrorOf(String argsJson) throws JSONException {
+        JSONObject response = new JSONObject(new CoopAgentCommands().dispatch(
+                "{\"id\":33,\"cmd\":\"mark\",\"args\":" + argsJson + "}", EMPTY_CONTEXT));
+        assertFalse(response.getBoolean("ok"), argsJson + " should have been refused");
+        return response.getString("error");
     }
 
     private static String errorOf(String argsJson) throws JSONException {

@@ -213,7 +213,60 @@ class CoopDialogControllerTest {
         }
     }
 
-    private static final class FakeDialog implements InteractionDialogPlugin, CoopDismissableDialog {
+    // ---- the bridge's screen verb reads these -----------------------------------------------------
+
+    @Test
+    void aRequestedDialogIsNamedByItsOwnTitleAndNothingIsNamedWhenNothingIsRequested() {
+        CoopDialogController controller = new CoopDialogController("desync");
+
+        assertEquals("desync", controller.kind());
+        assertEquals("", controller.pendingTitle(),
+                "nothing requested has to read as no dialog, not as an empty-titled one");
+
+        controller.request(new TitledDialog("the seeds do not match"));
+        assertEquals("the seeds do not match", controller.pendingTitle());
+
+        controller.close();
+        assertEquals("", controller.pendingTitle());
+    }
+
+    /** A dialog whose title accessor throws is still a dialog; it must not take the verb down. */
+    @Test
+    void aTitleThatThrowsFallsBackToTheClassName() {
+        CoopDialogController controller = new CoopDialogController("reconnect");
+        controller.request(new TitledDialog(null));
+
+        assertEquals("TitledDialog", controller.pendingTitle());
+    }
+
+    /** A plugin that is not one of ours has no title to offer, so the class name is the answer. */
+    @Test
+    void aNonCoopPluginIsNamedByItsClass() {
+        CoopDialogController controller = new CoopDialogController("lobby");
+        controller.request(new FakeDialog());
+
+        assertEquals("FakeDialog", controller.pendingTitle(),
+                "FakeDialog does not override bridgeTitle, so the interface default answers");
+    }
+
+    /** {@code null} title = throw, which is the case the fallback exists for. */
+    private static final class TitledDialog extends FakeDialog {
+        private final String title;
+
+        private TitledDialog(String title) {
+            this.title = title;
+        }
+
+        @Override
+        public String bridgeTitle() {
+            if (title == null) {
+                throw new IllegalStateException("no title today");
+            }
+            return title;
+        }
+    }
+
+    private static class FakeDialog implements InteractionDialogPlugin, CoopDismissableDialog {
         private int closes;
 
         @Override

@@ -15,7 +15,11 @@ export const QUERY_VERBS = [
   'survey',
   'visibility',
   'colonizable',
-  'landmarks'
+  'landmarks',
+  'entities',
+  'intel',
+  'feed',
+  'screen'
 ];
 
 /** State-changing verbs. ss_act accepts these. */
@@ -30,7 +34,9 @@ export const ACTION_VERBS = [
   'surveyset',
   'expedition',
   'rep',
-  'netfault'
+  'netfault',
+  'save',
+  'mark'
 ];
 
 /**
@@ -46,8 +52,7 @@ export const NON_VERBS = {
   accept: 'bar-offer accept is verified through the dialog listener, not the offer object',
   open: 'market open/close drives snapshot-on-open; a bridge call would bypass the snapshot trigger',
   close: 'market open/close drives snapshot-on-open; a bridge call would bypass the snapshot trigger',
-  save: 'save/load control is out of scope for the bridge',
-  load: 'save/load control is out of scope for the bridge',
+  load: 'there is no programmatic load: cmdLoad() only opens the picker and LoadGameDialog is fully obfuscated',
   screenshot: 'no screenshots, no vision, no input injection'
 };
 

@@ -937,15 +937,32 @@ public class CoopNetPump implements EveryFrameScript {
         return preDropMessagesDiscarded;
     }
 
-    /** Test read: replayed reliable messages this side had already applied; see {@link #appliedReliableSeqs}. */
-    long reliableDuplicatesDroppedForTest() {
+    /**
+     * Replayed reliable messages this side had already applied; see {@link #appliedReliableSeqs}.
+     *
+     * <p>Not a test-only read: the bridge's {@code status} verb reports it, because the number that
+     * tells a link-drop smoke run the replay worked is "the peer re-sent and we recognised it", and
+     * that fact exists nowhere else. Named plainly rather than {@code …ForTest} for the same reason.
+     */
+    public long reliableDuplicatesDropped() {
         return reliableDuplicatesDropped;
     }
 
-    /** Test read: how many applied reliable seqs are remembered for {@code senderId}. */
-    int appliedReliableSeqCountForTest(String senderId) {
+    /** How many applied reliable seqs are remembered for {@code senderId}. */
+    public int appliedReliableSeqCount(String senderId) {
         java.util.LinkedHashSet<Long> applied = appliedReliableSeqs.get(reliableSenderKey(senderId));
         return applied == null ? 0 : applied.size();
+    }
+
+    /** The same count across every sender, which is what {@code status} reports. */
+    public int appliedReliableSeqTotal() {
+        int total = 0;
+        for (java.util.LinkedHashSet<Long> applied : appliedReliableSeqs.values()) {
+            if (applied != null) {
+                total += applied.size();
+            }
+        }
+        return total;
     }
 
     /** Test read: snapshot types re-sent after a queue-cap drop; see {@link #resendSnapshotsDroppedByQueueOverflow}. */
@@ -980,6 +997,25 @@ public class CoopNetPump implements EveryFrameScript {
     /** Bridge-only: the shared pause coordinator behind the bridge's {@code pause} verb. */
     public CoopSharedPauseCoordinator pauseCoordinatorForBridge() {
         return pauseCoordinator;
+    }
+
+    /**
+     * Bridge-only: the feed the campaign notices are written into, for the {@code feed} verb.
+     *
+     * <p>This pump's own instance rather than {@code CoopSessionIntelFeed.active()}: the static
+     * handle is uninstalled at session teardown, and the transcript of a session that just ended is
+     * exactly what the verb is for.
+     */
+    public coop.ui.CoopSessionIntelFeed intelFeedForBridge() {
+        return intelFeed;
+    }
+
+    /**
+     * Bridge-only: the coop dialog controllers, in the precedence order {@code CoopDialogArbiter}
+     * gives them, so the {@code screen} verb can report the one that would actually be on screen.
+     */
+    public java.util.List<coop.ui.CoopDialogController> coopDialogsForBridge() {
+        return java.util.List.of(reconnectDialogs, desyncDialogs, lobbyDialogs, connectingDialogs);
     }
 
     /** Bridge-only: the same predicate the pump gates gameplay replication on. */
@@ -8738,8 +8774,10 @@ public class CoopNetPump implements EveryFrameScript {
         coop.ui.CoopFeed.post(text, color);
         // Phase 20.6: the feed line scrolls away, the intel page's event log does not. Hooked here
         // rather than at each call site so a transition can never post a banner without also being
-        // recorded — the two are the same event by construction.
-        intelFeed.noteEvent(text);
+        // recorded — the two are the same event by construction. The kind and the colour go with it
+        // for the bridge's `feed` verb, which needs to say which transition a line was and how it was
+        // drawn; the page still renders the line alone.
+        intelFeed.noteEvent(kind, text, color);
     }
 
     /**

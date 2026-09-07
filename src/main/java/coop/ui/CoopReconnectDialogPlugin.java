@@ -68,6 +68,17 @@ public abstract class CoopReconnectDialogPlugin
     /** First line: what happened, in the local player's terms. */
     abstract String headline();
 
+    /** The bridge's {@code screen} verb reads the same first line the player is looking at. */
+    @Override
+    public String bridgeTitle() {
+        try {
+            String headline = headline();
+            return headline == null || headline.isEmpty() ? getClass().getSimpleName() : headline;
+        } catch (RuntimeException | LinkageError ex) {
+            return getClass().getSimpleName();
+        }
+    }
+
     /** Second line's template; {@code seconds} is the live countdown. */
     abstract String countdownText(int seconds);
 

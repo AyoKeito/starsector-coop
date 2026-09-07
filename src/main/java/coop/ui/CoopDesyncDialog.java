@@ -175,6 +175,17 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
     /** First paragraph: what happened, in the player's terms. */
     abstract String title();
 
+    /** The bridge's {@code screen} verb reads the same first paragraph the player is looking at. */
+    @Override
+    public String bridgeTitle() {
+        try {
+            String title = title();
+            return title == null || title.isEmpty() ? getClass().getSimpleName() : title;
+        } catch (RuntimeException | LinkageError ex) {
+            return getClass().getSimpleName();
+        }
+    }
+
     /** Cause then remedy, in that order and in likelihood order within the remedy. */
     abstract List<String> bodyParagraphs();
 

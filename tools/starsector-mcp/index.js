@@ -55,9 +55,24 @@ const TOOLS = [
       'colonizable{limit?, maxLy?, neutralOnly?} (uncolonized planets nearest the local player fleet; ' +
       'neutralOnly keeps only systems with no economy market, i.e. no faction presence), ' +
       'landmarks{kinds?, limit?, maxLy?} (hypershunts, cryosleepers, gates, stable locations, ' +
-      'the gate hauler); status, markets and barpool take none. ' +
-      'colonizable and landmarks rows carry x/y, the location-local coordinates ss_act teleport takes ' +
-      'alongside systemId.',
+      'the gate hauler), ' +
+      'entities{system?, kinds?} (everything in one location - system id or name, "hyperspace", or ' +
+      'the player fleet\'s location by default - as planet/station/jumpPoint/relay/base/fleet/other ' +
+      'rows with id, name, type, faction, x/y, tags, orbitFocus, hidden, discoverable and marketId; ' +
+      'this is how you get a hidden pirate/Path base\'s id, which ss_act teleport accepts and whose ' +
+      'marketId is the key to look up in ss_status baseMarketIds), ' +
+      'intel{filter?, limit?} (the player\'s intel entries with class, title, tags, isNew/isEnding/' +
+      'isEnded/important, factionId and an extra block - progress and factor names for event intel, ' +
+      'key numbers for the mod\'s own pages - plus a hostileActivity block that answers present/' +
+      'progress/factors directly, which is the "no Hostile Activity on the guest" check), ' +
+      'feed{limit?} (the last 200 co-op feed lines this instance posted, oldest last, with kind, ' +
+      'colour and wall-clock stamp; survives the session ending, so it answers what the screen said ' +
+      'when the link died), ' +
+      'screen (state, paused, dialogOpen, interactionDialog + target, coreTab, menuOpen, the coop ' +
+      'dialog requested or shown, and the same pause block ss_status carries); ' +
+      'status, markets and barpool take none. ' +
+      'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
+      'teleport takes alongside systemId.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -98,9 +113,11 @@ const TOOLS = [
     name: 'ss_act',
     description:
       `Run one state-changing bridge verb against one instance. Verbs: ${ACTION_VERBS.join(', ')}. ` +
-      'Args by verb: teleport{entityId} or teleport{x,y,locationId} (the two modes are mutually ' +
-      'exclusive; entityId resolves any entity in the sector and parks the fleet just outside it, ' +
-      'and a teleport that crosses locations runs the engine jump transition, so it completes over ' +
+      'Args by verb: teleport{entityId} or teleport{x,y,locationId|system} (the two modes are mutually ' +
+      'exclusive; entityId resolves any entity in the sector - hidden bases included, use ss_dump ' +
+      'entities to get one - and parks the fleet just outside it, while the coordinate mode takes a ' +
+      'system id, a system name or "hyperspace"; a teleport that crosses locations runs the engine ' +
+      'jump transition, so it completes over ' +
       'the next few seconds of game time rather than instantly), pause{on|off}, ability{abilityId}, ' +
       'setcr{value, memberIndex|"all"}, ' +
       'give{commodityId?, qty?, credits?}, addship{variantId, count?} (adds combat-ready ships to the ' +
@@ -113,7 +130,13 @@ const TOOLS = [
       'peer for seconds (1..180) so a link drop can be reproduced: discard throws away all inbound ' +
       'bytes, loss drops lossPercent of inbound datagrams, clear ends it now; outbound is never ' +
       'affected, so a symmetric outage is the verb on both instances, and ss_status carries a ' +
-      'netfault block while one is running). ' +
+      'netfault block while one is running), ' +
+      'save{force?} (takes this instance\'s own vanilla autosave, which fires the same beforeGameSave/' +
+      'afterGameSave hooks an F5 does and therefore sends the guest its SAVE_CHECKPOINT; refused on ' +
+      'the guest unless force:true, because a guest save the host did not order is aligned with no ' +
+      'host save, and refused while any dialog is open, because autosave() is silently a no-op then), ' +
+      'mark{text} (writes one "Coop MARK <text>" INFO line in this instance\'s log and returns its ' +
+      'atMillis, so two logs can be lined up per step; needs no campaign). ' +
       'Market buy/sell, officer hire, bar-offer accept and market open/close are deliberately absent.',
     inputSchema: {
       type: 'object',

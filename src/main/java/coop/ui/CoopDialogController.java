@@ -174,6 +174,32 @@ public final class CoopDialogController {
         return pending;
     }
 
+    /** The one word this controller's dialogs are logged under ("reconnect", "lobby", "desync"). */
+    public String kind() {
+        return kind;
+    }
+
+    /**
+     * A one-line label for whatever is requested, or {@code ""} when nothing is. Read by the agent
+     * bridge's {@code screen} verb; total, because a dialog whose title accessor throws must read as
+     * "a dialog with no title" rather than take the verb down.
+     */
+    public String pendingTitle() {
+        InteractionDialogPlugin plugin = pending;
+        if (plugin == null) {
+            return "";
+        }
+        try {
+            if (plugin instanceof CoopDismissableDialog dismissable) {
+                String title = dismissable.bridgeTitle();
+                return title == null ? "" : title;
+            }
+            return plugin.getClass().getSimpleName();
+        } catch (RuntimeException | LinkageError ex) {
+            return plugin.getClass().getSimpleName();
+        }
+    }
+
     /** Dismisses whatever is up and stops trying. Idempotent. */
     public void close() {
         InteractionDialogPlugin open = pending;

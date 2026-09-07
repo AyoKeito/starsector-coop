@@ -7677,14 +7677,14 @@ class CoopNetPumpTest {
         CoopNetPump pump = livePump(service, activeHostSession(), now::get);
         service.inbound.add(reliableFrom("guest-player", 11L));
         pump.advance(0f);
-        assertEquals(0L, pump.reliableDuplicatesDroppedForTest());
+        assertEquals(0L, pump.reliableDuplicatesDropped());
         service.sent.clear();
 
         // The sender never saw the first ack, so it replays.
         service.inbound.add(reliableFrom("guest-player", 11L));
         pump.advance(0f);
 
-        assertEquals(1L, pump.reliableDuplicatesDroppedForTest());
+        assertEquals(1L, pump.reliableDuplicatesDropped());
         assertEquals(List.of(11L), ackedSeqs(service),
                 "and it is acknowledged again - a sender whose ack went missing replays forever"
                         + " until it is told");
@@ -7701,9 +7701,9 @@ class CoopNetPumpTest {
         service.inbound.add(reliableFrom("guest-b", 11L));
         pump.advance(0f);
 
-        assertEquals(0L, pump.reliableDuplicatesDroppedForTest());
-        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-a"));
-        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-b"));
+        assertEquals(0L, pump.reliableDuplicatesDropped());
+        assertEquals(1, pump.appliedReliableSeqCount("guest-a"));
+        assertEquals(1, pump.appliedReliableSeqCount("guest-b"));
     }
 
     /** Nothing about a snapshot goes through any of this; its producer sends another one. */
@@ -7720,8 +7720,8 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         assertEquals(0, countOf(service, CoopMessages.Type.RELIABLE_ACK));
-        assertEquals(0, pump.appliedReliableSeqCountForTest("host-player"));
-        assertEquals(0L, pump.reliableDuplicatesDroppedForTest(),
+        assertEquals(0, pump.appliedReliableSeqCount("host-player"));
+        assertEquals(0L, pump.reliableDuplicatesDropped(),
                 "a repeated snapshot seq is a resend, not a duplicate to suppress");
     }
 
@@ -7837,12 +7837,12 @@ class CoopNetPumpTest {
         CoopNetPump pump = livePump(service, activeHostSession(), now::get);
         service.inbound.add(reliableFrom("guest-player", 11L));
         pump.advance(0f);
-        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-player"));
+        assertEquals(1, pump.appliedReliableSeqCount("guest-player"));
 
         service.connected = false;
         pump.advance(0f);
         assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(), "the window opened");
-        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-player"),
+        assertEquals(1, pump.appliedReliableSeqCount("guest-player"),
                 "a grace window is not a session end");
         service.connected = true;
         now.addAndGet(4_000L);
@@ -7851,7 +7851,7 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         assertFalse(pump.reconnectCoordinatorForTest().active());
-        assertEquals(1, pump.appliedReliableSeqCountForTest("guest-player"),
+        assertEquals(1, pump.appliedReliableSeqCount("guest-player"),
                 "a resume is the same session; forgetting here would re-apply the replay");
 
         // ...and the session ending IS the edge: the next one mints a new session id and starts its
@@ -7861,7 +7861,7 @@ class CoopNetPumpTest {
         pump.reconnectCoordinatorForTest().end("the grace ran out");
         pump.advance(0f);
 
-        assertEquals(0, pump.appliedReliableSeqCountForTest("guest-player"));
+        assertEquals(0, pump.appliedReliableSeqCount("guest-player"));
     }
 
     // ---- 0.1.1: the coordinated save reports back --------------------------------------------------

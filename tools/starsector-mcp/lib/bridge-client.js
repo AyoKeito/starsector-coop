@@ -69,7 +69,11 @@ export const READ_ONLY_COMMANDS = Object.freeze(
     'survey',
     'visibility',
     'colonizable',
-    'landmarks'
+    'landmarks',
+    'entities',
+    'intel',
+    'feed',
+    'screen'
   ])
 );
 
