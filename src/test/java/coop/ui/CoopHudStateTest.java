@@ -317,5 +317,67 @@ class CoopHudStateTest {
                 40, 0, CoopHudState.TRANSPORT_UDP);
 
         assertNull(state.cadenceHz());
+        assertNull(state.netFault(), "and no debug fault, which is the ordinary case");
+    }
+
+    // ---- 0.1.1: the netfault countdown line -------------------------------------------------------
+
+    /**
+     * The warning line, in its two shapes. Armed says what is coming and when; running says how much
+     * of it is left. They are different sentences because they answer different questions, and the
+     * tester reads them at a glance from across a desk.
+     */
+    @Test
+    void theNetFaultLineReadsAsAWarningWhileArmedAndAsACountdownWhileRunning() {
+        assertEquals("NET FAULT discard 40s IN 5", CoopHudState.formatNetFaultLine(
+                new CoopHudState.NetFault("discard", 40, true, 5L, 40L)));
+        assertEquals("NET FAULT loss 15s IN 3", CoopHudState.formatNetFaultLine(
+                new CoopHudState.NetFault("loss", 15, true, 3L, 15L)));
+        assertEquals("NET FAULT discard 37s LEFT", CoopHudState.formatNetFaultLine(
+                new CoopHudState.NetFault("discard", 40, false, 0L, 37L)));
+        assertEquals("NET FAULT loss 1s LEFT", CoopHudState.formatNetFaultLine(
+                new CoopHudState.NetFault("loss", 15, false, 0L, 1L)));
+    }
+
+    /**
+     * No fault, no line. The HUD draws a second row only when there is something to warn about — an
+     * always-present "NET FAULT none" would be exactly the noise the cadence segment was suppressed
+     * for.
+     */
+    @Test
+    void thereIsNoNetFaultLineWithoutAFault() {
+        assertEquals("", CoopHudState.formatNetFaultLine((CoopHudState.NetFault) null));
+        assertEquals("", CoopHudState.formatNetFaultLine((CoopHudState) null));
+        assertEquals("", CoopHudState.formatNetFaultLine(new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null)));
+    }
+
+    /**
+     * The countdown at its boundaries, driven by the same rounding the fault does: 5, 4, 3, 2, 1 and
+     * then the line changes shape. It never shows a zero, because a zero would sit on screen for a
+     * whole second saying the outage had not started while it already had.
+     */
+    @Test
+    void theArmedCountdownStepsDownOneSecondAtATimeAndNeverShowsZero() {
+        for (long n = 5L; n >= 1L; n--) {
+            assertEquals("NET FAULT discard 40s IN " + n, CoopHudState.formatNetFaultLine(
+                    new CoopHudState.NetFault("discard", 40, true, n, 40L)));
+        }
+        assertEquals("NET FAULT discard 40s LEFT", CoopHudState.formatNetFaultLine(
+                new CoopHudState.NetFault("discard", 40, false, 0L, 40L)),
+                "the instant after the 1 the line is the running one, not an IN 0");
+    }
+
+    /** Its own line, never a segment of the link readout: the two must not be able to collide. */
+    @Test
+    void theNetFaultNeverLeaksIntoTheLinkLine() {
+        CoopHudState state = new CoopHudState(CoopHudState.BADGE_HOST,
+                CoopHudState.STATUS_SESSION_ACTIVE, false, null, null, 18, 0,
+                CoopHudState.TRANSPORT_UDP, null,
+                new CoopHudState.NetFault("discard", 40, true, 5L, 40L));
+
+        assertEquals("HOST · session active · 18 ms · loss 0% · udp",
+                CoopHudState.formatLine(state, DOT));
+        assertEquals("NET FAULT discard 40s IN 5", CoopHudState.formatNetFaultLine(state));
     }
 }

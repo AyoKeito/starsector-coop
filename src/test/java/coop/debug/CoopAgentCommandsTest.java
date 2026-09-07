@@ -340,6 +340,36 @@ class CoopAgentCommandsTest {
                 errorOf("{\"mode\":\"loss\",\"seconds\":30,\"lossPercent\":101}"));
     }
 
+    /**
+     * {@code delaySeconds} is optional where {@code seconds} is required: absent means "start now",
+     * which is the shape every caller written before arming existed still sends. Out of range is
+     * refused for the same reason a bad duration is — a clamped delay would fire at a time nobody
+     * asked for, and the tester is watching a clock.
+     */
+    @Test
+    void netfaultRefusesADelayOutsideItsRangeAndTreatsAnAbsentOneAsZero() throws JSONException {
+        assertEquals("IllegalArgumentException: delaySeconds must be between 0 and 60, got 61",
+                errorOf("{\"mode\":\"discard\",\"seconds\":40,\"delaySeconds\":61}"));
+        assertEquals("IllegalArgumentException: delaySeconds must be between 0 and 60, got -1",
+                errorOf("{\"mode\":\"discard\",\"seconds\":40,\"delaySeconds\":-1}"));
+        assertEquals("IllegalArgumentException: delaySeconds must be between 0 and 60, got 61",
+                errorOf("{\"mode\":\"loss\",\"seconds\":40,\"lossPercent\":50,\"delaySeconds\":61}"));
+
+        // In range, and absent, both get past validation and fail on the missing transport instead.
+        assertTrue(errorOf("{\"mode\":\"discard\",\"seconds\":40,\"delaySeconds\":5}")
+                .contains("running coop transport"));
+        assertTrue(errorOf("{\"mode\":\"discard\",\"seconds\":40,\"delaySeconds\":0}")
+                .contains("running coop transport"));
+        assertTrue(errorOf("{\"mode\":\"discard\",\"seconds\":40}").contains("running coop transport"),
+                "an absent delay is not a missing argument, it is zero");
+        assertTrue(errorOf("{\"mode\":\"discard\",\"seconds\":40,\"delaySeconds\":60}")
+                .contains("running coop transport"), "the cap itself is allowed");
+
+        // The duration is still checked first: a request wrong in two ways names the worse one.
+        assertEquals("IllegalArgumentException: seconds must be between 1 and 180, got 181",
+                errorOf("{\"mode\":\"discard\",\"seconds\":181,\"delaySeconds\":99}"));
+    }
+
     /** Mixed case is a typo, not a different verb. */
     @Test
     void netfaultModeIsCaseInsensitive() throws JSONException {
@@ -360,15 +390,39 @@ class CoopAgentCommandsTest {
         assertEquals(0L, idle.getLong("remainingSeconds"));
         assertEquals(0L, idle.getLong("discardedBytes"));
         assertEquals(0L, idle.getLong("droppedDatagrams"));
+        assertFalse(idle.getBoolean("armed"));
+        assertEquals(0L, idle.getLong("startsInSeconds"));
 
         JSONObject running = CoopAgentCommands.netFaultBlock(
-                new coop.net.CoopNetService.NetFaultStatus(true, "discard", 37L, 1_234L, 8_192L, 3L));
+                new coop.net.CoopNetService.NetFaultStatus(true, "discard", 37L, 1_234L, 8_192L, 3L,
+                        false, 0L, 40));
 
         assertTrue(running.getBoolean("active"));
         assertEquals("discard", running.getString("mode"));
         assertEquals(37L, running.getLong("remainingSeconds"));
         assertEquals(8_192L, running.getLong("discardedBytes"));
         assertEquals(3L, running.getLong("droppedDatagrams"));
+        assertFalse(running.getBoolean("armed"));
+    }
+
+    /**
+     * The armed shape, which is the one a tester reads while waiting: a fault exists, nothing has
+     * been dropped, and {@code active} must say so rather than being true because a fault is on the
+     * books. A script that polls {@code active} to decide whether the link should be silent would
+     * otherwise fail for the length of the delay.
+     */
+    @Test
+    void anArmedFaultReportsArmedAndNotActive() throws JSONException {
+        JSONObject armed = CoopAgentCommands.netFaultBlock(
+                new coop.net.CoopNetService.NetFaultStatus(false, "discard", 40L, 46_000L, 0L, 0L,
+                        true, 5L, 40));
+
+        assertFalse(armed.getBoolean("active"), "an armed fault has dropped nothing yet");
+        assertTrue(armed.getBoolean("armed"));
+        assertEquals(5L, armed.getLong("startsInSeconds"));
+        assertEquals("discard", armed.getString("mode"));
+        assertEquals(40L, armed.getLong("remainingSeconds"),
+                "the outage it promises is 40 s, not 45: the delay is not part of the outage");
     }
 
     // ---- 0.1.1 smoke verbs: registry membership and the refusals that need no campaign -----------

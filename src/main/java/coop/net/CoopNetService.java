@@ -1425,63 +1425,118 @@ public class CoopNetService {
     // ---- Debug net fault (bridge verb "netfault") ------------------------------------------------
 
     /**
-     * What the bridge reports about the fault. {@code mode} is {@code ""} when none is active, so a
-     * caller reading the status block never has to distinguish null from absent.
+     * What the bridge reports about the fault. {@code mode} is {@code ""} when there is no fault at
+     * all, so a caller reading the status block never has to distinguish null from absent.
+     *
+     * <p>{@code active} and {@code armed} are exclusive and never both true. {@code active} means
+     * traffic is being thrown away <em>right now</em>; {@code armed} means a fault exists with a
+     * delay still to run and nothing has been dropped yet. A caller asking "is there a fault at all"
+     * wants {@code active || armed} — the two are kept apart deliberately, because a script that
+     * polled {@code active} to decide whether the link should be silent must not be told yes by a
+     * fault that has not started.
+     *
+     * @param seconds         the outage duration as requested, which is what the feed and HUD lines
+     *                        name; {@code remainingSeconds} counts it down once the fault is running
+     * @param startsInSeconds whole seconds until an armed fault begins, rounded up; zero once it has
      */
     public record NetFaultStatus(boolean active, String mode, long remainingSeconds, long endsAtMillis,
-                                 long discardedBytes, long droppedDatagrams) {
-        public static final NetFaultStatus INACTIVE = new NetFaultStatus(false, "", 0L, 0L, 0L, 0L);
+                                 long discardedBytes, long droppedDatagrams, boolean armed,
+                                 long startsInSeconds, int seconds) {
+        public static final NetFaultStatus INACTIVE =
+                new NetFaultStatus(false, "", 0L, 0L, 0L, 0L, false, 0L, 0);
+
+        /** True when a fault exists in either state; the one question most callers actually have. */
+        public boolean present() {
+            return active || armed;
+        }
+    }
+
+    /** The outcome of {@code netfault mode:"clear"}: whether it ended anything, and what. */
+    public record NetFaultClear(boolean cleared, boolean wasArmed) {
+        public static final NetFaultClear NOTHING = new NetFaultClear(false, false);
     }
 
     /**
-     * Starts (or replaces) a deliberate inbound outage on this instance. See {@link CoopNetFault} for
-     * what each mode does and why outbound is deliberately left alone.
-     *
-     * @param mode        {@link CoopNetFault.Mode#DISCARD} or {@link CoopNetFault.Mode#LOSS}
-     * @param seconds     1..{@link CoopNetFault#MAX_SECONDS}
-     * @param lossPercent 1..100, ignored for discard
+     * Starts (or replaces) a deliberate inbound outage on this instance, immediately. See
+     * {@link CoopNetFault} for what each mode does and why outbound is deliberately left alone.
      */
     public NetFaultStatus applyNetFault(CoopNetFault.Mode mode, int seconds, int lossPercent) {
+        return applyNetFault(mode, seconds, lossPercent, 0);
+    }
+
+    /**
+     * Starts (or replaces) a deliberate inbound outage on this instance.
+     *
+     * @param mode         {@link CoopNetFault.Mode#DISCARD} or {@link CoopNetFault.Mode#LOSS}
+     * @param seconds      1..{@link CoopNetFault#MAX_SECONDS}
+     * @param lossPercent  1..100, ignored for discard
+     * @param delaySeconds 0..{@link CoopNetFault#MAX_DELAY_SECONDS}; above zero the fault is armed
+     *                     rather than started, and the tester gets a countdown before it bites
+     */
+    public NetFaultStatus applyNetFault(CoopNetFault.Mode mode, int seconds, int lossPercent,
+                                        int delaySeconds) {
         if (mode == null) {
             throw new IllegalArgumentException("netfault needs a mode");
         }
         synchronized (lifecycleLock) {
             long now = clockMillis.getAsLong();
             CoopNetFault fault = mode == CoopNetFault.Mode.DISCARD
-                    ? CoopNetFault.discard(now, seconds)
-                    : CoopNetFault.loss(now, seconds, lossPercent);
+                    ? CoopNetFault.discard(now, seconds, delaySeconds)
+                    : CoopNetFault.loss(now, seconds, lossPercent, delaySeconds);
             // Built before the replacement is logged, so a refused duration leaves the running fault
             // exactly as it was rather than ending it and then throwing.
             CoopNetFault replaced = netFault;
             netFault = fault;
+            // An armed fault latches its own started line for the flip; one started here would be a
+            // lie for the length of the delay.
+            String opening = fault.armedAt(now)
+                    ? "Coop netfault " + fault.describeArmed(now)
+                    : "Coop netfault " + fault.describe() + " started";
+            if (!fault.armedAt(now)) {
+                fault.announceStart(now);
+            }
             if (replaced == null) {
-                CoopLog.info(CoopNetService.class, "Coop netfault " + fault.describe() + " started");
+                CoopLog.info(CoopNetService.class, opening);
             } else {
-                CoopLog.info(CoopNetService.class, "Coop netfault " + fault.describe()
-                        + " started, replacing the active " + replaced.mode().wireName() + " fault ("
-                        + replaced.describeCounters() + ")");
+                CoopLog.info(CoopNetService.class, opening + ", replacing the "
+                        + (replaced.armedAt(now) ? "armed " : "active ") + replaced.mode().wireName()
+                        + " fault (" + replaced.describeCounters() + ")");
             }
             return statusOfLocked(fault, now);
         }
     }
 
-    /** @return true when a fault was actually running; false means there was nothing to clear */
-    public boolean clearNetFault() {
+    /**
+     * Ends whatever fault is scheduled or running.
+     *
+     * @return {@code cleared} false when there was nothing to clear; {@code wasArmed} true when the
+     *         fault was cancelled before it ever touched a byte
+     */
+    public NetFaultClear clearNetFault() {
         synchronized (lifecycleLock) {
             CoopNetFault fault = netFault;
             if (fault == null) {
-                return false;
+                return NetFaultClear.NOTHING;
             }
+            long now = clockMillis.getAsLong();
+            boolean wasArmed = fault.armedAt(now);
             netFault = null;
-            CoopLog.info(CoopNetService.class, "Coop netfault ended (" + fault.describeCounters() + ")");
-            return true;
+            if (wasArmed) {
+                CoopLog.info(CoopNetService.class, "Coop netfault cancelled while armed ("
+                        + fault.mode().wireName() + ", " + fault.startsInSeconds(now)
+                        + " s before it would have started)");
+            } else {
+                CoopLog.info(CoopNetService.class,
+                        "Coop netfault ended (" + fault.describeCounters() + ")");
+            }
+            return new NetFaultClear(true, wasArmed);
         }
     }
 
     /**
      * The status block the {@code status} verb carries, so a fault someone forgot about can never be
-     * mistaken for a real defect. Expires a due fault on the way past, which is also what makes the
-     * counters final rather than still moving.
+     * mistaken for a real defect. Steps the fault's lifecycle on the way past, which is also what
+     * makes the counters final rather than still moving.
      */
     public NetFaultStatus netFaultStatus() {
         synchronized (lifecycleLock) {
@@ -1493,18 +1548,27 @@ public class CoopNetService {
     }
 
     private NetFaultStatus statusOfLocked(CoopNetFault fault, long now) {
-        return new NetFaultStatus(true, fault.mode().wireName(), fault.remainingSeconds(now),
-                fault.endsAtMillis(), fault.discardedBytes(), fault.droppedDatagrams());
+        boolean armed = fault.armedAt(now);
+        return new NetFaultStatus(!armed, fault.mode().wireName(), fault.remainingSeconds(now),
+                fault.endsAtMillis(), fault.discardedBytes(), fault.droppedDatagrams(), armed,
+                fault.startsInSeconds(now), fault.seconds());
     }
 
     /**
-     * Ends a fault whose time is up. Called from the head of every poll rather than only from the
-     * status verb, so the outage really does heal by itself with nobody watching — that is the whole
-     * reason it has a duration instead of an on/off switch.
+     * Steps a fault through its two edges: armed &rarr; active (logged once, latched by the fault
+     * itself) and active &rarr; gone. Called from the head of every poll rather than only from the
+     * status verb, so the outage really does start and heal by itself with nobody watching — that is
+     * the whole reason it has a schedule instead of an on/off switch.
      */
     private void expireNetFaultLocked(long now) {
         CoopNetFault fault = netFault;
-        if (fault != null && fault.expiredAt(now)) {
+        if (fault == null) {
+            return;
+        }
+        if (fault.announceStart(now)) {
+            CoopLog.info(CoopNetService.class, "Coop netfault " + fault.describe() + " started");
+        }
+        if (fault.expiredAt(now)) {
             netFault = null;
             CoopLog.info(CoopNetService.class, "Coop netfault ended (" + fault.describeCounters() + ")");
         }

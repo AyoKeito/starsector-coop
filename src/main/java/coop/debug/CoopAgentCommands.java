@@ -346,6 +346,11 @@ public final class CoopAgentCommands {
         out.put("remainingSeconds", status.remainingSeconds());
         out.put("discardedBytes", status.discardedBytes());
         out.put("droppedDatagrams", status.droppedDatagrams());
+        // 0.1.1 arming. Exclusive with "active" by construction: armed means the fault exists and has
+        // dropped nothing yet, so a script that polls "active" to decide whether the link should be
+        // silent is never told yes by a fault that has not started.
+        out.put("armed", status.armed());
+        out.put("startsInSeconds", status.startsInSeconds());
         return out;
     }
 
@@ -3046,6 +3051,13 @@ public final class CoopAgentCommands {
      * active fault now. {@code seconds} is 1..{@link CoopNetFault#MAX_SECONDS} and the fault expires
      * by itself, so a forgotten one heals.
      *
+     * <p><b>Arming.</b> {@code delaySeconds} (0..{@link CoopNetFault#MAX_DELAY_SECONDS}, default 0)
+     * schedules the outage instead of starting it. The tester is a human at two game windows, and a
+     * fault that lands while they are still in a menu proves nothing: an armed fault logs its warning
+     * line, shows up as {@code armed} with a {@code startsInSeconds} countdown, and drops nothing
+     * until it flips. {@code clear} while armed cancels it before it ever touches a byte, which the
+     * response says with {@code wasArmed}.
+     *
      * <p><b>Outbound is never touched, in any mode.</b> This side keeps writing and the peer keeps
      * hearing it, which is what makes the sender believe it delivered. A <em>symmetric</em> outage is
      * this verb run on both instances.
@@ -3058,8 +3070,12 @@ public final class CoopAgentCommands {
         String mode = requiredString(args, "mode").toLowerCase(Locale.ROOT);
         JSONObject out = new JSONObject();
         if ("clear".equals(mode)) {
+            CoopNetService.NetFaultClear cleared = requireTransport(context).clearNetFault();
             out.put("mode", "clear");
-            out.put("cleared", requireTransport(context).clearNetFault());
+            out.put("cleared", cleared.cleared());
+            // Worth its own field rather than inferable from the counters: "cancelled before it
+            // started" and "ended after it dropped nothing measurable" look identical otherwise.
+            out.put("wasArmed", cleared.wasArmed());
             return out;
         }
 
@@ -3089,12 +3105,21 @@ public final class CoopAgentCommands {
                         + lossPercent);
             }
         }
+        // Optional, unlike seconds: an absent delay is a fault that starts now, which is the shape
+        // every caller written before arming existed still sends.
+        int delaySeconds = optionalInt(args, "delaySeconds", 0);
+        if (delaySeconds < 0 || delaySeconds > CoopNetFault.MAX_DELAY_SECONDS) {
+            throw new IllegalArgumentException("delaySeconds must be between 0 and "
+                    + CoopNetFault.MAX_DELAY_SECONDS + ", got " + delaySeconds);
+        }
 
-        CoopNetService.NetFaultStatus status =
-                requireTransport(context).applyNetFault(faultMode, seconds, lossPercent);
+        CoopNetService.NetFaultStatus status = requireTransport(context)
+                .applyNetFault(faultMode, seconds, lossPercent, delaySeconds);
         out.put("mode", status.mode());
         out.put("endsAtMillis", status.endsAtMillis());
         out.put("remainingSeconds", status.remainingSeconds());
+        out.put("armed", status.armed());
+        out.put("startsInSeconds", status.startsInSeconds());
         if (faultMode == CoopNetFault.Mode.LOSS) {
             out.put("lossPercent", lossPercent);
         }

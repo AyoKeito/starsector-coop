@@ -104,6 +104,17 @@ public class CoopNetPump implements EveryFrameScript {
     /** 0.1.1: reliable one-shots that reached a socket but were never acknowledged; see endSessionAfterDrop. */
     private static final String FEED_RELIABLE_LOST = "reliableLost";
     /**
+     * 0.1.1: the {@code netfault} debug outage going live, and ending.
+     *
+     * <p>Both kinds are suffixed with the fault's own {@code endsAtMillis} at the call site, the way
+     * {@link #FEED_OPTIONS} is suffixed with the option it carries. {@link #postFeed} dedupes per
+     * kind for 30 s, and a tester firing three short faults in a row would otherwise see one banner
+     * and find one line in the {@code feed} verb's record — which is the exact opposite of what these
+     * lines exist for.
+     */
+    private static final String FEED_NET_FAULT_ACTIVE = "netFaultActive";
+    private static final String FEED_NET_FAULT_ENDED = "netFaultEnded";
+    /**
      * How long a guest that has just sent a deterministic reject holds its socket open so the reject
      * can leave it. Two seconds is far past any local flush and still short enough that a player
      * staring at the failure dialog never notices it; the ordinary case exits in the same frame.
@@ -2976,6 +2987,62 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    // ---- 0.1.1 netfault: schedule step, HUD feed and campaign feed --------------------------------
+
+    /**
+     * Last reading of this instance's deliberate outage, taken on the campaign thread once a frame.
+     *
+     * <p>Volatile and cached rather than read live by {@link #hudState}, because the HUD renders on
+     * the render thread and {@link CoopNetService#netFaultStatus()} takes the transport's lifecycle
+     * lock — the same lock the network poll holds while it is reading sockets. A cosmetic line is
+     * never worth a chance of stalling a frame behind a socket read.
+     */
+    private volatile CoopNetService.NetFaultStatus netFaultStatus =
+            CoopNetService.NetFaultStatus.INACTIVE;
+
+    /**
+     * Steps the netfault schedule and posts the two campaign-feed lines the HUD countdown cannot: one
+     * when the outage actually starts and one when it ends.
+     *
+     * <p>The feed gets exactly these two, and never the countdown — the countdown is a per-second
+     * value, and per-second writes are what make the vanilla text panel flash (which is why the HUD
+     * draws it instead). What the feed is for here is the record: {@link #postFeed} also files each
+     * line on the intel page's event log, which is what the bridge's {@code feed} verb reads, so a
+     * smoke run can prove afterwards that the outage it saw was the one it asked for.
+     */
+    private void tickNetFault() {
+        CoopNetService.NetFaultStatus previous = netFaultStatus;
+        // Reading the status is also what steps the schedule (it expires a due fault and latches the
+        // armed-to-active flip), so this call is the tick, not just a poll of one.
+        CoopNetService.NetFaultStatus current = service.netFaultStatus();
+        netFaultStatus = current;
+        if (previous.active() == current.active()) {
+            return;
+        }
+        long now = clockMillis.getAsLong();
+        if (current.active()) {
+            postFeed(FEED_NET_FAULT_ACTIVE + ":" + current.endsAtMillis(), now,
+                    "Co-op test: net fault (" + current.mode() + ") active for "
+                            + current.seconds() + " s.", FEED_WARN_COLOR);
+        } else {
+            postFeed(FEED_NET_FAULT_ENDED + ":" + previous.endsAtMillis(), now,
+                    "Co-op test: net fault ended.", FEED_WARN_COLOR);
+        }
+    }
+
+    /**
+     * The cached fault reading as the HUD wants it, or null when there is none. Null rather than an
+     * "inactive" record so {@link CoopHudState#formatNetFaultLine} has one thing to check.
+     */
+    private CoopHudState.NetFault hudNetFault() {
+        CoopNetService.NetFaultStatus status = netFaultStatus;
+        if (!status.present()) {
+            return null;
+        }
+        return new CoopHudState.NetFault(status.mode(), status.seconds(), status.armed(),
+                status.startsInSeconds(), status.remainingSeconds());
+    }
+
     // ---- Phase 20.6 link HUD accessor ------------------------------------------------------------
 
     /**
@@ -3085,8 +3152,10 @@ public class CoopNetPump implements EveryFrameScript {
             cadenceHz = stateStreamTier.hz();
         }
 
+        // 0.1.1: outside the session gate above on purpose. A netfault is what makes the link look
+        // dead, so the warning about it has to survive the session going away.
         return new CoopHudState(badge, status, paused, pauseHolder, driftGameHours,
-                rttMillis, lossPercent, transport, cadenceHz);
+                rttMillis, lossPercent, transport, cadenceHz, hudNetFault());
     }
 
     /**
@@ -3278,6 +3347,10 @@ public class CoopNetPump implements EveryFrameScript {
         // stops being the one driving the campaign". Two field reads on the frames that are not an
         // edge, so it is deliberately not given its own profiler section.
         tickSessionLeaveWatchdog();
+        // 0.1.1: steps the netfault schedule on the campaign thread and caches the reading the HUD
+        // draws, so the render pass never takes the transport's lifecycle lock. Two field reads on
+        // the frames that are not an edge, so it gets no profiler section of its own either.
+        tickNetFault();
         syncNpcReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();

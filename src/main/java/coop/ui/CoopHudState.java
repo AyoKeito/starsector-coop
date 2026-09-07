@@ -31,6 +31,10 @@ import coop.net.CoopConnectionRole;
  *                             segment that reads "10 Hz" on every healthy link all session long is
  *                             noise, and the whole point of the readout is that a changed rate is
  *                             visible
+ * @param netFault             the {@code netfault} debug outage scheduled or running on THIS
+ *                             instance, or null when there is none. Deliberately its own line rather
+ *                             than a segment of the link readout: it is a warning aimed at the
+ *                             person driving the test, not a property of the link
  */
 public record CoopHudState(String roleBadge,
                            String status,
@@ -40,7 +44,8 @@ public record CoopHudState(String roleBadge,
                            Integer rttMillis,
                            Integer lossPercent,
                            String transport,
-                           Integer cadenceHz) {
+                           Integer cadenceHz,
+                           NetFault netFault) {
 
     /**
      * Pre-20.6-M2 shape: role, status, pause and drift with no link readout. Kept because the link
@@ -58,6 +63,31 @@ public record CoopHudState(String roleBadge,
                         String transport) {
         this(roleBadge, status, paused, pauseHolder, clockDriftGameHours, rttMillis, lossPercent,
                 transport, null);
+    }
+
+    /** Pre-0.1.1 shape: everything but the debug net fault, which most frames do not have. */
+    public CoopHudState(String roleBadge, String status, boolean paused, String pauseHolder,
+                        Integer clockDriftGameHours, Integer rttMillis, Integer lossPercent,
+                        String transport, Integer cadenceHz) {
+        this(roleBadge, status, paused, pauseHolder, clockDriftGameHours, rttMillis, lossPercent,
+                transport, cadenceHz, null);
+    }
+
+    /**
+     * One deliberate outage from the {@code netfault} bridge verb, as the HUD needs to say it.
+     *
+     * <p>Carried on the HUD state rather than read off the transport by the renderer for the same
+     * reason the link numbers are: the render pass must never reach into the net service, and every
+     * word the HUD says has to be formattable in a unit test with no sockets and no GL.
+     *
+     * @param mode            {@code "discard"} or {@code "loss"}
+     * @param seconds         the outage duration as requested — what the armed line promises
+     * @param armed           true while the fault is still counting down to its start
+     * @param startsInSeconds whole seconds until it starts, rounded up; only meaningful when armed
+     * @param remainingSeconds whole seconds of outage left; only meaningful when it is running
+     */
+    public record NetFault(String mode, int seconds, boolean armed, long startsInSeconds,
+                           long remainingSeconds) {
     }
 
     public static final String BADGE_HOST = "HOST";
@@ -220,5 +250,38 @@ public record CoopHudState(String roleBadge,
             }
         }
         return line.toString();
+    }
+
+    /** Prefix of both net-fault lines; also what makes the line greppable in a screenshot. */
+    public static final String NET_FAULT_PREFIX = "NET FAULT ";
+
+    /**
+     * The second HUD line: the {@code netfault} countdown, or {@code ""} when no fault is scheduled
+     * or running.
+     *
+     * <p>Two shapes, because the two states are answers to different questions. Armed reads
+     * {@code "NET FAULT discard 40s IN 5"} — what is coming, how long it will last, and how long you
+     * have to get out of a menu. Running reads {@code "NET FAULT discard 37s LEFT"} — how much of it
+     * is still to go. The counts come straight off {@link NetFault}, which rounds the delay up, so
+     * the armed line steps 5, 4, 3, 2, 1 and then the line changes shape rather than showing 0.
+     *
+     * <p>Kept off the link line on purpose: this warns the human driving the test that the outage
+     * they are about to see is one they asked for, and it must not be mistaken for a reading of the
+     * link's health.
+     */
+    public static String formatNetFaultLine(NetFault fault) {
+        if (fault == null) {
+            return "";
+        }
+        String mode = fault.mode() == null ? "" : fault.mode();
+        if (fault.armed()) {
+            return NET_FAULT_PREFIX + mode + " " + fault.seconds() + "s IN " + fault.startsInSeconds();
+        }
+        return NET_FAULT_PREFIX + mode + " " + fault.remainingSeconds() + "s LEFT";
+    }
+
+    /** Convenience for the renderer: the fault line for this whole state, or {@code ""}. */
+    public static String formatNetFaultLine(CoopHudState state) {
+        return state == null ? "" : formatNetFaultLine(state.netFault());
     }
 }

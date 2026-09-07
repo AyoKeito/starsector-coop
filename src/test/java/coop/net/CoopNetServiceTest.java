@@ -2631,9 +2631,11 @@ class CoopNetServiceTest {
             assertTrue(during.discardedBytes() > 0L,
                     "the bytes were read off the socket and thrown away, not left in the kernel");
 
-            assertTrue(host.clearNetFault(), "the fault was running, so clearing it did something");
+            assertTrue(host.clearNetFault().cleared(),
+                    "the fault was running, so clearing it did something");
             assertFalse(host.netFaultStatus().active());
-            assertFalse(host.clearNetFault(), "clearing twice is not an error, it is a no-op");
+            assertFalse(host.clearNetFault().cleared(),
+                    "clearing twice is not an error, it is a no-op");
 
             guest.send(CoopMessages.ping(null, guest.nextSeq(), 2_000L));
             CoopMessages.Message afterClear = waitForMessageWhilePollingGuest(guest, host,
@@ -2754,7 +2756,102 @@ class CoopNetServiceTest {
 
             assertFalse(service.netFaultStatus().active(), "the fault expired on its own");
             assertEquals("", service.netFaultStatus().mode());
-            assertFalse(service.clearNetFault(), "there is nothing left to clear");
+            assertFalse(service.clearNetFault().cleared(), "there is nothing left to clear");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /**
+     * The arming window on the real transport, which is the claim the HUD countdown is making: while
+     * a fault is armed the link is completely ordinary, and the instant it flips the same link stops
+     * delivering. One session, one fault, both sides of the flip.
+     */
+    @Test
+    void anArmedFaultDeliversUntilItFlipsAndThenStopsDead() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(700_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+            CoopNetService.NetFaultStatus armed =
+                    host.applyNetFault(CoopNetFault.Mode.DISCARD, 40, 0, 5);
+
+            assertTrue(armed.armed(), "5 s of delay means armed, not running");
+            assertFalse(armed.active());
+            assertEquals(5L, armed.startsInSeconds());
+            assertEquals(40L, armed.remainingSeconds(), "the outage it promises, not 45");
+            assertEquals(40, armed.seconds());
+
+            // Inside the armed window the link is untouched: this frame has to arrive.
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1_000L));
+            CoopMessages.Message duringArming = waitForMessageWhilePollingGuest(guest, host,
+                    "an armed fault must not drop anything");
+            assertEquals(CoopMessages.Type.PING, duringArming.type());
+            assertEquals(1L, duringArming.seq());
+            assertEquals(0L, host.netFaultStatus().discardedBytes(),
+                    "nothing was discarded while it was only armed");
+
+            // Past the start instant, and still well inside the 15 s silence rule.
+            clock.addAndGet(5_000L);
+            assertTrue(host.netFaultStatus().active(), "the fault flipped on its own");
+            assertFalse(host.netFaultStatus().armed());
+
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 2_000L));
+            for (int i = 0; i < 40; i++) {
+                guest.flushOutbound();
+                host.beginFrame();
+                host.flushOutbound();
+                assertNull(host.pollInbound(), "the frame sent after the flip must never arrive");
+                Thread.sleep(5L);
+            }
+            assertTrue(host.netFaultStatus().discardedBytes() > 0L,
+                    "and it was read off the socket and thrown away, not left in the kernel");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * Cancelling a fault before it bites. {@code wasArmed} exists because the counters cannot tell
+     * this apart from "ran its course and happened to drop nothing" — both read zero.
+     */
+    @Test
+    void clearingWhileArmedCancelsTheFaultBeforeItEverStarts() {
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService service = new CoopNetService(clock::get);
+        try {
+            service.applyNetFault(CoopNetFault.Mode.DISCARD, 40, 0, 10);
+            assertTrue(service.netFaultStatus().armed());
+
+            CoopNetService.NetFaultClear cleared = service.clearNetFault();
+            assertTrue(cleared.cleared());
+            assertTrue(cleared.wasArmed(), "it never got as far as dropping anything");
+
+            // The clock walking past the start instant must not resurrect it.
+            clock.addAndGet(30_000L);
+            CoopNetService.NetFaultStatus after = service.netFaultStatus();
+            assertFalse(after.active(), "a cancelled fault does not start later");
+            assertFalse(after.armed());
+            assertEquals("", after.mode());
+            assertFalse(service.clearNetFault().cleared());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /** Clearing a running fault reports it as running, not armed. */
+    @Test
+    void clearingARunningFaultSaysItWasNotArmed() {
+        CoopNetService service = new CoopNetService(() -> 1_000L);
+        try {
+            service.applyNetFault(CoopNetFault.Mode.DISCARD, 40, 0);
+
+            CoopNetService.NetFaultClear cleared = service.clearNetFault();
+            assertTrue(cleared.cleared());
+            assertFalse(cleared.wasArmed());
         } finally {
             service.shutdown();
         }

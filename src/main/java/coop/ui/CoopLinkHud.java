@@ -55,6 +55,13 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
 
     private static final Color TEXT_COLOR = new Color(200, 200, 200);
     private static final Color PAUSED_COLOR = new Color(255, 215, 120);
+    /**
+     * The {@code netfault} countdown line. Deliberately a harder orange than {@link #PAUSED_COLOR}:
+     * a paused world is normal and this is not, and the two lines are adjacent, so the same amber for
+     * both would let a tester read the warning as a pause and miss the outage they scheduled. Matches
+     * the feed's "bad" colour, which is what carries the same two events into the intel log.
+     */
+    private static final Color NET_FAULT_COLOR = new Color(255, 170, 90);
 
     private final CoopNetPump pump;
     /**
@@ -79,6 +86,8 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     private String cachedBadge = CoopHudState.BADGE_COOP;
     private String cachedLine = "";
     private boolean cachedPaused;
+    /** The 0.1.1 netfault countdown, or {@code ""} when no fault is armed or running. */
+    private String cachedNetFaultLine = "";
 
     private CoopLinkHud(CoopNetPump pump, CoopHudCorner corner) {
         this.pump = pump;
@@ -168,23 +177,49 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         }
 
         refreshIfDue(sector);
-        if (hiddenByOption || cachedLine.isEmpty()) {
+        if (hiddenByOption || (cachedLine.isEmpty() && cachedNetFaultLine.isEmpty())) {
             return;
         }
 
         float screenWidth = Global.getSettings().getScreenWidth();
         float screenHeight = Global.getSettings().getScreenHeight();
-        float badgeWidth = font.width(cachedBadge);
-        float totalWidth = font.width(cachedLine);
-        HudAnchor anchor = anchor(corner, screenWidth, screenHeight, totalWidth, font.lineHeight());
-        float x = anchor.x();
-        float y = anchor.y();
+        float lineHeight = font.lineHeight();
+        float y = 0f;
+        if (!cachedLine.isEmpty()) {
+            float badgeWidth = font.width(cachedBadge);
+            float totalWidth = font.width(cachedLine);
+            HudAnchor anchor = anchor(corner, screenWidth, screenHeight, totalWidth, lineHeight);
+            float x = anchor.x();
+            y = anchor.y();
 
-        // Two draws so the badge keeps the player colour while the rest carries the pause state.
-        // formatLine always leads with the badge, so this split is exact.
-        String remainder = cachedLine.substring(Math.min(cachedBadge.length(), cachedLine.length()));
-        font.draw(cachedBadge, x, y, badgeColor());
-        font.draw(remainder, x + badgeWidth, y, cachedPaused ? PAUSED_COLOR : TEXT_COLOR);
+            // Two draws so the badge keeps the player colour while the rest carries the pause state.
+            // formatLine always leads with the badge, so this split is exact.
+            String remainder = cachedLine.substring(Math.min(cachedBadge.length(), cachedLine.length()));
+            font.draw(cachedBadge, x, y, badgeColor());
+            font.draw(remainder, x + badgeWidth, y, cachedPaused ? PAUSED_COLOR : TEXT_COLOR);
+        }
+
+        if (!cachedNetFaultLine.isEmpty()) {
+            // Its own row, never the link line's: the whole reason it exists is to be read at a
+            // glance, and a warning drawn over the readout it is warning about is worse than none.
+            float faultWidth = font.width(cachedNetFaultLine);
+            HudAnchor faultAnchor = anchor(corner, screenWidth, screenHeight, faultWidth, lineHeight);
+            float faultY = cachedLine.isEmpty() ? faultAnchor.y() : secondRowY(corner, y, lineHeight);
+            font.draw(cachedNetFaultLine, faultAnchor.x(), faultY, NET_FAULT_COLOR);
+        }
+    }
+
+    /**
+     * Where the second line's top edge goes, given the first line's. Top corners stack downward and
+     * bottom corners stack upward, so the second row grows away from the screen edge in both cases
+     * and neither line ever lands on the other.
+     *
+     * <p>Pure and GL-free, like {@link #anchor}, so the stacking is unit-testable.
+     */
+    static float secondRowY(CoopHudCorner corner, float firstRowY, float lineHeight) {
+        CoopHudCorner effective = corner == null ? CoopHudCorner.DEFAULT : corner;
+        boolean top = effective == CoopHudCorner.TOP_LEFT || effective == CoopHudCorner.TOP_RIGHT;
+        return top ? firstRowY - lineHeight : firstRowY + lineHeight;
     }
 
     /**
@@ -228,6 +263,8 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         cachedBadge = state.roleBadge();
         cachedPaused = state.paused();
         cachedLine = CoopHudState.formatLine(state, separator);
+        // 100 ms is well inside a one-second countdown step, so the armed line never skips a number.
+        cachedNetFaultLine = CoopHudState.formatNetFaultLine(state);
     }
 
     /**

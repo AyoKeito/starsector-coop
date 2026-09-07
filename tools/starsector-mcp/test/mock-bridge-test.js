@@ -1027,11 +1027,37 @@ test('expedition is an action verb, passed through with its optional factionId',
 });
 
 test('netfault is an action verb on either instance, and its refusals are the mod\'s', async (t) => {
-  const started = { mode: 'discard', endsAtMillis: 1_700_000_040_000, remainingSeconds: 40 };
+  const started = {
+    mode: 'discard',
+    endsAtMillis: 1_700_000_040_000,
+    remainingSeconds: 40,
+    armed: false,
+    startsInSeconds: 0
+  };
+  // The 0.1.1 armed shape: the window is shifted by the delay, but the outage it promises is still
+  // the 40 s that was asked for.
+  const armed = {
+    mode: 'discard',
+    endsAtMillis: 1_700_000_045_000,
+    remainingSeconds: 40,
+    armed: true,
+    startsInSeconds: 5
+  };
   const respond = (request) => {
     if (request.cmd !== 'netfault') return { ok: false, error: 'IllegalArgumentException: unknown command' };
-    if (request.args.mode === 'clear') return { ok: true, data: { mode: 'clear', cleared: true } };
-    if (request.args.mode === 'discard') return { ok: true, data: started };
+    if (request.args.mode === 'clear') {
+      return { ok: true, data: { mode: 'clear', cleared: true, wasArmed: false } };
+    }
+    if (request.args.mode === 'discard') {
+      if (request.args.delaySeconds > 60 || request.args.delaySeconds < 0) {
+        return {
+          ok: false,
+          error: 'IllegalArgumentException: delaySeconds must be between 0 and 60, got '
+            + request.args.delaySeconds
+        };
+      }
+      return { ok: true, data: request.args.delaySeconds ? armed : started };
+    }
     return {
       ok: false,
       error: 'IllegalArgumentException: netfault mode must be discard|loss|clear, got sever'
@@ -1056,13 +1082,26 @@ test('netfault is an action verb on either instance, and its refusals are the mo
 
   assert.deepEqual(await ssAct(bridges, 'host', 'netfault', { mode: 'clear' }), {
     mode: 'clear',
-    cleared: true
+    cleared: true,
+    wasArmed: false
   });
 
-  // Duration and mode validation is the mod's: the server relays the refusal rather than pre-judging.
+  // 0.1.1 arming: delaySeconds rides through untouched, and the armed reading comes back whole.
+  assert.deepEqual(
+    await ssAct(bridges, 'host', 'netfault', { mode: 'discard', seconds: 40, delaySeconds: 5 }),
+    armed
+  );
+  assert.deepEqual(hostBridge.requests.at(-1).args, { mode: 'discard', seconds: 40, delaySeconds: 5 });
+
+  // Duration, mode and delay validation is all the mod's: the server relays the refusal rather than
+  // pre-judging any of it.
   await assert.rejects(
     () => ssAct(bridges, 'host', 'netfault', { mode: 'sever', seconds: 40 }),
     /must be discard\|loss\|clear/
+  );
+  await assert.rejects(
+    () => ssAct(bridges, 'host', 'netfault', { mode: 'discard', seconds: 40, delaySeconds: 61 }),
+    /delaySeconds must be between 0 and 60, got 61/
   );
   await assert.rejects(() => ssDump(bridges, 'host', 'netfault', {}), /unknown query verb "netfault"/);
 });

@@ -34,6 +34,14 @@ public final class CoopNetFault {
      */
     public static final int MAX_SECONDS = 180;
 
+    /**
+     * Hard cap on the <em>arming</em> delay. A minute is long enough to leave a menu, close a dialog
+     * and be back on the campaign map before the outage lands, and short enough that a fault armed
+     * and then forgotten still fires inside the smoke step that asked for it rather than during the
+     * next one.
+     */
+    public static final int MAX_DELAY_SECONDS = 60;
+
     /** What an active fault does to inbound traffic. */
     public enum Mode {
         /** Read and throw away every inbound byte, TCP and UDP alike. */
@@ -50,16 +58,20 @@ public final class CoopNetFault {
     private final Mode mode;
     private final int seconds;
     private final int lossPercent;
+    private final long startsAtMillis;
     private final long endsAtMillis;
 
     private long discardedBytes;
     private long droppedDatagrams;
+    /** Latched by {@link #announceStart}, so the armed-to-active flip is logged once, not per poll. */
+    private boolean startAnnounced;
 
-    private CoopNetFault(Mode mode, int seconds, int lossPercent, long nowMillis) {
+    private CoopNetFault(Mode mode, int seconds, int lossPercent, int delaySeconds, long nowMillis) {
         this.mode = mode;
         this.seconds = seconds;
         this.lossPercent = lossPercent;
-        this.endsAtMillis = nowMillis + seconds * 1000L;
+        this.startsAtMillis = nowMillis + delaySeconds * 1000L;
+        this.endsAtMillis = this.startsAtMillis + seconds * 1000L;
     }
 
     /**
@@ -67,15 +79,41 @@ public final class CoopNetFault {
      *                clamped duration would silently answer a different question than the one asked
      */
     public static CoopNetFault discard(long nowMillis, int seconds) {
-        return new CoopNetFault(Mode.DISCARD, requireSeconds(seconds), 0, nowMillis);
+        return discard(nowMillis, seconds, 0);
+    }
+
+    /**
+     * @param delaySeconds 0..{@link #MAX_DELAY_SECONDS}. Above zero the fault is <em>armed</em>: it
+     *                     exists, it is reported, and it does nothing to traffic until the delay
+     *                     elapses. This is for the human at the two game windows — an outage that
+     *                     lands while they are still in a menu proves nothing, so the fault announces
+     *                     itself first and the HUD counts it down
+     */
+    public static CoopNetFault discard(long nowMillis, int seconds, int delaySeconds) {
+        return new CoopNetFault(Mode.DISCARD, requireSeconds(seconds), 0,
+                requireDelaySeconds(delaySeconds), nowMillis);
     }
 
     /** @param lossPercent 1..100; 0 is refused because "a fault that does nothing" is never wanted */
     public static CoopNetFault loss(long nowMillis, int seconds, int lossPercent) {
+        return loss(nowMillis, seconds, lossPercent, 0);
+    }
+
+    /** @param delaySeconds 0..{@link #MAX_DELAY_SECONDS}; see {@link #discard(long, int, int)} */
+    public static CoopNetFault loss(long nowMillis, int seconds, int lossPercent, int delaySeconds) {
         if (lossPercent < 1 || lossPercent > 100) {
             throw new IllegalArgumentException("lossPercent must be between 1 and 100, got " + lossPercent);
         }
-        return new CoopNetFault(Mode.LOSS, requireSeconds(seconds), lossPercent, nowMillis);
+        return new CoopNetFault(Mode.LOSS, requireSeconds(seconds), lossPercent,
+                requireDelaySeconds(delaySeconds), nowMillis);
+    }
+
+    private static int requireDelaySeconds(int delaySeconds) {
+        if (delaySeconds < 0 || delaySeconds > MAX_DELAY_SECONDS) {
+            throw new IllegalArgumentException("delaySeconds must be between 0 and "
+                    + MAX_DELAY_SECONDS + ", got " + delaySeconds);
+        }
+        return delaySeconds;
     }
 
     private static int requireSeconds(int seconds) {
@@ -99,6 +137,11 @@ public final class CoopNetFault {
         return lossPercent;
     }
 
+    /** When the outage begins. Equal to the request instant unless a delay armed it. */
+    public long startsAtMillis() {
+        return startsAtMillis;
+    }
+
     public long endsAtMillis() {
         return endsAtMillis;
     }
@@ -116,15 +159,60 @@ public final class CoopNetFault {
         return nowMillis >= endsAtMillis;
     }
 
-    /** Whole seconds left, floored at zero, which is what the bridge reports. */
+    /**
+     * True while the fault exists but has not begun. An armed fault touches nothing — it is a
+     * promise with a countdown, and the countdown is the whole point of arming one.
+     */
+    public boolean armedAt(long nowMillis) {
+        return nowMillis < startsAtMillis;
+    }
+
+    /** True exactly while the fault is affecting traffic: started, and not yet expired. */
+    public boolean activeAt(long nowMillis) {
+        return !armedAt(nowMillis) && !expiredAt(nowMillis);
+    }
+
+    /**
+     * Whole seconds until the fault starts, rounded UP so a countdown never shows a number the
+     * player has already gone past: 4.2 s away reads 5, exactly 4.0 s away reads 4, and it reaches
+     * zero only once the fault is running. Zero for a fault that has already started.
+     */
+    public long startsInSeconds(long nowMillis) {
+        long remaining = startsAtMillis - nowMillis;
+        return remaining <= 0L ? 0L : (remaining + 999L) / 1000L;
+    }
+
+    /**
+     * Whole seconds of outage left, floored at zero, which is what the bridge reports.
+     *
+     * <p>While armed this is the full requested duration rather than the distance to
+     * {@link #endsAtMillis()}: none of the outage has run yet, and reporting "delay plus seconds"
+     * would claim a longer outage than the one that was asked for.
+     */
     public long remainingSeconds(long nowMillis) {
+        if (armedAt(nowMillis)) {
+            return seconds;
+        }
         long remaining = endsAtMillis - nowMillis;
         return remaining <= 0L ? 0L : (remaining + 999L) / 1000L;
     }
 
+    /**
+     * Latches the armed &rarr; active flip. Returns true exactly once, on the first call at or after
+     * the start instant, so a caller stepping this from a per-poll check logs the started line once
+     * instead of on every poll for the rest of the outage.
+     */
+    public boolean announceStart(long nowMillis) {
+        if (startAnnounced || armedAt(nowMillis)) {
+            return false;
+        }
+        startAnnounced = true;
+        return true;
+    }
+
     /** True while a discard fault is live. Loss mode leaves TCP alone by design. */
     public boolean shouldDiscardTcp(long nowMillis) {
-        return mode == Mode.DISCARD && !expiredAt(nowMillis);
+        return mode == Mode.DISCARD && activeAt(nowMillis);
     }
 
     /**
@@ -135,7 +223,7 @@ public final class CoopNetFault {
      * hears nothing, and a path probe that still echoed would keep the link looking healthy.
      */
     public boolean shouldDropDatagram(long nowMillis, Random random) {
-        if (expiredAt(nowMillis)) {
+        if (!activeAt(nowMillis)) {
             return false;
         }
         if (mode == Mode.DISCARD) {
@@ -166,5 +254,16 @@ public final class CoopNetFault {
             return "loss for " + seconds + " s (" + lossPercent + "% of inbound datagrams)";
         }
         return "discard for " + seconds + " s";
+    }
+
+    /**
+     * {@code "discard armed, starts in 5 s for 40 s"} — the warning line, logged when the fault is
+     * scheduled rather than when it lands. The loss fraction rides in the same place it does in
+     * {@link #describe}, so the two lines read alike.
+     */
+    public String describeArmed(long nowMillis) {
+        String tail = mode == Mode.LOSS ? " (" + lossPercent + "% of inbound datagrams)" : "";
+        return mode.wireName() + " armed, starts in " + startsInSeconds(nowMillis) + " s for "
+                + seconds + " s" + tail;
     }
 }

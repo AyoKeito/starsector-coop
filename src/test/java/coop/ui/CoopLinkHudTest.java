@@ -69,6 +69,46 @@ class CoopLinkHudTest {
         assertEquals(SCREEN_HEIGHT - CoopLinkHud.TOP_OFFSET, anchor.y());
     }
 
+    // ---- 0.1.1: the netfault line's row -----------------------------------------------------------
+
+    /**
+     * The second row grows away from the screen edge in every corner, so the netfault warning can
+     * never land on the link readout it is warning about. Top corners stack down, bottom corners
+     * stack up — in UI coordinates y is up, which is why the two signs differ.
+     */
+    @Test
+    void theSecondRowStacksAwayFromTheScreenEdgeInEveryCorner() {
+        float first = SCREEN_HEIGHT - CoopLinkHud.TOP_OFFSET;
+
+        assertEquals(first - TEXT_HEIGHT,
+                CoopLinkHud.secondRowY(CoopHudCorner.TOP_RIGHT, first, TEXT_HEIGHT));
+        assertEquals(first - TEXT_HEIGHT,
+                CoopLinkHud.secondRowY(CoopHudCorner.TOP_LEFT, first, TEXT_HEIGHT));
+
+        float bottomFirst = CoopLinkHud.BOTTOM_OFFSET + TEXT_HEIGHT;
+        assertEquals(bottomFirst + TEXT_HEIGHT,
+                CoopLinkHud.secondRowY(CoopHudCorner.BOTTOM_RIGHT, bottomFirst, TEXT_HEIGHT));
+        assertEquals(bottomFirst + TEXT_HEIGHT,
+                CoopLinkHud.secondRowY(CoopHudCorner.BOTTOM_LEFT, bottomFirst, TEXT_HEIGHT));
+    }
+
+    /** Whatever the corner, the rows are a full line height apart and never the same y. */
+    @Test
+    void theTwoRowsAreNeverAtTheSameHeight() {
+        for (CoopHudCorner corner : CoopHudCorner.values()) {
+            CoopLinkHud.HudAnchor anchor = CoopLinkHud.anchor(
+                    corner, SCREEN_WIDTH, SCREEN_HEIGHT, TEXT_WIDTH, TEXT_HEIGHT);
+            float second = CoopLinkHud.secondRowY(corner, anchor.y(), TEXT_HEIGHT);
+
+            assertEquals(TEXT_HEIGHT, Math.abs(second - anchor.y()), corner + " overlapped");
+        }
+    }
+
+    @Test
+    void aNullCornerStacksTheSecondRowLikeTopRight() {
+        assertEquals(100f - TEXT_HEIGHT, CoopLinkHud.secondRowY(null, 100f, TEXT_HEIGHT));
+    }
+
     // ---- the disable flag (red-team item 2) -----------------------------------------------------
 
     /** A store whose user-file layer holds {@code values} and whose command line holds nothing. */

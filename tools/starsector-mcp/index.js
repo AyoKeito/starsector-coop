@@ -126,11 +126,14 @@ const TOOLS = [
       'expedition{factionId?} (host only: forces a punitive expedition against a player colony), ' +
       'rep{factionId, value|points} (host only: sets the player faction\'s standing with factionId; ' +
       'value is -1..1 in API units, points is -100..100 as shown in the UI, exactly one is required), ' +
-      'netfault{mode: discard|loss|clear, seconds, lossPercent} (makes THIS instance stop hearing its ' +
-      'peer for seconds (1..180) so a link drop can be reproduced: discard throws away all inbound ' +
-      'bytes, loss drops lossPercent of inbound datagrams, clear ends it now; outbound is never ' +
-      'affected, so a symmetric outage is the verb on both instances, and ss_status carries a ' +
-      'netfault block while one is running), ' +
+      'netfault{mode: discard|loss|clear, seconds, lossPercent, delaySeconds} (makes THIS instance ' +
+      'stop hearing its peer for seconds (1..180) so a link drop can be reproduced: discard throws ' +
+      'away all inbound bytes, loss drops lossPercent of inbound datagrams, clear ends it now; ' +
+      'delaySeconds (0..60, default 0) ARMS the fault instead of starting it, which gives the human ' +
+      'at the two game windows a countdown on the HUD to get out of a menu first, and clear while ' +
+      'armed cancels it (wasArmed:true); outbound is never affected, so a symmetric outage is the ' +
+      'verb on both instances, and ss_status carries a netfault block with armed and ' +
+      'startsInSeconds while one is scheduled or running), ' +
       'save{force?} (takes this instance\'s own vanilla autosave, which fires the same beforeGameSave/' +
       'afterGameSave hooks an F5 does and therefore sends the guest its SAVE_CHECKPOINT; refused on ' +
       'the guest unless force:true, because a guest save the host did not order is aligned with no ' +
