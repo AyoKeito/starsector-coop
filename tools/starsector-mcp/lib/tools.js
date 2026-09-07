@@ -29,7 +29,8 @@ export const ACTION_VERBS = [
   'objective',
   'surveyset',
   'expedition',
-  'rep'
+  'rep',
+  'netfault'
 ];
 
 /**

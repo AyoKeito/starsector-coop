@@ -217,7 +217,7 @@ test('READ_ONLY_COMMANDS is exactly the ten read verbs and none of the mutations
     [...READ_ONLY_COMMANDS].sort(),
     ['barpool', 'cargo', 'colonizable', 'fleets', 'landmarks', 'market', 'markets', 'status', 'survey', 'visibility']
   );
-  for (const mutation of ['teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset', 'expedition']) {
+  for (const mutation of ['teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset', 'expedition', 'rep', 'netfault']) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
 });
@@ -1001,6 +1001,47 @@ test('expedition is an action verb, passed through with its optional factionId',
   // The host-only refusal is the mod's to make; the server must relay it rather than pre-judge it.
   await assert.rejects(() => ssAct(bridges, 'guest', 'expedition', {}), /host-only.*suppressed/s);
   await assert.rejects(() => ssDump(bridges, 'host', 'expedition', {}), /unknown query verb "expedition"/);
+});
+
+test('netfault is an action verb on either instance, and its refusals are the mod\'s', async (t) => {
+  const started = { mode: 'discard', endsAtMillis: 1_700_000_040_000, remainingSeconds: 40 };
+  const respond = (request) => {
+    if (request.cmd !== 'netfault') return { ok: false, error: 'IllegalArgumentException: unknown command' };
+    if (request.args.mode === 'clear') return { ok: true, data: { mode: 'clear', cleared: true } };
+    if (request.args.mode === 'discard') return { ok: true, data: started };
+    return {
+      ok: false,
+      error: 'IllegalArgumentException: netfault mode must be discard|loss|clear, got sever'
+    };
+  };
+  const hostBridge = new MockBridge(respond);
+  const guestBridge = new MockBridge(respond);
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssAct(bridges, 'host', 'netfault', { mode: 'discard', seconds: 40 }), started);
+  assert.deepEqual(hostBridge.requests[0].args, { mode: 'discard', seconds: 40 });
+
+  // No role gate: either side can be the one that goes deaf, and a symmetric outage is both.
+  assert.deepEqual(await ssAct(bridges, 'guest', 'netfault', { mode: 'discard', seconds: 40 }), started);
+
+  assert.deepEqual(await ssAct(bridges, 'host', 'netfault', { mode: 'clear' }), {
+    mode: 'clear',
+    cleared: true
+  });
+
+  // Duration and mode validation is the mod's: the server relays the refusal rather than pre-judging.
+  await assert.rejects(
+    () => ssAct(bridges, 'host', 'netfault', { mode: 'sever', seconds: 40 }),
+    /must be discard\|loss\|clear/
+  );
+  await assert.rejects(() => ssDump(bridges, 'host', 'netfault', {}), /unknown query verb "netfault"/);
 });
 
 test('addship is an action verb, relaying the count and the refusals the mod makes', async (t) => {

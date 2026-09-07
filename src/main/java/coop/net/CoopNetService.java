@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -271,6 +272,13 @@ public class CoopNetService {
      * because the largest UDP payload that exists is 65,507 bytes.
      */
     static final int MAX_INBOUND_DATAGRAM_BYTES = 4 * 1024;
+    /**
+     * Reads one poll may spend draining a {@link CoopNetFault.Mode#DISCARD} outage. The normal path's
+     * frame and byte budgets are deliberately untouched while discarding (they are inbound stats),
+     * so the drain needs its own bound: 64 reads of {@link #READ_BUFFER_BYTES} is far more than a
+     * session produces per frame and still a ceiling.
+     */
+    static final int MAX_DISCARD_READS_PER_POLL = 64;
 
     private final Queue<Inbound> inbound = new ConcurrentLinkedQueue<>();
     // High-frequency state datagrams (UDP). Kept separate from the reliable TCP control queues.
@@ -287,6 +295,12 @@ public class CoopNetService {
     /** Wall clock; injectable so keepalive and challenge timing are testable without sleeping. */
     private final LongSupplier clockMillis;
     private final SecureRandom nonceSource = new SecureRandom();
+    /**
+     * Loss sampling for {@link CoopNetFault}. Deliberately the cheap {@link Random}, not
+     * {@link SecureRandom}: this decides which debug datagram to throw away, and nothing about it is
+     * a secret.
+     */
+    private final Random faultRandom = new Random();
 
     /**
      * The peer table. Fixed length: slots are pre-created and reused rather than added and removed,
@@ -311,6 +325,8 @@ public class CoopNetService {
     private volatile boolean connected;
     private SocketChannel pendingConnectChannel;
     private DatagramChannel udpChannel;
+    /** The active debug outage, or null. Guarded by {@link #lifecycleLock} like every other poll state. */
+    private CoopNetFault netFault;
     private boolean noTokenWarned;
     private boolean tokenMismatchWarned;
     private boolean malformedDatagramWarned;
@@ -1406,10 +1422,99 @@ public class CoopNetService {
         }
     }
 
+    // ---- Debug net fault (bridge verb "netfault") ------------------------------------------------
+
+    /**
+     * What the bridge reports about the fault. {@code mode} is {@code ""} when none is active, so a
+     * caller reading the status block never has to distinguish null from absent.
+     */
+    public record NetFaultStatus(boolean active, String mode, long remainingSeconds, long endsAtMillis,
+                                 long discardedBytes, long droppedDatagrams) {
+        public static final NetFaultStatus INACTIVE = new NetFaultStatus(false, "", 0L, 0L, 0L, 0L);
+    }
+
+    /**
+     * Starts (or replaces) a deliberate inbound outage on this instance. See {@link CoopNetFault} for
+     * what each mode does and why outbound is deliberately left alone.
+     *
+     * @param mode        {@link CoopNetFault.Mode#DISCARD} or {@link CoopNetFault.Mode#LOSS}
+     * @param seconds     1..{@link CoopNetFault#MAX_SECONDS}
+     * @param lossPercent 1..100, ignored for discard
+     */
+    public NetFaultStatus applyNetFault(CoopNetFault.Mode mode, int seconds, int lossPercent) {
+        if (mode == null) {
+            throw new IllegalArgumentException("netfault needs a mode");
+        }
+        synchronized (lifecycleLock) {
+            long now = clockMillis.getAsLong();
+            CoopNetFault fault = mode == CoopNetFault.Mode.DISCARD
+                    ? CoopNetFault.discard(now, seconds)
+                    : CoopNetFault.loss(now, seconds, lossPercent);
+            // Built before the replacement is logged, so a refused duration leaves the running fault
+            // exactly as it was rather than ending it and then throwing.
+            CoopNetFault replaced = netFault;
+            netFault = fault;
+            if (replaced == null) {
+                CoopLog.info(CoopNetService.class, "Coop netfault " + fault.describe() + " started");
+            } else {
+                CoopLog.info(CoopNetService.class, "Coop netfault " + fault.describe()
+                        + " started, replacing the active " + replaced.mode().wireName() + " fault ("
+                        + replaced.describeCounters() + ")");
+            }
+            return statusOfLocked(fault, now);
+        }
+    }
+
+    /** @return true when a fault was actually running; false means there was nothing to clear */
+    public boolean clearNetFault() {
+        synchronized (lifecycleLock) {
+            CoopNetFault fault = netFault;
+            if (fault == null) {
+                return false;
+            }
+            netFault = null;
+            CoopLog.info(CoopNetService.class, "Coop netfault ended (" + fault.describeCounters() + ")");
+            return true;
+        }
+    }
+
+    /**
+     * The status block the {@code status} verb carries, so a fault someone forgot about can never be
+     * mistaken for a real defect. Expires a due fault on the way past, which is also what makes the
+     * counters final rather than still moving.
+     */
+    public NetFaultStatus netFaultStatus() {
+        synchronized (lifecycleLock) {
+            long now = clockMillis.getAsLong();
+            expireNetFaultLocked(now);
+            CoopNetFault fault = netFault;
+            return fault == null ? NetFaultStatus.INACTIVE : statusOfLocked(fault, now);
+        }
+    }
+
+    private NetFaultStatus statusOfLocked(CoopNetFault fault, long now) {
+        return new NetFaultStatus(true, fault.mode().wireName(), fault.remainingSeconds(now),
+                fault.endsAtMillis(), fault.discardedBytes(), fault.droppedDatagrams());
+    }
+
+    /**
+     * Ends a fault whose time is up. Called from the head of every poll rather than only from the
+     * status verb, so the outage really does heal by itself with nobody watching — that is the whole
+     * reason it has a duration instead of an on/off switch.
+     */
+    private void expireNetFaultLocked(long now) {
+        CoopNetFault fault = netFault;
+        if (fault != null && fault.expiredAt(now)) {
+            netFault = null;
+            CoopLog.info(CoopNetService.class, "Coop netfault ended (" + fault.describeCounters() + ")");
+        }
+    }
+
     private void pollNetworkLocked() {
         // Deliberately no budget reset here: the frame and byte budgets are per campaign frame and
         // are reset by beginFrame(). Resetting per poll made them per drain batch, which is not a
         // bound at all - see beginFrame().
+        expireNetFaultLocked(clockMillis.getAsLong());
         try {
             acceptHostConnectionLocked();
             progressGuestConnectionLocked();
@@ -1495,6 +1600,8 @@ public class CoopNetService {
         if (channel == null) {
             return;
         }
+        CoopNetFault fault = netFault;
+        long faultNow = fault == null ? 0L : clockMillis.getAsLong();
         int received = 0;
         while (received < MAX_DATAGRAMS_PER_POLL) {
             SocketAddress source;
@@ -1515,6 +1622,13 @@ public class CoopNetService {
                 return;
             }
             received++;
+            // Before anything is read out of the buffer or learned from the source: a dropped
+            // datagram must leave no trace in the peer's clocks, counters or address tables. The
+            // receive loop stays bounded by the same MAX_DATAGRAMS_PER_POLL as always.
+            if (fault != null && fault.shouldDropDatagram(faultNow, faultRandom)) {
+                fault.noteDroppedDatagram();
+                continue;
+            }
             if (datagramBuffer.position() > MAX_INBOUND_DATAGRAM_BYTES) {
                 // Red-team A5/A15: replaces a truncated-buffer check that could never fire (no UDP
                 // payload reaches 64 KB). Everything this transport composes is under 1200 bytes, so
@@ -2328,6 +2442,12 @@ public class CoopNetService {
             return;
         }
 
+        CoopNetFault fault = netFault;
+        if (fault != null && fault.shouldDiscardTcp(clockMillis.getAsLong())) {
+            discardInboundLocked(peer, channel, fault);
+            return;
+        }
+
         // Hoisted out of the byte loop: these used to be two allocations per received byte.
         java.util.function.Consumer<String> frameSink = frame -> handleFrame(peer, frame);
         Runnable oversized = () -> noteOversizedFrameLocked(peer);
@@ -2381,6 +2501,46 @@ public class CoopNetService {
                 }
             }
 
+            if (read < 0) {
+                closeLinkLocked(peer);
+            }
+        } catch (Exception ex) {
+            CoopLog.warn(CoopNetService.class, "Coop TCP polling failed", ex);
+            closeLinkLocked(peer);
+        }
+    }
+
+    /**
+     * The {@link CoopNetFault.Mode#DISCARD} half of {@link #readAvailableLocked}: take the peer's
+     * bytes off the socket and throw them away.
+     *
+     * <p>Draining rather than simply not reading is the point. Leaving the bytes in the kernel buffer
+     * would fill the receive window and stall the <em>sender</em>, which is a different failure; the
+     * one being reproduced is "the sender's stack considers it delivered and the receiver never
+     * applied it", so the sender must see every write complete.
+     *
+     * <p>Nothing but the fault's byte counter moves: no {@link CoopPeerLink#noteInboundBytes} (that is
+     * the silence clock the 15 s link-death rule reads), no frame or byte budget, no framer. Any
+     * bytes a previous poll parked go the same way — replaying half a stream after the fault ends
+     * would only produce garbage frames. EOF and exceptions behave exactly as the normal path does.
+     */
+    private void discardInboundLocked(CoopPeerLink peer, SocketChannel channel, CoopNetFault fault) {
+        ByteBuffer deferred = peer.deferredInbound();
+        if (deferred != null) {
+            fault.noteDiscardedBytes(deferred.remaining());
+            peer.deferInbound(null);
+        }
+        try {
+            int read;
+            int passes = 0;
+            do {
+                readBuffer.clear();
+                read = channel.read(readBuffer);
+                if (read > 0) {
+                    fault.noteDiscardedBytes(read);
+                }
+                passes++;
+            } while (read > 0 && passes < MAX_DISCARD_READS_PER_POLL);
             if (read < 0) {
                 closeLinkLocked(peer);
             }

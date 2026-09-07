@@ -48,7 +48,9 @@ import coop.fleet.CoopNpcFleetReplicator;
 import coop.fleet.CoopPresenceIndicator;
 import coop.fleet.CoopSensorSync;
 import coop.net.CoopConnectionRole;
+import coop.net.CoopNetFault;
 import coop.net.CoopNetPump;
+import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.util.CoopLog;
@@ -227,6 +229,7 @@ public final class CoopAgentCommands {
         map.put("surveyset", CoopAgentCommands::surveyset);
         map.put("expedition", CoopAgentCommands::expedition);
         map.put("rep", CoopAgentCommands::rep);
+        map.put("netfault", CoopAgentCommands::netfault);
         return map;
     }
 
@@ -278,6 +281,29 @@ public final class CoopAgentCommands {
         // Phase 32 addition B: the credit-transfer ledgers, so a money smoke can be verified from
         // outside the game. Pass a "ledgerId" argument to ask about one specific grant.
         out.put("credits", creditsBlock(optionalString(args, "ledgerId")));
+        // 0.1.1: always present, so a netfault someone forgot to clear can never be read as a bug.
+        out.put("netfault", netFaultBlock(netFaultStatusOf(pump)));
+        return out;
+    }
+
+    /** {@link CoopNetService.NetFaultStatus#INACTIVE} when there is no transport to ask. */
+    static CoopNetService.NetFaultStatus netFaultStatusOf(CoopNetPump pump) {
+        CoopNetService service = pump == null ? null : pump.netServiceForBridge();
+        return service == null ? CoopNetService.NetFaultStatus.INACTIVE : service.netFaultStatus();
+    }
+
+    /**
+     * The state of the {@code netfault} verb's deliberate outage on this instance. Reported on every
+     * {@code status} on purpose: a fault is invisible from the outside — it looks exactly like a dead
+     * link — so the one place a smoke run always looks has to say whether one is running.
+     */
+    static JSONObject netFaultBlock(CoopNetService.NetFaultStatus status) throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("active", status.active());
+        out.put("mode", status.mode());
+        out.put("remainingSeconds", status.remainingSeconds());
+        out.put("discardedBytes", status.discardedBytes());
+        out.put("droppedDatagrams", status.droppedDatagrams());
         return out;
     }
 
@@ -2135,6 +2161,89 @@ public final class CoopAgentCommands {
             throw new IllegalStateException("rep is host-only: standings are host-authoritative and the"
                     + " next PLAYER_REP_SNAPSHOT would overwrite a guest edit");
         }
+    }
+
+    // ---- netfault: a deliberate inbound outage on this instance -----------------------------------
+
+    /**
+     * Makes <em>this</em> instance stop hearing its peer for a while, so a link drop can be
+     * reproduced on demand without freezing a JVM from outside.
+     *
+     * <p><b>What it reproduces.</b> The 0.1.1 loss — bytes the sender's TCP stack considers delivered
+     * that the receiver never applied — is what the reliable-delivery layer (RELIABLE_ACK plus the
+     * unacked replay) exists to heal. Suspending the peer process does not produce it: that stops the
+     * peer from sending. Going deaf here does. See {@link CoopNetFault} for the mechanics.
+     *
+     * <p><b>Modes.</b> {@code discard} throws away every inbound byte, TCP and UDP; {@code loss}
+     * drops {@code lossPercent} of inbound datagrams and leaves TCP alone; {@code clear} ends an
+     * active fault now. {@code seconds} is 1..{@link CoopNetFault#MAX_SECONDS} and the fault expires
+     * by itself, so a forgotten one heals.
+     *
+     * <p><b>Outbound is never touched, in any mode.</b> This side keeps writing and the peer keeps
+     * hearing it, which is what makes the sender believe it delivered. A <em>symmetric</em> outage is
+     * this verb run on both instances.
+     *
+     * <p>Works on host and guest alike: both sides own the same transport and either can be the one
+     * that goes deaf. Arguments are validated before the transport is looked up, so a malformed
+     * request is refused for what is wrong with it rather than for the session it was aimed at.
+     */
+    static JSONObject netfault(JSONObject args, Context context) throws JSONException {
+        String mode = requiredString(args, "mode").toLowerCase(Locale.ROOT);
+        JSONObject out = new JSONObject();
+        if ("clear".equals(mode)) {
+            out.put("mode", "clear");
+            out.put("cleared", requireTransport(context).clearNetFault());
+            return out;
+        }
+
+        CoopNetFault.Mode faultMode = switch (mode) {
+            case "discard" -> CoopNetFault.Mode.DISCARD;
+            case "loss" -> CoopNetFault.Mode.LOSS;
+            default -> throw new IllegalArgumentException(
+                    "netfault mode must be discard|loss|clear, got " + mode);
+        };
+        if (!args.has("seconds")) {
+            throw new IllegalArgumentException("netfault " + mode + " needs {\"seconds\": 1.."
+                    + CoopNetFault.MAX_SECONDS + "}");
+        }
+        int seconds = optionalInt(args, "seconds", 0);
+        if (seconds < 1 || seconds > CoopNetFault.MAX_SECONDS) {
+            throw new IllegalArgumentException("seconds must be between 1 and "
+                    + CoopNetFault.MAX_SECONDS + ", got " + seconds);
+        }
+        int lossPercent = 0;
+        if (faultMode == CoopNetFault.Mode.LOSS) {
+            if (!args.has("lossPercent")) {
+                throw new IllegalArgumentException("netfault loss needs {\"lossPercent\": 1..100}");
+            }
+            lossPercent = optionalInt(args, "lossPercent", 0);
+            if (lossPercent < 1 || lossPercent > 100) {
+                throw new IllegalArgumentException("lossPercent must be between 1 and 100, got "
+                        + lossPercent);
+            }
+        }
+
+        CoopNetService.NetFaultStatus status =
+                requireTransport(context).applyNetFault(faultMode, seconds, lossPercent);
+        out.put("mode", status.mode());
+        out.put("endsAtMillis", status.endsAtMillis());
+        out.put("remainingSeconds", status.remainingSeconds());
+        if (faultMode == CoopNetFault.Mode.LOSS) {
+            out.put("lossPercent", lossPercent);
+        }
+        return out;
+    }
+
+    /** A fault only means anything against a running transport; with none, say so rather than no-op. */
+    private static CoopNetService requireTransport(Context context) {
+        CoopNetPump pump = context == null ? null : context.pump();
+        CoopNetService service = pump == null ? null : pump.netServiceForBridge();
+        if (service == null || service.role() == CoopConnectionRole.NONE) {
+            throw new IllegalStateException("netfault needs a running coop transport; this instance has"
+                    + " no session (role " + (service == null ? "NONE, no pump installed"
+                    : service.role().name()) + ")");
+        }
+        return service;
     }
 
     // ---- expedition: forcing the Phase 24 milestone-3 warning ------------------------------------

@@ -195,8 +195,9 @@ class CoopAgentCommandsTest {
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
                 java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "expedition",
-                        "fleets", "give", "landmarks", "market", "markets", "objective", "pause", "rep",
-                        "setcr", "status", "survey", "surveyset", "teleport", "visibility"),
+                        "fleets", "give", "landmarks", "market", "markets", "netfault", "objective",
+                        "pause", "rep", "setcr", "status", "survey", "surveyset", "teleport",
+                        "visibility"),
                 new CoopAgentCommands().verbs());
     }
 
@@ -281,6 +282,100 @@ class CoopAgentCommandsTest {
         assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
                 "the verb must be wired; without a sector it refuses for the same reason every"
                         + " other verb does");
+    }
+
+    // ---- netfault --------------------------------------------------------------------------------
+
+    /**
+     * Unlike every other verb, {@code netfault} has nothing to do with the campaign — it acts on the
+     * transport. Without one it must say so, rather than pretending it armed a fault that will never
+     * fire.
+     */
+    @Test
+    void netfaultWithoutATransportRefusesByName() throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+
+        JSONObject response = new JSONObject(commands.dispatch(
+                "{\"id\":20,\"cmd\":\"netfault\",\"args\":{\"mode\":\"discard\",\"seconds\":40}}",
+                EMPTY_CONTEXT));
+
+        assertFalse(response.getBoolean("ok"));
+        assertTrue(response.getString("error").startsWith("IllegalStateException: netfault needs a"
+                + " running coop transport"), response.getString("error"));
+    }
+
+    @Test
+    void netfaultClearAlsoNeedsATransportRatherThanReportingAnEmptyClear() throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+
+        JSONObject response = new JSONObject(
+                commands.dispatch("{\"id\":21,\"cmd\":\"netfault\",\"args\":{\"mode\":\"clear\"}}",
+                        EMPTY_CONTEXT));
+
+        assertFalse(response.getBoolean("ok"));
+        assertTrue(response.getString("error").contains("running coop transport"),
+                response.getString("error"));
+    }
+
+    /**
+     * Argument validation runs before the transport lookup, so a malformed request is refused for
+     * what is wrong with it. Every one of these is a mistake a tester makes at 2am.
+     */
+    @Test
+    void netfaultRefusesMalformedRequestsBeforeItLooksForATransport() throws JSONException {
+        assertEquals("IllegalArgumentException: netfault mode must be discard|loss|clear, got sever",
+                errorOf("{\"mode\":\"sever\",\"seconds\":40}"));
+        assertEquals("IllegalArgumentException: missing required argument mode", errorOf("{}"));
+        assertEquals("IllegalArgumentException: netfault discard needs {\"seconds\": 1..180}",
+                errorOf("{\"mode\":\"discard\"}"));
+        assertEquals("IllegalArgumentException: seconds must be between 1 and 180, got 181",
+                errorOf("{\"mode\":\"discard\",\"seconds\":181}"));
+        assertEquals("IllegalArgumentException: seconds must be between 1 and 180, got 0",
+                errorOf("{\"mode\":\"loss\",\"seconds\":0,\"lossPercent\":50}"));
+        assertEquals("IllegalArgumentException: netfault loss needs {\"lossPercent\": 1..100}",
+                errorOf("{\"mode\":\"loss\",\"seconds\":30}"));
+        assertEquals("IllegalArgumentException: lossPercent must be between 1 and 100, got 0",
+                errorOf("{\"mode\":\"loss\",\"seconds\":30,\"lossPercent\":0}"));
+        assertEquals("IllegalArgumentException: lossPercent must be between 1 and 100, got 101",
+                errorOf("{\"mode\":\"loss\",\"seconds\":30,\"lossPercent\":101}"));
+    }
+
+    /** Mixed case is a typo, not a different verb. */
+    @Test
+    void netfaultModeIsCaseInsensitive() throws JSONException {
+        assertTrue(errorOf("{\"mode\":\"DISCARD\",\"seconds\":40}").contains("running coop transport"),
+                "a recognized mode gets as far as the transport check");
+    }
+
+    /**
+     * The {@code status} block a forgotten fault has to show up in. Shape first: every field is
+     * always present, so a smoke script never has to distinguish "no fault" from "old mod build".
+     */
+    @Test
+    void theStatusNetFaultBlockAlwaysCarriesEveryField() throws JSONException {
+        JSONObject idle = CoopAgentCommands.netFaultBlock(CoopAgentCommands.netFaultStatusOf(null));
+
+        assertFalse(idle.getBoolean("active"));
+        assertEquals("", idle.getString("mode"));
+        assertEquals(0L, idle.getLong("remainingSeconds"));
+        assertEquals(0L, idle.getLong("discardedBytes"));
+        assertEquals(0L, idle.getLong("droppedDatagrams"));
+
+        JSONObject running = CoopAgentCommands.netFaultBlock(
+                new coop.net.CoopNetService.NetFaultStatus(true, "discard", 37L, 1_234L, 8_192L, 3L));
+
+        assertTrue(running.getBoolean("active"));
+        assertEquals("discard", running.getString("mode"));
+        assertEquals(37L, running.getLong("remainingSeconds"));
+        assertEquals(8_192L, running.getLong("discardedBytes"));
+        assertEquals(3L, running.getLong("droppedDatagrams"));
+    }
+
+    private static String errorOf(String argsJson) throws JSONException {
+        JSONObject response = new JSONObject(new CoopAgentCommands().dispatch(
+                "{\"id\":22,\"cmd\":\"netfault\",\"args\":" + argsJson + "}", EMPTY_CONTEXT));
+        assertFalse(response.getBoolean("ok"), argsJson + " should have been refused");
+        return response.getString("error");
     }
 
     private static CoopAgentCommands registryOf(String verb, CoopAgentCommands.Handler handler) {

@@ -2590,4 +2590,211 @@ class CoopNetServiceTest {
             host.shutdown();
         }
     }
+
+    // ---- 0.1.1: the netfault debug outage ---------------------------------------------------------
+
+    /**
+     * The defect the reliable-delivery layer exists to heal, on demand: the guest writes a frame, its
+     * socket takes every byte, and the receiver never applies it. That is what a link drop actually
+     * costs — not "the peer stopped sending", which is what freezing the peer process produces.
+     *
+     * <p>After the fault is cleared the same link carries the next message, which is what makes the
+     * verb usable twice in one smoke run.
+     */
+    @Test
+    void aDiscardFaultSwallowsTheFramesTheSenderBelievesItDelivered() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+            host.applyNetFault(CoopNetFault.Mode.DISCARD, 60, 0);
+
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1_000L));
+            waitUntil(() -> {
+                guest.flushOutbound();
+                host.flushOutbound();
+                return guest.outboundQueueDepth() == 0 && guest.outboundIdle();
+            }, "the guest's socket took the whole frame");
+
+            // Every chance the host would have had to frame it, spent.
+            for (int i = 0; i < 40; i++) {
+                guest.flushOutbound();
+                host.beginFrame();
+                host.flushOutbound();
+                assertNull(host.pollInbound(), "a discarded frame must never reach the dispatch");
+                Thread.sleep(5L);
+            }
+            CoopNetService.NetFaultStatus during = host.netFaultStatus();
+            assertTrue(during.active());
+            assertEquals("discard", during.mode());
+            assertTrue(during.discardedBytes() > 0L,
+                    "the bytes were read off the socket and thrown away, not left in the kernel");
+
+            assertTrue(host.clearNetFault(), "the fault was running, so clearing it did something");
+            assertFalse(host.netFaultStatus().active());
+            assertFalse(host.clearNetFault(), "clearing twice is not an error, it is a no-op");
+
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 2_000L));
+            CoopMessages.Message afterClear = waitForMessageWhilePollingGuest(guest, host,
+                    "the host hears the link again once the fault is cleared");
+            assertEquals(CoopMessages.Type.PING, afterClear.type());
+            assertEquals(2L, afterClear.seq(), "the frame lost to the fault is gone for good");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /**
+     * The rule that makes the fault a realistic outage rather than a half-alive link: link death is
+     * declared on ~15 s of inbound silence measured from the peer's last inbound bytes, so discarding
+     * must not refresh that stamp. If it did, the link would look healthy while applying nothing —
+     * a failure the transport has never actually had.
+     */
+    @Test
+    void aDiscardFaultDoesNotRefreshTheInboundSilenceClock() throws Exception {
+        int port = reserveLocalPort();
+        AtomicLong clock = new AtomicLong(500_000L);
+        CoopNetService host = new CoopNetService(clock::get);
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+            long attachedAt = host.peerForTest(0).lastInboundFrameAtMillis();
+
+            host.applyNetFault(CoopNetFault.Mode.DISCARD, 60, 0);
+            // Well past the 15 s silence rule, so a refreshed stamp would be unmissable.
+            clock.addAndGet(20_000L);
+
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1_000L));
+            waitUntil(() -> {
+                guest.flushOutbound();
+                host.flushOutbound();
+                return host.netFaultStatus().discardedBytes() > 0L;
+            }, "the host read and discarded the guest's frame");
+
+            assertEquals(attachedAt, host.peerForTest(0).lastInboundFrameAtMillis(),
+                    "discarded bytes are not inbound traffic: the silence clock must not move");
+            assertTrue(clock.get() - host.peerForTest(0).lastInboundFrameAtMillis() > 15_000L,
+                    "which is what lets the link die the ordinary way while the fault runs");
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /** Total loss: the UDP stream stops dead while TCP keeps carrying control traffic. */
+    @Test
+    void aTotalLossFaultDeliversNoDatagramAndLeavesTcpAlone() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        CoopNetService guest = new CoopNetService();
+        try {
+            startSession(host, guest, port);
+            host.applyNetFault(CoopNetFault.Mode.LOSS, 60, 100);
+
+            for (int i = 0; i < 8; i++) {
+                guest.sendDatagram(snapshot(GUEST_SENDER, 1L + i, "snapshot-" + i));
+            }
+            for (int i = 0; i < 40; i++) {
+                guest.flushOutbound();
+                host.flushOutbound();
+                assertNull(host.pollDatagram(), "100% loss must not let one datagram through");
+                Thread.sleep(5L);
+            }
+            CoopNetService.NetFaultStatus during = host.netFaultStatus();
+            assertEquals("loss", during.mode());
+            assertTrue(during.droppedDatagrams() >= 8L,
+                    "all eight were dropped, got " + during.droppedDatagrams());
+            assertEquals(0L, during.discardedBytes(), "loss mode never touches the TCP stream");
+
+            guest.send(CoopMessages.ping(null, guest.nextSeq(), 1_000L));
+            assertEquals(CoopMessages.Type.PING,
+                    waitForMessageWhilePollingGuest(guest, host, "TCP under a loss fault").type());
+
+            host.clearNetFault();
+            guest.sendDatagram(snapshot(GUEST_SENDER, 99L, "after-clear"));
+            assertEquals(snapshot(GUEST_SENDER, 99L, "after-clear"),
+                    waitForDatagram(host, "the datagram stream resumes after the fault", guest));
+        } finally {
+            guest.shutdown();
+            host.shutdown();
+        }
+    }
+
+    /** A second fault replaces the first outright; there is never more than one running. */
+    @Test
+    void startingAFaultWhileOneIsRunningReplacesIt() {
+        CoopNetService service = new CoopNetService(() -> 1_000L);
+        try {
+            service.applyNetFault(CoopNetFault.Mode.DISCARD, 40, 0);
+            CoopNetService.NetFaultStatus replacement =
+                    service.applyNetFault(CoopNetFault.Mode.LOSS, 10, 25);
+
+            assertEquals("loss", replacement.mode());
+            assertEquals(10L, replacement.remainingSeconds());
+            assertEquals(11_000L, replacement.endsAtMillis());
+            assertEquals("loss", service.netFaultStatus().mode(),
+                    "the discard is gone, not queued behind the loss");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /** A fault heals itself: nobody has to remember to clear it. */
+    @Test
+    void aFaultExpiresOnItsOwnAndStopsBeingReported() {
+        AtomicLong clock = new AtomicLong(1_000L);
+        CoopNetService service = new CoopNetService(clock::get);
+        try {
+            service.applyNetFault(CoopNetFault.Mode.DISCARD, 5, 0);
+            assertTrue(service.netFaultStatus().active());
+
+            clock.addAndGet(5_000L);
+
+            assertFalse(service.netFaultStatus().active(), "the fault expired on its own");
+            assertEquals("", service.netFaultStatus().mode());
+            assertFalse(service.clearNetFault(), "there is nothing left to clear");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /** The caps live in {@link CoopNetFault}; the service must not launder a bad duration. */
+    @Test
+    void aFaultOutsideTheCapsIsRefusedAndLeavesTheRunningOneAlone() {
+        CoopNetService service = new CoopNetService(() -> 1_000L);
+        try {
+            service.applyNetFault(CoopNetFault.Mode.DISCARD, 30, 0);
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.applyNetFault(CoopNetFault.Mode.DISCARD,
+                            CoopNetFault.MAX_SECONDS + 1, 0));
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.applyNetFault(CoopNetFault.Mode.LOSS, 30, 0));
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.applyNetFault(null, 30, 0));
+
+            CoopNetService.NetFaultStatus still = service.netFaultStatus();
+            assertEquals("discard", still.mode(), "a refused request must not end the running fault");
+            assertEquals(30L, still.remainingSeconds());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /** Drives the sending end while waiting on the receiving end's dispatch. */
+    private CoopMessages.Message waitForMessageWhilePollingGuest(CoopNetService guest,
+                                                                 CoopNetService host,
+                                                                 String description)
+            throws InterruptedException {
+        AtomicReference<CoopMessages.Message> message = new AtomicReference<>();
+        waitUntil(() -> {
+            guest.flushOutbound();
+            host.flushOutbound();
+            message.set(host.pollInbound());
+            return message.get() != null;
+        }, description);
+        return message.get();
+    }
 }
