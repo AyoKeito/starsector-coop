@@ -9,17 +9,33 @@ import java.util.Objects;
 /**
  * The host's full authoritative set of non-player campaign fleets, carried by the reliable TCP
  * {@code NPC_FLEET_SET} message (Phase 9). The whole set is rebroadcast whenever {@link #setHash()}
- * changes, and — since 2026-09-05 — also when {@link #computeHealthHash} changes, at most once every
- * {@code CoopNpcFleetReplicator.HEALTH_RESYNC_INTERVAL_MILLIS}; the guest reconciles against it
- * idempotently (add fleets present here but missing locally, dispose mirrors absent here). Full-set
- * rebroadcast is chosen for v1 because it is self-correcting (no add/remove delta ordering or
- * lost-packet bugs).
+ * changes, and — since 2026-09-05 — also when the rate-limited {@link #computeSoftHash} changes, at
+ * most once every {@code CoopNpcFleetReplicator.SOFT_RESYNC_INTERVAL_MILLIS}; the guest reconciles
+ * against it idempotently (add fleets present here but missing locally, dispose mirrors absent here).
+ * Full-set rebroadcast is chosen for v1 because it is self-correcting (no add/remove delta ordering or
+ * lost-packet bugs). There are exactly two send triggers and nothing here may add a third.
  *
  * <p>{@link #setHash()} is order-independent and folds in each fleet's identity, name, faction,
- * location, transponder state, roster ({@code fleetHash}) and action text
- * ({@code aiAssignmentSummary}) so it flips on spawn/despawn, rename, faction change, system jump,
- * transponder toggle, roster edit, or tooltip-text change — everything the 1 Hz set is the sole
- * carrier of and the guest must re-apply rather than merely interpolate.
+ * location, transponder state and roster ({@code fleetHash}), so it flips on spawn/despawn, rename,
+ * faction change, system jump, transponder toggle or roster edit — the changes the guest has to
+ * re-apply promptly rather than merely interpolate.
+ *
+ * <p><b>Revised 2026-09-13: cosmetic action text left the structural hash.</b> The tooltip line
+ * ({@code aiAssignmentSummary}) used to be folded in here, and it dominated the wire. Measured live
+ * on 2026-09-13: 291 structural sends against 8 health sends, with the full 33-fleet set going out
+ * once per second for minutes while the guest sat in a busy trade system — because somewhere in that
+ * system a fleet's line flipped from "returning to X" to "delivering Y to Z" on nearly every tick, and
+ * one fleet's cosmetic text was enough to re-send all 33. On loopback that is invisible; on a WAN link
+ * it is precisely the payload the Phase 20 diet was about. Action text now rides
+ * {@link #computeSoftHash}, which shares the health trigger's 10 s floor, so a text-only change costs
+ * at most one set per 10 s and no structural change is delayed by even a frame.
+ *
+ * <p><b>Name stays structural (decided 2026-09-13).</b> A fleet is named when it spawns and normally
+ * keeps that name for life; renames are rare events (inflation-time relabels, the {@code "Your
+ * &lt;name&gt;"} / partner labels) rather than per-tick status churn, so they were not part of the
+ * measured storm. Name is identity, it has no carrier other than this set (the guest's
+ * {@code refreshIdentity} only sees a rename when a set arrives), and holding it behind a 10 s floor
+ * would save nothing measurable while leaving a visibly stale label on the guest.
  *
  * <p>Transponder state is in the hash because it is the only place it travels: the 10 Hz
  * {@code NPC_FLEET_MOTION} datagram does not carry it, and on the guest a mirror's transponder flag is
@@ -46,20 +62,26 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
     }
 
     /**
-     * Order-independent hash over each fleet's identity/name/faction/location/transponder/roster/
-     * action text. Name and action text are in the hash for the same reason transponder state is: the
-     * 1 Hz set is their only carrier, and {@code sendSetIfChanged} only rebroadcasts when this hash
-     * moves — a rename (the 2026-08-19 identity fix) or a "traveling to X" → "pursuing Y" flip
-     * (Phase 9b) that does not flip the hash would sit on the host until an unrelated structural
-     * change happened to flush it.
+     * Order-independent hash over each fleet's identity/name/faction/location/transponder/roster —
+     * the fields whose change the guest must act on within the tick, not within ten seconds. Name is
+     * in the hash for the same reason transponder state is: the 1 Hz set is its only carrier, and
+     * {@code sendSetIfChanged} only rebroadcasts when this hash moves, so a rename (the 2026-08-19
+     * identity fix) that did not flip it would sit on the host until an unrelated structural change
+     * happened to flush it. Location is here because a change of it moves the mirror between systems.
+     *
+     * <p><b>Action text is deliberately absent since 2026-09-13</b> — see the class doc for the
+     * measurement. It is cosmetic tooltip prose that re-words itself several times a minute per fleet
+     * in a busy system, and while it was folded in here one fleet's re-wording re-sent the whole set.
+     * It moved to the rate-limited {@link #computeSoftHash} trigger, which puts the very same message
+     * on the wire at most once per {@code CoopNpcFleetReplicator.SOFT_RESYNC_INTERVAL_MILLIS}.
      *
      * <p><b>Health is deliberately absent</b> — CR and hull fraction are not in {@code fleetHash}
      * (see {@link CoopFleetSnapshot#computeFleetHash}) and so are not in this hash either, because a
      * flip here means the guest re-applies structure and the guest's freeze-release logic
      * ({@code CoopFleetMirrorRegistry}) reads {@code fleetHash} as "the ship set changed". Health
-     * reaches the guest through the separate, rate-limited {@link #computeHealthHash} trigger in
+     * reaches the guest through the same rate-limited {@link #computeSoftHash} trigger in
      * {@code CoopNpcFleetReplicator}, which sends the very same set message without disturbing the
-     * meaning of either structural hash.
+     * meaning of either hash.
      */
     public static String computeSetHash(List<CoopNpcFleetSnapshot> fleets) {
         List<String> records = new ArrayList<>();
@@ -67,8 +89,7 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
             for (CoopNpcFleetSnapshot fleet : fleets) {
                 records.add(fleet.coopFleetId() + "|" + fleet.factionId() + "|"
                         + fleet.locationId() + "|" + (fleet.transponderOn() ? "1" : "0")
-                        + "|" + fleet.fleetHash() + "|" + fleet.name()
-                        + "|" + fleet.aiAssignmentSummary());
+                        + "|" + fleet.fleetHash() + "|" + fleet.name());
             }
         }
         records.sort(null);
@@ -76,8 +97,35 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
     }
 
     /**
-     * Order-independent hash over every member's CR and hull fraction, bucketed to 5%. The second
-     * send trigger for {@code NPC_FLEET_SET}: {@link #computeSetHash} is structural on purpose, and
+     * The second and last send trigger for {@code NPC_FLEET_SET} (2026-09-13): everything the guest
+     * needs eventually but not promptly, folded into one hash so there is still exactly one
+     * rate-limited trigger behind {@code CoopNpcFleetReplicator.SOFT_RESYNC_INTERVAL_MILLIS}. Two
+     * things live here — member CR/hull in 5% buckets ({@link #computeHealthHash}) and each fleet's
+     * cosmetic action text — and they share the floor because they share the reason: neither is worth
+     * a full set at 1 Hz, and both are carried by nothing else on the wire.
+     *
+     * <p>A flip here decides only <em>whether to send</em>. The arriving set is structurally identical
+     * to the last one as far as the guest is concerned, and the receive path paints health onto the
+     * existing members ({@code CoopFleetMirror#updateMemberState}) and re-pins the action text
+     * ({@code CoopFleetMirror#applyActionText}, which runs on every snapshot, not only on hash change)
+     * without rebuilding a roster.
+     */
+    public static String computeSoftHash(List<CoopNpcFleetSnapshot> fleets) {
+        List<String> records = new ArrayList<>();
+        if (fleets != null) {
+            for (CoopNpcFleetSnapshot fleet : fleets) {
+                records.add(fleet.coopFleetId() + "|" + fleet.aiAssignmentSummary());
+            }
+        }
+        records.sort(null);
+        return CoopChecksum.sha256Text(
+                computeHealthHash(fleets) + "\n" + String.join("\n", records));
+    }
+
+    /**
+     * Order-independent hash over every member's CR and hull fraction, bucketed to 5%. The health
+     * half of the rate-limited {@link #computeSoftHash} trigger (it was that trigger outright until
+     * 2026-09-13, when action text joined it): {@link #computeSetHash} is structural on purpose, and
      * the 10 Hz {@code NPC_FLEET_MOTION} datagram carries neither CR nor hull, so before this existed
      * a fleet that repaired from 30% hull to full produced no wire traffic at all and the guest's
      * mirror showed the damage until some unrelated field of some fleet happened to move.

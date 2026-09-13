@@ -286,7 +286,7 @@ class CoopNpcFleetReplicatorTest {
     // ---- set send triggers -----------------------------------------------------------------------
 
     @Test
-    void aStructuralChangeSendsRegardlessOfTheHealthFloor() {
+    void aStructuralChangeSendsRegardlessOfTheSoftFloor() {
         // Phase 9's contract: spawn/despawn/rename/roster edits reconcile on arrival, and the guest's
         // post-battle freeze release waits on one. Rate-limiting those would be a regression.
         assertTrue(CoopNpcFleetReplicator.shouldSendSet(true, false, 0L, 10_000L));
@@ -294,7 +294,7 @@ class CoopNpcFleetReplicatorTest {
     }
 
     @Test
-    void aHealthOnlyChangeWaitsForTheFloorAndThenSends() {
+    void aSoftOnlyChangeWaitsForTheFloorAndThenSends() {
         assertFalse(CoopNpcFleetReplicator.shouldSendSet(false, true, 9_999L, 10_000L));
         assertTrue(CoopNpcFleetReplicator.shouldSendSet(false, true, 10_000L, 10_000L));
         assertTrue(CoopNpcFleetReplicator.shouldSendSet(false, true, 60_000L, 10_000L));
@@ -358,6 +358,39 @@ class CoopNpcFleetReplicatorTest {
                 "repair must never look like a roster change to the guest");
     }
 
+    /**
+     * The 2026-09-13 payload fix, end to end: a fleet whose only change is its tooltip action line.
+     * Before the split that string was in the structural hash, so one fleet re-wording "returning to
+     * X" into "delivering Y to Z" re-sent the whole set — measured live as 291 structural sends
+     * against 8 health sends, a 33-fleet set per second for minutes. It still has to reach the guest,
+     * so it rides the same rate-limited trigger health does.
+     */
+    @Test
+    void anActionTextOnlyChangeWaitsForTheFloorAndThenSends() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        MutableHealth health = new MutableHealth(1.0f, 1.0f);
+        String[] actionText = {"traveling to Jangala"};
+        SectorAPI sector = sectorWithOneDamagedFleet(health, actionText);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(sector, 0L);
+        assertEquals(1, service.sent.size(), "the first set is always structural");
+
+        actionText[0] = "delivering supplies to Jangala";
+        replicator.sendSetIfChanged(sector, 9_999L);
+        assertEquals(1, service.sent.size(),
+                "cosmetic text must not re-send the whole set at 1 Hz any more");
+
+        replicator.sendSetIfChanged(sector, 10_000L);
+        assertEquals(2, service.sent.size(), "past the floor the new line still has to reach the guest");
+        assertEquals("delivering supplies to Jangala",
+                decodeSet(service.sent.get(1)).fleets().get(0).aiAssignmentSummary());
+
+        // ...and the structural hash never moved, so the guest rebuilt no roster for a tooltip.
+        assertEquals(decodeSet(service.sent.get(0)).setHash(), decodeSet(service.sent.get(1)).setHash());
+    }
+
     /** The {@code set} blob out of an {@code NPC_FLEET_SET} payload. */
     private static CoopNpcFleetSetSnapshot decodeSet(CoopMessages.Message message) {
         return CoopNpcFleetSetSnapshot.decode(
@@ -383,6 +416,15 @@ class CoopNpcFleetReplicatorTest {
      * path is defensive about all of it, which is what makes a stub this narrow viable.
      */
     private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health) {
+        return sectorWithOneDamagedFleet(health, new String[]{""});
+    }
+
+    /**
+     * As above, with the fleet's tooltip action line under the caller's control. The stub has no
+     * {@code ModularFleetAI}, which is exactly the branch {@link CoopNpcActionTextCapture} resolves
+     * through {@code getNullAIActionText}, so one answer drives the captured text.
+     */
+    private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health, String[] actionText) {
         Object repairTracker = stub(RepairTrackerAPI.class, (name, args) ->
                 "getCR".equals(name) ? health.cr : null);
         Object status = stub(FleetMemberStatusAPI.class, (name, args) ->
@@ -406,6 +448,7 @@ class CoopNpcFleetReplicatorTest {
             case "getLocation" -> new Vector2f(100f, 200f);
             case "getVelocity" -> new Vector2f(0f, 0f);
             case "getFleetData" -> fleetData;
+            case "getNullAIActionText" -> actionText[0];
             default -> null;
         });
         location[0] = stub(LocationAPI.class, (name, args) -> switch (name) {

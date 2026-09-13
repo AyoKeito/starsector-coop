@@ -75,20 +75,38 @@ class CoopNpcFleetSetSnapshotTest {
     }
 
     @Test
-    void setHashChangesOnActionText() {
-        // Phase 9b: the set is the only carrier of the tooltip action line, and the host only
-        // rebroadcasts when the hash moves. "traveling to Jangala" -> "pursuing your fleet" with no
-        // structural change must still flip it, or the guest's tooltip freezes on the first text.
+    void setHashChangesOnFaction() {
+        // A faction change re-colours the mirror and re-decides who is hostile to whom; the guest has
+        // to act on it in the tick it happens, so it stays structural.
         assertNotEquals(
-                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Name f1",
-                        "corvus", "lasher", true, "traveling to Jangala"))),
-                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Name f1",
-                        "corvus", "lasher", true, "pursuing your fleet"))));
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "corvus", "lasher"))),
+                CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "pirates", "corvus", "lasher"))));
+    }
+
+    @Test
+    void setHashIgnoresActionTextButTheSoftHashDoesNot() {
+        // 2026-09-13: cosmetic tooltip prose left the structural hash. Live measurement that session
+        // was 291 structural sends against 8 health sends, the whole 33-fleet set going out once a
+        // second, because in a busy system somebody's line flips from "returning to X" to "delivering
+        // Y to Z" on nearly every tick. It still has to reach the guest (the set is its only carrier),
+        // so it moved to the soft hash behind the 10 s floor instead of being dropped.
+        List<CoopNpcFleetSnapshot> travelling = List.of(fleet("f1", "hegemony", "Name f1",
+                "corvus", "lasher", true, "traveling to Jangala"));
+        List<CoopNpcFleetSnapshot> pursuing = List.of(fleet("f1", "hegemony", "Name f1",
+                "corvus", "lasher", true, "pursuing your fleet"));
+
+        assertEquals(CoopNpcFleetSetSnapshot.computeSetHash(travelling),
+                CoopNpcFleetSetSnapshot.computeSetHash(pursuing));
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeSoftHash(travelling),
+                CoopNpcFleetSetSnapshot.computeSoftHash(pursuing));
     }
 
     @Test
     void setHashChangesOnName() {
         // Same carrier argument as action text: refreshIdentity only sees a rename if a set arrives.
+        // Name stayed structural on 2026-09-13 when action text moved out — a fleet is named at spawn
+        // and keeps it, so renames are rare events rather than per-tick churn, and holding one behind
+        // the 10 s floor would only buy a visibly stale label.
         assertNotEquals(
                 CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Patrol",
                         "corvus", "lasher", true, ""))),
@@ -148,6 +166,66 @@ class CoopNpcFleetSetSnapshotTest {
         assertEquals(
                 CoopNpcFleetSetSnapshot.computeSetHash(List.of(damaged("f1", 0.20f, 0.30f))),
                 CoopNpcFleetSetSnapshot.computeSetHash(List.of(damaged("f1", 1.00f, 1.00f))));
+    }
+
+    @Test
+    void softHashCarriesHealthAsWellAsText() {
+        // One trigger, two contents: the soft hash has to move for either, or the rate-limited path
+        // stops being the carrier for whichever half it dropped.
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(damaged("f1", 0.20f, 1.0f))),
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(damaged("f1", 0.70f, 1.0f))));
+        assertEquals(
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(damaged("f1", 0.500f, 1.0f))),
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(damaged("f1", 0.510f, 1.0f))));
+    }
+
+    @Test
+    void softHashIsIndependentOfFleetOrder() {
+        List<CoopNpcFleetSnapshot> a = List.of(
+                fleet("f3", "pirates", "Name f3", "corvus", "wolf", true, "orbiting Corvus I"),
+                fleet("f1", "hegemony", "Name f1", "corvus", "lasher", true, "traveling to Jangala"));
+        List<CoopNpcFleetSnapshot> b = List.of(
+                fleet("f1", "hegemony", "Name f1", "corvus", "lasher", true, "traveling to Jangala"),
+                fleet("f3", "pirates", "Name f3", "corvus", "wolf", true, "orbiting Corvus I"));
+
+        assertEquals(CoopNpcFleetSetSnapshot.computeSoftHash(a),
+                CoopNpcFleetSetSnapshot.computeSoftHash(b));
+    }
+
+    /**
+     * The payload number the Phase 20 diet is argued from: what one representative
+     * {@code NPC_FLEET_SET} body actually costs on the wire. Thirty fleets of five ships each, with
+     * realistic names, captains and action lines — the shape of a busy trade system, which is where
+     * the 2026-09-13 measurement of one full set per second was taken.
+     *
+     * <p>Measured 2026-09-13: <b>20,827 bytes</b> UTF-8 for the encoded set body, ~139 bytes per
+     * replicated ship (the flat envelope and its JSON escaping sit on top of that). At the pre-fix
+     * rate of one structural send per second — which is what a busy trade system actually produced,
+     * because cosmetic action text was in the structural hash — that is ~20 KB/s of reliable TCP.
+     * Behind the 10 s soft floor a text-only change costs at most ~2 KB/s.
+     */
+    @Test
+    void aThirtyFleetSetEncodesToAboutTwentyKilobytes() {
+        List<CoopNpcFleetSnapshot> fleets = new java.util.ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            List<CoopFleetSnapshot.Member> members = new java.util.ArrayList<>();
+            for (int m = 0; m < 5; m++) {
+                members.add(new CoopFleetSnapshot.Member("mem_" + i + "_" + m, "enforcer",
+                        "enforcer_Assault", "TTS Vigilance " + i + "-" + m, "Captain Yaroslav",
+                        0.7f, 0.95f));
+            }
+            fleets.add(CoopNpcFleetSnapshot.create("fleet_" + i, "hegemony",
+                    "Hegemony Patrol Fleet " + i, "corvus", 1234.5f, -6789.25f, 12.5f, -3.25f,
+                    true, sensors(150f, 90f), "delivering supplies to Jangala", members));
+        }
+
+        int bytes = CoopNpcFleetSetSnapshot.create(fleets).encode()
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+
+        // Loose bounds: this pins the order of magnitude the plan quotes, not the exact fixture.
+        org.junit.jupiter.api.Assertions.assertTrue(bytes > 15_000 && bytes < 28_000,
+                "representative 30-fleet set encoded to " + bytes + " bytes");
     }
 
     @Test

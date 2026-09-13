@@ -161,7 +161,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * {@code CoopNpcFleetReplicator} sends the same set on a second trigger keyed to
      * {@code CoopNpcFleetSetSnapshot#computeHealthHash} (CR/hull in 5% buckets, at most one set every
      * 10 s), so a repairing fleet reaches the guest without any hash the roster rebuild watches ever
-     * moving.
+     * moving. Since 2026-09-13 that trigger is {@code computeSoftHash}, which folds the health hash
+     * together with cosmetic action text under the same floor.
      */
     public static String computeFleetHash(List<Member> members) {
         List<Member> safe = members == null ? List.of() : members;

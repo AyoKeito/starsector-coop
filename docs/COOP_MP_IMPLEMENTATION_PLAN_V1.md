@@ -3665,8 +3665,9 @@ have not been in front of a running game.
   trigger: `CoopNpcFleetSetSnapshot.computeHealthHash` (5% buckets) sends at most one health-only
   set per 10 s. The wire message and both structural hashes are unchanged, and the guest's in-place
   `updateMemberState` already applied CR/hull in both directions. **Smoke:** watch a damaged NPC
-  fleet from the guest for a minute; its hull and CR should recover in steps, with `trigger=health`
-  set sends in the host log.
+  fleet from the guest for a minute; its hull and CR should recover in steps, with rate-limited
+  set sends in the host log (the log token was `trigger=health` until the 2026-09-13 pass below
+  folded action text into the same trigger and renamed it `trigger=soft`).
 
 
 ## Fifth fix pass (2026-09-05, review findings)
@@ -3805,6 +3806,33 @@ one pre-existing skip. Deployed to both test profiles.
 
 **New divergence found, documented, fix planned (Phase 34):** `SystemBountyManager` is not
 suppressed on the guest, so each engine posts its own system bounties.
+
+## Seventh fix pass (2026-09-13, NPC_FLEET_SET payload)
+
+**Cosmetic action text was driving the whole set onto the wire at 1 Hz (P2).** `NPC_FLEET_SET` has
+two send triggers and the structural one folded in each fleet's tooltip action line
+(`aiAssignmentSummary`). Measured live on 2026-09-13: 291 structural sends against 8 health sends,
+with the full 33-fleet set going out once per second for minutes while the guest sat in a busy trade
+system - in a system that size some fleet's line flips from "returning to X" to "delivering Y to Z"
+on nearly every tick, and one fleet's re-wording re-sent all 33. A representative 30-fleet set (five
+ships each) encodes to **20,827 bytes**, ~139 bytes per replicated ship, so that is ~20 KB/s of
+reliable TCP for prose. Invisible on loopback; on a WAN link it is exactly what the Phase 20 payload
+diet is about.
+
+The fix splits the hash rather than dropping the text. `CoopNpcFleetSetSnapshot.computeSetHash` keeps
+identity, name, faction, location, transponder and roster `fleetHash`; the new `computeSoftHash`
+carries member CR/hull (the old `computeHealthHash`, now its health half) **and** action text, and
+shares the same 10 s floor - still two triggers, no third. Structural changes are not delayed by a
+frame; a text-only change costs at most one set per 10 s. **Name stayed structural**: a fleet is named
+at spawn and keeps it, renames were not part of the measured churn, and the guest's `refreshIdentity`
+has no other carrier, so holding one behind the floor would only buy a stale label. Nothing changes on
+the receiver - the wire format, `encode`/`decode` and the guest's `applySet` are untouched, the hash
+strings are host-local (the guest never reads the decoded `setHash`), and `CoopFleetMirror` re-applies
+action text on every snapshot rather than only on a hash change. The replicator's
+`HEALTH_RESYNC_INTERVAL_MILLIS` is now `SOFT_RESYNC_INTERVAL_MILLIS` and the log token
+`trigger=health` is now `trigger=soft`. **Smoke:** sit the guest in a busy trade system and watch the
+host log - `Coop sent NPC_FLEET_SET` should no longer print once a second, and NPC tooltips on the
+guest should still track the host within ~10 s.
 
 ## Maybe (Post-V1 Ideas — Not Committed)
 

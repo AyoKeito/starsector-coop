@@ -1073,7 +1073,9 @@ public final class CoopMessages {
     /**
      * Phase 9 host&rarr;guest full authoritative NPC fleet set (reliable TCP). The body is a
      * {@link coop.fleet.CoopNpcFleetSetSnapshot#encode()} blob; the guest reconciles its mirror
-     * registry against it. Rebroadcast whenever the set hash changes. (NPC fleet *motion* rides the
+     * registry against it. Rebroadcast whenever the structural set hash changes, and at most once
+     * every 10 s when only soft state (member CR/hull, cosmetic action text) moved. (NPC fleet
+     * *motion* rides the
      * separate high-frequency UDP {@code NPC_FLEET_MOTION} datagram, built via {@link #datagram}.)
      */
     public static Message npcFleetSet(String sessionId, long seq, long sentAtMillis,
