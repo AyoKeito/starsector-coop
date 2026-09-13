@@ -4,6 +4,8 @@ import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
+import com.fs.starfarer.api.campaign.CampaignTerrainPlugin;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.CoreUITabId;
@@ -34,6 +36,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.ids.Terrain;
 import com.fs.starfarer.api.impl.campaign.intel.events.BaseEventIntel;
 import com.fs.starfarer.api.impl.campaign.intel.events.EventFactor;
 import com.fs.starfarer.api.impl.campaign.intel.events.HostileActivityEventIntel;
@@ -247,6 +250,7 @@ public final class CoopAgentCommands {
         map.put("netfault", CoopAgentCommands::netfault);
         map.put("save", CoopAgentCommands::save);
         map.put("mark", CoopAgentCommands::mark);
+        map.put("memory", CoopAgentCommands::memory);
         return map;
     }
 
@@ -2237,6 +2241,190 @@ public final class CoopAgentCommands {
         }
     }
 
+    // ---- memory: one campaign-memory key, read or written -----------------------------------------
+
+    /** The memories {@code memory} can address, and the argument spelling for each. */
+    static final List<String> MEMORY_SCOPES = List.of("global", "player", "entity");
+
+    /** The rules-file prefix that names sector memory rather than part of the key. */
+    private static final String MEMORY_GLOBAL_PREFIX = "global.";
+
+    /**
+     * Read or write one key in sector memory, the player fleet's memory, or any entity's.
+     *
+     * <p><b>Why it exists.</b> The flags that gate vanilla dialog options are campaign memory, and
+     * nothing outside the game could set one. The case that forced the verb is the gate scan:
+     * rules.csv gates the "Scan the Gate" option on {@code $global.canScanGates}, and the only thing
+     * in vanilla that ever sets it is the At the Gates story chain. Without a way to set it on the
+     * host, two code paths the mod owns are unreachable from a smoke run — the host&rarr;guest
+     * replication of the flag ({@code CoopSkeletonMutationWatcher} / {@code WORLD_DELTA}
+     * {@code GATE_ACTIVATED}) and the guest's own scan of a gate — so neither has ever been exercised
+     * end to end.
+     *
+     * <p><b>Keys are normalised, not guessed.</b> The rules spelling and the engine spelling differ:
+     * {@code $global.canScanGates} in a rule is the sector-memory key {@code "$canScanGates"}, where
+     * {@code global.} names <em>which memory</em> and is no part of the key. So {@code canScanGates},
+     * {@code $canScanGates} and {@code $global.canScanGates} all mean the same key here, and a
+     * {@code global.} prefix in any other scope is refused rather than silently written to a key
+     * nobody will ever read.
+     *
+     * <p><b>Types.</b> A boolean stays a boolean and a string stays a string; a number becomes a
+     * {@code Float}, because that is what {@code MemoryAPI} stores and what {@code getFloat} and the
+     * rules comparisons read back. Anything else (a JSON null, an object, an array) is a refusal.
+     *
+     * <p><b>Writes are allowed on both roles, and logged at WARN.</b> This is a test harness and half
+     * its purpose is putting the two instances into deliberately unequal states, so there is no role
+     * gate — but a flag set by hand is exactly what makes a later "desync" unexplainable, so every
+     * write leaves a {@code Coop bridge memory write} line in the log that outlives the run. Reads
+     * write nothing and log nothing.
+     *
+     * <p><b>No deferral.</b> {@code CoopAgentBridge} dispatches inside its own {@code advance()} on
+     * the campaign thread, so a write lands on the same thread the engine mutates memory from; there
+     * is nothing to marshal and nothing to wait for. That also makes the verb unsafe to replay blind
+     * after a dropped socket, which is why the MCP client keeps it out of its retry allowlist with
+     * the other mutations even when the request carries no {@code value}.
+     *
+     * <p>Args: {@code scope} (one of {@link #MEMORY_SCOPES}), {@code entityId} (required by, and only
+     * accepted by, the {@code entity} scope; resolved by {@link #findEntity} exactly as
+     * {@code teleport}'s entity mode resolves it), {@code key}, optional {@code value} and optional
+     * {@code expireDays} (a positive number, only meaningful alongside a value).
+     */
+    static JSONObject memory(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String scope = requiredString(args, "scope").toLowerCase(Locale.ROOT);
+        String key = memoryKey(scope, requiredString(args, "key"));
+        MemoryAPI memory = resolveMemory(sector, scope, args);
+
+        JSONObject out = new JSONObject();
+        out.put("scope", scope);
+        out.put("key", key);
+
+        boolean present = memory.contains(key);
+        Object before = present ? memory.get(key) : null;
+        if (!args.has("value")) {
+            out.put("present", present);
+            out.put("value", memoryJsonValue(before));
+            out.put("type", before == null ? "" : before.getClass().getSimpleName());
+            return out;
+        }
+
+        Object value = memoryValue(args.opt("value"));
+        boolean expires = args.has("expireDays");
+        double expireDays = optionalDouble(args, "expireDays", 0d);
+        if (expires && expireDays <= 0d) {
+            throw new IllegalArgumentException("expireDays must be positive, got " + expireDays);
+        }
+        if (expires) {
+            memory.set(key, value, (float) expireDays);
+        } else {
+            memory.set(key, value);
+        }
+        Object after = memory.contains(key) ? memory.get(key) : null;
+
+        CoopLog.warn(CoopAgentCommands.class, "Coop bridge memory write scope=" + scope
+                + " key=" + key + " before=" + before + " after=" + after
+                + (expires ? " expireDays=" + expireDays : ""));
+
+        out.put("before", memoryJsonValue(before));
+        out.put("after", memoryJsonValue(after));
+        return out;
+    }
+
+    /**
+     * The engine key for the key a caller asked for. Strips one leading {@code $} and, in the global
+     * scope only, the {@code global.} that names the memory rather than the key; re-adds the
+     * {@code $} every engine memory key carries.
+     */
+    static String memoryKey(String scope, String key) {
+        String name = key.trim();
+        if (name.startsWith("$")) {
+            name = name.substring(1);
+        }
+        if (name.regionMatches(true, 0, MEMORY_GLOBAL_PREFIX, 0, MEMORY_GLOBAL_PREFIX.length())) {
+            if (!"global".equals(scope)) {
+                throw new IllegalArgumentException("the \"global.\" prefix names sector memory and means"
+                        + " nothing in the " + scope + " scope; got " + key);
+            }
+            name = name.substring(MEMORY_GLOBAL_PREFIX.length());
+        }
+        if (name.isEmpty()) {
+            throw new IllegalArgumentException("key is empty once $ and global. are stripped: " + key);
+        }
+        return "$" + name;
+    }
+
+    /**
+     * The memory the scope names. {@code entityId} is required by the entity scope and refused by the
+     * other two: a caller who passed one meant an entity, and answering out of sector memory instead
+     * would be a wrong answer wearing a right one's shape.
+     */
+    private static MemoryAPI resolveMemory(SectorAPI sector, String scope, JSONObject args) {
+        if (!MEMORY_SCOPES.contains(scope)) {
+            throw new IllegalArgumentException("unknown memory scope " + scope + "; known scopes: "
+                    + String.join(", ", MEMORY_SCOPES));
+        }
+        if (!"entity".equals(scope) && args.has("entityId")) {
+            throw new IllegalArgumentException("entityId belongs to the entity scope; got it with scope "
+                    + scope);
+        }
+        MemoryAPI memory = switch (scope) {
+            case "global" -> sector.getMemoryWithoutUpdate();
+            case "player" -> requirePlayerFleet(sector).getMemoryWithoutUpdate();
+            default -> entityMemory(sector, requiredString(args, "entityId"));
+        };
+        if (memory == null) {
+            throw new IllegalStateException("the " + scope + " scope has no memory");
+        }
+        return memory;
+    }
+
+    private static MemoryAPI entityMemory(SectorAPI sector, String entityId) {
+        SectorEntityToken entity = findEntity(sector, entityId);
+        if (entity == null) {
+            throw new IllegalArgumentException("no entity with id " + entityId
+                    + " anywhere in this sector");
+        }
+        return entity.getMemoryWithoutUpdate();
+    }
+
+    /** The JSON value a caller passed, as the engine type {@code MemoryAPI} stores for it. */
+    static Object memoryValue(Object raw) {
+        if (raw instanceof Boolean flag) {
+            return flag;
+        }
+        if (raw instanceof Number number) {
+            return number.floatValue();
+        }
+        if (raw instanceof String text) {
+            return text;
+        }
+        throw new IllegalArgumentException("memory value must be a boolean, a number or a string, got "
+                + (raw == null ? "nothing" : raw.getClass().getSimpleName()));
+    }
+
+    /**
+     * A stored value as JSON. Numbers go through the same quantization every other numeric response
+     * field uses; anything the bridge has no JSON shape for (a {@code Vector2f}, an entity) is
+     * reported as its string form rather than failing the read, which is the whole reason a read of
+     * an unexpected key is still useful.
+     */
+    static Object memoryJsonValue(Object stored) {
+        if (stored == null) {
+            return JSONObject.NULL;
+        }
+        if (stored instanceof Boolean || stored instanceof String) {
+            return stored;
+        }
+        if (stored instanceof Number number) {
+            return round(number.floatValue());
+        }
+        try {
+            return String.valueOf(stored);
+        } catch (RuntimeException | LinkageError ex) {
+            return stored.getClass().getSimpleName();
+        }
+    }
+
     // ---- feed: the campaign notices this instance has actually shown ------------------------------
 
     /** Feed lines returned when the caller does not say. One screenful. */
@@ -2479,14 +2667,32 @@ public final class CoopAgentCommands {
      * a system with no fleets in it. De-duped by identity, because a modded location that puts a
      * fleet in both must not produce two rows.
      *
+     * <p><b>Clutter is excluded by default, and that is a bug fix.</b> Measured 2026-09-13 in Corvus
+     * and Askonia: the 300-row cap was spent entirely on {@code CampaignAsteroid},
+     * {@code orbital_junk}, {@code RingBand} and terrain, and the system's <em>gate</em> — the one
+     * entity the run was looking for — never appeared in a list of everything in the system. None of
+     * those four is an interaction target, so with no {@code kinds} filter they are dropped before the
+     * cap. Terrain is decided by its terrain id rather than its class, because a debris field is a
+     * {@code CampaignTerrain} too and a debris field <em>is</em> a target; wrecks, derelict probes,
+     * stations, planets, jump points, relays, bases and fleets were never in the excluded set at all.
+     * Passing {@code kinds} at all, or {@code includeClutter: true}, restores the unfiltered walk —
+     * {@code kinds} because the only way to ask for asteroids is {@code "other"}, and asking for a
+     * thing that is then filtered out is not an answer.
+     *
      * <p>Args: {@code system} (star system id or name, or {@code "hyperspace"}; default is wherever
-     * the local player fleet is), {@code kinds} (array or comma-separated; default all). Sorted by
-     * kind then id, so {@code ss_diff} on it is a real comparison, and capped at
-     * {@value #ENTITIES_MAX_ROWS} with a {@code truncated} flag rather than silently short.
+     * the local player fleet is), {@code kinds} (array or comma-separated; default all),
+     * {@code includeClutter} (default false). Sorted by kind then id, so {@code ss_diff} on it is a
+     * real comparison, and capped at {@value #ENTITIES_MAX_ROWS} with a {@code truncated} flag rather
+     * than silently short.
      */
     static JSONObject entities(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
         List<String> kinds = requestedEntityKinds(args);
+        // A kinds filter is itself a statement about what the caller wants, and "other" is the only
+        // kind asteroids and terrain are ever in; filtering them out of an explicit request for them
+        // would leave no way to ask at all.
+        boolean excludeClutter = !optionalBoolean(args, "includeClutter", false)
+                && !hasKindsArgument(args);
         String requested = optionalString(args, "system");
 
         LocationAPI location;
@@ -2518,7 +2724,11 @@ public final class CoopAgentCommands {
             if (!kinds.contains(kind)) {
                 continue;
             }
-            rows.add(entityRow(entity, kind));
+            String type = entityType(entity);
+            if (excludeClutter && isClutterEntity(type, terrainIdOf(entity))) {
+                continue;
+            }
+            rows.add(entityRow(entity, kind, type));
         }
         rows.sort(Comparator
                 .comparingInt((JSONObject row) -> ENTITY_KINDS.indexOf(row.optString("kind", "other")))
@@ -2528,6 +2738,7 @@ public final class CoopAgentCommands {
         out.put("locationId", nullSafe(location.getId()));
         out.put("locationName", nullSafe(location.getName()));
         out.put("kinds", new JSONArray(kinds));
+        out.put("clutterExcluded", excludeClutter);
         out.put("candidateCount", rows.size());
         boolean truncated = rows.size() > ENTITIES_MAX_ROWS;
         if (truncated) {
@@ -2647,12 +2858,59 @@ public final class CoopAgentCommands {
         }
     }
 
-    private static JSONObject entityRow(SectorEntityToken entity, String kind) throws JSONException {
+    /**
+     * The entity types that are never an interaction target, lower-cased for matching. Three class
+     * names and one custom-entity spec id, which is exactly how {@link #entityType} reports them.
+     * Terrain is in the set only as the fallback for a terrain entity whose plugin will not name
+     * itself — {@link #isClutterEntity} decides terrain by its terrain id first.
+     */
+    static final Set<String> CLUTTER_ENTITY_TYPES =
+            Set.of("campaignasteroid", "orbital_junk", "ringband", "campaignterrain");
+
+    /**
+     * The clutter decision, as a pure function of the two strings a row already carries. Terrain wins
+     * the decision when it is identified: every terrain type is clutter <em>except</em>
+     * {@link Terrain#DEBRIS_FIELD}, which is an ordinary salvage target that happens to be
+     * implemented as terrain. Otherwise the type name decides.
+     *
+     * @param type      {@link #entityType}'s answer: the custom entity spec id, else the class name
+     * @param terrainId the entity's terrain id, or empty when it is not terrain (or will not say)
+     */
+    static boolean isClutterEntity(String type, String terrainId) {
+        String terrain = terrainId == null ? "" : terrainId.trim();
+        if (!terrain.isEmpty()) {
+            return !Terrain.DEBRIS_FIELD.equalsIgnoreCase(terrain);
+        }
+        String name = type == null ? "" : type.trim().toLowerCase(Locale.ROOT);
+        return CLUTTER_ENTITY_TYPES.contains(name);
+    }
+
+    /** Whether the request carried a {@code kinds} argument at all, in either accepted spelling. */
+    static boolean hasKindsArgument(JSONObject args) {
+        return args.optJSONArray("kinds") != null || !optionalString(args, "kinds").isEmpty();
+    }
+
+    /** The terrain id of a terrain entity, or empty. Never throws: an unreadable plugin is "unknown". */
+    private static String terrainIdOf(SectorEntityToken entity) {
+        if (!(entity instanceof CampaignTerrainAPI terrain)) {
+            return "";
+        }
+        try {
+            CampaignTerrainPlugin plugin = terrain.getPlugin();
+            String id = plugin == null ? null : plugin.getTerrainId();
+            return id == null || id.isEmpty() ? nullSafe(terrain.getType()) : id;
+        } catch (RuntimeException | LinkageError ex) {
+            return "";
+        }
+    }
+
+    private static JSONObject entityRow(SectorEntityToken entity, String kind, String type)
+            throws JSONException {
         JSONObject row = new JSONObject();
         row.put("id", nullSafe(entity.getId()));
         row.put("name", nullSafe(entity.getName()));
         row.put("kind", kind);
-        row.put("type", entityType(entity));
+        row.put("type", type);
         FactionAPI faction = safeRead(entity::getFaction);
         row.put("faction", faction == null ? "" : nullSafe(faction.getId()));
         Vector2f at = safeRead(entity::getLocation);

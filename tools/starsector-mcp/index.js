@@ -56,11 +56,15 @@ const TOOLS = [
       'neutralOnly keeps only systems with no economy market, i.e. no faction presence), ' +
       'landmarks{kinds?, limit?, maxLy?} (hypershunts, cryosleepers, gates, stable locations, ' +
       'the gate hauler), ' +
-      'entities{system?, kinds?} (everything in one location - system id or name, "hyperspace", or ' +
-      'the player fleet\'s location by default - as planet/station/jumpPoint/relay/base/fleet/other ' +
-      'rows with id, name, type, faction, x/y, tags, orbitFocus, hidden, discoverable and marketId; ' +
-      'this is how you get a hidden pirate/Path base\'s id, which ss_act teleport accepts and whose ' +
-      'marketId is the key to look up in ss_status baseMarketIds), ' +
+      'entities{system?, kinds?, includeClutter?} (everything in one location - system id or name, ' +
+      '"hyperspace", or the player fleet\'s location by default - as planet/station/jumpPoint/relay/' +
+      'base/fleet/other rows with id, name, type, faction, x/y, tags, orbitFocus, hidden, ' +
+      'discoverable and marketId; this is how you get a hidden pirate/Path base\'s id, which ss_act ' +
+      'teleport accepts and whose marketId is the key to look up in ss_status baseMarketIds. ' +
+      'Asteroids, orbital junk, ring bands and non-debris terrain are dropped by default - in an ' +
+      'asteroid-heavy system they ate the whole 300-row cap and the gate never appeared - and ' +
+      'clutterExcluded says so in the response; passing kinds at all, or includeClutter:true, ' +
+      'restores the unfiltered walk), ' +
       'intel{filter?, limit?} (the player\'s intel entries with class, title, tags, isNew/isEnding/' +
       'isEnded/important, factionId and an extra block - progress and factor names for event intel, ' +
       'key numbers for the mod\'s own pages - plus a hostileActivity block that answers present/' +
@@ -139,7 +143,18 @@ const TOOLS = [
       'the guest unless force:true, because a guest save the host did not order is aligned with no ' +
       'host save, and refused while any dialog is open, because autosave() is silently a no-op then), ' +
       'mark{text} (writes one "Coop MARK <text>" INFO line in this instance\'s log and returns its ' +
-      'atMillis, so two logs can be lined up per step; needs no campaign). ' +
+      'atMillis, so two logs can be lined up per step; needs no campaign), ' +
+      'memory{scope, key, entityId?, value?, expireDays?} (one campaign-memory key. scope is ' +
+      '"global" for sector memory - the $global. namespace rules.csv uses - "player" for the player ' +
+      'fleet\'s memory, or "entity" with entityId, resolved the way teleport resolves one. key takes ' +
+      'any spelling: canScanGates, $canScanGates and $global.canScanGates all mean sector memory\'s ' +
+      '"$canScanGates". With no value it reads and returns {scope, key, present, value, type}; with ' +
+      'a value (boolean, number or string; numbers are stored as the Float MemoryAPI keeps) it ' +
+      'writes and returns {scope, key, before, after}, and logs a WARN line either way. Both roles, ' +
+      'reads and writes alike - it is a test harness. The case it exists for: the vanilla "Scan the ' +
+      'Gate" option is gated on $global.canScanGates, which only the At the Gates story sets, so ' +
+      'setting it on the host is the only way to exercise the flag\'s replication to the guest and ' +
+      'the guest\'s own scan). ' +
       'Market buy/sell, officer hire, bar-offer accept and market open/close are deliberately absent.',
     inputSchema: {
       type: 'object',

@@ -22,7 +22,14 @@ export const QUERY_VERBS = [
   'screen'
 ];
 
-/** State-changing verbs. ss_act accepts these. */
+/**
+ * State-changing verbs. ss_act accepts these.
+ *
+ * `memory` is here rather than in QUERY_VERBS even though it reads when given no `value`: one verb
+ * name cannot be both retry-safe and not, and the client's dropped-socket retry is keyed by name
+ * alone. A memory read through ss_act costs nothing but the tool it is spelled with; a retried write
+ * would report a `before` that never existed.
+ */
 export const ACTION_VERBS = [
   'teleport',
   'pause',
@@ -36,7 +43,8 @@ export const ACTION_VERBS = [
   'rep',
   'netfault',
   'save',
-  'mark'
+  'mark',
+  'memory'
 ];
 
 /**

@@ -232,9 +232,11 @@ test('READ_ONLY_COMMANDS is exactly the fourteen read verbs and none of the muta
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and
   // fires the checkpoint, mark writes a log line, and neither is safe to replay on a dropped socket.
+  // memory is one verb that both reads and writes, and the retry allowlist is keyed by verb name
+  // alone, so it is classed by its worst case.
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
-    'expedition', 'rep', 'netfault', 'save', 'mark'
+    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -1106,6 +1108,103 @@ test('netfault is an action verb on either instance, and its refusals are the mo
   await assert.rejects(() => ssDump(bridges, 'host', 'netfault', {}), /unknown query verb "netfault"/);
 });
 
+test('memory reads and writes one campaign-memory key through ss_act on either role', async (t) => {
+  // A stand-in for sector memory, one per instance: a write on the host is the host's until the mod
+  // replicates it, which is exactly the thing the gate-flag smoke is checking.
+  const memoryOf = () => {
+    const stored = new Map();
+    return (request) => {
+      if (request.cmd !== 'memory') {
+        return { ok: false, error: 'IllegalArgumentException: unknown command' };
+      }
+      const { scope, key, value } = request.args;
+      if (!['global', 'player', 'entity'].includes(scope)) {
+        return {
+          ok: false,
+          error: `IllegalArgumentException: unknown memory scope ${scope}; known scopes: global, player, entity`
+        };
+      }
+      // The mod's normalisation: $global.canScanGates in a rule is sector memory's $canScanGates.
+      const engineKey = '$' + String(key).replace(/^\$/, '').replace(/^global\./i, '');
+      const slot = `${scope}:${request.args.entityId ?? ''}:${engineKey}`;
+      const before = stored.has(slot) ? stored.get(slot) : null;
+      if (value === undefined) {
+        return {
+          ok: true,
+          data: {
+            scope,
+            key: engineKey,
+            present: before !== null,
+            value: before,
+            type: before === null ? '' : before.constructor.name
+          }
+        };
+      }
+      stored.set(slot, value);
+      return { ok: true, data: { scope, key: engineKey, before, after: value } };
+    };
+  };
+  const hostBridge = new MockBridge(memoryOf());
+  const guestBridge = new MockBridge(memoryOf());
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  // Read: the flag is not set yet, and the rules spelling resolves to the engine key.
+  assert.deepEqual(
+    await ssAct(bridges, 'host', 'memory', { scope: 'global', key: '$global.canScanGates' }),
+    { scope: 'global', key: '$canScanGates', present: false, value: null, type: '' }
+  );
+
+  // Write: the gate-scan flag the At the Gates story would otherwise be the only source of.
+  assert.deepEqual(
+    await ssAct(bridges, 'host', 'memory', { scope: 'global', key: 'canScanGates', value: true }),
+    { scope: 'global', key: '$canScanGates', before: null, after: true }
+  );
+  assert.deepEqual(hostBridge.requests.at(-1).args, {
+    scope: 'global',
+    key: 'canScanGates',
+    value: true
+  });
+
+  // And the read after it sees the write, the way the smoke will.
+  assert.deepEqual(
+    await ssAct(bridges, 'host', 'memory', { scope: 'global', key: '$canScanGates' }),
+    { scope: 'global', key: '$canScanGates', present: true, value: true, type: 'Boolean' }
+  );
+
+  // No role gate: the guest is where the replicated flag has to be read back.
+  assert.deepEqual(
+    await ssAct(bridges, 'guest', 'memory', { scope: 'global', key: 'canScanGates' }),
+    { scope: 'global', key: '$canScanGates', present: false, value: null, type: '' }
+  );
+
+  // Entity scope, keyed per entity so two entities' copies of a key are not one slot.
+  await ssAct(bridges, 'host', 'memory', {
+    scope: 'entity',
+    entityId: 'corvus_gate',
+    key: '$gateScanned',
+    value: true
+  });
+  assert.deepEqual(
+    await ssAct(bridges, 'host', 'memory', { scope: 'entity', entityId: 'corvus_gate', key: 'gateScanned' }),
+    { scope: 'entity', key: '$gateScanned', present: true, value: true, type: 'Boolean' }
+  );
+
+  // Scope validation is the mod's; the server relays the refusal rather than pre-judging it.
+  await assert.rejects(
+    () => ssAct(bridges, 'host', 'memory', { scope: 'fleet', key: 'x' }),
+    /unknown memory scope fleet/
+  );
+  // It is an action verb, not a query one, even for a read: see ACTION_VERBS' note on the retry rule.
+  await assert.rejects(() => ssDump(bridges, 'host', 'memory', {}), /unknown query verb "memory"/);
+});
+
 test('the 0.1.1 smoke verbs are split read vs action, and save is no longer a non-verb', async (t) => {
   for (const verb of ['entities', 'intel', 'feed', 'screen']) {
     assert.ok(QUERY_VERBS.includes(verb), `${verb} must be an ss_dump verb`);
@@ -1183,6 +1282,11 @@ test('entities, intel, feed and screen relay their args and diff across instance
 
   // The base's id is the thing the verb exists to produce, and ss_act teleport takes it.
   assert.equal(ENTITIES.entities[1].id, 'pirate_base');
+
+  // includeClutter rides through untouched: the filter decision is the mod's, and the server must
+  // not drop an argument it does not itself understand.
+  await ssDump(bridges, 'host', 'entities', { system: 'askonia', includeClutter: true });
+  assert.deepEqual(hostBridge.requests.at(-1).args, { system: 'askonia', includeClutter: true });
 
   const feed = await ssDump(bridges, 'guest', 'feed', { limit: 5 });
   assert.equal(feed.sessionEnded, true, 'the transcript outlives the session it describes');

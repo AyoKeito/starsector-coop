@@ -196,8 +196,8 @@ class CoopAgentCommandsTest {
         assertEquals(
                 java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "entities",
                         "expedition", "feed", "fleets", "give", "intel", "landmarks", "mark", "market",
-                        "markets", "netfault", "objective", "pause", "rep", "save", "screen", "setcr",
-                        "status", "survey", "surveyset", "teleport", "visibility"),
+                        "markets", "memory", "netfault", "objective", "pause", "rep", "save", "screen",
+                        "setcr", "status", "survey", "surveyset", "teleport", "visibility"),
                 new CoopAgentCommands().verbs());
     }
 
@@ -525,6 +525,197 @@ class CoopAgentCommandsTest {
         assertEquals(0, idle.getInt("unacked"));
         assertEquals(0L, idle.getLong("duplicatesDropped"));
         assertEquals(0, idle.getInt("appliedSeqs"));
+    }
+
+    // ---- memory ---------------------------------------------------------------------------------
+
+    /**
+     * The whole reason the verb exists: a rules-file flag can be named the way rules.csv names it and
+     * still land on the key the engine actually stores. {@code $global.canScanGates} in a rule is
+     * sector memory's {@code "$canScanGates"} — the {@code global.} names the memory, not the key.
+     */
+    @Test
+    void everySpellingOfAGlobalFlagNormalisesToTheOneEngineKey() {
+        assertEquals("$canScanGates", CoopAgentCommands.memoryKey("global", "canScanGates"));
+        assertEquals("$canScanGates", CoopAgentCommands.memoryKey("global", "$canScanGates"));
+        assertEquals("$canScanGates", CoopAgentCommands.memoryKey("global", "$global.canScanGates"));
+        assertEquals("$canScanGates", CoopAgentCommands.memoryKey("global", " global.canScanGates "));
+        assertEquals("$coopTest", CoopAgentCommands.memoryKey("player", "$coopTest"));
+    }
+
+    @Test
+    void aGlobalPrefixOutsideTheGlobalScopeIsRefusedRatherThanWrittenToADeadKey() {
+        IllegalArgumentException refused = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> CoopAgentCommands.memoryKey("player", "$global.canScanGates"));
+        assertTrue(refused.getMessage().contains("names sector memory"), refused.getMessage());
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.memoryKey("global", "$"));
+    }
+
+    /** Booleans stay booleans, numbers become the Float MemoryAPI stores, everything else refuses. */
+    @Test
+    void memoryValuesAreCoercedToTheTypesTheEngineStores() {
+        assertEquals(Boolean.TRUE, CoopAgentCommands.memoryValue(Boolean.TRUE));
+        assertEquals(3.5f, CoopAgentCommands.memoryValue(3.5d));
+        assertEquals(7f, CoopAgentCommands.memoryValue(7));
+        assertEquals("ziggurat", CoopAgentCommands.memoryValue("ziggurat"));
+
+        IllegalArgumentException refused = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> CoopAgentCommands.memoryValue(JSONObject.NULL));
+        assertTrue(refused.getMessage().startsWith("memory value must be"), refused.getMessage());
+    }
+
+    /** A read of a key holding something the bridge has no JSON shape for must still answer. */
+    @Test
+    void anUnrepresentableStoredValueReadsAsItsStringFormRatherThanFailing() {
+        assertEquals(JSONObject.NULL, CoopAgentCommands.memoryJsonValue(null));
+        assertEquals(Boolean.FALSE, CoopAgentCommands.memoryJsonValue(Boolean.FALSE));
+        assertEquals(2.5d, CoopAgentCommands.memoryJsonValue(2.5f));
+
+        Object vector = CoopAgentCommands.memoryJsonValue(new org.lwjgl.util.vector.Vector2f(1f, 2f));
+        assertTrue(vector instanceof String, "expected a string form, got " + vector);
+        assertFalse(((String) vector).isEmpty());
+    }
+
+    @Test
+    void aGlobalReadReportsPresenceTypeAndValueWithoutWritingAnything() throws JSONException {
+        Map<String, Object> values = new LinkedHashMap<>();
+        JSONObject absent = CoopAgentCommands.memory(
+                new JSONObject("{\"scope\":\"global\",\"key\":\"$global.canScanGates\"}"),
+                memoryContext(values));
+
+        assertEquals("global", absent.getString("scope"));
+        assertEquals("$canScanGates", absent.getString("key"));
+        assertFalse(absent.getBoolean("present"));
+        assertEquals(JSONObject.NULL, absent.get("value"));
+        assertEquals("", absent.getString("type"));
+        assertTrue(values.isEmpty(), "a read must not create the key");
+
+        values.put("$canScanGates", Boolean.TRUE);
+        JSONObject present = CoopAgentCommands.memory(
+                new JSONObject("{\"scope\":\"global\",\"key\":\"canScanGates\"}"),
+                memoryContext(values));
+
+        assertTrue(present.getBoolean("present"));
+        assertEquals(Boolean.TRUE, present.get("value"));
+        assertEquals("Boolean", present.getString("type"));
+    }
+
+    @Test
+    void aGlobalWriteReportsBeforeAndAfterAndStoresTheEngineType() throws JSONException {
+        Map<String, Object> values = new LinkedHashMap<>();
+
+        JSONObject flag = CoopAgentCommands.memory(
+                new JSONObject("{\"scope\":\"global\",\"key\":\"$global.canScanGates\",\"value\":true}"),
+                memoryContext(values));
+
+        assertEquals("$canScanGates", flag.getString("key"));
+        assertEquals(JSONObject.NULL, flag.get("before"));
+        assertEquals(Boolean.TRUE, flag.get("after"));
+        assertEquals(Boolean.TRUE, values.get("$canScanGates"));
+
+        JSONObject number = CoopAgentCommands.memory(
+                new JSONObject("{\"scope\":\"global\",\"key\":\"coopTest\",\"value\":4}"),
+                memoryContext(values));
+
+        assertEquals(4d, number.getDouble("after"));
+        assertEquals(4f, values.get("$coopTest"),
+                "a number must land as the Float MemoryAPI stores, not an Integer rules cannot compare");
+    }
+
+    @Test
+    void theScopeAndItsArgumentsAreRefusedTogetherRatherThanQuietlyMismatched() throws JSONException {
+        assertEquals("IllegalArgumentException: unknown memory scope fleet;"
+                        + " known scopes: global, player, entity",
+                memoryErrorOf("{\"scope\":\"fleet\",\"key\":\"x\"}"));
+        assertEquals("IllegalArgumentException: entityId belongs to the entity scope;"
+                        + " got it with scope global",
+                memoryErrorOf("{\"scope\":\"global\",\"key\":\"x\",\"entityId\":\"jangala\"}"));
+        assertEquals("IllegalArgumentException: missing required argument key",
+                memoryErrorOf("{\"scope\":\"global\"}"));
+        assertEquals("IllegalArgumentException: expireDays must be positive, got 0.0",
+                memoryErrorOf("{\"scope\":\"global\",\"key\":\"x\",\"value\":true,\"expireDays\":0}"));
+    }
+
+    @Test
+    void memoryIsRegisteredAndFailsOnTheCampaignCheckRatherThanAsAnUnknownVerb() throws JSONException {
+        JSONObject response = new JSONObject(new CoopAgentCommands().dispatch(
+                "{\"id\":41,\"cmd\":\"memory\",\"args\":{\"scope\":\"global\",\"key\":\"x\"}}",
+                EMPTY_CONTEXT));
+
+        assertFalse(response.getBoolean("ok"));
+        assertEquals("IllegalStateException: no campaign loaded", response.getString("error"));
+    }
+
+    // ---- entities: the clutter filter -------------------------------------------------------------
+
+    /**
+     * The 2026-09-13 finding: in Corvus and Askonia the 300-row cap was spent on asteroids, junk,
+     * ring bands and terrain, and the system's gate never made the list. These four are what gets
+     * dropped, and a debris field is not one of them even though it is terrain by class.
+     */
+    @Test
+    void theClutterFilterDropsTheFourNonTargetsAndKeepsEverythingElse() {
+        assertTrue(CoopAgentCommands.isClutterEntity("CampaignAsteroid", ""));
+        assertTrue(CoopAgentCommands.isClutterEntity("orbital_junk", ""));
+        assertTrue(CoopAgentCommands.isClutterEntity("RingBand", ""));
+        assertTrue(CoopAgentCommands.isClutterEntity("CampaignTerrain", ""),
+                "terrain whose plugin will not name itself falls back to the class name");
+
+        assertFalse(CoopAgentCommands.isClutterEntity("inactive_gate", ""));
+        assertFalse(CoopAgentCommands.isClutterEntity("wreck", ""));
+        assertFalse(CoopAgentCommands.isClutterEntity("derelict_survey_ship", ""));
+        assertFalse(CoopAgentCommands.isClutterEntity("JumpPointAPI", ""));
+        assertFalse(CoopAgentCommands.isClutterEntity("", ""));
+    }
+
+    @Test
+    void terrainIsDecidedByItsTerrainIdSoADebrisFieldSurvives() {
+        assertFalse(CoopAgentCommands.isClutterEntity("CampaignTerrain", "debris_field"));
+        assertTrue(CoopAgentCommands.isClutterEntity("CampaignTerrain", "asteroid_belt"));
+        assertTrue(CoopAgentCommands.isClutterEntity("CampaignTerrain", "ring"));
+        assertTrue(CoopAgentCommands.isClutterEntity("CampaignTerrain", "magnetic_field"));
+        assertTrue(CoopAgentCommands.isClutterEntity("some_custom_entity", "nebula"),
+                "terrain wins the decision when it is identified, whatever the type string says");
+    }
+
+    /** A kinds request turns the filter off, because "other" is the only way to ask for asteroids. */
+    @Test
+    void aKindsArgumentIsDetectedInBothSpellingsAndNoOther() throws JSONException {
+        assertFalse(CoopAgentCommands.hasKindsArgument(new JSONObject("{}")));
+        assertFalse(CoopAgentCommands.hasKindsArgument(new JSONObject("{\"kinds\":\"\"}")));
+        assertFalse(CoopAgentCommands.hasKindsArgument(new JSONObject("{\"system\":\"corvus\"}")));
+        assertTrue(CoopAgentCommands.hasKindsArgument(new JSONObject("{\"kinds\":\"other\"}")));
+        assertTrue(CoopAgentCommands.hasKindsArgument(new JSONObject("{\"kinds\":[\"other\"]}")));
+    }
+
+    /** A sector whose only real answer is its memory, which is all the global scope reads. */
+    private static CoopAgentCommands.Context memoryContext(Map<String, Object> values) {
+        SectorAPI sector = coop.testing.ApiProxies.sectorWithMemory(coop.testing.ApiProxies.memory(values));
+        return new CoopAgentCommands.Context() {
+            @Override
+            public SectorAPI sector() {
+                return sector;
+            }
+
+            @Override
+            public CoopNetPump pump() {
+                return null;
+            }
+        };
+    }
+
+    private static String memoryErrorOf(String argsJson) throws JSONException {
+        Map<String, Object> values = new LinkedHashMap<>();
+        CoopAgentCommands.Context context = memoryContext(values);
+        JSONObject response = new JSONObject(new CoopAgentCommands(
+                Map.of("memory", CoopAgentCommands::memory)).dispatch(
+                "{\"id\":42,\"cmd\":\"memory\",\"args\":" + argsJson + "}", context));
+        assertFalse(response.getBoolean("ok"), argsJson + " should have been refused");
+        return response.getString("error");
     }
 
     private static String markErrorOf(String argsJson) throws JSONException {
