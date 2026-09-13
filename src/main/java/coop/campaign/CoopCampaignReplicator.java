@@ -65,6 +65,7 @@ import coop.colony.CoopColonySync;
 import coop.colony.CoopExpeditionWarning;
 import coop.colony.CoopExpeditionWarningSync;
 import coop.colony.CoopRaidOutcomeSync;
+import coop.fleet.CoopGuestMirrorHandle;
 import coop.rewards.CoopRewardSplitter;
 import coop.ui.CoopFeed;
 import coop.net.CoopConnectionRole;
@@ -4964,8 +4965,26 @@ public final class CoopCampaignReplicator
 
     /**
      * Host: ~1Hz, broadcast the current orbit angle of every orbiting body in the host player's
-     * location so the guest can snap out clock-drift. Only the host's location is sent — that is the
-     * system the players share when together, which is the only time the desync is visible.
+     * location, and in the guest's when that is a different system, so the guest can snap out
+     * clock-drift in both.
+     *
+     * <p><b>Host-only was wrong, and it was measured wrong.</b> The old reasoning was that an orbit
+     * desync is only visible when both players are in the same system. It is not. On 2026-09-13 with
+     * the guest alone in Magec, the Magec Fringe Jump-point sat at (2709, 14537) on the guest and
+     * (4671, -15566) on the host, and the Maxios Jump-point 484 su apart — so the guest "parked on
+     * the jump point" was in open space as far as the host was concerned, and the host-positioned NPC
+     * mirrors jumped in and out of nothing on the guest's map. Every host-authored position that
+     * lands in the guest's system (fleet mirrors, encounters, anything keyed to a body) is wrong by
+     * exactly that offset until the guest's own system is snapped.
+     *
+     * <p><b>Cost stays bounded.</b> At most two locations per tick, the same
+     * {@link #syncableOrbitBodies} filter on each, and the second one is sent only when the guest is
+     * somewhere else and not in hyperspace. The guest's location is read off
+     * {@link CoopGuestMirrorHandle#current()} — an O(1) field read, null when no guest is paired or
+     * the mirror is not placed. The two snapshots are separate {@code ORBIT_SNAPSHOT} messages with
+     * their own {@code locationId}; the guest's {@code applyOrbitSnapshot} resolves the target
+     * location from the first stable-id body in the payload rather than from the {@code locationId}
+     * field, so two snapshots for two systems land independently with no keying change.
      */
     public void tickOrbitSync() {
         if (!isHost() || !isActive()) {
@@ -4979,25 +4998,67 @@ public final class CoopCampaignReplicator
         try {
             SectorAPI sector = Global.getSector();
             CampaignFleetAPI player = sector == null ? null : sector.getPlayerFleet();
-            LocationAPI location = player == null ? null : player.getContainingLocation();
-            if (location == null || location.isHyperspace()) {
-                return;
-            }
-            List<SectorEntityToken> bodies = syncableOrbitBodies(location);
-            List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
-            for (SectorEntityToken e : bodies) {
-                String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
-                entries.add(new CoopOrbitSync.OrbitEntry(e.getId(), focusId, e.getCircularOrbitRadius(),
-                        e.getCircularOrbitPeriod(), e.getCircularOrbitAngle()));
-            }
-            maybeDumpOrbitBreakdown(bodies);
-            if (!entries.isEmpty()) {
-                send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
-                        location.getId(), CoopOrbitSync.encode(entries)));
+            CampaignFleetAPI guestMirror = CoopGuestMirrorHandle.current();
+            List<LocationAPI> locations = orbitSyncLocations(
+                    player == null ? null : player.getContainingLocation(),
+                    guestMirror == null ? null : guestMirror.getContainingLocation());
+            boolean firstLocation = true;
+            for (LocationAPI location : locations) {
+                List<SectorEntityToken> bodies = syncableOrbitBodies(location);
+                List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
+                for (SectorEntityToken e : bodies) {
+                    String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
+                    entries.add(new CoopOrbitSync.OrbitEntry(e.getId(), focusId,
+                            e.getCircularOrbitRadius(), e.getCircularOrbitPeriod(),
+                            e.getCircularOrbitAngle()));
+                }
+                // The breakdown tracks a single body count across ticks, so only the first location
+                // feeds it; two locations taking turns would report a change every tick and say
+                // nothing about either.
+                if (firstLocation) {
+                    maybeDumpOrbitBreakdown(bodies);
+                    firstLocation = false;
+                }
+                if (!entries.isEmpty()) {
+                    send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
+                            location.getId(), CoopOrbitSync.encode(entries)));
+                }
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Orbit sync capture failed", ex);
         }
+    }
+
+    /**
+     * The locations one orbit-sync tick snapshots, host's first. Pure so it can be tested without an
+     * engine: null (no fleet, no guest mirror) and hyperspace are both "nothing to sync", and the
+     * guest's location is added only when it is a genuinely different one — identity first, then id,
+     * because the same system can be reached through two references.
+     */
+    static List<LocationAPI> orbitSyncLocations(LocationAPI hostLocation, LocationAPI guestLocation) {
+        List<LocationAPI> out = new ArrayList<>(2);
+        if (isOrbitSyncableLocation(hostLocation)) {
+            out.add(hostLocation);
+        }
+        if (isOrbitSyncableLocation(guestLocation) && !isSameLocation(hostLocation, guestLocation)) {
+            out.add(guestLocation);
+        }
+        return out;
+    }
+
+    private static boolean isOrbitSyncableLocation(LocationAPI location) {
+        return location != null && !location.isHyperspace();
+    }
+
+    private static boolean isSameLocation(LocationAPI a, LocationAPI b) {
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        String aId = a.getId();
+        return aId != null && aId.equals(b.getId());
     }
 
     /** Guest: snap local orbiting bodies to the host's angles (string-id first, then orbit signature). */
