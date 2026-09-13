@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
+import com.fs.starfarer.api.campaign.FleetInflater;
 import com.fs.starfarer.api.fleet.FleetMemberStatusAPI;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import coop.net.CoopConnectionRole;
@@ -389,6 +390,130 @@ class CoopNpcFleetReplicatorTest {
 
         // ...and the structural hash never moved, so the guest rebuilt no roster for a tooltip.
         assertEquals(decodeSet(service.sent.get(0)).setHash(), decodeSet(service.sent.get(1)).setHash());
+    }
+
+    // ---- 2026-09-13: inflating a deflated fleet the guest has brought into range -----------------
+
+    @Test
+    void aDeflatedFleetOnlyTheGuestCanSeeIsInflatedBeforeItIsCaptured() {
+        // The live defect: a fleet the host player had never been near since the save loaded was
+        // captured deflated (stock hulls, no d-mods). When it then engaged the GUEST, vanilla
+        // inflated it as it committed to the encounter, the structural fleetHash flipped 617 ms after
+        // ENGAGE_GUEST went out, and the guest rebuilt its mirror's roster underneath an already-open
+        // encounter dialog -- every ship at 0% CR. Inflating at capture time is what stops the flip.
+        InflationSpy spy = new InflationSpy();
+        SectorAPI sector = sectorWithOneDeflatedFleet(spy);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+        try {
+            CoopGuestMirrorHandle.publish(spy.guestMirror);
+
+            replicator.sendSetIfChanged(sector, 0L);
+            assertEquals(1, spy.inflations, "the guest brought it into range, so the host inflates it");
+
+            replicator.sendSetIfChanged(sector, 10_000L);
+            assertEquals(1, spy.inflations, "an already-inflated fleet is never inflated again");
+        } finally {
+            CoopGuestMirrorHandle.clear();
+        }
+    }
+
+    @Test
+    void withNoGuestInSessionNothingIsInflated() {
+        // Solo-host frames must not pay an autofit pass per fleet for a guest that is not there.
+        InflationSpy spy = new InflationSpy();
+        SectorAPI sector = sectorWithOneDeflatedFleet(spy);
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+        CoopGuestMirrorHandle.clear();
+
+        replicator.sendSetIfChanged(sector, 0L);
+
+        assertEquals(0, spy.inflations);
+    }
+
+    @Test
+    void onlyADeflatedFleetWithAnInflaterAndBudgetLeftIsInflated() {
+        assertTrue(CoopNpcFleetReplicator.shouldInflateForGuest(true, false, 1));
+        assertTrue(CoopNpcFleetReplicator.shouldInflateForGuest(true, false,
+                CoopNpcFleetReplicator.MAX_GUEST_INFLATIONS_PER_SET));
+        // Nothing to inflate: no inflater at all (player fleets, most scripted fleets), or the engine
+        // has already done it -- in which case inflateIfNeeded is a no-op but the reads are not free.
+        assertFalse(CoopNpcFleetReplicator.shouldInflateForGuest(false, false, 4));
+        assertFalse(CoopNpcFleetReplicator.shouldInflateForGuest(true, true, 4));
+        // The per-tick cap: a system full of never-visited fleets must not stall one frame inflating
+        // all of them. They drain over the following set ticks instead.
+        assertFalse(CoopNpcFleetReplicator.shouldInflateForGuest(true, false, 0));
+        assertTrue(CoopNpcFleetReplicator.MAX_GUEST_INFLATIONS_PER_SET > 0,
+                "a zero budget would disable the fix outright");
+    }
+
+    /** Tracks inflation state for one stubbed fleet, and the guest mirror that brings it into range. */
+    private static final class InflationSpy {
+        private boolean inflated;
+        private int inflations;
+        private CampaignFleetAPI guestMirror;
+    }
+
+    /** One location, one deflated one-ship NPC fleet, and a guest mirror parked beside it. */
+    private static SectorAPI sectorWithOneDeflatedFleet(InflationSpy spy) {
+        Object repairTracker = stub(RepairTrackerAPI.class, (name, args) ->
+                "getCR".equals(name) ? 0.9f : null);
+        Object status = stub(FleetMemberStatusAPI.class, (name, args) ->
+                "getHullFraction".equals(name) ? 1.0f : null);
+        FleetMemberAPI member = (FleetMemberAPI) stub(FleetMemberAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "m-1";
+            case "getHullId" -> "hound";
+            case "getRepairTracker" -> repairTracker;
+            case "getStatus" -> status;
+            default -> null;
+        });
+        Object fleetData = stub(FleetDataAPI.class, (name, args) ->
+                "getMembersListCopy".equals(name) ? new ArrayList<>(List.of(member)) : null);
+        Object inflater = stub(FleetInflater.class, (name, args) -> null);
+
+        Object[] location = new Object[1];
+        CampaignFleetAPI fleet = (CampaignFleetAPI) stub(CampaignFleetAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "fleet-1";
+            case "getName" -> "Patrol";
+            case "getContainingLocation" -> location[0];
+            case "getLocation" -> new Vector2f(0f, 0f);
+            case "getVelocity" -> new Vector2f(0f, 0f);
+            case "getFleetData" -> fleetData;
+            case "getInflater" -> inflater;
+            case "isInflated" -> spy.inflated;
+            case "inflateIfNeeded" -> {
+                spy.inflations++;
+                spy.inflated = true;
+                yield null;
+            }
+            default -> null;
+        });
+        // No sensor answer: getMaxSensorRangeToDetect falls through to the proxy default (0), so the
+        // radius is RANGE_FLOOR_SU and a mirror 100 su away is comfortably inside it.
+        spy.guestMirror = (CampaignFleetAPI) stub(CampaignFleetAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "guest-mirror";
+            // CoopGuestMirrorHandle.current() drops a handle whose fleet is not in the world.
+            case "isAlive" -> true;
+            case "getContainingLocation" -> location[0];
+            case "getLocation" -> new Vector2f(100f, 0f);
+            default -> null;
+        });
+        location[0] = stub(LocationAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "corvus";
+            // The mirror is NOT in the fleet list: forEachReplicatedFleet would skip it on its tag
+            // anyway, and leaving it out keeps this stub to the one fleet under test.
+            case "getFleets" -> new ArrayList<>(List.of(fleet));
+            default -> null;
+        });
+
+        return (SectorAPI) stub(SectorAPI.class, (name, args) -> switch (name) {
+            case "getCurrentLocation" -> location[0];
+            case "getAllLocations" -> new ArrayList<>(List.of(location[0]));
+            default -> null;
+        });
     }
 
     /** The {@code set} blob out of an {@code NPC_FLEET_SET} payload. */

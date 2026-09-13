@@ -8,6 +8,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -61,6 +62,12 @@ class CoopFleetMirrorRegistryTest {
         public void advanceMotion(double cursorSeconds) {
             motionAdvances++;
             lastCursorSeconds = cursorSeconds;
+        }
+
+        @Override
+        public boolean isMirrorFleet(Object candidate) {
+            // Same identity test the real mirror makes, so the registry's lookup cannot drift.
+            return CoopFleetMirror.shouldReleaseShield(fleet, candidate);
         }
 
         @Override
@@ -545,6 +552,152 @@ class CoopFleetMirrorRegistryTest {
 
         assertEquals(1, registry.size(), "same size, different fleet");
         assertNotEquals(withA, registry.fleetIdsHash());
+    }
+
+    // ---- 2026-09-13: the open-encounter-dialog structural hold -----------------------------------
+
+    @Test
+    void aRosterRebuildIsHeldWhileTheDialogOnThatMirrorIsOpen() {
+        // The live case: the host inflates the fleet as it commits to engaging the guest, so a new
+        // structural hash arrives milliseconds after the guest's encounter dialog opened. Rebuilding
+        // there empties every member's crew composition under an open dialog that keeps the world
+        // paused, and the dialog reads 0% CR for every ship.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+
+        registry.noteDialogInteraction(mirror.fleet, 2000L);
+        registry.applySet(set(fleet("a", "corvus", "hammerhead")), 0.0, 2100L);
+
+        assertEquals(1, mirror.snapshotApplies, "the structural rebuild must not land mid-dialog");
+        assertEquals("a", registry.dialogHeldFleetId());
+    }
+
+    @Test
+    void aHealthOnlyUpdateStillReachesTheMirrorDuringTheDialog() {
+        // Same hash means no rebuild: CR/hull/position are exactly what the open dialog should be
+        // showing, and holding those would make the encounter screen go stale instead of wrong.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+
+        registry.noteDialogInteraction(mirror.fleet, 2000L);
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 5.0, 2100L);
+
+        assertEquals(2, mirror.snapshotApplies);
+        assertEquals(5.0, mirror.lastSampleTimeSeconds);
+    }
+
+    @Test
+    void anotherFleetsRebuildIsNotHeldByTheDialog() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf"), fleet("b", "corvus", "lasher")),
+                0.0, 1000L);
+        FakeMirror held = creationOrder.get(0);
+        FakeMirror other = creationOrder.get(1);
+
+        registry.noteDialogInteraction(held.fleet, 2000L);
+        registry.applySet(set(fleet("a", "corvus", "hammerhead"), fleet("b", "corvus", "hound")),
+                0.0, 2100L);
+
+        assertEquals(1, held.snapshotApplies);
+        assertEquals(2, other.snapshotApplies, "the hold is one mirror wide");
+    }
+
+    @Test
+    void closingTheDialogAppliesTheLatestHeldSnapshot() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.noteDialogInteraction(mirror.fleet, 2000L);
+
+        registry.applySet(set(fleet("a", "corvus", "hammerhead")), 0.0, 2100L);
+        registry.applySet(set(fleet("a", "corvus", "onslaught")), 7.0, 2200L);
+        assertEquals(1, mirror.snapshotApplies);
+
+        registry.noteDialogInteraction(null, 2300L);
+
+        assertEquals(2, mirror.snapshotApplies);
+        assertEquals("onslaught", mirror.lastSnapshot.members().get(0).hullId(),
+                "the newest held snapshot wins, not the first one held");
+        assertEquals(7.0, mirror.lastSampleTimeSeconds);
+        assertNull(registry.dialogHeldFleetId());
+    }
+
+    @Test
+    void aDialogNobodyEverClosesReleasesOnTheCap() {
+        // A player who walks away mid-encounter must not be able to pin a mirror off the host's state
+        // for the rest of the session.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.noteDialogInteraction(mirror.fleet, 2000L);
+        registry.applySet(set(fleet("a", "corvus", "hammerhead")), 3.0, 2100L);
+
+        registry.noteDialogInteraction(mirror.fleet,
+                2000L + CoopFleetMirrorRegistry.DIALOG_HOLD_CAP_MILLIS - 1L);
+        assertEquals(1, mirror.snapshotApplies, "still inside the cap");
+
+        registry.noteDialogInteraction(mirror.fleet,
+                2000L + CoopFleetMirrorRegistry.DIALOG_HOLD_CAP_MILLIS);
+
+        assertEquals(2, mirror.snapshotApplies);
+        assertEquals("hammerhead", mirror.lastSnapshot.members().get(0).hullId());
+        assertNull(registry.dialogHeldFleetId());
+    }
+
+    @Test
+    void aMirrorWithNoRosterYetIsNeverHeld() {
+        // Holding the very first snapshot would leave the dialog looking at an empty fleet, which is
+        // strictly worse than the rebuild this hold exists to prevent.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.noteDialogInteraction(mirror.fleet, 1500L);
+
+        // "b" has never been applied, so it has no last-applied hash to hold against.
+        assertFalse(CoopFleetMirrorRegistry.shouldHoldForDialog("b", 1500L, "b", null,
+                "hash-1", 1600L));
+        // ...while "a" (already applied) does hold.
+        assertTrue(CoopFleetMirrorRegistry.shouldHoldForDialog("a", 1500L, "a", "hash-0",
+                "hash-1", 1600L));
+        assertFalse(CoopFleetMirrorRegistry.shouldHoldForDialog(null, 0L, "a", "hash-0",
+                "hash-1", 1600L));
+        assertFalse(CoopFleetMirrorRegistry.shouldHoldForDialog("a", 1500L, "a", "hash-0",
+                "hash-0", 1600L), "same hash is not a rebuild");
+        assertEquals("a", registry.dialogHeldFleetId());
+    }
+
+    @Test
+    void aFleetTheHostDropsClearsItsDialogHold() {
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.noteDialogInteraction(mirror.fleet, 2000L);
+
+        registry.applySet(set(fleet("b", "corvus", "lasher")), 0.0, 2100L);
+
+        assertTrue(mirror.disposed);
+        assertNull(registry.dialogHeldFleetId(), "nothing left to hold a rebuild for");
+    }
+
+    @Test
+    void theDialogHoldNeverResurrectsAFleetThePostBattleFreezeIsGuarding() {
+        // The two holds overlap in the post-battle dialog: the player is standing in the salvage
+        // screen of a mirror they just destroyed. Releasing on close must not apply the host's
+        // pre-battle roster - that is exactly the resurrection the Phase 15 freeze exists to stop.
+        CoopFleetMirrorRegistry registry = newRegistry();
+        registry.applySet(set(fleet("a", "corvus", "wolf")), 0.0, 1000L);
+        FakeMirror mirror = creationOrder.get(0);
+        registry.noteDialogInteraction(mirror.fleet, 2000L);
+        registry.applySet(set(fleet("a", "corvus", "hammerhead")), 0.0, 2100L);
+        // The battle ends and the bridge freezes the mirror on its now-current (held) state.
+        registry.markPendingReconcile("a", 2200L);
+
+        registry.noteDialogInteraction(null, 2300L);
+
+        assertEquals(1, mirror.snapshotApplies, "the freeze outranks the dialog hold");
+        assertEquals(List.of("a"), new ArrayList<>(registry.pendingReconcileIds()));
     }
 
     /** Phase 14b sensor identity fixture: profile + the three detected-range aggregates + strength. */

@@ -6398,7 +6398,12 @@ public class CoopNetPump implements EveryFrameScript {
             // read entirely rather than paying for it every frame.
             return;
         }
-        npcFleetRegistry.assertEngagementShields(playerEngagementTargetOrNull(), now);
+        ScreenTargets targets = screenTargets();
+        npcFleetRegistry.assertEngagementShields(targets.engagementTarget(), now);
+        // 2026-09-13: the other half of the same sector read. While a dialog IS open the registry
+        // holds structural rebuilds of the mirror it opened on — a roster rebuilt underneath an open
+        // encounter dialog reads 0% CR for every ship (see CoopFleetMirrorRegistry's class doc).
+        npcFleetRegistry.noteDialogInteraction(targets.dialogTarget(), now);
         // Same frame, same clock read: post-battle freezes expire on wall time, not on the host
         // happening to send another NPC_FLEET_SET (it only sends one when its set hash changes, so
         // a lost BATTLE_RESULT used to freeze a mirror indefinitely).
@@ -6406,26 +6411,47 @@ public class CoopNetPump implements EveryFrameScript {
     }
 
     /**
-     * The fleet the local player is walking into, or null. Read here rather than in the mirrors so
-     * they stay engine-dumb. Returns null while any dialog owns the screen: by then the encounter has
-     * already been constructed and vanilla's {@code FleetInteractionDialogPluginImpl} — which never
-     * consults the fader — drives the battle, so the shield can go straight back up.
+     * The local player's interaction target, split by whether a dialog owns the screen. Exactly one
+     * of the two is ever non-null, and the split is the point:
+     *
+     * <ul>
+     *   <li>{@code engagementTarget} — the fleet the player is <em>walking into</em>, which is what
+     *       the engagement shield releases for. Null once a dialog is up: by then the encounter has
+     *       been constructed and vanilla's {@code FleetInteractionDialogPluginImpl} — which never
+     *       consults the fader — drives the battle, so the shield can go straight back up.</li>
+     *   <li>{@code dialogTarget} — the fleet an <em>open</em> dialog is talking to, which is the
+     *       window in which a mirror's roster must not be rebuilt underneath it.</li>
+     * </ul>
+     *
+     * <p>Read here rather than in the mirrors or the registry so both stay engine-dumb, and read once
+     * per frame rather than twice because this is on the per-frame path.
      */
-    private Object playerEngagementTargetOrNull() {
+    private record ScreenTargets(Object engagementTarget, Object dialogTarget) {
+    }
+
+    private static final ScreenTargets NO_SCREEN_TARGETS = new ScreenTargets(null, null);
+
+    private ScreenTargets screenTargets() {
         try {
             SectorAPI sector = Global.getSector();
             if (sector == null) {
-                return null;
-            }
-            CampaignUIAPI ui = sector.getCampaignUI();
-            if (ui != null && (ui.isShowingDialog() || ui.getCurrentInteractionDialog() != null)) {
-                return null;
+                return NO_SCREEN_TARGETS;
             }
             CampaignFleetAPI player = sector.getPlayerFleet();
-            return player == null ? null : player.getInteractionTarget();
+            Object playerTarget = player == null ? null : player.getInteractionTarget();
+            CampaignUIAPI ui = sector.getCampaignUI();
+            InteractionDialogAPI dialog = ui == null ? null : ui.getCurrentInteractionDialog();
+            boolean dialogOpen = ui != null && (ui.isShowingDialog() || dialog != null);
+            if (!dialogOpen) {
+                return new ScreenTargets(playerTarget, null);
+            }
+            // The dialog's own target first: the player fleet's is cleared on some exit paths while
+            // the dialog is still up, and it is the dialog's reference that is showing the 0% CR.
+            Object dialogTarget = dialog == null ? null : dialog.getInteractionTarget();
+            return new ScreenTargets(null, dialogTarget == null ? playerTarget : dialogTarget);
         } catch (RuntimeException | LinkageError ex) {
             // Hot path, once per frame: an unreadable sector just means "no target this frame".
-            return null;
+            return NO_SCREEN_TARGETS;
         }
     }
 

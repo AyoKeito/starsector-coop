@@ -1,6 +1,7 @@
 package coop.fleet;
 
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import coop.util.CoopDebug;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -445,6 +447,70 @@ class CoopFleetMirrorTest {
     @Test
     void aBackwardsClockReassertsRatherThanLeavingTheShieldDown() {
         assertTrue(CoopFleetMirror.shouldReassertShield(10_000L, 9_000L));
+    }
+
+    // ---- 2026-09-13: the rebuilt roster has to be recrewed on the same frame ----------------------
+
+    @Test
+    void aRebuiltRosterIsFlaggedDirtyAndThenSyncedImmediately() {
+        // The live encounter-dialog case: the host inflates a fleet as it commits to engaging the
+        // guest, the new structural hash rebuilds the mirror's roster 7 ms after the guest's dialog
+        // opened, and every ship in that dialog reads 0% CR. getCR() is the set value "modified by
+        // the crew fraction" and freshly built members have an empty crew composition until FleetData
+        // syncs -- which, with a dialog holding the world paused, never happened. Order matters:
+        // syncIfNeeded() does nothing unless the flag is already set.
+        List<String> calls = new ArrayList<>();
+        CoopFleetMirror.syncRosterNow(recordingFleetData(calls, false));
+
+        assertEquals(List.of("setSyncNeeded", "syncIfNeeded"), calls);
+    }
+
+    @Test
+    void aFleetDataThatCannotSyncNeverBreaksTheApply() {
+        // A mirror apply runs inside the guest pump; throwing into it would cost the whole frame.
+        // Degrading to "the flag is set, the engine syncs on its next advance" is the pre-fix
+        // behaviour, which is exactly the right floor.
+        List<String> calls = new ArrayList<>();
+        CoopFleetMirror.syncRosterNow(recordingFleetData(calls, true));
+        CoopFleetMirror.syncRosterNow(null);
+
+        assertEquals(List.of("setSyncNeeded"), calls, "the flag is written before the throw");
+    }
+
+    private static FleetDataAPI recordingFleetData(List<String> calls, boolean throwOnSync) {
+        return (FleetDataAPI) Proxy.newProxyInstance(
+                FleetDataAPI.class.getClassLoader(),
+                new Class<?>[] {FleetDataAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "setSyncNeeded" -> {
+                        calls.add("setSyncNeeded");
+                        yield null;
+                    }
+                    case "syncIfNeeded" -> {
+                        if (throwOnSync) {
+                            throw new IllegalStateException("no crew data");
+                        }
+                        calls.add("syncIfNeeded");
+                        yield null;
+                    }
+                    case "toString" -> "FakeFleetData";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    @Test
+    void aMirrorIdentifiesItsOwnEngineFleetByIdentity() {
+        // What lets the registry turn the pump's interaction target back into a coopFleetId without
+        // reaching into a mirror's engine fleet (the open-dialog rebuild hold).
+        Object fleet = new Object();
+        assertTrue(CoopFleetMirror.shouldReleaseShield(fleet, fleet));
+        assertFalse(CoopFleetMirror.shouldReleaseShield(fleet, new Object()));
+        assertFalse(CoopFleetMirror.shouldReleaseShield(null, null));
+        // A mirror with no fleet built yet must answer "not me" rather than matching a null target.
+        assertFalse(new CoopFleetMirror().isMirrorFleet(null));
+        assertFalse(new CoopFleetMirror().isMirrorFleet(fleet));
     }
 
     @Test
