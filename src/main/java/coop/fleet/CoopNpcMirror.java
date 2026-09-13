@@ -50,6 +50,18 @@ public interface CoopNpcMirror {
     default void assertSensorState() {
     }
 
+    /**
+     * True when {@code candidate} is <em>this</em> mirror's engine fleet (2026-09-13). Identity, not
+     * equality — the same test {@link CoopFleetMirror#shouldReleaseShield} makes.
+     *
+     * <p>Exists so {@link CoopFleetMirrorRegistry} can turn the interaction target the pump hands it
+     * back into a {@code coopFleetId} without reaching into a mirror's engine fleet itself. Defaults
+     * to false so a headless fake with no fleet answers "not me".
+     */
+    default boolean isMirrorFleet(Object candidate) {
+        return false;
+    }
+
     /** Removes the mirror fleet from the world. Idempotent. */
     void dispose();
 }

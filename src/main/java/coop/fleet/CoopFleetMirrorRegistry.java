@@ -58,6 +58,24 @@ import java.util.function.Supplier;
  * <em>not</em> gated by it, and they carry position/velocity without touching the roster, so a
  * surviving mirror keeps moving normally while its roster waits. A destroyed mirror has no fleet left
  * for motion to drive and its {@code applyMotion} no-ops on its own.
+ *
+ * <h2>2026-09-13: the open-encounter-dialog hold</h2>
+ * A second, unrelated window needs the same treatment, for the opposite reason: not "the host has not
+ * caught up" but "the host caught up at the worst possible instant". When an NPC fleet engages the
+ * guest, vanilla inflates that fleet on the host as it commits to the encounter, so its structural
+ * {@code fleetHash} changes <em>while the guest's encounter dialog is opening</em>. The guest then
+ * tore down and rebuilt the mirror's roster underneath the open dialog, and the dialog — which is
+ * holding a reference to the fleet it opened on, and which keeps the world paused — showed every ship
+ * at 0% CR. {@link CoopFleetMirror#syncRosterNow} makes the rebuilt roster read correctly, and
+ * {@code CoopNpcFleetReplicator} stops the host-side hash flip at the source; this hold is the third
+ * leg, and the only one that covers <em>any</em> structural change arriving mid-dialog, whatever
+ * caused it.
+ *
+ * <p>The rule is narrow: while the local player's interaction target is a mirror, only that one
+ * mirror holds, only snapshots whose {@code fleetHash} differs from the last applied one hold
+ * (health/CR/hull/position updates still land, because they are what keeps the dialog honest), and
+ * the hold breaks after {@link #DIALOG_HOLD_CAP_MILLIS} whatever the dialog is doing. The latest held
+ * snapshot is applied the moment the dialog closes, so a mirror can never be left behind the host.
  */
 public final class CoopFleetMirrorRegistry {
 
@@ -70,12 +88,27 @@ public final class CoopFleetMirrorRegistry {
      */
     static final long PENDING_RECONCILE_TIMEOUT_MILLIS = 60000L;
 
+    /**
+     * The safety cap on the open-dialog structural hold (2026-09-13). A dialog the player leaves open
+     * — walked away from the keyboard mid-encounter — must not be able to pin a mirror off the host's
+     * state indefinitely; five minutes is far longer than any encounter dialog and far shorter than
+     * "forever". On expiry the held snapshot applies exactly as it would on close.
+     */
+    static final long DIALOG_HOLD_CAP_MILLIS = 300_000L;
+
     private final Supplier<? extends CoopNpcMirror> mirrorFactory;
     private final LongSupplier clockMillis;
     private final Map<String, CoopNpcMirror> mirrors = new LinkedHashMap<>();
     /** The {@code fleetHash} of the last snapshot actually applied per fleet (freeze release test). */
     private final Map<String, String> lastAppliedHash = new HashMap<>();
     private final Map<String, PendingReconcile> pendingReconcile = new LinkedHashMap<>();
+    /** The mirror the local player's open dialog is interacting with, or null. One at a time. */
+    private String dialogMirrorId;
+    private long dialogHoldStartedAtMillis;
+    private CoopNpcFleetSnapshot dialogDeferredSnapshot;
+    private double dialogDeferredSampleTimeSeconds;
+    /** Guards the "rebuild held" line so a 1 Hz set cadence cannot flood the log through a dialog. */
+    private String dialogHeldLoggedHash;
 
     public CoopFleetMirrorRegistry() {
         this(CoopFleetMirror::new);
@@ -124,6 +157,22 @@ public final class CoopFleetMirrorRegistry {
                 CoopLog.debug(CoopFleetMirrorRegistry.class, "Coop mirror released from post-battle"
                         + " freeze coopFleetId=" + id + " fleetHash=" + snapshot.fleetHash());
             }
+            if (shouldHoldForDialog(dialogMirrorId, dialogHoldStartedAtMillis, id,
+                    lastAppliedHash.get(id), snapshot.fleetHash(), nowMillis)) {
+                // The player is standing in an encounter dialog on this exact mirror and the host
+                // just changed its roster. Rebuilding now empties every member's crew composition
+                // under the open dialog and the paused world never syncs it back, so the dialog reads
+                // 0% CR for every ship. Keep the newest snapshot and apply it on close.
+                dialogDeferredSnapshot = snapshot;
+                dialogDeferredSampleTimeSeconds = sampleTimeSeconds;
+                if (!Objects.equals(dialogHeldLoggedHash, snapshot.fleetHash())) {
+                    dialogHeldLoggedHash = snapshot.fleetHash();
+                    CoopLog.info(CoopFleetMirrorRegistry.class, "Coop mirror roster rebuild held"
+                            + " while the player's dialog is open coopFleetId=" + id
+                            + " fleetHash=" + snapshot.fleetHash());
+                }
+                continue;
+            }
             CoopNpcMirror mirror = mirrors.get(id);
             if (mirror == null) {
                 mirror = Objects.requireNonNull(mirrorFactory.get(), "mirrorFactory.get()");
@@ -144,6 +193,15 @@ public final class CoopFleetMirrorRegistry {
             CoopNpcMirror mirror = mirrors.remove(id);
             pendingReconcile.remove(id);
             lastAppliedHash.remove(id);
+            if (id.equals(dialogMirrorId)) {
+                // The host says the fleet is gone: there is nothing left to hold a rebuild for, and
+                // keeping the id would let a later mirror reusing it inherit the hold.
+                dialogMirrorId = null;
+                dialogHoldStartedAtMillis = 0L;
+                dialogDeferredSnapshot = null;
+                dialogDeferredSampleTimeSeconds = 0.0;
+                dialogHeldLoggedHash = null;
+            }
             if (mirror != null) {
                 mirror.dispose();
             }
@@ -188,6 +246,114 @@ public final class CoopFleetMirrorRegistry {
         }
         return Objects.equals(markHash == null ? "" : markHash,
                 incomingHash == null ? "" : incomingHash);
+    }
+
+    // ---- 2026-09-13: the open-encounter-dialog structural hold ------------------------------------
+
+    /**
+     * Tells the registry which mirror (if any) the local player's open interaction dialog is talking
+     * to. Driven once per frame by the guest pump, beside the shield pass, from the same "read the
+     * sector here so the mirrors stay engine-dumb" rule — the registry never looks at {@code Global}.
+     *
+     * <p>Note this is deliberately <em>not</em> the value the shield pass gets. That one is null while
+     * a dialog owns the screen (by then vanilla drives the encounter and the shield can go back up);
+     * this one is the target <em>only</em> while a dialog owns the screen, which is exactly the window
+     * a roster rebuild must not land in.
+     *
+     * <p>Also the hold's expiry tick: a dialog nobody ever closes releases after
+     * {@link #DIALOG_HOLD_CAP_MILLIS} anyway.
+     *
+     * @param dialogInteractionTarget the fleet the open dialog is interacting with, or null when no
+     *                                dialog owns the screen
+     * @param nowMillis the pump's wall clock for this frame
+     */
+    public void noteDialogInteraction(Object dialogInteractionTarget, long nowMillis) {
+        String targetId = resolveMirrorId(dialogInteractionTarget);
+        if (targetId != null && targetId.equals(dialogMirrorId)) {
+            if (nowMillis - dialogHoldStartedAtMillis >= DIALOG_HOLD_CAP_MILLIS) {
+                releaseDialogHold("cap");
+            }
+            return;
+        }
+        if (dialogMirrorId != null) {
+            releaseDialogHold("closed");
+        }
+        if (targetId != null) {
+            dialogMirrorId = targetId;
+            dialogHoldStartedAtMillis = nowMillis;
+        }
+    }
+
+    /** The mirror currently shielded from structural rebuilds by an open dialog (tests/diagnostics). */
+    public String dialogHeldFleetId() {
+        return dialogMirrorId;
+    }
+
+    /**
+     * The hold predicate, pure like {@link #shouldDeferReassert} beside it: hold only the one mirror
+     * the dialog is on, only a snapshot that would actually rebuild the roster (a differing {@code
+     * fleetHash}), only while the cap has not run out — and never a mirror that has no roster yet
+     * ({@code lastAppliedHash == null}), because holding that one leaves the dialog looking at an
+     * empty fleet, which is strictly worse than the rebuild.
+     */
+    static boolean shouldHoldForDialog(String dialogMirrorId, long dialogHoldStartedAtMillis,
+                                       String fleetId, String lastAppliedHash, String incomingHash,
+                                       long nowMillis) {
+        if (dialogMirrorId == null || !dialogMirrorId.equals(fleetId) || lastAppliedHash == null) {
+            return false;
+        }
+        if (nowMillis - dialogHoldStartedAtMillis >= DIALOG_HOLD_CAP_MILLIS) {
+            return false;
+        }
+        return !Objects.equals(lastAppliedHash, incomingHash == null ? "" : incomingHash);
+    }
+
+    /** Drops the hold and applies whatever it was sitting on. {@code reason} only reaches the log. */
+    private void releaseDialogHold(String reason) {
+        String id = dialogMirrorId;
+        CoopNpcFleetSnapshot deferred = dialogDeferredSnapshot;
+        double sample = dialogDeferredSampleTimeSeconds;
+        dialogMirrorId = null;
+        dialogHoldStartedAtMillis = 0L;
+        dialogDeferredSnapshot = null;
+        dialogDeferredSampleTimeSeconds = 0.0;
+        dialogHeldLoggedHash = null;
+        if (deferred == null || id == null) {
+            return;
+        }
+        CoopNpcMirror mirror = mirrors.get(id);
+        if (mirror == null) {
+            return;
+        }
+        // The post-battle freeze outranks this one whenever both are standing (the player is in the
+        // salvage screen of a mirror they just destroyed). That freeze exists to stop a resurrection,
+        // and this snapshot predates the battle, so it is handed over rather than applied: the
+        // freeze's own release conditions then decide its fate, exactly as if applySet had skipped it.
+        PendingReconcile pending = pendingReconcile.get(id);
+        if (pending != null) {
+            pendingReconcile.put(id, new PendingReconcile(pending.markHash(),
+                    pending.markedAtMillis(), deferred, sample));
+            CoopLog.info(CoopFleetMirrorRegistry.class, "Coop mirror roster rebuild released ("
+                    + reason + ") into the post-battle freeze coopFleetId=" + id);
+            return;
+        }
+        mirror.applySnapshot(deferred, sample);
+        lastAppliedHash.put(id, deferred.fleetHash());
+        CoopLog.info(CoopFleetMirrorRegistry.class, "Coop mirror roster rebuild released ("
+                + reason + ") coopFleetId=" + id + " fleetHash=" + deferred.fleetHash());
+    }
+
+    /** Which mirror owns this engine fleet, or null. Identity-based; see {@link CoopNpcMirror#isMirrorFleet}. */
+    private String resolveMirrorId(Object fleet) {
+        if (fleet == null) {
+            return null;
+        }
+        for (Map.Entry<String, CoopNpcMirror> entry : mirrors.entrySet()) {
+            if (entry.getValue().isMirrorFleet(fleet)) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     /**
@@ -311,6 +477,11 @@ public final class CoopFleetMirrorRegistry {
         mirrors.clear();
         pendingReconcile.clear();
         lastAppliedHash.clear();
+        dialogMirrorId = null;
+        dialogHoldStartedAtMillis = 0L;
+        dialogDeferredSnapshot = null;
+        dialogDeferredSampleTimeSeconds = 0.0;
+        dialogHeldLoggedHash = null;
     }
 
     public int size() {

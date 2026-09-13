@@ -88,6 +88,15 @@ public final class CoopNpcFleetReplicator {
     /** Diagnostic cadence for the eligible/filtered counts; {@link CoopDebug}-gated. */
     private static final long RANGE_LOG_INTERVAL_MILLIS = 60_000L;
     /**
+     * How many deflated fleets one set tick may inflate for the guest (2026-09-13). {@code
+     * inflateIfNeeded} runs the fleet's {@code FleetInflater} — an autofit pass over every ship — so
+     * a system the guest has just entered, full of never-visited fleets, could otherwise stall a
+     * frame inflating all of them at once. At the set cadence ({@link #SET_SYNC_INTERVAL_MILLIS})
+     * this drains a crowded system over a few seconds instead, which is well inside the time it takes
+     * the guest to close on any of them.
+     */
+    static final int MAX_GUEST_INFLATIONS_PER_SET = 4;
+    /**
      * Slack the chunk packer holds back for stamps that grow between ticks. A chunk's budget is
      * computed from this tick's epoch and stream time, but the invariant it enforces has to hold on
      * the next tick too, where either number may have gained a decimal digit.
@@ -306,8 +315,15 @@ public final class CoopNpcFleetReplicator {
         CampaignFleetAPI hostPlayerFleet = sector.getPlayerFleet();
         CampaignFleetAPI guestMirror = CoopGuestMirrorHandle.current();
         String hostPlayerLabel = CoopPresenceIndicator.presenceLabel(sessionState.localName());
-        forEachReplicatedFleet(sector, fleet -> fleets.add(
-                toSnapshot(fleet, hostLocation, hostPlayerFleet, guestMirror, hostPlayerLabel)));
+        // 2026-09-13: inflate before capture, not after. See inflateForGuestIfNeeded.
+        List<CampaignFleetAPI> guestObservers =
+                guestMirror == null ? List.of() : List.of(guestMirror);
+        int[] inflationBudget = {MAX_GUEST_INFLATIONS_PER_SET};
+        expireRadiusCache(now);
+        forEachReplicatedFleet(sector, fleet -> {
+            inflateForGuestIfNeeded(fleet, guestObservers, inflationBudget);
+            fleets.add(toSnapshot(fleet, hostLocation, hostPlayerFleet, guestMirror, hostPlayerLabel));
+        });
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
         String healthHash = CoopNpcFleetSetSnapshot.computeHealthHash(fleets);
         boolean structuralChanged = !set.setHash().equals(lastSetHash);
@@ -663,6 +679,82 @@ public final class CoopNpcFleetReplicator {
         CoopLog.info(CoopNpcFleetReplicator.class, "Coop motion range filter eligible=" + eligible
                 + " filtered=" + filtered + " (floor=" + (int) RANGE_FLOOR_SU + "su margin="
                 + RANGE_MARGIN + "x)");
+    }
+
+    // ---- 2026-09-13: inflating for the guest observer ---------------------------------------------
+
+    /**
+     * Inflates a deflated NPC fleet the <em>guest</em> has brought into range, before its roster is
+     * captured for the set.
+     *
+     * <p>The bug this closes: a fleet the host player has never been near since the save loaded is
+     * still deflated ({@code getInflater() != null && !isInflated()}) — stock hulls, no d-mods, the
+     * variants worldgen wrote rather than the ones the fleet will actually fly. That is what went on
+     * the wire, and it was stable, so the guest's mirror matched. Then the fleet engaged the
+     * <em>guest</em>: vanilla inflates a fleet as it commits to an encounter, the host's structural
+     * {@code fleetHash} flipped 617 ms after {@code ENGAGE_GUEST} went out, and the guest tore down
+     * and rebuilt its mirror's roster 7 ms after its encounter dialog had opened — every ship in that
+     * dialog read 0% CR (see {@link CoopFleetMirror#syncRosterNow} for the receiving half).
+     *
+     * <p>Inflating here is not a workaround, it is what vanilla already does for a player at
+     * composition-detail visibility; the guest is a player too, it simply is not the one the engine
+     * knows about. Once inflated, {@link CoopInflationLatch} keeps the real fit across any later
+     * deflation, so the hash stops flipping at the worst possible moment.
+     *
+     * <p>Scoped to the guest observer on purpose. A fleet inside the host player's own range is
+     * inflated by the engine anyway, so this only pays for the fleets nothing else would cover, and
+     * it never touches a fleet with no inflater, a player fleet or a mirror (those never reach here —
+     * {@link #forEachReplicatedFleet} filters them). Budgeted per tick; never fatal.
+     */
+    private void inflateForGuestIfNeeded(CampaignFleetAPI fleet,
+                                         List<CampaignFleetAPI> guestObservers, int[] budget) {
+        if (guestObservers.isEmpty() || budget[0] <= 0) {
+            return;
+        }
+        boolean hasInflater;
+        boolean alreadyInflated;
+        try {
+            hasInflater = fleet.getInflater() != null;
+            alreadyInflated = fleet.isInflated();
+        } catch (RuntimeException | LinkageError ignored) {
+            // Same degradation as capturesRealFit: a fleet that cannot answer is left alone.
+            return;
+        }
+        if (!shouldInflateForGuest(hasInflater, alreadyInflated, budget[0])) {
+            return;
+        }
+        LocationAPI loc = safeContainingLocation(fleet);
+        if (loc == null || !withinStreamRange(guestObservers, fleet, loc)) {
+            return;
+        }
+        budget[0]--;
+        try {
+            fleet.inflateIfNeeded();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNpcFleetReplicator.class,
+                    "Coop could not inflate a fleet for the guest; its mirror will carry the stock"
+                            + " fit until the host makes contact", ex);
+            return;
+        }
+        if (CoopDebug.diagnosticsEnabled()) {
+            try {
+                CoopLog.info(CoopNpcFleetReplicator.class, "Coop host inflated fleet for the guest"
+                        + " coopFleetId=" + safeId(fleet) + " name="
+                        + (fleet.getName() == null ? "" : fleet.getName()));
+            } catch (RuntimeException ignored) {
+                // A diagnostic must never break the send it is reporting on.
+            }
+        }
+    }
+
+    /**
+     * The decision on its own, pure so the budget and the two engine flags are testable without a
+     * sector. Range is deliberately <em>not</em> part of it: that test needs live positions and is
+     * already covered by {@link #withinStreamRange}.
+     */
+    static boolean shouldInflateForGuest(boolean hasInflater, boolean alreadyInflated,
+                                         int remainingBudget) {
+        return hasInflater && !alreadyInflated && remainingBudget > 0;
     }
 
     private CoopNpcFleetSnapshot toSnapshot(CampaignFleetAPI fleet, LocationAPI hostLocation,

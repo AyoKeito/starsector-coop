@@ -2,6 +2,7 @@ package coop.fleet;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.ai.CampaignFleetAIAPI;
@@ -737,6 +738,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
         return mirrorFleet != null && mirrorFleet == playerInteractionTarget;
     }
 
+    /** {@inheritDoc} Same identity test the shield release makes, exposed for the registry. */
+    @Override
+    public boolean isMirrorFleet(Object candidate) {
+        return shouldReleaseShield(mirrorFleet, candidate);
+    }
+
     /**
      * Clears the shield with the vanilla idiom: {@code setNoEngaging(0f)} builds a zero-duration fader,
      * whose {@code fadeIn()} forces it straight to IDLE, so the engine nulls it on the mirror's next
@@ -1117,7 +1124,20 @@ public class CoopFleetMirror implements CoopNpcMirror {
         return permuted ? pairing : null;
     }
 
-    /** @return true when every member in the snapshot was actually built and attached. */
+    /**
+     * @return true when every member in the snapshot was actually built and attached.
+     *
+     * <p><b>The rebuilt roster has to be recrewed on the same frame (2026-09-13).</b> The live
+     * encounter-dialog case: an NPC fleet engages the guest, the host inflates it as it commits to
+     * the encounter, the new structural hash lands here milliseconds after the guest's dialog opened,
+     * and the dialog then showed <em>every</em> ship at 0% CR — the vanilla encounter AI sized the
+     * fleet up as worthless and declined to fight. The members built below start with an empty crew
+     * composition, and {@code RepairTrackerAPI#getCR()} is documented as the set value "modified by
+     * the crew fraction" ({@code api_pristine/.../RepairTrackerAPI.java:48}), so until {@code
+     * FleetData} syncs every read is zero. {@code setSyncNeeded()} alone only schedules that sync for
+     * the fleet's next advance — and an open dialog keeps the world paused, so it never came. See
+     * {@link #syncRosterNow}.
+     */
     private boolean rebuildRoster(List<CoopFleetSnapshot.Member> members, String fleetHash) {
         // Diagnostic counter only; a no-op unless the frame profiler is enabled.
         CoopFrameProfiler.noteRosterRebuild();
@@ -1136,12 +1156,44 @@ public class CoopFleetMirror implements CoopNpcMirror {
         builtMemberIds = builtIds;
         builtMemberCount = builtIds.size();
         int built = builtIds.size();
-        mirrorFleet.getFleetData().setSyncNeeded();
+        // Both halves, in this order: the flag is what the engine's own paths consult, and the
+        // immediate sync is what makes getCR() truthful before anything (a just-opened encounter
+        // dialog, most of all) reads it. This is also the mirror's FIRST member build — the roster is
+        // only ever attached here — so a freshly created mirror is recrewed on creation too.
+        syncRosterNow(mirrorFleet.getFleetData());
         CoopLog.info(CoopFleetMirror.class,
                 "Coop mirror fleet roster refreshed to " + built + " of " + members.size()
                         + " ship(s) coopFleetId=" + coopFleetId + " fleetHash=" + fleetHash);
         reportRoster(members, fleetHash);
         return built == members.size();
+    }
+
+    /**
+     * Flags the mirror's {@code FleetData} dirty and syncs it immediately (2026-09-13).
+     *
+     * <p>Split out behind a seam because the ordering is the whole fix and is worth pinning in a
+     * test: {@code setSyncNeeded()} then {@code syncIfNeeded()}
+     * ({@code api_pristine/.../FleetDataAPI.java:102,104}). The sync is what runs the engine's
+     * {@code recrewFleetMembersV2}, which fills each member's crew from {@code getMinCrew}; on an
+     * AI-mode fleet — which every mirror is — the crew fraction then short-circuits to 1.0 and
+     * {@code getCR()} returns the CR the roster build actually wrote instead of zero.
+     *
+     * <p>Never fatal. A mirror apply runs inside the guest pump and must not throw into it; a fleet
+     * that cannot sync degrades to exactly the pre-fix behaviour (the flag is set, the engine syncs
+     * on its next advance) rather than aborting the frame.
+     */
+    static void syncRosterNow(FleetDataAPI data) {
+        if (data == null) {
+            return;
+        }
+        try {
+            data.setSyncNeeded();
+            data.syncIfNeeded();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopFleetMirror.class,
+                    "Coop mirror roster could not be recrewed immediately; CR may read low until the"
+                            + " engine syncs it", ex);
+        }
     }
 
     /**
