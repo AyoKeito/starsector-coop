@@ -17,12 +17,12 @@
     # parser reads it as absent and offers no forum link. Set this once the release post exists.
     "modThreadId":0,
 
-    # Matches "version" in mod_info.json and build.gradle. patch 0 displays as "v0.1".
+    # Matches "version" in mod_info.json and build.gradle. A patch of 0 displays as "v0.1".
     "modVersion":
     {
         "major":0,
         "minor":1,
-        "patch":0
+        "patch":1
     },
 
     # Optional, read by LunaLib's bundled version checker UI.

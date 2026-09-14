@@ -1,4 +1,4 @@
-# Starsector Coop V1 (0.1.0)
+# Starsector Coop V1 (0.1.1)
 
 Two people, two copies of Starsector 0.98a-RC8, one campaign. The sector is generated once from a
 shared seed and both of you fly around in it at the same time, on one calendar. The host's game is

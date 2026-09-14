@@ -411,7 +411,7 @@ public final class CoopInstallCheck {
      * the other jar. Nothing at runtime notices when they disagree - the handshake reports
      * {@code coop.jar}'s version on behalf of both, so two players can pass a version check and
      * still be running different forked engines. The commit is what tells them apart; the version
-     * is {@code 0.1.0} on every build so far and would catch nothing on its own.
+     * changes once a release and would catch nothing on its own.
      *
      * <p>The forks half is read from the jar the {@code -classpath} entry points at, which is not
      * always this mod folder's own. When the two differ the row says which file it read: an install

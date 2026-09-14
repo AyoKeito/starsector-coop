@@ -8,7 +8,7 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
 
 - **You fight your own battles.** Two players in one battle is not in this release.
 - **Hyperspace weather and slipstreams differ between you.** Each PC rolls its own storms, flares and
-  slipstream map.
+  slipstream map. A storm that costs you combat readiness is invisible on your partner's screen.
 - **Deep space and sensor ghosts are host-only.** The abyss content exists on the host's engine, and
   the guest sees no sensor ghosts anywhere.
 - **Story missions are the host's.** The mod removes every way into the Galatia Academy chain on
@@ -208,10 +208,14 @@ without asking who did it, so a contract the guest is holding pays out when the 
 planet. And either player entering a system marks its planets as seen on both maps.
 
 **Weather and hyperspace.** Hyperspace storm cells and star flares are rolled independently on each
-PC. A storm only hits the fleet standing in it and both fleets are owner-authoritative, so this costs
-nothing but a different sky. Slipstreams are the same story with a visible artifact: the two of you
-see different slipstream maps, so your partner's fleet can appear to cross empty hyperspace
-impossibly fast.
+PC. A storm only hits the fleet standing in it and both fleets are owner-authoritative, so the damage
+is real and it is yours alone: a cell that strikes your fleet does not exist on your partner's map,
+and what they see is your CR dropping for no reason they can point at. In a test run on 2026-09-15
+the guest lost 12%, 20% and 33% combat readiness over four days of hyperspace travel to three storm
+hits the host never saw, then repaired back to 70% over the next three weeks. Check your own screen,
+not your partner's, before reporting a CR drop in hyperspace as a bug. Slipstreams are the same story
+with a visible artifact: the two of you see different slipstream maps, so your partner's fleet can
+appear to cross empty hyperspace impossibly fast.
 
 **The abyss.** The guest can fly into it. The deep content there (rogue stellar objects, lights,
 Threat encounters) exists on the host's engine only, so those are host experiences.

@@ -5,7 +5,7 @@ shared seed and both players fly in it on one calendar. The host's game runs the
 markets, the economy, the colonies. The guest's game mirrors it. Each player pilots their own battles
 on their own PC.
 
-Version 0.1.0, Windows, in a private test period before a public forum post. Expect rough edges and
+Version 0.1.1, Windows, in a private test period before a public forum post. Expect rough edges and
 report them.
 
 ## Quick start

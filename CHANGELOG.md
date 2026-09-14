@@ -1,16 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
 
-**Launcher**
-
-- Compact Host/Join setup keeps the Launch bar in place. Campaign, connection, installation and
-  settings details open separately; Logs is a movable window that can stay open during play.
-- Full-size Copy/Paste actions, stable progress labels, keyboard-accessible controls and explicit
-  connection results replace the small inline actions. Changed invitations prompt a fresh copy;
-  stale connection results are discarded when the role or endpoint changes.
-- Outline icons and aligned header, connection status and Launch action match the UI prototype.
-  The pencil beside Copy invite opens connection settings without adding another row.
+Shared storage, shared submarkets and player-to-player credits, plus everything five two-player test
+sessions turned up in 0.1.0. The last of those sessions ran with the second player on the far side of
+an Internet tunnel instead of on the same LAN.
 
 **Shared storage and submarkets**
 
@@ -31,10 +25,107 @@
 
 **Credits**
 
-- A Send credits row on the Coop Options page moves money between players: step the amount, press
-  Send, confirm. It leaves your account on send and lands once on the other side. A transfer made
-  while the link is down goes through on the resume; one that can never be delivered is put back in
-  your account with a message-feed line.
+- A Send credits row on the Coop Options page moves money between players: type the amount, press
+  Send, confirm. It leaves your account on send and lands once on the other side, and a transfer made
+  while the link is down goes through on the resume.
+
+**A dropped link no longer eats what you were doing**
+
+- 0.1.0 lost any message that was still on its way when the connection died. Three were confirmed
+  lost in testing: a market purchase, a 3,000 credit transfer and a 50 supply storage deposit. In
+  each case the goods or the money left one side and never arrived on the other. Reliable messages
+  are now acknowledged, kept until the acknowledgement comes back, and resent after the reconnect.
+  They land exactly once.
+- A transfer that can never be delivered, because the other game is gone for good, is put back in
+  your account when the session ends, with a line in the message feed.
+- A resent message could arrive one millisecond before the reconnect finished and be thrown away for
+  arriving too early, and nothing retried it. Messages from a connection that has not proved itself
+  yet are held and delivered behind the resume.
+
+**Encounters and NPC fleets**
+
+- A fleet that caught the guest with its transponder off always offered a free **Leave**. The engine
+  treats a fleet as hostile to a transponder-off player only once it has identified them, and a
+  mirrored fleet carries none of that memory, so the encounter was never forced. It is now.
+- Mirrored fleets could show every ship at 0% combat readiness in the guest's encounter dialog. The
+  roster was rebuilt without a crew, and the dialog holds the game paused, so the crew never arrived
+  while the dialog was open. Rosters are crewed on the same frame now. The host also fills in a
+  fleet's real loadout and d-mods before sending it to a guest standing close enough to read them.
+- Jump points in a system neither player had visited sat at a different angle in each game, in one
+  case 30,000 units apart. A guest jumping in landed beside its own copy of the exit and then watched
+  it move away. The host now corrects every system's jump points in the background at one system a
+  second, 233 systems and 460 jump points in about four minutes, and an arrival stays put.
+- Planets and jump points are kept in step in the guest's system too, not just the host's.
+- Ship hulls a trade fleet is carrying as cargo draw as mothballed instead of as warships at 0%.
+- Nothing engages a player whose game is paused.
+- NPC tooltips stopped driving the traffic. One fleet's action line changing from "returning to X" to
+  "delivering Y" re-sent all 33 fleets in the sector, once a second for minutes at a time, at roughly
+  20 KB a send. Action text and ship health now ride a 10 second floor, and only fleets in a system
+  one of you is standing in force an immediate send.
+
+**Colonies, gates and the bar**
+
+- A gate one of you scans now shows up in the other's Gates intel tab. It was marked scanned and
+  counted, but the part of the vanilla rule that the tab actually reads was never run.
+- Both players could accept the same bar mission. First-come claiming was built but nothing at the
+  bar ever called it. The loser now reads `<partner> already took that offer.` and keeps no orphan
+  mission in their intel.
+- A colony edit that failed to apply rolled the other player's edit back with it.
+- The guest no longer carries a Hostile Activity meter for a shared colony, which only the host's
+  economy drives, and the Galatia Academy story chain is off on the guest rather than half working.
+- A guest sitting alone in a system no longer has ambient fleets spawned on top of it.
+
+**Markets**
+
+- Commodity stacks on the guest sat a unit below the host's on every stack the economy was decaying
+  toward its limit. The guest's own market plugin ran its restock pass after the mod had applied the
+  host's numbers and shaved a unit off each over-limit stack on every dock. Its timers are reset
+  after each sync now.
+- A ship in shared storage was torn down and rebuilt every time the locker was opened, because the
+  two games list a ship's weapon groups in different order and the comparison read the order. It
+  compares a sorted form now, so the ship keeps its identity.
+
+**Saving and quitting**
+
+- The coordinated save gave up after 30 seconds if the other player had a screen open, left the two
+  saves out of step and told nobody. It now waits up to ten minutes and says on the host's message
+  feed whether it caught up.
+- Quitting to the menu or closing the game tells the other player at once. They used to wait out the
+  full 60 second reconnect countdown for someone who had left on purpose.
+- Load a save from the wrong campaign and the refusal now names the save that does match, and points
+  at the launcher checkbox rather than at a command line switch.
+- The credit transfer is one amount field and a Send button instead of a row of stepper buttons.
+
+**Launcher**
+
+- Compact Host/Join setup keeps the Launch bar in place. Campaign, connection, installation and
+  settings details open separately; Logs is a movable window that can stay open during play.
+- Full-size Copy/Paste actions, stable progress labels, keyboard-accessible controls and explicit
+  connection results replace the small inline actions. Changed invitations prompt a fresh copy;
+  stale connection results are discarded when the role or endpoint changes.
+- Outline icons and aligned header, connection status and Launch action match the UI prototype.
+  The pencil beside Copy invite opens connection settings without adding another row.
+
+**Under the hood**
+
+- Round trip times measured across a battle are discarded. A guest sitting in the combat screen is
+  not answering the campaign pump, so the host measured 43 seconds of round trip, warned about a
+  degraded connection after every fight the guest had, and widened the distance at which it hands a
+  chasing fleet over to the guest from about 100 units to nearly 4,000.
+- A diagnostic probe on your own fleet, silent unless diagnostics are switched on, records every drop
+  in combat readiness, hull or supplies alongside the engine event that caused it. It is what
+  identified the storm limitation below.
+- A battle result can no longer name a player's own fleet.
+
+**Known limitations**
+
+The full list is in `docs/player/LIMITATIONS.md` and has not changed since 0.1.0, but one entry is
+worth stating plainly because it looks exactly like a bug. Hyperspace storms are rolled separately in
+each game. A storm cell that hits your fleet does not exist on your partner's screen, so they watch
+your combat readiness fall with nothing on their map to explain it, and the same the other way round.
+In one test run the guest lost 12%, 20% and 33% combat readiness to three storm hits over four days
+of hyperspace travel, then repaired back to 70% over the next three weeks; the host saw none of it.
+The damage is real, and it is only ever done to the fleet standing in the cell.
 
 ## 0.1.0, first release
 
