@@ -18,8 +18,7 @@ import com.fs.starfarer.api.util.Misc;
  * two-factor AND:
  * <ol>
  *   <li>hostility — {@code ai.isHostileTo(player) || context.isEngagedInHostilities() ||
- *       $cfai_makePreventDisengage} (FID:3514-3517), already true for the pirate/Remnant fleets the
- *       watcher hands off; and</li>
+ *       $cfai_makePreventDisengage} (FID:3514-3517); and</li>
  *   <li>{@code ai.pickEncounterOption(context, playerFleet) == ENGAGE} (FID:3510).</li>
  * </ol>
  * True &rarr; FID:973 prints {@code initialAggressive} ("The &lt;faction&gt; fleet maneuvers to prevent
@@ -37,10 +36,10 @@ import com.fs.starfarer.api.util.Misc;
  * the two evaluations can disagree at the margin — and a disagreement turns a committed handoff into
  * a neutral menu. One flag closes that gap deterministically.
  *
- * <h2>The minimum flag, and why not more</h2>
+ * <h2>The pick flag, and why not more</h2>
  * {@code $cfai_makeAggressive} is checked first thing in {@code TacticalModule.pickEncounterOption}
  * (:1286) and returns {@code ENGAGE} outright when the target is the player fleet, ahead of every
- * strength comparison and ahead of the 0.3 s decision cache. That is the whole staging.
+ * strength comparison and ahead of the 0.3 s decision cache. That is factor 2 of the AND.
  *
  * <p>Deliberately <b>not</b> set: {@code $cfai_makePreventDisengage}. It would also force ENGAGE
  * (:1292) but it additionally satisfies the hostility disjunct for non-hostile fleets and flips the
@@ -56,16 +55,52 @@ import com.fs.starfarer.api.util.Misc;
  * (as the customs staging must, for a different rule path) would only make the mirror eligible to be
  * dragged into unrelated battles.
  *
+ * <h2>Factor 1: the mirror is not hostile to a transponder-off guest (S4-E, 2026-09-14)</h2>
+ * The aggressive flag alone was not enough, and the guest log said so: <em>every</em> handoff ever
+ * staged with {@code hostileToPlayer=false}, so {@code fleetWantsToFight} failed at FID:3514 and the
+ * guest was offered a free Leave against a fleet the host had already decided caught it.
+ * {@code $cfai_makeAggressive} only means "engage <em>if</em> already hostile"; it is factor 2 and
+ * factor 2 alone.
+ *
+ * <p>{@code TacticalModule.isHostileTo} (:1095-1112) decides hostility toward the player fleet from
+ * fleet <em>memory</em> first: {@code $cfai_makeHostile} &rarr; hostile; {@code $cfai_makeHostileWhileTOff}
+ * with the player's transponder off &rarr; hostile (:1108); otherwise the faction-standing answer is
+ * reached only when the player's transponder is on or {@code knowsWhoPlayerIs()} — transponder on,
+ * {@code $sawPlayerTransponderOn}, or unique-signature hulls (:1111). A guest running dark is none of
+ * those, so a pirate the guest has never squawked at is <em>not</em> hostile to it, by design.
+ *
+ * <p>Vanilla closes that same gap for its own fleets in the identification block of
+ * {@code TacticalModule.advance} (:283-290): when a fleet with the right visibility level makes a
+ * transponder-off player, it writes
+ * {@code Misc.setFlagWithReason(memory, "$cfai_makeHostileWhileTOff", "tOff", true, 1f)} — "we know
+ * who that is, and we are hostile to them while they keep the transponder off". That block is behind
+ * {@code campaignFleet2.isPlayerFleet()}, so it never runs for a mirror: the mirror carries no vanilla
+ * fleet memory at all (nothing in {@code $cfai_*} is replicated).
+ *
+ * <p>So the staging writes that same flag, with the coop reason and vanilla's own 1-day expiry. This
+ * is not an override of the identification rule — it is the rule's conclusion, transplanted. The host
+ * ran the real check against the real fleets and decided this NPC caught the guest, and "it caught
+ * you" is exactly what vanilla means by "it made you at contact". Verified live 2026-09-14: writing
+ * the flag onto the mirror over the debug bridge turned the next handoff's staging line to
+ * {@code hostileToPlayer=true} and replaced the free Leave with "Attempt to disengage".
+ *
+ * <p>Note what it still does <b>not</b> do: it is conditional on the guest's transponder being off.
+ * A guest flying with the transponder on takes the {@code knowsWhoPlayerIs} path and faction standing
+ * decides, which is the vanilla answer and already hostile for the pirates and Remnants the watcher
+ * hands off. Hostility is all this buys — the disengage rolls stay vanilla's, as above.
+ *
  * <h2>No permanent posture pollution</h2>
- * The flag is written through {@link Misc#setFlagWithReason} with a coop-owned reason, so it is
- * reference-counted rather than a bare set: {@code Misc}:1439-1451 registers
- * {@code $cfai_makeAggressive_coopEngage} as a <em>required key</em> of {@code $cfai_makeAggressive},
- * and {@code MemoryAPI} drops the base key once no required key survives. Three independent things
- * therefore retire it — vanilla's own one-battle unset (via
- * {@link MemFlags#MEMORY_KEY_MAKE_AGGRESSIVE_ONE_BATTLE_ONLY}, honoured in
- * {@code CampaignEngine.reportBattleOccurred}), the {@link #AGGRESSIVE_EXPIRY_DAYS} expiry on the
- * reason key, and {@link #clear} on the no-battle outcome — and none of them can strand another
- * mod's or vanilla's reason for the same flag.
+ * Both flags are written through {@link Misc#setFlagWithReason} with a coop-owned reason, so they are
+ * reference-counted rather than bare sets: {@code Misc}:1439-1451 registers
+ * {@code <flag>_coopEngage} as a <em>required key</em> of {@code <flag>}, and {@code MemoryAPI} drops
+ * the base key once no required key survives. Three independent things retire the aggressive flag —
+ * vanilla's own one-battle unset (via {@link MemFlags#MEMORY_KEY_MAKE_AGGRESSIVE_ONE_BATTLE_ONLY},
+ * honoured in {@code CampaignEngine.reportBattleOccurred}), the {@link #AGGRESSIVE_EXPIRY_DAYS} expiry
+ * on the reason key, and {@link #clear} on the no-battle outcome. The hostility flag has two of those
+ * three (no one-battle unset exists for it), so on a handoff that turns into a battle its reason key
+ * lives out the 1-day expiry — the same lifetime vanilla's own {@code "tOff"} reason would have had on
+ * a fleet that identified the guest itself, which is the point. Neither path can strand another mod's
+ * or vanilla's reason for the same flag: {@link #clear} unsets our reason key only.
  */
 public final class CoopEngageDialogStaging {
 
@@ -73,10 +108,11 @@ public final class CoopEngageDialogStaging {
     static final String REASON = "coopEngage";
 
     /**
-     * Backstop expiry on the reason key, in campaign days. Short: the encounter resolves within
+     * Backstop expiry on both reason keys, in campaign days. Short: the encounter resolves within
      * seconds of real time, and the two normal retirements ({@link #clear} on a no-battle outcome,
-     * vanilla's one-battle unset on a fought one) both land first. This only matters if the guest
-     * quits or disconnects mid-dialog, where nothing else would ever clear it.
+     * vanilla's one-battle unset on a fought one) both land first for the aggressive flag. For the
+     * hostility flag it is also the ordinary lifetime, and it is deliberately vanilla's own number for
+     * the same flag (TacticalModule:284, reason {@code "tOff"}, 1 day).
      */
     static final float AGGRESSIVE_EXPIRY_DAYS = 1f;
 
@@ -95,7 +131,11 @@ public final class CoopEngageDialogStaging {
             return "no-memory";
         }
         StringBuilder out = new StringBuilder();
-        setFlagWithReason(mem, out, true);
+        setFlagWithReason(mem, out, MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE, true);
+        // Factor 1 of fleetWantsToFight: a mirror carries none of vanilla's fleet memory, so nothing
+        // ever told it that it has made a transponder-off guest. The host's handoff decision is that
+        // identification; see the class javadoc (S4-E, 2026-09-14).
+        setFlagWithReason(mem, out, MemFlags.MEMORY_KEY_MAKE_HOSTILE_WHILE_TOFF, true);
         // Vanilla's "aggressive for this encounter only" idiom (MakeOtherFleetAggressiveOnce): the
         // engine hard-unsets $cfai_makeAggressive in reportBattleOccurred when this is set, so a
         // handoff that turns into a real battle cleans itself up with no mod bookkeeping at all.
@@ -106,7 +146,10 @@ public final class CoopEngageDialogStaging {
     /**
      * Retires the staged posture for an encounter that produced no battle (the guest disengaged, or
      * just left). Unsetting the reason key is what drops the base flag — see the class javadoc — so
-     * this never disturbs a reason some other system put on the same flag. Never throws.
+     * this never disturbs a reason some other system put on the same flag: vanilla's own "tOff" and
+     * "battle" reasons for {@code $cfai_makeHostileWhileTOff} survive untouched, and if one of them is
+     * live the base flag stays set, which is correct — that fleet made the guest on its own account.
+     * Never throws.
      */
     public static String clear(CampaignFleetAPI mirror) {
         MemoryAPI mem = memoryOf(mirror);
@@ -114,7 +157,8 @@ public final class CoopEngageDialogStaging {
             return "no-memory";
         }
         StringBuilder out = new StringBuilder();
-        setFlagWithReason(mem, out, false);
+        setFlagWithReason(mem, out, MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE, false);
+        setFlagWithReason(mem, out, MemFlags.MEMORY_KEY_MAKE_HOSTILE_WHILE_TOFF, false);
         unsetFlag(mem, out, MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE_ONE_BATTLE_ONLY);
         return out.toString().trim();
     }
@@ -123,7 +167,8 @@ public final class CoopEngageDialogStaging {
      * Log line naming anything that would make the encounter open in the wrong shape. A mirror that
      * is not hostile still opens the dialog, but the aggressor branch needs the hostility half of
      * {@code fleetWantsToFight} (FID:3514) — so an unexpected {@code hostile=false} here is the first
-     * thing to look at if the guest sees a neutral posture.
+     * thing to look at if the guest sees a neutral posture. It is read after {@link #stage} has run,
+     * so since S4-E a false means the hostility flag did not take.
      */
     public static String describePreconditions(CampaignFleetAPI mirror, CampaignFleetAPI player) {
         return CoopCustomsDialogStaging.describePreconditions(mirror)
@@ -138,15 +183,12 @@ public final class CoopEngageDialogStaging {
         }
     }
 
-    private static void setFlagWithReason(MemoryAPI mem, StringBuilder out, boolean value) {
+    private static void setFlagWithReason(MemoryAPI mem, StringBuilder out, String key, boolean value) {
         try {
-            Misc.setFlagWithReason(mem, MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE, REASON, value,
-                    AGGRESSIVE_EXPIRY_DAYS);
-            out.append(MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE).append('_').append(REASON)
-                    .append('=').append(value).append(' ');
+            Misc.setFlagWithReason(mem, key, REASON, value, AGGRESSIVE_EXPIRY_DAYS);
+            out.append(key).append('_').append(REASON).append('=').append(value).append(' ');
         } catch (RuntimeException | LinkageError ex) {
-            out.append(MemFlags.MEMORY_KEY_MAKE_AGGRESSIVE).append('_').append(REASON)
-                    .append("=THREW ");
+            out.append(key).append('_').append(REASON).append("=THREW ");
         }
     }
 
