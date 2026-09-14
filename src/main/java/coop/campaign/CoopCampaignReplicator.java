@@ -17,6 +17,7 @@ import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.SpecialItemData;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.SubmarketPlugin;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
@@ -198,6 +199,18 @@ public final class CoopCampaignReplicator
     static final long ORBIT_SYNC_INTERVAL_MILLIS = 1000L;
     private long lastOrbitSyncMillis;
     private int lastOrbitBodyCount = -1;
+
+    // S4-F (2026-09-14): the two player locations are not enough. A jump point whose orbit was
+    // generated non-deterministically (the fringe jump-point) sits at a different ANGLE in the two
+    // engines from generation onwards, and only the systems a player is standing in ever get reset.
+    // So the guest jumps into a system the host is not in, arrives at its own stale copy of the
+    // in-system jump-point, and one second later the first snapshot for that system teleports the
+    // jump-point to the host's angle -- possibly the far side of a 14.8k-su orbit -- stranding the
+    // guest in a system it can no longer back out of. The sweep is the background fix: one extra
+    // jump-point-only snapshot per tick, walking every star system in turn.
+    private int orbitSweepCursor;
+    private int orbitSweepSystemsSent;
+    private int orbitSweepJumpPointsSent;
 
     // Player faction standings: host re-broadcasts the full set on a slow cadence and the guest
     // force-matches it. Event-driven REP_DELTA covers host-side changes immediately; this snapshot is
@@ -491,6 +504,10 @@ public final class CoopCampaignReplicator
         colonyMgmtPoll.armBaseline();
         lastColonyMgmtPollMillis = 0L;
         resetExpeditionWarningStreams();
+        // S4-F: a session start is a new sector as far as the sweep is concerned (a fresh save, or a
+        // rejoin into a campaign whose systems this replicator has never covered), so the cursor
+        // restarts at the first system and the cycle counters restart with it.
+        resetOrbitSweep();
         CoopLog.info(CoopCampaignReplicator.class, "Coop campaign event listener registered");
     }
 
@@ -573,6 +590,7 @@ public final class CoopCampaignReplicator
         factionRelationsSeeded = false;
         lastPlayerRepSyncMillis = 0L;
         lastSkeletonPollMillis = 0L;
+        resetOrbitSweep();
         storageUnlockSync.reset();
         reportUnflushedBaseTraffic();
         // The table names this campaign's live base markets; CoopBaseAuthority refills it from the
@@ -4990,14 +5008,34 @@ public final class CoopCampaignReplicator
      * lands in the guest's system (fleet mirrors, encounters, anything keyed to a body) is wrong by
      * exactly that offset until the guest's own system is snapped.
      *
-     * <p><b>Cost stays bounded.</b> At most two locations per tick, the same
-     * {@link #syncableOrbitBodies} filter on each, and the second one is sent only when the guest is
-     * somewhere else and not in hyperspace. The guest's location is read off
-     * {@link CoopGuestMirrorHandle#current()} — an O(1) field read, null when no guest is paired or
-     * the mirror is not placed. The two snapshots are separate {@code ORBIT_SNAPSHOT} messages with
-     * their own {@code locationId}; the guest's {@code applyOrbitSnapshot} resolves the target
-     * location from the first stable-id body in the payload rather than from the {@code locationId}
-     * field, so two snapshots for two systems land independently with no keying change.
+     * <p><b>Two locations were still not enough (S4-F, 2026-09-14).</b> The player locations are the
+     * only ones that ever get reset, so every other system keeps its generated jump-point angles
+     * forever. Planets are fine — their orbits are deterministic and both engines agree — but the
+     * fringe jump-point's orbit is drawn non-deterministically: same focus, same radius, same period,
+     * <em>different angle</em>. Magec's ({@code 19f}) sat at (2709, 14537) on the guest and
+     * (4671, -15566) on the host, ~30k su apart on a 14.8k-su radius. A guest that jumps into a
+     * system the host is not in therefore arrives next to its own stale copy of the in-system jump
+     * point, and one second later the first snapshot for that system moves the jump point to the
+     * host's angle, possibly to the far side of its orbit — the guest cannot leave the system it just
+     * entered. So each tick also sends ONE extra snapshot for the next star system from a rotating
+     * cursor ({@link #nextOrbitSweepSystem}), carrying that system's jump points and nothing else.
+     *
+     * <p>~100 systems in a vanilla sector means ~100 s to first-cover the whole map, after which
+     * every jump point in it tracks the shared clock on its own: the reset carries focus, radius,
+     * period <em>and</em> angle, so once the geometry matches, angle alone stays matched by the
+     * clock reconciler. The periodic re-cover is the backstop for anything that is re-created or
+     * re-orbited mid-session.
+     *
+     * <p><b>Cost stays bounded.</b> At most three snapshots per tick: the host's location, the
+     * guest's when it differs, and one sweep system. The first two use the full
+     * {@link #syncableOrbitBodies} filter; the sweep one uses the jump-point-only filter
+     * ({@link #jumpPointOrbitBodies}), so it is a handful of entries rather than a system's worth,
+     * and a system already sent as a player location this tick is skipped rather than sent twice.
+     * The guest's location is read off {@link CoopGuestMirrorHandle#current()} — an O(1) field read,
+     * null when no guest is paired or the mirror is not placed. The snapshots are separate
+     * {@code ORBIT_SNAPSHOT} messages with their own {@code locationId} and the guest's
+     * {@code applyOrbitSnapshot} is idempotent and location-keyed, so they land independently with
+     * no keying change and no new message type.
      */
     public void tickOrbitSync() {
         if (!isHost() || !isActive()) {
@@ -5016,15 +5054,10 @@ public final class CoopCampaignReplicator
                     player == null ? null : player.getContainingLocation(),
                     guestMirror == null ? null : guestMirror.getContainingLocation());
             boolean firstLocation = true;
+            Set<String> sentThisTick = new HashSet<>();
             for (LocationAPI location : locations) {
                 List<SectorEntityToken> bodies = syncableOrbitBodies(location);
-                List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
-                for (SectorEntityToken e : bodies) {
-                    String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
-                    entries.add(new CoopOrbitSync.OrbitEntry(e.getId(), focusId,
-                            e.getCircularOrbitRadius(), e.getCircularOrbitPeriod(),
-                            e.getCircularOrbitAngle()));
-                }
+                List<CoopOrbitSync.OrbitEntry> entries = orbitEntries(bodies);
                 // The breakdown tracks a single body count across ticks, so only the first location
                 // feeds it; two locations taking turns would report a change every tick and say
                 // nothing about either.
@@ -5033,13 +5066,108 @@ public final class CoopCampaignReplicator
                     firstLocation = false;
                 }
                 if (!entries.isEmpty()) {
+                    sentThisTick.add(location.getId());
                     send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
                             location.getId(), CoopOrbitSync.encode(entries)));
                 }
             }
+            tickOrbitSweep(sector, nowMillis, sentThisTick);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Orbit sync capture failed", ex);
         }
+    }
+
+    /**
+     * S4-F: the third and last snapshot of an orbit-sync tick — the next star system on the rotating
+     * cursor, jump points only. See {@link #tickOrbitSync()} for why every system (not just the two
+     * the players stand in) needs its jump-point orbits reset.
+     *
+     * <p>The cursor advances by exactly one system per tick whether or not anything was sent, so a
+     * sector of N systems is fully covered in N ticks and the cost per tick is one filtered walk of
+     * one system's jump-point list. A system already sent above as a player location is skipped: it
+     * just received the full snapshot, which is a superset of this one.
+     */
+    private void tickOrbitSweep(SectorAPI sector, long nowMillis, Set<String> sentThisTick) {
+        List<StarSystemAPI> systems = sector.getStarSystems();
+        if (systems == null || systems.isEmpty()) {
+            return;
+        }
+        List<String> systemIds = new ArrayList<>(systems.size());
+        for (StarSystemAPI system : systems) {
+            systemIds.add(system == null ? null : system.getId());
+        }
+        OrbitSweepStep step = nextOrbitSweepSystem(systemIds, orbitSweepCursor, sentThisTick);
+        orbitSweepCursor = step.nextCursor();
+        if (step.index() >= 0) {
+            StarSystemAPI system = systems.get(step.index());
+            List<CoopOrbitSync.OrbitEntry> entries = orbitEntries(jumpPointOrbitBodies(system));
+            if (!entries.isEmpty()) {
+                orbitSweepSystemsSent++;
+                orbitSweepJumpPointsSent += entries.size();
+                send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
+                        system.getId(), CoopOrbitSync.encode(entries)));
+                if (CoopDebug.diagnosticsEnabled()) {
+                    CoopLog.info(CoopCampaignReplicator.class, "Coop jump-point orbit sweep sent loc="
+                            + system.getId() + " jumpPoints=" + entries.size());
+                }
+            }
+        }
+        if (step.cycleCompleted()) {
+            // One line per full pass over the sector (~100 s), not one per tick: this is the signal
+            // that every jump point in the sector has had its orbit reset at least once.
+            CoopLog.info(CoopCampaignReplicator.class, "Coop jump-point orbit sweep completed systems="
+                    + orbitSweepSystemsSent + " jumpPoints=" + orbitSweepJumpPointsSent
+                    + " scanned=" + systemIds.size());
+            orbitSweepSystemsSent = 0;
+            orbitSweepJumpPointsSent = 0;
+        }
+    }
+
+    private void resetOrbitSweep() {
+        orbitSweepCursor = 0;
+        orbitSweepSystemsSent = 0;
+        orbitSweepJumpPointsSent = 0;
+    }
+
+    /**
+     * One step of the orbit sweep's rotating cursor. Pure so the rotation can be pinned without an
+     * engine.
+     *
+     * @param systemIds     the sector's star-system ids, in the engine's order
+     * @param cursor        the position to consider this tick (out-of-range restarts at 0, which is
+     *                      what a sector whose system list shrank mid-session hands us)
+     * @param alreadySent   ids already snapshot this tick as player locations
+     * @return the system to send ({@code index == -1} for "nothing this tick"), the cursor for the
+     *         next tick, and whether this step closed a full pass over the sector
+     */
+    static OrbitSweepStep nextOrbitSweepSystem(List<String> systemIds, int cursor, Set<String> alreadySent) {
+        if (systemIds == null || systemIds.isEmpty()) {
+            return new OrbitSweepStep(-1, null, 0, false);
+        }
+        int index = cursor < 0 || cursor >= systemIds.size() ? 0 : cursor;
+        int nextCursor = (index + 1) % systemIds.size();
+        String systemId = systemIds.get(index);
+        // Advance past a skipped system rather than hunting for the next sendable one: the skip is a
+        // system that already got a (larger) snapshot this tick, and one advance per tick is what
+        // makes a full pass take exactly N ticks.
+        boolean skip = systemId == null || (alreadySent != null && alreadySent.contains(systemId));
+        return new OrbitSweepStep(skip ? -1 : index, skip ? null : systemId, nextCursor, nextCursor == 0);
+    }
+
+    /** {@link #nextOrbitSweepSystem} result: what to send, where the cursor lands, did a pass close. */
+    record OrbitSweepStep(int index, String systemId, int nextCursor, boolean cycleCompleted) {
+    }
+
+    /** Captures the current circular orbit of each body, in the order given. */
+    private static List<CoopOrbitSync.OrbitEntry> orbitEntries(List<SectorEntityToken> bodies) {
+        List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
+        for (SectorEntityToken e : bodies) {
+            String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
+            entries.add(new CoopOrbitSync.OrbitEntry(e.getId(), focusId,
+                    e.getCircularOrbitRadius(), e.getCircularOrbitPeriod(),
+                    e.getCircularOrbitAngle()));
+        }
+        return entries;
     }
 
     /**
@@ -5100,7 +5228,16 @@ public final class CoopCampaignReplicator
             }
         }
         if (location == null) {
-            return;
+            // S4-F: the sweep's payloads are jump points only, and a system whose sole orbiting jump
+            // point is the hex-id fringe one has no stable id to resolve through — the very system
+            // this sweep exists to fix would be the one silently skipped. Star-system ids come out of
+            // the seed-locked generation identical on both engines, so fall back to the message's
+            // own locationId. Scanning the system list is affordable here: it only runs when the
+            // entity path found nothing.
+            location = starSystemById(sector, locationId);
+            if (location == null) {
+                return;
+            }
         }
         replayGuard.begin();
         try {
@@ -5146,6 +5283,26 @@ public final class CoopCampaignReplicator
         } finally {
             replayGuard.end();
         }
+    }
+
+    /**
+     * The star system with this id, or null. {@code SectorAPI.getStarSystem} matches on <em>name</em>,
+     * not id, so the id lookup has to walk the list.
+     */
+    private static LocationAPI starSystemById(SectorAPI sector, String locationId) {
+        if (locationId == null || locationId.isEmpty()) {
+            return null;
+        }
+        List<StarSystemAPI> systems = sector.getStarSystems();
+        if (systems == null) {
+            return null;
+        }
+        for (StarSystemAPI system : systems) {
+            if (system != null && locationId.equals(system.getId())) {
+                return system;
+            }
+        }
+        return null;
     }
 
     /**
@@ -5230,10 +5387,49 @@ public final class CoopCampaignReplicator
     }
 
     private boolean isSyncableOrbit(SectorEntityToken e) {
-        if (e instanceof CampaignFleetAPI || e.getOrbit() == null || e.getCircularOrbitRadius() <= 0f) {
-            return false;
+        return hasCircularOrbit(e)
+                && (CoopOrbitSync.isStableId(e.getId()) || e instanceof JumpPointAPI || e instanceof PlanetAPI);
+    }
+
+    /** The part of the orbit-sync filter that is about the orbit rather than about the body. */
+    private static boolean hasCircularOrbit(SectorEntityToken e) {
+        return !(e instanceof CampaignFleetAPI) && e.getOrbit() != null && e.getCircularOrbitRadius() > 0f;
+    }
+
+    /**
+     * S4-F sweep body set: the orbiting jump points of a system and nothing else.
+     *
+     * <p>Narrower than {@link #syncableOrbitBodies} on purpose. The sweep visits every system in the
+     * sector, so it has to stay a few entries per snapshot; and jump points are the only bodies the
+     * sweep needs — planets/moons/stations are generated deterministically and already agree between
+     * the engines down to the clock drift the player-location snapshots correct. Both the typed
+     * {@code getJumpPoints()} list and the {@code jump_point}-tagged custom entities count, because
+     * a modded or scripted jump point may only be the latter.
+     */
+    private static List<SectorEntityToken> jumpPointOrbitBodies(LocationAPI location) {
+        List<SectorEntityToken> bodies = new ArrayList<>();
+        addJumpPointOrbitBodies(bodies, location.getJumpPoints());
+        addJumpPointOrbitBodies(bodies, location.getCustomEntities());
+        return bodies;
+    }
+
+    /** Pure half of {@link #jumpPointOrbitBodies}: appends the orbiting jump points, no duplicates. */
+    static void addJumpPointOrbitBodies(List<SectorEntityToken> out,
+                                        List<? extends SectorEntityToken> candidates) {
+        if (candidates == null) {
+            return;
         }
-        return CoopOrbitSync.isStableId(e.getId()) || e instanceof JumpPointAPI || e instanceof PlanetAPI;
+        for (SectorEntityToken e : candidates) {
+            if (isJumpPointOrbit(e) && !out.contains(e)) {
+                out.add(e);
+            }
+        }
+    }
+
+    /** A jump point (typed or tagged) that actually orbits something. */
+    static boolean isJumpPointOrbit(SectorEntityToken e) {
+        return e != null && hasCircularOrbit(e)
+                && (e instanceof JumpPointAPI || e.hasTag(Tags.JUMP_POINT));
     }
 
     /**
