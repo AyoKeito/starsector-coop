@@ -3843,8 +3843,47 @@ Session 4 of the 0.1.1 smoke finished on 2026-09-14 on `f7a441d`: every step pas
 cut-link re-checks (10, 12 addendum, 14, 16, 19 part 3, 21) passed under the bridge `netfault`
 verb, and the seventh pass held up live (S4-A, S4-D). The run produced six findings; this pass
 fixes all of them plus the S4-B polish item. Merged at `4259589`, 3593 Gradle tests and 50 MCP
-tests green, deployed to both test profiles the same day. None of it is live-verified; Session 5
-runs on this build.
+tests green, deployed to both test profiles the same day. Session 5 ran on this build on
+2026-09-14/15 with the guest on a real Internet path (tnp AmneziaWG tunnel, host seen from the
+tunnel exit, UDP return path validated): S4-E, S4-F, S4-H and S4-I PASS live, S4-C PARTIAL (idle
+structural resends 0.14/s, down from 0.3-0.5/s; route despawns in the host's own system still
+count as near), S4-B not exercised. Two new findings wait for a ninth pass: S5-A, the RTT sampler
+keeps running while the guest sits in the combat screen, so the host reports a false "connection
+degraded" after every guest battle and the inflated p95 (43.8 s seen) widens the threat watcher's
+handoff margins to thousands of su for a while (fix: discard samples while the peer is in combat);
+S5-B, the guest's Ziggurat lost CR and hull after a battle with no storm (user: debug later).
+Run notes: `tmp_ff_analysis/local-smoke-0.1.1.md`, section "Session 5 run".
+
+## Ninth fix pass (2026-09-15, Session 5 findings)
+
+Merged at `376efa7` (ee8067e S5-A + 2721ac1 S5-B probe), 3624 Gradle tests green, deployed to both
+test profiles. Not live-verified, not pushed.
+
+**S5-A: RTT samples taken across a battle.** `CoopLinkQuality` now takes a `CombatWindow` (in-combat
+flag + last battle-end stamp, supplied by `CoopNetPump` from `CoopBattleBridge`) and discards any
+PING/PONG pair whose PONG lands while either side is in combat or whose PING predates the last
+battle end. The degraded evaluation is frozen (both sustain runs restarted) while a battle is open,
+so a genuinely slow link still raises the banner about 10 s after the fight instead of losing its
+run. Cadence, backlog, loss accounting and keepalives are untouched; the threat watcher and the
+claim-wait tracker read the same p95 and become correct on their own. Grep: `Coop RTT sample
+discarded: peer in combat (N dropped this battle)` once, 6 s after the battle ends.
+
+**S5-B: instrumentation plus one guard.** A static audit found no mod path that writes CR, hull,
+mothball state, cargo or members on the local player fleet (every `getPlayerFleet()` call site is a
+read; the only own-fleet mutations are credits). The one latent hole was
+`CoopBattleResultReconciler.EngineFleets.scan()`, which resolved fleets by id alone with roster
+deletion and a CR/hull repaint behind it; nothing puts a player fleet id into `BATTLE_RESULT` today,
+but Phase 33 will, so it now refuses the local player fleet with a WARN. `CoopOwnFleetProbe`
+(`coop.debug`, ticked from the pump, dormant unless diagnostics are on) diffs the player fleet every
+frame and logs `Coop ownfleet DROP` (CR, HULL, SUPPLIES, MEMBER_GONE, MEMBER_NEW) with date, member,
+old/new values, `RepairTrackerAPI` fields (`getRecentEvents`, `getNoSupplyCRLossEvent`, rates),
+supplies/fuel/crew, hyperspace, paused, battle and location; `Coop ownfleet DAY` (per-campaign-day
+maintenance drip) and `Coop ownfleet SUMMARY` (every 10 s). `Coop ownfleet MODWRITE` (WARN with a
+compact stack) fires with diagnostics on or off whenever one of our writers touches a player-fleet
+member. Bridge verb `ownfleet` returns the extended member table and the last 50 drop lines. Read
+rule for the next smoke: a DROP with no MODWRITE beside it is vanilla, and its `crEvents` names the
+cause. Note from the audit: the forked `Misc` shadows vanilla for every caller, so vanilla damage
+events draw from the session-seeded RNG; its `applyDamage` body is unedited.
 
 **S4-E: encounters were never forced on a guest with its transponder off.** The ENGAGE_GUEST
 handoff staged the mirror with `$cfai_makeAggressive`, which the engine reads as "engage if
