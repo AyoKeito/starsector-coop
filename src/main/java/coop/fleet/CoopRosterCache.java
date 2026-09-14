@@ -113,7 +113,8 @@ public final class CoopRosterCache {
             out.set(order[k], new CoopFleetSnapshot.Member(member.fleetMemberId(), member.hullId(),
                     member.variantId(), member.shipName(), member.captainName(),
                     state.cr(), state.hullFraction(), member.dmodIds(), member.sModIds(),
-                    member.sModdedBuiltInIds()));
+                    // Structural, so it rides the roster half and never the tick (2026-09-14, S4-B).
+                    member.sModdedBuiltInIds(), member.mothballed()));
         }
         return out;
     }

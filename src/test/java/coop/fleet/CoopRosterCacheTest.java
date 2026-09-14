@@ -186,7 +186,7 @@ class CoopRosterCacheTest {
     void theRosterItselfRoundTripsThroughItsWireForm() {
         CoopFleetSnapshot source = snapshot(List.of(
                 new CoopFleetSnapshot.Member("m|1", "wolf", "wolf_Assault", "Fang\nEdge", "Vela",
-                        0.7f, 0.5f, "d_dmod", "s_smod", "s_builtin"),
+                        0.7f, 0.5f, "d_dmod", "s_smod", "s_builtin", false),
                 member("m2", "lasher", 0.8f)));
 
         CoopFleetRoster roster = CoopFleetRoster.of(source);
@@ -207,13 +207,13 @@ class CoopRosterCacheTest {
         // Both halves of a restore move: the d-mod list empties and the hull loses its _default_D.
         String battered = CoopFleetRoster.of(snapshot(List.of(
                 new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault", "Fang", "",
-                        0.4f, 0.6f, "compromised_storage,damagedengines", "", "")))).fleetHash16();
+                        0.4f, 0.6f, "compromised_storage,damagedengines", "", "", false)))).fleetHash16();
         String restored = CoopFleetRoster.of(snapshot(List.of(
                 new CoopFleetSnapshot.Member("m1", "falcon", "falcon_Assault", "Fang", "",
-                        0.4f, 0.6f, "", "", "")))).fleetHash16();
+                        0.4f, 0.6f, "", "", "", false)))).fleetHash16();
         String oneDmodLeft = CoopFleetRoster.of(snapshot(List.of(
                 new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault", "Fang", "",
-                        0.4f, 0.6f, "compromised_storage", "", "")))).fleetHash16();
+                        0.4f, 0.6f, "compromised_storage", "", "", false)))).fleetHash16();
 
         assertNotEquals(battered, restored);
         assertNotEquals(battered, oneDmodLeft, "losing one d-mod of two is still a new ship set");

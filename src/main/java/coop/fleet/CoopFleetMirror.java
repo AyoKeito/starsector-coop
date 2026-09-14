@@ -976,6 +976,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * per-tick noise around a stable CR still moves no reference and still invalidates nothing — while
      * making a slow monotonic recovery fire once per 0.005 of real movement.
      *
+     * <p><b>Mothballing is not fought here (2026-09-14, S4-B).</b> A mothballed ship's base CR is 0
+     * by definition ({@code RepairTracker.setMothballed} zeroes it and stashes the old value), so the
+     * sender captures 0 for it and this writes the same 0 back — a no-op, not a correction. The flag
+     * itself is structural and arrives through {@link #rebuildRoster}; nothing on this path sets or
+     * clears it.
+     *
      * <p><b>A member whose wire CR is {@link CoopFleetSnapshot#CR_UNKNOWN} is skipped entirely
      * (2026-09-07)</b> — hull fraction still applies, but the mirror keeps its own CR and the slot's
      * gate reference stays unseated, so the first real reading to arrive fires the invalidation no
@@ -1071,6 +1077,54 @@ public class CoopFleetMirror implements CoopNpcMirror {
             return false;
         }
         tracker.setCR(wireCr);
+        return true;
+    }
+
+    /**
+     * Mirrors the sender's mothballed flag onto a freshly built ship (2026-09-14, S4-B).
+     *
+     * <p><b>After the CR write, never before.</b> {@code RepairTracker.setMothballed(true)} moves the
+     * current {@code cr} into {@code crPriorToMothballing} and zeroes {@code cr}; a later
+     * {@code setCR} would leave a mothballed ship carrying a live combat readiness, and an
+     * un-mothballing would then restore the wrong one. In this order the mirror lands where vanilla
+     * puts a mothballed ship: 0 CR, which is also exactly what the sender captured for it, so the CR
+     * path and this one agree instead of fighting.
+     *
+     * <p>Only ever set to {@code true} here. The ship was created moments ago and the engine's own
+     * default is un-mothballed, so there is nothing to clear; a member that stops being mothballed on
+     * the sender flips the structural hash ({@link CoopFleetSnapshot#computeFleetHash}) and arrives as
+     * a brand-new build.
+     *
+     * <p>Never fatal, and never a reason to report the member as unbuilt: {@code setMothballed} calls
+     * into {@code FleetMember.updateStats()} and the fleet's {@code setSyncNeeded()}, either of which
+     * can throw on a mirror mid-rebuild. A ship that stays un-mothballed is cosmetically wrong; a
+     * roster short by one ship is the truncation defect {@code CoopFleetSnapshotFactory} documents.
+     */
+    private void applyMothballed(FleetMemberAPI created, CoopFleetSnapshot.Member member) {
+        try {
+            if (!writeMothballed(created.getRepairTracker(), member.mothballed())
+                    && member.mothballed()) {
+                CoopLog.warn(CoopFleetMirror.class, "Coop mirror could not mothball a member: no"
+                        + " repair tracker coopFleetId=" + coopFleetId
+                        + " fleetMemberId=" + member.fleetMemberId());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopFleetMirror.class, "Coop mirror could not mothball a member"
+                    + " coopFleetId=" + coopFleetId + " fleetMemberId=" + member.fleetMemberId(), ex);
+        }
+    }
+
+    /**
+     * The mothball write itself, behind the same kind of static seam {@link #writeCr} uses so the
+     * ordering and the no-op case are unit-tested without an engine.
+     *
+     * @return true when {@code setMothballed(true)} was actually called
+     */
+    static boolean writeMothballed(RepairTrackerAPI tracker, boolean mothballed) {
+        if (!mothballed || tracker == null) {
+            return false;
+        }
+        tracker.setMothballed(true);
         return true;
     }
 
@@ -1242,6 +1296,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 noteUnknownCr(member);
             }
             created.getStatus().setHullFraction(member.hullFraction());
+            applyMothballed(created, member);
             return true;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class,

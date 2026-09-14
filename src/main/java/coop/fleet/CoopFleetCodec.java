@@ -21,9 +21,20 @@ final class CoopFleetCodec {
     static final char FIELD_SEPARATOR = '|';
     /**
      * Bumped 7 -&gt; 10 by Phase 16 for the replicated permanent hullmods ({@code dmodIds},
-     * {@code sModIds}, {@code sModdedBuiltInIds}); see {@link CoopFleetSnapshot.Member}.
+     * {@code sModIds}, {@code sModdedBuiltInIds}), and 10 -&gt; 11 on 2026-09-14 (S4-B) for
+     * {@code mothballed}; see {@link CoopFleetSnapshot.Member}.
      */
-    static final int MEMBER_FIELD_COUNT = 10;
+    static final int MEMBER_FIELD_COUNT = 11;
+
+    /**
+     * The member record shape before {@code mothballed} (2026-09-14, S4-B). Both peers always run the
+     * same build — the handshake's {@code COOP-GAME} version check refuses anything else — so nothing
+     * in a live session can emit one of these. The decoder accepts it anyway because the parser is
+     * also what reads the wiretap fixtures and the recorded bodies in {@code tmp_ff_analysis}, and
+     * because "one trailing field is missing" has exactly one sane reading (the flag was not sent, so
+     * it is false) while a hard throw drops the whole roster the member is in.
+     */
+    static final int MEMBER_FIELD_COUNT_PRE_MOTHBALL = 10;
     /** U+001F UNIT SEPARATOR: the datagram envelope's record separator, and player-typeable. */
     static final char UNIT_SEPARATOR = (char) 0x1F;
 
@@ -208,17 +219,27 @@ final class CoopFleetCodec {
                 .append(FIELD_SEPARATOR).append(encodeFloat(member.hullFraction(), FRACTION_STEP))
                 .append(FIELD_SEPARATOR).append(escape(member.dmodIds()))
                 .append(FIELD_SEPARATOR).append(escape(member.sModIds()))
-                .append(FIELD_SEPARATOR).append(escape(member.sModdedBuiltInIds()));
+                .append(FIELD_SEPARATOR).append(escape(member.sModdedBuiltInIds()))
+                .append(FIELD_SEPARATOR).append(member.mothballed() ? '1' : '0');
     }
 
-    /** Parses the 10 fields of one member record produced by {@link #appendMember}. */
+    /**
+     * Parses the {@value #MEMBER_FIELD_COUNT} fields of one member record produced by
+     * {@link #appendMember}, tolerating the {@value #MEMBER_FIELD_COUNT_PRE_MOTHBALL}-field shape that
+     * predates {@code mothballed} (see {@link #MEMBER_FIELD_COUNT_PRE_MOTHBALL}). Any other count is
+     * still a hard error: a record that is neither shape has been corrupted or truncated somewhere
+     * this codec cannot reason about, and guessing which fields survived would silently build the
+     * wrong ship.
+     */
     static CoopFleetSnapshot.Member parseMember(List<String> fields) {
-        if (fields.size() != MEMBER_FIELD_COUNT) {
+        if (fields.size() != MEMBER_FIELD_COUNT && fields.size() != MEMBER_FIELD_COUNT_PRE_MOTHBALL) {
             throw new IllegalArgumentException("Expected " + MEMBER_FIELD_COUNT
                     + " member fields, got " + fields.size());
         }
+        boolean mothballed = fields.size() > MEMBER_FIELD_COUNT_PRE_MOTHBALL
+                && "1".equals(fields.get(MEMBER_FIELD_COUNT_PRE_MOTHBALL));
         return new CoopFleetSnapshot.Member(fields.get(0), fields.get(1), fields.get(2), fields.get(3),
                 fields.get(4), parseFiniteFloat(fields.get(5)), parseFiniteFloat(fields.get(6)),
-                fields.get(7), fields.get(8), fields.get(9));
+                fields.get(7), fields.get(8), fields.get(9), mothballed);
     }
 }

@@ -46,12 +46,12 @@ class CoopRosterSummaryTest {
         assertEquals("falcon_default_D+d2 x1, wolf+s1 x1, onslaught+d1+s2 x1",
                 CoopRosterSummary.ofMembers(List.of(
                         new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault",
-                                "Ship", "", 1f, 1f, "compromised_storage,damagedengines", "", ""),
+                                "Ship", "", 1f, 1f, "compromised_storage,damagedengines", "", "", false),
                         new CoopFleetSnapshot.Member("m2", "wolf", "wolf_Assault",
-                                "Ship", "", 1f, 1f, "", "heavyarmor", ""),
+                                "Ship", "", 1f, 1f, "", "heavyarmor", "", false),
                         new CoopFleetSnapshot.Member("m3", "onslaught", "onslaught_Standard",
                                 "Ship", "", 1f, 1f, "structuraldamage", "heavyarmor",
-                                "armoredweapons"))));
+                                "armoredweapons", false))));
     }
 
     @Test

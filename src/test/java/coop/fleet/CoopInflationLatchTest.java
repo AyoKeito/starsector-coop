@@ -25,7 +25,7 @@ class CoopInflationLatchTest {
     /** The same ship after {@code DefaultFleetInflater} autofit it: D hull, D variant, d-mods. */
     private static CoopFleetSnapshot.Member inflated(String id, String hull) {
         return new CoopFleetSnapshot.Member(id, hull + "_default_D", hull + "_default_D", "ISS " + id,
-                "", 1f, 1f, "compromised_storage,damagedengines", "", "");
+                "", 1f, 1f, "compromised_storage,damagedengines", "", "", false);
     }
 
     private static String hash(List<CoopFleetSnapshot.Member> members) {
@@ -102,7 +102,7 @@ class CoopInflationLatchTest {
         Object playerFleet = new Object();
         List<CoopFleetSnapshot.Member> refit = List.of(
                 new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "Vela", 0.7f, 0.9f,
-                        "", "heavyarmor", "solar_shielding"));
+                        "", "heavyarmor", "solar_shielding", false));
         List<CoopFleetSnapshot.Member> stripped = List.of(stock("m1", "wolf"));
 
         assertSame(refit, latch.reconcile(playerFleet, true, refit));
@@ -133,7 +133,7 @@ class CoopInflationLatchTest {
         Object fleet = new Object();
         latch.reconcile(fleet, true, List.of(inflated("m1", "atlas")));
         CoopFleetSnapshot.Member repaired = new CoopFleetSnapshot.Member("m1", "atlas",
-                "atlas_Standard", "ISS m1", "", 1f, 1f, "damagedengines", "", "");
+                "atlas_Standard", "ISS m1", "", 1f, 1f, "damagedengines", "", "", false);
         latch.reconcile(fleet, true, List.of(repaired));
 
         assertEquals(List.of(repaired), latch.reconcile(fleet, false, List.of(stock("m1", "atlas"))));

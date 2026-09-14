@@ -60,7 +60,10 @@ final class CoopInflationLatch {
         CoopFleetSnapshot.Member onto(CoopFleetSnapshot.Member member) {
             return new CoopFleetSnapshot.Member(member.fleetMemberId(), hullId, variantId,
                     member.shipName(), member.captainName(), member.cr(), member.hullFraction(),
-                    dmodIds, sModIds, sModdedBuiltInIds);
+                    dmodIds, sModIds, sModdedBuiltInIds,
+                    // Live state, not fitted state: inflation does not mothball or un-mothball
+                    // anything, so the freshly-read flag is the true one (2026-09-14, S4-B).
+                    member.mothballed());
         }
     }
 
