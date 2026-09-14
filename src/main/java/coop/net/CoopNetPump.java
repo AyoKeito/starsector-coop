@@ -419,6 +419,42 @@ public class CoopNetPump implements EveryFrameScript {
     private long preDropMessagesApplied;
     private long preDropMessagesDiscarded;
     /**
+     * S4-I (2026-09-14): reliable one-shots that reached the grace gate from the connection that has
+     * not proved itself yet, held rather than dropped until that same connection completes a resume.
+     *
+     * <p>The live failure: the host queues {@code SESSION_RESUME_ACCEPT}, resumes, and replays what
+     * the guest never acknowledged — and the replay reached the guest one millisecond <em>before</em>
+     * the accept, so the gate below dropped a {@code CREDITS_GRANT} as unproven-peer traffic. Nothing
+     * retried it while the link was up and the host's unacked entry never cleared. The sender-side
+     * ordering fix ({@code CoopPeerLink#enqueueAheadOfSessionTraffic}) is what stops that particular
+     * ordering; this buffer is what makes the gate stop <em>losing facts</em> for every other
+     * ordering, including held session traffic the write gate flushes behind the accept.
+     *
+     * <p>Not a security hole: an entry is dispatched only if the exact connection generation it
+     * arrived on goes on to complete the resume exchange — which runs the host's password gate and
+     * the guest's session-id check. Anything else is discarded, loudly. Bounded by
+     * {@link #MAX_GRACE_BUFFERED_INBOUND} so a stranger hammering the socket cannot grow the heap.
+     */
+    private final java.util.ArrayDeque<DeferredInbound> graceBufferedInbound =
+            new java.util.ArrayDeque<>();
+    /**
+     * Cap on {@link #graceBufferedInbound}. Newest-refused rather than oldest-evicted: the entries
+     * already held came in first and are the likelier partner traffic, so a flood must not be able to
+     * push them out.
+     */
+    static final int MAX_GRACE_BUFFERED_INBOUND = 256;
+    /** How many buffered-at-the-gate messages were released by a resume this session (S4-I). */
+    private long graceBufferedReleased;
+    /** How many were thrown away instead: cap, foreign generation, or a window that never resumed. */
+    private long graceBufferedDiscarded;
+    /**
+     * The connection generation of the message {@link #dispatchOneInbound} is currently running, so a
+     * handler can ask "which socket am I answering" without every handler signature growing a
+     * parameter it does not use. Valid only inside a dispatch; {@link #NO_CONNECTION_GENERATION}
+     * outside one.
+     */
+    private long dispatchingConnectionGeneration = NO_CONNECTION_GENERATION;
+    /**
      * 0.1.1 reliable delivery, receiver half: the envelope seqs of reliable one-shots this side has
      * applied, per sender. The sender replays anything it has not heard about after a resume, so a
      * message that <em>did</em> land before the socket died arrives a second time; without this set
@@ -4122,6 +4158,12 @@ public class CoopNetPump implements EveryFrameScript {
         appliedReliableSeqs.clear();
         pendingReliableAcks.clear();
         reliableDuplicatesDropped = 0L;
+        // S4-I: the session the held messages belonged to is over, so no resume can release them.
+        // The discard logs what is being lost first; the counters are session-scoped like the dedup
+        // ids above and start over with the next session.
+        discardGraceBufferedInbound("the session ended before the connection proved itself");
+        graceBufferedReleased = 0L;
+        graceBufferedDiscarded = 0L;
         // Phase 20.6: drop every live reading but keep the event log, so the page still explains what
         // happened after the session it described is gone.
         intelFeed.endSession();
@@ -4266,9 +4308,14 @@ public class CoopNetPump implements EveryFrameScript {
         // Only after the accept is queued: the resume re-sets the datagram token and forces the
         // rebroadcast, and both belong strictly after the guest has been told it may keep the session.
         reconnect.resume();
+        // S4-I: this socket has now cleared the password gate and named the session it is resuming,
+        // so whatever it said while the gate was shut may be applied. Before the replay below, so the
+        // guest's own pre-resume events are dispatched in arrival order ahead of our echo of them.
+        releaseGraceBufferedInbound(dispatchingConnectionGeneration);
         // 0.1.1: and only after the resume, which is what marks this connection proven — the flush
         // holds session traffic until then, so a replay queued before it would sit in a pre-proof
-        // hold rather than go out. It lands behind the accept above; see requeueUnackedForResend.
+        // hold rather than go out. It lands behind the accept above — which, since S4-I, is at the
+        // head of the queue rather than at its tail; see CoopPeerLink#enqueueAheadOfSessionTraffic.
         resendUnackedReliable(message.senderId());
     }
 
@@ -4297,6 +4344,10 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
         reconnect.resume();
+        // S4-I: the accept named the session this guest holds, so the connection that carried it is
+        // the partner's. Anything it said ahead of the accept — a replay that overtook it, or session
+        // traffic the host's write gate released behind it — is dispatched now rather than lost.
+        releaseGraceBufferedInbound(dispatchingConnectionGeneration);
         // 0.1.1, guest half: everything this guest wrote into the socket that died and never heard
         // back about goes out again on the connection that just proved itself.
         resendUnackedReliable(message.senderId());
@@ -4655,7 +4706,7 @@ public class CoopNetPump implements EveryFrameScript {
         CoopNetService.Inbound entry;
         while ((entry = service.pollInboundEntry()) != null) {
             if (isTerminalRejectType(entry.message().type())) {
-                dispatchOneInbound(entry.message(), isPreDropProven(entry.connectionGeneration()));
+                dispatchOneInbound(entry.message(), entry.connectionGeneration());
             } else {
                 // net-fix-2/net-fix-5: parked with the generation of the socket that produced it, not
                 // with a blanket "proven". Bytes off the connection that WAS the partner have to
@@ -4699,7 +4750,14 @@ public class CoopNetPump implements EveryFrameScript {
     private void drainInbound() {
         DeferredInbound next;
         while ((next = nextInbound()) != null) {
-            dispatchOneInbound(next.message(), isPreDropProven(next.connectionGeneration()));
+            dispatchOneInbound(next.message(), next.connectionGeneration());
+        }
+        // S4-I: the window can close inside the loop above by any route that is not a resume — the
+        // host serving a relaunched partner's LOBBY_HELLO, a reject, an expiry. Whatever is still
+        // held then was never proven and never will be on this connection, so it goes, loudly: this
+        // is the one place a buffered campaign event can be lost, and it must be visible in the log.
+        if (!graceBufferedInbound.isEmpty() && !reconnect.active()) {
+            discardGraceBufferedInbound("the reconnect window closed without a resume");
         }
     }
 
@@ -4773,6 +4831,26 @@ public class CoopNetPump implements EveryFrameScript {
      * Replays whatever this side still owes {@code senderId} after an accepted resume, and says so.
      * Called from both halves of the resume exchange; see {@link CoopPeerLink#requeueUnackedForResend}
      * for why the replay lands behind the accept rather than in front of it.
+     *
+     * <p><b>Why there is no periodic re-send while the link is up</b> (S4-I audit, 2026-09-14). It
+     * was considered: a timer that re-wrote anything unacknowledged every few seconds would cover any
+     * gate that ever drops a reliable message, not just the grace gate. It is not safe, because two
+     * of the eleven {@link CoopMessages#isReliableOneShot} types have no dedup of their own and are
+     * additive on receipt — {@code GUEST_REP_DELTA} (the host adds {@code delta} to the standing
+     * relationship) and {@code SHIP_LOST} (the host tallies it into the session stats). The nine
+     * others do: {@code MARKET_TXN} keys on (sender, seq), {@code CREDITS_GRANT} on its ledger id,
+     * {@code WORLD_DELTA}/{@code RAID_RESULT}/{@code COLONY_*} on their ledgers, and
+     * {@code REP_DELTA}/{@code FACTION_REL_DELTA} carry an absolute {@code resultingValue} rather
+     * than an increment. The receiver's per-session seq dedup would cover even the additive two —
+     * but it is capped at {@link #MAX_APPLIED_RELIABLE_SEQS} entries and evicts oldest-first, so a
+     * timer that can re-send an hour later is betting a doubled reputation swing on a busy session
+     * not having pushed the entry out. The grace-gate buffer is the bounded, non-guessing half of
+     * the same job; anything past that waits for the next resume.
+     *
+     * <p>The same audit is why a replay keeps its ORIGINAL seq and is never re-stamped: the seq is
+     * the dedup key both at this transport ({@link #appliedReliableSeqs}) and inside
+     * {@code CoopCampaignReplicator}'s MARKET_TXN table. A fresh seq would make every replay look
+     * like a new event to both.
      */
     private void resendUnackedReliable(String senderId) {
         java.util.Map<CoopMessages.Type, Integer> replayed;
@@ -4790,6 +4868,110 @@ public class CoopNetPump implements EveryFrameScript {
         CoopLog.info(CoopNetPump.class, "Coop resending " + total
                 + " unacknowledged reliable message(s) after the resume: "
                 + CoopNetService.describeTypeCounts(replayed));
+    }
+
+    // ---- S4-I grace buffer ------------------------------------------------------------------------
+
+    /**
+     * Holds one reliable one-shot that the grace gate would otherwise have destroyed, tagged with the
+     * connection it arrived on.
+     *
+     * <p>Refuses the <em>newest</em> at the cap rather than evicting the oldest: everything already
+     * held arrived earlier and is the likelier partner traffic, and a stranger hammering the socket
+     * must not be able to push it out.
+     */
+    private void bufferDuringGrace(CoopMessages.Message message, long connectionGeneration) {
+        if (graceBufferedInbound.size() >= MAX_GRACE_BUFFERED_INBOUND) {
+            graceBufferedDiscarded++;
+            CoopLog.warn(CoopNetPump.class, "Coop refusing to hold type=" + message.type() + " seq="
+                    + message.seq() + " during the reconnect grace window: " + MAX_GRACE_BUFFERED_INBOUND
+                    + " messages are already held from a connection that has not proved itself."
+                    + " If this peer is the partner, the sender replays what it is owed on the next"
+                    + " resume; if it is not, this is a flood.");
+            return;
+        }
+        graceBufferedInbound.add(new DeferredInbound(message, connectionGeneration));
+        CoopLog.info(CoopNetPump.class, "Coop holding type=" + message.type() + " seq="
+                + message.seq() + " until the connection that sent it completes the resume ("
+                + graceBufferedInbound.size() + " held)");
+    }
+
+    /**
+     * The connection named by {@code provenGeneration} has just completed the resume exchange, so
+     * what it said during the grace window may finally be applied. Entries go to the <em>front</em>
+     * of {@link #deferredInbound} in arrival order: the drain loop takes that queue first, so they
+     * are dispatched immediately after the accept/request that released them and ahead of anything
+     * the same batch carried behind it.
+     *
+     * <p>Anything from a different generation is discarded — that connection proved nothing and the
+     * session it was talking to is not the one that came back.
+     */
+    private void releaseGraceBufferedInbound(long provenGeneration) {
+        if (graceBufferedInbound.isEmpty()) {
+            return;
+        }
+        java.util.List<DeferredInbound> released = new java.util.ArrayList<>();
+        java.util.List<DeferredInbound> foreign = new java.util.ArrayList<>();
+        for (DeferredInbound entry : graceBufferedInbound) {
+            if (entry.connectionGeneration() == provenGeneration) {
+                released.add(entry);
+            } else {
+                foreign.add(entry);
+            }
+        }
+        graceBufferedInbound.clear();
+        for (int at = released.size() - 1; at >= 0; at--) {
+            deferredInbound.addFirst(released.get(at));
+        }
+        if (!released.isEmpty()) {
+            graceBufferedReleased += released.size();
+            CoopLog.info(CoopNetPump.class, "Coop releasing " + released.size()
+                    + " message(s) held at the reconnect gate now that the connection resumed: "
+                    + describeHeld(released));
+        }
+        if (!foreign.isEmpty()) {
+            graceBufferedDiscarded += foreign.size();
+            CoopLog.warn(CoopNetPump.class, "Coop discarding " + foreign.size()
+                    + " message(s) held at the reconnect gate from a connection that never proved"
+                    + " itself: " + describeHeld(foreign));
+        }
+    }
+
+    /** Drops everything held, with the reason, because no resume is going to release it. */
+    private void discardGraceBufferedInbound(String reason) {
+        java.util.List<DeferredInbound> dropped = new java.util.ArrayList<>(graceBufferedInbound);
+        graceBufferedInbound.clear();
+        if (dropped.isEmpty()) {
+            return;
+        }
+        graceBufferedDiscarded += dropped.size();
+        CoopLog.warn(CoopNetPump.class, "Coop discarding " + dropped.size()
+                + " message(s) held at the reconnect gate: " + reason + " (" + describeHeld(dropped)
+                + "). If the peer that sent them is the partner, it still owes them and replays them"
+                + " on the next resume.");
+    }
+
+    private static String describeHeld(java.util.List<DeferredInbound> entries) {
+        java.util.Map<CoopMessages.Type, Integer> counts = new java.util.LinkedHashMap<>();
+        for (DeferredInbound entry : entries) {
+            counts.merge(entry.message().type(), 1, Integer::sum);
+        }
+        return CoopNetService.describeTypeCounts(counts);
+    }
+
+    /** Test read: messages the grace gate held and a resume then released (S4-I). */
+    long graceBufferedReleasedForTest() {
+        return graceBufferedReleased;
+    }
+
+    /** Test read: messages the grace gate held and then threw away (S4-I). */
+    long graceBufferedDiscardedForTest() {
+        return graceBufferedDiscarded;
+    }
+
+    /** Test read: how many messages are held at the gate right now (S4-I). */
+    int graceBufferedPendingForTest() {
+        return graceBufferedInbound.size();
     }
 
     /** The key {@link #appliedReliableSeqs} is bucketed by; "" stands in for an unstamped sender. */
@@ -4815,7 +4997,8 @@ public class CoopNetPump implements EveryFrameScript {
         return entry == null ? null : new DeferredInbound(entry.message(), entry.connectionGeneration());
     }
 
-    private void dispatchOneInbound(CoopMessages.Message message, boolean preDropProven) {
+    private void dispatchOneInbound(CoopMessages.Message message, long connectionGeneration) {
+        boolean preDropProven = isPreDropProven(connectionGeneration);
         logInbound(message);
         // Any inbound TCP message proves the peer's process is alive and its pump is running.
         // That is what lets the UDP-blocked rule tell "the network eats UDP" apart from "the peer
@@ -4826,21 +5009,27 @@ public class CoopNetPump implements EveryFrameScript {
         // with it the whole pump, so a version-skewed peer or a stray connection could take the
         // session down. One bad message is a bug to log, never a peer to disconnect (Phase 12b).
         long dispatchStart = profiler.start();
+        // S4-I: published for the length of this dispatch so handleSessionResumeRequest/Accept can
+        // name the connection that just proved itself when it releases the grace buffer.
+        this.dispatchingConnectionGeneration = connectionGeneration;
         try {
-            dispatchInbound(message, preDropProven);
+            dispatchInbound(message, preDropProven, connectionGeneration);
         } catch (RuntimeException | LinkageError ex) {
             // LinkageError too (red-team C9): a handler that reaches an engine class this build
             // does not have throws Error, not Exception, and the whole point of this guard is
             // that no single inbound message may take the pump down.
             CoopLog.warn(CoopNetPump.class, "Coop dropped malformed/unexpected message type="
                     + message.type() + " seq=" + message.seq(), ex);
+        } finally {
+            this.dispatchingConnectionGeneration = NO_CONNECTION_GENERATION;
         }
         // Per-type so one expensive handler stands out in the summary rather than hiding inside
         // the aggregate drain cost. Runs on the throwing path too: the catch above swallows.
         profiler.record(SECTION_BY_MESSAGE_TYPE[message.type().ordinal()], dispatchStart);
     }
 
-    private void dispatchInbound(CoopMessages.Message message, boolean preDropProven) {
+    private void dispatchInbound(CoopMessages.Message message, boolean preDropProven,
+            long connectionGeneration) {
         // Phase 20.2. During a grace window the session record is deliberately still live, so
         // isGameplaySessionActive() is true and every campaign handler below would happily run — for
         // whoever happens to be on the far end of this socket, which has not yet proved it is the
@@ -4861,8 +5050,22 @@ public class CoopNetPump implements EveryFrameScript {
                     CoopLog.info(CoopNetPump.class, "Coop discarding pre-drop type=" + message.type()
                             + " seq=" + message.seq()
                             + ": the drop edge already reset what it would have applied to");
-                } else if (!graceTrafficDropWarned) {
+                    return;
+                }
+                // S4-I (2026-09-14): a reliable one-shot is the one class of message whose loss here
+                // is a lost fact — it is exactly the set the sender replays after a resume, and the
+                // replay is what arrived ahead of the accept in the live capture. Held instead of
+                // dropped, and only released if THIS connection then proves itself. Everything else
+                // (snapshots, streams, the moment-scoped types) keeps the old drop: the resume forces
+                // a full rebroadcast and a stale copy behind the fresh one is worse than nothing.
+                if (CoopMessages.isReliableOneShot(message.type())) {
+                    bufferDuringGrace(message, connectionGeneration);
+                    return;
+                }
+                if (!graceTrafficDropWarned) {
                     graceTrafficDropWarned = true;
+                    // Kept for genuinely foreign traffic: an unproven peer speaking campaign
+                    // vocabulary at us is still worth one line.
                     CoopLog.warn(CoopNetPump.class, "Coop ignoring type=" + message.type()
                             + " from an unproven peer during the reconnect grace window");
                 }

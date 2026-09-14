@@ -2342,9 +2342,12 @@ class CoopNetServiceTest {
                 return drained.size() >= 2;
             }, "the keepalive and the resume verdict crossed");
 
-            assertEquals(List.of(CoopMessages.Type.PING, CoopMessages.Type.SESSION_RESUME_ACCEPT),
+            // S4-I (2026-09-14): the accept leads even though it was sent third. A resume verdict is
+            // queued ahead of held session traffic, because on the frame the resume opens the write
+            // gate the cursor no longer overtakes anything and the queue order is what the peer sees.
+            assertEquals(List.of(CoopMessages.Type.SESSION_RESUME_ACCEPT, CoopMessages.Type.PING),
                     List.of(drained.get(0).type(), drained.get(1).type()),
-                    "only the pre-proof vocabulary reaches an unproven socket");
+                    "only the pre-proof vocabulary reaches an unproven socket, verdict first");
             assertEquals(2, host.outboundQueueDepth(), "session traffic is held, not dropped");
 
             // The resume was accepted for this socket: same token, re-set, marks it proven.

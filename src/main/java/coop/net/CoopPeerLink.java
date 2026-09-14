@@ -538,13 +538,51 @@ public final class CoopPeerLink {
         }
         java.util.List<CoopMessages.Message> replayed = new java.util.ArrayList<>(unacked.values());
         unacked.clear();
+        outbound.addAll(indexAfterLeadingControl(), replayed);
+        return replayed;
+    }
+
+    /**
+     * The first index in {@link #outbound} that is not connection-scoped control, i.e. the seam
+     * between "vocabulary this socket needs before anything else means anything" and ordinary
+     * session traffic.
+     *
+     * <p>S4-I, 2026-09-14: this used to be inlined in {@link #requeueUnackedForResend()} alone, and
+     * the invariant it assumed — that the resume accept is at the head — was false in the live case.
+     * The accept is enqueued at the <em>tail</em>, behind whatever session traffic the grace window
+     * held, so the leading run was empty and the replay went in at index 0, ahead of the accept. The
+     * guest then dispatched a {@code CREDITS_GRANT} one millisecond before the accept that would have
+     * closed its grace gate, and the gate dropped it as coming from an unproven peer. The other half
+     * of the fix is {@link #enqueueAheadOfSessionTraffic}, which is what actually puts the accept at
+     * the head; this method is shared so the two placements cannot drift apart.
+     */
+    private int indexAfterLeadingControl() {
         int at = 0;
         while (at < outbound.size()
                 && CoopNetService.isConnectionScopedControl(outbound.get(at).type())) {
             at++;
         }
-        outbound.addAll(at, replayed);
-        return replayed;
+        return at;
+    }
+
+    /**
+     * Enqueues at the end of the leading connection-scoped control run rather than at the tail, for
+     * the resume vocabulary only (S4-I, 2026-09-14).
+     *
+     * <p>Why the resume verdicts cannot simply queue behind held traffic: the receiver's grace gate
+     * ({@code CoopNetPump#allowedDuringReconnectGrace}) drops every session message that arrives
+     * before the accept, so ordinary traffic written ahead of the accept is not delayed, it is
+     * destroyed. Until now the flush's cursor hid that — the outbound write gate refuses session
+     * traffic for the length of the grace and the cursor skips past it, so the accept overtook the
+     * queue on its way out. The resume opens that gate <em>before</em> the frame's flush runs, so on
+     * the one frame that matters the cursor overtakes nothing and the queue order decides.
+     *
+     * <p>Scoped to the three resume types on purpose. {@code SESSION_LEAVE} is connection-scoped too
+     * and must <em>not</em> jump: moving "I left" ahead of the last queued {@code MARKET_TXN}s would
+     * end the peer's session before it applied them.
+     */
+    void enqueueAheadOfSessionTraffic(CoopMessages.Message message) {
+        outbound.add(indexAfterLeadingControl(), message);
     }
 
     /**

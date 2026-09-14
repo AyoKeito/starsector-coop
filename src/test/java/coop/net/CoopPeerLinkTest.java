@@ -431,6 +431,55 @@ class CoopPeerLinkTest {
                 "accept first, then the replay oldest-first, then what was already waiting");
     }
 
+    /**
+     * S4-I, 2026-09-14, and the reason the test above passed while the live build failed: it queued
+     * the accept <em>first</em>, which is not what production does. {@code sendTo} appends at the
+     * tail, and during a grace window the tail is behind whatever session traffic the write gate has
+     * been holding — so the leading connection-scoped run was empty and the replay went in at index
+     * 0, ahead of the accept. The guest then dropped the replayed {@code CREDITS_GRANT} at its
+     * unproven-peer gate one millisecond before the accept that would have opened it.
+     *
+     * <p>This models the real order: held traffic, then the accept, then the requeue.
+     */
+    @Test
+    void theResumeAcceptLeadsEvenWhenItIsQueuedBehindHeldSessionTraffic() throws Exception {
+        CoopPeerLink link = link();
+        link.attach(null, InetAddress.getByName("127.0.0.1"), 1_000L, false, 1L);
+        write(link, grant(1L, "ledger-1"));
+        // What the outbound write gate held for the length of the grace window, queued before the
+        // resume was ever answered.
+        link.enqueue(semantic(40L));
+        link.enqueue(semantic(41L));
+
+        // Production's own path: the accept goes through the service's queue routing, not addLast.
+        link.enqueueAheadOfSessionTraffic(CoopMessages.sessionResumeAccept(SESSION, 50L, 1_000L));
+        link.requeueUnackedForResend();
+
+        assertEquals(List.of(50L, 1L, 40L, 41L),
+                link.outbound().stream().map(CoopMessages.Message::seq).toList(),
+                "accept, then the replay, then the traffic the grace window held");
+    }
+
+    /**
+     * The narrow scope of the jump (S4-I). A leave describes the socket it was written to, and moving
+     * it ahead of queued campaign events would end the peer's session before it applied them.
+     */
+    @Test
+    void onlyTheResumeVerdictsJumpAheadOfHeldSessionTraffic() {
+        assertTrue(CoopNetService.isResumeVerdict(CoopMessages.Type.SESSION_RESUME_REQUEST));
+        assertTrue(CoopNetService.isResumeVerdict(CoopMessages.Type.SESSION_RESUME_ACCEPT));
+        assertTrue(CoopNetService.isResumeVerdict(CoopMessages.Type.SESSION_RESUME_REJECT));
+        assertFalse(CoopNetService.isResumeVerdict(CoopMessages.Type.SESSION_LEAVE));
+        assertFalse(CoopNetService.isResumeVerdict(CoopMessages.Type.RELIABLE_ACK));
+        assertFalse(CoopNetService.isResumeVerdict(CoopMessages.Type.LOBBY_ACCEPT));
+        for (CoopMessages.Type type : CoopMessages.Type.values()) {
+            if (CoopNetService.isResumeVerdict(type)) {
+                assertTrue(CoopNetService.isConnectionScopedControl(type),
+                        type + " jumps the queue, so the leading-run scan must recognise it");
+            }
+        }
+    }
+
     @Test
     void aReplayWithNothingOwedIsANoOp() {
         CoopPeerLink link = link();

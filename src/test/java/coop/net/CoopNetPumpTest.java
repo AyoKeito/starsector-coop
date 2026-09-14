@@ -3725,15 +3725,226 @@ class CoopNetPumpTest {
 
         assertEquals(0, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA),
                 "an unproven peer's campaign traffic must not reach the replicator");
+        // S4-I (2026-09-14): held rather than destroyed. A WORLD_DELTA is a reliable one-shot, so
+        // losing it here loses a fact; it waits for this connection to prove itself, and if it never
+        // does it is discarded. What must not happen — and does not — is it reaching the replicator
+        // before the proof.
+        assertEquals(1, pump.graceBufferedPendingForTest());
 
         // After a matching resume the same message is ordinary session traffic again.
         service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 6L, 2000L, "guest-player"));
         pump.advance(0f);
+
+        assertEquals(0, pump.graceBufferedPendingForTest(), "the resume released what was held");
+        assertEquals(1, pump.graceBufferedReleasedForTest());
+        assertEquals(1, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA),
+                "the held delta reaches the replicator exactly once, behind the accept");
+
         service.inbound.add(CoopMessages.worldDelta("session-a", 7L, 2000L,
-                "entity-1", "CONSUME", true, "", "guest-player"));
+                "entity-2", "CONSUME", true, "", "guest-player"));
         pump.advance(0f);
 
-        assertEquals(1, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA));
+        assertEquals(2, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA));
+    }
+
+    // ---- S4-I: a replay must never be processed ahead of the accept it follows --------------------
+
+    /**
+     * S4-I, reproduced from the 2026-09-14 guest log. The host queued {@code SESSION_RESUME_ACCEPT},
+     * resumed, and replayed the {@code CREDITS_GRANT} the guest had never acknowledged — and the
+     * replay carried its original (older) seq and reached the guest one millisecond <em>before</em>
+     * the accept:
+     *
+     * <pre>
+     *   3679577 inbound CREDITS_GRANT seq=26610
+     *   3679577 WARN  ignoring type=CREDITS_GRANT from an unproven peer during the reconnect grace
+     *   3679578 inbound SESSION_RESUME_ACCEPT seq=26773
+     * </pre>
+     *
+     * <p>Nothing retried it while the link was up and the host's unacked entry never cleared, so the
+     * same stale grant was replayed and dropped again on the next reconnect. This feeds exactly that
+     * batch, in that order, and asserts the grant is applied once and acknowledged.
+     */
+    @Test
+    void aReplayThatArrivesAheadOfTheResumeAcceptIsAppliedOnceRatherThanDropped() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+        service.connected = true;
+        service.connectionGeneration++;
+        pump.advance(0f);
+        service.sent.clear();
+
+        // One batch, replay first: the order the live capture recorded.
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 26610L, 2000L,
+                "ledger-a", 5_000, "gift"));
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 26773L, 2000L));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "the accept still resumed");
+        assertEquals(1, pump.graceBufferedReleasedForTest(),
+                "the grant was held at the gate and released behind the accept, not destroyed");
+        assertEquals(0, pump.graceBufferedPendingForTest());
+        assertEquals(0, pump.reliableDuplicatesDropped(), "applied, not swallowed as a duplicate");
+        assertEquals(1, pump.appliedReliableSeqCount(null));
+        assertEquals(List.of(26610L), CoopMessages.parseReliableAckSeqs(
+                lastOfType(service, CoopMessages.Type.RELIABLE_ACK)),
+                "and the host is told, so it stops owing the grant");
+    }
+
+    /**
+     * The second half of S4-I's cost: a replay the receiver has already applied still has to be
+     * acknowledged, or the sender replays it forever and its unacked entry never clears. The dedup
+     * drops the dispatch, not the ack.
+     */
+    @Test
+    void aDuplicateReplayIsDroppedButStillAcknowledged() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 77L, 2000L,
+                "ledger-a", 5_000, "gift"));
+        pump.advance(0f);
+        assertEquals(List.of(77L), CoopMessages.parseReliableAckSeqs(
+                lastOfType(service, CoopMessages.Type.RELIABLE_ACK)));
+
+        service.sent.clear();
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 77L, 3000L,
+                "ledger-a", 5_000, "gift"));
+        pump.advance(0f);
+
+        assertEquals(1, pump.reliableDuplicatesDropped());
+        assertEquals(List.of(77L), CoopMessages.parseReliableAckSeqs(
+                lastOfType(service, CoopMessages.Type.RELIABLE_ACK)),
+                "the sender's ack went missing once already; saying nothing is what made it replay");
+    }
+
+    /**
+     * The grace buffer is not a retry queue. Nothing is applied unless the connection that sent it
+     * goes on to prove itself, and a window that expires instead takes the held messages with it —
+     * loudly, because that is the one place S4-I's fix can still lose a campaign event.
+     */
+    @Test
+    void messagesHeldAtTheReconnectGateAreDiscardedWhenTheWindowExpires() {
+        LogCapture appender = LogCapture.attach(CoopNetPump.class);
+        try {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            CoopSessionState session = activeHostSession();
+            AtomicLong now = new AtomicLong(1000L);
+            CoopNetPump pump = hostInGraceWindow(service, session, now);
+            service.connectionGeneration++;
+
+            service.inbound.add(CoopMessages.worldDelta("session-a", 5L, now.get(),
+                    "entity-1", "CONSUME", true, "", "guest-player"));
+            pump.advance(0f);
+            assertEquals(1, pump.graceBufferedPendingForTest());
+
+            now.addAndGet(CoopNetStartupConfig.DEFAULT_RECONNECT_GRACE_SECONDS * 1000L + 1000L);
+            pump.advance(0f);
+
+            assertEquals(0, pump.graceBufferedPendingForTest());
+            assertEquals(0, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA),
+                    "a connection that never proved itself never reaches the replicator");
+            assertTrue(appender.messages.stream().anyMatch(line ->
+                            line.contains("discarding 1 message(s) held at the reconnect gate")),
+                    "the loss has to be visible in the log: " + appender.messages);
+        } finally {
+            appender.detach();
+        }
+    }
+
+    /** Held traffic belongs to the socket that sent it; another socket's resume does not free it. */
+    @Test
+    void messagesHeldFromOneConnectionAreNotReleasedByAnothersResume() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+
+        service.connectionGeneration++;
+        service.inbound.add(CoopMessages.worldDelta("session-a", 5L, now.get(),
+                "entity-1", "CONSUME", true, "", "guest-player"));
+        pump.advance(0f);
+        assertEquals(1, pump.graceBufferedPendingForTest());
+
+        // A different socket takes the slot and it is that one that resumes.
+        service.connectionGeneration++;
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 6L, now.get(),
+                "guest-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(0, pump.graceBufferedPendingForTest());
+        assertEquals(0, pump.graceBufferedReleasedForTest());
+        assertEquals(1, pump.graceBufferedDiscardedForTest());
+        assertEquals(0, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA),
+                "the generation that spoke is not the generation that proved itself");
+    }
+
+    /**
+     * The bound. Newest refused rather than oldest evicted: a flood from a stranger must not be able
+     * to push the partner's earlier traffic out of the buffer.
+     */
+    @Test
+    void theReconnectGateBufferRefusesTheNewestPastItsCap() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = hostInGraceWindow(service, session, now);
+        service.connectionGeneration++;
+
+        int cap = CoopNetPump.MAX_GRACE_BUFFERED_INBOUND;
+        for (int at = 0; at < cap + 3; at++) {
+            service.inbound.add(CoopMessages.worldDelta("session-a", 100L + at, now.get(),
+                    "entity-" + at, "CONSUME", true, "", "guest-player"));
+        }
+        pump.advance(0f);
+
+        assertEquals(cap, pump.graceBufferedPendingForTest());
+        assertEquals(3, pump.graceBufferedDiscardedForTest());
+
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(),
+                "guest-player"));
+        pump.advance(0f);
+
+        assertEquals(cap, pump.graceBufferedReleasedForTest());
+        assertEquals(cap, countOfExcludingCommission(service, CoopMessages.Type.WORLD_DELTA),
+                "the first arrivals survived the flood and were applied behind the accept");
+    }
+
+    /**
+     * Snapshots and moment-scoped types keep the old drop, and the WARN that goes with it. Buffering
+     * a stale {@code TIME_SNAPSHOT} behind the fresh one the resume forces would be worse than losing
+     * it, and an {@code INTERACTION_CLAIM} names a dialog the drop edge already closed.
+     */
+    @Test
+    void onlyReliableOneShotsAreHeldAtTheReconnectGate() {
+        LogCapture appender = LogCapture.attach(CoopNetPump.class);
+        try {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            CoopSessionState session = activeHostSession();
+            AtomicLong now = new AtomicLong(1000L);
+            CoopNetPump pump = hostInGraceWindow(service, session, now);
+            service.connectionGeneration++;
+
+            service.inbound.add(CoopMessages.timeSnapshot("session-a", 5L, false, false,
+                    now.get(), 1L, now.get(), ""));
+            pump.advance(0f);
+
+            assertEquals(0, pump.graceBufferedPendingForTest());
+            assertTrue(appender.messages.stream().anyMatch(line ->
+                            line.contains("ignoring type=TIME_SNAPSHOT from an unproven peer")),
+                    "the WARN for foreign traffic stays: " + appender.messages);
+        } finally {
+            appender.detach();
+        }
     }
 
     /**
