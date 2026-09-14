@@ -81,16 +81,19 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
@@ -2604,7 +2607,7 @@ public final class CoopCampaignReplicator
                 continue;
             }
             matchedListings.add(listing.itemId());
-            if (storedHullMatchesListing(member, listing)) {
+            if (storedHullMatchesListing(member, listing, marketId)) {
                 kept++;
                 continue;
             }
@@ -2656,20 +2659,159 @@ public final class CoopCampaignReplicator
      * canonicalized; see its javadoc for what stays ordered and why, including that an s-modded
      * built-in still reads unequal for exactly one cycle, as it did before.
      */
-    private boolean storedHullMatchesListing(FleetMemberAPI member, CoopMarketSync.StockItem listing) {
+    private boolean storedHullMatchesListing(FleetMemberAPI member, CoopMarketSync.StockItem listing,
+                                             String marketId) {
         try {
             String blob = listing.detail();
             if (blob == null || blob.isEmpty()) {
                 return false;
             }
             CoopShipDetail local = captureShipDetail(member);
+            if (local == null) {
+                return false;
+            }
+            CoopShipDetail localStamped = local.withMemberId(listing.itemId());
             // decode() throws on a malformed blob; the catch below turns that into "replace it",
             // which is the same answer the string compare gave for a blob it could not match.
-            return local != null
-                    && local.withMemberId(listing.itemId()).sameShip(CoopShipDetail.decode(blob));
+            CoopShipDetail incoming = CoopShipDetail.decode(blob);
+            if (localStamped.sameShip(incoming)) {
+                return true;
+            }
+            // 2026-09-14: the 2026-09-14 smoke logged "kept=0 replaced=1" between opens that
+            // logged "kept=1" for the same locker, with no way to tell which field of the stored
+            // hull and the incoming listing disagreed. Name it.
+            logStoredHullDiff(marketId, listing.itemId(), localStamped, incoming);
+            return false;
         } catch (RuntimeException | LinkageError ex) {
             return false;
         }
+    }
+
+    private static void logStoredHullDiff(String marketId, String hullId, CoopShipDetail local,
+                                          CoopShipDetail incoming) {
+        List<ShipFieldDiff> diffs = diffStoredHull(local, incoming);
+        StringBuilder text = new StringBuilder();
+        for (ShipFieldDiff diff : diffs) {
+            if (text.length() > 0) {
+                text.append("; ");
+            }
+            text.append(diff.field()).append(" '").append(diff.localValue())
+                    .append("' vs '").append(diff.incomingValue()).append('\'');
+        }
+        if (text.length() == 0) {
+            // sameShip() said unequal but the field-by-field walk below found nothing: the two
+            // disagree on a comparison this helper does not yet cover. Say so instead of printing
+            // an empty "differs:" line that looks like a bug in the log line itself.
+            text.append("(diffStoredHull found no differing field; sameShip() still says unequal -"
+                    + " diffStoredHull is out of sync with CoopShipDetail.sameShip)");
+        }
+        CoopLog.info(CoopCampaignReplicator.class, "Coop storage hull replaced market=" + marketId
+                + " hullId=" + hullId + " differs: " + text);
+    }
+
+    /** One field of {@link CoopShipDetail} that differs between a stored hull and its listing. */
+    record ShipFieldDiff(String field, String localValue, String incomingValue) {
+        ShipFieldDiff {
+            Objects.requireNonNull(field, "field");
+            Objects.requireNonNull(localValue, "localValue");
+            Objects.requireNonNull(incomingValue, "incomingValue");
+        }
+    }
+
+    /**
+     * Field-by-field diff behind {@link #storedHullMatchesListing}, split out as a pure function so
+     * it is unit-testable without an engine. Covers exactly the fields {@link CoopShipDetail#sameShip}
+     * compares - see that method's javadoc for which collections are order-free - so a build that
+     * changes what the matcher looks at must update both. {@code memberId} is excluded: the caller
+     * always stamps {@code local} with the listing's id before comparing, so it can never differ.
+     *
+     * <p>Empty when the two are the same ship; one entry per field that disagrees, in record
+     * declaration order, never just the first.
+     */
+    static List<ShipFieldDiff> diffStoredHull(CoopShipDetail local, CoopShipDetail incoming) {
+        List<ShipFieldDiff> diffs = new ArrayList<>();
+        addIfDiffers(diffs, "shipName", local.shipName(), incoming.shipName());
+        addIfDiffers(diffs, "baseVariantId", local.baseVariantId(), incoming.baseVariantId());
+        addIfDiffers(diffs, "hullSpecId", local.hullSpecId(), incoming.hullSpecId());
+        addIfDiffers(diffs, "baseCR", floatText(local.baseCR()), floatText(incoming.baseCR()));
+        addIfDiffers(diffs, "vents", String.valueOf(local.vents()), String.valueOf(incoming.vents()));
+        addIfDiffers(diffs, "caps", String.valueOf(local.caps()), String.valueOf(incoming.caps()));
+        addIfSetDiffers(diffs, "permaMods", local.permaMods(), incoming.permaMods());
+        addIfSetDiffers(diffs, "sMods", local.sMods(), incoming.sMods());
+        addIfSetDiffers(diffs, "sModdedBuiltIns", local.sModdedBuiltIns(), incoming.sModdedBuiltIns());
+        addIfSetDiffers(diffs, "refitMods", local.refitMods(), incoming.refitMods());
+        addIfSetDiffers(diffs, "suppressedMods", local.suppressedMods(), incoming.suppressedMods());
+        addIfMapDiffers(diffs, "weapons", local.weapons(), incoming.weapons());
+        addIfMapDiffers(diffs, "wings", local.wings(), incoming.wings());
+        addIfDiffers(diffs, "weaponGroups", local.weaponGroups().toString(),
+                incoming.weaponGroups().toString());
+        addIfDiffers(diffs, "hullFraction", floatText(local.hullFraction()),
+                floatText(incoming.hullFraction()));
+        addIfDiffers(diffs, "displayName", local.displayName(), incoming.displayName());
+        addModulesDiffIfAny(diffs, local.modules(), incoming.modules());
+        return List.copyOf(diffs);
+    }
+
+    private static void addIfDiffers(List<ShipFieldDiff> diffs, String field, String localValue,
+                                      String incomingValue) {
+        if (!Objects.equals(localValue, incomingValue)) {
+            diffs.add(new ShipFieldDiff(field, localValue, incomingValue));
+        }
+    }
+
+    /** permaMods/sMods/sModdedBuiltIns/refitMods/suppressedMods: sets read off order-free accessors. */
+    private static void addIfSetDiffers(List<ShipFieldDiff> diffs, String field,
+                                        List<String> local, List<String> incoming) {
+        List<String> localSorted = new ArrayList<>(local);
+        List<String> incomingSorted = new ArrayList<>(incoming);
+        Collections.sort(localSorted);
+        Collections.sort(incomingSorted);
+        addIfDiffers(diffs, field, localSorted.toString(), incomingSorted.toString());
+    }
+
+    /** weapons/wings: {@link Map#equals} is already order-free, so no sort is needed to compare. */
+    private static void addIfMapDiffers(List<ShipFieldDiff> diffs, String field,
+                                        Map<String, String> local, Map<String, String> incoming) {
+        if (!Objects.equals(local, incoming)) {
+            diffs.add(new ShipFieldDiff(field, new TreeMap<>(local).toString(),
+                    new TreeMap<>(incoming).toString()));
+        }
+    }
+
+    private static void addModulesDiffIfAny(List<ShipFieldDiff> diffs,
+                                             Map<String, CoopShipDetail> local,
+                                             Map<String, CoopShipDetail> incoming) {
+        if (modulesMatch(local, incoming)) {
+            return;
+        }
+        boolean sameSlots = local.keySet().equals(incoming.keySet());
+        String suffix = sameSlots ? " (same slot ids, different content)" : "";
+        diffs.add(new ShipFieldDiff("modules", moduleKeysText(local) + suffix,
+                moduleKeysText(incoming) + suffix));
+    }
+
+    private static boolean modulesMatch(Map<String, CoopShipDetail> local,
+                                        Map<String, CoopShipDetail> incoming) {
+        if (!local.keySet().equals(incoming.keySet())) {
+            return false;
+        }
+        for (Map.Entry<String, CoopShipDetail> entry : local.entrySet()) {
+            if (!entry.getValue().sameShip(incoming.get(entry.getKey()))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String moduleKeysText(Map<String, CoopShipDetail> modules) {
+        List<String> keys = new ArrayList<>(modules.keySet());
+        Collections.sort(keys);
+        return keys.toString();
+    }
+
+    /** Same rounding as {@code CoopShipDetail}'s wire format, so a float diff means a real one. */
+    private static String floatText(float value) {
+        return String.format(Locale.ROOT, "%.4f", value);
     }
 
     /** Set a commodity stack to a target quantity via add/remove. */
