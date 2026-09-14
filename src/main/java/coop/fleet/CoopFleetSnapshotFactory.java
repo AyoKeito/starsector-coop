@@ -270,7 +270,8 @@ public final class CoopFleetSnapshotFactory {
                 hullFraction,
                 captureDmodIds(variant),
                 captureSModIds(variant),
-                captureSModdedBuiltInIds(variant));
+                captureSModdedBuiltInIds(variant),
+                captureMothballed(member));
     }
 
     // ---- Permanent hullmod capture (Phase 16) ---------------------------------------------------
@@ -560,6 +561,34 @@ public final class CoopFleetSnapshotFactory {
     static float captureCr(FleetMemberAPI member) {
         return resolveCr(readOptionalFloat(() -> member.getRepairTracker().getCR()),
                 readOptionalFloat(() -> member.getRepairTracker().getBaseCR()));
+    }
+
+    /**
+     * One ship's mothballed flag for the wire (2026-09-14, S4-B).
+     *
+     * <p>A trade fleet's "ship hulls" cargo is not cargo at the fleet-member level: vanilla's
+     * {@code EconomyFleetAssignmentAI.syncMothballedShips} attaches those hulls as real members and
+     * mothballs them. Mothballing zeroes {@code RepairTracker.cr} ({@code setMothballed} stashes the
+     * old value in {@code crPriorToMothballing}), so before this field existed the receiver rebuilt
+     * them as ordinary warships sitting at 0% CR, which is what the 2026-09-13 smoke saw in the fleet
+     * tooltip.
+     *
+     * <p><b>An unreadable tracker answers {@code false}, and that is deliberate rather than a silent
+     * fallback.</b> Every other per-member read here is best-effort by design (see
+     * {@link #captureMembers}), and the one state that can make this read fail — a member whose
+     * {@code getRepairTracker()} is still null during the load window — is the <em>same</em> state
+     * that makes both CR reads fail, so it already streams {@link CoopFleetSnapshot#CR_UNKNOWN} and
+     * the receiver already says so out loud once per mirror
+     * ({@code CoopFleetMirror#noteUnknownCr}). Warning again from here would add a second line at
+     * 10 Hz per member for a fact already reported, and {@code false} fabricates nothing: it is the
+     * state a freshly built mirror member is in either way.
+     */
+    static boolean captureMothballed(FleetMemberAPI member) {
+        try {
+            return member.getRepairTracker().isMothballed();
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
     }
 
     /** The pure half of {@link #captureCr}, so the precedence is unit-tested without an engine. */

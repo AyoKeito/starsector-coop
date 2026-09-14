@@ -97,6 +97,15 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * the contract by validating every id against the sender's own spec store before it is sent —
      * sound because the handshake already requires an identical mod manifest on both sides.
      *
+     * <p><b>{@code mothballed} (2026-09-14, S4-B)</b> is the ship's
+     * {@code RepairTrackerAPI#isMothballed()} state. A trade fleet carries its "ship hulls" cargo as
+     * real fleet members — {@code EconomyFleetAssignmentAI.syncMothballedShips} adds them mothballed,
+     * which is why vanilla draws them greyed out at the bottom of the fleet tooltip — and without this
+     * field the mirror rebuilt them as ordinary combat ships that merely happened to read 0% CR. That
+     * is the "0 CR ships" the 2026-09-13 smoke reported: not a CR defect at all, a missing flag. It is
+     * structural (see {@link #computeFleetHash}), because a roster rebuild is the only path that
+     * applies it.
+     *
      * <p><b>{@code dmodIds}, {@code sModIds} and {@code sModdedBuiltInIds} (Phase 16)</b> are
      * comma-joined, sorted lists of the variant's permanent hullmod ids — damaged, story-pointed, and
      * story-pointed built-in respectively — each empty when the ship has none. Those are stock
@@ -107,7 +116,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      */
     public record Member(String fleetMemberId, String hullId, String variantId, String shipName,
                          String captainName, float cr, float hullFraction,
-                         String dmodIds, String sModIds, String sModdedBuiltInIds) {
+                         String dmodIds, String sModIds, String sModdedBuiltInIds,
+                         boolean mothballed) {
         public Member {
             fleetMemberId = normalize(fleetMemberId);
             hullId = normalize(hullId);
@@ -125,7 +135,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
          */
         public Member(String fleetMemberId, String hullId, String variantId, String shipName,
                       String captainName, float cr, float hullFraction) {
-            this(fleetMemberId, hullId, variantId, shipName, captainName, cr, hullFraction, "", "", "");
+            this(fleetMemberId, hullId, variantId, shipName, captainName, cr, hullFraction, "", "", "",
+                    false);
         }
     }
 
@@ -145,6 +156,14 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * (identity, hull, variant, names, permanent hullmods): the hash gates a full mirror-roster
      * teardown and rebuild on the remote client, so it must flip only when the ship set actually
      * changes.
+     *
+     * <p><b>{@code mothballed} is structural too (2026-09-14, S4-B).</b> Not because mothballing is
+     * expensive to miss, but because the roster rebuild is the only apply path member state has: the
+     * 10 Hz tick carries CR and hull and nothing else, so a flag left out of this hash would reach an
+     * already-built mirror never. It cannot reproduce the CR rebuild storm below either — a ship is
+     * mothballed when a trade fleet buys hulls at a market or a player parks one, which is a
+     * once-in-a-while event, not a per-second one. (In the case that motivated the field the hash was
+     * going to move regardless: {@code syncMothballedShips} adds and removes the members themselves.)
      *
      * <p>D-mods and S-mods are structural (Phase 16) because they are baked into the mirror ship at
      * build time — a ship that gains one has to be rebuilt for the mirror to show it. They are also
@@ -183,7 +202,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .append('|').append(member.captainName())
                     .append('|').append(member.dmodIds())
                     .append('|').append(member.sModIds())
-                    .append('|').append(member.sModdedBuiltInIds());
+                    .append('|').append(member.sModdedBuiltInIds())
+                    .append('|').append(member.mothballed() ? '1' : '0');
         }
         return CoopChecksum.sha256Text(canonical.toString());
     }
@@ -197,7 +217,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .thenComparing(Member::captainName)
                     .thenComparing(Member::dmodIds)
                     .thenComparing(Member::sModIds)
-                    .thenComparing(Member::sModdedBuiltInIds);
+                    .thenComparing(Member::sModdedBuiltInIds)
+                    .thenComparing(Member::mothballed);
 
     /**
      * The permutation that puts {@code members} into the hash's canonical order: element {@code k} is

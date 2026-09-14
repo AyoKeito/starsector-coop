@@ -127,16 +127,16 @@ class CoopFleetSnapshotTest {
         // shapes a real roster mixes, plus the empty one that must not turn into a phantom mod id.
         List<CoopFleetSnapshot.Member> members = List.of(
                 new CoopFleetSnapshot.Member("m0", "wolf", "wolf_Assault", "Clean", "", 1f, 1f,
-                        "", "", ""),
+                        "", "", "", false),
                 new CoopFleetSnapshot.Member("m1", "falcon_default_D", "falcon_Assault", "Battered",
-                        "", 0.4f, 0.6f, "compromised_storage,damagedengines", "", ""),
+                        "", 0.4f, 0.6f, "compromised_storage,damagedengines", "", "", false),
                 new CoopFleetSnapshot.Member("m2", "wolf", "wolf_Assault", "Refit", "", 1f, 1f,
-                        "", "heavyarmor,hardenedshieldemitter", ""),
+                        "", "heavyarmor,hardenedshieldemitter", "", false),
                 new CoopFleetSnapshot.Member("m3", "hound", "hound_Standard", "Built-in", "", 1f, 1f,
-                        "", "", "solar_shielding"),
+                        "", "", "solar_shielding", false),
                 new CoopFleetSnapshot.Member("m4", "onslaught_default_D", "onslaught_Standard",
                         "Veteran", "Ahab", 0.7f, 0.8f, "structuraldamage", "heavyarmor",
-                        "armoredweapons"));
+                        "armoredweapons", false));
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
                 "p1", "Alice", "corvus", 0f, 0f, 0f, 0f, "player", true, sensors(650f, 420f), members);
 
@@ -169,13 +169,13 @@ class CoopFleetSnapshotTest {
 
         assertNotEquals(clean, CoopFleetSnapshot.computeFleetHash(List.of(
                 new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f,
-                        "damagedengines", "", ""))));
+                        "damagedengines", "", "", false))));
         assertNotEquals(clean, CoopFleetSnapshot.computeFleetHash(List.of(
                 new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f,
-                        "", "heavyarmor", ""))));
+                        "", "heavyarmor", "", false))));
         assertNotEquals(clean, CoopFleetSnapshot.computeFleetHash(List.of(
                 new CoopFleetSnapshot.Member("m1", "wolf", "wolf_Assault", "Fang", "", 1f, 1f,
-                        "", "", "solar_shielding"))));
+                        "", "", "solar_shielding", false))));
     }
 
     @Test
@@ -369,7 +369,7 @@ class CoopFleetSnapshotTest {
         for (int i = 0; i < 30; i++) {
             members.add(new CoopFleetSnapshot.Member("PL" + i + "-1234567890", "onslaught",
                     "onslaught_xiv_Elite", "ISS Nevermore " + i, "Captain Vela Solvang",
-                    0.673f, 0.812f, "damaged_engines,structural_damage", "safetyoverrides", ""));
+                    0.673f, 0.812f, "damaged_engines,structural_damage", "safetyoverrides", "", false));
         }
         CoopFleetSnapshot snapshot = CoopFleetSnapshot.create(
                 "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "Alice Longname",
