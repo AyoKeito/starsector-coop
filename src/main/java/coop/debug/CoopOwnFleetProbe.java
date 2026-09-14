@@ -444,9 +444,26 @@ public final class CoopOwnFleetProbe {
                         ? "" : location.getId(), List.copyOf(members));
     }
 
-    /** True while a combat engine exists in this process — i.e. the local client is in a battle. */
+    /**
+     * Where {@link #battleActive()} reads from. The pump installs the battle bridge's
+     * {@code isAnyCoopBattleActive()} at construction; until then (unit tests, no pump) the
+     * fallback asks whether a combat engine exists, which is true during a fight but also stays
+     * true after a save is loaded (the engine object outlives the battle), so the fallback is only
+     * a rough answer.
+     */
+    private static volatile java.util.function.BooleanSupplier battleSource = null;
+
+    public static void setBattleSource(java.util.function.BooleanSupplier source) {
+        battleSource = source;
+    }
+
+    /** True while the local client is in a co-op tracked battle (see {@link #setBattleSource}). */
     public static boolean battleActive() {
+        java.util.function.BooleanSupplier source = battleSource;
         try {
+            if (source != null) {
+                return source.getAsBoolean();
+            }
             return Global.getCombatEngine() != null;
         } catch (RuntimeException | LinkageError ignored) {
             return false;

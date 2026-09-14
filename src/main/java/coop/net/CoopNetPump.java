@@ -873,6 +873,9 @@ public class CoopNetPump implements EveryFrameScript {
         // than the measurement reaching into it.
         this.linkQuality.setCombatWindow(CoopLinkQuality.CombatWindow.of(
                 this::eitherSideInCombat, battleBridge::lastCombatEndedAtMillis));
+        // The own-fleet probe's battle flag reads the same truth source, not "a combat engine exists"
+        // (which stays true after a load).
+        coop.debug.CoopOwnFleetProbe.setBattleSource(battleBridge::isAnyCoopBattleActive);
         // Phase 20 M6: the pre-contact handoff band is derived against the measured link, so the
         // watcher reads p95 RTT from the same place the HUD does. Null (no PONG yet) maps to 0, which
         // the watcher treats as "unmeasured" and answers with Phase 14's flat loopback geometry.
