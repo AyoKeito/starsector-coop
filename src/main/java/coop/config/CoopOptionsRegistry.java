@@ -348,15 +348,19 @@ public final class CoopOptionsRegistry {
                 "next battle result", ApplyBoundary.NEXT_BATTLE_RESULT,
                 "How salvage from a jointly fought battle is divided. INERT until Phase 22 builds,"
                         + " which is also what defines any value other than equal."));
+        // 2026-09-14: Phase 24 shipped without ever reading this key - CoopRewardSplitter hardwires
+        // the equal split. The description says so instead of promising a phase that already
+        // happened; see CoopOptionsView.INERT_KEYS for the page-side caveat.
         options.add(enumOption(INCOME_SPLIT, Tier.POLICY, "equal", List.of("equal", "host-banks"),
                 "Phase 24", "next month tick", ApplyBoundary.NEXT_MONTH_TICK,
-                "equal splits shared-faction colony income 50/50 (local upkeep stays with the"
-                        + " owner); host-banks pays it all to the host. INERT until Phase 24 wires"
-                        + " the key."));
+                "Not consulted in this build: CoopRewardSplitter hardwires the equal 50/50 split"
+                        + " (local upkeep stays with the owner) regardless of this value."));
+        // 2026-09-14: same as INCOME_SPLIT above - colonization is trusted unconditionally, the
+        // guest is never asked, and this key is never read.
         options.add(boolOption(GUEST_COLONIZATION_CONSENT, Tier.POLICY, "false", "Phase 24",
                 "next colonization", ApplyBoundary.NEXT_COLONIZATION,
-                "true makes a guest founding a colony ask the host first. Default false is the"
-                        + " shipped trusted model. INERT until Phase 24 wires the key."));
+                "Not consulted in this build: a guest founding a colony is never asked to wait for"
+                        + " host consent, regardless of this value. Colonization is trusted."));
 
         // -- Tier 3: per-client preferences ----------------------------------------------------
         options.add(boolOption(HUD_DISABLE, Tier.CLIENT, "false", "Phase 20.6",
@@ -371,9 +375,10 @@ public final class CoopOptionsRegistry {
         options.add(enumOption(FEED_VERBOSITY, Tier.CLIENT, "all",
                 List.of("all", "important", "minimal"), "Phase 20.6", "immediately", ApplyBoundary.IMMEDIATE,
                 "How much of the coop event feed is shown. INERT until the feed reads the key."));
+        // 2026-09-14: Phase 8 shipped a fixed presence-marker colour and never read this key.
         options.add(stringOption(PARTNER_COLOR, Tier.CLIENT, "", true, "Phase 8", "immediately", ApplyBoundary.IMMEDIATE,
-                "Colour used for your partner's presence marker. Empty is the built-in preset;"
-                        + " Phase 8 defines the named vocabulary when it wires the key."));
+                "Not consulted in this build: your partner's presence marker colour is unused,"
+                        + " and there is no named vocabulary to set it to."));
 
         // -- -D only, forever ------------------------------------------------------------------
         // One-shot consent gestures (the friction IS the feature) and debug escape hatches. They

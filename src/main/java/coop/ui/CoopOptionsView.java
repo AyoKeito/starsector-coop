@@ -311,7 +311,11 @@ public record CoopOptionsView(List<Section> sections) {
     private static String note(CoopOptionsRegistry.Option option, boolean sessionActive,
                                Control control) {
         if (INERT_KEYS.contains(option.key())) {
-            return "no effect in this build - " + option.owner() + " wires it";
+            // 2026-09-14: used to say "<owner> wires it", which promises a specific phase will
+            // start reading the key. Three of these owners (Phase 24 x2, Phase 8) already shipped
+            // without ever consulting their key - see the option descriptions for what actually
+            // happens instead. The suffix no longer promises a future; it states the present fact.
+            return "no effect in this build (key not wired; owner " + option.owner() + ")";
         }
         if (LAUNCH_READ_POLICY_KEYS.contains(option.key())) {
             return "each install reads its own value at launch; shown here so both players can see it";
