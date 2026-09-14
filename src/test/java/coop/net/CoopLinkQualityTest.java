@@ -570,4 +570,112 @@ class CoopLinkQualityTest {
 
         assertEquals(0, link.jitterStdDevMillis());
     }
+
+    // ---- S5-A: RTT samples taken across a battle -------------------------------------------------
+
+    /** Stand-in for the battle bridge; the pump wires the real thing in. */
+    private static final class FakeCombat implements CoopLinkQuality.CombatWindow {
+        private boolean inCombat;
+        private long endedAtMillis;
+
+        @Override
+        public boolean inCombat() {
+            return inCombat;
+        }
+
+        @Override
+        public long combatEndedAtMillis() {
+            return endedAtMillis;
+        }
+
+        private void end(long atMillis) {
+            inCombat = false;
+            endedAtMillis = atMillis;
+        }
+    }
+
+    @Test
+    void pongsAnsweredAcrossAPeerBattleAreDiscardedRatherThanMeasured() {
+        CoopLinkQuality link = armed(0L);
+        FakeCombat combat = new FakeCombat();
+        link.setCombatWindow(combat);
+
+        // A minute of ordinary link.
+        for (long seq = 1; seq <= 10; seq++) {
+            pong(link, seq, seq * 1_000L, 60);
+        }
+        assertEquals(60, link.p95RttMillis());
+        assertEquals(60, link.medianRttMillis());
+
+        // The partner goes into a five-minute battle. Its pump stops; ours keeps pinging into it and
+        // the answers come back all at once, timed against a clock that was frozen the whole time.
+        combat.inCombat = true;
+        for (long seq = 11; seq <= 20; seq++) {
+            link.notePingSent(seq, 20_000L + seq * 3_000L);
+        }
+        for (long seq = 11; seq <= 20; seq++) {
+            assertEquals(-1, link.notePongReceived(seq, 320_000L),
+                    "a pong answered by a stopped pump is not a sample");
+        }
+
+        assertEquals(60, link.rttMillis(), "the EWMA must not see a five-minute round trip");
+        assertEquals(60, link.p95RttMillis(), "this is what widened the handoff margin to 3793 su");
+        assertEquals(60, link.medianRttMillis(), "and this is what the cadence controller keys on");
+        assertEquals(10, link.combatDroppedSamples());
+
+        // No banner, however long the fight runs.
+        for (long at = 30_000L; at <= 320_000L; at += 1_000L) {
+            assertFalse(link.evaluateDegraded(at), "a battle is not a degraded connection");
+        }
+
+        combat.end(320_000L);
+        assertEquals(10, link.drainCombatDroppedSamples(), "the count is logged once, at battle end");
+        assertEquals(0, link.drainCombatDroppedSamples(), "and only once");
+
+        // Real samples resume immediately after the fight.
+        pong(link, 21L, 321_000L, 70);
+        assertEquals(62, link.rttMillis(), "0.2 * 70 + 0.8 * 60");
+        assertFalse(link.evaluateDegraded(330_000L));
+    }
+
+    @Test
+    void aPingSentBeforeTheBattleEndedIsDiscardedWhenItsAnswerFinallyArrives() {
+        CoopLinkQuality link = armed(0L);
+        FakeCombat combat = new FakeCombat();
+        link.setCombatWindow(combat);
+        combat.inCombat = true;
+        link.notePingSent(1L, 99_000L);
+
+        // BATTLE_END lands first, then the backlog of pongs the peer answered on its way out.
+        combat.end(100_000L);
+        assertEquals(-1, link.notePongReceived(1L, 101_000L),
+                "the ping left while the pump was stopped, so its round trip is not the link's");
+        assertNull(link.rttMillis());
+        assertEquals(1, link.combatDroppedSamples());
+
+        // A ping sent after the battle ended is an ordinary sample again.
+        link.notePingSent(2L, 100_001L);
+        assertEquals(40, link.notePongReceived(2L, 100_041L));
+        assertEquals(40, link.rttMillis());
+        assertEquals(1, link.combatDroppedSamples(), "no second discard");
+    }
+
+    @Test
+    void theDegradedVerdictIsFrozenForTheLengthOfTheBattleRatherThanSuppressed() {
+        CoopLinkQuality link = armed(0L);
+        FakeCombat combat = new FakeCombat();
+        link.setCombatWindow(combat);
+
+        // One genuinely bad sample before the fight starts the sustain run.
+        pong(link, 1L, 0L, 900);
+        assertFalse(link.evaluateDegraded(1_000L));
+
+        combat.inCombat = true;
+        assertFalse(link.evaluateDegraded(60_000L), "a minute in combat buys no sustain");
+
+        combat.end(60_000L);
+        assertFalse(link.evaluateDegraded(61_000L), "the run restarts when the pumps do");
+        assertFalse(link.evaluateDegraded(69_000L));
+        assertTrue(link.evaluateDegraded(72_000L), "a link that really is slow still says so");
+    }
 }

@@ -84,6 +84,12 @@ public class CoopNetPump implements EveryFrameScript {
     private static final long LINK_STATUS_INTERVAL_MILLIS = 5_000L;
     /** How often the fallback/degraded rules are evaluated. Cheap; the rules are all time thresholds. */
     private static final long LINK_EVAL_INTERVAL_MILLIS = 1_000L;
+    /**
+     * How long after a battle ends the discarded-sample tally is held before it is logged (S5-A): two
+     * PING intervals, which is longer than it takes the answers to PINGs sent during the fight to come
+     * back and be dropped.
+     */
+    private static final long COMBAT_SAMPLE_SETTLE_MILLIS = 2L * PING_INTERVAL_MILLIS;
     /** A peer LINK_STATUS older than this is no longer evidence about the peer's UDP path. */
     private static final long PEER_LINK_STATUS_FRESH_MILLIS = 10_000L;
     /** The guest logs its connection doctor block this long after session start even if no UDP came. */
@@ -862,6 +868,11 @@ public class CoopNetPump implements EveryFrameScript {
         this.npcFleetRegistry = new CoopFleetMirrorRegistry(CoopFleetMirror::new, clockMillis);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
         this.battleBridge = new CoopBattleBridge(service, sessionState, clockMillis, pauseCoordinator);
+        // S5-A: a PING answered across a battle times a stopped pump, not the link. The bridge is the
+        // only thing that knows a battle is open on either side, so it supplies that state here rather
+        // than the measurement reaching into it.
+        this.linkQuality.setCombatWindow(CoopLinkQuality.CombatWindow.of(
+                this::eitherSideInCombat, battleBridge::lastCombatEndedAtMillis));
         // Phase 20 M6: the pre-contact handoff band is derived against the measured link, so the
         // watcher reads p95 RTT from the same place the HUD does. Null (no PONG yet) maps to 0, which
         // the watcher treats as "unmeasured" and answers with Phase 14's flat loopback geometry.
@@ -8007,6 +8018,15 @@ public class CoopNetPump implements EveryFrameScript {
                 + " ms entity=" + entityName);
     }
 
+    /**
+     * Is either client inside a battle right now? The bridge's own flags answer for both sides on both
+     * roles; the shared combat pause intent is folded in because on the host it is asserted at
+     * {@code BATTLE_BEGIN} time, one step ahead of anything else that could tell us.
+     */
+    private boolean eitherSideInCombat() {
+        return battleBridge.isAnyCoopBattleActive() || pauseCoordinator.eitherInCombat();
+    }
+
     /** The measured p95 RTT with "no sample yet" folded to 0 (the unmeasured/loopback contract). */
     private int p95RttMillisOrZero() {
         Integer p95 = linkQuality.p95RttMillis();
@@ -8688,6 +8708,7 @@ public class CoopNetPump implements EveryFrameScript {
             tickCadence(now, fallback);
             tickInterpolationDelay(now);
             tickDegradedNotice(now);
+            maybeLogCombatSampleDrops(now);
             maybeLogGuestDoctor(now, stats);
             maybeDeclareLinkDead(now);
         }
@@ -8998,6 +9019,33 @@ public class CoopNetPump implements EveryFrameScript {
         } else {
             postFeed(FEED_DEGRADED_RECOVERED, now, "Co-op: connection recovered.", FEED_GOOD_COLOR);
         }
+    }
+
+    /**
+     * One INFO line per battle for the RTT samples that battle cost us (S5-A), so a smoke log can show
+     * the filter working instead of only the absence of a bad number.
+     *
+     * <p>It waits {@link #COMBAT_SAMPLE_SETTLE_MILLIS} past the end of the fight rather than firing on
+     * the edge: the PONGs for PINGs sent during the battle arrive in the seconds just after it, and
+     * they are the point of the filter. Once the settle has passed no further sample can be discarded
+     * for this reason, so there is nothing left to accumulate and the line cannot repeat.
+     */
+    private void maybeLogCombatSampleDrops(long now) {
+        if (eitherSideInCombat()) {
+            return;
+        }
+        long endedAt = battleBridge.lastCombatEndedAtMillis();
+        if (endedAt <= 0L || now - endedAt < COMBAT_SAMPLE_SETTLE_MILLIS) {
+            return;
+        }
+        int dropped = linkQuality.drainCombatDroppedSamples();
+        if (dropped <= 0) {
+            return;
+        }
+        CoopLog.info(CoopNetPump.class, "Coop RTT sample discarded: peer in combat ("
+                + dropped + " dropped this battle); battle ended " + (now - endedAt)
+                + " ms ago, rtt=" + linkQuality.rttMillis()
+                + " p95Rtt=" + linkQuality.p95RttMillis());
     }
 
     /**

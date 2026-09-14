@@ -31,6 +31,20 @@ import java.util.Set;
  * sender rather than by (sender, type) is what makes the sequence dense; keying by type would read
  * every interleaved motion datagram as a snapshot gap.
  *
+ * <p><b>An RTT sample taken across a battle is not a measurement</b> (S5-A). A client in combat is not
+ * running its campaign pump, so it answers no PING until the fight is over: a PING sent at minute one
+ * of a five-minute battle is PONGed at minute six and reads as a 300 s round trip. Those numbers are
+ * not slow link, they are no link being observed at all, and they poisoned everything downstream — a
+ * false "connection degraded" banner, and a Phase 20 M6 handoff margin (which scales with the p95)
+ * widened to thousands of su for as long as the samples stayed in the ring. So a matched PONG only
+ * becomes a sample when neither side was in combat: {@link #setCombatWindow} supplies that state from
+ * the battle bridge, and {@link #notePongReceived} drops the pair if combat is open now <em>or</em>
+ * the PING left before the last battle ended (the stale answers that arrive in the first seconds
+ * back). {@link #evaluateDegraded} holds its sustain timers still for the same reason: while a pump is
+ * stopped there is no evidence either way, so the banner neither raises nor clears. Loss accounting,
+ * cadence and keepalives are deliberately untouched — a peer that is not draining really is not
+ * draining, and the cadence controller is right to react to it.
+ *
  * <p>Pure logic: every method takes the caller's wall clock, so the whole thing is testable on a fake
  * clock with no sockets. One instance per pump.
  */
@@ -144,6 +158,77 @@ public final class CoopLinkQuality {
     private long degradedSinceMillis;
     private long healthySinceMillis;
 
+    /** Combat state of the two processes; see {@link CombatWindow}. Never null. */
+    private CombatWindow combatWindow = CombatWindow.NONE;
+    /** Matched PONGs thrown away because a battle was in the way, since the last drain. */
+    private int combatDroppedSamples;
+
+    /**
+     * The two facts the RTT measurement needs about combat, supplied by the caller rather than looked
+     * up here: this class owns no game state and must stay testable on a fake clock.
+     *
+     * <p>The pump wires it to the battle bridge, which is the truth source for both sides of the
+     * link — {@code BATTLE_BEGIN}/{@code BATTLE_END} for the peer, the local battle window for this
+     * process.
+     */
+    public interface CombatWindow {
+
+        /** Nothing is ever in combat: the default, and what every unit test gets unless it says otherwise. */
+        CombatWindow NONE = new CombatWindow() {
+            @Override
+            public boolean inCombat() {
+                return false;
+            }
+
+            @Override
+            public long combatEndedAtMillis() {
+                return 0L;
+            }
+        };
+
+        /** Whether either side of the link is in a battle right now. */
+        boolean inCombat();
+
+        /** Wall clock the most recent battle on either side ended at, or 0 when none has. */
+        long combatEndedAtMillis();
+
+        /** Adapter so a caller can hand over two method references instead of writing a class. */
+        static CombatWindow of(java.util.function.BooleanSupplier inCombat,
+                               java.util.function.LongSupplier combatEndedAtMillis) {
+            return new CombatWindow() {
+                @Override
+                public boolean inCombat() {
+                    return inCombat.getAsBoolean();
+                }
+
+                @Override
+                public long combatEndedAtMillis() {
+                    return combatEndedAtMillis.getAsLong();
+                }
+            };
+        }
+    }
+
+    /** Installs the combat state the RTT sampler filters on. Passing null restores {@link CombatWindow#NONE}. */
+    public void setCombatWindow(CombatWindow window) {
+        combatWindow = window == null ? CombatWindow.NONE : window;
+    }
+
+    /**
+     * How many matched PONGs have been discarded as combat artefacts since the last call, and resets
+     * the count. The pump logs this once per battle rather than per sample.
+     */
+    public int drainCombatDroppedSamples() {
+        int dropped = combatDroppedSamples;
+        combatDroppedSamples = 0;
+        return dropped;
+    }
+
+    /** Pending discard count without clearing it; for assertions and the bridge query. */
+    public int combatDroppedSamples() {
+        return combatDroppedSamples;
+    }
+
     /**
      * Session edge: forget everything, and start both silence timers from now. Measuring silence from
      * the session start rather than from an epoch-zero stamp is what stops a brand-new session from
@@ -167,6 +252,7 @@ public final class CoopLinkQuality {
         degraded = false;
         degradedSinceMillis = 0L;
         healthySinceMillis = nowMillis;
+        combatDroppedSamples = 0;
         // Frame bookkeeping deliberately survives: it describes THIS process, not the connection.
         // A session edge does not un-stall a game that just spent forty seconds in a battle, and
         // clearing it here would throw away the very gap the next verdict has to account for.
@@ -242,9 +328,10 @@ public final class CoopLinkQuality {
 
     /**
      * Times a PONG against the PING it answers. An unknown {@code pingSeq} (evicted, or a peer
-     * echoing something we never sent) is ignored rather than producing a garbage sample.
+     * echoing something we never sent) is ignored rather than producing a garbage sample, and so is a
+     * pair that crossed a battle (see {@link #combatTainted} and the class doc).
      *
-     * @return the RTT sample in milliseconds, or -1 when the pong could not be matched
+     * @return the RTT sample in milliseconds, or -1 when the pong could not be matched or was discarded
      */
     public int notePongReceived(long pingSeq, long nowMillis) {
         Long sentAt = outstandingPings.remove(pingSeq);
@@ -253,6 +340,10 @@ public final class CoopLinkQuality {
         }
         long rtt = nowMillis - sentAt;
         if (rtt < 0L) {
+            return -1;
+        }
+        if (combatTainted(sentAt)) {
+            combatDroppedSamples++;
             return -1;
         }
         int sample = (int) Math.min(rtt, Integer.MAX_VALUE);
@@ -264,6 +355,21 @@ public final class CoopLinkQuality {
             rttRingCount++;
         }
         return sample;
+    }
+
+    /**
+     * Whether a matched PING/PONG pair describes the network or a battle. Two ways it does not:
+     * combat is open right now (the PONG we are holding was answered by a pump that had been stopped,
+     * or is about to be), and the PING left at or before the last battle ended — the stale answers
+     * that come back in the first seconds after a fight, timed against a clock that was frozen for
+     * the whole of it.
+     */
+    private boolean combatTainted(long pingSentAtMillis) {
+        if (combatWindow.inCombat()) {
+            return true;
+        }
+        long endedAt = combatWindow.combatEndedAtMillis();
+        return endedAt > 0L && pingSentAtMillis <= endedAt;
     }
 
     /** Every inbound TCP message, whatever its type: the peer's process is alive and talking. */
@@ -500,9 +606,24 @@ public final class CoopLinkQuality {
      * held continuously for {@link #DEGRADED_SUSTAIN_MILLIS} in each direction so one bad sample
      * neither raises nor clears the banner.
      *
+     * <p>While either side is in combat the verdict is frozen instead: both sustain runs are pushed to
+     * now, so no time in a battle counts toward raising or clearing the banner and the window starts
+     * over when the fight is done. Nothing measured across a stopped pump is evidence about the link
+     * (S5-A) — the RTT samples themselves are dropped at the source, and the loss window would read a
+     * silent peer rather than a lossy one.
+     *
      * @return whether the link is currently considered degraded
      */
     public boolean evaluateDegraded(long nowMillis) {
+        if (combatWindow.inCombat()) {
+            if (degradedSinceMillis != 0L) {
+                degradedSinceMillis = nowMillis;
+            }
+            if (healthySinceMillis != 0L) {
+                healthySinceMillis = nowMillis;
+            }
+            return degraded;
+        }
         Integer rtt = rttMillis();
         // Inclusive (red-team B9): both constants are documented as "at or above this counts as
         // degraded", and a strict comparison made the documented threshold value itself healthy.

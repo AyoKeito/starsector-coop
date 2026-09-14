@@ -191,6 +191,13 @@ public final class CoopBattleBridge {
     /** Last {@link #notifyBattleConcluded} re-fire while the post-battle dialog held the result. */
     private long lastFreezeRefreshMillis;
 
+    /**
+     * Wall clock of the last battle end on either side; see {@link #lastCombatEndedAtMillis()}. Not
+     * per side: what the link measurement needs is "when did a stopped pump last start running again",
+     * and the later of the two ends is that answer.
+     */
+    private long lastCombatEndedAtMillis;
+
     // ---- spectator side ----
     private boolean remoteBattleActive;
     private String remoteBattleId = "";
@@ -452,6 +459,7 @@ public final class CoopBattleBridge {
         }
         String battleId = remoteBattleId;
         remoteBattleActive = false;
+        lastCombatEndedAtMillis = nowMillis;
         remoteBattleSignalAtMillis = 0L;
         remoteStatus = null;
         remoteStatusDigest = "";
@@ -468,6 +476,16 @@ public final class CoopBattleBridge {
     /** True while this client is piloting a coop battle (used by the threat watcher's gate). */
     public boolean isAnyCoopBattleActive() {
         return localBattleActive || remoteBattleActive;
+    }
+
+    /**
+     * Wall clock the most recent battle on either side ended at, or 0 when none has since this
+     * process started. Read by the link measurement (S5-A): a PING sent at or before this stamp was
+     * answered by a pump that had been stopped, so its round trip describes the battle rather than the
+     * network and cannot become an RTT sample.
+     */
+    public long lastCombatEndedAtMillis() {
+        return lastCombatEndedAtMillis;
     }
 
     /**
@@ -578,6 +596,7 @@ public final class CoopBattleBridge {
         // The survivor line rides on the last status that arrived — no new message fields.
         queueBanner(battleEndBanner(partnerName(), outcome, survivorSummary(remoteStatus)));
         remoteBattleActive = false;
+        lastCombatEndedAtMillis = clock.getAsLong();
         remoteBattleSignalAtMillis = 0L;
         remoteStatus = null;
         remoteStatusDigest = "";
@@ -688,6 +707,7 @@ public final class CoopBattleBridge {
         String battleId = localBattleId;
         List<String> npcFleetIds = List.copyOf(localBattleNpcFleetIds);
         localBattleActive = false;
+        lastCombatEndedAtMillis = clock.getAsLong();
         sawCombatFrame = false;
         lastSeenShips.clear();
         localBattleNpcFleetIds.clear();
@@ -1276,6 +1296,10 @@ public final class CoopBattleBridge {
     private void onSessionEnded(SectorAPI sector) {
         if (localBattleActive && !localBattleEndSent) {
             CoopLog.warn(CoopBattleBridge.class, discardedResultMessage(localBattleId, localEnemySummary));
+        }
+        if (localBattleActive || remoteBattleActive) {
+            // The session edge closes the combat window too, so the RTT filter stops holding it open.
+            lastCombatEndedAtMillis = clock.getAsLong();
         }
         localBattleActive = false;
         sawCombatFrame = false;
