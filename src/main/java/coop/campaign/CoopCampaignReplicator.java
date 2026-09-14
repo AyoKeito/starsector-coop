@@ -42,6 +42,7 @@ import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarData;
+import com.fs.starfarer.api.impl.campaign.rulecmd.missions.GateCMD;
 import com.fs.starfarer.api.impl.campaign.intel.bar.PortsideBarEvent;
 import com.fs.starfarer.api.impl.campaign.intel.bar.events.BarEventManager;
 import com.fs.starfarer.api.impl.campaign.intel.deciv.DecivTracker;
@@ -4332,6 +4333,18 @@ public final class CoopCampaignReplicator
             // "$gateScanned = true"). Idempotent because decideGate only asks for the write when the
             // flag is not already set.
             GateEntityPlugin.addGateScanned();
+            // 2026-09-14 (S4-H): the flag and the counter are only two thirds of vanilla's
+            // gateScanSel rule; the third is "GateCMD notifyScanned", which puts the gate into
+            // GateEntityPlugin.getGateData().scanned (what the Intel > Gates tab lists) and advances
+            // the gate plugin once so it activates at once when the quest is already done. Without
+            // it the peer's map showed the gate scanned while its intel tab did not.
+            try {
+                GateCMD.notifyScanned(gate);
+            } catch (RuntimeException | LinkageError ex) {
+                CoopLog.warn(CoopCampaignReplicator.class, "Coop GATE_ACTIVATED entity="
+                        + delta.entityId() + ": GateCMD.notifyScanned threw; the gate is flagged"
+                        + " scanned but may be missing from the Gates intel tab", ex);
+            }
         }
         CoopLog.info(CoopCampaignReplicator.class, "Coop applied GATE_ACTIVATED entity="
                 + delta.entityId() + " " + apply);
