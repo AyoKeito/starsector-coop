@@ -392,6 +392,234 @@ class CoopNpcFleetReplicatorTest {
         assertEquals(decodeSet(service.sent.get(0)).setHash(), decodeSet(service.sent.get(1)).setHash());
     }
 
+    // ---- 2026-09-14 (S4-C remainder): structural is scoped to the observers' locations -----------
+
+    private static CoopNpcFleetSnapshot snapshot(String id, String locationId, boolean transponderOn) {
+        return CoopNpcFleetSnapshot.create(id, "hegemony", "Name " + id, locationId, 1f, 2f, 0f, 0f,
+                transponderOn, new CoopSensorSync.Profile(150f, 0f, 0f, 1f, 90f), "",
+                List.of(new CoopFleetSnapshot.Member("m-" + id, "lasher", "lasher_Standard",
+                        "Ship", "Cpt", 0.8f, 1.0f)));
+    }
+
+    @Test
+    void farStructuralChurnMovesOnlyTheRateLimitedTrigger() {
+        // The pure half of the rule: with an observer only in Corvus, a fleet in Arcadia toggling its
+        // transponder must not be able to put a 20 KB set on the wire inside the frame.
+        List<CoopNpcFleetSnapshot> before = List.of(
+                snapshot("near", "corvus", true), snapshot("far", "arcadia", true));
+        List<CoopNpcFleetSnapshot> after = List.of(
+                snapshot("near", "corvus", true), snapshot("far", "arcadia", false));
+
+        CoopNpcFleetReplicator.SetTriggers a =
+                CoopNpcFleetReplicator.computeTriggers(before, Set.of("corvus"));
+        CoopNpcFleetReplicator.SetTriggers b =
+                CoopNpcFleetReplicator.computeTriggers(after, Set.of("corvus"));
+
+        assertEquals(a.nearHash(), b.nearHash());
+        assertFalse(a.softHash().equals(b.softHash()), "far structure still has to reach the guest");
+        assertFalse(CoopNpcFleetReplicator.shouldSendSet(
+                        !a.nearHash().equals(b.nearHash()), !a.softHash().equals(b.softHash()),
+                        1_000L, 10_000L),
+                "before the floor a far-only change sends nothing");
+        assertTrue(CoopNpcFleetReplicator.shouldSendSet(
+                        !a.nearHash().equals(b.nearHash()), !a.softHash().equals(b.softHash()),
+                        10_000L, 10_000L),
+                "on the floor it goes out as one full set");
+    }
+
+    @Test
+    void aNearStructuralChangeStillTripsTheImmediateTrigger() {
+        List<CoopNpcFleetSnapshot> before = List.of(
+                snapshot("near", "corvus", true), snapshot("far", "arcadia", true));
+        List<CoopNpcFleetSnapshot> after = List.of(
+                snapshot("near", "corvus", false), snapshot("far", "arcadia", true));
+
+        CoopNpcFleetReplicator.SetTriggers a =
+                CoopNpcFleetReplicator.computeTriggers(before, Set.of("corvus"));
+        CoopNpcFleetReplicator.SetTriggers b =
+                CoopNpcFleetReplicator.computeTriggers(after, Set.of("corvus"));
+
+        assertTrue(CoopNpcFleetReplicator.shouldSendSet(
+                !a.nearHash().equals(b.nearHash()), !a.softHash().equals(b.softHash()), 1L, 10_000L));
+    }
+
+    /**
+     * The live measurement the scope change came from, reproduced against an engine stub: the host
+     * player parked in Corvus, one NPC fleet beside him and one in Arcadia churning. Before the fix
+     * every far event was a full ~20-25 KB set within the frame — 12 of them in 28 s with both
+     * players stationary, bursts of 19-29 a minute.
+     */
+    @Test
+    void aFarSystemsChurnRidesTheFloorWhileANearChangeIsImmediate() {
+        CoopGuestMirrorHandle.clear();
+        TwoSystemWorld world = twoSystemWorld();
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(world.sector, 0L);
+        assertEquals(1, service.sent.size(), "the first set is always structural");
+
+        world.farTransponder = false;
+        replicator.sendSetIfChanged(world.sector, 1_000L);
+        world.farPresent = false;
+        replicator.sendSetIfChanged(world.sector, 2_000L);
+        assertEquals(1, service.sent.size(),
+                "a transponder toggle and a despawn in a system nobody is in must not send");
+
+        replicator.sendSetIfChanged(world.sector, 10_000L);
+        assertEquals(2, service.sent.size(), "past the floor the far state still reaches the guest");
+        assertEquals(1, decodeSet(service.sent.get(1)).fleets().size(),
+                "and the set it reaches on is the full set, with the despawned fleet gone");
+
+        world.nearTransponder = false;
+        replicator.sendSetIfChanged(world.sector, 10_100L);
+        assertEquals(3, service.sent.size(), "a change beside the player is immediate, floor or not");
+
+        replicator.sendSetIfChanged(world.sector, 10_200L);
+        assertEquals(3, service.sent.size(), "nothing moved: nothing sends");
+    }
+
+    @Test
+    void aFleetJumpingIntoTheObserversSystemIsImmediate() {
+        CoopGuestMirrorHandle.clear();
+        TwoSystemWorld world = twoSystemWorld();
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(world.sector, 0L);
+        assertEquals(1, service.sent.size());
+
+        // Far -> near: the arriving fleet has no record in the previous near hash, so the guest must
+        // see it in the frame it arrives rather than up to 10 s later.
+        world.farInCorvus = true;
+        replicator.sendSetIfChanged(world.sector, 100L);
+        assertEquals(2, service.sent.size(), "an arrival in the player's own system is immediate");
+
+        // ...and near -> far the same way: the mirror has to stop being drawn in this system now.
+        world.farInCorvus = false;
+        replicator.sendSetIfChanged(world.sector, 200L);
+        assertEquals(3, service.sent.size(), "a departure from the player's own system is immediate");
+    }
+
+    @Test
+    void aForcedResendStillSendsNowThatTheTriggerIsTheNearHash() {
+        // forceResendSet is what releases the guest's post-battle mirror freeze. It used to clear the
+        // whole-sector hash; clearing that alone would no longer force anything.
+        CoopGuestMirrorHandle.clear();
+        TwoSystemWorld world = twoSystemWorld();
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(world.sector, 0L);
+        replicator.sendSetIfChanged(world.sector, 1_000L);
+        assertEquals(1, service.sent.size(), "nothing changed in between");
+
+        replicator.forceResendSet();
+        replicator.sendSetIfChanged(world.sector, 1_100L);
+
+        assertEquals(2, service.sent.size(), "an unchanged set is exactly the signal the guest waits on");
+    }
+
+    /** Host player parked in Corvus with one NPC fleet; a second NPC fleet churning in Arcadia. */
+    private static final class TwoSystemWorld {
+        private SectorAPI sector;
+        private LocationAPI corvus;
+        private LocationAPI arcadia;
+        private boolean nearTransponder = true;
+        private boolean farTransponder = true;
+        private boolean farPresent = true;
+        private boolean farInCorvus;
+    }
+
+    private static TwoSystemWorld twoSystemWorld() {
+        TwoSystemWorld world = new TwoSystemWorld();
+        CampaignFleetAPI nearFleet = (CampaignFleetAPI) stub(CampaignFleetAPI.class,
+                (name, args) -> switch (name) {
+                    case "getId" -> "near-fleet";
+                    case "getName" -> "Patrol";
+                    case "getContainingLocation" -> world.corvus;
+                    case "getLocation" -> new Vector2f(100f, 200f);
+                    case "getVelocity" -> new Vector2f(0f, 0f);
+                    case "getFleetData" -> oneShipFleetData("near");
+                    case "isTransponderOn" -> world.nearTransponder;
+                    case "getNullAIActionText" -> "";
+                    default -> null;
+                });
+        CampaignFleetAPI farFleet = (CampaignFleetAPI) stub(CampaignFleetAPI.class,
+                (name, args) -> switch (name) {
+                    case "getId" -> "far-fleet";
+                    case "getName" -> "Raiders";
+                    // A despawn is modelled as leaving every location's fleet list, which is what
+                    // forEachReplicatedFleet actually walks.
+                    case "getContainingLocation" -> !world.farPresent ? null
+                            : (world.farInCorvus ? world.corvus : world.arcadia);
+                    case "getLocation" -> new Vector2f(-500f, 300f);
+                    case "getVelocity" -> new Vector2f(0f, 0f);
+                    case "getFleetData" -> oneShipFleetData("far");
+                    case "isTransponderOn" -> world.farTransponder;
+                    case "getNullAIActionText" -> "";
+                    default -> null;
+                });
+        CampaignFleetAPI player = (CampaignFleetAPI) stub(CampaignFleetAPI.class,
+                (name, args) -> switch (name) {
+                    case "getId" -> "player-fleet";
+                    case "getContainingLocation" -> world.corvus;
+                    case "getLocation" -> new Vector2f(0f, 0f);
+                    default -> null;
+                });
+        List<CampaignFleetAPI> all = List.of(player, nearFleet, farFleet);
+
+        world.corvus = (LocationAPI) stub(LocationAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "corvus";
+            case "getFleets" -> fleetsIn(all, world.corvus);
+            default -> null;
+        });
+        world.arcadia = (LocationAPI) stub(LocationAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "arcadia";
+            case "getFleets" -> fleetsIn(all, world.arcadia);
+            default -> null;
+        });
+        world.sector = (SectorAPI) stub(SectorAPI.class, (name, args) -> switch (name) {
+            case "getPlayerFleet" -> player;
+            case "getCurrentLocation" -> world.corvus;
+            case "getAllLocations" -> new ArrayList<>(List.of(world.corvus, world.arcadia));
+            default -> null;
+        });
+        return world;
+    }
+
+    /** Whoever currently reports this location as theirs; the player included, as the engine does. */
+    private static ArrayList<CampaignFleetAPI> fleetsIn(List<CampaignFleetAPI> all, LocationAPI loc) {
+        ArrayList<CampaignFleetAPI> here = new ArrayList<>();
+        for (CampaignFleetAPI fleet : all) {
+            if (fleet.getContainingLocation() == loc) {
+                here.add(fleet);
+            }
+        }
+        return here;
+    }
+
+    private static Object oneShipFleetData(String fleetKey) {
+        Object repairTracker = stub(RepairTrackerAPI.class, (name, args) ->
+                "getCR".equals(name) ? 0.9f : null);
+        Object status = stub(FleetMemberStatusAPI.class, (name, args) ->
+                "getHullFraction".equals(name) ? 1.0f : null);
+        FleetMemberAPI member = (FleetMemberAPI) stub(FleetMemberAPI.class,
+                (name, args) -> switch (name) {
+                    case "getId" -> "member-" + fleetKey;
+                    case "getShipName" -> "ISS " + fleetKey;
+                    case "isFighterWing" -> false;
+                    case "getRepairTracker" -> repairTracker;
+                    case "getStatus" -> status;
+                    default -> null;
+                });
+        return stub(FleetDataAPI.class, (name, args) ->
+                "getMembersListCopy".equals(name) ? new ArrayList<>(List.of(member)) : null);
+    }
+
     // ---- 2026-09-13: inflating a deflated fleet the guest has brought into range -----------------
 
     @Test

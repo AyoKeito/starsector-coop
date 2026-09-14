@@ -30,10 +30,13 @@ import java.util.function.LongSupplier;
  * the Phase 8 guest-player mirror, and stations) and:
  *
  * <ul>
- *   <li>emits the full {@code NPC_FLEET_SET} over reliable TCP whenever its order-independent set hash
- *       changes (existence/identity/roster parity sector-wide, including off-screen fleets), and at
- *       most once every {@link #SOFT_RESYNC_INTERVAL_MILLIS} when only soft state moved — member
- *       CR/hull or cosmetic action text ({@link CoopNpcFleetSetSnapshot#computeSoftHash});</li>
+ *   <li>emits the full {@code NPC_FLEET_SET} over reliable TCP whenever the structural state of the
+ *       fleets in a location an observer is in changes ({@link CoopNpcFleetSetSnapshot#computeNearHash},
+ *       2026-09-14), and at most once every {@link #SOFT_RESYNC_INTERVAL_MILLIS} when only soft state
+ *       moved — member CR/hull, cosmetic action text, or the structural state of a fleet no player is
+ *       anywhere near ({@link CoopNpcFleetSetSnapshot#computeSoftHash(java.util.List, java.util.Set)}).
+ *       The <em>message</em> stays sector-wide either way: every send carries the full set, which is
+ *       what the guest's add/dispose reconciliation reads;</li>
  *   <li>emits {@code NPC_FLEET_MOTION} over UDP at 10 Hz for fleets in a location where either player
  *       currently is (bounded bandwidth; off-screen mirrors keep their last set position).</li>
  * </ul>
@@ -61,6 +64,11 @@ public final class CoopNpcFleetReplicator {
      * fleet that repairs from 30% hull to full, or re-words its tooltip, ships nothing. Ten seconds is
      * the compromise: all of it is display state, and one extra full set every 10 s is bounded traffic
      * no matter how many fleets in the sector are repairing or re-tasking at once.
+     *
+     * <p>Since 2026-09-14 this floor also carries the structural state of fleets no player is near
+     * (S4-C remainder): the guest cannot observe a far system until it travels there, and travelling
+     * there makes those fleets near, so ten seconds of staleness is invisible by construction. The
+     * bound argument is unchanged — one extra full set per 10 s however many far systems churn.
      */
     static final long SOFT_RESYNC_INTERVAL_MILLIS = 10_000L;
 
@@ -150,7 +158,16 @@ public final class CoopNpcFleetReplicator {
     private final coop.net.CoopStreamCadence motionCadence =
             new coop.net.CoopStreamCadence(MOTION_INTERVAL_MILLIS);
     private String lastSetHash = "";
-    /** Soft hash ({@link CoopNpcFleetSetSnapshot#computeSoftHash}) of the last set actually sent. */
+    /**
+     * Near hash ({@link CoopNpcFleetSetSnapshot#computeNearHash}) of the last set actually sent — the
+     * structural trigger since 2026-09-14. Separate from {@link #lastSetHash}, which stays the
+     * whole-sector set identity the pump's diagnostics report.
+     */
+    private String lastNearHash = "";
+    /**
+     * Soft hash ({@link CoopNpcFleetSetSnapshot#computeSoftHash(java.util.List, java.util.Set)}) of
+     * the last set actually sent: health, action text, and the structural state of the far fleets.
+     */
     private String lastSoftHash = "";
     /** Earliest wall-clock time a soft-only change may cause a send; see the interval constant. */
     private long nextSoftResendAtMillis;
@@ -270,6 +287,7 @@ public final class CoopNpcFleetReplicator {
     /** Forget the last-sent hash so the next tick rebroadcasts the full set (session (re)start). */
     public void reset() {
         lastSetHash = "";
+        lastNearHash = "";
         lastSoftHash = "";
         nextSoftResendAtMillis = 0L;
         lastFleetCount = 0;
@@ -295,6 +313,10 @@ public final class CoopNpcFleetReplicator {
      */
     public void forceResendSet() {
         lastSetHash = "";
+        // The structural trigger is the near hash, so clearing lastSetHash alone would no longer
+        // force anything (2026-09-14). A cleared near hash can never equal a real one — even an empty
+        // near set hashes to a non-empty digest — so the next tick sends.
+        lastNearHash = "";
         nextSetAtMillis = 0L;
     }
 
@@ -326,9 +348,12 @@ public final class CoopNpcFleetReplicator {
             fleets.add(toSnapshot(fleet, hostLocation, hostPlayerFleet, guestMirror, hostPlayerLabel));
         });
         CoopNpcFleetSetSnapshot set = CoopNpcFleetSetSnapshot.create(fleets);
-        String softHash = CoopNpcFleetSetSnapshot.computeSoftHash(fleets);
-        boolean structuralChanged = !set.setHash().equals(lastSetHash);
-        boolean softChanged = !softHash.equals(lastSoftHash);
+        // 2026-09-14 (S4-C remainder): the send decision is scoped to where the players are, not to
+        // the whole sector. Same observer resolution the motion filter uses.
+        SetTriggers triggers = computeTriggers(fleets,
+                observerLocationIds(playerObservers(sector, guestMirror)));
+        boolean structuralChanged = !triggers.nearHash().equals(lastNearHash);
+        boolean softChanged = !triggers.softHash().equals(lastSoftHash);
         if (!shouldSendSet(structuralChanged, softChanged, now, nextSoftResendAtMillis)) {
             return;
         }
@@ -336,7 +361,8 @@ public final class CoopNpcFleetReplicator {
                 sessionState.sessionId(), service.nextSeq(), now,
                 streamClock.gameTimeMillis(), set.encode()));
         lastSetHash = set.setHash();
-        lastSoftHash = softHash;
+        lastNearHash = triggers.nearHash();
+        lastSoftHash = triggers.softHash();
         // Every send resets the floor, structural or not: the set that just went out carried the
         // current health and action text, so the next soft-only send is a full interval away either
         // way.
@@ -351,13 +377,41 @@ public final class CoopNpcFleetReplicator {
     /**
      * The send decision, split out pure so it is testable without an engine. A structural change goes
      * out immediately (that is the Phase 9 contract the guest's add/dispose reconciliation and the
-     * freeze release depend on); a health-only change waits for the
+     * freeze release depend on) — since 2026-09-14 "structural" means {@link #computeTriggers}' near
+     * hash, i.e. structural state in a location an observer is in; a health-only change waits for the
      * {@link #SOFT_RESYNC_INTERVAL_MILLIS} floor, because a sector full of repairing fleets would
      * otherwise put a full set on the wire every single tick.
      */
     static boolean shouldSendSet(boolean structuralChanged, boolean healthChanged, long now,
                                  long nextSoftResendAtMillis) {
         return structuralChanged || (healthChanged && now >= nextSoftResendAtMillis);
+    }
+
+    /** The two hashes {@link #sendSetIfChanged} compares, so the pair is always built the same way. */
+    record SetTriggers(String nearHash, String softHash) {
+    }
+
+    /**
+     * Partitions a tick's fleets into the immediate trigger and the rate-limited one (2026-09-14,
+     * finding S4-C remainder). Pure: the observer locations go in as ids, so the whole near/far rule
+     * is testable without a sector.
+     *
+     * <p>A fleet is <em>near</em> when its {@code locationId} is one of the observers' — the host
+     * player fleet's and the guest mirror's, hyperspace included, which is the same pair and the same
+     * accessors the 10 Hz motion filter uses. Near fleets keep the Phase 9 contract: spawn, despawn,
+     * jump, rename, faction or transponder change and roster edits all put a set on the wire in the
+     * frame they happen. Far fleets do the same things constantly in systems neither player has ever
+     * visited (measured 2026-09-14: 12 structural sends in 28 s with both players parked, all of them
+     * far), and none of it is observable, so their structural state rides the 10 s soft floor.
+     *
+     * <p>Note what is <em>not</em> partitioned: the message. Each send still carries every fleet,
+     * because the guest's reconciliation disposes any mirror the set omits.
+     */
+    static SetTriggers computeTriggers(List<CoopNpcFleetSnapshot> fleets,
+                                       Set<String> observerLocationIds) {
+        return new SetTriggers(
+                CoopNpcFleetSetSnapshot.computeNearHash(fleets, observerLocationIds),
+                CoopNpcFleetSetSnapshot.computeSoftHash(fleets, observerLocationIds));
     }
 
     /**
