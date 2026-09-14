@@ -41,6 +41,41 @@ class CoopBattleResultReconcilerEngineFleetsTest {
         assertEquals(List.of("fleet-a"), world.despawned);
     }
 
+    // ---- S5-B: a battle result may never reach the local player's own fleet -----------------------
+
+    /**
+     * The lookup walks every fleet in every location and matched on engine id alone, and the two
+     * mutations behind it are "despawn this fleet" and "delete ships out of it and repaint the
+     * survivors' CR and hull". A {@code coopFleetId} that happens to name this client's own fleet
+     * therefore had the whole player fleet on the other end of it. Nothing in today's protocol sends
+     * one — Phase 33 is the concrete way that changes — so the guard goes in first.
+     */
+    @Test
+    void aBattleResultNamingTheLocalPlayerFleetResolvesToNothing() {
+        World world = new World("fleet-a", "player-fleet");
+        world.playerFleetId = "player-fleet";
+        CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
+
+        assertFalse(fleets.exists("player-fleet"), "the player's own fleet is never a target");
+        assertTrue(fleets.exists("fleet-a"), "every other fleet still resolves");
+    }
+
+    /** And the refusal holds through the mutations, not just through {@code exists()}. */
+    @Test
+    void theLocalPlayerFleetIsNeitherDespawnedNorRosterEdited() {
+        World world = new World("player-fleet");
+        world.playerFleetId = "player-fleet";
+        CoopBattleResultReconciler.EngineFleets fleets = world.engineFleets();
+
+        // "Already gone" is the right answer for a target that does not resolve: reporting failure
+        // would keep the host retrying a result it must never apply.
+        assertTrue(fleets.despawn("player-fleet"));
+        assertTrue(world.despawned.isEmpty(), "the player fleet must not be despawned");
+
+        assertTrue(fleets.applySurvivingRoster("player-fleet", List.of()));
+        assertEquals(0, world.fleetDataReads.get(), "its roster must not even be read");
+    }
+
     // ---- failure reporting: the reconciler's ledger depends on it ---------------------------------
 
     /**
@@ -265,6 +300,8 @@ class CoopBattleResultReconcilerEngineFleetsTest {
         private final LocationAPI location;
         /** When set, {@code despawn()} throws the way a hostile engine state would. */
         private boolean failDespawn;
+        /** When set, the sector reports the fleet with this id as the local player's own fleet. */
+        private String playerFleetId = "";
 
         private World(String... fleetIds) {
             location = (LocationAPI) Proxy.newProxyInstance(
@@ -335,6 +372,15 @@ class CoopBattleResultReconcilerEngineFleetsTest {
                         case "getAllLocations" -> {
                             scans.incrementAndGet();
                             yield List.of(location);
+                        }
+                        case "getPlayerFleet" -> {
+                            CampaignFleetAPI player = null;
+                            for (CampaignFleetAPI fleet : fleets) {
+                                if (playerFleetId.equals(fleet.getId())) {
+                                    player = fleet;
+                                }
+                            }
+                            yield player;
                         }
                         case "toString" -> "Sector";
                         case "hashCode" -> System.identityHashCode(proxy);

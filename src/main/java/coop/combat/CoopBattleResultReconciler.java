@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import coop.debug.CoopOwnFleetProbe;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.util.CoopLog;
@@ -416,6 +417,9 @@ public final class CoopBattleResultReconciler {
                     continue;
                 }
                 try {
+                    // S5-B guard: find() already refuses the local player fleet, so this can only
+                    // reach an NPC's roster. The hook is the proof, not the protection.
+                    CoopOwnFleetProbe.noteWrite(member, "battleResult.paintDamage");
                     member.getRepairTracker().setCR(reported.cr());
                     member.getStatus().setHullFraction(reported.hullFraction());
                 } catch (RuntimeException | LinkageError ignored) {
@@ -469,6 +473,23 @@ public final class CoopBattleResultReconciler {
             }
         }
 
+        /**
+         * The id-to-fleet lookup, with one hard exclusion: <b>the local player's own fleet is never a
+         * battle-result target</b> (2026-09-15, S5-B audit).
+         *
+         * <p>A {@code BATTLE_RESULT} names NPC fleets by engine id, and this scan walked every fleet
+         * in every location and matched on id alone. Nothing in the current protocol puts the host's
+         * own fleet id in that list — but nothing stopped it either, and the two mutations behind
+         * this lookup are {@code despawn()} and {@code applySurvivingRoster()}, i.e. "delete the
+         * player's fleet" and "delete ships out of it and repaint the survivors' CR and hull". The
+         * cost of the guard is one identity compare per candidate; the cost of being wrong once is a
+         * player's fleet. Phase 33 (AI-ally battles) is the concrete way a player fleet id starts
+         * appearing in battle traffic, so the guard goes in before that lands, not after.
+         *
+         * <p>It is also the only shape that would let a smoke distinguish "the mod ate my CR" from
+         * "vanilla did": with this in place, {@code CoopOwnFleetProbe}'s mod-write WARN can no longer
+         * fire from here at all, so a CR drop with no WARN beside it is vanilla's.
+         */
         private CampaignFleetAPI scan(String coopFleetId) {
             SectorAPI sector;
             try {
@@ -479,15 +500,33 @@ public final class CoopBattleResultReconciler {
             if (sector == null) {
                 return null;
             }
+            CampaignFleetAPI playerFleet;
+            try {
+                playerFleet = sector.getPlayerFleet();
+            } catch (RuntimeException | LinkageError ex) {
+                // Cannot prove the candidate is not the player's fleet, so refuse the whole lookup
+                // rather than edit a fleet that might be it.
+                CoopLog.warn(CoopBattleResultReconciler.class, "Coop fleet lookup refused for"
+                        + " coopFleetId=" + coopFleetId + ": the player fleet could not be read", ex);
+                return null;
+            }
             try {
                 for (LocationAPI location : sector.getAllLocations()) {
                     if (location == null) {
                         continue;
                     }
                     for (CampaignFleetAPI fleet : location.getFleets()) {
-                        if (fleet != null && coopFleetId.equals(safeId(fleet))) {
-                            return fleet;
+                        if (fleet == null || !coopFleetId.equals(safeId(fleet))) {
+                            continue;
                         }
+                        if (fleet == playerFleet) {
+                            CoopLog.warn(CoopBattleResultReconciler.class, "Coop BATTLE_RESULT named"
+                                    + " this client's OWN player fleet coopFleetId=" + coopFleetId
+                                    + "; refused. A battle result may never edit the local player's"
+                                    + " fleet -- own fleet is locally authoritative.");
+                            return null;
+                        }
+                        return fleet;
                     }
                 }
             } catch (RuntimeException | LinkageError ex) {

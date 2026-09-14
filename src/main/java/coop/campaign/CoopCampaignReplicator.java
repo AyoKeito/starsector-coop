@@ -67,6 +67,7 @@ import coop.colony.CoopColonySync;
 import coop.colony.CoopExpeditionWarning;
 import coop.colony.CoopExpeditionWarningSync;
 import coop.colony.CoopRaidOutcomeSync;
+import coop.debug.CoopOwnFleetProbe;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.rewards.CoopRewardSplitter;
 import coop.ui.CoopFeed;
@@ -3055,6 +3056,8 @@ public final class CoopCampaignReplicator
             } else {
                 member.setId(detail.memberId());
             }
+            // S5-B guard: same contract as applyShipDetail's — a stored hull, never a live fleet.
+            CoopOwnFleetProbe.noteWrite(member, "replicator.storeBaseVariant");
             if (member.getRepairTracker() != null) {
                 member.getRepairTracker().setMothballed(true);
                 member.getRepairTracker().setCR(detail.baseCR());
@@ -3183,6 +3186,9 @@ public final class CoopCampaignReplicator
         if (!detail.shipName().isEmpty()) {
             member.setShipName(detail.shipName());
         }
+        // S5-B guard: this writes CR, mothball state and hull onto a member that must always belong
+        // to a submarket's mothballed roster, never to anyone's live fleet.
+        CoopOwnFleetProbe.noteWrite(member, "replicator.applyShipDetail");
         if (member.getRepairTracker() != null) {
             member.getRepairTracker().setMothballed(true);
             member.getRepairTracker().setCR(detail.baseCR());

@@ -196,8 +196,9 @@ class CoopAgentCommandsTest {
         assertEquals(
                 java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "entities",
                         "expedition", "feed", "fleets", "give", "intel", "landmarks", "mark", "market",
-                        "markets", "memory", "netfault", "objective", "pause", "rep", "save", "screen",
-                        "setcr", "status", "survey", "surveyset", "teleport", "visibility"),
+                        "markets", "memory", "netfault", "objective", "ownfleet", "pause", "rep",
+                        "save", "screen", "setcr", "status", "survey", "surveyset", "teleport",
+                        "visibility"),
                 new CoopAgentCommands().verbs());
     }
 

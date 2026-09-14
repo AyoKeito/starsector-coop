@@ -27,6 +27,7 @@ import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.fleet.FleetMemberStatusAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import com.fs.starfarer.api.impl.campaign.GateEntityPlugin;
@@ -231,6 +232,7 @@ public final class CoopAgentCommands {
         map.put("barpool", CoopAgentCommands::barpool);
         map.put("survey", CoopAgentCommands::survey);
         map.put("visibility", CoopAgentCommands::visibility);
+        map.put("ownfleet", CoopAgentCommands::ownfleet);
         map.put("colonizable", CoopAgentCommands::colonizable);
         map.put("landmarks", CoopAgentCommands::landmarks);
         map.put("entities", CoopAgentCommands::entities);
@@ -900,6 +902,134 @@ public final class CoopAgentCommands {
         out.put("lines", lines);
         out.put("viewCount", viewJson.length());
         out.put("view", viewJson);
+        return out;
+    }
+
+    // ---- ownfleet: the local player's own fleet, in the detail the S5-B CR mystery needs ----------
+
+    /**
+     * The local player's own fleet, read live, plus the {@link CoopOwnFleetProbe} drop ring.
+     *
+     * <p>Exists because the S5-B smoke could see <em>that</em> the guest's own ship lost CR and hull
+     * and could not see <em>why</em>: the fleet screen shows a number, not the engine's CR-event
+     * trail. Every {@code RepairTrackerAPI} getter that bears on that question is here, including
+     * {@code getRecentEvents()} and {@code getNoSupplyCRLossEvent()} — vanilla's own labels for why a
+     * ship is losing readiness.
+     *
+     * <p>The member table is a live read and needs no diagnostics. The {@code drops} array is the
+     * probe's ring buffer, which only fills while {@code CoopDebug.diagnosticsEnabled()} — with
+     * diagnostics off it is simply empty, which {@code diagnostics:false} in the response explains.
+     */
+    static JSONObject ownfleet(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        JSONObject out = new JSONObject();
+        out.put("role", roleOf(context.pump()).name());
+        out.put("diagnostics", coop.util.CoopDebug.diagnosticsEnabled());
+        out.put("battleActive", CoopOwnFleetProbe.battleActive());
+        out.put("modWrites", CoopOwnFleetProbe.INSTANCE.modWriteCount());
+
+        CampaignClockAPI clock = sector.getClock();
+        out.put("date", clock == null || clock.getDateString() == null ? "" : clock.getDateString());
+        out.put("hour", clock == null ? 0 : clock.getHour());
+        out.put("timestamp", clock == null ? 0L : clock.getTimestamp());
+
+        CampaignFleetAPI fleet = sector.getPlayerFleet();
+        if (fleet == null) {
+            out.put("members", new JSONArray());
+            out.put("drops", dropsJson());
+            return out;
+        }
+        LocationAPI location = fleet.getContainingLocation();
+        out.put("locationId", location == null || location.getId() == null ? "" : location.getId());
+        out.put("inHyperspace", fleet.isInHyperspace());
+        out.put("paused", sector.isPaused());
+        CargoAPI cargo = fleet.getCargo();
+        out.put("supplies", cargo == null ? 0d : round(cargo.getSupplies()));
+        out.put("fuel", cargo == null ? 0d : round(cargo.getFuel()));
+        out.put("crew", cargo == null ? 0 : cargo.getTotalCrew());
+        out.put("maxCapacity", cargo == null ? 0d : round(cargo.getMaxCapacity()));
+
+        JSONArray members = new JSONArray();
+        float minCrew = 0f;
+        FleetDataAPI data = fleet.getFleetData();
+        List<FleetMemberAPI> list = data == null ? List.of() : data.getMembersListCopy();
+        for (FleetMemberAPI member : list) {
+            if (member == null) {
+                continue;
+            }
+            minCrew += member.getMinCrew();
+            members.put(ownFleetMember(member));
+        }
+        out.put("fleetMinCrew", round(minCrew));
+        out.put("memberCount", members.length());
+        out.put("members", members);
+        out.put("drops", dropsJson());
+        return out;
+    }
+
+    private static JSONObject ownFleetMember(FleetMemberAPI member) throws JSONException {
+        JSONObject entry = new JSONObject();
+        entry.put("id", CoopOwnFleetProbe.safeId(member));
+        entry.put("hullId", CoopOwnFleetProbe.safeHullId(member));
+        entry.put("variantId", CoopOwnFleetProbe.safeVariantId(member));
+        entry.put("name", CoopOwnFleetProbe.safeShipName(member));
+        entry.put("minCrew", round(member.getMinCrew()));
+        entry.put("neededCrew", round(member.getNeededCrew()));
+        entry.put("maxCrew", round(member.getMaxCrew()));
+        entry.put("crewFraction", round(member.getCrewFraction()));
+        entry.put("mothballed", member.isMothballed());
+
+        FleetMemberStatusAPI status = member.getStatus();
+        entry.put("hullFraction", status == null ? 0d : round(status.getHullFraction()));
+        entry.put("hullDamageTaken", status == null ? 0d : round(status.getHullDamageTaken()));
+        entry.put("needsRepairs", status != null && status.needsRepairs());
+
+        RepairTrackerAPI repair = member.getRepairTracker();
+        if (repair == null) {
+            return entry;
+        }
+        entry.put("cr", round(repair.getCR()));
+        entry.put("maxCr", round(repair.getMaxCR()));
+        entry.put("baseCr", round(repair.getBaseCR()));
+        entry.put("crashMothballing", repair.isCrashMothballed());
+        entry.put("suspendRepairs", repair.isSuspendRepairs());
+        entry.put("recoveryRate", round(repair.getRecoveryRate()));
+        entry.put("decreaseRate", round(repair.getDecreaseRate()));
+        entry.put("repairRatePerDay", round(repair.getRepairRatePerDay()));
+        entry.put("remainingRepairTime", round(repair.getRemainingRepairTime()));
+        entry.put("repairednessFraction", round(repair.computeRepairednessFraction()));
+        entry.put("crPriorToMothballing", round(repair.getCRPriorToMothballing()));
+        entry.put("noSupplyCrLoss", crEventJson(repair.getNoSupplyCRLossEvent()));
+        JSONArray events = new JSONArray();
+        List<RepairTrackerAPI.CREvent> recent = repair.getRecentEvents();
+        if (recent != null) {
+            for (RepairTrackerAPI.CREvent event : recent) {
+                if (event != null) {
+                    events.put(crEventJson(event));
+                }
+            }
+        }
+        entry.put("recentEvents", events);
+        return entry;
+    }
+
+    private static JSONObject crEventJson(RepairTrackerAPI.CREvent event) throws JSONException {
+        JSONObject out = new JSONObject();
+        if (event == null) {
+            return out;
+        }
+        out.put("id", event.id == null ? "" : event.id);
+        out.put("crAmount", round(event.getCrAmount()));
+        out.put("text", event.getText() == null ? "" : event.getText());
+        out.put("elapsed", round(event.getElapsed()));
+        return out;
+    }
+
+    private static JSONArray dropsJson() {
+        JSONArray out = new JSONArray();
+        for (String line : CoopOwnFleetProbe.INSTANCE.recentDrops()) {
+            out.put(line);
+        }
         return out;
     }
 
