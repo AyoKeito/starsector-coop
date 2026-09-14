@@ -5,12 +5,14 @@ import coop.handshake.CoopChecksum;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * The host's full authoritative set of non-player campaign fleets, carried by the reliable TCP
- * {@code NPC_FLEET_SET} message (Phase 9). The whole set is rebroadcast whenever {@link #setHash()}
- * changes, and — since 2026-09-05 — also when the rate-limited {@link #computeSoftHash} changes, at
- * most once every {@code CoopNpcFleetReplicator.SOFT_RESYNC_INTERVAL_MILLIS}; the guest reconciles
+ * {@code NPC_FLEET_SET} message (Phase 9). The whole set is rebroadcast whenever the structural state
+ * of the fleets <em>near a player</em> changes ({@link #computeNearHash}, since 2026-09-14), and —
+ * since 2026-09-05 — also when the rate-limited {@link #computeSoftHash} changes, at most once every
+ * {@code CoopNpcFleetReplicator.SOFT_RESYNC_INTERVAL_MILLIS}; the guest reconciles
  * against it idempotently (add fleets present here but missing locally, dispose mirrors absent here).
  * Full-set rebroadcast is chosen for v1 because it is self-correcting (no add/remove delta ordering or
  * lost-packet bugs). There are exactly two send triggers and nothing here may add a third.
@@ -29,6 +31,23 @@ import java.util.Objects;
  * it is precisely the payload the Phase 20 diet was about. Action text now rides
  * {@link #computeSoftHash}, which shares the health trigger's 10 s floor, so a text-only change costs
  * at most one set per 10 s and no structural change is delayed by even a frame.
+ *
+ * <p><b>Revised 2026-09-14 (finding S4-C remainder): structural is now scoped to the observers'
+ * locations.</b> The 2026-09-13 split stopped the text storm but left a second one. The replicated
+ * population is sector-wide on purpose ({@code forEachReplicatedFleet} walks every location), so
+ * {@link #computeSetHash} flips on a spawn, despawn, jump or transponder toggle <em>anywhere</em> —
+ * and NPC fleets do all four constantly in systems neither player has ever visited. Measured live
+ * with both players stationary (33 bridge samples over 28 s): 12 structural sends, every one of them
+ * caused by a fleet in Corvus / Arcadia / Eos Exodus / Valhalla / hyperspace despawning (roster
+ * emptied, then gone), spawning, changing locationId or toggling its transponder — bursts of 19-29
+ * full sets a minute, ~20-25 KB each for 38 fleets, none of it observable by either player. The rule
+ * now: fold a fleet's structural fields into {@link #computeNearHash} when its {@code locationId} is
+ * one of the observers' (host player fleet, guest mirror; hyperspace counts as a location like any
+ * other), and into the rate-limited {@link #computeSoftHash} otherwise. A far fleet's structural
+ * change still reaches the guest, just on the 10 s floor instead of within the frame — which is the
+ * delay the guest already tolerates for it, since it cannot see that system until it travels there,
+ * and travelling there makes those fleets near. Each send still carries the FULL set: the payload is
+ * unchanged and the guest's add/dispose reconciliation still depends on seeing every fleet.
  *
  * <p><b>Name stays structural (decided 2026-09-13).</b> A fleet is named when it spawns and normally
  * keeps that name for life; renames are rare events (inflation-time relabels, the {@code "Your
@@ -82,18 +101,70 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
      * reaches the guest through the same rate-limited {@link #computeSoftHash} trigger in
      * {@code CoopNpcFleetReplicator}, which sends the very same set message without disturbing the
      * meaning of either hash.
+     *
+     * <p><b>Since 2026-09-14 this is no longer the send trigger</b> — {@link #computeNearHash} is,
+     * and this whole-sector hash remains as the set's own identity field ({@link #setHash()}, carried
+     * on the wire and reported by the pump's diagnostics). Read the class doc before wiring it back
+     * into a send decision: sector-wide structural churn in systems no player is in was the second
+     * storm (2026-09-14), and this hash is exactly what flipped for it.
      */
     public static String computeSetHash(List<CoopNpcFleetSnapshot> fleets) {
         List<String> records = new ArrayList<>();
         if (fleets != null) {
             for (CoopNpcFleetSnapshot fleet : fleets) {
-                records.add(fleet.coopFleetId() + "|" + fleet.factionId() + "|"
-                        + fleet.locationId() + "|" + (fleet.transponderOn() ? "1" : "0")
-                        + "|" + fleet.fleetHash() + "|" + fleet.name());
+                records.add(structuralRecord(fleet));
             }
         }
         records.sort(null);
         return CoopChecksum.sha256Text(String.join("\n", records));
+    }
+
+    /**
+     * The first send trigger since 2026-09-14: {@link #computeSetHash} restricted to the fleets in a
+     * location an observer is in. Same per-fleet record, so every field that used to make a send
+     * immediate still does — for the fleets a player can actually see. Because a fleet's record is
+     * simply absent when it is far, near-set <em>membership</em> moves this hash too: a fleet jumping
+     * into an observer's system, or out of it, flips it in the frame it happens, which is what the
+     * guest's add/dispose reconciliation and {@code CoopFleetMirrorRegistry}'s freeze release need.
+     *
+     * <p>Everything not folded in here is folded into {@link #computeSoftHash(List, Set)} instead —
+     * delayed, never dropped. See the class doc for the 2026-09-14 measurement.
+     *
+     * <p><b>An empty observer set means "everything is near", not "nothing is".</b> The replicator
+     * derives the set from live engine reads, and the one way it comes back empty is that neither
+     * the host fleet nor the guest mirror could answer where it is. Treating that as "nothing is
+     * observable" would hold every structural change behind the 10 s floor for as long as the engine
+     * stayed unreadable; treating it as "everything is observable" degrades to exactly the
+     * pre-2026-09-14 behaviour, which is bounded extra traffic rather than a stale guest.
+     */
+    public static String computeNearHash(List<CoopNpcFleetSnapshot> fleets,
+                                         Set<String> observerLocationIds) {
+        List<String> records = new ArrayList<>();
+        if (fleets != null) {
+            for (CoopNpcFleetSnapshot fleet : fleets) {
+                if (isNear(fleet, observerLocationIds)) {
+                    records.add(structuralRecord(fleet));
+                }
+            }
+        }
+        records.sort(null);
+        return CoopChecksum.sha256Text(String.join("\n", records));
+    }
+
+    /** The per-fleet structural line {@link #computeSetHash} and {@link #computeNearHash} both fold. */
+    private static String structuralRecord(CoopNpcFleetSnapshot fleet) {
+        return fleet.coopFleetId() + "|" + fleet.factionId() + "|"
+                + fleet.locationId() + "|" + (fleet.transponderOn() ? "1" : "0")
+                + "|" + fleet.fleetHash() + "|" + fleet.name();
+    }
+
+    /**
+     * Whether a fleet sits in a location an observer is in. Null/empty observer set = every fleet is
+     * near; see {@link #computeNearHash} for why that is the safe direction to fail in.
+     */
+    private static boolean isNear(CoopNpcFleetSnapshot fleet, Set<String> observerLocationIds) {
+        return observerLocationIds == null || observerLocationIds.isEmpty()
+                || observerLocationIds.contains(fleet.locationId());
     }
 
     /**
@@ -109,6 +180,10 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
      * existing members ({@code CoopFleetMirror#updateMemberState}) and re-pins the action text
      * ({@code CoopFleetMirror#applyActionText}, which runs on every snapshot, not only on hash change)
      * without rebuilding a roster.
+     *
+     * <p>Since 2026-09-14 the replicator compares {@link #computeSoftHash(List, Set)}, which is this
+     * hash plus the structural fields of the fleets no observer is near; this form is the health/text
+     * half on its own.
      */
     public static String computeSoftHash(List<CoopNpcFleetSnapshot> fleets) {
         List<String> records = new ArrayList<>();
@@ -120,6 +195,37 @@ public record CoopNpcFleetSetSnapshot(List<CoopNpcFleetSnapshot> fleets, String 
         records.sort(null);
         return CoopChecksum.sha256Text(
                 computeHealthHash(fleets) + "\n" + String.join("\n", records));
+    }
+
+    /**
+     * The rate-limited trigger the replicator actually compares since 2026-09-14: the soft hash above
+     * (health + action text, sector-wide) plus the <em>structural</em> fields of every fleet
+     * {@link #computeNearHash} left out because no observer is in its location.
+     *
+     * <p>An overload rather than a separate {@code computeFarHash} the replicator would have to
+     * combine: there is still exactly one rate-limited trigger, one field to remember and one
+     * comparison to make in {@code sendSetIfChanged}, and the "at most one set per
+     * {@code SOFT_RESYNC_INTERVAL_MILLIS}" guarantee stays a property of a single hash instead of
+     * something the caller has to reassemble correctly. The one-argument form is kept for the
+     * hash-semantics tests and for anyone reasoning about health/text alone.
+     *
+     * <p>A far fleet despawning, spawning, jumping or toggling its transponder therefore costs one
+     * full set per 10 s no matter how many of them do it, and the guest still gets the complete
+     * picture on that set — the payload never shrank.
+     */
+    public static String computeSoftHash(List<CoopNpcFleetSnapshot> fleets,
+                                         Set<String> observerLocationIds) {
+        List<String> farRecords = new ArrayList<>();
+        if (fleets != null) {
+            for (CoopNpcFleetSnapshot fleet : fleets) {
+                if (!isNear(fleet, observerLocationIds)) {
+                    farRecords.add(structuralRecord(fleet));
+                }
+            }
+        }
+        farRecords.sort(null);
+        return CoopChecksum.sha256Text(
+                computeSoftHash(fleets) + "\n" + String.join("\n", farRecords));
     }
 
     /**

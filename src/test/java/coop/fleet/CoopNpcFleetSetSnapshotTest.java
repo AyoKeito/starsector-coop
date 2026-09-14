@@ -3,6 +3,7 @@ package coop.fleet;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -112,6 +113,187 @@ class CoopNpcFleetSetSnapshotTest {
                         "corvus", "lasher", true, ""))),
                 CoopNpcFleetSetSnapshot.computeSetHash(List.of(fleet("f1", "hegemony", "Trade Convoy",
                         "corvus", "lasher", true, ""))));
+    }
+
+    // ---- 2026-09-14 (S4-C remainder): structural is scoped to the observers' locations ------------
+
+    private static final Set<String> CORVUS = Set.of("corvus");
+    private static final Set<String> CORVUS_AND_MAGEC = Set.of("corvus", "magec");
+
+    @Test
+    void theNearHashIgnoresStructuralChurnInSystemsNoPlayerIsIn() {
+        // The measured defect: with both players parked, 12 structural sends in 28 s, every one of
+        // them a fleet spawning/despawning/jumping/toggling its transponder in Corvus, Arcadia, Eos
+        // Exodus, Valhalla or hyperspace -- none of it observable, all of it a ~20 KB full set.
+        List<CoopNpcFleetSnapshot> before = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"),
+                fleet("far", "pirates", "arcadia", "wolf", true));
+        List<CoopNpcFleetSnapshot> afterFarToggle = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"),
+                fleet("far", "pirates", "arcadia", "wolf", false));
+        List<CoopNpcFleetSnapshot> afterFarRoster = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"),
+                fleet("far", "pirates", "arcadia", "onslaught", true));
+        List<CoopNpcFleetSnapshot> afterFarDespawn = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"));
+        List<CoopNpcFleetSnapshot> afterFarSpawn = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"),
+                fleet("far", "pirates", "arcadia", "wolf", true),
+                fleet("far2", "pirates", "arcadia", "kite", true));
+
+        String base = CoopNpcFleetSetSnapshot.computeNearHash(before, CORVUS);
+        assertEquals(base, CoopNpcFleetSetSnapshot.computeNearHash(afterFarToggle, CORVUS));
+        assertEquals(base, CoopNpcFleetSetSnapshot.computeNearHash(afterFarRoster, CORVUS));
+        assertEquals(base, CoopNpcFleetSetSnapshot.computeNearHash(afterFarDespawn, CORVUS));
+        assertEquals(base, CoopNpcFleetSetSnapshot.computeNearHash(afterFarSpawn, CORVUS));
+        // ...and the whole-sector hash still moves for all of them, which is why it stopped being the
+        // send trigger rather than being sharpened.
+        String sectorBase = CoopNpcFleetSetSnapshot.computeSetHash(before);
+        assertNotEquals(sectorBase, CoopNpcFleetSetSnapshot.computeSetHash(afterFarToggle));
+        assertNotEquals(sectorBase, CoopNpcFleetSetSnapshot.computeSetHash(afterFarDespawn));
+    }
+
+    @Test
+    void everyStructuralFieldOfANearFleetStillMovesTheNearHash() {
+        // The Phase 9 contract, unchanged for the fleets a player can see.
+        List<CoopNpcFleetSnapshot> base = List.of(
+                fleet("near", "hegemony", "Patrol", "corvus", "lasher", true, ""),
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, ""));
+        String baseHash = CoopNpcFleetSetSnapshot.computeNearHash(base, CORVUS);
+
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("near", "hegemony", "Trade Convoy", "corvus", "lasher", true, ""),
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS), "rename");
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("near", "pirates", "Patrol", "corvus", "lasher", true, ""),
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS), "faction");
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("near", "hegemony", "Patrol", "corvus", "lasher", false, ""),
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS), "transponder");
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("near", "hegemony", "Patrol", "corvus", "onslaught", true, ""),
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS), "roster");
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS), "despawn");
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("near", "hegemony", "Patrol", "corvus", "lasher", true, ""),
+                fleet("near2", "hegemony", "Picket", "corvus", "kite", true, ""),
+                fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS), "spawn");
+    }
+
+    @Test
+    void aJumpAcrossTheNearBoundaryIsImmediateInBothDirections() {
+        // Membership, not just field values: an arriving fleet has no record in the previous near
+        // hash and a departing one loses its record, so both flip it in the frame they happen.
+        List<CoopNpcFleetSnapshot> far = List.of(fleet("f1", "pirates", "arcadia", "wolf"));
+        List<CoopNpcFleetSnapshot> near = List.of(fleet("f1", "pirates", "corvus", "wolf"));
+
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeNearHash(far, CORVUS),
+                CoopNpcFleetSetSnapshot.computeNearHash(near, CORVUS));
+        // Hyperspace is a location like any other: a player sitting in it observes the fleets there.
+        assertNotEquals(
+                CoopNpcFleetSetSnapshot.computeNearHash(
+                        List.of(fleet("f1", "pirates", "corvus", "wolf")), Set.of("hyperspace")),
+                CoopNpcFleetSetSnapshot.computeNearHash(
+                        List.of(fleet("f1", "pirates", "hyperspace", "wolf")), Set.of("hyperspace")));
+    }
+
+    @Test
+    void twoObserversInDifferentSystemsBothCount() {
+        // Host in Corvus, guest in Magec: a structural change in either is immediate, one in a third
+        // system is not.
+        List<CoopNpcFleetSnapshot> base = List.of(
+                fleet("a", "hegemony", "corvus", "lasher"),
+                fleet("b", "independent", "magec", "kite"),
+                fleet("c", "pirates", "arcadia", "wolf"));
+        String baseHash = CoopNpcFleetSetSnapshot.computeNearHash(base, CORVUS_AND_MAGEC);
+
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("a", "hegemony", "corvus", "onslaught"),
+                fleet("b", "independent", "magec", "kite"),
+                fleet("c", "pirates", "arcadia", "wolf")), CORVUS_AND_MAGEC));
+        assertNotEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("a", "hegemony", "corvus", "lasher"),
+                fleet("b", "independent", "magec", "onslaught"),
+                fleet("c", "pirates", "arcadia", "wolf")), CORVUS_AND_MAGEC));
+        assertEquals(baseHash, CoopNpcFleetSetSnapshot.computeNearHash(List.of(
+                fleet("a", "hegemony", "corvus", "lasher"),
+                fleet("b", "independent", "magec", "kite"),
+                fleet("c", "pirates", "arcadia", "onslaught")), CORVUS_AND_MAGEC));
+    }
+
+    @Test
+    void anUnreadableObserverSetTreatsEveryFleetAsNear() {
+        // Fail in the direction of over-sending: if neither player fleet can say where it is, holding
+        // every structural change behind the 10 s floor would leave the guest stale for as long as
+        // the engine stayed unreadable. Empty (or null) therefore degrades to the pre-2026-09-14
+        // whole-sector rule.
+        List<CoopNpcFleetSnapshot> before = List.of(fleet("far", "pirates", "arcadia", "wolf"));
+        List<CoopNpcFleetSnapshot> after = List.of(fleet("far", "pirates", "arcadia", "onslaught"));
+
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeNearHash(before, Set.of()),
+                CoopNpcFleetSetSnapshot.computeNearHash(after, Set.of()));
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeNearHash(before, null),
+                CoopNpcFleetSetSnapshot.computeNearHash(after, null));
+        assertEquals(CoopNpcFleetSetSnapshot.computeSetHash(before),
+                CoopNpcFleetSetSnapshot.computeNearHash(before, Set.of()),
+                "with nothing far, the near hash is the whole-sector hash");
+    }
+
+    @Test
+    void theNearHashIsIndependentOfFleetOrder() {
+        List<CoopNpcFleetSnapshot> a = List.of(
+                fleet("f3", "pirates", "corvus", "wolf"),
+                fleet("f1", "hegemony", "corvus", "lasher"),
+                fleet("f2", "independent", "arcadia", "kite"));
+        List<CoopNpcFleetSnapshot> b = List.of(
+                fleet("f2", "independent", "arcadia", "kite"),
+                fleet("f1", "hegemony", "corvus", "lasher"),
+                fleet("f3", "pirates", "corvus", "wolf"));
+
+        assertEquals(CoopNpcFleetSetSnapshot.computeNearHash(a, CORVUS),
+                CoopNpcFleetSetSnapshot.computeNearHash(b, CORVUS));
+    }
+
+    @Test
+    void theSoftHashPicksUpExactlyWhatTheNearHashDropped() {
+        // Delayed, never dropped: a far fleet's structural change has to move the rate-limited
+        // trigger, or the guest would not learn about it until something else happened to send.
+        List<CoopNpcFleetSnapshot> before = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"),
+                fleet("far", "pirates", "arcadia", "wolf", true));
+        List<CoopNpcFleetSnapshot> afterFar = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"),
+                fleet("far", "pirates", "arcadia", "wolf", false));
+        List<CoopNpcFleetSnapshot> afterFarDespawn = List.of(
+                fleet("near", "hegemony", "corvus", "lasher"));
+
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeSoftHash(before, CORVUS),
+                CoopNpcFleetSetSnapshot.computeSoftHash(afterFar, CORVUS));
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeSoftHash(before, CORVUS),
+                CoopNpcFleetSetSnapshot.computeSoftHash(afterFarDespawn, CORVUS));
+        // Health and action text still ride it too, near or far.
+        assertNotEquals(CoopNpcFleetSetSnapshot.computeSoftHash(before, CORVUS),
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(
+                        fleet("near", "hegemony", "Name near", "corvus", "lasher", true,
+                                "delivering supplies to Jangala"),
+                        fleet("far", "pirates", "arcadia", "wolf", true)), CORVUS));
+    }
+
+    @Test
+    void theSoftHashDoesNotDoubleCountANearStructuralChange() {
+        // A near structural change is the immediate trigger's business. If it also moved the soft
+        // hash, every such send would reset the floor for a reason that has nothing to do with the
+        // far fleets -- harmless today (every send resets the floor anyway) but a trap for anyone
+        // later making the two triggers independent.
+        assertEquals(
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(
+                        fleet("near", "hegemony", "Patrol", "corvus", "lasher", true, ""),
+                        fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS),
+                CoopNpcFleetSetSnapshot.computeSoftHash(List.of(
+                        fleet("near", "hegemony", "Trade Convoy", "corvus", "onslaught", false, ""),
+                        fleet("far", "pirates", "Raiders", "arcadia", "wolf", true, "")), CORVUS),
+                "a near fleet's name/roster/transponder are not soft state");
     }
 
     // ---- health hash: the second send trigger -----------------------------------------------------
