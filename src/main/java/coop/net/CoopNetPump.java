@@ -3288,6 +3288,11 @@ public class CoopNetPump implements EveryFrameScript {
         // Same shape: CoopDebug.diagnosticsEnabled() is read 3-4x a frame from the hot paths, so the
         // property + sector-memory lookup behind it runs here on a 300-frame poll instead.
         CoopDebug.pollFrame();
+        // S5-B (2026-09-15): per-frame watch on the LOCAL player's own fleet, dormant unless
+        // diagnostics are on. Immediately after the poll that decides whether it runs at all, and
+        // before anything below can write to the world, so the "previous frame" it diffs against is
+        // the state this frame started in.
+        coop.debug.CoopOwnFleetProbe.INSTANCE.tickFromGlobal(clockMillis.getAsLong());
         // Same again for the datagram wiretap, which also emits its size summary from this poll.
         CoopWiretap.pollFrame();
         // Phase 29 M1: stream time advances by campaign dt, frozen while paused, before anything

@@ -14,6 +14,7 @@ import com.fs.starfarer.api.fleet.RepairTrackerAPI;
 import com.fs.starfarer.api.impl.campaign.DModManager;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.loading.VariantSource;
+import coop.debug.CoopOwnFleetProbe;
 import coop.util.CoopDebug;
 import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
@@ -1001,6 +1002,10 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 FleetMemberAPI member = current.get(i);
                 CoopFleetSnapshot.Member state = members.get(pairing == null ? i : pairing[i]);
                 float cr = state.cr();
+                // S5-B guard: this method writes CR and hull, and it must only ever reach a mirror's
+                // own members. One field read on the normal path; a WARN with a stack if it ever
+                // lands on the local player's fleet.
+                CoopOwnFleetProbe.noteWrite(member, "mirror.updateMemberState");
                 member.getStatus().setHullFraction(state.hullFraction());
                 if (!CoopFleetSnapshot.isKnownCr(cr)) {
                     // Unreadable on the sender: hold the mirror's own CR and leave the slot unseated,
@@ -1283,6 +1288,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
         try {
             mirrorFleet.getFleetData().addFleetMember(created);
+            // S5-B guard: after the attach, so the member already knows which roster it is in.
+            CoopOwnFleetProbe.noteWrite(created, "mirror.addMirrorMember");
             if (!member.shipName().isEmpty()) {
                 created.setShipName(member.shipName());
             }
