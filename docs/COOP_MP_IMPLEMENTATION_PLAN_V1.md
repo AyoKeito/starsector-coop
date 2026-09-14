@@ -3837,6 +3837,76 @@ action text on every snapshot rather than only on a hash change. The replicator'
 host log - `Coop sent NPC_FLEET_SET` should no longer print once a second, and NPC tooltips on the
 guest should still track the host within ~10 s.
 
+## Eighth fix pass (2026-09-14, Session 4 findings)
+
+Session 4 of the 0.1.1 smoke finished on 2026-09-14 on `f7a441d`: every step passed, the six
+cut-link re-checks (10, 12 addendum, 14, 16, 19 part 3, 21) passed under the bridge `netfault`
+verb, and the seventh pass held up live (S4-A, S4-D). The run produced six findings; this pass
+fixes all of them plus the S4-B polish item. Merged at `4259589`, 3593 Gradle tests and 50 MCP
+tests green, deployed to both test profiles the same day. None of it is live-verified; Session 5
+runs on this build.
+
+**S4-E: encounters were never forced on a guest with its transponder off.** The ENGAGE_GUEST
+handoff staged the mirror with `$cfai_makeAggressive`, which the engine reads as "engage if
+already hostile". Hostility toward a transponder-off player needs `$cfai_makeHostileWhileTOff`
+(`TacticalModule.isHostileTo` :1107) or an identified player; vanilla pirates write that flag
+themselves at contact (:283-290, reason `tOff`, one day) and the encounter dialog's
+`fleetWantsToFight` (:3514) requires it. Mirrors carry no vanilla fleet memory, so every handoff
+in the archives staged `hostileToPlayer=false` and offered a free Leave. Writing the flag over the
+bridge flipped the next handoff to forced. `CoopEngageDialogStaging.stage` now sets the flag with
+reason `coopEngage` for one day and `clear` removes only that reason. Live check: with the
+guest's transponder off, a pirate handoff must offer "Attempt to disengage", not "Leave".
+
+**S4-F: the in-system jump-point moved away on arrival.** Fringe jump-point orbit angles differ
+between the two engines from generation (same radius, different angle; Magec's was about 30k su
+apart). Only the two systems the players occupy were being corrected, so a guest jumping into
+an unvisited system landed at its stale copy and then watched the S4-D snapshot relocate the
+exit. `tickOrbitSync` now also sends one jump-point-only `ORBIT_SNAPSHOT` per tick from a cursor
+over every star system (about 100 s to cover the sector, then it keeps cycling), three snapshots
+per tick at most. The guest apply learned to resolve a location by id when a payload holds only
+generated hex ids, which is exactly the fringe-jump-point case; without that the sweep would have
+been dropped for the systems it exists for. Live check: jump the guest into a system neither
+player has visited and confirm the jump-point stays put; the host logs one line per completed
+sweep.
+
+**S4-C remainder: sector-wide churn still resent the whole set.** The set is every NPC fleet in
+the sector by design. With both players parked, 33 bridge samples over 28 s showed 12 structural
+sends, all from far systems (despawns, spawns, jumps, transponder toggles). The structural hash
+is now computed over fleets in an observer's location only (host system plus guest system,
+hyperspace included); far fleets' structural fields ride the soft hash and its 10 s floor. A
+fleet crossing into or out of an observer's system flips the near hash, so arrivals are still
+immediate. The post-battle force-resend now clears the near hash too; it only cleared the old
+one. Live check: park both players and count `trigger=structural` in the host log; expect close
+to zero while nothing changes near either player.
+
+**S4-H: a scanned gate was missing from the partner's Gates intel.** The apply set `$gateScanned`
+and bumped the counter but never ran `GateCMD.notifyScanned`, the third part of vanilla's
+`gateScanSel` rule, which is what the Gates tab reads. Now called after the flag.
+
+**S4-I: a host-to-guest replay after a reconnect was dropped every time.** The premise recorded
+in the smoke (dispatch by sequence number) was wrong. Inbound is FIFO; the fault was sender-side
+queue placement. `CoopPeerLink.requeueUnackedForResend` inserted the replay after the leading
+run of connection-scoped control on the assumption the resume accept sat at the head, but during
+a grace window the head is held session traffic, so the replay went in at index 0 and the accept
+went out last. The guest's unproven-peer gate then destroyed the replay, and the same fate met
+any held traffic flushed ahead of the accept. Two halves: resume verdicts are now enqueued ahead
+of session traffic, and the receiver holds reliable one-shots from the unproven connection (cap
+256, newest refused) and releases them behind the accept of that same connection generation.
+Re-stamping replays with a fresh sequence number was rejected because the sequence number is the
+dedup key on both receivers. An idempotency audit of the eleven reliable types found two that
+are not (GUEST_REP_DELTA adds a delta, SHIP_LOST tallies), so no timer-based retry was added.
+Live check: drop the link with a credit grant pending host to guest; the guest logs the hold and
+the release, and the host's unacknowledged count returns to zero instead of replaying the same
+sequence on the next reconnect.
+
+**S4-G and S4-B polish.** Three options-page descriptions claimed Phase 24 or Phase 8 would wire
+keys those phases shipped without consulting (income split, colonization consent, partner marker
+colour); they now say the key is not consulted and what the build does instead, and the generic
+suffix no longer promises a phase. Member snapshots carry a `mothballed` flag (one wire field,
+old shape still decodes) applied after `setCR` on the mirror, so a trade fleet's hull cargo shows
+as mothballed on the guest rather than as 0% CR warships. The storage reconcile logs the first
+differing field when it rebuilds a stored hull, after one unexplained rebuild in step 14.
+
 ## Maybe (Post-V1 Ideas — Not Committed)
 
 > Researched candidates that are out of committed v1 scope. Each needs a design decision before it becomes a phase. Do not implement from this section without promoting it into a numbered phase first.
