@@ -93,6 +93,15 @@ class CoopMessageTypePolicyTest {
             // replaces it, end the very session the partner just came back to.
             CoopMessages.Type.SESSION_LEAVE);
 
+    // ---- table: CoopNetService.isResumeVerdict(Type) ----------------------------------------
+    // S4-I (2026-09-14). These three are queued ahead of held session traffic instead of at the tail,
+    // because the receiver's grace gate destroys everything that arrives before them. A strict subset
+    // of CONNECTION_SCOPED_CONTROL, and deliberately not the whole of it: a SESSION_LEAVE or a lobby
+    // verdict overtaking queued campaign events would end or reset a session before it applied them.
+    private static final EnumSet<CoopMessages.Type> RESUME_VERDICT = EnumSet.of(
+            CoopMessages.Type.SESSION_RESUME_REQUEST, CoopMessages.Type.SESSION_RESUME_ACCEPT,
+            CoopMessages.Type.SESSION_RESUME_REJECT);
+
     /**
      * The lobby round proper: {@link #CONNECTION_SCOPED_CONTROL} minus the two 0.1.1 types. The two
      * cross-table rules at the bottom of this file were written when those two sets were the same
@@ -212,7 +221,7 @@ class CoopMessageTypePolicyTest {
         assertEquals(EnumSet.allOf(CoopMessages.Type.class), EnumSet.copyOf(ALL_KNOWN_TYPES),
                 "A CoopMessages.Type constant is missing from CoopMessageTypePolicyTest.ALL_KNOWN_TYPES. "
                         + "It must be argued onto: CoopNetService.coalesceKey, "
-                        + "CoopNetService.isConnectionScopedControl, "
+                        + "CoopNetService.isConnectionScopedControl, CoopNetService.isResumeVerdict, "
                         + "CoopNetPump.allowedDuringReconnectGrace, CoopNetPump.survivesTheDropEdge, "
                         + "CoopNetPump.isTerminalRejectType, CoopNetPump.isControlPlane, and "
                         + "CoopNetPump.isHighFrequency before this test can pass.");
@@ -235,6 +244,26 @@ class CoopMessageTypePolicyTest {
         for (CoopMessages.Type type : ALL_KNOWN_TYPES) {
             assertEquals(CONNECTION_SCOPED_CONTROL.contains(type),
                     CoopNetService.isConnectionScopedControl(type), type.name());
+        }
+    }
+
+    @Test
+    void resumeVerdictMatchesWhitelist() {
+        for (CoopMessages.Type type : ALL_KNOWN_TYPES) {
+            assertEquals(RESUME_VERDICT.contains(type),
+                    CoopNetService.isResumeVerdict(type), type.name());
+        }
+    }
+
+    /**
+     * S4-I: the queue jump relies on {@code CoopPeerLink}'s leading-run scan recognising the message
+     * it just placed, and that scan is written against {@code isConnectionScopedControl}. A resume
+     * verdict outside that set would be inserted ahead of itself on the next call.
+     */
+    @Test
+    void everyResumeVerdictIsAlsoConnectionScopedControl() {
+        for (CoopMessages.Type type : RESUME_VERDICT) {
+            assertTrue(CONNECTION_SCOPED_CONTROL.contains(type), type.name());
         }
     }
 

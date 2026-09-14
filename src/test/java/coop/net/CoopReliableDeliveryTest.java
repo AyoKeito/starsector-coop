@@ -119,6 +119,62 @@ class CoopReliableDeliveryTest {
         }
     }
 
+    /**
+     * S4-I, 2026-09-14, at the seam the live failure actually crossed: the accept is sent through
+     * {@code sendTo} with held session traffic already in the queue, and it still has to leave first.
+     * Before the fix it was appended at the tail, the replay was inserted at index 0 because the
+     * leading connection-scoped run was empty, and the guest's grace gate destroyed the replayed
+     * grant one millisecond before the accept that would have opened the gate.
+     */
+    @Test
+    void theResumeAcceptLeavesAheadOfTheReplayEvenThoughItIsSentLast() {
+        CoopNetService service = new CoopNetService(System::currentTimeMillis, 1);
+        try {
+            CoopPeerLink peer = service.peerForTest(0);
+            peer.learnSenderId("guest-a");
+            write(peer, grant(1L, "ledger-1"));
+            // Session traffic the outbound write gate refused for the length of the grace window.
+            service.send(marketTxn(40L));
+            service.sendTo("guest-a", CoopMessages.sessionResumeAccept(SESSION, 50L, 1_000L));
+
+            service.requeueUnackedReliable("guest-a");
+
+            assertEquals(List.of(50L, 1L, 40L),
+                    peer.outbound().stream().map(CoopMessages.Message::seq).toList(),
+                    "accept, then the replay, then the held traffic");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    /**
+     * The other half of S4-I: once the replay is written again it is owed again, and the peer's
+     * acknowledgement is what finally clears it. Pre-fix the guest never applied the replay, so it
+     * never acknowledged it and this entry stayed owed for the rest of the session.
+     */
+    @Test
+    void aReplayedMessageStopsBeingOwedOnceThePeerAcknowledgesIt() {
+        CoopNetService service = new CoopNetService(System::currentTimeMillis, 1);
+        try {
+            CoopPeerLink peer = service.peerForTest(0);
+            peer.learnSenderId("guest-a");
+            write(peer, grant(7L, "ledger-7"));
+
+            service.requeueUnackedReliable("guest-a");
+            assertEquals(0, peer.unackedCount(), "the replay is back on the queue, not in the history");
+
+            // The flush writes it again, which is what puts it back in the history.
+            write(peer, peer.outbound().removeFirst());
+            assertEquals(1, peer.unackedCount());
+
+            service.acknowledgeReliable("guest-a", List.of(7L));
+
+            assertEquals(0, peer.unackedCount(), "the peer applied the replay and said so");
+        } finally {
+            service.shutdown();
+        }
+    }
+
     @Test
     void anEmptyTallyRendersAsNothing() {
         assertEquals("", CoopNetService.describeTypeCounts(Map.of()));

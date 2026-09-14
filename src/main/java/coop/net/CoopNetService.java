@@ -859,7 +859,11 @@ public class CoopNetService {
     private void queueLocked(CoopPeerLink peer, CoopMessages.Message stamped) {
         if (!peer.backlogged(COALESCE_BACKLOG_MESSAGES)
                 || !peer.replaceQueued(stamped, coalesceKey(stamped))) {
-            peer.enqueue(stamped);
+            if (isResumeVerdict(stamped.type())) {
+                peer.enqueueAheadOfSessionTraffic(stamped);
+            } else {
+                peer.enqueue(stamped);
+            }
         }
         if (peer.outboundDepth() > QUEUE_DEPTH_WARN_MESSAGES && peer.shouldWarnQueueDepth()) {
             CoopLog.warn(CoopNetService.class, "Coop TCP outbound queue for peer slot " + peer.slot()
@@ -1203,6 +1207,20 @@ public class CoopNetService {
                  SESSION_LEAVE -> true;
             default -> false;
         };
+    }
+
+    /**
+     * The three messages that decide whether the peer's reconnect grace window closes (S4-I,
+     * 2026-09-14). They are queued ahead of held session traffic rather than at the tail — see
+     * {@link CoopPeerLink#enqueueAheadOfSessionTraffic} for the failure that made this necessary.
+     *
+     * <p>A strict subset of {@link #isConnectionScopedControl}, and deliberately not the whole of it:
+     * {@code SESSION_LEAVE} and the lobby round have no business overtaking queued campaign events.
+     */
+    static boolean isResumeVerdict(CoopMessages.Type type) {
+        return type == CoopMessages.Type.SESSION_RESUME_REQUEST
+                || type == CoopMessages.Type.SESSION_RESUME_ACCEPT
+                || type == CoopMessages.Type.SESSION_RESUME_REJECT;
     }
 
     /**
