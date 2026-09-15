@@ -49,7 +49,7 @@ import java.util.function.Predicate;
  * writes {@code addPermaMod(id, true)} only for S-mods. A hull's own built-in mods live on the hull
  * spec, which the receiver already reproduces from {@code hullId}/{@code variantId}. The
  * non-permanent half of an autofit loadout (weapons, ordinary hullmods) stays out of scope — that is
- * the "full loadout replication" item still parked in {@code PHASE14_SPIKE_NOTES.md}.
+ * the "full loadout replication" item still parked (see {@code docs/starsector-runtime-limitations.md}, "Mirrors of inflated fleets").
  *
  * <p><b>The clone is the whole safety story.</b> A member created from a stock variant id carries the
  * <em>shared global spec object</em> for that variant, not a copy of it. Adding perma-mods to it in

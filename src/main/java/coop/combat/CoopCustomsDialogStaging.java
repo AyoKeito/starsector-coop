@@ -15,7 +15,7 @@ import coop.net.CoopMessages;
  * fleet interaction against it makes the rules engine take a scan branch instead of the plain
  * engage/leave menu (Phase 14, {@code DIALOG_BEGIN}).
  *
- * <p>Spike-proven 2026-08-19 (see {@code docs/PHASE14_SPIKE_NOTES.md}): the full vanilla running-dark
+ * <p>Spike-proven 2026-08-19 (see {@code docs/starsector-runtime-limitations.md}, "Synthesizing a patrol dialog against a mirror fleet"): the full vanilla running-dark
  * confrontation ran end to end against a Hegemony mirror on the guest — hail, {@code AdjustRep
  * TRANSPONDER_OFF}, comply/story-point/refuse, {@code CargoScan} against the guest's real cargo — and
  * the faction rep delta reached the host through the existing Phase 12 {@code GUEST_REP_DELTA} path

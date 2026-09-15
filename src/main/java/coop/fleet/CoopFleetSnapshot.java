@@ -112,7 +112,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      * spreadsheet ids too, so they resolve on both installs exactly like {@code variantId} does; the
      * receiver re-applies them on top of the clean stock ship it built ({@link CoopShipMods}, which
      * documents why the engine keeps the three lists apart). Without them a battered, story-pointed
-     * host ship mirrored as a pristine one — see {@code PHASE14_SPIKE_NOTES.md}.
+     * host ship mirrored as a pristine one — see {@code docs/starsector-runtime-limitations.md}, "Mirrors of inflated fleets".
      */
     public record Member(String fleetMemberId, String hullId, String variantId, String shipName,
                          String captainName, float cr, float hullFraction,

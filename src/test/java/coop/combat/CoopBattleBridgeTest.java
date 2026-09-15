@@ -424,7 +424,7 @@ class CoopBattleBridgeTest {
         // BattleCreationContext initialises fields from Global.getSettings(), so it cannot be built
         // headless: the call throws, the bridge's guard catches it and releases the shared clock
         // rather than stranding the partner. That release is the assertion worth making here; that
-        // startBattle itself works against a mirror is spike-verified in-game (PHASE14_SPIKE_NOTES b).
+        // startBattle itself works against a mirror is spike-verified in-game (Phase 14 spike b, 2026-08-19).
         assertEquals("START_FAILED", CoopMessages.requiredPayloadString(
                 fixture.service.sent.get(1), "outcome"));
         assertFalse(fixture.bridge.isAnyCoopBattleActive());

@@ -94,14 +94,14 @@
       "sevLabel": "known gap",
       "head": "Parked Phase 14 fallout (cosmetic/UX)",
       "state": "documented, deferred",
-      "body": "Synthesized customs pursuit reads below vanilla quality (works - chase/give-up/stand-down/catch all pass - but motion is coarser than the engine's own steering); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). D-mod replication for mirrors landed with <span class=\"rp\" data-jump=\"16\">Phase 16</span>; full loadout replication stays parked. The coarse synthesized-pursuit motion largely predates <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1's kinematic drive - re-judge it at the next customs encounter before spending anything on it. Grey-fleet flicker and the unknown-market warn were fixed by 14b. Full list with suspects: <code>PHASE14_SPIKE_NOTES.md</code> \"Known issues\"."
+      "body": "Synthesized customs pursuit reads below vanilla quality (works - chase/give-up/stand-down/catch all pass - but motion is coarser than the engine's own steering); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). D-mod replication for mirrors landed with <span class=\"rp\" data-jump=\"16\">Phase 16</span>; full loadout replication stays parked. The coarse synthesized-pursuit motion largely predates <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1's kinematic drive - re-judge it at the next customs encounter before spending anything on it. Grey-fleet flicker and the unknown-market warn were fixed by 14b."
     },
     {
       "sev": "risk",
       "sevLabel": "maintenance",
       "head": "Six vanilla classes are forked (pinned 0.98a-RC8)",
       "state": "guarded, re-fork on game update",
-      "body": "The guest-presence family (<code>RouteManager</code>, <code>PlayerVisibleFleetManager</code>, <code>DisposableFleetManager</code> + two subclasses, <code>SourceBasedFleetManager</code>) plus the pre-existing <code>Misc</code>/procgen forks ride the coop-forks.jar classpath shadow. A Starsector update requires re-extracting each file and re-applying the small additive diffs; the shared runtime guard (<code>CoopPresenceRegistry.getForFork</code>) loudly disables the presence terms on a version mismatch instead of drifting silently. Re-fork procedure: <code>phase11-rng-determinism.md</code>."
+      "body": "The guest-presence family (<code>RouteManager</code>, <code>PlayerVisibleFleetManager</code>, <code>DisposableFleetManager</code> + two subclasses, <code>SourceBasedFleetManager</code>) plus the pre-existing <code>Misc</code>/procgen forks ride the coop-forks.jar classpath shadow. A Starsector update requires re-extracting each file and re-applying the small additive diffs; the shared runtime guard (<code>CoopPresenceRegistry.getForFork</code>) loudly disables the presence terms on a version mismatch instead of drifting silently. Re-fork procedure: <code>starsector-runtime-limitations.md</code>, Classpath forks."
     }
   ],
   "phases": [

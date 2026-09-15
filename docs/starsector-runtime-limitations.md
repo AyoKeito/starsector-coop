@@ -1,82 +1,73 @@
 # Starsector Runtime Limitations
 
-These notes capture constraints discovered while implementing and smoke-testing the coop Phase 3 TCP pump on Starsector `0.98a-RC8`.
+What Starsector `0.98a-RC8` does and does not let a mod script do, and what the coop mod accepts as a result. Every entry states the engine mechanism and the consequence a player or tester sees. Findings that later got fixed are removed from here as the fix lands; the ledger in `COOP_MP_IMPLEMENTATION_PLAN_V1.md` keeps that history.
 
-## Script Sandbox
+## Script sandbox
 
-Starsector mod scripts run under a guarded script classloader. When the guard trips, the UI usually reports:
+Mod scripts load through a guarded classloader. When the guard trips the UI shows:
 
 ```text
 Fatal: File access and reflection are not allowed to scripts.
 ```
 
-The useful detail is in `starsector-core/starsector.log`.
+The class name that tripped it is in `starsector-core/starsector.log`.
 
-Observed blocked patterns:
+### What the loader refuses
 
-- Netty `4.1.69.Final` initializes `io.netty.util.internal.PlatformDependent0`, which loads reflection classes such as `java.lang.reflect.Method`. This crashes during host startup.
-- `java.io.*` is treated as file access even when the class is only an in-memory type. `ByteArrayOutputStream` in `CoopNetService` crashed at object construction.
-- `java.nio.file.Files` is blocked in campaign scripts. Phase 5 manifest capture crashed at `coop.handshake.CoopChecksum.sha256IfExists()` before sending `HANDSHAKE_MANIFEST`.
-- Mod-created networking daemon threads are not reliable enough for campaign networking. In live two-client testing the `coop-net-*` threads disappeared while the game stayed running and the socket state was left half-open.
+`com/fs/starfarer/loading/scripts/B.loadClass` (read off the shipped class, 2026-09-04) refuses every name that starts with `java.io`, `java.nio.file.File` or `java.lang.reflect`, minus an allow-list held in its constant pool:
 
-Current rules:
+- `java.io`: `BufferedInputStream`, `BufferedReader`, `FilterInputStream`, `InputStreamReader`, `Reader`, `Serializable`, `InvalidClassException`, `ObjectStreamException`, `InputStream`, `IOException`, `PrintStream`, `PrintWriter`, `ByteArrayInputStream`, `FilterOutputStream`, `OutputStream`, `Closeable`, `Flushable`, `StringReader`, `FileReader`.
+- `java.nio.file`: `Path` and `Paths` pass (they do not start with `File`); `Files` and `FileSystems` do not.
+- `java.lang.reflect`: `AnnotatedElement`, `InvocationTargetException`, `Type` and `GenericDeclaration` pass; everything else does not.
 
-- Do not add Netty or similar reflection-heavy networking libraries to `mod_info.json`.
-- Do not use `java.io.*` in runtime campaign/network code. Use plain arrays, strings, and sandbox-proven JDK types instead.
-- Do not use `java.nio.file.*`, `java.net.URL.openStream()`, or protection-domain jar inspection in runtime handshake code. Runtime manifests may compare Starsector/mod metadata and generated coop build constants, but direct file checksums are blocked by the Starsector script sandbox unless a future non-script API is found.
-- Keep coop networking progressed from `EveryFrameScript.advance()` on the campaign thread.
-- Keep runtime dependencies minimal and covered by sandbox compatibility tests.
+Types that have crashed the mod in practice: `ByteArrayOutputStream` (at object construction), `UncheckedIOException`, `StringWriter`, `EOFException`, `File`, `java.nio.file.Files`, and the `java.lang.reflect.Method` load inside Netty's `PlatformDependent0` initializer. `java.io.IOException` is on the allow-list and does not trip the guard.
 
-### What the loader actually refuses (read off the shipped class, 2026-09-04)
+### Project rules
 
-`com/fs/starfarer/loading/scripts/B.loadClass` refuses every name that starts with `java.io`,
-`java.nio.file.File` or `java.lang.reflect`, minus an explicit allow-list held in its constant pool:
+These are a superset of the engine's list. The superset costs nothing and survives an engine update that trims the allow-list, but it is not an explanation for a crash; the list above is.
 
-- `java.io`: `BufferedInputStream`, `BufferedReader`, `FilterInputStream`, `InputStreamReader`,
-  `Reader`, `Serializable`, `InvalidClassException`, `ObjectStreamException`, `InputStream`,
-  `IOException`, `PrintStream`, `PrintWriter`, `ByteArrayInputStream`, `FilterOutputStream`,
-  `OutputStream`, `Closeable`, `Flushable`, `StringReader`, `FileReader`.
-- `java.nio.file`: `Path` and `Paths` pass (they do not start with `File`); `Files` and
-  `FileSystems` do not.
-- `java.lang.reflect`: `AnnotatedElement`, `InvocationTargetException`, `Type` and
-  `GenericDeclaration` pass; everything else does not.
+- No Netty or other reflection-heavy networking library in `mod_info.json`.
+- No `java.io.*` in runtime campaign or network code. Plain arrays, strings and sandbox-proven JDK types instead.
+- No `java.nio.file.*`, `java.net.URL.openStream()` or protection-domain jar inspection in handshake code.
+- Field access on engine classes goes through `java.lang.invoke.MethodHandles`, never `java.lang.reflect`. Both compile and unit-test green; only the second one throws in-game.
+- All networking is progressed from `EveryFrameScript.advance()` on the campaign thread. Mod-created daemon threads are not reliable: in two-client testing the `coop-net-*` threads disappeared while the game kept running and left the socket half-open.
+- `CoopNetServiceSandboxCompatibilityTest` and `CoopHandshakeSandboxCompatibilityTest` pin the rules; keep them aligned with any change here.
 
-The project rule above stays as written: it is a superset of the engine's list, it costs nothing,
-and it survives an engine update that trims the list. But it is not an explanation for a crash. The
-types that actually trip the guard include `UncheckedIOException`, `StringWriter`,
-`ByteArrayOutputStream`, `EOFException` and `File`, and `java.io.IOException` is not one of them.
+### `SettingsAPI.loadText` works from inside the sandbox
 
-### Handshake checksums: RESOLVED — `SettingsAPI.loadText` works in the sandbox (Phase 6b, 2026-08-17)
+`SettingsAPI.loadText(String, String modId)` is the engine's own text loader and is usable from campaign scripts (verified on both clients 2026-08-17). `CoopHandshakeManifest` hashes each enabled mod's `mod_info.json` through it with `CoopChecksum.sha256Text`, line endings normalized so a CRLF/LF checkout difference does not read as a mismatch. Two conditions are pinned by `CoopHandshakeSandboxCompatibilityTest`:
 
-Phase 12b could not settle whether `SettingsAPI.loadText(String, String modId)` survives the script
-sandbox (the guard lives in the mod classloader, so the call compiles and unit-tests clean either
-way). It shipped a dormant, diagnostics-gated `CoopChecksumProbe` instead, and the 12b/12d drill
-session (2026-08-17) delivered the verdict: **SUCCESS on both clients**, identical hashes
-(`Coop checksum probe: SUCCESS, mod_info.json hashed to a35cede3... (275 chars)`). The engine's own
-text loader is usable from campaign scripts.
+- The call catches `Throwable`, not a named checked exception, so a blocked `java.io` type can never be named in the calling class.
+- A per-mod failure degrades to that mod's `UNAVAILABLE:script-sandbox` entry instead of throwing out of `capture()`, so one unreadable third-party mod cannot kill the handshake.
 
-Phase 6b promoted the call: `CoopHandshakeManifest` now hashes each enabled mod's `mod_info.json`
-via `loadText` + `CoopChecksum.sha256Text` (line endings normalized so a CRLF/LF checkout difference
-does not read as a mismatch), and the probe was deleted. Two safety conditions survive from the
-probe era and are pinned by `CoopHandshakeSandboxCompatibilityTest`:
+Jar checksums stay `UNAVAILABLE` permanently: no engine surface hands back jar bytes and the sandbox forbids opening them. The git-commit comparison and the Phase 6 sector fingerprint are the primary guards against a skewed install; the `mod_info.json` hashes are corroborating detail in the handshake diff.
 
-- The call catches `Throwable`, never a named checked exception. `loadText` declares `IOException`;
-  that one type is on the loader's allow-list above, so naming it would in fact load, but the broad
-  catch costs nothing and is what keeps the call safe against the `java.io` types that are blocked.
-  (Corrected 2026-09-04: this bullet used to state that naming `IOException` trips the guard.)
-- A per-mod failure degrades to that mod's `UNAVAILABLE:script-sandbox` placeholder entry instead of
-  throwing out of `capture()`, so one unreadable third-party mod cannot kill the handshake.
+## Classpath forks (`coop-forks.jar`)
 
-Jar checksums stay `UNAVAILABLE` permanently: no engine surface hands back jar bytes and the sandbox
-forbids opening them directly. The git-commit comparison and the Phase 6 sector fingerprint remain
-the primary guards against a skewed install; the checksums are corroborating detail in the
-handshake diff.
+Source forks under `data/scripts/com/fs/starfarer/api/impl/...` are not reliable for API classes that are already loaded. Forked engine classes that must override `starfarer.api.jar` are compiled into `jars/coop-forks.jar`, which the host and guest launch scripts prepend to the JVM `-classpath`.
 
-## Save Serialization
+- Forked classes load in the JVM system classloader; `coop.jar` loads in Starsector's child mod classloader. A fork cannot see child-loader classes or objects, so any helper a fork uses must also be built into `coop-forks.jar` and excluded from `coop.jar`. Two helpers live there: `coop.rng.CoopRandom` (reads only the JVM `coop.newGameSeed` property, no mod runtime state) and `coop.presence.CoopPresenceRegistry` (the guest-presence slot). Their source sits under `src/main/java/coop/rng` and `coop/presence`; `build.gradle` compiles those directories into the `forks` source set and the `jar` task excludes them from `coop.jar`, along with the generated `CoopForksBuildInfo` stamp that identifies the forks jar in the handshake.
+- `CoopPresenceRegistry` also owns the pinned-version guard (`PINNED_VERSION` + `getForFork(String)`): one constant to change on a Starsector version bump, one verdict logged per process, and on a mismatch every presence term goes silent and the forks behave as stock.
+- Every presence edit is additive, guarded on `presence != null`, and adds no instance field, because the forked managers are save-serialised `EveryFrameScript`s.
+- Re-fork procedure after an engine update: copy the new vanilla source over the fork byte-identically, diff to confirm, then re-apply only the `COOP FORK`-tagged hunks listed in the file's header banner. Whitespace-only blank-line hunks in that diff are editor normalisation.
+- New forks go under `forks/`, never under `data/scripts/`.
 
-Persistent campaign scripts are serialized into saves by XStream. Runtime networking objects are not save-safe.
+RNG forks: `Misc` (seeds `Misc.random` from `CoopRandom.ofOrDefault("Misc.random")`, replaces `genRandomSeed()`'s `System.nanoTime()` entropy with the session seed while keeping vanilla's `seedUniquifier()` counter), `GateHaulerLocation` and `NamelessRock` (swap `StarSystemGenerator.random` for an independent topic-keyed stream for the duration of `generate()`), `AbyssalRogueStellarObjectEPEC` (reseeds `data.random` by encounter id and rounded hyperspace coordinates; abyss parity only, not part of the fingerprint). Presence forks: `RouteManager`, `PlayerVisibleFleetManager`, `DisposableFleetManager`, `SourceBasedFleetManager`, `DisposableHostileActivityFleetManager`, `DisposableThreatFleetManager`.
 
-Observed failure:
+The `Misc` fork binds its field and logs its `[COOP-FORK] Misc fork active...` probe during core data loading, about ten seconds before any mod plugin exists, so the seeding only lands in time on the `-Dcoop.newGameSeed` path. The Phase 31 launcher's seed lives in `saves/common/coop_options.json.data` and becomes a system property only when `CoopModPlugin.onApplicationLoad` republishes it; on that path the probe legitimately reads `coopSession=false` and `CoopModPlugin.rebindTheForkedSharedRandom` writes the field afterwards. The line that proves the seed took is `Coop reseeded the forked Misc.random`, not the probe.
+
+## Seed lock and sector fingerprint
+
+- The vanilla new-game seed field is not enough for automated two-client runs. `coop.seed.CoopSectorProcGen`, registered through `data/config/settings.json`, applies `coop.newGameSeed` to `CharacterCreationData` (`setSeed(long)` + `setSeedString(String)`, via `CoopSeedSync`) at the top of both `prepare()` and `generate()`, and forces `sector.setSeedString` after generation so the saved sector carries the coop seed string.
+- Derived seed longs must be positive: `SectorProcGen.prepare()` only seeds `StarSystemGenerator.random` when `data.getSeed() > 0`, so the SHA-256-derived long is masked with `Long.MAX_VALUE`.
+- `CoopSectorFingerprint` is a session-start tripwire, not a world-equality proof. It covers system id, market id, market size, faction id and rounded hyperspace anchor coordinates, and excludes hidden markets (`MarketAPI.isHidden()`: pirate and Pather bases with engine-minted ids, replicated host-authoritatively instead). The verified matching fingerprint on a fresh two-client game had 272 entries.
+- On a mismatch both sides log the full canonical fingerprint text (one line per entry, the exact SHA input), so the diverged entry is found by diffing the two logs. There is no diff protocol on purpose: the canonical text is about 11 KB.
+
+**Mutability contract.** `marketSize` and `factionId` are mutable campaign state and are in the fingerprint deliberately: it is re-validated on every session start, including loaded-save reconnects, so those fields prove both saves evolved identically. Any feature that mutates market size, faction ownership or market existence must ship with replication of that mutation to the guest's save, or the next reconnect hard-rejects with no heal path. Player colonization (Phase 24) and decivilization (`WORLD_DELTA(DECIV)`) are the two vectors so far. The fix for a tripped fingerprint is always to add the missing replication, never to relax the check; splitting structural and mutable fingerprints was considered in Phase 6b and rejected for that reason. Related: seeds are gen-time only, runtime RNG is replicated and never re-seeded (per-script audit in plan Phase 13).
+
+## Save serialization
+
+Persistent campaign scripts are serialized into saves by XStream. A persistent `CoopNetPump` made XStream walk into runtime networking state (`AtomicReference` among others) and every new game failed with:
 
 ```text
 Error creating new game:
@@ -84,629 +75,321 @@ Error saving game.
 No converter available
 ```
 
-Root cause found during testing:
+Rules: install `CoopNetPump` with `SectorAPI.addTransientScript()`, remove both persistent and transient old pump instances before installing a fresh one, and never store sockets, channels, threads, queues or other transport objects in saved campaign state.
 
-- A persistent `CoopNetPump` caused XStream to walk into runtime networking state, including classes such as `AtomicReference`.
+## Transport
 
-Current rules:
+- Host: non-blocking `ServerSocketChannel`. Guest: non-blocking `SocketChannel`. Both sides: one `DatagramChannel` for the UDP path, deliberately not `connect()`ed so an ICMP error does not poison the channel. No `Selector`, no worker thread.
+- Frames are UTF-8 JSON, capped at `CoopNetService.MAX_FRAME_BYTES` (1 MB). `CoopCampaignReplicator.SNAPSHOT_WARN_BYTES` (256 KB) and `SNAPSHOT_MAX_BYTES` mirror that cap by value, not by reference; changing the frame cap means changing both.
+- Guest connect attempts retry, because host and guest campaign loads are not ordered.
 
-- Install `CoopNetPump` with `SectorAPI.addTransientScript()`.
-- Remove both persistent and transient old pump instances before installing a fresh pump.
-- Do not store sockets, channels, threads, queues, or other runtime transport objects in saved campaign state.
+### The pump does not run during combat or while a save is written
 
-## TCP Pump Constraints
+`CoopNetPump` is an `EveryFrameScript` on the campaign engine. Combat runs on a different screen and `saveGame` blocks the thread that would tick the pump, so during either one nothing is read or sent. A save is a few seconds on a fast machine and past 15 s on a slow one with a large sector, which is the link-death threshold.
 
-The working Phase 3 transport is intentionally conservative:
+Link death is therefore declared on inbound TCP silence (`CoopLinkQuality.DEAD_TCP_SILENCE_MILLIS`, 15 s), with three exemptions evaluated in `CoopLinkQuality.evaluateLinkDeath` and acted on by `CoopNetPump.maybeDeclareLinkDead` on the 1 s supervision cadence: the peer is in a battle (the battle bridge's `isRemoteBattleActive`, cleared after `REMOTE_BATTLE_SILENCE_TIMEOUT_MILLIS` = 30 s of silence so a mid-combat drop cannot leave a phantom, or the shared combat pause intent), a save checkpoint passed within `DEATH_SAVE_EXEMPT_MILLIS` (60 s), or this process itself stalled (a frame gap over `LOCAL_STALL_FRAME_GAP_MILLIS` = 5 s, with the exemption held for a further 15 s after the stall ends). The peer's own save has no natural signal, since the saving side is the one that goes quiet, so both roles send a `STALL_NOTICE` from `beforeGameSave` and flush it before the block starts.
 
-- Host uses `ServerSocketChannel` in non-blocking mode.
-- Guest uses `SocketChannel` in non-blocking mode.
-- No `Selector`, no background worker thread, no Netty event loop.
-- Message frames are UTF-8 JSON lines buffered with a fixed byte array.
-- Guest connect attempts retry because host and guest campaign loads are not ordered.
+### A throttled game window runs its clock slow
 
-Two-client smoke evidence to preserve:
+Starsector caps per-frame `dt`. A minimized or background window gets fewer frames, so its campaign clock falls behind wall time, and from the other client's point of view the throttled side is behind. In the 2026-09-02 QA matrix the guest read up to 2.5 game-days ahead of a minimized host; the clock reconciler pulled it back to 0.01 game-days once both windows were visible. Only reachable with both games on one PC, which is what a two-instance test session is. Rule for testers: keep both windows restored and visible.
 
-```text
-Host:  Coop TCP channel active as HOST
-Host:  Coop net HOST inbound PING seq=1
-Host:  Coop net HOST outbound PONG seq=1
-Guest: Coop TCP channel active as GUEST
-Guest: Coop TCP guest connected to 127.0.0.1:7777
-Guest: Coop net GUEST outbound PING seq=1
-Guest: Coop net GUEST inbound PONG seq=1
-```
+### Port mapping (UPnP IGD, NAT-PMP fallback)
 
-## Phase 7 Time Lock - Control Names and Fast-Forward
+- `CoopPortMapper` is a non-blocking NIO state machine driven one slice per campaign frame: no thread, no `HttpURLConnection` (that needs `java.io`). UPnP IGD first, NAT-PMP when SSDP finds nothing or UPnP refuses; PCP is documented-not-implemented. If the router's "external" address is private or in `100.64.0.0/10` the mapping is real but useless (CGNAT), and that verdict is reported as such.
+- The lease is `LEASE_SECONDS` (3600), renewed every 30 min. Release runs from `CoopModPlugin.onGameLoad` through `CoopNetPump.shutdownPortMapper()`, because that is the only teardown hook the engine gives a mod (no quit-to-menu or exit callback), and `CoopPortMapper.shutdown()` drives the release as a bounded busy loop (1.2 s budget) since there is no thread to wait on. A process that exits without reaching it leaves the mapping to expire with the lease. A router that rejects timed leases (`UPnPError 725`) gets a permanent mapping instead, which the shutdown path still deletes; a crash leaves that one open until the next launch.
+- A gateway response over `MAX_RESPONSE_BYTES` (256 KB) is abandoned and the exchange settles as failed. Real device descriptors and SOAP replies are a few kilobytes; the cap stops a streaming or hostile device from growing a buffer on the campaign thread. The log names the limit that was hit.
 
-Discovered while implementing the guest time lock on `0.98a-RC8`.
+## Campaign time
 
-### Control enum-constant names (input blocker)
+### Control enum-constant names
 
-`InputEventAPI.isControlActivated/isControlDownEvent/isControlUpEvent(String)` resolve the
-argument via `Enum.valueOf` on the obfuscated control enum (`com.fs.starfarer.title.<obf>$oo` in
-`starsector-core/starfarer_obf.jar`). An unknown name throws `IllegalArgumentException: No enum
-constant ...<name>`; if uncaught it becomes a **Fatal** crash dialog back to the title screen.
+`InputEventAPI.isControlActivated/isControlDownEvent/isControlUpEvent(String)` resolve the argument with `Enum.valueOf` on the obfuscated control enum (`com.fs.starfarer.title.<obf>$oo` in `starsector-core/starfarer_obf.jar`). An unknown name throws `IllegalArgumentException: No enum constant ...` and, uncaught, becomes a Fatal dialog back to the title screen.
 
-- The campaign pause control is **`GENERAL_PAUSE`**, not `PAUSE`. Passing `"PAUSE"` crashed the client.
-- Campaign fast-forward control is **`FAST_FORWARD`**; combat slow-mo is `GO_SLOW`.
-- To dump the readable list: extract the `$oo` class from `starfarer_obf.jar` and
-  `javap -v <class> | grep "= Utf8"` (constants like `CORE_*`, `CMENU_*`, `C2_*`).
-- `CoopCampaignInputBlocker` wraps the lookups in `try/catch (IllegalArgumentException)` as a
-  defensive net, but tests must assert against the real constant names - the test mocks
-  `InputEventAPI` with arbitrary strings, so a wrong name passes tests yet crashes the real engine.
+- Campaign pause is `GENERAL_PAUSE`, not `PAUSE`. Passing `"PAUSE"` crashed the client.
+- Campaign fast-forward is `FAST_FORWARD`; combat slow-mo is `GO_SLOW`.
+- To list them: extract the `$oo` class from `starfarer_obf.jar` and run `javap -v <class> | grep "= Utf8"` (constants like `CORE_*`, `CMENU_*`, `C2_*`).
+- `CoopCampaignInputBlocker` wraps the lookups in `try/catch (IllegalArgumentException)`, but the unit tests mock `InputEventAPI` with arbitrary strings, so a wrong name passes tests and crashes the real engine. Tests must assert against the real constant names.
 
-### Fast-forward has no public on/off setter
+### Fast-forward
 
-> **⚠️ SUPERSEDED IN PART (2026-06-10, see plan Phase 7b).** Everything below is true only for
-> vanilla's default **hold**-Shift input mode. Vanilla also has a **toggle** fast-forward mode
-> (settings-menu checkbox `Campaign "speed up time" is a toggle`, backed by a static boolean in
-> `com.fs.starfarer.settings.StarfarerSettings`: getter `Oo0000()Z`, static setter `ö00000(Z)V`
-> — U+00F6 then five zeros; the earlier `?00000` reading was `javap` rendering that non-ASCII
-> character, and five *different* static `(boolean)` setters on that class print identically, so the
-> setter must never be looked up by name. Both accessors read/write the private static boolean field
-> literally named `class` (the Java keyword; distinct from the separate field `class.class`), which
-> is what `CoopFastForwardLock` resolves instead, with `findStaticGetter`/`findStaticSetter` on a
-> `privateLookupIn` of that class. Corrected 2026-09-02 by parsing the constant pool of
-> `StarfarerSettings.class` on 0.98a-RC8.) In toggle mode the per-frame key poll is skipped entirely; the persistent
-> `CampaignState.fastForward` field (plain name, private) is flipped only by a consumable
-> `FAST_FORWARD` key event — so the guest's existing pre-core event consumption blocks it, and a
-> `MethodHandles` field write sticks. The speed loop is
-> `iters = fastForward ? Math.round(getFloat("campaignSpeedupMult")) : 1` with a live `getFloat`
-> each frame, so the multiplier is also runtime-settable via public `SettingsAPI.setFloat`.
-> Verified by `javap` disassembly of `starfarer_obf.jar` (dumps in `K:\Starsector\tmp_ff_analysis\`).
-> Phase 7b restores shared fast-forward on this basis; the 1x lock below remains the fallback when
-> the handles fail to resolve.
+Vanilla has two fast-forward input modes. Which one is active is a static boolean on `com.fs.starfarer.settings.StarfarerSettings` (settings-menu checkbox `Campaign "speed up time" is a toggle`), stored in a private static field literally named `class`, getter `Oo0000()Z`. The field is resolved with `findStaticGetter`/`findStaticSetter` on a `privateLookupIn` of that class, never by setter name: the setter is `ö00000(Z)V` (U+00F6) and four other static `(boolean)` setters on the class print identically under `javap`. Dumps are in `K:\Starsector\tmp_ff_analysis\`.
 
-Hold-Shift fast-forward is implemented inside the obfuscated
-`com.fs.starfarer.campaign.CampaignState.advance(float, ...)` as a per-frame loop that calls
-`CampaignEngine.advance()` ~2x while the key is held. **Runtime-verified via TIMEDIAG logging:**
-while fast-forwarding, the campaign clock advanced at exactly 2x, yet both
-`SectorAPI.isInFastAdvance()` and `SectorAPI.isFastForwardIteration()` read `false` at the point an
-`EveryFrameScript` observes them.
+**Hold mode** (vanilla default) cannot be mirrored or blocked from a mod. The loop lives in obfuscated `CampaignState.advance(float, ...)`, polls the Shift key directly and calls `CampaignEngine.advance()` twice per frame. Consuming the `FAST_FORWARD` input event does not stop it. `SectorAPI.isInFastAdvance()` and `isFastForwardIteration()` both read `false` from an `EveryFrameScript` while it runs, `setFastForwardIteration` is overwritten every frame, and `setInFastAdvance(true)` sticks but does not change the clock rate (it drives a separate extra `CampaignClock.advance()`, the ">>" path). The only public read is `CampaignUIAPI.isFastForward()`.
 
-- `setFastForwardIteration(boolean)` - internal per-frame flag the engine overwrites; setting it
-  does nothing. (Original plan assumption - wrong.)
-- `setInFastAdvance(boolean)` - drives a *separate* extra `CampaignClock.advance()` inside
-  `CampaignEngine.advance()` (the ">>" toggle path), NOT the hold-Shift loop; reads `false` on the
-  host during hold-Shift, so it cannot *capture* fast-forward.
-- **Capture lever (host):** `CampaignUIAPI.isFastForward()` - the public getter that reflects the
-  fast-forward state. Reached via `Global.getSector().getCampaignUI().isFastForward()`.
-- **Apply lever (guest):** `SectorAPI.setInFastAdvance(hostValue)` each frame makes the guest's
-  clock run ~2x to mirror the host.
-- `setInFastAdvance(true)` sticks on the guest (read-back is true) but does **not** change the
-  guest clock rate (verified: `dGuestClockTs` stays 1x). The real 2x comes only from
-  `CampaignState.advance` calling `CampaignEngine.advance()` twice per frame.
-- The guest's own hold-Shift loop lives in obfuscated `CampaignState` and polls the key directly,
-  so it cannot be blocked via public API (consuming the `FAST_FORWARD` input event does not stop
-  it). Forking `CampaignState` is impractical because it is obfuscated engine code (unlike the
-  Phase 11 forks, which were readable `com.fs.starfarer.api.impl.*` source).
+**Toggle mode** skips the per-frame key poll. The persistent private field `CampaignState.fastForward` is flipped only by a consumable `FAST_FORWARD` key event, so the guest's pre-core event consumption blocks it and a `MethodHandles` write sticks. The speed loop is `iters = fastForward ? Math.round(getFloat("campaignSpeedupMult")) : 1` with a live `getFloat` per frame, so the multiplier is settable at runtime through public `SettingsAPI.setFloat`.
 
-### Resolution adopted for v1
+What the mod does (`coop.time.CoopFastForwardLock`): forces toggle mode and `campaignSpeedupMult = SESSION_MULT` (2) on both roles for the life of a session, mirrors the host's `fastForward` field onto the guest from `CoopTimeLock.apply`, and restores the player's own toggle preference at session end. If the handles fail to resolve, or `-Dcoop.ff.disable=true` is set, the lock goes sticky-unavailable and the session runs at a runtime 1x lock instead.
 
-> **⚠️ SUPERSEDED (plan Phase 7b):** the 1x lock is demoted from "the resolution" to "the fallback";
-> Phase 7b removes the static `campaignSpeedupMult:1` override and restores shared fast-forward via
-> toggle mode, re-applying a 1x lock at runtime (`setFloat`) only when the MethodHandles are
-> unavailable.
->
-> **Built (Phase 7b, 2026-09-02).** `data/config/settings.json` no longer carries the override at
-> all; `coop.time.CoopFastForwardLock` forces toggle mode + `campaignSpeedupMult=2` on both roles
-> for the life of a session, mirrors the host's `CampaignState.fastForward` field onto the guest from
-> `CoopTimeLock.apply`, and restores the player's own toggle preference when the session ends. The
-> `setInFastAdvance(...)` mirror described in the last bullet below is **gone** — it moved nothing
-> but a cosmetic flag. The runtime 1x lock survives only as the degrade path (handles fail to
-> resolve, or `-Dcoop.ff.disable=true`).
->
-> Two caveats on the forced toggle flag (it is a static on `StarfarerSettings`, process-wide, set
-> false by the class initializer): (1) the restore only runs from the pump's session-end branch, so
-> leaving the campaign mid-session (exit to menu, load another save) leaves toggle mode on until the
-> next coop session ends or the game restarts — harmless in play, hold-Shift simply acts as a tap
-> toggle; (2) if the player opens the vanilla settings menu *during* a session and applies, vanilla
-> writes the current (forced-true) value to its settings file, and the mod cannot tell. Neither is
-> worth a fix in v1; noted so a "my Shift became a toggle" report is recognised.
->
-> **Consequence for the NPC handoff margin (2026-09-04).** `CoopNpcThreatWatcher.handoffMargin`
-> takes a campaign speed multiplier, read per scan off `CampaignUIAPI.isFastForward()`: at
-> `CoopFastForwardLock.SESSION_MULT` a chaser covers that multiple of the distance inside the same
-> RTT budget, so a margin sized for 1x fired the pre-contact handoff after contact. The multiplier is
-> clamped at 1, so it can only widen the band. The `p95 <= 0` case (a loopback link) still returns
-> the flat `CONTACT_MARGIN_SU` and is deliberately not scaled: that floor covers measurement noise,
-> not travel.
+Two caveats on the forced toggle flag, which is process-wide and set false by the class initializer:
 
-Because hold-mode fast-forward cannot be mirrored or blocked via public API, the v1 coop session was
-locked to 1x instead:
+1. The restore runs from the pump's per-frame `syncFastForwardLock` on the first campaign frame with the session inactive, so it needs the pump to tick after the session ends. Leaving the campaign mid-session (exit to menu, load another save) leaves toggle mode on until the next coop session ends or the game restarts. Hold-Shift then acts as a tap toggle. Harmless; recognise a "my Shift became a toggle" report.
+2. If the player opens the vanilla settings menu during a session and applies, vanilla writes the forced-true value to its settings file, and the mod cannot tell.
 
-- `data/config/settings.json` sets `"campaignSpeedupMult":1` (engine default is 2). Hold-Shift then
-  advances at 1x for any client running the mod, so no client can fast-forward and there is nothing
-  to mirror. Verified: with the override, `clockTs` stays at the 1x delta even while
-  `CampaignUIAPI.isFastForward()` reports true. (Side effect: fast-forward is also disabled in solo
-  games while the coop mod is enabled.)
-- `CoopTimeLock.capture()` still reads `CampaignUIAPI.isFastForward()` and `apply()` still calls
-  `setInFastAdvance(...)` to keep the guest's flag consistent with the host (animation/UI only); the
-  1x lock - not these calls - is what enforces equal time rate.
+`CoopNpcThreatWatcher.handoffMargin` takes the campaign speed multiplier (read per scan off `CampaignUIAPI.isFastForward()`, clamped at 1 so it can only widen the band): at 2x a chaser covers twice the distance inside the same RTT budget, and a margin sized for 1x fired the pre-contact handoff after contact. The `p95 <= 0` loopback case keeps the flat `CONTACT_MARGIN_SU`, which covers measurement noise, not travel.
 
-### Connect-time clock alignment
+### The campaign clock
 
-> **⚠️ SUPERSEDED IN PART (2026-06-10, see plan Phase 7c).** The "no public clock-setter" claim
-> below is wrong on 0.98a-RC8: `com.fs.starfarer.campaign.CampaignClock` is `DoNotObfuscate`, its
-> source of truth is a `private transient GregorianCalendar cal` exposed by a **public `getCal()`**
-> (so the clock is writable via plain `cal.setTimeInMillis(...)`), with the cached
-> `private long timestamp` field re-syncable via `MethodHandles` (javap dump:
-> `K:\Starsector\tmp_ff_analysis\CampaignClock.javap.txt`). Also note `advance(float)` int-truncates
-> calendar-seconds per frame, so clocks drift structurally across machines even at shared 1x.
-> Phase 7c builds a guest-side drift reconciler on this basis (bounded monotonic slew + forward-only
-> snaps). The host-pause-hold during connect described below REMAINS correct and primary —
-> prevention still beats correction for the connect gap.
->
-> **Built 2026-09-02 (`coop.time.CoopClockReconciler`).** `getCal()` is on the public
-> `CampaignClockAPI` (javap of `starfarer.api.jar`), so the only handle the reconciler needs is a
-> `MethodHandles` setter for the private `long timestamp` cache; both are written together, `cal`
-> first, because `cal` is `transient` and `timestamp` is the only persisted representation. The
-> reconciler is guest-only and corrects accumulated *in-session* drift; it does not close a
-> connect-time gap and does not attempt late-join catch-up, so nothing below is retired. Writing the
-> clock also cannot move an on-screen orbit position: every orbit class integrates a private
-> `currAngle` from the frame dt and never reads the clock's absolute value; the 1 Hz orbit snap still
-> owns that. Falls back to the pre-7c behaviour (uncorrected drift, one logged warning) on any handle
-> failure or with `-Dcoop.clock.disable=true`.
+`CampaignClockAPI.getCal()` is public and returns the `private transient GregorianCalendar cal` that `com.fs.starfarer.campaign.CampaignClock` (`DoNotObfuscate`) uses as its source of truth, so the clock is writable with `cal.setTimeInMillis(...)`. The cached `private long timestamp` is the only persisted representation and needs a `MethodHandles` setter; both are written together, `cal` first (javap dump: `K:\Starsector\tmp_ff_analysis\CampaignClock.javap.txt`). `createClock(long)` makes a detached clock that cannot be installed, and `SectorAPI` has no `setClock`.
 
-There is **no public clock-setter on the API surface** (`CampaignClockAPI` has no `setTimestamp`;
-`SectorAPI` has no `setClock`; `createClock(long)` makes a detached clock that cannot be installed),
-and fast-advance cannot be driven, so a guest that starts behind the host **cannot be made to catch
-up** *via API-only means*. If the host
-runs unpaused during the multi-second connect/handshake/seed-lock, the guest starts several campaign
-days behind permanently.
+`CampaignClock.advance(float)` int-truncates calendar-seconds per frame, so two clocks drift apart structurally even at a shared rate. `coop.time.CoopClockReconciler` (guest-only) corrects accumulated in-session drift with a bounded monotonic slew and forward-only snaps; `-Dcoop.clock.disable=true` or any handle failure falls back to uncorrected drift with one logged warning. Writing the clock does not move an on-screen orbit: every orbit class integrates a private `currAngle` from the frame dt and never reads the clock's absolute value. The 1 Hz orbit snap owns that.
 
-Fix: the host **holds the campaign paused** (`CoopNetPump.maybeHoldHostPausedUntilSessionReady`) from
-the moment it starts hosting until the session is active (`handshakeValidated && seedLong != null`).
-No time passes during connection, so the guest starts aligned; afterwards the host's normal
-pause/unpause mirrors to the guest (residual offset = network latency, sub-second). Prevent the gap
-rather than close it.
+The reconciler does not close the connect-time gap and does not do late-join catch-up. That gap is prevented instead: `CoopNetPump.maybeHoldPausedUntilSessionReady()` holds the local clock paused on both roles from the moment the client takes a coop role until the session is playable (peer connected, handshake validated, seed lock done), evaluated every frame with no timeout, so no time passes during connect, handshake and seed lock. The guest skips the hold while its own interaction dialog is open (forcing `setPaused` under a dialog freezes the trade-tab exit). Afterwards the host's pause state mirrors to the guest (residual offset = network latency). `setPaused`/`isPaused` is read by the engine every frame, so the guest pause lock is a real lever.
 
-Pause itself is a real lever: `setPaused`/`isPaused` is read by the engine every frame, so the guest
-pause lock works fully.
-
-## Title Screen And New Game Dialog (2026-09-02)
+## Title screen, new game, rejoin
 
 ### The "New Game" button cannot be renamed
 
-The label is a string constant inside the obfuscated title-screen class (`com.fs.starfarer.title.C`). It is not in `data/strings`, not in `settings.json`, and the title screen is built before `onApplicationLoad` returns, so no mod hook can reach it. A guest launch therefore still starts with "New Game". The coop cue lives on the new-game dialog's Continue option instead (`coop.newgame.CoopNewGameDialogPlugin`, registered through the `newGameDialogPlugin` key the mod's `settings.json` already owns for procgen).
+The label is a string constant inside the obfuscated title-screen class (`com.fs.starfarer.title.C`). It is not in `data/strings` or `settings.json`, and the title screen is built before `onApplicationLoad` returns, so no mod hook reaches it. The coop cue lives on the new-game dialog's Continue option instead (`coop.newgame.CoopNewGameDialogPlugin`, registered through the `newGameDialogPlugin` key the mod's `settings.json` already owns for procgen).
 
 ### The new-game options panel is one atomic widget
 
-`VisualPanelAPI.showNewGameOptionsPanel(data)` is the only entry point for name, portrait, gender, seed field, sector size and star age. There is no per-field enable/disable, and the panel writes seed, `sectorSize` and `sectorAge` back onto `CharacterCreationData` whenever its state changes. The only way to hold coop values is to overwrite them after the panel: the plugin pins on `init`, on every `advance` frame, and once more on Continue. Procgen reads the data object last, so the last write wins.
+`VisualPanelAPI.showNewGameOptionsPanel(data)` is the only entry point for name, portrait, gender, seed field, sector size and star age. There is no per-field enable/disable, and the panel writes seed, `sectorSize` and `sectorAge` back onto `CharacterCreationData` whenever its state changes. The plugin pins the coop values on `init`, on every `advance` frame, and once more on Continue; procgen reads the data object last, so the last write wins.
 
 ### Do not re-show the text panel next to the options panel
 
-`NewGameDialogPluginImpl.init` ends with `dialog.hideTextPanel()`. Calling `showTextPanel()` after it reserves the left column for the text panel, which pushes the options panel to the right of center, and the added paragraph still does not render. Tried and reverted the same day.
+`NewGameDialogPluginImpl.init` ends with `dialog.hideTextPanel()`. Calling `showTextPanel()` after it reserves the left column, pushes the options panel right of center, and the added paragraph still does not render. Tried and reverted 2026-09-02.
 
 ### Player-faction fleet names carry the faction article
 
-Vanilla renders every fleet as `<faction display name with article> <fleet name>`, and `data/world/factions/player.faction` sets `displayNameWithArticle` to `Your`. A player-faction fleet named `Alice` therefore shows as "Your Alice"; once colonies name the faction it becomes "<Faction> Alice". The partner's mirror fleet is named `partner <Name>` so both prefixes read as a sentence. Any future player-faction fleet the mod names needs a noun phrase, not a bare name.
+Vanilla renders every fleet as `<faction display name with article> <fleet name>`, and `data/world/factions/player.faction` sets `displayNameWithArticle` to `Your`. A player-faction fleet named `Alice` shows as "Your Alice"; once colonies name the faction it becomes "<Faction> Alice". The partner's mirror fleet is named `partner <Name>` so both prefixes read as a sentence. Any future player-faction fleet the mod names needs a noun phrase, not a bare name.
 
 ### Guest rejoin is by loading the coordinated autosave
 
-A guest that quit mid-session rejoins by loading the save that Phase 16's coordinated autosave wrote, whose stored campaign id matches the host's. A New Game on the same seed is rejected at seed lock ("this campaign is already in flight and this guest campaign is brand new") and only `launch-guest.ps1 -AdoptCampaign` (`-Dcoop.adoptCampaignId=true`) forces it through, at the cost of the guest's progress. To find the right save, grep the host campaign id from the reject line across `saves/save_*/campaign.xml`.
+A guest that quit mid-session rejoins by loading the save that the Phase 16 coordinated autosave wrote, whose stored campaign id matches the host's. A New Game on the same seed is rejected at seed lock ("this campaign is already in flight and this guest campaign is brand new"); only `launch-guest.ps1 -AdoptCampaign` (`-Dcoop.adoptCampaignId=true`) forces it through, at the cost of the guest's progress.
 
-## Regression Tests
+Which save folder holds which campaign is not derivable from the engine's slot list: folders are named `save_<character>_<random>` and `descriptor.xml` carries no campaign id. `CoopSaveIndex` writes one row per save to `saves/common/coop_saves.json.data` from `afterGameSave`, keyed by the sector-persistent `coop.campaignId`, and the launcher reads it. Two engine facts behind it: `SectorAPI` has no `getSaveDirName()` (it is on `CampaignEngine`, `DoNotObfuscate`, reached through `MethodHandles.privateLookupIn`), and the engine swaps `saveDirName` to a fresh folder for the duration of an autosave or save-as, restoring it after the routine returns, so the value has to be read inside the hook every time and never cached. When the handle cannot be resolved the row is written without a folder name and the launcher falls back to matching `characterName` plus `gameDateTimestamp` against each `descriptor.xml`. Manual fallback: grep the host campaign id from the reject line across `saves/save_*/campaign.xml`.
 
-Keep these tests aligned with the rules above:
+## Runtime randomness: accepted divergences
 
-- `coop.net.CoopNetServiceSandboxCompatibilityTest`
-- `coop.net.CoopNetServiceTest`
-- `coop.net.CoopNetPumpInstallerTest`
-
-Before declaring runtime networking safe, run:
-
-```powershell
-powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"
-```
-
-Then deploy to both test clients and verify PING/PONG in both logs.
-
-## Phase 13 — Accepted Runtime Divergences
-
-Runtime randomness cannot be fixed by seeding or forking an RNG. A shared seed only guarantees identical draw sequences while both clients execute the same code in lockstep, and that lockstep breaks the moment the campaign runs: the guest sim is suppressed, frame timing differs between clients, and call order diverges after the first runtime draw. The bar-offer experiment proved this empirically — offers diverged despite a synced seed (memory `bar-mission-seed-sync`). Every runtime-random site gets one of three treatments: replicate the outcome, suppress the generator, or accept the divergence. This section covers the accepted cases, plus one item (sensor ghosts) where suppression itself is the permanent answer rather than a step toward replication.
+A shared seed only guarantees identical draw sequences while both clients execute the same code in lockstep, and lockstep ends the moment the campaign runs: the guest sim is suppressed, frame timing differs, and call order diverges after the first runtime draw. Every runtime-random site gets one of three treatments: replicate the outcome, suppress the generator, or accept the divergence. The accepted cases follow. The ownership argument behind most of them: own fleets are owner-authoritative and NPC mirrors are position-forced echoes, so an effect that only touches the fleet it hits never touches shared state.
 
 ### Hyperspace storm cells
 
-`HyperspaceTerrainPlugin` + `HyperspaceAutomaton`: cell evolution is a deterministic automaton, but generation reseeds use `new Random()` (`HyperspaceAutomaton.java:150`) and strike timing/damage use `Math.random()` (`HyperspaceTerrainPlugin.java:1472,1485`). Not suppressible — it is a terrain plugin, not a script, so the suppressor has no hook into it.
+`HyperspaceTerrainPlugin` + `HyperspaceAutomaton`: cell evolution is a deterministic automaton, but generation reseeds use `new Random()` (`HyperspaceAutomaton.java:150`) and strike timing and damage use `Math.random()` (`HyperspaceTerrainPlugin.java:1472,1485`). It is a terrain plugin, not a script, so the script suppressor has no hook into it. Each player sees their own weather, and a strike only hits the fleet inside its cell. Not purely cosmetic: a strike grants a 1.25 s burn burst (`HyperStormBoost`) and CR damage, so two fleets travelling together get different boosts and hits.
 
-Accepted: a storm strike only hits the fleet inside its cell. Own fleets are owner-authoritative and NPC mirrors are position-forced echoes, so a strike never touches shared state. Each player just sees their own weather.
+Planned fix (Phase 26 milestone 4): the plugin is registered by class name in `data/campaign/terrain.json`, `auto`/`activeCells`/`tiles` are `protected`, and `advance`/`readResolve` are overridable, so a mod-side subclass can replace it without a classpath fork. The committed generation (`cells`) changes only at the 1.5 to 2.5 day interval boundary and already has a deflate codec (`encodeTiles`), so it replicates as one capture per generation. `CellStateTracker` instances exist only within 10000 su of the local player and take their durations from `Math.random()` at creation, so they get keyed off `(generation, i, j)` with elapsed catch-up rather than shipped.
 
-Correction and deferred fix (2026-09-05, Phase 26 milestone 4, open decision): "not suppressible" is true of the script suppressor only. The plugin is registered by class name in `data/campaign/terrain.json`, `auto`/`activeCells`/`tiles` are `protected`, and `advance`/`readResolve` are overridable, so a mod-side subclass can take its place without a classpath fork. The committed generation (`cells`) only changes at the 1.5-2.5 day interval boundary and already has a deflate codec (`encodeTiles`), so it replicates as a one-shot capture per generation, like a slipstream polyline. Trackers (`CellStateTracker`) are per-client by construction: they exist only within ±10000 su of the local player and take their durations from `Math.random()` at creation, so they are keyed off `(generation, i, j)` with an elapsed catch-up instead of being shipped. Strike timing and damage stay local per fleet. Also worth knowing for the "cosmetic" claim: a storm strike grants a 1.25 s burn burst (`HyperStormBoost`) and CR damage, so two fleets travelling together do get different boosts and hits today.
+### Star-corona and pulsar flares
 
-### Star-corona / pulsar flares
-
-`FlareManager`, `new Random()` at line ~307. Same ownership argument as storm cells — a flare only affects the fleet it hits, no shared state involved. Accepted.
-
-### Officer pools at markets — RESOLVED by Phase 12c gap 2d
-
-Was accepted here as "each player hires from their own pool". Now replicated: the host's pool rides the `MARKET_SNAPSHOT` as one stock line per person and the guest strips its own pool and rebuilds the host's through `OfficerManagerEvent.addAvailable`/`addAvailableAdmin`. One roll still diverges before the snapshot lands; see "Mercenary level rolled off `Misc.random`" below.
-
-### Smuggling scans and patrol hassles of the local player
-
-Per-player by design: local dialog interactions against a player's own cargo and rep, with no shared state touched. Accepted.
-
-**Widened by Phase 32 (2026-09-05), same reasoning.** The black market and the military submarket are shared now, but everything a trade *causes* still runs only on the engine that made the trade: smuggling suspicion, the odds a patrol scans you, learning a blueprint from a sale, and the price impact of a large trade. Two players standing at the same black market can read different suspicion strings. The cargo moves; the consequences do not.
-
-Bar *offers* used to be listed here on the same reasoning. They are not accepted any more; Phase 12c build task C replicates the pool instead of trying to reseed it. The seeding half of that old entry stands and is why the pool had to be replicated: offer selection runs through a `WeightedRandomPicker` with a null `Random`, which falls back to `Math.random()`, so equal `BarEventManager.seed` values never produced equal offers (memory `bar-mission-seed-sync`). What the seed does control is the shown subset, and that is now synced too. See "Phase 12c — Bar Pool" below for what still diverges.
+`FlareManager`, `new Random()` near line 307. A flare only affects the fleet it hits. Accepted.
 
 ### Slipstream networks
 
-`SlipstreamManager.random` (~`SlipstreamManager.java:442`) is `new Random()` — unseeded wall-clock entropy, minted per client when the manager is constructed and serialized into each save. The `Misc.random` fork does not cover it: `random = Misc.random` only happens under `DebugFlags.SLIPSTREAM_DEBUG` (~line 460). Monthly layout draws (config pick, `addStream` placement, month-6/12 despawn timing) fire from the `interval.intervalElapsed()` branch of `advance()`, and the interval itself has a random phase (`IntervalUtil(1f, 2f)`), so the number and timing of draws differ per client even from identical RNG state.
+`SlipstreamManager.random` (`SlipstreamManager.java:442`) is `new Random()`, minted per client when the manager is constructed and serialized into each save; `random = Misc.random` happens only under `DebugFlags.SLIPSTREAM_DEBUG`. Monthly layout draws fire from an `IntervalUtil(1f, 2f)` with a random phase, so the number and timing of draws differ per client even from identical RNG state. A per-month-reseed fork was rejected: outcomes would still depend on per-client `addStream` call counts, and removing that dependence means restructuring gameplay logic, which the fork rules forbid.
 
-No fork closes this gap. Per the gen-time-only principle, a per-month-reseed fork (`CoopRandom.of("Slipstream", cycle, month)`) was considered and rejected: outcomes would still depend on per-client `addStream` call counts and days, and removing that dependence means restructuring gameplay logic, which the fork rules forbid. Accepted for v1: fleets stay owner-authoritative (Phase 8/9 mirroring), so positions never desync — players just see different slipstream maps (one fleet can appear to burn impossibly fast through empty hyperspace) and get different travel opportunities.
-
-Deferred fix, Phase 26 milestone 1: suppress the guest's `SlipstreamManager` via the same `removeScript`/`addScript`-at-`onGameLoad` mechanism used for the base managers, and replicate the host's finished stream segment polylines. Not the placement params — the builder itself consumes RNG, so RNG alignment is not attempted.
+In play: fleet positions never desync (fleets are owner-authoritative), but players see different slipstream maps, one fleet can appear to burn impossibly fast through empty hyperspace, and travel opportunities differ. Planned fix (Phase 26 milestone 1): suppress the guest's `SlipstreamManager` through the same `removeScript`/`addScript`-at-`onGameLoad` mechanism the base managers use and replicate the host's finished stream polylines, not the placement parameters.
 
 ### Abyss partial parity
 
-EP placement comes from each client's own unseeded `HyperspaceAbyssPluginImpl.random` (~line 59), so the encounter-point sets differ per client by construction. The `AbyssalRogueStellarObjectEPEC` fork makes generated systems deterministic per encounter-point id once an EP exists, but placement itself is not forkable. With the guest's `EncounterManager` suppressed (unseeded `new Random()`, `EncounterManager.java:66`), abyssal temporary star systems exist host-side only. Guests can travel the abyss, but deep abyssal content — rogue stellar objects, lights, Threat encounters — is host-experienced only.
+Encounter-point placement comes from each client's own unseeded `HyperspaceAbyssPluginImpl.random` (line 59), so the EP sets differ by construction. The `AbyssalRogueStellarObjectEPEC` fork makes generated systems deterministic per encounter-point id once an EP exists, but placement is not forkable. With the guest's `EncounterManager` suppressed (unseeded `new Random()`, `EncounterManager.java:66`), abyssal temporary star systems exist host-side only: guests can travel the abyss, but rogue stellar objects, lights and Threat encounters are host-experienced. Planned fix (Phase 26 milestone 2): replicate each encounter's outcome and let the forked EPEC regenerate identical content guest-side.
 
-Full fix, Phase 26 milestone 2: replicate each encounter's outcome (EPs are transient per-player probe points, not shared entities) and let the forked EPEC regenerate identical content guest-side; the fork was built cheap enough to support this.
+### Sensor ghosts are suppressed, not left to diverge
 
-### Sensor ghosts — suppressed, not accepted
+`SensorGhostManager` seeds from `new Random(Misc.genRandomSeed())` (`SensorGhostManager.java:79`). Several ghost types spawn real encounters or fleets (EncounterTrickster, ShipGhost) or touch story state (Ziggurat and guide ghosts), so an independent guest-side roll risks story-state or NPC-authority conflicts. The manager is removed guest-side and the suppressor nulls the cached sector-memory handle. The guest never sees a ghost, host-originated or otherwise.
 
-`SensorGhostManager` seeds from `new Random(Misc.genRandomSeed())` (`SensorGhostManager.java:79`). Unlike the items above, this one is not left to diverge — it is suppressed guest-side, so hyperspace sensor ghosts do not spawn on the guest at all. Several ghost types spawn real encounters or fleets (EncounterTrickster, ShipGhost) or touch story state (Ziggurat/guide ghosts), so an independent guest-side roll risks story-state or NPC-authority conflicts, not just a visual mismatch. The suppressor nulls the cached sector-memory handle after removal. The loss is cosmetic only: the guest never sees ghosts, host or otherwise.
+### Trade consequences run only on the engine that made the trade
 
-## Gate Scanning and Stable-Location Construction: Accepted Residues
+Smuggling suspicion, the odds a patrol scans you, learning a blueprint from a sale, and the price impact of a large trade all run on the trading player's engine against that player's cargo and rep. Since Phase 32 the black market and military submarket contents are shared, but the consequences are not: two players at the same black market can read different suspicion strings. The cargo moves; the consequences do not.
 
-Both were guest-limiting gaps rather than engine limits, and both are closed. What is left is small and worth knowing.
-
-**Gate scanning.** The "Scan the Gate" option is gated by rules.csv on `$global.canScanGates` (`gateOpenDialogCanScan1`, `gateScanOpt`), a sector-memory flag only the host's Galatia questline ever sets. It now rides the `GATE_ACTIVATED` payload alongside `$gatesActive` and `$playerCanUseGates`, and the poll that produces that payload runs on both roles, so a guest can scan and both players get the gate.
-
-- Because the three globals repeat on every gate record, a flip in any of them re-reports **every** gate in the sector on the next poll. That is a dozen-odd deltas, a handful of times per campaign, and it is what makes each packet self-contained.
-- `$numGatesScanned` is derived rather than synced: whichever client applies a peer's scan calls vanilla's own `GateEntityPlugin.addGateScanned()`. Both clients therefore count the gates they know to be scanned, which converges — but a client that never hears about a scan (a gate scanned while it was disconnected and never re-reported) counts one low, which only matters as a rules condition inside the Galatia questline.
-- A guest that **rejoins from a save** where gates were already scanned reports each of them upward once on its seeding poll. The host applies them as no-ops. Harmless, and cheaper than tracking which flips the guest learned from the host in a previous session.
-
-**Stable-location construction.** `Objectives.build` creates the makeshift relay/buoy/array with `addCustomEntity(null, ...)`, so the engine mints its id per client; the same is true of the stable location `Objectives.salvage` puts back on disassembly. Both now ride a `SPAWN` world-delta carrying a coop-assigned id, the spec, the faction, the orbit, and the id of the stable location the build consumed.
-
-- The consumed stable location is removed **twice** on the receiving client — once by the `SPAWN` apply and once by the `CONSUME` the originator's watcher emits for it — and the peer's own removal then reports a `CONSUME` back. All three are idempotent and the ledger absorbs them; suppressing the redundancy would mean tracking a per-entity exception through two watchers to save one packet.
-- The orbit rides the wire rather than being copied off the consumed stable location, so the two deltas are order-independent. If the orbit focus does not resolve on the peer (it is a gen-time planet or star, so it should), the entity materializes at the fixed position that rode along and does not orbit.
-- Only the entity is replicated, not the interaction that produced it. Build costs come out of the acting player's own cargo, and the reputation hit for disassembling somebody else's objective (`Objectives.salvage`) is charged to the acting client alone.
-- The Phase 6b world fingerprint covers markets only, so neither half of this can move it.
-
-## Phase 12c — Guest Distress Call Retains the Mirror Fleet in the Host Save
-
-When the guest activates `distress_call`, the host runs the vanilla plugin on the guest's mirror fleet (`CoopAbilityEffectApplier`). `DistressCallAbility.activate()` immediately calls `addResponseScript`, which does **not** create the route — it calls `Global.getSector().addScript(new DelayedActionScript(delayDays) { ... })` (`impl/campaign/abilities/DistressCallAbility.java:194,220`). That anonymous script holds an implicit reference to `DistressCallAbility.this`, which holds the mirror fleet through `getFleet()`. Ten to twenty in-game days later the script fires and calls `RouteManager.getInstance().addRoute("dca_distress_call", ..., DistressCallAbility.this, data)`, so a `RouteData` then holds the same plugin as its `RouteFleetSpawner`. Both are serialized into the host save, and the mirror fleet is reachable from them for as long as they live.
-
-Targeted cleanup was considered and rejected:
-
-- The route half is cheap to clean — `RouteManager.getRoutesForSource("dca_distress_call")` plus `RouteData.getSpawner()` identity plus `removeRoute` are all public (`impl/campaign/fleets/RouteManager.java:387,515,557`; the coop fork keeps that surface unchanged) — but it is also the half that usually does not exist yet. The mirror is torn down at session end, long before the 10-20 day delay elapses, so at cleanup time there is nothing in the route list to remove.
-- The script half is the actual retention and is not removable. `SectorAPI.getScripts()` returns the list, but the only way to tell one guest-spawned `DelayedActionScript` from the host's own is the anonymous class's captured outer reference, and reading it needs `java.lang.reflect` — blocked by the script sandbox. Matching on the synthetic class name (`DistressCallAbility$2`) would cancel the host player's pending distress responses too.
-
-Accepted. The retained reference is inert: neither `DelayedActionScript.doAction` nor `DistressCallAbility.spawnFleet` ever calls `getFleet()` — both read `Global.getSector().getPlayerFleet()` and the route's own `custom` payload (`DistressCallAbility.java:203,324`), so a dead mirror is never dereferenced. The cost is a dead `CampaignFleetAPI` kept in the host save graph until the script fires and its route expires — days of game time, then it is collected.
-
-Second-order consequence, also accepted: because `spawnFleet` positions the response fleet relative to `getPlayerFleet()`, a guest-triggered distress response arrives near the **host**, not the guest. The jump points it routes through are still the guest's (they come from the `DistressResponseData` captured at activation, when the mirror was the fleet in system), so the responder does reach the right system; only the hyperspace approach is anchored wrong.
-
-### Guest interdiction pulse: radius and duration read an unpinned stat — RESOLVED by the Phase 20 red-team pass (C3)
-
-**Correction 2026-09-05:** the first paragraph below is stale. `CoopSensorSync.Profile` has carried the three `sensorRangeMod` aggregates (flat, percent, mult) since red-team finding C3 (`04a8676`), and `applySensorRange` pins them on the mirror every frame next to the sensor strength, so `InterdictionPulseAbility.getRange`/`getInterdictSeconds` now read the guest's real values on the host. What remains accepted is the second and third paragraph: the standing hit is charged by the guest's own pulse at charge-up time, and only against fleets the guest's client knows about.
-
-
-`InterdictionPulseAbility.getRange` and `getInterdictSeconds` both read `fleet.getSensorRangeMod().computeEffective(fleet.getSensorStrength())` (`InterdictionPulseAbility.java:123,309`). Phase 14b's `CoopSensorSync` pins the mirror's *sensor strength* and its `detectedRangeMod` totals, but not `sensorRangeMod`, so a guest whose skills or hullmods modify sensor range gets a pulse on the host that is slightly the wrong size and slightly the wrong strength against each victim. Accepted for v1: the error is a percentage on a 500+ su radius, and the pulse is not a state the two clients have to agree on — the host's result is the only one that exists.
-
-The standing hit is charged by the **guest's own** vanilla pulse, not by the host. On the guest the pulsing fleet *is* the player fleet, so `InterdictionPulseAbility.applyEffect` runs its `INTERDICTED` adjustment locally at pulse time, and `onPlayerReputationChange` forwards it to the host as a `GUEST_REP_DELTA`. The host used to re-apply the hit against the mirror as well (`CoopAbilityEffectApplier.applyInterdictionRepHit`), which charged the canonical standing twice per victim and then rebroadcast the doubled value; that code is gone.
-
-The residue is a narrow **undercharge**: the guest's own pulse only sees the fleets the guest's client knows about, so a fleet inside the host's pulse radius that the guest never mirrored costs the guest nothing. The victim set is also gated by the guest's transponder and detection state rather than the host's. Accepted — undercharging by a fleet the guest could not see beats double-charging every fleet it could.
-
-## Phase 12c — Market Capture Fidelity: Accepted Gaps
-
-Gaps 2a through 2e closed most of what the market snapshot used to drop. Two things it still does not carry; the third, module loadouts, was closed by Phase 32.
-
-### Multi-module ships arrive with pristine modules — RESOLVED by Phase 32 (2026-09-05)
-
-Was accepted here because `CoopShipDetail` captured one variant: a damaged Prometheus MkII listing reconstructed with a battered parent and clean modules. Phase 32 needed the same blob for shared storage, where a parked ship losing its modules is a real loss rather than a wrong price, so the codec now recurses `getModuleSlots()`/`setModuleVariant` to a depth of four and carries weapon groups, current hull fraction and the variant display name with it.
-
-Two residues, both in the Phase 32 section below: only a module hanging directly off the member carries its hull damage, and nesting past four levels is refused rather than walked.
-
-### Mercenary level rolled off `Misc.random` before the snapshot
-
-`OfficerManagerEvent.createOfficer` draws a mercenary's level with `Misc.random.nextInt(maxLevel + 1 - minLevel)` and its officer-vs-merc level bump with `(float) Math.random() > 0.75f` (`impl/campaign/events/OfficerManagerEvent.java:378,388`). Both clients roll independently, so before a `MARKET_SNAPSHOT` reaches the guest its bar holds different captains at different levels than the host's.
-
-The snapshot overwrites that, so the divergence is only visible in the window between the guest's market screen opening and the host's reply arriving, and only if the guest is looking at the comm directory rather than the trade screen. Not worth a suppressor: `OfficerManagerEvent` also runs the timeout pruning that keeps stale offers from accumulating, so removing it guest-side would need that half reimplemented.
-
-### `OpenMarketPlugin.writeReplace` drops stock older than 30 days on save
-
-`OpenMarketPlugin` clears its ship and weapon stock at serialization time when `okToUpdateShipsAndWeapons()` says the last roll is over 30 days old, so a market's shop contents can change across a save/load with no player action and no event. Host and guest save at different moments with different amounts of accumulated play time, so the two copies of a market neither has docked at recently can drift apart without either client doing anything. *(Mechanism precision, 2026-08-25 bytecode check: `okToUpdateShipsAndWeapons()` reads `sinceLastCargoUpdate`, a frame-dt accumulator on `BaseSubmarketPlugin` — NOT a campaign-clock timestamp — so Phase 7c clock reconciliation does not change this behavior. The clock-adjacent part is the reroll seed, `getMonth() * 170000`, which 7c DOES help by keeping both clients on the same month number.)*
-
-Independent of gap 2e's restock rebroadcast, which only fires on `reportPlayerOpenedMarketAndCargoUpdated`. The converging force is the same one gap 2e relies on: any dock re-runs `updateCargoPrePlayerInteraction` and the host re-broadcasts, so the drift lasts until the next time either player opens that market.
-
-## Phase 12c — Bar Pool: What Is Replicated and What Is Not
-
-The host's `PortsideBarData` pool is captured in order and pushed on change (`MISSION_POOL_SNAPSHOT`, carrying each offer's id, class name, content seed and `shownAt` pin, plus the host's `BarEventManager` seed). The guest rebuilds the replicable part of its own pool from that list and has its `BarEventManager` script registration removed so it rolls nothing of its own. Five things this does not give you.
-
-### Offer numbers scale off the local fleet — user-accepted
-
-The wire carries the seed an offer regenerates from, not the numbers it regenerates into. `DeliveryBarEvent` and its siblings size quantity and payment against the *local* player's cargo capacity and the local market's supply price, inside `regen(market)`, from `seed + market.getId().hashCode()`. Two players therefore see the same offer from the same person for the same commodity with different tonnage and different credits.
-
-Accepted on request rather than by default: pinning the numbers would mean either capturing every derived field per offer type or forking each event class, and both players completing the same offer is the point, not both completing it for the same fee.
-
-### Rumor offers stay locally generated, and can shift the shown subset
-
-`PirateBaseRumorBarEvent` and `LuddicPathBaseBarEvent` hold a live `PirateBaseIntel` / `LuddicPathBaseIntel` reference, and their `shouldRemoveEvent()` reads it. Nothing about that survives the wire, so the capture skips them and the guest keeps making its own from the Phase 13 replicated base intel. Both are `isAlwaysShow()`, so both players do see their local one.
-
-The cost is subset parity. `BarCMD.showOptions` runs `Collections.shuffle(events, random)` over the whole pool, and `shuffle`'s permutation is a function of the list *size* and the random alone. A rumor event sitting at a different index on each client shifts every other offer's post-shuffle position, so the two bars can show different picks out of an identical pool. With no rumor events live, which is the normal early-campaign state, the two pools are element-for-element identical and the picks match.
-
-### Injected offers never expire on the guest
-
-`BarEventManager.advance` is what ages `active` and drops timed-out offers, and it is exactly what the suppressor stops. Injected events are also deliberately kept out of `barEventCreators`, because `advance`'s orphan sweep deletes anything that is in `barEventCreators` but not in `active`; an event the manager has never seen is invisible to that sweep and survives.
-
-So nothing on the guest ever removes an injected offer on a timer. The host's next snapshot does it instead: when an offer expires or is accepted host-side it leaves the host pool, the pool signature changes, and the guest's rebuild drops it. Same for a guest that accepts an offer, which the host's copy will keep offering until its own timer runs out.
-
-### Accepting an offer is not arbitrated at the offer level
-
-`CoopInteractionGate` claims are keyed by entity id, so two players at the same market already serialize on the market entity, bar screen included. There is no seam below that: the engine fires no listener on `BarEventManager.notifyWasInteractedWith`, so a bar acceptance cannot request a `MISSION_CLAIM_REQUEST` without forking the dialog plugin. What the pool does enforce is the host's side of first-come — an offer the host has taken vanishes from its pool and is gone from the guest's next rebuild — and `visibleEntriesFor` keeps any claim recorded through the existing machinery out of the injected set.
-
-### Contacts, contact-board missions and person bounties stay per-player — user-accepted
-
-Only bar events ride the pool. Contact lists, the missions a contact offers through `BaseMissionHub`, and `PersonBountyManager` are untouched, and `PersonBountyManager` is one of the scripts the Phase 9 suppressor removes guest-side, so a guest has no person bounties at all in v1.
-
-## Phase 12c — Survey Levels and Ruins: Three Accepted Leaks
-
-`MarketAPI.SurveyLevel` and the `$ruinsExplored` market-memory flag now replicate on the both-sides skeleton poll, as `WORLD_DELTA(SURVEY)` and `WORLD_DELTA(RUINS_EXPLORED)`. Apply is max-wins on the level's ordinal, so the two clients converge whatever order the deltas land in. What does not replicate is everything *around* the level.
-
-### The remote_survey lockout is per-player, so a system can be swept twice
-
-`RemoteSurveyAbility` latches its once-per-system flag into the star system's own memory (`$core_didRemoteSurveyInSystem`, `abilities/RemoteSurveyAbility.java:21,104`) and `findBestPlanet` refuses to run again while the key is present (line 131). That key is not on the wire, so host and guest each hold their own copy and each can remote-survey the same system once. Two PRELIMINARY sweeps where a solo campaign gets one.
-
-Left that way on purpose. The flag guards a cost the second player would still pay: the ability pins fleetwide max burn to zero while it charges (line 89), and the planet it would pick is already at PRELIMINARY from the first player's sweep, which arrived as a `SURVEY` delta. Replicating the flag buys nothing and takes the ability away from whoever activates second. The acting player also keeps the `RemoteSurveyDataForPlanetIntel` entry the ability mints (line 101); the other player gets the level without the intel entry.
-
-### The survey data goes to whoever ran the survey
-
-Completing a planet survey puts one `survey_data_1` through `survey_data_5` unit in the surveying fleet's cargo, picked by `SurveyPluginImpl.getSurveyDataType` off the planet's conditions and hazard (`impl/campaign/SurveyPluginImpl.java:157-183`). The peer's planet reaches FULL through the delta instead, and a planet at FULL is not offered the survey option again, so the peer never collects a unit of its own.
-
-Same rule as salvage: one player loots, the world state is shared. Not a bug to fix, and the alternative (minting a second commodity stack from a replicated flag) would be duplication of a sellable good.
-
-### A guest's survey mission pays out when the host does the surveying
-
-`SurveyPlanetMissionIntel.advanceMission` polls the target planet every frame and calls `reportPlayerSurveyedPlanet` the moment its market reads FULL (`intel/SurveyPlanetMissionIntel.java:141-143`). It never asks who surveyed it. So a survey mission the guest accepted completes, with payment, when the host's FULL arrives over the wire.
-
-Consistent with the shared world the rest of Phase 12 builds, and the same thing already happens for a mission whose target the host decivilizes or whose objective the host captures. Worth knowing before treating survey contracts as a per-player income stream: two players holding the same contract from different bar offers both get paid for one survey.
-
-### Either player entering a system reveals its planets on both maps
-
-`CoreScript.markSystemAsEntered` bumps every planet in a newly entered system from NONE to SEEN, and the poll replicates SEEN like any other level (deliberately — the system-map display reads the minimum system survey level, and filtering SEEN out would leave the two maps visibly different). The consequence: one player's travels light up planet markers on the partner's map. That is a shared-exploration feature under this mod's model, but it is a visible departure from two solo campaigns and belongs in any "what's different in co-op" player doc (Phase 23).
-
-## Phase 24 — Shared Colonies: Three Accepted Divergences
-
-### The guest's hostile-activity meter runs its own race
-
-`HostileActivityManager` is deliberately *not* on the Phase 9/13 suppressor list — it does not end in `FleetManager`/`RouteManager`/`BountyManager` and it was never added to `KNOWN_SPAWNERS` — so both clients advance their own copy of the colony-crisis event. It is harmless where it counts: everything it spawns reaches the campaign through `RouteManager`, which *is* suppressed guest-side, so the guest's copy produces no fleets. What diverges is the meter itself — event points, stage progress, which factor is loudest — because the two clients' `EconomyUpdateListener` inputs are not identical and the intel is not replicated.
-
-The consequence is that the guest's own hostile-activity intel is not a reliable read on what is actually coming. The mirrored `CoopExpeditionWarningIntel` entry is the authoritative inbound-attack signal on the guest: it is scanned off the host's live intel manager and reconciled as a set. A guest that sees a native hostile-activity entry and a coop warning for the same colony is seeing its own simulation next to the real one; the coop entry is the one with a countdown that matches the fleets on the map.
-
-**RESOLVED 2026-09-05 (`5e342e2`):** the paragraph that stood here argued suppression would cost more than it buys because `HostileActivityEventIntel.get()` is a singleton other systems reach for. Every reader was checked in the pristine source and tolerates null, so `HostileActivityManager` now joins the guest suppression set and the session-start pass ends any `HostileActivityEventIntel` the save holds, removes it and unsets `$hae_ref`. The guest has no meter and no `HOSTILE_ACTIVITY` colony condition; the coop expedition warning is its only inbound-attack signal. The host is untouched.
-
-### Construction progress drifts between the two clients until an industry finishes
-
-`COLONY_MGMT` replicates the construction *queue*, not build progress. That is the right primary channel — vanilla's build button only appends to `market.getConstructionQueue()`, and each engine's own `Market.advance` drains it through `BaseIndustry.buildNextInQueue` — but the two engines start the same build at slightly different moments and then run their own timers, so the progress bars do not match to the day.
-
-Reading the true progress across the wire is not cheaply possible: `Industry.getBuildOrUpgradeProgress()` returns a 0..1 fraction that reads `0` whenever the industry is disrupted (`BaseIndustry.java:491-498`), the absolute-days field needs a `BaseIndustry` cast, and the `buildTime` field it is measured against is not readable at all during an upgrade — `getBuildTime()` returns the *spec* value, not the field.
-
-Accepted, because it self-heals with a bound: the first client to finish reports the industry as finished, and the applier forces the lagging mirror to `finishBuildingOrUpgrading()`. The drift is therefore never larger than the gap between the two starts, and it always resolves at completion. The one visible artifact is that the client that finishes second may see its "construction complete" message a moment early.
-
-### Commodity fulfillment and shortage markers on a player colony can differ between clients
-
-Observed live 2026-09-01: the same shared colony showed different demand-met / deficit markers on the two clients — one side flagging a shortage the other did not.
-
-Nothing about the colony itself is out of sync; the economy around it is. Each engine runs its own `EconomyAPI` and solves supply for every market in the sector on its own iteration schedule, so fulfillment is a *derived* value, not replicated state. Two things guarantee the inputs differ: the two clocks sit a couple of days apart (the clock reconciler in Phase 7c is not built yet), and NPC market stockpiles and production are each engine's own simulation. `COLONY_MGMT` replicates the industries and the queue, Phase 12 replicates market contents on open — neither claims to replicate the sector-wide supply solve that decides which commodity reads as short.
-
-Same root as the income drift seen in that session (host 1456 vs guest 1663 in a month where the two colonies were not yet producing the same thing; the next month matched exactly, drift 0).
-
-Accepted. The host is canonical — its reading is the one to trust when the two disagree. Worth revisiting only if this ever turns into a persistent *stability* divergence rather than a display difference: a shortage that sticks on one side long enough to feed the stability penalty would make the two colonies grow apart, which the industry/queue channel would not catch.
-
-
-## Phase 20 — Transport Hardening: Four Runtime Facts
-
-### The network pump does not run during combat or while a save is written
-
-`CoopNetPump` is an `EveryFrameScript` on the campaign engine. Combat runs on a different screen and
-`saveGame` blocks the thread that would otherwise tick it, so during either one the pump stops
-draining inbound bytes and stops sending. On a fast machine a save is a few seconds; on a slow one
-with a large sector it can pass 15 s, which is exactly the link-death threshold.
-
-This is why link death is declared on *inbound TCP silence* rather than on anything the pump measures
-about its own cadence, and why the rule carries three exemptions: the peer is in a battle
-(`BATTLE_STATUS`, aged out after 30 s of silence so a mid-combat drop cannot leave a phantom), a
-`SAVE_CHECKPOINT` passed within the last 60 s, or this process itself stalled. A fourth case, the
-*peer's* own save, has no natural signal at all: the saving side is the one that goes quiet, and it
-cannot send while it is blocked. Both roles therefore announce a `STALL_NOTICE` from `beforeGameSave`
-and flush it immediately, before the block starts.
-
-The same constraint rules out declaring death from silence in `CoopLinkQuality`, which measures RTT
-and loss: quiet is normal there. All death decisions live in `CoopReconnectCoordinator`.
-
-### A throttled game window runs its clock slow, and looks like the *other* client running fast
-
-Starsector caps per-frame `dt`. A minimized or background window gets far fewer frames, so its
-campaign clock advances slower than wall time, and from the other client's point of view the throttled
-side is behind and it is ahead. During the 2026-09-02 QA matrix the guest read up to 2.5 game-days
-ahead of a minimized host; the Phase 7c reconciler pulled it back to 0.01 game-days once both windows
-were visible again.
-
-This is only reachable when both games run on one PC, which is exactly what a two-instance test
-session does. It is not a defect and there is no fix from inside the mod: the engine will not run a
-window it does not have. Rule for two-windows-one-PC sessions, and it is worth telling testers:
-keep both windows restored and visible.
-
-### The agent bridge serves four clients at a time
-
-`-Dcoop.debug.bridge` opens a socket that accepts up to four connections at once. The fifth is closed
-on connect and the refusal is logged; the four already connected are untouched, because the client
-being served is the one with work in flight.
-
-It used to accept exactly one, which is how a scripted supply drip got `ECONNRESET` once a minute
-through profile (e) of the QA matrix while the MCP server held the line. Each client now carries its
-own framing buffer, request queue and write queue, and the four-commands-per-frame dispatch budget is
-spent one request per client per pass, so the cap on campaign-thread time per frame is unchanged and
-a client sending a burst cannot starve another.
-
-The cap is a real limit, not a formality: every slot costs a 256 KB framing buffer for the life of the
-connection, and all of it — accept, read, dispatch, write — runs on the campaign thread inside
-`advance()`. Four is sized for one MCP server plus a helper or two, which is the load this tooling
-was built for.
-
-### The mod cannot release its UPnP port mapping when the process exits
-
-`CoopPortMapper` releases its lease on the next game load, not at shutdown. There is no engine hook
-for process exit that the sandbox can reach, and a JVM shutdown hook would run on a thread the mod is
-not allowed to build network state on. A mapping therefore outlives a closed game until the next
-launch cleans it up.
-
-Routers with working lease timers expire it on their own within the renewal interval. The case that
-matters is a router that rejects timed leases (`UPnPError 725`): the mod falls back to a permanent
-mapping there, so a crash leaves the port open until the next launch.
-
-### A UPnP response larger than 256 KB is abandoned
-
-`CoopPortMapper` stops reading a gateway's HTTP response at `MAX_RESPONSE_BYTES` (256 KB) and settles
-the exchange as failed rather than growing its buffer. Real device descriptors and SOAP replies are a
-few kilobytes; the cap exists so a gateway that answers with a stream, or a device on the LAN
-pretending to be one, cannot make the mod accumulate unbounded bytes on the campaign thread. A router
-whose descriptor genuinely exceeds it will not be mapped, and the log says which limit was hit.
-
-## Limitations review 2026-09-05 — One New Divergence, One Enforced Rule
-
-### System bounties are posted per engine (planned fix: Phase 34)
-
-`SystemBountyManager` (`CoreLifecyclePluginImpl.java:722`, a `BaseEventManager` sector script) was never in the Phase 13 suppression set: it spawns no fleets, only `SystemBountyIntel` entries, so the "spawner" filter did not catch it. Each engine therefore posts its own system bounties from its own rolls, and `SystemBountyIntel.reportBattleOccurred` pays the local player from the local intel for local kills. The guest is paid by its own game for bounties the host never saw, and sees none of the host's. Accepted until Phase 34 replicates the host's set and suppresses the guest's manager; person bounties (already suppressed, so the guest has none) are the other half of that phase.
-
-### The Galatia Academy chain is unavailable on the guest (enforced 2026-09-05)
-
-Not a divergence but the rule that prevents one. `CoopStoryChainGate` publishes `$coopIsGuest` on sector memory from the `CoopModPlugin.beginGameSession()` prologue (set on a guest launch, unset on host or no-role), and nine vanilla `rules.csv` rows are replaced by id with `!$global.coopIsGuest` appended: `goToTheGABarEventOption`, `goToGA_barEvent`, `gaAddOptionMeetProvost`, `gaIntro2surveyOpen`, `gaDHOhookStart`, `gaDHOhookStartDev`, `gaDHOjustFoundArrayStart`, `hamatsu_PostShipRecoverySpecial`, `gaDevMenuOption`. Everything downstream tests state only those roots can write. Tutorial-only entries are unreachable because the mod forces the tutorial skip. `CoopRulesFileTest` pins the gate on every root and the file's id uniqueness.
-
-## Bug audit 2026-09-04 — Four Accepted Divergences
-
-Found by the bug-hunt campaign recorded in the plan; each was judged not worth the code it would take
-in v1. The full report lives outside the repo at
-`tmp_ff_analysis\bughunt\BUG-REPORT-2026-09-03.md`.
-
-### The guest's `PirateBaseManager` start date restarts on every guest load (fleet-12)
-
-`CoopNpcFleetSuppressor.removeSpawnerScripts` takes `PirateBaseManager` out of `sector.getScripts()`,
-so a guest save no longer carries it. On the next load vanilla's `CoreLifecyclePluginImpl` sees
-`!sector.hasScript(PirateBaseManager.class)` and constructs a fresh one, whose constructor sets
-`start = clock.getTimestamp()` and overwrites the `$core_pirateBaseManager` handle that
-`MANAGER_HANDLES` deliberately preserves as a data holder.
-
-The visible effect is that `PirateBaseManager.getInstance().getDaysSinceStart()` reads ~0 on the guest
-after a reload while the host's reads the real campaign age. It feeds `Tuning.getDaysSinceStart()` and
-a few locally constructed bar missions (`SurplusShipHull` cycles, `CustomProductionContract`), so
-those parameters differ between the two clients and reset again on every subsequent guest load. Fixing
-it means writing a private field on a vanilla manager after construction, on every load, which is more
-surface than the drift is worth.
-
-### An orphan mirror cargo pod can outlive the pod it copies
-
-Mirror pods are created with `setNeverExpire(true)` so the creating client stays the only owner of the
-decay timer. The cost is the other direction: when the original expires while nobody is in that
-location, nothing generates the `WORLD_DELTA(CONSUME)` that would remove the mirror, so the partner
-keeps a pod that no longer exists on the authoritative side and can still loot it. This is the milder
-half of a trade — the alternative, letting each client run its own timer, deleted live pods out from
-under the player who dropped them.
-
-### Ambient fleets can appear on top of a guest in a system the host is not in (forks-2) — RESOLVED 2026-09-05 (`5dece99`)
-
-**Resolution:** the forked `setLocationAndOrders` reads the position back after the AI constructor places the fleet and, when the guest's presence entity is in the same system and the fleet is inside `getMaxSensorRange() + 500` of it, moves it to `minDist + 2000` toward the star (the same numbers `pickLocationNotNearPlayer` uses for the host), unless that point would land within the same distance of the host. Presence null = vanilla. The paragraphs below describe the defect as it was.
-
-
-The `DisposableFleetManager` fork makes `currSpawnLoc` presence-aware so ambient pirate and Pather
-fleets spawn around the guest as well as the host. Vanilla's placement, however, branches on
-`fleet.getContainingLocation() == Global.getSector().getCurrentLocation()`, which on the host-authored
-side is the host's location, and only the host-present branch routes through
-`Misc.pickLocationNotNearPlayer`. In a guest-only system the fleet takes the other branch and is
-dropped at `Misc.getPointAtRadius(target.getLocation(), target.getRadius() + 100f)` with no distance
-check against anyone — which can be the jump point or planet the guest is sitting at.
-
-The result is a hostile fleet materializing next to the guest instead of at a polite distance. The fix
-is a second geometry edit inside a forked vanilla placement path, and the fork subtree is already the
-most expensive thing in the mod to keep in step with an engine update, so v1 accepts the pop-in.
-
-### The colony editor is claimed whole, because no API says which colony it is editing (colony-3)
-
-The colony screen reached from the command tab (`CoreUITabId.OUTPOSTS`) docks nothing and fires no
-market callback, so `CoopInteractionGate` — which keys claims on the entity a dialog opened — had
-nothing to key on, and both players could edit the same colony at once. There is no engine call that
-reports which colony that tab currently shows, and none that closes the core UI, so the claim is taken
-for the synthetic entity id `coop:colony-management`: while either player has the tab open, the other
-sees "Remote player is interacting: colony management" and is bounced to the INTEL tab.
-
-Two consequences to expect in play: the lockout is global, so the second player cannot edit a
-*different* colony either, and the bounce is a tab switch rather than a closed screen.
-
-
-## Phase 32 — Shared Submarkets and Storage: Accepted Divergences
-
-Storage, the black market and the military submarket became host-canonical on 2026-09-05, on the same snapshot-on-open and guest-delta path the open market had used since Phase 12. What follows is what the two engines still do differently, and what a player sees when they hit it.
-
-### One unlock, two monthly fees
-
-Either player's 5000 credits opens a market's storage for both, and after that both engines bill their own monthly storage fee against the same contents. The fee is charged locally by each engine's economy tick, and the alternative, billing one player for a locker both use, was worse. It is the price of one unlock for two players.
+## Markets and the bar
 
 ### Shop listings diverge between opens
 
-Ship and weapon stock on the open, black and military submarkets is rolled from unseeded item RNG on each engine, so the two disagree until someone docks. Snapshot-on-open is the whole convergence mechanism: the host answers the dock with one snapshot per shared submarket and the partner's shelf is replaced with the host's. Between opens they drift again, and the 30-day save-time reroll described under `OpenMarketPlugin.writeReplace` above adds to it. Docking fixes it.
+Ship and weapon stock on the open, black and military submarkets is rolled from unseeded item RNG on each engine. Snapshot-on-open is the whole convergence mechanism: the host answers a dock with one `MARKET_SNAPSHOT` per shared submarket and the partner's shelf is replaced with the host's. Between opens the two drift again.
 
-### The guest holds the host's commission, and none of what it pays
+One extra source of drift: `OpenMarketPlugin.writeReplace` clears ship and weapon stock at serialization time when `okToUpdateShipsAndWeapons()` says the last roll is over 30 days old. That reads `sinceLastCargoUpdate`, a frame-dt accumulator on `BaseSubmarketPlugin`, not a campaign-clock timestamp, so clock reconciliation does not touch it; host and guest save at different moments with different accumulated play time, and a market neither has docked at recently can change across a save/load with no player action. The reroll seed is `getMonth() * 170000`, which reconciliation does keep aligned. Docking fixes both.
 
-The host's commission faction is mirrored to the guest as the `$fcm_faction` memory key, which is the one thing the military submarket reads to decide whether a commission-gated item is buyable. That is the whole of it: the salary, the commission bounties and the `FactionCommissionIntel` entry stay on the host, because instantiating the intel on the guest would run a second salary and a second termination. The guest also cannot sign or resign a commission of its own, and that is enforced rather than accepted: `cmsn_askForCommissionOpt` and `cmsn_resignCommissionOpt` are replaced in `rules.csv` with `!$global.coopIsGuest` appended, the same mechanism that removes the Galatia chain. Resign is gated because the mirrored key otherwise makes vanilla offer the guest the chance to resign the host's commission.
+### Mercenary level is rolled before the snapshot
 
-### A locker too big to send is not sent
+`OfficerManagerEvent.createOfficer` draws a mercenary's level with `Misc.random.nextInt(maxLevel + 1 - minLevel)` and the officer-vs-merc bump with `(float) Math.random() > 0.75f` (`OfficerManagerEvent.java:378,388`). Both clients roll independently. The host's pool rides the `MARKET_SNAPSHOT` as one stock line per person and the guest strips its own pool and rebuilds the host's through `OfficerManagerEvent.addAvailable`/`addAvailableAdmin`, so the divergence is visible only between the guest's market screen opening and the host's reply arriving, and only in the comm directory. Not worth a suppressor: `OfficerManagerEvent` also runs the timeout pruning that keeps stale offers from accumulating.
 
-There is no chunking on `MARKET_SNAPSHOT`. A submarket whose encoded stock passes the 1 MB frame cap is skipped, and the host player gets a feed line naming the submarket, the market and the size in KB; the partner keeps whatever it had until the locker shrinks. A warning fires at 256 KB, well before the cap. It takes thousands of hulls to get there, and the remedy is to take ships out of that locker.
+### Bar pool: what is replicated and what is not
 
-### A stored hull the host cannot capture in full is listed degraded
+Offer selection runs through a `WeightedRandomPicker` with a null `Random`, which falls back to `Math.random()`, so equal `BarEventManager.seed` values never produce equal offers. The host's `PortsideBarData` pool is therefore captured in order and pushed on change (`MISSION_POOL_SNAPSHOT`: each offer's id, class name, content seed and `shownAt` pin, plus the host's `BarEventManager` seed). The guest rebuilds the replicable part of its own pool from that list and has its `BarEventManager` script registration removed. Five things this does not give you:
 
-The partner sees a pristine hull of the right variant with the right CR and hull damage; the D-mods, s-mods, weapons and weapon groups are missing on their side only. The alternative was omitting the hull from the listing, which reads to the other player as a ship that was stolen. The log line is `Coop stored hull member=... could not be captured in full`, and the depositor's own copy is untouched.
+**Offer numbers scale off the local fleet (user-accepted).** The wire carries the seed an offer regenerates from, not the numbers. `DeliveryBarEvent` and its siblings size quantity and payment against the local player's cargo capacity and the local market's supply price inside `regen(market)`, so two players see the same offer from the same person for the same commodity with different tonnage and credits. Pinning the numbers would mean capturing every derived field per offer type or forking each event class.
 
-### A stored ship the receiver cannot rebuild comes back as its base variant
+**Rumor offers stay locally generated and can shift the shown subset.** `PirateBaseRumorBarEvent` and `LuddicPathBaseBarEvent` hold a live `PirateBaseIntel`/`LuddicPathBaseIntel` reference that `shouldRemoveEvent()` reads, so the capture skips them and the guest makes its own from the replicated base intel. Both are `isAlwaysShow()`, so both players see their local one. The cost: `BarCMD.showOptions` runs `Collections.shuffle(events, random)` over the whole pool, and the permutation depends on list size and the random alone, so a rumor event at a different index on each client shifts every other offer's position and the two bars can show different picks from an identical pool. With no rumor events live, the normal early-campaign state, the picks match.
 
-The same failure at the other end: the ship is added on the base variant with the sender's CR and hull fraction, losing the refit, the D-mods and the custom name, rather than being dropped. A ship listing in a *shop* that fails the same rebuild is skipped instead, because a shop listing belongs to nobody and a wrong price is worse than a missing line.
+**Injected offers never expire on the guest.** `BarEventManager.advance` is what ages `active` and drops timed-out offers, and it is what the suppressor stops. Injected events are also kept out of `barEventCreators` because `advance`'s orphan sweep deletes anything there that is not in `active`. The host's next snapshot removes them instead: when an offer expires or is accepted host-side it leaves the host pool, the pool signature changes, and the guest's rebuild drops it. An offer the guest accepts stays on the host's copy until its own timer runs out.
 
-### A withdrawal that matches nothing on the host is a no-op
+**Acceptance is detected by disappearance, not by a listener.** The engine fires no "mission accepted" event; every acceptance path funnels through `BarEventManager.notifyWasInteractedWith(event)`, which removes the offer from `PortsideBarData`. `CoopBarAcceptanceWatcher` polls the local pool every 2 s and treats an offer that was present last poll and is gone now as accepted, raising the first-come claim (`MISSION_CLAIM_REQUEST`), with `BarEventManager.getCreatorFor(event)` on the retained reference as the discriminator between an acceptance and an expiry. Two readings it cannot make: accept-then-expire inside one poll interval reads as expiry, and a poll that lands after the manager's orphan sweep sees the offer gone with no creator and reads it as expiry. `CoopInteractionGate` claims are keyed by entity id, so two players at the same market already serialize on the market entity, bar screen included, and `visibleEntriesFor` keeps any recorded claim out of the injected set.
 
-If a guest withdraws a hull whose id the host cannot find, the host logs a warning and changes nothing. The guest's own view is corrected by the next snapshot, which is the next time it opens that storage.
+**Contacts, contact-board missions and person bounties stay per-player (user-accepted).** Only bar events ride the pool. Contact lists, `BaseMissionHub` missions and `PersonBountyManager` are untouched, and `PersonBountyManager` is one of the scripts the Phase 9 suppressor removes guest-side, so a guest has no person bounties in v1.
 
-### An s-modded built-in hull mod gains a `permaMods` entry
+### System bounties are posted per engine (planned fix: Phase 34)
 
-Built-in hull mods are not in `permaMods` on a stock variant; s-modding one puts it there on the rebuilt copy, so a capture, rebuild and re-capture cycle adds the entry. It is stable after one cycle and changes nothing in play, but a field-by-field diff of the same ship before and after a round trip shows it.
+`SystemBountyManager` (`CoreLifecyclePluginImpl.java:722`, a `BaseEventManager` sector script) spawns no fleets, only `SystemBountyIntel` entries, so the Phase 13 spawner filter never caught it. Each engine posts its own system bounties from its own rolls, and `SystemBountyIntel.reportBattleOccurred` pays the local player from the local intel for local kills. The guest is paid by its own game for bounties the host never saw and sees none of the host's. Phase 34 replicates the host's set and suppresses the guest's manager; person bounties are the other half of that phase.
 
-### Only a module hanging directly off the member carries its hull damage
+## Storage and shared submarkets
 
-Module variants recurse, module *damage* does not: the per-module hull fraction is read off the member's status index, which vanilla populates one level deep. A module of a module rebuilds undamaged. Vanilla nests one level, so this is reachable only with a mod that nests deeper.
+Storage, the black market and the military submarket became host-canonical on 2026-09-05, on the same snapshot-on-open and guest-delta path the open market uses.
 
-### Module nesting is capped at four levels
+### One unlock, two monthly fees
 
-Capture warns and stops at four; decoding a deeper blob throws. The cap exists so a mod that manages to make a module cycle costs a warning rather than the campaign thread.
+Either player's 5000 credits opens a market's storage for both, and after that each engine bills its own monthly storage fee against the same contents. The alternative, billing one player for a locker both use, was worse.
 
-### Officers do not travel with a stored ship
+### The guest holds the host's commission and none of what it pays
 
-Vanilla removes the officer when the player stores a ship, so there is nothing to carry across and nothing is lost. The officer stays in the depositor's fleet.
+The host's commission faction is mirrored to the guest as the `$fcm_faction` memory key, which is the one thing the military submarket reads to decide whether a commission-gated item is buyable. The salary, the commission bounties and the `FactionCommissionIntel` entry stay on the host, because instantiating the intel on the guest would run a second salary and a second termination. The guest cannot sign or resign a commission of its own: `cmsn_askForCommissionOpt` and `cmsn_resignCommissionOpt` are replaced in `rules.csv` with `!$global.coopIsGuest` appended (the mirrored key otherwise makes vanilla offer the guest the chance to resign the host's commission).
 
-### Weapon groups under a mod mismatch
+### Size limits
 
-When the receiving engine cannot resolve a weapon in a group, that slot is dropped from the group. A group that ends up empty stays as an empty placeholder so the surviving groups keep their numbers, and if no group survives at all the receiver autogenerates them the way the refit screen does. A warning names the member.
+- There is no chunking on `MARKET_SNAPSHOT`. A submarket whose encoded stock passes the 1 MB frame cap is skipped; the host player gets a feed line naming the submarket, the market and the size in KB, and the partner keeps whatever it had until the locker shrinks. A warning fires at 256 KB. It takes thousands of hulls to get there.
+- Module nesting is captured to a depth of four. Capture warns and stops there; decoding a deeper blob throws. The cap exists so a mod that makes a module cycle costs a warning rather than the campaign thread.
 
-### A market whose only shared submarket is a locked locker opens on the timeout
+### Hull capture and rebuild residues
 
-The guest's sync gate arms on the dock, the host finds nothing shareable to snapshot, and the trade options open 5 seconds later on the timeout instead of on the reply. Same for a hidden base the guest has paired but the host has since lost. It looks like a slow dock and nothing else.
+- A stored hull the host cannot capture in full is listed degraded: the partner sees a pristine hull of the right variant with the right CR and hull damage, missing the D-mods, s-mods, weapons and weapon groups on their side only. Log line: `Coop stored hull member=... could not be captured in full`. The depositor's own copy is untouched.
+- A stored ship the receiver cannot rebuild comes back as its base variant with the sender's CR and hull fraction, losing the refit, D-mods and custom name. A *shop* listing that fails the same rebuild is skipped instead, because a wrong price is worse than a missing line.
+- A withdrawal whose hull id the host cannot find is a no-op with a warning; the guest's view is corrected by the next snapshot.
+- An s-modded built-in hull mod gains a `permaMods` entry on the rebuilt copy (built-ins are not in `permaMods` on a stock variant). Stable after one cycle, changes nothing in play, shows up in a field-by-field diff.
+- Only a module hanging directly off the member carries its hull damage: the per-module hull fraction is read off the member's status index, which vanilla populates one level deep. Reachable only with a mod that nests modules deeper than vanilla.
+- When the receiving engine cannot resolve a weapon in a group, that slot is dropped; an empty group stays as a placeholder so the surviving groups keep their numbers, and if no group survives the receiver autogenerates them the way the refit screen does. A warning names the member.
+- Officers do not travel with a stored ship. Vanilla removes the officer when the player stores a ship, so nothing is lost; the officer stays in the depositor's fleet.
 
-### The host materialises an empty locker for every unlocked market the guest opens
+### Docking and materialisation details
 
-Capturing storage calls `getCargo()`, which creates the submarket's cargo object when it does not exist. On the host that means an unlocked market the host has never used gets an empty locker object. It rolls nothing, costs nothing and is invisible in play.
+- A market whose only shared submarket is a locked locker opens on the 5 s timeout rather than on the reply: the guest's sync gate arms on the dock and the host finds nothing to snapshot. Same for a hidden base the guest has paired but the host has since lost. Looks like a slow dock.
+- Capturing storage calls `getCargo()`, which creates the submarket's cargo object when it does not exist, so on the host an unlocked market the host never used gets an empty locker object. Invisible in play.
+- Hidden-base (pirate, Luddic Path) markets have engine-minted ids, so they are paired through a `hostMarketId <-> localMarketId` table (`CoopMarketIds`, written only by `CoopBaseAuthority`, identity for every other market); once paired, stock and transactions are shared, and guest traffic for a base not yet paired is held until it is. The base's name and orbit still differ per engine because each engine mints those itself, and a base carries only `open_market` and `black_market`, so the storage code never runs there.
+- The host resolves every market id before sending its unlock baseline, so a destroyed base or abandoned colony is pruned from what the peer receives. The `coop.storageUnlocked:<marketId>` key stays in sector persistent data on purpose: a market rebuilt at the same id keeps its unlock instead of charging 5000 credits again.
 
-### Hidden-base markets are shared, with two residues
+### Credits
 
-A pirate or Luddic Path base's market is paired across the two engines by id now, so its stock and transactions are shared. The base's **name and orbit still differ per engine**, because each engine mints those itself. And a base carries only `open_market` and `black_market`, no storage and no military, so the storage half of the shared-submarket code never runs there.
+The engine wallet is a `float`, so above 2^24 credits a small transfer can land a credit or two off. That is vanilla arithmetic. On the transfer design: a grant already written to the OS socket counts as delivered, so a receiving process that dies before applying it loses the money the way it loses any other unsaved state; a grant that never reaches the socket (queue cap, session end, shutdown) is refunded to the sender with a feed line. Gifts are counted nowhere in the session stats.
 
-### Storage-unlock flags outlive the market only in persistent data
+### For the runbooks
 
-The host resolves every market id before sending its unlock baseline, so a destroyed base or an abandoned colony is pruned out of what the peer receives. The `coop.storageUnlocked:<marketId>` key itself stays in sector persistent data, deliberately: a market rebuilt at the same id keeps its unlock instead of charging 5000 credits a second time.
+Ship ids in the Phase 30 bridge market dump are origin-namespaced (`c_<playerId>_<memberId>`), so a grep for a bare member id finds nothing.
 
-### Credits are a float, and a delivered grant is delivered
+## Exploration and world state
 
-The engine wallet is a `float`, so above 2^24 credits a small transfer can land a credit or two off. That is vanilla arithmetic, not the wire. Two consequences of the transfer design itself: a grant already written to the OS socket counts as delivered, so a receiving process that dies before applying it loses the money the way it loses any other unsaved state; and a grant that never reaches the socket (queue cap, session end, shutdown) is refunded to the sender with a feed line. Gifts are counted nowhere in the session stats.
+### Gate scanning
 
-### Two notes for the runbooks
+The "Scan the Gate" option is gated by rules.csv on `$global.canScanGates` (`gateOpenDialogCanScan1`, `gateScanOpt`), a sector-memory flag only the host's Galatia questline sets. It rides the `GATE_ACTIVATED` payload alongside `$gatesActive` and `$playerCanUseGates`, and the poll that produces that payload runs on both roles, so a guest can scan and both players get the gate. Residues:
 
-Ship ids in the Phase 30 bridge market dump are origin-namespaced (`c_<playerId>_<memberId>`), so a grep for a bare member id finds nothing. And `SNAPSHOT_WARN_BYTES`/`SNAPSHOT_MAX_BYTES` in `CoopCampaignReplicator` mirror `CoopNetService`'s frame constants by value rather than by reference; changing the frame cap means changing both.
+- The three globals repeat on every gate record, so a flip in any of them re-reports every gate in the sector on the next poll. A dozen-odd deltas, a handful of times per campaign; it is what makes each packet self-contained.
+- `$numGatesScanned` is derived, not synced: whichever client applies a peer's scan calls vanilla's `GateEntityPlugin.addGateScanned()`. A client that never hears about a scan (gate scanned while it was disconnected, never re-reported) counts one low, which matters only as a rules condition inside the Galatia questline.
+- A guest that rejoins from a save where gates were already scanned reports each of them upward once on its seeding poll. The host applies them as no-ops.
+
+### Stable-location construction
+
+`Objectives.build` creates the makeshift relay, buoy or array with `addCustomEntity(null, ...)`, so the engine mints its id per client; the same holds for the stable location `Objectives.salvage` puts back on disassembly. Both ride a `SPAWN` world-delta carrying a coop-assigned id, the spec, the faction, the orbit and the id of the stable location the build consumed.
+
+- The consumed stable location is removed twice on the receiving client (once by the `SPAWN` apply, once by the `CONSUME` the originator's watcher emits), and the peer's own removal reports a `CONSUME` back. All three are idempotent and the ledger absorbs them.
+- The orbit rides the wire rather than being copied off the consumed stable location, so the two deltas are order-independent. If the orbit focus does not resolve on the peer, the entity materializes at the fixed position that rode along and does not orbit.
+- Only the entity is replicated, not the interaction. Build costs come out of the acting player's cargo, and the reputation hit for disassembling somebody else's objective is charged to the acting client alone.
+- The Phase 6b world fingerprint covers markets only, so neither half of this moves it.
+
+### Survey levels and ruins
+
+`MarketAPI.SurveyLevel` and the `$ruinsExplored` market-memory flag replicate on the both-sides skeleton poll as `WORLD_DELTA(SURVEY)` and `WORLD_DELTA(RUINS_EXPLORED)`, apply is max-wins on the level's ordinal. What does not replicate is everything around the level.
+
+**A system can be remote-surveyed twice.** `RemoteSurveyAbility` latches its once-per-system flag into the star system's own memory (`$core_didRemoteSurveyInSystem`, `RemoteSurveyAbility.java:21,104`) and `findBestPlanet` refuses to run again while the key is present (line 131). The key is not on the wire, so each player gets one sweep per system. Left that way on purpose: the ability pins fleetwide max burn to zero while it charges (line 89), and the planet it would pick is already PRELIMINARY from the first player's sweep, so replicating the flag would only take the ability away from whoever activates second. The acting player keeps the `RemoteSurveyDataForPlanetIntel` entry (line 101); the other gets the level without it.
+
+**Survey data goes to whoever ran the survey.** Completing a planet survey puts one `survey_data_1` through `survey_data_5` unit in the surveying fleet's cargo (`SurveyPluginImpl.getSurveyDataType`, lines 157 to 183). The peer's planet reaches FULL through the delta, and a FULL planet is not offered the survey option again, so the peer never collects a unit. Same rule as salvage: one player loots, the world state is shared.
+
+**A guest's survey mission pays out when the host surveys.** `SurveyPlanetMissionIntel.advanceMission` polls the target every frame and calls `reportPlayerSurveyedPlanet` the moment its market reads FULL (`SurveyPlanetMissionIntel.java:141-143`), without asking who surveyed it. Two players holding the same contract from different bar offers both get paid for one survey. The same already happens for a mission whose target the host decivilizes or whose objective the host captures.
+
+**Either player entering a system reveals its planets on both maps.** `CoreScript.markSystemAsEntered` bumps every planet in a newly entered system from NONE to SEEN, and the poll replicates SEEN like any other level (the system-map display reads the minimum system survey level, and filtering SEEN out would leave the two maps visibly different). One player's travels light up planet markers on the partner's map. Belongs in the "what's different in co-op" player doc.
+
+### An orphan mirror cargo pod can outlive the pod it copies
+
+Mirror pods are created with `setNeverExpire(true)` so the creating client is the only owner of the decay timer. When the original expires while nobody is in that location, nothing generates the `WORLD_DELTA(CONSUME)` that would remove the mirror, so the partner keeps a pod that no longer exists on the authoritative side and can still loot it. The alternative, each client running its own timer, deleted live pods out from under the player who dropped them.
+
+### The guest's `PirateBaseManager` start date restarts on every guest load
+
+`CoopNpcFleetSuppressor.removeSpawnerScripts` takes `PirateBaseManager` out of `sector.getScripts()`, so a guest save no longer carries it. On the next load `CoreLifecyclePluginImpl` sees `!sector.hasScript(PirateBaseManager.class)` and constructs a fresh one, whose constructor sets `start = clock.getTimestamp()` and overwrites the `$core_pirateBaseManager` handle `MANAGER_HANDLES` preserves as a data holder. `getDaysSinceStart()` then reads about 0 on the guest after a reload while the host's reads the real campaign age. It feeds `Tuning.getDaysSinceStart()` and a few locally constructed bar missions (`SurplusShipHull` cycles, `CustomProductionContract`), so those parameters differ between clients and reset on every guest load. The fix would be writing a private field on a vanilla manager after construction on every load, which is more surface than the drift is worth.
+
+## NPC mirrors and patrol encounters
+
+### Mirrors of inflated fleets carry d-mods but not the autofit loadout
+
+When a player fleet comes near an NPC fleet the engine inflates it: `DefaultFleetInflater.inflate` autofits every ship onto a runtime variant named from the fleet id and member index, which exists in no other engine. The host therefore streams the stock variant the inflater autofit *from* (`setOriginalVariant`) plus the d-mod hullmod ids per member (`CoopShipMods`), and the guest clones the stock variant, applies the d-mods and runs `DModManager`'s damaged-hull swap. Weapon slots and fighter bays are not captured for NPC mirrors, so a scavenged loadout mirrors as the stock one. CR and hull fraction are replicated per member and battle outcomes are host-authoritative, so this is a sizing-up error only.
+
+### Customs pursuit of the guest reads below vanilla
+
+Vanilla's inspection pursuit of a dark fleet is hardcoded player-only, so `CoopNpcThreatWatcher` drives the patrol at the guest's mirror with a re-issued `INTERCEPT` assignment (`CUSTOMS_PURSUIT_ASSIGNMENT_DAYS`) on a 250 ms scan instead of the engine's per-tactical-interval `setMoveDestination` steering: coarser turn-in, no speed matching, no sensor bursts or hail posturing. All four scenarios pass (chase-from-detection, outrun and give up, transponder-on stand-down, catch-and-hail; verified 2026-08-19). Improving it means either shorter assignment slices at the vanilla tactical interval or a fork of `TacticalModule`'s inspection clauses.
+
+### Synthesizing a patrol dialog against a mirror fleet
+
+The plan's original "customs inspection" rules (`rules.csv:2749-2854`, keyed off `$doingCustomsInspection`) are dead: nothing sets that key, and the rulecmds they call (`CustomsInspectionGenerateResult` and siblings) are absent from the 0.98a API source. Two live paths replaced it, both `BeginFleetEncounter` rules on the patrol fleet's own memory, both ending in the `CargoScan` rulecmd:
+
+- **Transponder-off stop**: `tOffPatrolBegin` (`rules.csv:3395`), conditions `CaresAboutTransponder`, `!$tOff_didAlready`, `!$isHostile`, `!$faction.c:allowsTransponderOffTrade`, `!$sourceMarket.mc:free_market`, `$isPatrol`, `$sawPlayerTransponderOff`. `CaresAboutTransponder` reduces to `memory.getBoolean("$cfai_makeAggressive_tOff")` and returns false early if `$patrolAllowTOff` is set. Continuation `tOffPatrolOpenComm` applies `AdjustRep $faction.id TRANSPONDER_OFF`, then `tOffCargoScan` runs `CargoScan`. This is the branch that carries the running-dark confrontation and its standing penalty.
+- **Smuggling scan**: `cargoScanInitial` (`rules.csv:3551`), conditions `!$cargoScan_didAlready`, `!$isHostile`, `$pursuePlayer_smugglingScan`. `SmugglingScanScript` sets that flag through `Misc.setFlagWithReason(mem, MEMORY_KEY_PURSUE_PLAYER, "smugglingScan", ...)`. Fewest preconditions, so it is the fallback.
+
+Memory scope matters. `RuleBasedInteractionDialogPluginImpl.updateMemory()` builds a map of named scopes rather than merging: `$foo` resolves against `LOCAL`, `$prefix.foo` against `memoryMap.get(prefix)`. `BeginFleetEncounter` fires before any person is active, so trigger conditions read the fleet's memory bare; the commander becomes the active person immediately before `OpenCommLink`, at which point `LOCAL` is the person's memory and `ENTITY` is the fleet's. A mirror with a null commander opens the encounter and then silently fails every comm-stage condition (`$entity.transponderOffConv` and friends) because `ENTITY` is not in the map. `CoopFleetMirror.ensureNpcFleet` calls `createEmptyFleet(factionId, label, true)`, and the third argument is `withCommander`.
+
+Preconditions that break the path without throwing:
+
+| Precondition | Consequence when unmet | Source |
+| --- | --- | --- |
+| `$sourceMarket` set to a real market id | `CargoScan` crashes | `CargoScan.java:103-110` dereferences `Misc.getSourceMarket(other).getMemory()` before null-checking |
+| mirror commander non-null | all `OpenCommLink` conditions fail silently | `RuleBasedInteractionDialogPluginImpl.java:137-156` |
+| mirror faction is not the player faction | option panel gets "Leave" only | `FleetInteractionDialogPluginImpl.java:2545-2549` (unless `$isSmuggler` is set) |
+| mirror hostile state | `$isHostile` is recomputed on every `getMemory()` and cannot be pre-set | `CoreCampaignPluginImpl.updateEntityFacts` |
+| `$sourceMarket` market lacks `free_market` | `!$sourceMarket.mc:free_market` fails on the transponder branch | `Conditions.FREE_PORT` |
+| mirror has no `Tags.STATION` / `Tags.HAS_INTERACTION_DIALOG` / market | picker returns `RuleBasedInteractionDialogPluginImpl` instead of the fleet plugin, losing the encounter machinery | `CoreCampaignPluginImpl.pickInteractionDialogPlugin`, lines 86-111 |
+
+`CargoScan` reads `Global.getSector().getPlayerFleet()` for the cargo it scans and judges legality against `other.getFaction()`, which against a local mirror is the wanted behaviour: the guest's own cargo, checked against the patrol's faction. Entry point: `CampaignUIAPI.showInteractionDialog(SectorEntityToken)` (the one-argument form) runs the plugin picker, which lands on `FleetInteractionDialogPluginImpl` for a `CampaignFleetAPI` target.
+
+## Abilities
+
+### A guest distress call retains the mirror fleet in the host save
+
+When the guest activates `distress_call`, the host runs the vanilla plugin on the guest's mirror fleet (`CoopAbilityEffectApplier`). `DistressCallAbility.activate()` calls `addResponseScript`, which adds an anonymous `DelayedActionScript` (`DistressCallAbility.java:194,220`) holding an implicit reference to `DistressCallAbility.this`, which holds the mirror through `getFleet()`. Ten to twenty days later the script adds a route (`RouteManager.addRoute("dca_distress_call", ..., DistressCallAbility.this, data)`) whose `RouteData` holds the same plugin as its spawner. Both serialize into the host save.
+
+The route half is cleanable through public API (`getRoutesForSource`, `RouteData.getSpawner()`, `removeRoute`) but usually does not exist yet when the mirror is torn down at session end. The script half is not removable: telling a guest-spawned `DelayedActionScript` from the host's own needs the anonymous class's captured outer reference, which needs `java.lang.reflect`; matching on the synthetic class name (`DistressCallAbility$2`) would cancel the host player's pending responses too.
+
+Accepted because the reference is inert: neither `DelayedActionScript.doAction` nor `DistressCallAbility.spawnFleet` calls `getFleet()`; both read `Global.getSector().getPlayerFleet()` and the route's `custom` payload (lines 203, 324). The cost is a dead `CampaignFleetAPI` in the host save graph until the script fires and its route expires. Second consequence: because `spawnFleet` positions the response relative to `getPlayerFleet()`, a guest-triggered distress response arrives near the host. The jump points it routes through are the guest's (captured in `DistressResponseData` at activation), so it reaches the right system; only the hyperspace approach is anchored wrong.
+
+### Interdiction pulse: the standing hit is charged by the guest's own pulse
+
+On the guest the pulsing fleet is the player fleet, so `InterdictionPulseAbility.applyEffect` runs its `INTERDICTED` adjustment locally at pulse time and `onPlayerReputationChange` forwards it to the host as a `GUEST_REP_DELTA`. On the host, `CoopAbilityEffectApplier` runs the vanilla pulse on the mirror for the victims' benefit, and vanilla's own `INTERDICTED` charge is gated on `fleet.isPlayerFleet()` (`InterdictionPulseAbility.java:293`), which the mirror is not, so it charges nothing; the mod does not add a charge of its own (doing so charged every victim twice). The radius and duration the host uses come from the mirror's pinned `sensorRangeMod` aggregates (`CoopSensorSync.Profile`), so they match the guest's real values.
+
+The residue is an undercharge: the guest's pulse only sees fleets the guest's client knows about, so a fleet inside the host's pulse radius that the guest never mirrored costs the guest nothing, and the victim set is gated by the guest's transponder and detection state rather than the host's. Undercharging by a fleet the guest could not see beats double-charging every fleet it could.
+
+## Colonies
+
+### The guest has no hostile-activity meter
+
+`HostileActivityManager` is in the guest suppression set, and the session-start pass ends any `HostileActivityEventIntel` the save holds, removes it and unsets `$hae_ref`. Every reader of `HostileActivityEventIntel.get()` in the pristine source tolerates null. The guest therefore has no meter and no `HOSTILE_ACTIVITY` colony condition; the mirrored `CoopExpeditionWarningIntel` entry, scanned off the host's live intel manager and reconciled as a set, is its only inbound-attack signal. The host is untouched.
+
+### Construction progress drifts until an industry finishes
+
+`COLONY_MGMT` replicates the construction queue, not build progress. Vanilla's build button only appends to `market.getConstructionQueue()` and each engine's own `Market.advance` drains it through `BaseIndustry.buildNextInQueue`, so the two engines start the same build at slightly different moments and run their own timers. Reading true progress across the wire is not cheap: `Industry.getBuildOrUpgradeProgress()` reads `0` whenever the industry is disrupted (`BaseIndustry.java:491-498`), the absolute-days field needs a `BaseIndustry` cast, and `getBuildTime()` returns the spec value rather than the field during an upgrade.
+
+It self-heals with a bound: the first client to finish reports the industry finished and the applier forces the lagging mirror to `finishBuildingOrUpgrading()`. The drift is never larger than the gap between the two starts. The client that finishes second may see its "construction complete" message a moment early.
+
+### Commodity fulfillment and shortage markers can differ between clients
+
+Observed live 2026-09-01: the same shared colony showed different demand-met and deficit markers on the two clients. The colony is in sync; the economy around it is not. Each engine runs its own `EconomyAPI` and solves supply for every market in the sector on its own iteration schedule, so fulfillment is a derived value. NPC market stockpiles and production are each engine's own simulation, so the inputs differ. `COLONY_MGMT` replicates industries and the queue, Phase 12 replicates market contents on open; neither replicates the sector-wide supply solve. Same root as the income drift seen that session (host 1456 vs guest 1663 in a month where the two colonies were not yet producing the same thing; the next month matched exactly).
+
+The host is canonical. Worth revisiting only if a shortage sticks on one side long enough to feed the stability penalty, which would make the two colonies grow apart in a way the industry/queue channel would not catch.
+
+### The colony editor is claimed whole
+
+The colony screen reached from the command tab (`CoreUITabId.OUTPOSTS`) docks nothing and fires no market callback, so `CoopInteractionGate`, which keys claims on the entity a dialog opened, had nothing to key on. No engine call reports which colony that tab shows and none closes the core UI, so the claim is taken for the synthetic entity id `coop:colony-management`: while either player has the tab open, the other sees "Remote player is interacting: colony management" and is bounced to the INTEL tab. The lockout is global (the second player cannot edit a different colony either) and the bounce is a tab switch, not a closed screen.
+
+## Story content gated off the guest
+
+`CoopStoryChainGate` publishes `$coopIsGuest` on sector memory from the `CoopModPlugin.beginGameSession()` prologue (set on a guest launch, unset on host or no-role). Nine vanilla `rules.csv` rows are replaced by id with `!$global.coopIsGuest` appended: `goToTheGABarEventOption`, `goToGA_barEvent`, `gaAddOptionMeetProvost`, `gaIntro2surveyOpen`, `gaDHOhookStart`, `gaDHOhookStartDev`, `gaDHOjustFoundArrayStart`, `hamatsu_PostShipRecoverySpecial`, `gaDevMenuOption`. Everything downstream of the Galatia Academy chain tests state only those roots can write. Tutorial-only entries are unreachable because the mod forces the tutorial skip. `CoopRulesFileTest` pins the gate on every root and the file's id uniqueness. The commission rows under Storage above use the same mechanism.
+
+## Engine call costs (measured 2026-08-20)
+
+Measured with `coop.util.CoopFrameProfiler` (`-Dcoop.debug.frameProfile=true`) after the `ORBIT_SNAPSHOT` apply was caught doing about 70 sector-wide `getEntityById` scans per second (67 to 82 ms single-frame stalls).
+
+- `sector.getAllLocations()` allocates two fresh `ArrayList`s and copies about 130 systems per call. Hyperspace is already in the list; a `!contains(hyperspace)` guard pays a full scan for nothing.
+- `location.getFleets()` is a live list with one `unmodifiableList` wrapper allocation per call.
+- `sector.getEntityById()` is an id-map hit plus a `getAllEntities().contains()` validation, falling back to hyperspace and every system.
+- `fleet.setNoEngaging(f)` allocates a new `Fader` per call; the shield expires about 1 s after the last call, so a 4 Hz re-assert is enough.
+- `entity.getMemoryWithoutUpdate()` lazily allocates, and save-persists, a `Memory` for entities that lack one.
+- `IntelManager.getIntel(Class)` is O(1), not a scan.
+- The profiler cannot see combat-engine plugins (`CoopBattleStatusCombatPlugin.advance` attaches to every combat engine, refit sim and title screen included), vanilla listener dispatch, or the save hooks: all of those run outside the pump's `advance()`.
+
+## Debug tooling
+
+### The agent bridge serves four clients at a time
+
+`-Dcoop.debug.bridge` opens a loopback socket that accepts up to `MAX_CLIENTS` (4) connections. The fifth is closed on connect and logged. Each client carries its own framing buffer, request queue and write queue, and the four-commands-per-frame dispatch budget is spent one request per client per pass, so a client sending a burst cannot starve another. The cap is real: every slot costs a 256 KB framing buffer for the life of the connection, and accept, read, dispatch and write all run on the campaign thread inside `advance()`. Four is sized for one MCP server plus a helper or two.
