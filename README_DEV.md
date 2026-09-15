@@ -9,7 +9,6 @@ This directory is the git repo (origin: `https://github.com/AyoKeito/starsector-
 - `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` — the phased implementation plan (canonical; moved into the repo 2026-06-10 — pointer files remain at the old `K:\Starsector\` paths)
 - `docs/COOP_MP_DESIGN.md` — the design document
 - `docs/starsector-runtime-limitations.md` — engine/sandbox limits found during implementation
-- `docs/phase11-rng-determinism.md` — RNG determinism evidence (pre-renumber name; belongs to what is now Phase 13)
 
 Git workflow: run git from this directory (running it from `K:\Starsector` fails — that is not a repo, which is why pre-2026-06-10 sessions deferred their commits). Commit after each plan phase with the message listed in that phase, then push:
 
