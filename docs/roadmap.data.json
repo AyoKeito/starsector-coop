@@ -10,19 +10,19 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game (P1-18 incl. 6b, 9b, 12b, 12d, 13, 14, 14b); 12c code-complete + automated smoke PASSED 2026-08-25 (manual residue open); 30 built + live-verified 2026-08-25; 24 built 2026-08-25 + live smoke PASSED 2026-09-01; 7b and 7c built + live smoke PASSED 2026-09-02; 20 built + red-teamed + six-profile shaped-loopback matrix PASSED 2026-09-02, real-Internet smoke PASSED the same evening; 29 M2 built + certified on the shaped matrix 2026-09-03; 21 and 28 built 2026-09-03 and two-instance smoke PASSED the same day after 7 fixes (c5c50cb); 31 built 2026-09-03 and its launcher path PASSED in smoke session 1 on 2026-09-05; 32 specced, built and red-teamed 2026-09-05 (6ba4bca) and played across smoke sessions 3 and 4. On top of the 0.1.0 release: nine fix passes between 2026-09-04 and 2026-09-15, carried by five two-instance smoke sessions (2026-09-05 to 2026-09-15, the last over a real Internet path) plus a diagnostics run; the 0.1.1 candidate is 41c6208"
+      "note": "code-complete and smoke-verified in-game. Per-phase dates, commits and smoke results are in the plan's Phase Status Ledger"
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "partially built. Phase 23: the player guides, launch scripts, changelog and release checklist landed 2026-09-03, the license the same day (CC BY-NC 4.0, Fractal Softworks exempt). What is left is not code: the forum-thread URL the listing ships, and removing or dev-gating the COOP TEST Ziggurat start"
+      "note": "partially built. Phase 23: guides, launch scripts, changelog, release checklist and license are in; left are the forum-thread URL and the COOP TEST Ziggurat start (see ATTENTION)"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "immediate focus. Phase 19, the final sign-off, is the last V1 phase and the only unbuilt one left; it starts once 0.1.1 is published and Phase 23's two items land"
+      "note": "immediate focus. Phase 19, the final sign-off, is the only unbuilt V1 phase; it starts once Phase 23's two items land, and its checklist is the ATTENTION list above"
     },
     {
       "key": "queued",
@@ -37,64 +37,57 @@
       "note": "after the private soak / public release; order decided 2026-09-05: 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 33 → 22 → 25 → 27, as appetite allows"
     }
   ],
-  "hereHead": "You are here: 0.1.0 is published; 0.1.1 is packaged from 7e60e6e, the last code change in it being 41c6208, after five two-instance smoke sessions, nine fix passes and a diagnostics run, and is waiting to be published; then Phase 23's forum-thread URL and the COOP TEST Ziggurat start, then the Phase 19 sign-off",
-  "here": "<b>0.1.0 is published and 0.1.1 is built, smoked and packaged.</b> Tag <code>v0.1.0</code> on <code>43e090b</code>, <code>coop-0.1.0.zip</code> attached at <a href=\"https://github.com/AyoKeito/starsector-coop/releases/tag/v0.1.0\">releases/tag/v0.1.0</a> (2026-09-05). Everything since is 0.1.1, packaged from <code>7e60e6e</code> with <code>41c6208</code> as its last code change: nine fix passes and <span class=\"rp\" data-jump=\"32\">Phase 32</span> (shared storage, the black and military submarkets, hidden-base markets, credit transfer). Five two-instance sessions ran between 2026-09-05 and 2026-09-15, the last one with the guest on a real Internet path through an AmneziaWG tunnel, followed by a diagnostics run on the ninth pass. They closed the three P1 holes 0.1.0 shipped with: a market transaction, a credit grant and a storage deposit made across a dropped link were each lost outright, and all three now land exactly once after the resume. Every fix pass through the eighth is live-verified, and the ninth pass's RTT fix passed on 2026-09-15. Nothing has been pushed since <code>a15b4d3</code>, so publishing 0.1.1 starts with a push. <b>Everything below is outstanding.</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span> needs the forum-thread URL for <code>docs/player/LISTING.md</code> and the removal or dev-gating of the COOP TEST Ziggurat start in <code>data/campaign/rules.csv</code>. <span class=\"rp\" data-jump=\"19\">Phase 19</span>, the final sign-off, runs last: the full two-instance checklist plus the steps Sessions 1-5 never reached, with fixes limited to what the checklist fails.",
+  "hereHead": "You are here: 0.1.1 is published (v0.1.1 on 7e60e6e, 2026-09-15). Left before V1 sign-off: Phase 23's forum-thread URL and the COOP TEST Ziggurat start, then the Phase 19 checklist.",
+  "here": "<b>0.1.1 is published.</b> Tag <code>v0.1.1</code> on <code>7e60e6e</code>, zip attached at <a href=\"https://github.com/AyoKeito/starsector-coop/releases/tag/v0.1.1\">releases/tag/v0.1.1</a> (2026-09-15); the launcher's update check and Version Checker both read it. <b>Everything below is outstanding.</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: put the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code> (still 0), and remove or dev-gate the COOP TEST Ziggurat start (<code>coopZigguratStart</code>/<code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code>). Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the full two-instance checklist plus the steps listed under ATTENTION that Sessions 1-5 never reached, with fixes limited to what the checklist fails.",
   "attention": [
     {
-      "sev": "action",
-      "sevLabel": "action",
-      "head": "Publish 0.1.1: push main, tag it, attach the zip",
-      "state": "open; packaged at 7e60e6e, nothing pushed since a15b4d3",
-      "body": "The tree is version-bumped (<code>mod_info.json</code>, <code>coop.version</code>, <code>README.md</code>, <code>docs/player/LISTING.md</code>, the two issue templates), the 0.1.1 changelog entry is written, and <code>scripts\\package-release.ps1</code> has built <code>dist\\coop-0.1.1.zip</code> (2,573,026 bytes, 20 entries) from a clean tree at <code>7e60e6e</code>, with 3624 tests green and every jar manifest stamped at that commit. Left: push <code>main</code>, tag, and attach that zip to a GitHub release. Not a prerelease: the launcher's update check asks GitHub for <code>releases/latest</code>, which skips prereleases, and LazyWizard's Version Checker reads <code>coop.version</code> from <code>main</code>. There is no CI, so the zip in the release is the one built here and nothing rebuilds it. The user publishes."
-    },
-    {
       "sev": "scope",
-      "sevLabel": "before release",
-      "head": "Phase 23: the forum-thread URL and the COOP TEST Ziggurat start",
-      "state": "open; blocks a public build",
-      "body": "<span class=\"rp\" data-jump=\"23\">Phase 23</span> is docs-complete and licensed (CC BY-NC 4.0 with Fractal Softworks exempt); the repository is public. Two things are left and neither is code. The forum-thread URL goes in <code>docs/player/LISTING.md</code> and in <code>modThreadId</code> in <code>coop.version</code>, which is 0 today, so Version Checker offers players no forum link. The COOP TEST Ziggurat start (option 6 in <code>data/campaign/rules.csv</code>, a Ziggurat plus 1,000,000 credits) must be removed or dev-gated before any public build. The forced tutorial skip and forced Normal difficulty stay: they are <em>permanent</em> mod behaviour, because the tutorial rewrites Galatia and Easy's per-client sensor bonus would desync fleet views, and solo play with the mod enabled is unsupported by policy (decided 2026-08-19)."
+      "sevLabel": "before public listing",
+      "head": "Phase 23: forum-thread URL and the COOP TEST Ziggurat start",
+      "state": "open; two edits, neither is code",
+      "body": "(1) Create the forum thread, then put its URL in <code>docs/player/LISTING.md</code> and its numeric id in <code>modThreadId</code> in <code>coop.version</code> (0 today, so Version Checker offers no link). Verify: Version Checker's mod entry links to the thread. (2) Remove or dev-gate the COOP TEST start: rows <code>coopZigguratStart</code> and <code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code> (option 6, a Ziggurat plus 1,000,000 credits). Verify: a new game shows five occupation choices, or six only with the dev flag. The forced tutorial skip and forced Normal difficulty stay; they are permanent mod behaviour (see the plan, <span class=\"rp\" data-jump=\"23\">Phase 23</span>)."
     },
     {
       "sev": "revisit",
-      "sevLabel": "live smoke",
-      "head": "Phase 31 launcher: the wrong-save notice, and one pass on the 0.1.1 build",
-      "state": "open; folds into the Phase 19 checklist",
-      "body": "Session 1 ran the launcher path end to end on 2026-09-05 (build 9ed19e5) and passed all eight steps: both red install rows fixed by the button, Check my connection, the invite round trip, the guest's test connection, <code>Coop published the settings-file</code> in both logs, no <code>getSaveDirName</code> WARN, the save finder picking up the new campaign, and two bug-report zips with the password blanked. That was before nine fix passes landed, so the path is worth one run on the 0.1.1 build. Never run at all: the wrong-save notice (smoke step 13). It reads <code>coop.expectedCampaignId</code>, which only the launcher writes from an invite carrying a campaign pick, so on the script-launched guests the seed lock refused first and the named-save notice has never been in front of a game. Two small rows are also untested: an old <code>coop-forks.jar</code> beside a fresh <code>coop.jar</code> should turn the forks row red, and a <code>starfarer_obf.jar</code> whose timestamp has been touched should leave the Game version row grey rather than red."
+      "sevLabel": "Phase 19 checklist",
+      "head": "Phase 31 launcher: one pass on the published build, plus three rows never exercised",
+      "state": "open",
+      "body": "Run the eight-step launcher path once on the v0.1.1 build (fix button on both red install rows, Check my connection, invite round trip, guest test connection, <code>Coop published the settings-file</code> in both logs, no <code>getSaveDirName</code> WARN, save finder shows the new campaign, bug-report zip with the password blanked). Then three rows that have never been in front of a game: <b>the wrong-save notice</b> (smoke step 13): send an invite that carries a campaign pick, have the guest load a different save, expect the notice naming the right save before the seed lock refuses; <b>stale forks jar</b>: an old <code>coop-forks.jar</code> beside a fresh <code>coop.jar</code> must turn the forks row red; <b>touched game jar</b>: a <code>starfarer_obf.jar</code> with a modified timestamp must leave the Game version row grey, not red."
     },
     {
       "sev": "revisit",
-      "sevLabel": "live smoke",
+      "sevLabel": "Phase 19 checklist",
       "head": "Smoke steps Sessions 1-5 never reached",
-      "state": "open; folds into the Phase 19 checklist",
-      "body": "<b>Step 20, the host dies with a credit grant in flight.</b> The 2026-09-06 run failed it: the guest kept the debit and got no refund. The 2026-09-07 pass made unacked grants refund at session end, and the cut-link half passed in Sessions 4 and 5, but nobody has killed the host with a grant outstanding since. Watch the sender's balance come back with the returned-credits feed line. <b>Step 23, a guest unlock at a hidden pirate base right after a reconnect blip.</b> Skipped twice for want of a reachable hidden base; the hidden-base pairing is the one <span class=\"rp\" data-jump=\"32\">Phase 32</span> feature still unplayed, and a guest-local market id must not produce <code>flagged unknown market</code>. <b>Step 33, a guest saturation bombardment decivilising the host's colony</b>, with the next reconnect passing the fingerprint check instead of hard-rejecting. <b>S4-B, mothballed hull cargo.</b> A trade fleet carrying ship hulls should draw them as mothballed on the guest rather than as 0% CR warships; no hull-carrying trader came into either player's view. <b>The ambient-spawn nudge never fired.</b> Step 29 passed twice, but in 31 in-game days alone in Magec the guest saw no <code>DisposableFleetManager</code> spawn at all, so the nudge that moves one off the guest has not been exercised. <b>Post-battle mirror freeze expiry</b> needs a lost BATTLE_RESULT and has no cheap trigger; it stays unit-verified. <b>A locker of 30 or more refitted hulls</b> may log <code>Coop MARKET_SNAPSHOT is large</code> but must never log <code>refused</code>. <b>A router that speaks UPnP but not <code>GetSpecificPortMappingEntry</code></b> should get a conflict report naming the owner and a port change, not an eviction; the MikroTik on this network answers the call, so the path cannot be exercised here."
+      "state": "open; each has a pass criterion",
+      "body": "<b>Step 20, host dies with a credit grant in flight:</b> kill the host process with a grant unacked; pass = the sender's balance comes back with the returned-credits feed line at session end. <b>Step 23, guest storage unlock at a hidden pirate base right after a reconnect blip:</b> pass = the unlock lands on both engines and the host log has no <code>flagged unknown market</code>. <b>Step 33, guest saturation bombardment decivilising the host's colony:</b> pass = the next reconnect passes the fingerprint check. <b>S4-B, mothballed hull cargo:</b> find a trade fleet carrying hulls; pass = the guest draws them mothballed, not as 0% CR warships. <b>Ambient-spawn nudge:</b> park the guest alone in a populated system until a <code>DisposableFleetManager</code> spawn appears; pass = it appears outside sensor range plus 500 (log line from the forked <code>setLocationAndOrders</code>). <b>Large locker:</b> 30 or more refitted hulls in one storage; pass = at most <code>Coop MARKET_SNAPSHOT is large</code>, never <code>refused</code>. <b>Post-battle mirror freeze expiry</b> needs a lost BATTLE_RESULT and has no cheap trigger; stays unit-verified. <b>UPnP router without <code>GetSpecificPortMappingEntry</code>:</b> cannot be exercised on this network (the MikroTik answers it); expected behaviour is a conflict report and a port change, not an eviction."
     },
     {
       "sev": "revisit",
-      "sevLabel": "live smoke",
-      "head": "Phase 12c manual residue: two items left",
-      "state": "open; the claim race is done",
-      "body": "The claim race is closed. Smoke step 25 put both players at the Shethe Mah bar, one accepted, the offer vanished for the other and no orphan mission intel was left behind; the host logged <code>consumed local bar offer</code> and the pool went 17 to 18 offers. Left from <span class=\"rp\" data-jump=\"12c\">Phase 12c</span>'s manual list: the sell-back and hire click-throughs (sell a ship back to a market and hire an officer out of a pool with the partner on the same screen), and the feel pass."
+      "sevLabel": "Phase 19 checklist",
+      "head": "Phase 12c manual residue: two click-throughs",
+      "state": "open",
+      "body": "With the partner on the same market screen: sell a ship back to the market and hire an officer out of the pool. Pass = the partner's next open shows the sold hull in stock and the hired officer gone, with no duplicate. Then the feel pass from <span class=\"rp\" data-jump=\"12c\">Phase 12c</span>'s manual list."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
-      "head": "S4-C: fleet churn in far systems still resends the whole NPC set",
-      "state": "partial; 0.14 structural sends/s while idle, down from 0.3-0.5/s",
-      "body": "The eighth pass scoped the structural hash to the two observers' locations and left everything else on the 10 s soft floor. A clean 130 s window in Session 5 with both fleets parked measured 18 structural and 7 soft sends, so 0.14/s against Session 4's 0.3-0.5/s bursts. Not the near-zero the fix aimed at: the near set shrank from 40 fleets to 37 during the window because route fleets despawning around Jangala, the host's own system, count as near. A 30-fleet set encodes to about 20.8 KB, so each send is real bytes on the link. Candidate: treat the despawn of a fleet the guest has never seen as far."
+      "head": "S4-C: fleet churn in far systems still resends the NPC set",
+      "state": "partial; 0.14 structural sends/s idle (was 0.3-0.5/s)",
+      "body": "Structural NPC_FLEET_SET sends are scoped to the two observers' locations, but route fleets despawning in the host's own system count as near, so a parked pair still sees about one 20 KB set every 7 s. Candidate fix: treat the despawn of a fleet the guest has never mirrored as far. Measure: count <code>Coop sent NPC_FLEET_SET</code> lines in the host log over a 130 s window with both fleets parked; target is near zero."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Hyperspace storms hit one player and the other never sees why",
-      "state": "documented limitation; Phase 26 M4 would replicate it, not built",
-      "body": "Run down on 2026-09-15 with the new own-fleet probe, after the guest's Ziggurat kept losing CR with no battle and no visible cause. Every drop carried the vanilla repair-tracker event id <code>hyperstorm</code> with <code>hyper=true</code>, hull unchanged and no mod write anywhere: Aug 1 0.663 to 0.540, Aug 2 0.567 to 0.486, Aug 4 0.555 to 0.426, recovering to 0.70 by Aug 25 at 0.09/day. Storm cells are rolled inside each engine and are not replicated (<span class=\"rp\" data-jump=\"26\">Phase 26</span> M4 is specced, not built), so a cell that strikes the guest is invisible on the host and the partner sees an unexplained CR drop. Not a bug and nothing to fix in V1; <code>docs/player/LIMITATIONS.md</code> and the 0.1.1 changelog both say so."
+      "state": "documented; Phase 26 M4 would replicate it, not built",
+      "body": "Storm cells are rolled per engine, so a strike on the guest (CR loss, repair-tracker event <code>hyperstorm</code>) is invisible on the host and reads as an unexplained CR drop. Not a bug in V1; stated in <code>docs/player/LIMITATIONS.md</code> and the 0.1.1 changelog. The fix is <span class=\"rp\" data-jump=\"26\">Phase 26</span> M4 (terrain-plugin subclass, one capture per generation), specced in the plan."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
-      "head": "Parked Phase 14 fallout (cosmetic/UX)",
-      "state": "documented, deferred",
-      "body": "Synthesized customs pursuit reads below vanilla quality (works - chase/give-up/stand-down/catch all pass - but motion is coarser than the engine's own steering); jump-point fleet pop-in near the guest (vanilla's pop-in avoidance is host-relative); and with the two players parked in <em>different</em> populated systems, only one gets ambient spawns (single <code>currSpawnLoc</code>, no-new-fields constraint). D-mod replication for mirrors landed with <span class=\"rp\" data-jump=\"16\">Phase 16</span>; full loadout replication stays parked. The coarse synthesized-pursuit motion largely predates <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1's kinematic drive - re-judge it at the next customs encounter before spending anything on it. Grey-fleet flicker and the unknown-market warn were fixed by 14b."
+      "head": "Parked Phase 14 fallout (cosmetic)",
+      "state": "deferred; re-judge before spending anything",
+      "body": "Synthesized customs pursuit of the guest reads coarser than vanilla steering (mechanism and ceiling in <code>starsector-runtime-limitations.md</code>, NPC mirrors); re-judge at the next customs encounter, since <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1's kinematic drive landed after the verdict. Also parked: NPC mirrors carry d-mods but not the autofit weapon loadout, and with the two players in different populated systems only one gets ambient spawns (single <code>currSpawnLoc</code>)."
     },
     {
       "sev": "risk",
