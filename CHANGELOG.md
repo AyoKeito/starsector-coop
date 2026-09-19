@@ -25,6 +25,13 @@ minimized windows, no gameplay fault seen), plus documentation work. No gameplay
 - Characters above ASCII in a marker note are written as `\uXXXX` escapes, so both logs hold the
   same bytes whatever code page each Windows uses.
 
+**Launcher**
+
+- Settings has an **Agent bridge** checkbox in the Developer group. Off for normal play. Ticked, the game
+  starts with the 127.0.0.1 socket the developer tooling talks to, on port 7801 for a host launch and
+  7802 for a guest launch unless the port field beside it says otherwise. The typed port survives
+  unticking the box.
+
 **Documentation**
 
 - `docs/player/LIMITATIONS.md` and `docs/player/CONNECT.md` explain the minimized-window stall:
