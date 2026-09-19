@@ -54,6 +54,8 @@ const TOOLS = [
       'capacities with used/free, and an overloaded flag naming which limit is past), ' +
       'colonizable{limit?, maxLy?, neutralOnly?} (uncolonized planets nearest the local player fleet; ' +
       'neutralOnly keeps only systems with no economy market, i.e. no faction presence), ' +
+      'hirable{limit?, maxLy?} (the markets holding officers or administrators for hire, nearest the ' +
+      'local player fleet first, with per-market officer and admin counts and the people themselves), ' +
       'landmarks{kinds?, limit?, maxLy?} (hypershunts, cryosleepers, gates, stable locations, ' +
       'the gate hauler), ' +
       'entities{system?, kinds?, includeClutter?} (everything in one location - system id or name, ' +

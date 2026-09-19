@@ -114,6 +114,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `survey` | `{systemId}` or `{systemId: "all"}` | planetId to survey level and ruins state |
 | `visibility` | `{fleetId?}` | `lines`, the probe's text dump, plus `view`, a coopFleetId to visibility-level map |
 | `colonizable` | `{limit?, maxLy?, neutralOnly?}` | uncolonized planets nearest the local player fleet, nearest first |
+| `hirable` | `{limit?, maxLy?}` | markets holding officers or administrators for hire, nearest the local player fleet first |
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 
 ```

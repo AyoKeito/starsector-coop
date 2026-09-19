@@ -15,6 +15,7 @@ export const QUERY_VERBS = [
   'survey',
   'visibility',
   'colonizable',
+  'hirable',
   'landmarks',
   'entities',
   'intel',
