@@ -36,6 +36,9 @@ minimized windows, no gameplay fault seen), plus documentation work. No gameplay
   rest of its text over the rows above and below it, hiding their dots and names. The stale
   `-Dcoop.*` warning, which lists every flag it found on the java line, did this on every install
   that had one.
+- Loading a save that has never been in a co-op session while the invite names a campaign now
+  shows the wrong-save notice at load, naming the save to load. Before, that case waited for
+  the seed lock's refusal on connect.
 
 **Developer tooling**
 

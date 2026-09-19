@@ -41,11 +41,21 @@ class CoopCampaignGuardTest {
     }
 
     @Test
-    void nothingIsSaidWhenTheLoadedSaveHasNeverBeenSeedLocked() {
-        // No campaign id at all is an ordinary solo save, or a co-op save from before the first
-        // connect. The seed lock handles it on connect; guessing here would warn on every solo load.
-        assertTrue(CoopCampaignGuard.onLoad("camp-invited", "", INDEX).silent());
-        assertTrue(CoopCampaignGuard.onLoad("camp-invited", null, INDEX).silent());
+    void anIdLessSaveIsTheWrongSaveWhenTheInviteNamesACampaign() {
+        // No campaign id at all is a solo save, or a co-op save from before its first connect. An
+        // invite that names a campaign is one that has been seed-locked already, so this save is
+        // not it. Only runs under such an invite, so it never warns on an ordinary solo load.
+        for (String loaded : new String[] {"", null}) {
+            CoopCampaignGuard.Notice notice = CoopCampaignGuard.onLoad("camp-invited", loaded, INDEX);
+            assertEquals(CoopCampaignGuard.Kind.WRONG_CAMPAIGN, notice.kind());
+            String message = notice.message();
+            assertTrue(message.contains("has no co-op campaign id"), message);
+            assertTrue(message.contains("Kaz Alba"), message);
+            assertTrue(message.contains("keep playing"), message);
+            assertAscii(message);
+        }
+        assertEquals(CoopCampaignGuard.Kind.WRONG_CAMPAIGN_NO_SAVE,
+                CoopCampaignGuard.onLoad("camp-invited", "", List.of()).kind());
     }
 
     @Test

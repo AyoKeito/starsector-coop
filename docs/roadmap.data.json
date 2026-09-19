@@ -50,13 +50,6 @@
     {
       "sev": "revisit",
       "sevLabel": "Phase 19 checklist",
-      "head": "Phase 31 launcher: one pass on the published build, plus three rows never exercised",
-      "state": "open",
-      "body": "Run the launcher path once on the published build: fix button on both red install rows, Check my connection, <code>Coop published the settings-file</code> in both logs, no <code>getSaveDirName</code> WARN, save finder shows the new campaign. Then three rows that have never been in front of a game: the wrong-save notice (smoke step 13): send an invite that carries a campaign pick, have the guest load a different save, expect the notice naming the right save before the seed lock refuses; stale forks jar: an old <code>coop-forks.jar</code> beside a fresh <code>coop.jar</code> must turn the forks row red; touched game jar: a <code>starfarer_obf.jar</code> with a modified timestamp must leave the Game version row grey, not red."
-    },
-    {
-      "sev": "revisit",
-      "sevLabel": "Phase 19 checklist",
       "head": "Smoke steps Sessions 1-5 never reached",
       "state": "open; each has a pass criterion",
       "body": "<b>Step 33, guest saturation bombardment decivilising the host's colony:</b> pass = the next reconnect passes the fingerprint check. <b>S4-B, mothballed hull cargo:</b> find a trade fleet carrying hulls; pass = the guest draws them mothballed, not as 0% CR warships. <b>Ambient-spawn nudge:</b> park the guest alone in a populated system until a <code>DisposableFleetManager</code> spawn appears; pass = it appears outside sensor range plus 500 (log line from the forked <code>setLocationAndOrders</code>). <b>Large locker:</b> 30 or more refitted hulls in one storage; pass = at most <code>Coop MARKET_SNAPSHOT is large</code>, never <code>refused</code>. <b>Post-battle mirror freeze expiry</b> needs a lost BATTLE_RESULT and has no cheap trigger; stays unit-verified. <b>UPnP router without <code>GetSpecificPortMappingEntry</code>:</b> cannot be exercised on this network (the MikroTik answers it); expected behaviour is a conflict report and a port change, not an eviction."

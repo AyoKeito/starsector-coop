@@ -91,13 +91,20 @@ public final class CoopCampaignGuard {
                                 List<CoopSaveIndexSchema.Row> index) {
         String expected = text(expectedCampaignId);
         String loaded = text(loadedCampaignId);
-        if (expected.isEmpty() || loaded.isEmpty() || expected.equals(loaded)) {
+        if (expected.isEmpty() || expected.equals(loaded)) {
             return Notice.none();
         }
         CoopSaveIndexSchema.Row row = CoopSaveIndex.newestForCampaign(index, expected);
+        // A save with no campaign id has never been through a seed lock: a solo save, or a
+        // co-op one from before its first connect. An invite that names a campaign is one that
+        // has been locked already, so under that invite an id-less save is the wrong save too, and
+        // the seed lock would only say so several minutes later (seen live 2026-09-20).
         String head = "This is not the campaign the co-op invite is for."
                 + "\n\nThe invite is for campaign " + shortId(expected)
-                + "; this save belongs to campaign " + shortId(loaded) + ".";
+                + (loaded.isEmpty()
+                        ? "; this save has no co-op campaign id, so it has never been in a co-op"
+                                + " session."
+                        : "; this save belongs to campaign " + shortId(loaded) + ".");
         String tail = "\n\nYou can keep playing this one. The co-op session will turn the connection"
                 + " down until both players are in the same campaign.";
         if (row == null) {
