@@ -400,11 +400,12 @@ broken. A partner who is in a battle, who just announced a save, or whose proces
 for as long as that lasts.
 
 Both players get a countdown, the world is held paused on both sides, and each of you can choose to
-end the session or wait another five minutes. `Wait 5 more minutes` may be pressed as often as you
-like. If the guest gets back inside the window, the session carries on: the whole world state is
-rebroadcast so both sides restart from one picture, nothing is rolled back, and anything that was
-still on its way when the link died, a purchase, a credit transfer, a storage deposit, is resent and
-lands exactly once.
+end the session or wait another five minutes. The countdown holds at 30 minutes remaining at most:
+once it is there, pressing `Wait 5 more minutes` again does nothing and the countdown stays put. If
+the guest gets back inside the window, the session carries on: the whole world state is rebroadcast
+so both sides restart from one picture, nothing is rolled back, and anything that was still on its
+way when the link died, a purchase, a credit transfer, a storage deposit, is resent and lands exactly
+once.
 
 All of that is for a link that died. A partner who quits to the menu or closes the game says so on
 the way out, so there is no countdown to sit through: the session ends at once and the dialog says
@@ -445,7 +446,8 @@ not the save.
 | `router only supports permanent leases; retrying TCP with lease 0` | The router refuses timed leases | Nothing to do; the mod retries with a permanent lease and deletes it on exit. |
 | Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both firewall rules from tier 1. |
 | Fine but choppy | Latency, not reachability | Check round trip on the intel page. Above about 250 ms, try a VPN with a closer relay. |
-| One clock runs ahead, both games on one PC | Starsector caps its frame step, so a background window runs its clock slow | Keep both windows restored and visible. The drift pulls back together within a minute. |
+| One clock runs ahead, both games on one PC, both windows visible | Starsector caps its frame step, so a background window runs its clock slow | Keep both windows visible. The drift pulls back together within a minute. |
+| The reconnect countdown appears while your partner is minimised or alt-tabbed away | The minimised game has stopped advancing frames | Restore the window. The session reconnects and resumes on its own within a few seconds. |
 
 ---
 
