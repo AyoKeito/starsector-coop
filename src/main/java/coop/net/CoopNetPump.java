@@ -689,12 +689,19 @@ public class CoopNetPump implements EveryFrameScript {
      * Phase 15 mirror freeze compares a mark stamped with {@code clockMillis} against a timeout
      * measured inside {@code applySet}, and two different clocks there would silently break it.
      */
-    private final CoopFleetMirrorRegistry npcFleetRegistry;
+    private CoopFleetMirrorRegistry npcFleetRegistry;
     private final CoopNpcFleetSuppressor npcFleetSuppressor = new CoopNpcFleetSuppressor();
     private final CoopBarGenerationSuppressor barGenerationSuppressor = new CoopBarGenerationSuppressor();
     private final CoopNpcFleetReplicator npcFleetReplicator;
     private final CoopBaseAuthority baseAuthority;
+    /**
+     * Session-scoped, not link-scoped: true from the first connect of a co-op session until that
+     * session is really over, <em>through</em> a reconnect grace window. See
+     * {@link #syncNpcReplication()} for why a held drop is not a session edge.
+     */
     private boolean npcReplicationStreaming;
+    /** Link-scoped twin of {@link #npcReplicationStreaming}: true exactly while the link is up. */
+    private boolean npcLinkStreaming;
     private boolean baseReplicationStreaming;
     private boolean barSuppressionArmed;
     private String lastNpcDebug;
@@ -4572,12 +4579,17 @@ public class CoopNetPump implements EveryFrameScript {
      * {@link #syncCampaignReplicator()}, all gated on {@code service.isConnected()}. They already went
      * inactive on the drop, so the resume frame takes the active edge and everything — NPC set, base
      * set, bar/mission pool, faction relations, player rep snapshot, colony state — is re-sent from
-     * scratch. Clearing the flags here makes that guarantee explicit rather than incidental, and the
-     * two cadenced streams that are not edge-driven are pulled forward by hand.
+     * scratch, and the two cadenced streams that are not edge-driven are pulled forward by hand.
+     *
+     * <p>The NPC and base flags are deliberately <em>not</em> cleared here any more: since a held drop
+     * stopped being a session edge (see {@link #syncNpcReplication()}), clearing them would replay the
+     * whole session start on the resume — a second {@code wiretap.sessionStarted()} with no matching
+     * end, a wiped battle-result dedup set that lets a re-sent {@code BATTLE_RESULT} apply twice, and
+     * on the guest the very spawner-suppression re-run this change exists to stop. The two resets the
+     * host actually owes the returning peer are the two right below, which the start edge would have
+     * called anyway.
      */
     private void forceFullRebroadcast() {
-        npcReplicationStreaming = false;
-        baseReplicationStreaming = false;
         barSuppressionArmed = false;
         npcFleetReplicator.reset();
         baseAuthority.reset();
@@ -7616,36 +7628,69 @@ public class CoopNetPump implements EveryFrameScript {
      * renders host mirrors and suppresses its own NPC simulation. Mirrors are created/disposed by the
      * NPC_FLEET_SET handler and motion by the datagram drain; this method drives the host sender, the
      * guest suppressor sweep, and session-edge (re)set/teardown.
+     *
+     * <p><b>A held drop is not a session edge (0.1.2).</b> This used to key its session edges on
+     * {@code shouldStreamFleet()}, which is {@code isConnected()} plus a live session record — so a
+     * link that dropped inside a {@link CoopReconnectCoordinator} grace window read as a session end
+     * and the resume read as a fresh session start. Live evidence, 2026-09-19: nine blips in one
+     * session (a player minimising a fullscreen game), and each one disposed every NPC mirror and
+     * rebuilt it (271 "Created coop NPC mirror fleet" lines for 104 distinct fleets) while the
+     * re-armed suppressor's {@code endGuestBaseIntel} ended all six mirrored hidden bases and
+     * {@link #syncBaseReplication()} built them again under new market ids. {@code sessionHeld} below
+     * is the same rule {@link #campaignReplicatorShouldBeActive()} already used for the campaign
+     * replicator, and {@link CoopBaseAuthority#reset()} already cites for its market-id table.
+     *
+     * <p><b>The reset split.</b> Session-scoped state — the host replicator's set hashes, the guest
+     * spawner suppressor, the threat watcher, the battle-result dedup set, the wiretap accumulators,
+     * the mirrors themselves — belongs to the session and is held across the window. Link-scoped
+     * state is reset on every link edge, held or not, because all of it would otherwise carry a
+     * sample across the stall: the datagram watermark and redundancy depth (the returning peer may be
+     * a fresh process whose epochs restart at zero, which a stale high-water mark would swallow
+     * whole), the motion timeline (its cursor advances by campaign dt, so a stall leaves it pointing
+     * minutes behind the first sample back and every mirror interpolates across the gap), the
+     * accepted-stamp high-water mark (same restart-at-zero shape; clearing it re-applies the
+     * documented "first stamp of a session is accepted whatever it says" rule to the first stamp
+     * after the stall) and the motion speed probe, whose averages the stall would poison.
+     *
+     * <p>Mirrors need no correction beyond that: the host's resume forces a full rebroadcast and
+     * {@link CoopFleetMirrorRegistry#applySet} disposes every mirror missing from the incoming set, so
+     * fleets that died or spawned on the host during the stall are reconciled by the first NPC_FLEET_SET.
      */
     private void syncNpcReplication() {
         boolean active = shouldStreamFleet();
+        // Non-IDLE coordinator = the session record is being held for a resume, so the link being down
+        // says nothing about whether the session is over.
+        boolean sessionHeld = reconnect.active();
         if (active && !npcReplicationStreaming) {
-            // (Re)starting: rebroadcast the full set and re-arm the guest suppressor.
+            // Fresh session start (first connect, or a new session after a window really expired):
+            // rebroadcast the full set and re-arm the guest suppressor.
             npcFleetReplicator.reset();
             npcFleetSuppressor.reset();
             npcThreatWatcher.reset();
             battleResultReconciler.reset();
-            datagramWatermark.reset();
-            datagramRedundancy.reset();
-            motionTimeline.reset();
-            latestAcceptedSampleMillis = Long.MIN_VALUE;
-            coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
             wiretap.sessionStarted();
             npcReplicationStreaming = true;
-        } else if (!active && npcReplicationStreaming) {
-            // Session ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
+        } else if (!active && npcReplicationStreaming && !sessionHeld) {
+            // Session really ended: drop all guest NPC mirrors so no stale AI fleet is left behind.
+            // Evaluated every frame rather than only on the drop edge, so the teardown still runs
+            // exactly once when a window expires minutes after isConnected() went false.
             npcFleetRegistry.disposeAll();
-            datagramWatermark.reset();
-            datagramRedundancy.reset();
-            motionTimeline.reset();
-            latestAcceptedSampleMillis = Long.MIN_VALUE;
-            coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
             // Final size summary while the numbers still exist — this is the Phase 20.1 histogram.
             wiretap.sessionEnded();
             npcReplicationStreaming = false;
             lastNpcDebug = null;
             lastNpcMirrorCount = -1;
             lastNpcMirrorIdsHash = 0;
+        }
+        if (active != npcLinkStreaming) {
+            // Link edge, both directions and regardless of any hold: nothing that spans the outage may
+            // be interpolated or believed. See the reset split in this method's javadoc.
+            datagramWatermark.reset();
+            datagramRedundancy.reset();
+            motionTimeline.reset();
+            latestAcceptedSampleMillis = Long.MIN_VALUE;
+            coop.fleet.CoopMotionSpeedProbe.INSTANCE.reset();
+            npcLinkStreaming = active;
         }
         if (!active) {
             return;
@@ -7671,17 +7716,22 @@ public class CoopNetPump implements EveryFrameScript {
      * managers and broadcasts {@code BASE_SET} on set-hash change; the guest reconciles its own intel
      * manager against the last received set (idempotently, on a low-rate tick as well as on arrival).
      *
-     * <p>Session-edge behaviour mirrors {@link #syncNpcReplication()}: a (re)start re-arms the host
-     * rebroadcast so the guest always gets a full set on a fresh connection. Nothing is torn down when
-     * the session ends — unlike NPC mirrors, mirrored bases are ordinary campaign content the guest
-     * keeps, and the suppressor's session-start cleanup handles them on the next connect.
+     * <p>Session-edge behaviour mirrors {@link #syncNpcReplication()}, down to the same
+     * {@code sessionHeld} rule: a fresh (re)start re-arms the host rebroadcast so the guest always
+     * gets a full set on a fresh connection, while a drop inside a reconnect grace window is not an
+     * edge at all. Nothing is torn down when the session ends — unlike NPC mirrors, mirrored bases are
+     * ordinary campaign content the guest keeps, and the suppressor's session-start cleanup handles
+     * them on the next connect. Holding the edge across the window is what keeps that cleanup from
+     * running on a resume, which is what ended and rebuilt six mirrored hidden bases under new market
+     * ids on every blip of the 2026-09-19 session.
      */
     private void syncBaseReplication() {
         boolean active = shouldStreamFleet();
+        boolean sessionHeld = reconnect.active();
         if (active && !baseReplicationStreaming) {
             baseAuthority.reset();
             baseReplicationStreaming = true;
-        } else if (!active && baseReplicationStreaming) {
+        } else if (!active && baseReplicationStreaming && !sessionHeld) {
             baseReplicationStreaming = false;
         }
         if (!active) {
@@ -8846,6 +8896,39 @@ public class CoopNetPump implements EveryFrameScript {
     /** The receive-side epoch watermark, so tests can assert a datagram reached the apply path. */
     CoopDatagramWatermark datagramWatermark() {
         return datagramWatermark;
+    }
+
+    /** The guest NPC mirror registry; test read for the reconnect-grace hold. */
+    CoopFleetMirrorRegistry npcFleetRegistryForTest() {
+        return npcFleetRegistry;
+    }
+
+    /**
+     * Test seam: swaps in a registry built over fake mirrors, so a test can watch what a drop does
+     * and does not dispose without standing up an engine fleet.
+     */
+    void installNpcFleetRegistryForTest(CoopFleetMirrorRegistry registry) {
+        this.npcFleetRegistry = Objects.requireNonNull(registry, "registry");
+    }
+
+    /** The guest spawner suppressor; test read for the once-per-session arming. */
+    CoopNpcFleetSuppressor npcFleetSuppressorForTest() {
+        return npcFleetSuppressor;
+    }
+
+    /** Session-scoped NPC streaming flag: true through a reconnect grace, false once it is over. */
+    boolean npcReplicationStreamingForTest() {
+        return npcReplicationStreaming;
+    }
+
+    /** Session-scoped base streaming flag: true through a reconnect grace, false once it is over. */
+    boolean baseReplicationStreamingForTest() {
+        return baseReplicationStreaming;
+    }
+
+    /** The host-authoritative base replicator; test read for the stored desired set. */
+    CoopBaseAuthority baseAuthorityForTest() {
+        return baseAuthority;
     }
 
     /** The peer's cached fleet roster (Phase 20 M4); test/bridge read. */

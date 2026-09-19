@@ -142,6 +142,7 @@ public final class CoopNpcFleetSuppressor {
     private boolean spawnersSuppressed;
     /** Sentinel: the first tick of a session sweeps immediately (see {@link #shouldSweep}). */
     private long lastSweepAtMillis = Long.MIN_VALUE;
+    private int spawnerSuppressionRuns;
 
     /**
      * Runs all layers; call every frame on the guest while the session is active.
@@ -161,6 +162,7 @@ public final class CoopNpcFleetSuppressor {
                 // for the whole session, silently demoting the per-frame sweep from safety net to
                 // sole mechanism (vanilla spawners keep producing fleets we then delete every frame).
                 spawnersSuppressed = true;
+                spawnerSuppressionRuns++;
             } catch (RuntimeException | LinkageError ex) {
                 CoopLog.warn(CoopNpcFleetSuppressor.class, "Failed to suppress NPC spawner scripts", ex);
             }
@@ -195,6 +197,20 @@ public final class CoopNpcFleetSuppressor {
     public void reset() {
         spawnersSuppressed = false;
         lastSweepAtMillis = Long.MIN_VALUE;
+    }
+
+    /**
+     * How many times the once-per-session pass has actually run in this process. A reconnect grace
+     * must not raise it: every extra run re-does the session-start base-intel cleanup, which ends the
+     * guest's mirrored hidden bases. Test read; deliberately not cleared by {@link #reset()}.
+     */
+    public int spawnerSuppressionRuns() {
+        return spawnerSuppressionRuns;
+    }
+
+    /** Whether the once-per-session pass is currently armed; false means the next tick re-runs it. */
+    public boolean spawnersSuppressed() {
+        return spawnersSuppressed;
     }
 
     private void suppressSpawners(SectorAPI sector) {

@@ -5387,6 +5387,12 @@ class CoopNetPumpTest {
                             case "getIntelManager", "getClock" -> {
                                 return null;
                             }
+                            // The guest spawner suppressor's once-per-session pass walks both script
+                            // lists. Empty is the headless answer: nothing to remove, and the pass
+                            // still completes and arms itself, which is what the grace tests read.
+                            case "getScripts", "getTransientScripts" -> {
+                                return new ArrayList<>();
+                            }
                             case "getPersistentData" -> {
                                 return persistentData;
                             }
@@ -8249,6 +8255,206 @@ class CoopNetPumpTest {
         assertEquals(CoopMessages.LEAVE_REASON_MENU, CoopMessages.parseSessionLeaveReason(leave));
         assertTrue(service.flushed.stream().anyMatch(m -> m.type() == CoopMessages.Type.SESSION_LEAVE),
                 "a leave still sitting in the outbound queue when the process exits is no leave");
+    }
+
+    // ---- 0.1.2: a held drop is not a session edge for NPC mirrors or mirrored bases ----------------
+
+    /**
+     * Live evidence, 2026-09-19: nine link blips inside the grace window (a player minimising a
+     * fullscreen game) each disposed every NPC mirror and rebuilt it, and each re-armed the guest
+     * spawner suppressor, whose once-per-session pass ends every base intel the guest holds - the six
+     * mirrored hidden bases included, which came back under new market ids. The drop is inside a held
+     * session, so it is not a session edge.
+     */
+    @Test
+    void aDropInsideTheGraceWindowHoldsTheNpcMirrorsAndTheSuppressorArming() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        FakeNpcMirror mirror = mirrorInRegistryOf(pump, now);
+        pump.advance(0f);
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns(),
+                "the fresh session arms the suppressor once");
+        pump.npcFleetRegistryForTest().applySet(oneFleetSet("npc-1"), 1.0);
+        assertEquals(1, pump.npcFleetRegistryForTest().size());
+
+        service.connected = false;
+        now.addAndGet(100L);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting(), "the window opened");
+        assertEquals(0, mirror.disposeCalls,
+                "the world is held paused on both sides, so the mirrors stay where they are");
+        assertEquals(1, pump.npcFleetRegistryForTest().size());
+        assertTrue(pump.npcReplicationStreamingForTest(), "the session is held, not ended");
+        assertTrue(pump.baseReplicationStreamingForTest());
+        assertTrue(pump.npcFleetSuppressorForTest().spawnersSuppressed(),
+                "re-arming it is what ends the mirrored bases on the resume");
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+    }
+
+    /** ...and the resume does not replay the session start either. */
+    @Test
+    void aResumeInsideTheGraceWindowDoesNotReRunSpawnerSuppression() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        FakeNpcMirror mirror = mirrorInRegistryOf(pump, now);
+        pump.advance(0f);
+        pump.npcFleetRegistryForTest().applySet(oneFleetSet("npc-1"), 1.0);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+
+        service.connected = true;
+        service.connectionGeneration++;
+        now.addAndGet(2_000L);
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 9L, now.get()));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "the resume landed");
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns(),
+                "a resume must not re-run the pass that ends the guest's mirrored base intel");
+        assertEquals(0, mirror.disposeCalls);
+        assertEquals(1, pump.npcFleetRegistryForTest().size(),
+                "the host's forced rebroadcast reconciles the set; it does not need a rebuild");
+        assertTrue(pump.npcReplicationStreamingForTest());
+        assertTrue(pump.baseReplicationStreamingForTest());
+    }
+
+    /**
+     * The teardown is evaluated every frame rather than only on the drop edge, so it still runs -
+     * exactly once - when the window expires a minute after {@code isConnected()} went false.
+     */
+    @Test
+    void theGraceExpiryRunsTheHeldNpcTeardownExactlyOnce() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        FakeNpcMirror mirror = mirrorInRegistryOf(pump, now);
+        pump.advance(0f);
+        pump.npcFleetRegistryForTest().applySet(oneFleetSet("npc-1"), 1.0);
+        service.connected = false;
+        pump.advance(0f);
+        assertEquals(0, mirror.disposeCalls, "nothing while the window is open");
+
+        now.set(1_000L + 61_000L);
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "the window expired");
+        assertEquals(1, mirror.disposeCalls, "the session is really over, so the mirrors go");
+        assertEquals(0, pump.npcFleetRegistryForTest().size());
+        assertFalse(pump.npcReplicationStreamingForTest());
+        assertFalse(pump.baseReplicationStreamingForTest());
+
+        for (int frame = 0; frame < 5; frame++) {
+            now.addAndGet(100L);
+            pump.advance(0f);
+        }
+        assertEquals(1, mirror.disposeCalls, "once, not once per frame after the expiry");
+    }
+
+    /** A partner that says it is leaving gets no window, so the teardown runs on that frame. */
+    @Test
+    void aSessionLeaveRunsTheNpcTeardown() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = activeHostPump(service, now::get);
+        FakeNpcMirror mirror = mirrorInRegistryOf(pump, now);
+        pump.advance(0f);
+        pump.npcFleetRegistryForTest().applySet(oneFleetSet("npc-1"), 1.0);
+
+        service.inbound.add(CoopMessages.sessionLeave("session-a", 9L, now.get(),
+                CoopMessages.LEAVE_REASON_MENU));
+        pump.advance(0f);
+
+        assertFalse(pump.gameplaySessionActiveForBridge(), "the session is over on the same frame");
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "no window is owed");
+        assertEquals(1, mirror.disposeCalls);
+        assertEquals(0, pump.npcFleetRegistryForTest().size());
+        assertFalse(pump.npcReplicationStreamingForTest());
+    }
+
+    /**
+     * Nothing changes for a genuinely fresh session: the suppressor's pass runs on the session-start
+     * frame, and it still runs <em>before</em> the first base reconcile. The ordering is what the
+     * 2026-08-19 fix bought - a {@code BASE_SET} that lands on that same frame must survive it,
+     * because the host, whose set hash has not changed, never resends. When a window really expires
+     * both streaming flags go false again, so the next session takes that same start edge.
+     */
+    @Test
+    void aFreshSessionStartStillSuppressesBeforeTheFirstBaseReconcile() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        FakeNpcMirror mirror = mirrorInRegistryOf(pump, now);
+
+        // A BASE_SET on the very first frame of the session, which is the ordering hazard.
+        service.inbound.add(CoopMessages.baseSet("session-a", 1L, now.get(), oneBaseSet()));
+        pump.advance(0f);
+
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns(),
+                "the fresh start runs the once-per-session pass");
+        assertTrue(pump.baseReplicationStreamingForTest());
+        assertEquals(1, pump.baseAuthorityForTest().desiredBaseCount(),
+                "and the base edge must not reset() after the apply and wipe the set");
+        pump.npcFleetRegistryForTest().applySet(oneFleetSet("npc-1"), 1.0);
+
+        // The link dies and the window runs out: the session really is over, so both edges re-arm.
+        service.connected = false;
+        pump.advance(0f);
+        now.set(1_000L + 61_000L);
+        pump.advance(0f);
+
+        assertEquals(1, mirror.disposeCalls);
+        assertFalse(pump.npcReplicationStreamingForTest(),
+                "the next connect is a fresh session start, not a resume");
+        assertFalse(pump.baseReplicationStreamingForTest());
+    }
+
+    /** Installs a registry over one fake mirror and returns it; see {@link FakeNpcMirror}. */
+    private static FakeNpcMirror mirrorInRegistryOf(CoopNetPump pump, AtomicLong now) {
+        FakeNpcMirror mirror = new FakeNpcMirror();
+        pump.installNpcFleetRegistryForTest(
+                new coop.fleet.CoopFleetMirrorRegistry(() -> mirror, now::get));
+        return mirror;
+    }
+
+    private static coop.fleet.CoopNpcFleetSetSnapshot oneFleetSet(String coopFleetId) {
+        return coop.fleet.CoopNpcFleetSetSnapshot.create(List.of(
+                coop.fleet.CoopNpcFleetSnapshot.create(coopFleetId, "pirates", "Raiders", "loc-a",
+                        1f, 2f, 0f, 0f, false, coop.fleet.CoopSensorSync.Profile.UNKNOWN, "",
+                        List.of())));
+    }
+
+    private static String oneBaseSet() {
+        return coop.campaign.CoopBaseRecord.encodeSet(List.of(new coop.campaign.CoopBaseRecord(
+                coop.campaign.CoopBaseRecord.Kind.PIRATE, "system-a", "pirates",
+                coop.campaign.CoopBaseRecord.ATTR_LARGE, "market-a")));
+    }
+
+    /** A mirror with no engine fleet behind it, so a test can watch disposal. */
+    private static final class FakeNpcMirror implements coop.fleet.CoopNpcMirror {
+        private int disposeCalls;
+
+        @Override
+        public void applySnapshot(coop.fleet.CoopNpcFleetSnapshot snapshot, double sampleTimeSeconds) {
+        }
+
+        @Override
+        public void applyMotion(coop.fleet.CoopNpcFleetMotion motion, double sampleTimeSeconds) {
+        }
+
+        @Override
+        public void dispose() {
+            disposeCalls++;
+        }
     }
 
     private static List<String> intelEvents() {
