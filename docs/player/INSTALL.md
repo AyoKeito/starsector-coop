@@ -269,8 +269,12 @@ outstanding, naming each one. A `WARN` row is a reason it will work differently 
 ### Settings, launching and logs
 
 **Settings** in the header opens a separate window. **General** contains port mapping, HUD corner
-and reconnect grace. **Developer** contains the bridge port, wiretap sampling, interaction delay,
-diagnostics, frame profiling and the existing developer flags. **Allow game version mismatch** is
+and reconnect grace. **Developer** starts with the **Agent bridge** checkbox and its port, and goes
+on to wiretap sampling, interaction delay, diagnostics, frame profiling and the existing developer
+flags. **Agent bridge** is off for normal play; ticking it starts the game with a 127.0.0.1 socket
+open for the developer tooling, on port 7801 when this launcher hosts and 7802 when it joins, unless
+you type a port of your own in the field below it. Unticking the box leaves that port in the field
+for next time. **Allow game version mismatch** is
 an unsupported testing override; **Start over inside the host's campaign** remains a one-launch
 consent that discards the guest's co-op progress. These controls retain their existing defaults.
 
@@ -553,7 +557,9 @@ same way.
 | `coop.ff.disable` | `false` | Forces the shared fast-forward lock unavailable. |
 | `coop.clock.disable` | `false` | Turns off the clock reconciler and leaves calendar drift uncorrected. |
 | `coop.debug.diagnostics` | `false` | Master switch for the dormant diagnostics: orbit dumps, dialog state, probes. |
-| `coop.debug.bridge` | `0` | Port for the 127.0.0.1 agent bridge. `0` means no socket. |
+| `coop.debug.bridge` | `0` | Port for the 127.0.0.1 agent bridge. `0` means no socket. The launcher writes it from the **Agent bridge** checkbox in Settings: unticked it is left out of the file, ticked with the port field at `0` it is `7801` on a host launch and `7802` on a guest one. |
+| `coop.launcher.bridgeEnabled` | `false` | The **Agent bridge** checkbox, remembered between launches. The launcher reads it; the game does not. |
+| `coop.launcher.bridgePort` | `0` | The port typed beside that checkbox, remembered between launches, `0` for the port that goes with the role. The launcher reads it; the game does not. |
 | `coop.debug.wiretap` | `false` | Sampled message payloads plus per-type size histograms. |
 | `coop.debug.wiretapSample` | `10` | With the wiretap on, log every Nth datagram per direction and type. |
 | `coop.debug.frameProfile` | `false` | Per-frame pump profiler in the log. |

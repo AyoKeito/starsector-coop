@@ -271,7 +271,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 | host | `-Dcoop.debug.bridge=7801` | 127.0.0.1:7801 |
 | guest | `-Dcoop.debug.bridge=7802` | 127.0.0.1:7802 |
 
-The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind.
+The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind. The **Agent bridge** checkbox in the launcher's Settings window does the same job for a launch driven from the launcher: it writes the same two ports, 7801 hosting and 7802 joining, unless the port field beside it says otherwise.
 
 Twenty-eight verbs: `status`, `fleets`, `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`, `mark`, `memory` act. Eleven of them carry shapes worth knowing before you diff two dumps:
 

@@ -179,6 +179,7 @@ public final class CoopLauncherApp {
     private JCheckBox wiretapBox;
     private JSpinner wiretapSampleSpinner;
     private JCheckBox frameProfileBox;
+    private JCheckBox bridgeEnabledBox;
     private JSpinner bridgePortSpinner;
     private JSpinner interactionDelaySpinner;
     private JCheckBox fullFidelityBox;
@@ -778,13 +779,20 @@ public final class CoopLauncherApp {
         reconnectGraceSpinner = spinner(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS, 5);
         reconnectGraceSpinner.setToolTipText("How long a dropped link keeps the session alive."
                 + " Host decides.");
-        bridgePortSpinner = spinner(CoopOptionsRegistry.DEBUG_BRIDGE, 1);
-        bridgePortSpinner.setToolTipText("Port for the localhost agent bridge used by the dev"
-                + " tooling. 0 means no socket.");
+        bridgeEnabledBox = flag("Agent bridge", "Opens a 127.0.0.1 socket that the dev tooling in"
+                + " tools/starsector-mcp talks to. Off for normal play. With the port below at 0 it"
+                + " uses 7801 when this launcher hosts and 7802 when it joins.");
+        bridgeEnabledBox.setBorder(BorderFactory.createEmptyBorder(0, 2, 8, 0));
+        bridgeEnabledBox.addActionListener(event ->
+                bridgePortSpinner.setEnabled(bridgeEnabledBox.isSelected()));
+        bridgePortSpinner = spinner(CoopOptionsRegistry.LAUNCHER_BRIDGE_PORT, 1);
+        bridgePortSpinner.setToolTipText("Port for the localhost agent bridge. 0 means the port for"
+                + " this role: 7801 hosting, 7802 joining.");
         form.full("Reconnect grace (seconds)", reconnectGraceSpinner);
         JPanel developer = CoopLauncherUi.panel();
         form = new Form(developer);
-        form.full("Agent bridge port (0 = off)", bridgePortSpinner);
+        form.raw(bridgeEnabledBox);
+        form.full("Agent bridge port (0 = the port for this role)", bridgePortSpinner);
 
         wiretapSampleSpinner = spinner(CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE, 1);
         wiretapSampleSpinner.setToolTipText("Log every Nth datagram per type when the wiretap is"
@@ -1050,7 +1058,9 @@ public final class CoopLauncherApp {
                 DEFAULT_STAR_AGE));
 
         setSpinner(reconnectGraceSpinner, CoopLauncherConfig.RECONNECT_GRACE_SECONDS);
-        setSpinner(bridgePortSpinner, CoopLauncherConfig.DEBUG_BRIDGE);
+        setFlag(bridgeEnabledBox, CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED);
+        setSpinner(bridgePortSpinner, CoopLauncherConfig.LAUNCHER_BRIDGE_PORT);
+        bridgePortSpinner.setEnabled(bridgeEnabledBox.isSelected());
         setSpinner(wiretapSampleSpinner, CoopLauncherConfig.DEBUG_WIRETAP_SAMPLE);
         setSpinner(interactionDelaySpinner, CoopLauncherConfig.DEBUG_INTERACTION_DELAY_MS);
         setFlag(diagnosticsBox, CoopLauncherConfig.DEBUG_DIAGNOSTICS);
@@ -2454,7 +2464,17 @@ public final class CoopLauncherApp {
         }
         // Flags are written only when they differ from the registry default, so the file stays
         // readable and a default never masquerades as a deliberate choice.
-        owned.put(CoopLauncherConfig.DEBUG_BRIDGE, nonDefault(bridgePortSpinner, CoopLauncherConfig.DEBUG_BRIDGE));
+        // The checkbox and the port field are remembered as themselves, and coop.debug.bridge - the
+        // only one of the three the game reads - is what they add up to for this role. Remembering
+        // the field separately is what lets the box be unticked without losing a typed port.
+        owned.put(CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED,
+                nonDefault(bridgeEnabledBox, CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED));
+        owned.put(CoopLauncherConfig.LAUNCHER_BRIDGE_PORT,
+                nonDefault(bridgePortSpinner, CoopLauncherConfig.LAUNCHER_BRIDGE_PORT));
+        int bridgePort = CoopLauncherConfig.bridgePortFor(bridgeEnabledBox.isSelected(),
+                ((Number) bridgePortSpinner.getValue()).intValue(), host);
+        owned.put(CoopLauncherConfig.DEBUG_BRIDGE,
+                bridgePort == 0 ? "" : String.valueOf(bridgePort));
         owned.put(CoopLauncherConfig.DEBUG_WIRETAP_SAMPLE,
                 nonDefault(wiretapSampleSpinner, CoopLauncherConfig.DEBUG_WIRETAP_SAMPLE));
         owned.put(CoopLauncherConfig.DEBUG_INTERACTION_DELAY_MS,
