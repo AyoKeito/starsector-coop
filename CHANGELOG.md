@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Fixes from the first two-player Internet session on 0.1.2 (68 minutes, nine link drops from
+minimized windows, no gameplay fault seen), plus documentation work. No gameplay changes.
+
+**Reconnecting**
+
+- A link drop inside the reconnect window no longer tears down the guest's world. NPC mirror
+  fleets and the mirrored pirate and Pather bases stay in place while the countdown runs, and the
+  host's full rebroadcast on resume corrects whatever changed during the stall. Before, every resume
+  ended all six hidden bases and rebuilt them under new market ids and re-created every mirror.
+  Teardown still happens once when the window expires or the partner leaves.
+- `Wait 5 more minutes` stops at 30 minutes remaining. Presses past that do nothing and the
+  countdown stays put. One guest pressed it 53 times in 16 seconds and held a window of over four
+  hours.
+- When the partner has said it is leaving, the socket reset that follows is one info line in the
+  log instead of a warning with a stack trace.
+
+**Log markers**
+
+- Characters above ASCII in a marker note are written as `\uXXXX` escapes, so both logs hold the
+  same bytes whatever code page each Windows uses.
+
+**Documentation**
+
+- `docs/player/LIMITATIONS.md` and `docs/player/CONNECT.md` explain the minimized-window stall:
+  the other side sees the link drop after 15 seconds and the session resumes on its own when the
+  window is restored.
+- `docs/CONNECTIVITY.md` is retired; `docs/player/CONNECT.md` is the one networking guide.
+  `docs/COOP_MP_DESIGN.md` describes the code as built. `docs/CODEBASE_MAP.md` is new: packages,
+  the per-frame pump order, the wire contract and the in-game traps, for developers and AI workers.
+
 ## 0.1.2
 
 A hotkey that stamps a marker into both players' logs, for the first sessions played over the
