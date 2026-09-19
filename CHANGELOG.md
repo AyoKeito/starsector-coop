@@ -20,6 +20,8 @@ minimized windows, no gameplay fault seen), plus documentation work. No gameplay
 
 **Log markers**
 
+- The day in a marker line was a 39-digit number on both sides, because the engine answers the largest float
+  for a zero timestamp. It is now the cycle times 360 plus the day into the cycle, hours as a fraction.
 - Characters above ASCII in a marker note are written as `\uXXXX` escapes, so both logs hold the
   same bytes whatever code page each Windows uses.
 
