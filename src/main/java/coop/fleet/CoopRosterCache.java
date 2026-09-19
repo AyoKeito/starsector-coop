@@ -75,7 +75,8 @@ public final class CoopRosterCache {
         Objects.requireNonNull(tick, "tick");
         if (roster == null) {
             noteMismatch(tick.fleetHash16(), nowMillis, "no roster has arrived yet");
-            return snapshot(tick, fallbackPlayerId, fallbackUsername, "", tick.fleetHash16(), List.of());
+            return snapshot(tick, fallbackPlayerId, fallbackUsername, "", tick.fleetHash16(), List.of(),
+                    "", 0);
         }
         boolean usable = roster.fleetHash16().equals(tick.fleetHash16())
                 && tick.members().size() == roster.members().size();
@@ -88,7 +89,8 @@ public final class CoopRosterCache {
                             + roster.members().size() + " ships");
         }
         return snapshot(tick, roster.playerId(), roster.username(), roster.factionId(),
-                roster.fleetHash16(), applyStates(roster.members(), lastStates));
+                roster.fleetHash16(), applyStates(roster.members(), lastStates),
+                roster.commanderSkills(), roster.commanderLevel());
     }
 
     /**
@@ -114,17 +116,24 @@ public final class CoopRosterCache {
                     member.variantId(), member.shipName(), member.captainName(),
                     state.cr(), state.hullFraction(), member.dmodIds(), member.sModIds(),
                     // Structural, so it rides the roster half and never the tick (2026-09-14, S4-B).
-                    member.sModdedBuiltInIds(), member.mothballed()));
+                    member.sModdedBuiltInIds(), member.mothballed(),
+                    // Likewise the officer (Phase 33): the tick carries CR and hull, nothing else.
+                    member.captainLevel(), member.captainPersonality(), member.captainSkills()));
         }
         return out;
     }
 
     private static CoopFleetSnapshot snapshot(CoopFleetSnapshot.Tick tick, String playerId,
                                               String username, String factionId, String fleetHash,
-                                              List<CoopFleetSnapshot.Member> members) {
+                                              List<CoopFleetSnapshot.Member> members,
+                                              String commanderSkills, int commanderLevel) {
+        // The ally bit comes off the TICK even on a hash mismatch, deliberately: it is volatile
+        // consent, not roster structure, and the posture it drives has to follow the owner's toggle
+        // within a frame or two whether or not the roster has caught up.
         return new CoopFleetSnapshot(playerId, username, tick.locationId(),
                 tick.x(), tick.y(), tick.velocityX(), tick.velocityY(),
-                factionId, tick.transponderOn(), tick.sensors(), fleetHash, members);
+                factionId, tick.transponderOn(), tick.sensors(), fleetHash, members,
+                tick.allyAllowed(), commanderSkills, commanderLevel);
     }
 
     /**

@@ -16,7 +16,6 @@ import com.fs.starfarer.api.campaign.ai.StrategicModulePlugin;
 import com.fs.starfarer.api.campaign.ai.TacticalModulePlugin;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
-import coop.fleet.CoopAllyPullInSpike;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopMirrorTags;
 import coop.net.CoopMessages;
@@ -723,7 +722,6 @@ public final class CoopNpcThreatWatcher {
         pauseHoldLogged = false;
         ejectCount = 0;
         graceAppliedCount = 0;
-        CoopAllyPullInSpike.reset();
     }
 
     public int ejectCount() {
@@ -891,13 +889,17 @@ public final class CoopNpcThreatWatcher {
      * Load-bearing recovery, every frame. The dialog pull-in path can drag the mirror into a real
      * host battle without ever consulting {@code canBeEngaged()}; leaving it there means silent
      * autoresolve rounds against a fleet whose owner is not in a battle.
+     *
+     * <p><b>Unless the owner invited it (Phase 33).</b> A mirror whose
+     * {@link CoopMirrorTags#ALLY_ALLOWED_FLAG} is set is in that battle because its owner turned
+     * {@code coop_ally} on, and the losses are the point; ejecting it would undo the feature every
+     * frame. The flag is written from the owner's snapshot by
+     * {@code CoopFleetMirror.applyPlayerMirrorPosture}, so it can only be true while the owner's
+     * consent is live. Everything else — an NPC mirror, a partner mirror whose owner said no —
+     * still gets the eject and its WARN.
      */
     void ejectFromBattleIfNeeded(CampaignFleetAPI mirror) {
-        if (CoopDebug.allyPullInEnabled()) {
-            // Debug-only spike (-Dcoop.debug.allyPullIn): the recovery is exactly what makes the
-            // question unanswerable, so it stands down and the observer records the battle instead.
-            // Edge-logged, so a battle that lasts a thousand frames still prints two lines.
-            CoopAllyPullInSpike.observe(mirror);
+        if (allyAllowed(mirror)) {
             return;
         }
         BattleAPI battle;
@@ -919,6 +921,25 @@ public final class CoopNpcThreatWatcher {
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNpcThreatWatcher.class, "Coop FAILED to eject the guest mirror from a battle"
                     + " — autoresolve may damage a fleet whose owner is not fighting", ex);
+        }
+    }
+
+    /**
+     * Whether this fleet's owner has consented to it fighting as an AI ally (Phase 33). Read off
+     * fleet memory rather than asked of {@code CoopFleetMirror}, because this class holds a
+     * {@code CampaignFleetAPI} and nothing else; an absent flag — every NPC mirror, and a partner
+     * mirror with the toggle off — is false, which is exactly the pre-0.1.4 behaviour.
+     */
+    static boolean allyAllowed(CampaignFleetAPI mirror) {
+        if (mirror == null) {
+            return false;
+        }
+        try {
+            MemoryAPI memory = mirror.getMemoryWithoutUpdate();
+            return memory != null && memory.getBoolean(CoopMirrorTags.ALLY_ALLOWED_FLAG);
+        } catch (RuntimeException | LinkageError ignored) {
+            // A mirror that cannot answer for its memory has not consented to anything: eject.
+            return false;
         }
     }
 

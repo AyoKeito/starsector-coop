@@ -851,7 +851,7 @@ public final class CoopNpcFleetReplicator {
                 // fleet"). Stubbed "" from Phase 9 until 2026-08-20 — the guest mirror has no AI
                 // state to derive it from, so it has to ride the wire.
                 CoopNpcActionTextCapture.capture(fleet, hostPlayerFleet, guestMirror, hostPlayerLabel),
-                CoopFleetSnapshotFactory.captureMembers(fleet));
+                CoopFleetSnapshotFactory.captureMembersWithoutOfficers(fleet));
     }
 
     /**

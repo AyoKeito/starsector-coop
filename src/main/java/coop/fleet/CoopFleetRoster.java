@@ -22,9 +22,12 @@ import java.util.Objects;
  * roster is applied against it, one that does not is held (see {@link CoopRosterCache}).
  */
 public record CoopFleetRoster(String playerId, String username, String factionId,
-                              String fleetHash16, List<CoopFleetSnapshot.Member> members) {
+                              String fleetHash16, List<CoopFleetSnapshot.Member> members,
+                              String commanderSkills, int commanderLevel) {
 
-    private static final int HEADER_FIELD_COUNT = 5;
+    /** The roster header before Phase 33 appended the owner's commander character. */
+    private static final int HEADER_FIELD_COUNT_PRE_OFFICERS = 5;
+    private static final int HEADER_FIELD_COUNT = HEADER_FIELD_COUNT_PRE_OFFICERS + 2;
 
     public CoopFleetRoster {
         playerId = playerId == null ? "" : playerId;
@@ -32,23 +35,41 @@ public record CoopFleetRoster(String playerId, String username, String factionId
         factionId = factionId == null ? "" : factionId;
         fleetHash16 = fleetHash16 == null ? "" : fleetHash16;
         members = members == null ? List.of() : List.copyOf(members);
+        commanderSkills = commanderSkills == null ? "" : commanderSkills;
+        commanderLevel = Math.max(0, commanderLevel);
+    }
+
+    /** A roster from a sender with no replicated commander character (pre-0.1.4 shape). */
+    public CoopFleetRoster(String playerId, String username, String factionId, String fleetHash16,
+                           List<CoopFleetSnapshot.Member> members) {
+        this(playerId, username, factionId, fleetHash16, members, "", 0);
     }
 
     /** The roster half of a full snapshot, truncating its hash to the wire's 16 hex characters. */
     public static CoopFleetRoster of(CoopFleetSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         return new CoopFleetRoster(snapshot.playerId(), snapshot.username(), snapshot.factionId(),
-                snapshot.fleetHash16(), snapshot.members());
+                snapshot.fleetHash16(), snapshot.members(), snapshot.commanderSkills(),
+                snapshot.commanderLevel());
     }
 
-    /** Header line then one member record per line, in the {@link CoopFleetCodec} member encoding. */
+    /**
+     * Header line then one member record per line, in the {@link CoopFleetCodec} member encoding.
+     *
+     * <p>The commander fields ride here rather than on the 10 Hz tick because they are exactly as
+     * structural as the officers beside them: the mirror seats them on its placeholder commander at
+     * roster-build time and never again, and they move only when the owner spends a skill point.
+     * They sit after the member count so the count keeps its index (see {@link CoopFleetSnapshot}).
+     */
     public String encode() {
         StringBuilder out = new StringBuilder(96 + members.size() * 64);
         out.append(CoopFleetCodec.escape(playerId))
                 .append('|').append(CoopFleetCodec.escape(username))
                 .append('|').append(CoopFleetCodec.escape(factionId))
                 .append('|').append(CoopFleetCodec.escape(fleetHash16))
-                .append('|').append(Integer.toString(members.size()));
+                .append('|').append(Integer.toString(members.size()))
+                .append('|').append(CoopFleetCodec.escape(commanderSkills))
+                .append('|').append(Integer.toString(commanderLevel));
         for (CoopFleetSnapshot.Member member : members) {
             out.append('\n');
             CoopFleetCodec.appendMember(out, member);
@@ -60,10 +81,11 @@ public record CoopFleetRoster(String playerId, String username, String factionId
         Objects.requireNonNull(encoded, "encoded");
         String[] lines = encoded.split("\n", -1);
         List<String> header = CoopFleetCodec.split(lines[0]);
-        if (header.size() != HEADER_FIELD_COUNT) {
+        if (header.size() != HEADER_FIELD_COUNT && header.size() != HEADER_FIELD_COUNT_PRE_OFFICERS) {
             throw new IllegalArgumentException("Expected " + HEADER_FIELD_COUNT
                     + " roster header fields, got " + header.size());
         }
+        boolean carriesCommander = header.size() == HEADER_FIELD_COUNT;
         int memberCount = Integer.parseInt(header.get(4));
         // Explicit rather than left to ArrayList's capacity check (red-team A15): a negative count
         // sails past the "enough lines present" test below, and the exception a reader eventually
@@ -79,6 +101,17 @@ public record CoopFleetRoster(String playerId, String username, String factionId
         for (int i = 0; i < memberCount; i++) {
             members.add(CoopFleetCodec.parseMember(CoopFleetCodec.split(lines[i + 1])));
         }
-        return new CoopFleetRoster(header.get(0), header.get(1), header.get(2), header.get(3), members);
+        return new CoopFleetRoster(header.get(0), header.get(1), header.get(2), header.get(3), members,
+                carriesCommander ? header.get(5) : "",
+                carriesCommander ? parseCommanderLevel(header.get(6)) : 0);
+    }
+
+    /** Unparsable reads as "no level": the roster's ships are worth more than the commander's tier. */
+    private static int parseCommanderLevel(String text) {
+        try {
+            return Math.max(0, Integer.parseInt(text.trim()));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 }

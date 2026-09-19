@@ -41,7 +41,10 @@ class CoopAbilityArbiterTest {
     @Test
     void theLocalSetIsPinned() {
         assertEquals(java.util.Set.of("emergency_burn", "sustained_burn", "transponder", "go_dark",
-                        "sensor_burst", "gravitic_scan", "remote_survey"),
+                        "sensor_burst", "gravitic_scan", "remote_survey",
+                        // Phase 33: a per-player consent bit, so replicating the activation would
+                        // enrol the partner's fleet as well as the activating player's own.
+                        "coop_ally"),
                 CoopAbilityArbiter.LOCAL_ABILITIES);
     }
 

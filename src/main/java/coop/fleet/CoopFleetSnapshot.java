@@ -30,11 +30,20 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                                 float x, float y, float velocityX, float velocityY,
                                 String factionId, boolean transponderOn,
                                 CoopSensorSync.Profile sensors, String fleetHash,
-                                List<Member> members) {
+                                List<Member> members,
+                                boolean allyAllowed, String commanderSkills, int commanderLevel) {
 
-    private static final int HEADER_FIELD_COUNT = 10 + CoopSensorSync.FIELD_COUNT + 1;
+    /** The header shape before Phase 33 appended the ally bit and the commander's character. */
+    private static final int HEADER_FIELD_COUNT_PRE_OFFICERS = 10 + CoopSensorSync.FIELD_COUNT + 1;
     private static final int SENSOR_FIELD_OFFSET = 9;
-    private static final int MEMBER_COUNT_INDEX = HEADER_FIELD_COUNT - 1;
+    private static final int MEMBER_COUNT_INDEX = HEADER_FIELD_COUNT_PRE_OFFICERS - 1;
+    /**
+     * Phase 33 appends {@code allyAllowed}, {@code commanderSkills} and {@code commanderLevel}
+     * <em>after</em> the member count rather than before it, so {@link #MEMBER_COUNT_INDEX} — and
+     * with it every decoder that has ever read this format — stays where it was.
+     */
+    private static final int HEADER_FIELD_COUNT = HEADER_FIELD_COUNT_PRE_OFFICERS + 3;
+    private static final int ALLY_ALLOWED_INDEX = MEMBER_COUNT_INDEX + 1;
 
     /**
      * Hex characters of {@link #fleetHash} that go on the wire (Phase 20 M4 payload diet). Sixteen
@@ -77,6 +86,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
         fleetHash = normalize(fleetHash);
         sensors = sensors == null ? CoopSensorSync.Profile.UNKNOWN : sensors;
         members = members == null ? List.of() : List.copyOf(members);
+        commanderSkills = normalize(commanderSkills);
+        commanderLevel = Math.max(0, commanderLevel);
     }
 
     /**
@@ -117,7 +128,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
     public record Member(String fleetMemberId, String hullId, String variantId, String shipName,
                          String captainName, float cr, float hullFraction,
                          String dmodIds, String sModIds, String sModdedBuiltInIds,
-                         boolean mothballed) {
+                         boolean mothballed,
+                         int captainLevel, String captainPersonality, String captainSkills) {
         public Member {
             fleetMemberId = normalize(fleetMemberId);
             hullId = normalize(hullId);
@@ -127,6 +139,9 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             dmodIds = normalize(dmodIds);
             sModIds = normalize(sModIds);
             sModdedBuiltInIds = normalize(sModdedBuiltInIds);
+            captainLevel = Math.max(0, captainLevel);
+            captainPersonality = normalize(captainPersonality);
+            captainSkills = normalize(captainSkills);
         }
 
         /**
@@ -138,17 +153,49 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             this(fleetMemberId, hullId, variantId, shipName, captainName, cr, hullFraction, "", "", "",
                     false);
         }
+
+        /**
+         * A member whose captain is a name and nothing else: the pre-Phase-33 shape, kept so the
+         * hullmod and mothball call sites that predate the officer fields read as they did.
+         */
+        public Member(String fleetMemberId, String hullId, String variantId, String shipName,
+                      String captainName, float cr, float hullFraction,
+                      String dmodIds, String sModIds, String sModdedBuiltInIds, boolean mothballed) {
+            this(fleetMemberId, hullId, variantId, shipName, captainName, cr, hullFraction, dmodIds,
+                    sModIds, sModdedBuiltInIds, mothballed, 0, "", "");
+        }
+
+        /** True when this ship carries an officer worth rebuilding on the mirror. */
+        public boolean hasCaptain() {
+            return !captainName.isEmpty() || captainLevel > 0 || !captainSkills.isEmpty();
+        }
     }
 
-    /** Builds a snapshot, computing {@link #fleetHash} from {@code members}. */
+    /**
+     * Builds a snapshot, computing {@link #fleetHash} from {@code members}. The pre-Phase-33 form:
+     * no ally consent and no commander character, which is what every caller that is not the local
+     * player's own capture wants.
+     */
     public static CoopFleetSnapshot create(String playerId, String username, String locationId,
                                            float x, float y, float velocityX, float velocityY,
                                            String factionId, boolean transponderOn,
                                            CoopSensorSync.Profile sensors,
                                            List<Member> members) {
+        return create(playerId, username, locationId, x, y, velocityX, velocityY, factionId,
+                transponderOn, sensors, members, false, "", 0);
+    }
+
+    /** As above, with the Phase 33 ally bit and the owner's commander character. */
+    public static CoopFleetSnapshot create(String playerId, String username, String locationId,
+                                           float x, float y, float velocityX, float velocityY,
+                                           String factionId, boolean transponderOn,
+                                           CoopSensorSync.Profile sensors,
+                                           List<Member> members, boolean allyAllowed,
+                                           String commanderSkills, int commanderLevel) {
         List<Member> safeMembers = members == null ? List.of() : members;
         return new CoopFleetSnapshot(playerId, username, locationId, x, y, velocityX, velocityY,
-                factionId, transponderOn, sensors, computeFleetHash(safeMembers), safeMembers);
+                factionId, transponderOn, sensors, computeFleetHash(safeMembers), safeMembers,
+                allyAllowed, commanderSkills, commanderLevel);
     }
 
     /**
@@ -203,7 +250,15 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .append('|').append(member.dmodIds())
                     .append('|').append(member.sModIds())
                     .append('|').append(member.sModdedBuiltInIds())
-                    .append('|').append(member.mothballed() ? '1' : '0');
+                    .append('|').append(member.mothballed() ? '1' : '0')
+                    // Phase 33: the officer is structural for the same reason mothballed is. The
+                    // mirror builds a PersonAPI at roster-build time and nothing else ever touches
+                    // it, so a level-up or a reassignment that did not move this hash would reach an
+                    // already-built mirror never. Both are rare events (a skill point spent, an
+                    // officer moved between ships), so this cannot reproduce the CR rebuild storm.
+                    .append('|').append(member.captainLevel())
+                    .append('|').append(member.captainPersonality())
+                    .append('|').append(member.captainSkills());
         }
         return CoopChecksum.sha256Text(canonical.toString());
     }
@@ -218,7 +273,10 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     .thenComparing(Member::dmodIds)
                     .thenComparing(Member::sModIds)
                     .thenComparing(Member::sModdedBuiltInIds)
-                    .thenComparing(Member::mothballed);
+                    .thenComparing(Member::mothballed)
+                    .thenComparing(Member::captainLevel)
+                    .thenComparing(Member::captainPersonality)
+                    .thenComparing(Member::captainSkills);
 
     /**
      * The permutation that puts {@code members} into the hash's canonical order: element {@code k} is
@@ -288,7 +346,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
      */
     public record Tick(String locationId, float x, float y, float velocityX, float velocityY,
                        boolean transponderOn, CoopSensorSync.Profile sensors, String fleetHash16,
-                       List<MemberState> members) {
+                       List<MemberState> members, boolean allyAllowed) {
 
         /** Header fields before the per-member pairs: location, 4 motion, transponder, sensors, hash, count. */
         private static final int HEADER_FIELD_COUNT = 8 + CoopSensorSync.FIELD_COUNT;
@@ -302,6 +360,14 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             members = members == null ? List.of() : List.copyOf(members);
         }
 
+        /** A tick from a sender that does not replicate its ally consent (pre-0.1.4 shape). */
+        public Tick(String locationId, float x, float y, float velocityX, float velocityY,
+                    boolean transponderOn, CoopSensorSync.Profile sensors, String fleetHash16,
+                    List<MemberState> members) {
+            this(locationId, x, y, velocityX, velocityY, transponderOn, sensors, fleetHash16, members,
+                    false);
+        }
+
         /** The tick view of a full snapshot, in the roster's canonical order (see the class note). */
         public static Tick of(CoopFleetSnapshot snapshot) {
             Objects.requireNonNull(snapshot, "snapshot");
@@ -313,13 +379,20 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             }
             return new Tick(snapshot.locationId(), snapshot.x(), snapshot.y(),
                     snapshot.velocityX(), snapshot.velocityY(), snapshot.transponderOn(),
-                    snapshot.sensors(), snapshot.fleetHash16(), states);
+                    snapshot.sensors(), snapshot.fleetHash16(), states, snapshot.allyAllowed());
         }
 
         /**
-         * One line, pipe delimited: the header fields followed by {@code cr|hull} per member. Flat
-         * rather than line-per-member because a member record here is two short numbers and a
-         * newline would be 8% of it.
+         * One line, pipe delimited: the header fields, {@code cr|hull} per member, and the Phase 33
+         * ally bit last. Flat rather than line-per-member because a member record here is two short
+         * numbers and a newline would be 8% of it.
+         *
+         * <p><b>The ally bit goes at the end, after the variable-length member section.</b> That is
+         * what makes it additive: a tick from a peer that does not send it is one field short, which
+         * {@link #decode} reads as "this sender never consented" — exactly the safe answer — instead
+         * of shifting every member's CR one slot and rejecting the datagram. Two bytes on a 10 Hz
+         * stream, and the alternative (a header field) would have renumbered the member count index
+         * every decoder in this package keys on.
          */
         public String encode() {
             StringBuilder out = new StringBuilder(96 + members.size() * 12);
@@ -337,6 +410,7 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                         .append('|').append(CoopFleetCodec.encodeFloat(state.hullFraction(),
                                 CoopFleetCodec.FRACTION_STEP));
             }
+            out.append('|').append(allyAllowed ? '1' : '0');
             return out.toString();
         }
 
@@ -348,7 +422,9 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                         + " tick fields, got " + fields.size());
             }
             int memberCount = Integer.parseInt(fields.get(MEMBER_COUNT_INDEX));
-            if (memberCount < 0 || fields.size() != HEADER_FIELD_COUNT + memberCount * 2) {
+            int stateEnd = HEADER_FIELD_COUNT + memberCount * 2;
+            boolean carriesAllyBit = memberCount >= 0 && fields.size() == stateEnd + 1;
+            if (memberCount < 0 || (fields.size() != stateEnd && !carriesAllyBit)) {
                 throw new IllegalArgumentException("Declared " + memberCount
                         + " members but the record carries " + (fields.size() - HEADER_FIELD_COUNT)
                         + " state fields");
@@ -364,7 +440,8 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                     CoopFleetCodec.parseFiniteFloat(fields.get(3)), CoopFleetCodec.parseFiniteFloat(fields.get(4)),
                     "1".equals(fields.get(5)),
                     CoopSensorSync.parse(fields, SENSOR_FIELD_OFFSET),
-                    fields.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), states);
+                    fields.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), states,
+                    carriesAllyBit && "1".equals(fields.get(stateEnd)));
         }
     }
 
@@ -395,7 +472,10 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                 .append('|').append(transponderOn ? '1' : '0');
         CoopSensorSync.append(out, sensors);
         out.append('|').append(CoopFleetCodec.escape(fleetHash))
-                .append('|').append(Integer.toString(members.size()));
+                .append('|').append(Integer.toString(members.size()))
+                .append('|').append(allyAllowed ? '1' : '0')
+                .append('|').append(CoopFleetCodec.escape(commanderSkills))
+                .append('|').append(Integer.toString(commanderLevel));
         for (Member member : members) {
             out.append('\n');
             CoopFleetCodec.appendMember(out, member);
@@ -410,10 +490,13 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
             throw new IllegalArgumentException("Empty fleet snapshot");
         }
         List<String> header = CoopFleetCodec.split(lines[0]);
-        if (header.size() != HEADER_FIELD_COUNT) {
+        // Phase 33 appended three header fields; a body without them is still a snapshot, and the
+        // bridge dumps and wiretap fixtures this decoder also reads predate them.
+        if (header.size() != HEADER_FIELD_COUNT && header.size() != HEADER_FIELD_COUNT_PRE_OFFICERS) {
             throw new IllegalArgumentException("Expected " + HEADER_FIELD_COUNT
                     + " header fields, got " + header.size());
         }
+        boolean carriesOfficers = header.size() == HEADER_FIELD_COUNT;
         int memberCount = Integer.parseInt(header.get(MEMBER_COUNT_INDEX));
         // See CoopFleetRoster.decode: a negative count passes the line-count test below (red-team A15).
         if (memberCount < 0) {
@@ -432,7 +515,10 @@ public record CoopFleetSnapshot(String playerId, String username, String locatio
                 CoopFleetCodec.parseFiniteFloat(header.get(5)), CoopFleetCodec.parseFiniteFloat(header.get(6)),
                 header.get(7), "1".equals(header.get(8)),
                 CoopSensorSync.parse(header, SENSOR_FIELD_OFFSET),
-                header.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), members);
+                header.get(SENSOR_FIELD_OFFSET + CoopSensorSync.FIELD_COUNT), members,
+                carriesOfficers && "1".equals(header.get(ALLY_ALLOWED_INDEX)),
+                carriesOfficers ? header.get(ALLY_ALLOWED_INDEX + 1) : "",
+                carriesOfficers ? Integer.parseInt(header.get(ALLY_ALLOWED_INDEX + 2)) : 0);
     }
 
     private static String normalize(String value) {

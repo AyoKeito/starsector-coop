@@ -102,8 +102,6 @@ class CoopOptionsRegistryTest {
                 "coop.debug.wiretapSample",
                 "coop.debug.frameProfile",
                 "coop.debug.interactionDelayMs",
-                "coop.debug.allyPullIn",
-                "coop.debug.allyPullInDropShield",
                 // Launcher memory for the Agent bridge checkbox. -D-only for the same reason the
                 // rest of this set is: the launcher's settings file is its only channel, and the
                 // game reads neither.

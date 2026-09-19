@@ -20,4 +20,11 @@ class CoopMirrorTagsTest {
     void npcMirrorTagIsThePinnedLiteral() {
         assertEquals("$coopNpcFleetId", CoopMirrorTags.NPC_MIRROR_TAG);
     }
+
+    @Test
+    void allyAllowedFlagIsThePinnedLiteral() {
+        // Phase 33. Written by the mirror's posture apply and read by the threat watcher's battle
+        // eject and the customs shield restore, neither of which has anything but the fleet.
+        assertEquals("$coopAllyAllowed", CoopMirrorTags.ALLY_ALLOWED_FLAG);
+    }
 }

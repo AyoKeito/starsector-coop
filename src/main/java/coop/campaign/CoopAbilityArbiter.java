@@ -39,7 +39,14 @@ public final class CoopAbilityArbiter {
             // just this one. Routing the ability to the host applier only produced log noise: there
             // is no host-side effect wired for it, and the ability's own once-per-system flag and
             // CR cost are charged on the activating fleet regardless.
-            "remote_survey");
+            "remote_survey",
+            // Phase 33's own toggle, and the one id here that affects nothing at all locally. It is
+            // a per-player consent bit: replicating the activation would make the partner's engine
+            // toggle ITS copy of coop_ally, so one player's "yes" would enrol the other player's
+            // fleet too. The bit the other engine needs travels on the fleet snapshot instead
+            // (CoopFleetSnapshot#allyAllowed), which is state rather than an event and so cannot
+            // drift out of step with the toggle it describes.
+            CoopAllyToggleAbility.ABILITY_ID);
 
     /**
      * Vanilla ability ids that touch shared / NPC / world state and must be host-arbitrated. Kept as

@@ -21,10 +21,11 @@ final class CoopFleetCodec {
     static final char FIELD_SEPARATOR = '|';
     /**
      * Bumped 7 -&gt; 10 by Phase 16 for the replicated permanent hullmods ({@code dmodIds},
-     * {@code sModIds}, {@code sModdedBuiltInIds}), and 10 -&gt; 11 on 2026-09-14 (S4-B) for
-     * {@code mothballed}; see {@link CoopFleetSnapshot.Member}.
+     * {@code sModIds}, {@code sModdedBuiltInIds}), 10 -&gt; 11 on 2026-09-14 (S4-B) for
+     * {@code mothballed}, and 11 -&gt; 14 by Phase 33 for the officer ({@code captainLevel},
+     * {@code captainPersonality}, {@code captainSkills}); see {@link CoopFleetSnapshot.Member}.
      */
-    static final int MEMBER_FIELD_COUNT = 11;
+    static final int MEMBER_FIELD_COUNT = 14;
 
     /**
      * The member record shape before {@code mothballed} (2026-09-14, S4-B). Both peers always run the
@@ -35,6 +36,13 @@ final class CoopFleetCodec {
      * it is false) while a hard throw drops the whole roster the member is in.
      */
     static final int MEMBER_FIELD_COUNT_PRE_MOTHBALL = 10;
+
+    /**
+     * The member record shape before Phase 33's officer fields, tolerated for the same reason as
+     * {@link #MEMBER_FIELD_COUNT_PRE_MOTHBALL}: the missing trailing fields read as "this ship has no
+     * replicated officer", which is what every roster recorded before 0.1.4 meant.
+     */
+    static final int MEMBER_FIELD_COUNT_PRE_OFFICERS = 11;
     /** U+001F UNIT SEPARATOR: the datagram envelope's record separator, and player-typeable. */
     static final char UNIT_SEPARATOR = (char) 0x1F;
 
@@ -220,7 +228,10 @@ final class CoopFleetCodec {
                 .append(FIELD_SEPARATOR).append(escape(member.dmodIds()))
                 .append(FIELD_SEPARATOR).append(escape(member.sModIds()))
                 .append(FIELD_SEPARATOR).append(escape(member.sModdedBuiltInIds()))
-                .append(FIELD_SEPARATOR).append(member.mothballed() ? '1' : '0');
+                .append(FIELD_SEPARATOR).append(member.mothballed() ? '1' : '0')
+                .append(FIELD_SEPARATOR).append(Integer.toString(member.captainLevel()))
+                .append(FIELD_SEPARATOR).append(escape(member.captainPersonality()))
+                .append(FIELD_SEPARATOR).append(escape(member.captainSkills()));
     }
 
     /**
@@ -232,14 +243,32 @@ final class CoopFleetCodec {
      * wrong ship.
      */
     static CoopFleetSnapshot.Member parseMember(List<String> fields) {
-        if (fields.size() != MEMBER_FIELD_COUNT && fields.size() != MEMBER_FIELD_COUNT_PRE_MOTHBALL) {
+        if (fields.size() != MEMBER_FIELD_COUNT && fields.size() != MEMBER_FIELD_COUNT_PRE_MOTHBALL
+                && fields.size() != MEMBER_FIELD_COUNT_PRE_OFFICERS) {
             throw new IllegalArgumentException("Expected " + MEMBER_FIELD_COUNT
                     + " member fields, got " + fields.size());
         }
         boolean mothballed = fields.size() > MEMBER_FIELD_COUNT_PRE_MOTHBALL
                 && "1".equals(fields.get(MEMBER_FIELD_COUNT_PRE_MOTHBALL));
+        boolean officers = fields.size() == MEMBER_FIELD_COUNT;
         return new CoopFleetSnapshot.Member(fields.get(0), fields.get(1), fields.get(2), fields.get(3),
                 fields.get(4), parseFiniteFloat(fields.get(5)), parseFiniteFloat(fields.get(6)),
-                fields.get(7), fields.get(8), fields.get(9), mothballed);
+                fields.get(7), fields.get(8), fields.get(9), mothballed,
+                officers ? parseOfficerLevel(fields.get(11)) : 0,
+                officers ? fields.get(12) : "",
+                officers ? fields.get(13) : "");
+    }
+
+    /**
+     * An officer level off the wire. Unparsable reads as "no officer level", not as a throw: the rest
+     * of the ship is intact and a roster is not worth dropping over one number the mirror only uses
+     * to seat a {@code PersonAPI}'s stats.
+     */
+    private static int parseOfficerLevel(String text) {
+        try {
+            return Math.max(0, Integer.parseInt(text.trim()));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 }

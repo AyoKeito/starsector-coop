@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.util.Misc;
+import coop.fleet.CoopMirrorTags;
 import coop.net.CoopMessages;
 
 /**
@@ -107,6 +108,13 @@ public final class CoopCustomsDialogStaging {
      * {@code Misc.getBattleJoinRange()} would drag it in and report losses on a host fleet that never
      * fought. Written the same way the mirror creates it — a bare {@code set}, not a
      * reference-counted reason — so the two agree. Never throws.
+     *
+     * <p><b>It restores the posture, not a hard "ignore everyone" (Phase 33).</b> A mirror whose
+     * owner has {@code coop_ally} on is meant to be joinable, and putting an unconditional
+     * {@code true} back after a staged customs stop would switch the feature off for the rest of the
+     * session — the flag lives in fleet memory and only the owner's next snapshot would correct it.
+     * {@link CoopMirrorTags#ALLY_ALLOWED_FLAG} carries the owner's answer on the same memory, so this
+     * reads it and writes its negation.
      */
     public static String restoreEngagementShield(CampaignFleetAPI mirror) {
         MemoryAPI mem = memoryOf(mirror);
@@ -114,7 +122,12 @@ public final class CoopCustomsDialogStaging {
             return "no-memory";
         }
         StringBuilder out = new StringBuilder();
-        setFlag(mem, out, MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+        boolean allyAllowed = CoopNpcThreatWatcher.allyAllowed(mirror);
+        if (allyAllowed) {
+            unsetFlag(mem, out, MemFlags.FLEET_IGNORES_OTHER_FLEETS);
+        } else {
+            setFlag(mem, out, MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+        }
         return out.toString().trim();
     }
 

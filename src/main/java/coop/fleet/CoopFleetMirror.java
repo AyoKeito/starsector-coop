@@ -7,6 +7,9 @@ import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.ai.CampaignFleetAIAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.characters.FullName;
+import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
+import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
@@ -88,10 +91,24 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private CampaignFleetAPI mirrorFleet;
     /**
      * True once this instance has built the Phase 8 <em>player</em> mirror, false for an NPC mirror.
-     * Only the ally pull-in spike reads it: the two roles share this class, and the spike must move
-     * exactly one of them ({@link CoopAllyPullInSpike}).
+     * The two roles share this class and Phase 33 applies to exactly one of them: only a player
+     * mirror carries a posture, gets its member state frozen during a battle, or produces an ally
+     * battle record.
      */
     private boolean playerMirror;
+    /**
+     * Phase 33: the owner's {@code coop_ally} toggle as its last snapshot reported it. Held rather
+     * than read per call because {@link #applyPlayerMirrorPosture} writes it into fleet memory on
+     * every apply, and {@link #allyAllowed()} answers for the posture the mirror is actually wearing.
+     */
+    private boolean allyAllowed;
+    /** The owner's player id, for the ally battle records. Empty for an NPC mirror. */
+    private String ownerPlayerId = "";
+    /** Phase 33: the owner's own character, seated on the mirror's commander at every roster build. */
+    private String commanderSkills = "";
+    private int commanderLevel;
+    /** Watches this mirror's battle and owns the member-state freeze; inert on an NPC mirror. */
+    private final CoopAllyBattleTracker battleTracker = new CoopAllyBattleTracker();
     private String lastFleetHash;
     /**
      * A structural hash whose roster could not be built completely (an unresolvable variant/hull), kept
@@ -128,6 +145,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * the moment a non-empty roster arrives, so a second wipe later in the session logs again.
      */
     private boolean emptyRosterSkipLogged;
+    /** Whether the Phase 33 member-state freeze has already logged for the current battle episode. */
+    private boolean memberStateFreezeLogged;
     /**
      * Whether this mirror has already logged that the sender could not read one of its ships' CR
      * ({@link CoopFleetSnapshot#CR_UNKNOWN}). One line per mirror per session, not per apply.
@@ -155,6 +174,13 @@ public class CoopFleetMirror implements CoopNpcMirror {
     private List<String> builtMemberIds = List.of();
     /** {@link #builtMemberIds}'s size, or -1 while no rebuild has run yet (an empty build is 0). */
     private int builtMemberCount = -1;
+    /**
+     * Phase 33: engine {@code FleetMemberAPI.getId()} to the sender-side id the roster carried, for
+     * every ship {@link #rebuildRoster} actually built. {@link #builtMemberIds} cannot answer this —
+     * it is the sender's half only, and the post-battle read starts from the engine's live roster and
+     * has to get back to ids the owner can address its own ships by.
+     */
+    private final Map<String, String> senderIdsByEngineId = new HashMap<>();
 
     public CoopFleetMirror() {
         this(Global::getSector, new CoopPresenceIndicator());
@@ -189,17 +215,34 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 noteEmptyPlayerRosterSkipped(snapshot.fleetHash());
                 return;
             }
+            // Before ensurePlayerFleet, which stamps or re-asserts the posture from this field.
+            allyAllowed = snapshot.allyAllowed();
+            ownerPlayerId = snapshot.playerId();
+            commanderSkills = snapshot.commanderSkills();
+            commanderLevel = snapshot.commanderLevel();
             ensurePlayerFleet(snapshot, localPlayerFactionId);
+            // Ahead of the state applies below rather than only from the pump's shield pass: within a
+            // frame the shield pass runs first, but this is the path that would do the damage, and a
+            // freeze that depended on two passes agreeing would be one ordering change from silent.
+            battleTracker.poll(mirrorFleet, ownerPlayerId, senderIdsByEngineId);
             placeInLocation(location, snapshot.x(), snapshot.y());
             feedMotion(sampleTimeSeconds, snapshot.x(), snapshot.y(),
                     snapshot.velocityX(), snapshot.velocityY());
             acceptTransponder(snapshot.transponderOn());
             acceptSensors(snapshot.sensors());
-            // Phase 17: the player path is the only one the empty-roster guard covers. See
-            // shouldSkipRosterApply — the NPC path below must keep accepting empty rosters.
-            if (shouldSkipRosterApply(true, snapshot.members().size())) {
+            // Phase 33: motion, transponder and sensors keep flowing through a battle — the mirror
+            // must stay where the owner is and stay as detectable as the owner is. Hull, CR and the
+            // ship set must not: the spike showed the owner's snapshot erasing the engine's
+            // post-battle numbers within a frame of the fight ending, which is why there was nothing
+            // to diff. See CoopAllyBattleTracker.
+            if (battleTracker.frozen()) {
+                noteMemberStateFrozen();
+            } else if (shouldSkipRosterApply(true, snapshot.members().size())) {
+                // Phase 17: the player path is the only one the empty-roster guard covers. See
+                // shouldSkipRosterApply — the NPC path below must keep accepting empty rosters.
                 noteEmptyPlayerRosterSkipped(snapshot.fleetHash());
             } else {
+                memberStateFreezeLogged = false;
                 emptyRosterSkipLogged = false;
                 refreshRosterIfChanged(snapshot.fleetHash(), snapshot.members());
             }
@@ -207,6 +250,16 @@ public class CoopFleetMirror implements CoopNpcMirror {
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class, "Failed to apply coop fleet snapshot", ex);
         }
+    }
+
+    /** One line per freeze episode, not one per 10 Hz apply. */
+    private void noteMemberStateFrozen() {
+        if (memberStateFreezeLogged) {
+            return;
+        }
+        memberStateFreezeLogged = true;
+        CoopLog.info(CoopFleetMirror.class, "Coop ally mirror is fighting: the owner's hull, CR and"
+                + " roster writes are held until the battle result is read coopFleetId=" + coopFleetId);
     }
 
     // ---- NPC mirror (Phase 9) ----------------------------------------------------------------
@@ -337,7 +390,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
 
     private void ensurePlayerFleet(CoopFleetSnapshot snapshot, String localPlayerFactionId) {
         if (mirrorFleet != null && mirrorFleet.isAlive()) {
-            assertIgnoresOtherFleets(mirrorFleet, true);
+            applyPlayerMirrorPosture(mirrorFleet, allyAllowed);
             return;
         }
         String factionId = CoopPresenceIndicator.presenceFactionId(localPlayerFactionId);
@@ -358,7 +411,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
         // into host battles in ordinary play. Costs nothing: it only affects the mirror's own target
         // selection, which the snapshot driving overrides anyway.
         playerMirror = true;
-        stampPlayerMirrorMemory(mirrorFleet.getMemoryWithoutUpdate());
+        stampPlayerMirrorMemory(mirrorFleet.getMemoryWithoutUpdate(), allyAllowed);
         // This is the only thing in the mod that creates a player mirror, so publishing it here is
         // what lets the host's per-frame consumers stop scanning the sector for it. See
         // CoopGuestMirrorHandle.
@@ -369,10 +422,8 @@ public class CoopFleetMirror implements CoopNpcMirror {
         appliedFactionId = factionId;
         CoopLog.info(CoopFleetMirror.class,
                 "Created coop mirror fleet for playerId=" + snapshot.playerId()
-                        + " username=" + label + " faction=" + factionId);
-        // Once per session (the mirror is built once), so the log proves the switch took on this
-        // instance rather than only on the other one. Silent unless the spike is armed.
-        CoopAllyPullInSpike.announce();
+                        + " username=" + label + " faction=" + factionId
+                        + " allyAllowed=" + allyAllowed);
     }
 
     private void ensureNpcFleet(CoopNpcFleetSnapshot snapshot) {
@@ -401,40 +452,24 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     /**
-     * The memory a freshly created <em>player</em> mirror carries.
+     * The memory a freshly created <em>player</em> mirror carries: the Phase 33 posture, plus the tag
+     * every cleanup and suppression path recognises the partner's fleet by.
      *
-     * <p>{@code FLEET_IGNORES_OTHER_FLEETS} is the load-bearing half. The battle PULL-IN path bypasses
-     * {@code canBeEngaged()} entirely: {@code FleetInteractionDialogPluginImpl.pullInNearbyFleets} runs
-     * whenever the host opens any fleet dialog and joins nearby fleets honoring only this flag.
-     * Player-faction fleets get a 700 su join radius, so without it the guest mirror is dragged into
-     * host battles in ordinary play. It costs nothing: it only affects the mirror's own target
-     * selection, which the snapshot driving overrides anyway.
-     *
-     * <p>The one case where it is <em>not</em> set is the debug-only ally pull-in spike
-     * ({@code -Dcoop.debug.allyPullIn}), where being joinable is the whole point — see
-     * {@link CoopAllyPullInSpike}.
-     *
-     * <p>(Phase 14 removed 12b's interim {@code FLEET_IGNORED_BY_OTHER_FLEETS} from here. That flag
-     * only suppresses other fleets' AI target SELECTION and is never consulted by battle formation, so
-     * it bought no protection against autoresolve while costing the mirror all hostile attention. The
-     * real protections are the per-frame engagement shield — {@code assertEngagementShield} ->
-     * {@code canBeEngaged()} false — plus this flag, with {@code CoopNpcThreatWatcher}'s battle-eject
-     * as the recovery for the pull-in path.)
+     * @param allyAllowed the owner's {@code coop_ally} toggle as its last snapshot reported it
      */
-    static void stampPlayerMirrorMemory(MemoryAPI memory) {
+    static void stampPlayerMirrorMemory(MemoryAPI memory, boolean allyAllowed) {
         if (memory == null) {
             return;
         }
-        if (!CoopDebug.allyPullInEnabled()) {
-            memory.set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
-        }
+        writePlayerMirrorPosture(memory, allyAllowed);
         memory.set(PLAYER_MIRROR_TAG, true);
     }
 
     /**
-     * The memory a freshly created NPC mirror carries: the same pull-in flag, unconditionally (the
-     * spike moves the player mirror only), plus the host-side fleet id, which is what tells the guest's
-     * per-frame suppressor this is a sanctioned mirror and not to sweep it (see
+     * The memory a freshly created NPC mirror carries: the pull-in flag, unconditionally (Phase 33's
+     * posture moves the player mirror only, so an NPC mirror is never joinable and never carries
+     * {@link CoopMirrorTags#ALLY_ALLOWED_FLAG}), plus the host-side fleet id, which is what tells the
+     * guest's per-frame suppressor this is a sanctioned mirror and not to sweep it (see
      * {@code CoopNpcFleetSuppressor}).
      */
     static void stampNpcMirrorMemory(MemoryAPI memory, String coopFleetId) {
@@ -446,32 +481,20 @@ public class CoopFleetMirror implements CoopNpcMirror {
     }
 
     /**
-     * Re-asserts the battle pull-in shield on a mirror that already exists (2026-09-04). The flag is
-     * set once at creation, but it lives in the fleet's memory and the memory outlives this class's
-     * knowledge of it: anything that copies, restores or rebuilds a mirror's memory — the customs
-     * staging path did exactly that until {@code CoopCustomsDialogStaging.restoreEngagementShield}
-     * (c5caed1) — leaves the mirror joinable by {@code FleetInteractionDialogPluginImpl
-     * .pullInNearbyFleets}, which consults this flag and nothing else (never {@code canBeEngaged()}).
-     * Defence in depth on the snapshot path: one memory read per apply, a write only when the flag is
-     * actually gone.
+     * Re-asserts the battle pull-in shield on an <em>NPC</em> mirror that already exists
+     * (2026-09-04). The flag is set once at creation, but it lives in the fleet's memory and the
+     * memory outlives this class's knowledge of it: anything that copies, restores or rebuilds a
+     * mirror's memory — the customs staging path did exactly that until
+     * {@code CoopCustomsDialogStaging.restoreEngagementShield} (c5caed1) — leaves the mirror joinable
+     * by {@code FleetInteractionDialogPluginImpl.pullInNearbyFleets}, which consults this flag and
+     * nothing else (never {@code canBeEngaged()}). Defence in depth on the snapshot path: one memory
+     * read per apply, a write only when the flag is actually gone.
+     *
+     * <p>The player mirror goes through {@link #applyPlayerMirrorPosture} instead, which is the same
+     * re-assert with the owner's consent in front of it.
      */
     static void assertIgnoresOtherFleets(CampaignFleetAPI fleet) {
-        assertIgnoresOtherFleets(fleet, false);
-    }
-
-    /**
-     * As above, told which mirror it is looking at. The distinction exists for one reason: the ally
-     * pull-in spike ({@code -Dcoop.debug.allyPullIn}) has to leave the <em>player</em> mirror joinable
-     * while NPC mirrors keep the flag, and this re-assert would otherwise put it straight back on the
-     * next snapshot apply. With the spike off the parameter changes nothing.
-     *
-     * @param playerMirror true for the Phase 8 partner mirror, false for a Phase 9 NPC mirror
-     */
-    static void assertIgnoresOtherFleets(CampaignFleetAPI fleet, boolean playerMirror) {
         if (fleet == null) {
-            return;
-        }
-        if (playerMirror && CoopDebug.allyPullInEnabled()) {
             return;
         }
         try {
@@ -481,6 +504,63 @@ public class CoopFleetMirror implements CoopNpcMirror {
             }
         } catch (RuntimeException ignored) {
             // A mirror that cannot answer for its own memory is not worth aborting an apply over.
+        }
+    }
+
+    /**
+     * Phase 33: writes the partner mirror's <em>posture</em> on every apply, from the owner's
+     * {@code coop_ally} toggle as the snapshot carried it.
+     *
+     * <p>{@code FLEET_IGNORES_OTHER_FLEETS} is the load-bearing half and the reason this is a write
+     * rather than a one-time stamp. The battle pull-in path bypasses {@code canBeEngaged()} entirely:
+     * {@code FleetInteractionDialogPluginImpl.pullInNearbyFleets} runs whenever a fleet dialog opens
+     * and joins nearby fleets honouring only this flag, with a 700 su radius for player-faction
+     * fleets. Set, the mirror is out of reach exactly as it was before 0.1.4; cleared, vanilla treats
+     * it as an ally worth pulling in, which is the whole feature.
+     *
+     * <p>{@link CoopMirrorTags#ALLY_ALLOWED_FLAG} is the same fact written where a caller holding
+     * only a {@code CampaignFleetAPI} can read it: the threat watcher's per-frame battle eject (which
+     * must not eject a fleet that was invited) and the customs staging's shield restore (which must
+     * put back the posture, not a hard "ignore everyone").
+     *
+     * <p>(Phase 14 removed 12b's interim {@code FLEET_IGNORED_BY_OTHER_FLEETS} from here. That flag
+     * only suppresses other fleets' AI target SELECTION and is never consulted by battle formation,
+     * so it bought no protection against autoresolve while costing the mirror all hostile attention.
+     * The per-frame {@code setNoEngaging} shield stays up in both postures — it is the PvP block, and
+     * the spike confirmed pull-in never consults it.)
+     */
+    static void applyPlayerMirrorPosture(CampaignFleetAPI fleet, boolean allyAllowed) {
+        if (fleet == null) {
+            return;
+        }
+        try {
+            writePlayerMirrorPosture(fleet.getMemoryWithoutUpdate(), allyAllowed);
+        } catch (RuntimeException ignored) {
+            // A mirror that cannot answer for its own memory is not worth aborting an apply over.
+        }
+    }
+
+    /**
+     * The two memory writes the posture is, gated on an actual change so a 10 Hz apply on a mirror
+     * whose owner has not touched the toggle writes nothing.
+     */
+    private static void writePlayerMirrorPosture(MemoryAPI memory, boolean allyAllowed) {
+        if (memory == null) {
+            return;
+        }
+        boolean ignoresOthers = !allyAllowed;
+        if (memory.getBoolean(MemFlags.FLEET_IGNORES_OTHER_FLEETS) != ignoresOthers) {
+            if (ignoresOthers) {
+                memory.set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
+            } else {
+                // Unset rather than set-false, matching CoopCustomsDialogStaging.stage: the engine
+                // reads this with getBoolean, but anything that asks whether the key is present
+                // should see the same answer.
+                memory.unset(MemFlags.FLEET_IGNORES_OTHER_FLEETS);
+            }
+        }
+        if (memory.getBoolean(CoopMirrorTags.ALLY_ALLOWED_FLAG) != allyAllowed) {
+            memory.set(CoopMirrorTags.ALLY_ALLOWED_FLAG, allyAllowed);
         }
     }
 
@@ -653,9 +733,10 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * fader live with a 4x margin. The release path stays edge-triggered and, because it clears the
      * stamp, the shield goes back up on the very next frame rather than waiting out an interval.
      *
-     * <p>This unconditional form is what the <b>partner player mirror</b> gets on both roles: it is
-     * the PvP block (neither player can engage the other's mirror) and, on the host, the block that
-     * keeps the guest's mirror out of NPC battles. It is never released.
+     * <p>This unconditional form is what the <b>partner player mirror</b> gets on both roles, in both
+     * Phase 33 postures: it is the PvP block (neither player can engage the other's mirror), and the
+     * spike of 2026-09-20 confirmed vanilla's battle pull-in never consults it, so keeping it up
+     * costs an AI ally nothing. It is never released.
      *
      * @param nowMillis the pump's wall clock — the same one the rest of the frame is timed on, and
      *                  one that keeps running while the campaign is paused (as this must)
@@ -664,17 +745,12 @@ public class CoopFleetMirror implements CoopNpcMirror {
         if (mirrorFleet == null) {
             return;
         }
-        if (playerMirror && CoopDebug.allyPullInEnabled()) {
-            // The spike's observation point on BOTH roles: the host's battle eject lives in
-            // CoopNpcThreatWatcher, but a guest has no threat watcher and this pass is the only thing
-            // that touches the partner mirror every frame there. CoopAllyPullInSpike logs on the
-            // edges only, and shares that state with the watcher, so the host still logs once.
-            CoopAllyPullInSpike.observe(mirrorFleet);
-            if (CoopDebug.allyPullInDropShieldEnabled()) {
-                // Spike run 2: leave canBeEngaged() true as well, for the case where run 1 shows the
-                // mirror never being pulled in at all.
-                return;
-            }
+        if (playerMirror) {
+            // The only per-frame pass that touches the partner mirror on BOTH roles: the host's
+            // threat watcher runs on the host alone, and a guest has nothing else. The tracker acts
+            // on edges, so a frame this does not reach (a blocking screen owns the campaign) costs
+            // nothing but the timestamp on a log line. See CoopAllyBattleTracker.
+            battleTracker.poll(mirrorFleet, ownerPlayerId, senderIdsByEngineId);
         }
         shieldReleased = false;
         if (!shouldReassertShield(shieldAssertedAtMillis, nowMillis)) {
@@ -688,14 +764,15 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
     }
 
-    // ---- Phase 33 ally battle surface (stubs; the mirror worker fills them in) ---------------------
+    // ---- Phase 33 ally battle surface -------------------------------------------------------------
 
     /**
      * Phase 33: whether the owner of this player mirror currently allows it to fight as an AI ally.
-     * False for NPC mirrors and until the owner's snapshot says otherwise.
+     * False for NPC mirrors and until the owner's snapshot says otherwise; it is the last value
+     * {@link #applyPlayerMirrorPosture} was driven with, i.e. the posture the mirror is wearing.
      */
     public boolean allyAllowed() {
-        return false;
+        return playerMirror && allyAllowed;
     }
 
     /**
@@ -703,16 +780,51 @@ public class CoopFleetMirror implements CoopNpcMirror {
      * Polled every frame by the pump on the piloting engine and sent to the owner as ALLY_BATTLE_JOIN.
      */
     public coop.combat.CoopAllyBattleJoin takeAllyBattleJoin() {
-        return null;
+        return battleTracker.takeJoin();
     }
 
     /**
      * Phase 33: what the battle did to this mirror, read once when its battle went null and before
      * snapshot applies resume, or null. Polled every frame by the pump on the piloting engine and
      * sent to the owner as ALLY_BATTLE_RESULT. Taking it releases the member-state freeze.
+     *
+     * <p>It also drops {@link #lastFleetHash}, so the <em>next</em> roster the owner sends rebuilds
+     * the mirror whatever its hash says. That is the plan's roster resync backstop: by the time the
+     * owner's snapshot comes back it has applied the losses, but a battle that killed nothing still
+     * leaves a mirror the engine rearranged, and the structural hash cannot see either.
      */
     public coop.combat.CoopAllyBattleOutcome takeAllyBattleOutcome() {
-        return null;
+        coop.combat.CoopAllyBattleOutcome outcome = battleTracker.takeOutcome();
+        if (outcome != null) {
+            lastFleetHash = null;
+            retriedFleetHash = null;
+        }
+        return outcome;
+    }
+
+    /**
+     * Test seam: the battle watcher, so a test can drive it with a proxy fleet instead of standing
+     * up a whole engine to get a mirror into a battle. Production reads it through the three methods
+     * above and nowhere else.
+     */
+    CoopAllyBattleTracker battleTrackerForTesting() {
+        return battleTracker;
+    }
+
+    /**
+     * Test seams for the roster resync backstop. The gate's latch is private state whose only
+     * observable effect is a snapshot apply, and the rule worth pinning — taking an ally outcome
+     * drops it, so the owner's next roster rebuilds the mirror whatever its hash says — would
+     * otherwise need a live engine to see.
+     */
+    void seatRosterLatchForTesting(String fleetHash) {
+        lastFleetHash = fleetHash;
+        retriedFleetHash = fleetHash;
+    }
+
+    /** @see #seatRosterLatchForTesting(String) */
+    String rosterLatchForTesting() {
+        return lastFleetHash;
     }
 
     /**
@@ -1233,12 +1345,16 @@ public class CoopFleetMirror implements CoopNpcMirror {
         for (FleetMemberAPI existing : mirrorFleet.getFleetData().getMembersListCopy()) {
             mirrorFleet.getFleetData().removeFleetMember(existing);
         }
+        // New ships, new engine ids: the old mapping describes members that no longer exist, and a
+        // post-battle read against it would report the wrong ships to the owner.
+        senderIdsByEngineId.clear();
         List<String> builtIds = new ArrayList<>(members.size());
         for (CoopFleetSnapshot.Member member : members) {
             if (addMirrorMember(member)) {
                 builtIds.add(member.fleetMemberId());
             }
         }
+        applyCommanderCharacter();
         builtMemberIds = builtIds;
         builtMemberCount = builtIds.size();
         int built = builtIds.size();
@@ -1331,10 +1447,153 @@ public class CoopFleetMirror implements CoopNpcMirror {
             }
             created.getStatus().setHullFraction(member.hullFraction());
             applyMothballed(created, member);
+            applyCaptain(created, member);
+            rememberSenderId(created, member);
             return true;
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopFleetMirror.class,
                     "Failed to attach coop mirror member " + member.fleetMemberId(), ex);
+            return false;
+        }
+    }
+
+    /**
+     * Records which owner-side ship this engine member stands for (Phase 33). Read only after a
+     * battle, which is why a member the engine will not name costs nothing here: it simply cannot be
+     * reported as a survivor or a loss, and the owner keeps whatever it already had for it.
+     */
+    private void rememberSenderId(FleetMemberAPI created, CoopFleetSnapshot.Member member) {
+        if (member.fleetMemberId().isEmpty()) {
+            return;
+        }
+        try {
+            String engineId = created.getId();
+            if (engineId != null && !engineId.isEmpty()) {
+                senderIdsByEngineId.put(engineId, member.fleetMemberId());
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            // As above: a ship with no readable id is outside the ally result, not a failed build.
+        }
+    }
+
+    /**
+     * Rebuilds this ship's officer on the mirror (Phase 33, user decision 2026-09-20). Before it the
+     * ally fought every battle with default captains, which for a late-game fleet is a large share of
+     * its real strength — and the losses were charged to the owner either way.
+     *
+     * <p>Built the way {@code OfficerManagerEvent} builds one: personality, then level, then the
+     * skills, and a skill this install does not know is skipped rather than thrown on. Never fatal —
+     * a ship that ends up with a default captain is the pre-0.1.4 mirror, while a throw here would
+     * cost the roster a ship.
+     */
+    private void applyCaptain(FleetMemberAPI created, CoopFleetSnapshot.Member member) {
+        if (!member.hasCaptain()) {
+            return;
+        }
+        try {
+            PersonAPI captain = Global.getFactory().createPerson();
+            if (captain == null) {
+                return;
+            }
+            if (!member.captainName().isEmpty()) {
+                String[] name = splitCaptainName(member.captainName());
+                captain.setName(new FullName(name[0], name[1], FullName.Gender.ANY));
+            }
+            if (!appliedFactionId.isEmpty()) {
+                captain.setFaction(appliedFactionId);
+            }
+            if (!member.captainPersonality().isEmpty()) {
+                captain.setPersonality(member.captainPersonality());
+            }
+            applySkills(captain, member.captainLevel(), member.captainSkills());
+            created.setCaptain(captain);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopFleetMirror.class, "Coop mirror could not rebuild an officer"
+                    + " coopFleetId=" + coopFleetId + " fleetMemberId=" + member.fleetMemberId(), ex);
+        }
+    }
+
+    /**
+     * Gives the mirror's placeholder commander the owner's own character (Phase 33). Fleet-wide
+     * skills — Coordinated Maneuvers, Fighter Uplink, Officer Management and the rest — apply to
+     * every ship in the fleet they command, so without this the ally deployed at the strength of a
+     * fleet with no admiral.
+     *
+     * <p>Player mirrors only: an NPC mirror's commander is the host's, already described by the fleet
+     * it was replicated from, and nothing on that path carries a character.
+     */
+    private void applyCommanderCharacter() {
+        if (!playerMirror || (commanderSkills.isEmpty() && commanderLevel <= 0)) {
+            return;
+        }
+        try {
+            PersonAPI commander = mirrorFleet.getCommander();
+            if (commander == null) {
+                return;
+            }
+            applySkills(commander, commanderLevel, commanderSkills);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopFleetMirror.class, "Coop mirror could not give its commander the owner's"
+                    + " skills coopFleetId=" + coopFleetId, ex);
+        }
+    }
+
+    /**
+     * Seats a level and a skill list on a character, in vanilla's own build order: batch the writes
+     * behind {@code setSkipRefresh} and refresh once at the end, because refreshing per skill is both
+     * slow and, mid-build, wrong ({@code OfficerManagerEvent.createAdmin}).
+     *
+     * <p>A skill id this install cannot resolve is skipped. It should not happen — the handshake
+     * refuses a peer whose mod manifest differs — but {@code setSkillLevel} on an unknown id is the
+     * kind of engine call that throws out of a roster rebuild, and one missing skill is worth less
+     * than the ship it is on.
+     */
+    private static void applySkills(PersonAPI person, int level, String encodedSkills) {
+        MutableCharacterStatsAPI stats = person.getStats();
+        if (stats == null) {
+            return;
+        }
+        stats.setSkipRefresh(true);
+        try {
+            if (level > 0) {
+                stats.setLevel(level);
+            }
+            for (CoopOfficerSkills.Entry entry : CoopOfficerSkills.decode(encodedSkills)) {
+                if (!skillExists(entry.skillId())) {
+                    CoopLog.warn(CoopFleetMirror.class, "Coop mirror skipped an unknown skill id on a"
+                            + " replicated character: " + entry.skillId());
+                    continue;
+                }
+                stats.setSkillLevel(entry.skillId(), entry.level());
+            }
+        } finally {
+            stats.setSkipRefresh(false);
+        }
+        stats.refreshCharacterStatsEffects();
+    }
+
+    /**
+     * Splits the streamed officer name back into first and last. The wire carries what
+     * {@code PersonAPI.getNameString()} produced, which is "first last" with either half possibly
+     * empty; the engine's own {@code FullName} wants the two apart, and a name with no space at all
+     * is a surname, which is how vanilla names most officers.
+     *
+     * @return exactly two elements, first then last, neither null
+     */
+    static String[] splitCaptainName(String captainName) {
+        String name = captainName == null ? "" : captainName.trim();
+        int split = name.indexOf(' ');
+        if (split < 0) {
+            return new String[] {"", name};
+        }
+        return new String[] {name.substring(0, split), name.substring(split + 1).trim()};
+    }
+
+    /** {@code getSkillSpec} on an unknown id throws rather than returning null, so the catch is the test. */
+    private static boolean skillExists(String skillId) {
+        try {
+            return Global.getSettings().getSkillSpec(skillId) != null;
+        } catch (RuntimeException | LinkageError ignored) {
             return false;
         }
     }
@@ -1603,6 +1862,16 @@ public class CoopFleetMirror implements CoopNpcMirror {
         crInvalidationReferences = null;
         builtMemberIds = List.of();
         builtMemberCount = -1;
+        senderIdsByEngineId.clear();
+        // Phase 33: a disposed mirror or a session edge drops any pending ally record unsent. The
+        // engine it would have gone to is the one that just stopped having a mirror, and a result
+        // addressed to a fleet nobody is mirroring any more has nothing to apply to.
+        battleTracker.reset();
+        allyAllowed = false;
+        ownerPlayerId = "";
+        commanderSkills = "";
+        commanderLevel = 0;
+        memberStateFreezeLogged = false;
         lastLocationId = null;
         coopFleetId = "";
         appliedName = "";

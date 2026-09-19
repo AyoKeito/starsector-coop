@@ -3,6 +3,7 @@ package coop;
 import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
+import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
@@ -332,6 +333,10 @@ public class CoopModPlugin extends BaseModPlugin {
         // unique within a campaign) and the handle on the previous session's mirror fleet.
         CoopLocations.invalidate();
         CoopGuestMirrorHandle.clear();
+        // Phase 33: both players carry the ally toggle from the first co-op load, whether the save
+        // predates 0.1.4 or not. Idempotent, and the toggle's own state persists with the fleet, so
+        // this only ever adds the ability and never resets the player's answer.
+        ensureAllyAbility(Global.getSector());
         netService = new CoopNetService();
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
@@ -370,6 +375,41 @@ public class CoopModPlugin extends BaseModPlugin {
         // depends on it, and it must not stand between a load and a working session.
         installExpectedCampaignNotice(newGame);
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
+    }
+
+    /**
+     * Puts {@code coop_ally} on the local player's fleet when it is not already there (Phase 33).
+     *
+     * <p>Every load rather than only a new game, because the ability has to appear in saves that
+     * predate it — and because it is the only way a player who started the campaign solo, before
+     * enabling the mod, ever gets the toggle. {@code addAbility} on a fleet that already has one
+     * would replace the plugin and with it the player's answer, so the presence check is the whole
+     * point of the method rather than an optimisation.
+     *
+     * <p>Total: a sector or a fleet that cannot be read costs a log line. The snapshot capture reads
+     * the toggle through {@code getAbility}, which answers null for an absent ability, so the worst
+     * case of this failing is a player whose fleet is never pulled into their partner's fights.
+     *
+     * @return true when the ability was added on this call (test seam)
+     */
+    static boolean ensureAllyAbility(com.fs.starfarer.api.campaign.SectorAPI sector) {
+        try {
+            if (sector == null) {
+                return false;
+            }
+            com.fs.starfarer.api.campaign.CampaignFleetAPI fleet = sector.getPlayerFleet();
+            if (fleet == null || fleet.getAbility(CoopAllyToggleAbility.ABILITY_ID) != null) {
+                return false;
+            }
+            fleet.addAbility(CoopAllyToggleAbility.ABILITY_ID);
+            CoopLog.info(CoopModPlugin.class, "Coop added the " + CoopAllyToggleAbility.ABILITY_ID
+                    + " toggle to the player fleet; it is off until the player turns it on");
+            return true;
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopModPlugin.class, "Coop could not add the ally toggle to the player fleet;"
+                    + " this fleet will never be pulled into the partner's battles", ex);
+            return false;
+        }
     }
 
     /**

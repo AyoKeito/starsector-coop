@@ -81,13 +81,15 @@ class CoopFleetWireRedTeamTest {
         String roster = CoopFleetRoster.of(snapshot(CoopSensorSync.Profile.UNKNOWN)).encode();
         // The declared count sails past the "are there enough lines" check when it is negative, and
         // the exception a reader eventually gets names an ArrayList capacity instead of the field.
-        String negativeRoster = roster.replaceFirst("\\|1\\n", "|-1\n");
+        // The count is no longer the last header field -- Phase 33 appended the ally bit and the
+        // commander character behind it -- so the poison names the count and what follows it.
+        String negativeRoster = roster.replaceFirst("\\|1\\|\\|0\\n", "|-1||0\n");
         IllegalArgumentException rosterEx = assertThrows(IllegalArgumentException.class,
                 () -> CoopFleetRoster.decode(negativeRoster));
         assertEquals("Negative roster member count: -1", rosterEx.getMessage());
 
         String full = snapshot(CoopSensorSync.Profile.UNKNOWN).encodeFull();
-        String negativeFull = full.replaceFirst("\\|1\\n", "|-1\n");
+        String negativeFull = full.replaceFirst("\\|1\\|0\\|\\|0\\n", "|-1|0||0\n");
         IllegalArgumentException fullEx = assertThrows(IllegalArgumentException.class,
                 () -> CoopFleetSnapshot.decodeFull(negativeFull));
         assertEquals("Negative snapshot member count: -1", fullEx.getMessage());

@@ -14,6 +14,16 @@ public final class CoopMirrorTags {
     public static final String PLAYER_MIRROR_TAG = "$coopMirrorFleet";
     public static final String NPC_MIRROR_TAG = "$coopNpcFleetId";
 
+    /**
+     * Phase 33: whether the owner of the partner's mirror currently allows it to fight as an AI ally.
+     * Written on every player-mirror apply from the owner's {@code coop_ally} toggle
+     * ({@code CoopFleetMirror.applyPlayerMirrorPosture}) and read by the paths that hold only a
+     * {@code CampaignFleetAPI} — the threat watcher's battle eject and the customs staging's shield
+     * restore. An NPC mirror never carries it, so the absent-is-false reading is exactly the old
+     * behaviour for everything that is not the partner's own fleet.
+     */
+    public static final String ALLY_ALLOWED_FLAG = "$coopAllyAllowed";
+
     private CoopMirrorTags() {
     }
 }

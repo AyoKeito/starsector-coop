@@ -4,12 +4,15 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.characters.AbilityPlugin;
+import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.loading.HullModSpecAPI;
+import coop.campaign.CoopAllyToggleAbility;
 import coop.util.CoopLog;
 import org.lwjgl.util.vector.Vector2f;
 
@@ -73,7 +76,82 @@ public final class CoopFleetSnapshotFactory {
                 // Phase 14b: the remote client pins this onto the mirror so its NPC AI detects the
                 // remote player at vanilla ranges — transponder, Go Dark, burns, sensor burst, terrain.
                 CoopSensorSync.capture(fleet),
-                captureMembers(fleet));
+                captureMembers(fleet),
+                // Phase 33: the owner's coop_ally toggle. The engine holding this fleet's mirror
+                // writes FLEET_IGNORES_OTHER_FLEETS from it on every apply, so the consent and the
+                // posture can never be more than one snapshot apart.
+                allyAllowed(fleet),
+                captureCommanderSkills(fleet),
+                captureCommanderLevel(fleet));
+    }
+
+    /**
+     * Whether this fleet's {@code coop_ally} toggle is on right now (Phase 33). A fleet with no such
+     * ability — every fleet but the local player's, and the local player's own before
+     * {@code CoopModPlugin.onGameLoad} has added it — answers false, which is the pre-0.1.4 posture.
+     */
+    static boolean allyAllowed(CampaignFleetAPI fleet) {
+        try {
+            AbilityPlugin ability = fleet.getAbility(CoopAllyToggleAbility.ABILITY_ID);
+            return ability != null && ability.isActive();
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * The fleet commander's skills in the wire encoding (Phase 33). For the player's own fleet the
+     * commander is the player character, so this is what gives the mirror the owner's fleet-wide
+     * skills — Coordinated Maneuvers, Fighter Uplink and the rest — that the spike's ally fought
+     * without.
+     *
+     * <p>Best-effort like every other read here: a commander that cannot report its stats streams as
+     * no skills, and the mirror keeps the unskilled placeholder it has always had.
+     */
+    static String captureCommanderSkills(CampaignFleetAPI fleet) {
+        try {
+            return captureSkills(fleet.getCommander());
+        } catch (RuntimeException | LinkageError ignored) {
+            return "";
+        }
+    }
+
+    /** The commander's character level, for {@code MutableCharacterStatsAPI#setLevel} on the mirror. */
+    static int captureCommanderLevel(CampaignFleetAPI fleet) {
+        try {
+            PersonAPI commander = fleet.getCommander();
+            return commander == null ? 0 : Math.max(0, commander.getStats().getLevel());
+        } catch (RuntimeException | LinkageError ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * One character's skills as {@code skillId:level} pairs. Never throws: the caller is either a
+     * per-member capture that must not cost the ship, or the fleet header, which must not cost the
+     * snapshot.
+     */
+    static String captureSkills(PersonAPI person) {
+        if (person == null) {
+            return "";
+        }
+        List<CoopOfficerSkills.Entry> entries = new ArrayList<>();
+        try {
+            List<MutableCharacterStatsAPI.SkillLevelAPI> skills = person.getStats().getSkillsCopy();
+            if (skills == null) {
+                return "";
+            }
+            for (MutableCharacterStatsAPI.SkillLevelAPI skill : skills) {
+                if (skill == null || skill.getSkill() == null) {
+                    continue;
+                }
+                entries.add(new CoopOfficerSkills.Entry(skill.getSkill().getId(),
+                        CoopOfficerSkills.levelOf(skill.getLevel())));
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            return "";
+        }
+        return CoopOfficerSkills.encode(entries);
     }
 
     /**
@@ -99,6 +177,20 @@ public final class CoopFleetSnapshotFactory {
     }
 
     /**
+     * {@link #captureMembers} with the Phase 33 officer fields left off.
+     *
+     * <p>Only the NPC replicator asks for this, and it is a payload decision rather than a
+     * correctness one: a guest's NPC mirrors are driven by host snapshots and never fight, so their
+     * officers would buy nothing — while {@code NPC_FLEET_SET} carries the <em>whole</em> replicated
+     * population and already crossed 64 KB in a busy sector once (2026-08-20, which is why
+     * {@code CoopNetService.MAX_FRAME_BYTES} is what it is). Roughly doubling the per-ship record for
+     * every fleet in the sector is not a trade worth making for a fleet nobody is going to fly.
+     */
+    public static List<CoopFleetSnapshot.Member> captureMembersWithoutOfficers(CampaignFleetAPI fleet) {
+        return captureRoster(fleet, false).members();
+    }
+
+    /**
      * One fleet's replicable roster together with how much of it was lost to unreadable slots.
      *
      * <p>{@link #captureMembers} answers "read everything, there are four ships" and "read four of
@@ -110,6 +202,11 @@ public final class CoopFleetSnapshotFactory {
      * and refuse, the way they already refuse an empty roster the engine says is non-empty.
      */
     public static Capture captureRoster(CampaignFleetAPI fleet) {
+        return captureRoster(fleet, true);
+    }
+
+    /** @param withOfficers see {@link #captureMembersWithoutOfficers} */
+    public static Capture captureRoster(CampaignFleetAPI fleet, boolean withOfficers) {
         Objects.requireNonNull(fleet, "fleet");
         List<CoopFleetSnapshot.Member> members = new ArrayList<>();
         List<FleetMemberAPI> source;
@@ -124,7 +221,7 @@ public final class CoopFleetSnapshotFactory {
         if (source == null) {
             return new Capture(members, 0);
         }
-        int skipped = captureInto(members, engineSource(source));
+        int skipped = captureInto(members, engineSource(source, withOfficers));
         if (skipped > 0) {
             CoopLog.warn(CoopFleetSnapshotFactory.class, "Coop skipped " + skipped
                     + " unreadable ship(s) while capturing the roster of " + safeName(fleet)
@@ -204,7 +301,7 @@ public final class CoopFleetSnapshotFactory {
         CoopFleetSnapshot.Member capture(int index);
     }
 
-    private static MemberSource engineSource(List<FleetMemberAPI> members) {
+    private static MemberSource engineSource(List<FleetMemberAPI> members, boolean withOfficers) {
         return new MemberSource() {
             @Override
             public int size() {
@@ -219,7 +316,7 @@ public final class CoopFleetSnapshotFactory {
 
             @Override
             public CoopFleetSnapshot.Member capture(int index) {
-                return captureMember(members.get(index));
+                return captureMember(members.get(index), withOfficers);
             }
         };
     }
@@ -233,7 +330,7 @@ public final class CoopFleetSnapshotFactory {
         }
     }
 
-    private static CoopFleetSnapshot.Member captureMember(FleetMemberAPI member) {
+    private static CoopFleetSnapshot.Member captureMember(FleetMemberAPI member, boolean withOfficers) {
         ShipVariantAPI variant = null;
         try {
             variant = member.getVariant();
@@ -248,13 +345,17 @@ public final class CoopFleetSnapshotFactory {
         String hullId = streamableHullId(hullIdOrEmpty(member), CoopFleetSnapshotFactory::hullExists);
 
         String captainName = "";
+        PersonAPI captain = null;
         try {
-            PersonAPI captain = member.getCaptain();
+            captain = member.getCaptain();
             if (captain != null && !captain.isDefault()) {
                 captainName = captain.getNameString();
+            } else {
+                captain = null;
             }
         } catch (RuntimeException ignored) {
             captainName = "";
+            captain = null;
         }
 
         float cr = captureCr(member);
@@ -271,7 +372,38 @@ public final class CoopFleetSnapshotFactory {
                 captureDmodIds(variant),
                 captureSModIds(variant),
                 captureSModdedBuiltInIds(variant),
-                captureMothballed(member));
+                captureMothballed(member),
+                // Phase 33: what the mirror needs to rebuild this ship's officer. Before it the ally
+                // fought every fight with unskilled captains, which is a measurable share of a
+                // late-game fleet's strength and the losses were real either way.
+                withOfficers ? captureCaptainLevel(captain) : 0,
+                withOfficers ? capturePersonality(captain) : "",
+                withOfficers ? captureSkills(captain) : "");
+    }
+
+    /** The captain's character level, or 0 when there is no captain or it cannot be read. */
+    private static int captureCaptainLevel(PersonAPI captain) {
+        try {
+            return captain == null ? 0 : Math.max(0, captain.getStats().getLevel());
+        } catch (RuntimeException | LinkageError ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * The captain's personality id ({@code steady}, {@code aggressive}, ...). It is not cosmetic on
+     * an AI ally: the combat AI flies to it, so a reckless officer mirrored as a default one fights a
+     * different fight from the one the owner staffed.
+     */
+    private static String capturePersonality(PersonAPI captain) {
+        try {
+            if (captain == null || captain.getPersonalityAPI() == null) {
+                return "";
+            }
+            return normalize(captain.getPersonalityAPI().getId());
+        } catch (RuntimeException | LinkageError ignored) {
+            return "";
+        }
     }
 
     // ---- Permanent hullmod capture (Phase 16) ---------------------------------------------------
