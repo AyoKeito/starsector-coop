@@ -37,8 +37,8 @@
       "note": "after the private soak / public release; order decided 2026-09-05: 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 33 → 22 → 25 → 27, as appetite allows"
     }
   ],
-  "hereHead": "You are here: 0.1.1 is published (v0.1.1 on 7e60e6e, 2026-09-15). Left before V1 sign-off: Phase 23's forum-thread URL and the COOP TEST Ziggurat start, then the Phase 19 checklist.",
-  "here": "<b>0.1.1 is published.</b> Tag <code>v0.1.1</code> on <code>7e60e6e</code>, zip attached at <a href=\"https://github.com/AyoKeito/starsector-coop/releases/tag/v0.1.1\">releases/tag/v0.1.1</a> (2026-09-15); the launcher's update check and Version Checker both read it. <b>Everything below is outstanding.</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: put the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code> (still 0), and remove or dev-gate the COOP TEST Ziggurat start (<code>coopZigguratStart</code>/<code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code>). Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the full two-instance checklist plus the steps listed under ATTENTION that Sessions 1-5 never reached, with fixes limited to what the checklist fails.",
+  "hereHead": "You are here: 0.1.2 is published (v0.1.2 on 233da8f, 2026-09-19) with the COOP-MARK log marker hotkey for the first Internet sessions with a friend. Left before V1 sign-off: one live press of the marker on each side, Phase 23's forum-thread URL and the COOP TEST Ziggurat start, then the Phase 19 checklist.",
+  "here": "<b>0.1.2 is published.</b> Tag <code>v0.1.2</code> on <code>233da8f</code>, <code>coop-0.1.2.zip</code> attached at <a href=\"https://github.com/AyoKeito/starsector-coop/releases/tag/v0.1.2\">releases/tag/v0.1.2</a> (2026-09-19). It adds the F11 <code>COOP-MARK</code> log marker (one line in both logs, a note box on the open map, a launcher key setting) and changes nothing else in gameplay. The marker has unit tests and no live run yet; see ATTENTION. <b>Everything below is outstanding.</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: put the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code> (still 0), and remove or dev-gate the COOP TEST Ziggurat start (<code>coopZigguratStart</code>/<code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code>). Then <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the full two-instance checklist plus the steps listed under ATTENTION that Sessions 1-5 never reached, with fixes limited to what the checklist fails.",
   "attention": [
     {
       "sev": "scope",
@@ -46,6 +46,13 @@
       "head": "Phase 23: forum-thread URL and the COOP TEST Ziggurat start",
       "state": "open; two edits, neither is code",
       "body": "(1) Create the forum thread, then put its URL in <code>docs/player/LISTING.md</code> and its numeric id in <code>modThreadId</code> in <code>coop.version</code> (0 today, so Version Checker offers no link). Verify: Version Checker's mod entry links to the thread. (2) Remove or dev-gate the COOP TEST start: rows <code>coopZigguratStart</code> and <code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code> (option 6, a Ziggurat plus 1,000,000 credits). Verify: a new game shows five occupation choices, or six only with the dev flag. The forced tutorial skip and forced Normal difficulty stay; they are permanent mod behaviour (see the plan, <span class=\"rp\" data-jump=\"23\">Phase 23</span>)."
+    },
+    {
+      "sev": "revisit",
+      "sevLabel": "Phase 19 checklist",
+      "head": "COOP-MARK hotkey: one live press on each side before the friend session",
+      "state": "open",
+      "body": "0.1.2 shipped the marker with unit tests only. On the deployed build, host and guest each press F11 once on the open map and once inside a market. Pass: both logs carry identical <code>COOP-MARK host#1</code> and <code>COOP-MARK guest#1</code> lines (grep <code>COOP-MARK</code>), the note typed into the box lands as a <code>note |</code> line in both files, the market press writes the line with no box, and the guest's box accepts typed text. The build could not verify that <code>TextFieldAPI.grabFocus()</code> takes keystrokes inside a dialog; a dead box means the dialog needs a <code>CustomUIPanelPlugin.processInput</code> that consumes keys."
     },
     {
       "sev": "revisit",
