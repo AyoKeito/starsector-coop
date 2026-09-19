@@ -180,6 +180,20 @@ public final class CoopPeerLink {
     private boolean oversizedFrameWarned;
 
     /**
+     * Whether the peer on this connection announced a {@code SESSION_LEAVE} before the socket died
+     * (0.1.2). A player who quits cleanly sends the leave and then lets the process close the socket,
+     * which arrives here as a {@code Connection reset} a few milliseconds later. That reset is the
+     * expected end of a link whose partner already said goodbye, so the read path logs one info line
+     * for it instead of a WARN with a stack trace that reads like a crash in a bug report.
+     *
+     * <p>Set from the decode in {@code CoopNetService#handleFrame}, which is the one place the
+     * transport sees a frame's type, and cleared by {@link #attach} because it describes a socket
+     * rather than a peer: a partner that leaves and later reconnects gets a fresh socket whose own
+     * reset is unexplained again.
+     */
+    private boolean peerAnnouncedLeave;
+
+    /**
      * Undecodable frames seen on this connection. Only ever acted on before the handshake completes
      * (see {@link CoopNetService}): a session that has proved itself is allowed the occasional
      * garbage frame, a stranger on an Internet-open port is not.
@@ -280,6 +294,7 @@ public final class CoopPeerLink {
         this.datagramSendFailureLogged = false;
         this.oversizedFrameWarned = false;
         this.preProofHoldLogged = false;
+        this.peerAnnouncedLeave = false;
         forgetCandidate();
         dropStaleOutboundForNewSocket(grantsHeldForResume);
         if (clearValidatedUdpAddress) {
@@ -419,6 +434,16 @@ public final class CoopPeerLink {
         }
         preProofHoldLogged = true;
         return true;
+    }
+
+    /** Records that the peer on this connection announced a leave; see {@link #peerAnnouncedLeave}. */
+    void notePeerAnnouncedLeave() {
+        this.peerAnnouncedLeave = true;
+    }
+
+    /** Whether the peer on this connection said it was leaving; see {@link #peerAnnouncedLeave}. */
+    boolean peerAnnouncedLeave() {
+        return peerAnnouncedLeave;
     }
 
     /** Bytes carried over from a poll that hit its frame ceiling, or null. */
@@ -950,6 +975,7 @@ public final class CoopPeerLink {
         attachedAtMillis = 0L;
         attachGeneration = 0L;
         proven = false;
+        peerAnnouncedLeave = false;
         senderId = null;
         pinnedPeerAddress = null;
         validatedUdpAddress = null;
