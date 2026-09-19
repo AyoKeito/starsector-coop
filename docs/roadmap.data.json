@@ -34,11 +34,11 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "after the private soak / public release; order decided 2026-09-05: 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 33 → 22 → 25 → 27, as appetite allows"
+      "note": "after the private soak / public release; order revised 2026-09-20: 33 (next, spike first) → 22 → 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 25 → 27, as appetite allows"
     }
   ],
-  "hereHead": "You are here: 0.1.2 is published (v0.1.2, 2026-09-19); main holds the 0.1.3 work, unpushed, cut when the user says so. Remaining before V1 sign-off: Phase 23 (forum-thread URL, COOP TEST Ziggurat start) and the four Phase 19 checklist items under ATTENTION.",
-  "here": "<b>0.1.2 is published</b> (<code>v0.1.2</code>, 2026-09-19); main holds the 0.1.3 work, unpushed, cut when the user says so. <b>Remaining:</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code>, and remove or dev-gate the COOP TEST Ziggurat start. <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the four checklist items under ATTENTION, each waiting on a trigger.",
+  "hereHead": "You are here: 0.1.3 is published (v0.1.3, 2026-09-20). Next: Phase 33 (AI-ally battles), spike run first, then build. Remaining before V1 sign-off: Phase 23 (forum-thread URL, COOP TEST Ziggurat start) and the four Phase 19 checklist items under ATTENTION.",
+  "here": "<b>0.1.3 is published</b> (<code>v0.1.3</code>, 2026-09-20). <b>Next:</b> <span class=\"rp\" data-jump=\"33\">Phase 33</span>, AI-ally battles, pulled ahead of Phase 26 on 2026-09-20: run the pull-in spike on the test clients first, record its facts in the plan, then build. <b>Remaining for V1:</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code>, and remove or dev-gate the COOP TEST Ziggurat start. <span class=\"rp\" data-jump=\"19\">Phase 19</span>: the four checklist items under ATTENTION, each waiting on a trigger.",
   "attention": [
     {
       "sev": "scope",
@@ -767,7 +767,7 @@
         "allied wrecks unrecoverable (vanilla)",
         "owner cannot direct or retreat its ships"
       ],
-      "note": "Step 1 of the Phase 22 track (tied 2026-09-05): Phase 22 starts only when this is built and smoke-passed. Specced 2026-09-05 on user decisions (real losses, owner-side toggle, deploy everything, no spoils split). Live pull-in spike switch is on main (-Dcoop.debug.allyPullIn, runbook in tmp_ff_analysis); the run was deferred by the user the same day and is the first step when the phase starts."
+      "note": "Step 1 of the Phase 22 track (tied 2026-09-05): Phase 22 starts only when this is built and smoke-passed. Specced 2026-09-05 on user decisions (real losses, owner-side toggle, deploy everything, no spoils split). Live pull-in spike switch is on main (-Dcoop.debug.allyPullIn, runbook in tmp_ff_analysis); the run was deferred by the user the same day and is the first step when the phase starts. Pulled ahead of Phase 26 on 2026-09-20 (user): next up after 0.1.3."
     },
     {
       "id": "34",

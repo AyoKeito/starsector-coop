@@ -66,7 +66,7 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
     public static final String ADOPT_CAMPAIGN_CHECKBOX = "Start over inside the host's campaign (guest)";
 
     /** Where {@link #ADOPT_CAMPAIGN_CHECKBOX} lives, so the player knows where to look for it. */
-    public static final String ADOPT_CAMPAIGN_LOCATION = "the launcher's Advanced section";
+    public static final String ADOPT_CAMPAIGN_LOCATION = "the Developer tab of the launcher's Settings window";
 
     static final String OPTION_CLOSE_TEXT = "Close";
     static final String OPTION_RETRY_TEXT = "Try again";
@@ -618,7 +618,8 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
             body.add("Install Starsector " + mod + " on both PCs, or wait for a release of the mod"
                     + " built for " + game + ".");
             body.add("Testers can set the developer flag Allow game version mismatch in the"
-                    + " launcher's Advanced card. That runs co-op on this version anyway and is not"
+                    + " Developer tab of the launcher's Settings window. That runs co-op on this version"
+                    + " anyway and is not"
                     + " supported.");
             body.add("Nothing was started: no port was opened and no connection was made. Your"
                     + " campaign is unaffected and plays as single player.");

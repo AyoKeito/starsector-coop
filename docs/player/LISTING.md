@@ -1,4 +1,4 @@
-# Starsector Coop V1 (0.1.2)
+# Starsector Coop V1 (0.1.3)
 
 Two people, two copies of Starsector 0.98a-RC8, one campaign. The sector is generated once from a
 shared seed and both of you fly around in it at the same time, on one calendar. The host's game is
@@ -25,9 +25,9 @@ for installs where that write is refused.
 
 The rest is `Coop Launcher.cmd`, in the mod folder. It runs on the JRE that ships with the game, so
 there is nothing to install. It checks the install and names what is wrong with it, writes your
-settings into `saves\common\coop_options.json.data`, and starts the game. The host picks a port,
-presses Generate for a seed and presses Copy next to the invite line; the guest presses Paste and has
-the address, port, password and seed in one go.
+settings into `saves\common\coop_options.json.data`, and starts the game. The host is given a seed
+and a password and presses Copy invite; the guest presses Paste invite and has the address, port,
+password, seed, sector size and star age in one go.
 
 ## What it is
 
@@ -69,12 +69,13 @@ reconciled back into the shared world: ship losses, salvage, reputation, bountie
 
 **Connecting.** Only the host has to be reachable. At startup the host's game asks the router to open
 its port over UPnP, then NAT-PMP, and writes what happened to the log. Before the first session the
-host can press Check my connection in the launcher, which runs that same mapping and puts the result
-on screen instead of in a log file, and the guest can then press Test connection to find out whether
+host can press Check connection in the launcher, which runs that same mapping and puts the result
+on screen instead of in a log file, and the guest then presses the same button to find out whether
 TCP and UDP reach the host at all. There is an optional lobby password, and the launcher generates
 one for the host and puts it in the invite. A dropped link is held for 60 seconds with a countdown on
-both screens and the session resumes where it stopped if the connection comes back. When a session is
-refused or ends with a reason, you get a dialog naming the cause and the remedy.
+both screens, either player can add five minutes at a time up to half an hour, and the session
+resumes where it stopped if the connection comes back. When a session is refused or ends with a
+reason, you get a dialog naming the cause and the remedy.
 
 **Saving.** Coordinated saves on both machines. The guest rejoins by loading its co-op save, and the
 launcher names which save that is: character, level, save time and folder. Load the wrong one and the
@@ -139,10 +140,10 @@ Places where the two games legitimately read differently. None of these is a bug
 
 ## Reporting a problem
 
-Both of you press **Log**, then **Save a bug report**, in the launcher, and attach both zips. That packs the logs
-before the next launch overwrites them, together with your settings, your newest save and a summary;
-the password is blanked out of everything in it. One side's zip tells half the story, because a
-refusal is one machine rejecting the other.
+Both of you press **Logs**, then **Save a bug report**, in the launcher, and attach both zips. That
+packs the logs before the next launch overwrites them, together with your settings, your newest save
+and a summary; the password is blanked out of everything in it. One side's zip tells half the story,
+because a refusal is one machine rejecting the other.
 
 Paste the `[COOP-DOCTOR]` line from each side into the text of the report. It carries the code the
 dialog showed you and a session id that is identical in both logs, which is what pairs the two zips

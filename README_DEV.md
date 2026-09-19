@@ -273,7 +273,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 
 The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind. The **Agent bridge** checkbox in the launcher's Settings window does the same job for a launch driven from the launcher: it writes the same two ports, 7801 hosting and 7802 joining, unless the port field beside it says otherwise.
 
-Twenty-eight verbs: `status`, `fleets`, `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`, `mark`, `memory` act. Eleven of them carry shapes worth knowing before you diff two dumps:
+Thirty verbs: `status`, `fleets`, `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `ownfleet`, `hirable`, `colonizable`, `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`, `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`, `mark`, `memory` act. Eleven of them carry shapes worth knowing before you diff two dumps:
 
 | verb | shape |
 | --- | --- |

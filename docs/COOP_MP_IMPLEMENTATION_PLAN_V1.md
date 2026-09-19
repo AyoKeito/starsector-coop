@@ -3116,6 +3116,8 @@ Added by the red-team pass (2026-09-05), each aimed at a fix that is unit-verifi
 
 > **Tied to Phase 22 (user, 2026-09-05).** Phases 33 and 22 are one track, built in that order: 33 puts the partner's fleet into the battle and settles losses; 22 lets the partner command those ships. Phase 22 does not start until Phase 33 is built, its spike facts are recorded in this section, and its smoke has passed. Nothing in 22 is duplicated here: the toggle, the loss result and the mirror posture are 33's and 22 reuses them as they are.
 
+> **Ordered next (user, 2026-09-20).** Pulled ahead of Phase 26 after the 0.1.3 release: the partner's fleet never fighting alongside yours is the largest gap a player notices. Sequence: run the spike on the test clients, record its facts here, then build. Ships in its own release after its own two-instance smoke, not in a fix release.
+
 > **Why this phase exists (user, 2026-09-05):** "I'm thinking about putting these 'ai ally' battles in, but with a toggle (preferably as a panel skill, e.g. transponder) and without sharing spoils (for now)." Today the partner's mirror carries `FLEET_IGNORES_OTHER_FLEETS` on every frame, so vanilla's battle pull-in never takes it, and `CoopNpcThreatWatcher` ejects it if anything does. The 2026-06-10 design table named a fallback for two fleets in one engagement (the host pilots, the guest's mirror fights AI-controlled), but the shield was built and the fallback never was. This phase is the first slice of Phase 22 without the piloting: the mirror joins as a vanilla AI ally, and the owner's real fleet pays for what it loses.
 
 **Decisions (2026-09-05, user):**

@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-09-19 (0.1.2, e089b8f).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-09-20 (0.1.3, 7f88aac).
 
 ## Stack
 
@@ -141,7 +141,7 @@ republish.
   channel, all non-blocking. Owns the listening socket, session token, sender id, peer table,
   counters, the UDP inbound filter (pinned source address -> envelope prefix parse -> session token)
   and the Phase 20.4 abuse limits.
-- `CoopNetPump` - the `EveryFrameScript` that drives everything: ~9.4k lines, the frame order above.
+- `CoopNetPump` - the `EveryFrameScript` that drives everything: ~9.5k lines, the frame order above.
 - `CoopNetPumpInstaller` - installs it as a transient script.
 - `CoopMessages` - the `Type` enum (71 constants), the envelope codec, datagram header parse,
   `isReliableOneShot`, `wireToken`, `MAX_DATAGRAM_CHUNKS`.
@@ -151,6 +151,8 @@ republish.
   `CoopHttpMessages` / `CoopNatPmpMessages` - router port forwarding.
 - `CoopConnectionDoctor` - the "why can't we connect" log block, also used by the launcher.
 - `CoopReconnectCoordinator` - dead socket into a held session (grace window state machine).
+  "Wait more" presses are unlimited, but none can push the deadline past `MAX_REMAINING_MILLIS`,
+  thirty minutes from the press.
 - `CoopCadenceController` / `CoopCadenceTier` / `CoopStreamCadence` / `CoopStreamClock` /
   `CoopDatagramWatermark` / `CoopDatagramRedundancy` - the UDP state-stream discipline.
 - `CoopLinkQuality`, `CoopDatagramStats`, `CoopStateStreamSink`, `CoopOutboundDiscardListener`,
@@ -233,7 +235,9 @@ Owns: every wire type, since the enum lives here.
   `COLONY_ABANDONED`, `COLONY_MGMT`, `COLONY_INCOME`, `EXPEDITION_WARNING`, `RAID_RESULT`.
 - **`coop.save`** (7) - `CoopSaveCheckpoint` (host saves -> guest autosaves), `CoopGuestSnapshot` /
   `Factory` / `Store`, `CoopSaveIndex` + `CoopSaveIndexSchema`, `CoopCampaignGuard` (the only reader
-  of `coop.expectedCampaignId`). Owns `SAVE_CHECKPOINT`, `SAVE_CHECKPOINT_RESULT`, `GUEST_SNAPSHOT`.
+  of `coop.expectedCampaignId`; a loaded save whose campaign id differs from the invite's, or that
+  carries none at all, gets the wrong-campaign notice). Owns `SAVE_CHECKPOINT`,
+  `SAVE_CHECKPOINT_RESULT`, `GUEST_SNAPSHOT`.
 - **`coop.session`** (6) - `CoopSessionState`, `CoopPlayerInfo`, `CoopLobbyState`, `CoopLobbyRoster`,
   `CoopJoinPhase` (the five named join steps), `CoopIronModeGuard`. Owns `READY_STATE`,
   `LOBBY_STATUS`, `SESSION_LEAVE`.
@@ -256,8 +260,9 @@ Owns: every wire type, since the enum lives here.
   screen owns input), `CoopHostPauseInputListener`, `CoopMarkInputListener`.
 - **`coop.stats`** (3) - `CoopSessionStats` (host-tallied, persisted under `coop.sessionStats`),
   `CoopSessionStatsCodec`, `CoopSessionStatsStore`. Owns `SESSION_STATS`, `SHIP_LOST`.
-- **`coop.mark`** (3) - `CoopMarkService`, `CoopMarkKey`, `CoopMarkFormat`: the 0.1.2 hotkey that
-  writes one `COOP-MARK` line into both players' logs. Owns `MARK`.
+- **`coop.mark`** (3) - `CoopMarkService`, `CoopMarkKey`, `CoopMarkFormat`: the `coop.markKey`
+  hotkey (`F11` by default) that writes one `COOP-MARK` line into both players' logs, stamped with
+  the campaign day count (cycle times 360 plus the day into the cycle). Owns `MARK`.
 - **`coop.newgame`** (3) - `CoopNewGameDialogPlugin` (guest-aware New Game dialog),
   `CoopNewGameChoices`, `CoopWorldSettings` (the two settings a sector cannot be asked for later).
 - **`coop.debug`** (3) - `CoopAgentBridge` (dormant localhost TCP listener), `CoopAgentCommands`
@@ -273,7 +278,7 @@ Owns: every wire type, since the enum lives here.
 ## Wire Protocol
 
 Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **71 constants** as of
-0.1.2. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
+0.1.3. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
 payloads use the `CoopDelimited` unit-separator encoding instead):
 
 ```text
@@ -390,16 +395,20 @@ src/launcher/java/coop/launcher/   22 classes
   CoopInvite           the invite string; `cid` carries the campaign pick, last and optional
   CoopSaveIndexReader  reads coop_saves.json.data, joins rows to descriptor.xml on disk
   CoopCampaignPicker   the Campaign drop-down (New first, then one entry per campaign)
+  CoopLauncherUi       shared Swing primitives: panels, form rows, the wrapping row layouts
   CoopInstallCheck / CoopInstallFixer / CoopInstallLayout / CoopVmparamsText   the Fix button
   CoopUpdateCheck, CoopBugReport, CoopGameProcess, CoopLogTail, CoopPublicAddress, CoopPasswords,
-  CoopSeeds, CoopTheme, CoopIcons, CoopAtomicFiles, CoopLauncherProbe, CoopLauncherUi,
-  CoopLauncherLogging
+  CoopSeeds, CoopTheme, CoopIcons, CoopAtomicFiles, CoopLauncherProbe, CoopLauncherLogging
 ```
 
 - **Config round trip.** The launcher writes player settings and `-D`-only keys into
   `coop_options.json.data`. `CoopModPlugin.publishLauncherProperties()` republishes each as a real
   system property unless the command line already carries one (a real `-D` stays top of the stack),
   then strikes the one-shot keys (`coop.expectedCampaignId`, `coop.adoptCampaignId`) out of the file.
+  Launcher-only state lives in the same schema: `coop.launcher.bridgeEnabled` and
+  `coop.launcher.bridgePort` are the Settings window's Agent bridge checkbox and the port beside it,
+  which Launch composes into the `coop.debug.bridge` the game actually reads (0 means the role
+  default, 7801 hosting and 7802 joining).
 - **Install check.** `CoopInstallFixer` applies the two edits the mod cannot reach: inserting
   `..\mods\coop\jars\coop-forks.jar;` after the ` -classpath ` marker in `<install>\vmparams`
   (ISO-8859-1, no trailing newline, backup first), and appending `"coop"` to
@@ -416,10 +425,11 @@ src/launcher/java/coop/launcher/   22 classes
 
 - **Agent bridge.** `coop.debug.CoopAgentBridge`, gated on `-Dcoop.debug.bridge=<port>`; absent,
   unparsable or `0` means no socket and no log line. Binds 127.0.0.1 only, four clients, a few
-  commands per frame on the campaign thread. 29 verbs in `CoopAgentCommands`: `status`, `fleets`,
-  `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `hirable`,
-  `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`, `setcr`, `give`,
-  `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`, `mark`, `memory` act.
+  commands per frame on the campaign thread. 30 verbs in `CoopAgentCommands`: `status`, `fleets`,
+  `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `ownfleet`, `colonizable`,
+  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`,
+  `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`,
+  `mark`, `memory` act.
   Four things are deliberately **not** verbs (market buy/sell, officer hire, bar-offer accept, market
   open/close) because a UI listener drives each and a verb would bypass the listener under test.
 - **MCP server.** `tools/starsector-mcp` (Node, stdio) wraps host port 7801 and guest 7802 into
@@ -455,14 +465,14 @@ Order line, everything else from `docs/roadmap.data.json`; design lives in
 ## Tests
 
 ```text
-src/test/java/coop/   .java counts, 2026-09-19
-  campaign/ 48   net/ 35   fleet/ 31   ui/ 22   launcher/ 18   combat/ 10   testing/ 8   save/ 6
+src/test/java/coop/   .java counts, 2026-09-20
+  campaign/ 48   net/ 35   fleet/ 31   ui/ 22   launcher/ 19   combat/ 10   testing/ 8   save/ 6
   colony/ 5   debug/ 5   config/ 4   time/ 4   handshake/ 3   interaction/ 3   mark/ 3   seed/ 3
   session/ 3   util/ 3   input/ 2   newgame/ 2   stats/ 2   presence/ 1   rewards/ 1   rng/ 1
   CoopModPluginTest.java   CoopScaffoldTest.java
 ```
 
-3664 tests green on the last full run (2026-09-19). The suite is the only safety net between a change
+3693 tests green on the last full run (2026-09-20). The suite is the only safety net between a change
 and a two-instance smoke.
 
 `coop.testing` holds the shared fixtures rather than a ninth copy of the same proxy:
@@ -483,15 +493,15 @@ game's own `vmparams` do, because XStream 1.4.10 reflects into `java.base` durin
 | `README.md` | the player-facing pitch and release links |
 | `README_DEV.md` | every command: build, test, package, launch, two-client test, bridge verbs, release checklist, save-visible state |
 | `CLAUDE.md` | the short version an agent session gets wrong without being told |
-| `CHANGELOG.md` | per-release notes; 0.1.2 at the head |
+| `CHANGELOG.md` | per-release notes; 0.1.3 at the head |
 | `docs/COOP_MP_DESIGN.md` | design rationale |
 | `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` | the phase ledger and every agreed decision. **Canonical for status** - when it and a phase's checkboxes disagree, the ledger wins |
 | `docs/starsector-runtime-limitations.md` | engine and sandbox facts plus accepted divergences; current facts only, entries are deleted when their fix lands |
-| `docs/PHASE20_SPIKE_RESULTS.md` | the networking spike results, moved verbatim out of the retired `docs/CONNECTIVITY.md` on 2026-09-19 |
+| `docs/PHASE20_SPIKE_RESULTS.md` | the measured networking spike results: UPnP and NAT-PMP against the real router, dual-stack IPv6 binds, a session across the real Internet |
 | `docs/PHASE22_TACTICAL_FEASIBILITY.md` | the 2026-09-05 source pass on tactical orders over joined ships |
 | `docs/roadmap.html` | **generated** from `roadmap.data.json` + the ledger by `roadmap_gen.js`; never hand-edited |
 | `docs/player/INSTALL.md` | install, plus "Every setting" with defaults for every `coop.*` property |
-| `docs/player/CONNECT.md` | the player-facing networking guide (replaces `docs/CONNECTIVITY.md`) |
+| `docs/player/CONNECT.md` | the player-facing networking guide |
 | `docs/player/LIMITATIONS.md` | what is and is not shared |
 | `docs/player/LISTING.md` | forum/Nexus listing copy |
 | `docs/player/REPORTING.md` | how to report a problem |
@@ -541,6 +551,13 @@ Things that compile, pass the suite, and fail in-game.
 - **No mod threads.** Starsector kills mod-created networking threads without saying so; every socket
   is a state machine the pump advances. Never store a transport object in saved state - `CoopNetPump`
   is a transient script. (`CLAUDE.md`; `CoopNetService` javadoc.)
+- **A link drop inside a reconnect grace is not a session edge.** Session-scoped state is held across
+  the window: the host's NPC set hashes, the guest's spawner suppressor, the battle-result dedup set,
+  the partner's player mirror, the NPC mirrors, the mirrored hidden bases. Only link-scoped state
+  resets - datagram watermark, redundancy depth, motion timeline, accepted-stamp high-water mark. A
+  resume calls `CoopNpcFleetReplicator.rearmFullBroadcast()`, never `reset()`, which would unregister
+  `CoopGuestPresence` and let the vanilla fleet managers despawn the guest's fleets.
+  (`CoopNetPump.syncNpcReplication` javadoc.)
 - **`InputEventAPI` control names are enum constants** - `GENERAL_PAUSE`, not `PAUSE`; a wrong name
   passes the mocked tests and crashes the game. Worktree builds need
   `-PstarsectorCore=K:\Starsector\starsector-core` or the compile fails with a wall of "cannot find

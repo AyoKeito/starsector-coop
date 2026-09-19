@@ -495,7 +495,7 @@ public final class CoopInstallCheck {
         return new Row(label, allowed ? Status.WARN : Status.FAIL,
                 "game is " + game + ", the mod was built for " + mod,
                 "Install Starsector " + mod + " on both PCs, or tick Allow game version mismatch"
-                        + " under Advanced if you are testing.");
+                        + " on the Developer tab of Settings if you are testing.");
     }
 
     private static Row settingsRow(String settingsError) {

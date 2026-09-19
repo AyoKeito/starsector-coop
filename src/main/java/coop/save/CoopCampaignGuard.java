@@ -140,7 +140,8 @@ public final class CoopCampaignGuard {
                         + "\n\nThe seed lock turns a fresh start down as already in flight, so this"
                         + " new game will not be let into the session. Load that save instead, or"
                         + " start over on purpose with Start over inside the host's campaign on the"
-                        + " launcher's Advanced card (it loses the other player's progress).");
+                        + " Developer tab of the launcher's Settings window (it loses the other player's"
+                        + " progress).");
     }
 
     /**

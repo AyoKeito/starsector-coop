@@ -382,7 +382,7 @@ class CoopDesyncDialogTest {
         assertTrue(body.contains("Install Starsector 0.98a-RC8 on both PCs, or wait for a release of"
                 + " the mod built for 0.99a-RC1."), body);
         assertTrue(body.contains("Allow game version mismatch"), body);
-        assertTrue(body.contains("Advanced"), "the flag is named where a tester can find it: " + body);
+        assertTrue(body.contains("Developer tab"), "the flag is named where a tester can find it: " + body);
         assertTrue(body.contains("Support code COOP-GAME"), body);
     }
 

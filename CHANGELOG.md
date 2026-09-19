@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3
 
 Fixes from the first two-player Internet session on 0.1.2 (68 minutes, nine link drops from
 minimized windows, no gameplay fault seen), plus documentation work. No gameplay changes.
@@ -39,6 +39,7 @@ minimized windows, no gameplay fault seen), plus documentation work. No gameplay
 - Loading a save that has never been in a co-op session while the invite names a campaign now
   shows the wrong-save notice at load, naming the save to load. Before, that case waited for
   the seed lock's refusal on connect.
+- The wrong-version notice, the wrong-save notices and the Installation window's game-version row now point at the Developer tab of the Settings window. They said "Advanced", a card the launcher has not had since the Settings window replaced it.
 
 **Developer tooling**
 

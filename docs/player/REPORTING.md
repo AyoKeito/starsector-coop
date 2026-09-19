@@ -74,6 +74,9 @@ the key also opens a note box; what you type is written under the same marker as
 COOP-MARK host#3 note | "guest fleet snapped back after the jump"
 ```
 
+A note is cut at 120 characters, and anything outside printable ASCII is written as `\uXXXX`, so a
+Cyrillic or CJK note reads as escapes and both logs carry the identical characters.
+
 There is no box in combat, inside a market or in any other dialog. The marker still lands, so say
 the number out loud or write it down and put the words in your post. Both players see
 `marked host#3` or `partner marked host#3` on the link readout for five seconds. Another key can be

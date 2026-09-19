@@ -1,6 +1,6 @@
 # Starsector 2-Player Coop Multiplayer Mod: Design & Findings
 
-**Document status:** describes the code at HEAD (`e089b8f`, 2026-09-19, mod version 0.1.2 as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
+**Document status:** describes the code at HEAD (`7f88aac`, 2026-09-20, mod version 0.1.3 as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
 **Target:** Starsector 0.98a-RC8. `CoopPresenceRegistry.PINNED_VERSION` holds that string; the handshake refuses any other version unless `-Dcoop.allowGameVersionMismatch=true` is set.
 **Audience:** the author across machines, future Claude sessions, anyone joining the project.
 

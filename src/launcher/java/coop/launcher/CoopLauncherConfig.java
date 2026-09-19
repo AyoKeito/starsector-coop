@@ -50,7 +50,7 @@ public final class CoopLauncherConfig {
     public static final String SECTOR_SIZE = CoopOptionsRegistry.SECTOR_SIZE;
     public static final String SECTOR_AGE = CoopOptionsRegistry.SECTOR_AGE;
 
-    /** The -D-only flags the Advanced card exposes; the mod republishes them at application load. */
+    /** The -D-only flags the Settings window's Developer tab exposes; the mod republishes them at application load. */
     public static final String FULL_FIDELITY_GUEST_SYSTEM = CoopOptionsRegistry.FULL_FIDELITY_GUEST_SYSTEM;
     public static final String FF_DISABLE = CoopOptionsRegistry.FF_DISABLE;
     public static final String CLOCK_DISABLE = CoopOptionsRegistry.CLOCK_DISABLE;

@@ -54,8 +54,9 @@ because the host's campaign is already in flight and a brand new one is not it. 
 for the case where the guest's save is genuinely gone, and it costs the guest everything they had.
 
 The launcher names the save to load, down to the character, the level, the save time and the folder,
-so two campaigns' autosaves cannot be confused. Load a save from a different campaign and the mod
-says so in game and names the right one; it is a warning you close, not a refusal.
+so two campaigns' autosaves cannot be confused. Load a save from a different campaign, or one that
+has never been in a co-op session, and the mod says so in game and names the right one; it is a
+warning you close, not a refusal.
 
 **A mod update can end a campaign in progress.** Save compatibility across releases is not promised,
 because the co-op state written into a save is versioned with the code that wrote it. Unless a
@@ -140,10 +141,11 @@ commission's own bounties are paid to the host. The guest cannot sign or resign 
 own; those dialog options are removed on the guest's game.
 
 **Credits move from the Coop Options page.** Open the intel screen, Coop Options, the Send credits
-row: step the amount, press Send, confirm. The money leaves your account when you press it and lands
-once on the other side, including when it was sent during a dropped link, in which case it arrives
-with the rest of the queued traffic on the resume. If it can never be delivered, because the session
-ended first or the game is closing, it is put back in your account and the message feed says so.
+block: type the amount into the field, press Send credits, confirm. The money leaves your account
+when you press it and lands once on the other side, including when it was sent during a dropped
+link, in which case it arrives with the rest of the queued traffic on the resume. If it can never be
+delivered, because the session ended first or the game is closing, it is put back in your account
+and the message feed says so.
 
 One catch with pods. A pod is owned by whoever dropped it, and only that game runs its expiry timer.
 If the pod expires while neither of you is in that system, the partner's copy is never told and stays
@@ -266,10 +268,10 @@ clamped back to 1 with a warning, because the gameplay side of a third player is
 
 A minimised window looks like the link going dead, not the clock running slow. See Clocks, above.
 
-The 60 second reconnect wait ends for whoever clears the lobby password first. The host runs the
-password gate on an incoming hello and nothing else: it does not check that the client knocking is
-the partner who dropped. With no `coop.password` set that means anyone who can reach the port while
-the countdown is on screen.
+The 60 second reconnect wait, and every five-minute extension of it up to the thirty minute ceiling,
+ends for whoever clears the lobby password first. The host runs the password gate on an incoming
+hello and nothing else: it does not check that the client knocking is the partner who dropped. With
+no `coop.password` set that means anyone who can reach the port while the countdown is on screen.
 
 If the host's game crashes rather than exits, the port mapping it asked the router for outlives it.
 Most routers expire it within the hour. At the next launch the mod hits the conflict, asks the router
@@ -306,6 +308,6 @@ also learn from any web page you open. If you would rather not, leave the button
 address in yourself. The update check is the only other outbound request: one call to GitHub's
 releases API when the window opens.
 
-**A green Test connection is not a promise the session will start.** It proves the port is reachable
+**A green Check connection is not a promise the session will start.** It proves the port is reachable
 and that the thing answering is the co-op launcher. Mod lists, versions and seeds are compared later,
 by the games, at connect.

@@ -206,10 +206,11 @@ If the launcher cannot read `saves\common\coop_saves.json.data`, or that file wa
 version of the mod than the launcher, it says so on that same line and stops naming saves. Nothing
 else changes and **Launch Starsector** still works.
 
-The mod checks the same thing from inside the game. Load a save belonging to a different campaign
-than the one the launcher was pointed at and a message names the save you meant to load instead. It
-is a warning, not a refusal: it appears, you close it, and the game carries on. Loading an unrelated
-save on purpose is allowed.
+The mod checks the same thing from inside the game. Load a save that is not the campaign the
+launcher was pointed at and a message names the save you meant to load instead. A save that has
+never been in a co-op session counts as the wrong one too, and the message says so. It is a warning,
+not a refusal: it appears, you close it, and the game carries on. Loading an unrelated save on
+purpose is allowed.
 
 ### Joining a game
 
@@ -253,6 +254,7 @@ rechecks automatically; its result is recorded in **Logs**.
 | `no leftover -Dcoop.* in vmparams` | See below. No **Fix** button: these are flags somebody put there deliberately, and the launcher does not delete them. |
 | `co-op enabled in mods\enabled_mods.json` | The mod is not ticked. **Fix** ticks it. |
 | `mod_info.json version matches coop.jar` | Two builds got mixed in one folder. Delete `mods\coop` and unzip once. |
+| `coop-forks.jar matches coop.jar` | The two jars carry different versions or different git commits. The row names the file it read, which is the jar the classpath entry points at rather than this folder's own when those differ. Delete `mods\coop` and unzip once. |
 | `Game version` | Your Starsector is not the one the mod was built for. Part of the mod is compiled against the game's own classes, so the mod refuses to start a session on any other version and says `COOP-GAME`. The version is read out of the `Starting Starsector <version> launcher` line the game writes at the top of `starsector-core\starsector.log`, so before the game has run once here the row reads `unknown until the game has run once`. Ticking **Allow game version mismatch** under Settings → Developer drops it to a `WARN` and lets Launch Starsector work. |
 | `settings file saves\common\coop_options.json.data` | The file exists and is not readable as plain JSON. The launcher refuses to overwrite it, because that would throw away every setting in it. |
 | `Update available: <version>` | Not a failure. One request to GitHub's releases API at start, compared against the version baked into your jar, with an **Open release page** button on the row. It reads `Up to date: <version>` when you have the newest release, and `Update check: unavailable` with the reason when the request did not go through. |
@@ -268,13 +270,13 @@ outstanding, naming each one. A `WARN` row is a reason it will work differently 
 
 ### Settings, launching and logs
 
-**Settings** in the header opens a separate window. **General** contains port mapping, HUD corner
-and reconnect grace. **Developer** starts with the **Agent bridge** checkbox and its port, and goes
-on to wiretap sampling, interaction delay, diagnostics, frame profiling and the existing developer
-flags. **Agent bridge** is off for normal play; ticking it starts the game with a 127.0.0.1 socket
-open for the developer tooling, on port 7801 when this launcher hosts and 7802 when it joins, unless
-you type a port of your own in the field below it. Unticking the box leaves that port in the field
-for next time. **Allow game version mismatch** is
+**Settings** in the header opens a separate window. **General** contains port mapping, HUD corner,
+the log marker key and reconnect grace. **Developer** starts with the **Agent bridge** checkbox and
+its port on one row, and goes on to wiretap sampling, interaction delay, diagnostics, frame profiling
+and the existing developer flags. **Agent bridge** is off for normal play; ticking it starts the game
+with a 127.0.0.1 socket open for the developer tooling, on port 7801 when this launcher hosts and
+7802 when it joins, unless you type a port of your own in the field beside it. Unticking the box
+leaves that port in the field for next time. **Allow game version mismatch** is
 an unsupported testing override; **Start over inside the host's campaign** remains a one-launch
 consent that discards the guest's co-op progress. These controls retain their existing defaults.
 
@@ -373,7 +375,7 @@ Three groups on it:
   save and the host sends them to the guest, so both of you read the same value. The host presses the
   buttons; the guest reads each value with `(host setting)` after it and no button next to it.
 - **Your preferences.** Local to your install and never sent to your partner: whether the link HUD is
-  drawn, which corner it sits in.
+  drawn, which corner it sits in, which key writes a log marker.
 - **Connection (read at launch).** Host port, join address and port, router port mapping, password,
   display name. Nothing reads these once a session has started, so the buttons work only while no
   session is running; during a session each row says `takes effect at next launch` instead.
@@ -382,10 +384,10 @@ Changes in the last two groups are written to `saves\common\coop_options.json.da
 the page creates that file if you do not have one. A session rule goes into the campaign's save
 instead, and your partner is told in their event feed: `Co-op: the host set <name> to <value>.`
 
-The intel screen draws buttons, not text fields, so the vocabulary is short: `Turn on` / `Turn off`
-for a yes-or-no setting, `Change to <value>` to walk an enum, `Less` / `More` in 15 second steps for
-the reconnect window, and `Clear` for the password. An address, a name or a new password still has to
-be typed into the settings file, and those rows print
+Every setting row is a button rather than a text field, so the vocabulary is short: `Turn on` /
+`Turn off` for a yes-or-no setting, `Change to <value>` to walk an enum, `Less` / `More` in 15 second
+steps for the reconnect window, and `Clear` for the password. An address, a name, a marker key or a
+new password still has to be typed into the settings file, and those rows print
 `text setting - edit saves/common/coop_options.json.data` with no button. `Reset to defaults` at the
 bottom puts everything back to the shipped values; pressed by a guest it resets only that guest's own
 preferences.
@@ -415,19 +417,20 @@ for them to close it, rather than pulling the pause out from under them.
 ### Rows that do nothing yet
 
 Seven rows are on the page with the setting stored and the behaviour not built. They carry the note
-`no effect in this build - <phase> wires it`, and pressing the button changes the stored value and
-nothing else. Five of them are session rules:
+`no effect in this build (key not wired; owner <phase>)`, and pressing the button changes the stored
+value and nothing else. The phase in brackets is the part of the mod the key belongs to, not a
+promise that it will start reading it. Five of them are session rules:
 
-| Row | Note it prints |
+| Row | Owner in the note |
 |---|---|
-| Guest may pause the world | `no effect in this build - Phase 25 wires it` |
-| Allow joining a session in progress | `no effect in this build - Phase 27 wires it` |
-| Battle loot split | `no effect in this build - Phase 22 wires it` |
-| Colony income split | `no effect in this build - Phase 24 wires it` |
-| Guest asks before colonizing | `no effect in this build - Phase 24 wires it` |
+| Guest may pause the world | `Phase 25` |
+| Allow joining a session in progress | `Phase 27` |
+| Battle loot split | `Phase 22` |
+| Colony income split | `Phase 24` |
+| Guest asks before colonizing | `Phase 24` |
 
-The other two are preferences: **Event feed detail** (`Phase 20.6 wires it`) and **Partner marker
-colour** (`Phase 8 wires it`).
+The other two are preferences: **Event feed detail** (`Phase 20.6`) and **Partner marker colour**
+(`Phase 8`).
 
 Two further session rules work, but not the way the rest of the group does. **Maximum guests** and
 **Reconnect grace** both print
@@ -537,6 +540,7 @@ campaign already in progress; use the options page for that.
 | `coop.hudCorner` | `TR` | Which corner the status line sits in: `TR`, `TL`, `BR`, `BL`. Re-read while the game runs. |
 | `coop.feedVerbosity` | `all` | How much of the co-op event feed is shown: `all`, `important`, `minimal`. No effect in this build. |
 | `coop.partnerColor` | unset | Colour of your partner's presence marker. No effect in this build. |
+| `coop.markKey` | `F11` | Which key writes a `COOP-MARK` line into both logs. An LWJGL key name (`F11`, `F9`, `HOME`); an unknown name is warned about in the log and falls back to `F11`. Read once when the game loads. |
 
 **One-shot and diagnostic keys.** These never appear in the shipped defaults file, and a value for
 one of them in `data\config\coop_options.json` is skipped with a warning. Your own settings file is
@@ -551,7 +555,7 @@ same way.
 | `coop.sectorSize` | unset | `small` or `normal`. Omit for the panel default (`normal`). Must match. |
 | `coop.sectorAge` | unset | `young`, `average`, `old` or `mixed`. Omit for the panel default (`mixed`). Must match. |
 | `coop.adoptCampaignId` | `false` | Guest only. Overrides the seed lock and adopts the host's in-flight campaign id, at the cost of this save's progress. Struck from your settings file as soon as it has been published, so it applies to one launch and no other. |
-| `coop.expectedCampaignId` | unset | The campaign id the invite is for. The mod says so when the save you load belongs to a different campaign, and names the right one; it warns, never blocks. Struck from the file the same way. |
+| `coop.expectedCampaignId` | unset | The campaign id the invite is for. The mod says so when the save you load belongs to a different campaign or to none at all, and names the right one; it warns, never blocks. Struck from the file the same way. |
 | `coop.allowGameVersionMismatch` | `false` | Lets the mod run on a Starsector other than the one it was built for. For testing a release candidate; nothing on that version is supported. |
 | `coop.fullFidelityGuestSystem` | `true` | Kill switch for the full-fidelity guest-system driver. |
 | `coop.ff.disable` | `false` | Forces the shared fast-forward lock unavailable. |
@@ -570,9 +574,11 @@ them is caught at connect rather than discovered hours later. Setting host and g
 the same install stops the game at startup with "Configure either host or guest coop startup
 properties, not both".
 
-The launcher's Settings window sets `coop.portMapping`, `coop.hudCorner`, `coop.reconnectGraceSeconds`,
+The launcher's Settings window sets `coop.portMapping`, `coop.hudCorner`, `coop.markKey`,
+`coop.reconnectGraceSeconds`, `coop.launcher.bridgeEnabled`, `coop.launcher.bridgePort`,
 `coop.debug.bridge`, `coop.debug.wiretapSample`, `coop.debug.interactionDelayMs` and every Developer
-flag checkbox, writing the key into your settings file only when you move it away from its default.
+flag checkbox. The Developer tab's checkboxes and spinners reach your settings file only when you
+move them off their default; the General tab's four go in whatever you leave them at.
 `coop.expectedCampaignId` is set by the host's **Campaign** drop-down and by the `cid` part of a
 pasted invite, not by a field you can type into. `coop.password` and `coop.playerName` are Session
 launcher fields. `coop.hud.disable`, `coop.maxGuests` and the session rules have no launcher field at all.

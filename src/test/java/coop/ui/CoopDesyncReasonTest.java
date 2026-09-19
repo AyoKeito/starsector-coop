@@ -63,7 +63,7 @@ class CoopDesyncReasonTest {
                 + "; this campaign is already in flight and this guest campaign is brand new"
                 + " (a fresh same-seed roll cannot silently rejoin it). To join anyway with"
                 + " a fresh start, tick \"Start over inside the host's campaign (guest)\" in the"
-                + " launcher's Advanced section (-Dcoop.adoptCampaignId=true for script launches)";
+                + " Developer tab of the launcher's Settings window (-Dcoop.adoptCampaignId=true for script launches)";
 
         CoopDesyncReason reason = CoopDesyncReason.classify(raw, CoopDesyncReason.Source.SEED_LOCK);
 
@@ -78,7 +78,7 @@ class CoopDesyncReasonTest {
         String raw = "campaignId: host=camp-7f3a guest=camp-0001"
                 + "; guest save is not from this coop campaign. To adopt the host campaign"
                 + " anyway, tick \"Start over inside the host's campaign (guest)\" in the"
-                + " launcher's Advanced section (-Dcoop.adoptCampaignId=true for script launches)";
+                + " Developer tab of the launcher's Settings window (-Dcoop.adoptCampaignId=true for script launches)";
 
         CoopDesyncReason reason = CoopDesyncReason.classify(raw, CoopDesyncReason.Source.SEED_LOCK);
 

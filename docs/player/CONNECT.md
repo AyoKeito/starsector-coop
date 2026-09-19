@@ -405,7 +405,9 @@ once it is there, pressing `Wait 5 more minutes` again does nothing and the coun
 the guest gets back inside the window, the session carries on: the whole world state is rebroadcast
 so both sides restart from one picture, nothing is rolled back, and anything that was still on its
 way when the link died, a purchase, a credit transfer, a storage deposit, is resent and lands exactly
-once.
+once. The map behind the dialog is left standing while you wait: your partner's fleet, the mirrored
+NPC fleets and any hidden base the guest had found stay where they are, and the resume corrects them
+rather than rebuilding them.
 
 All of that is for a link that died. A partner who quits to the menu or closes the game says so on
 the way out, so there is no countdown to sit through: the session ends at once and the dialog says
@@ -464,9 +466,9 @@ sit both seeds and the first 8 characters of each sector fingerprint, side by si
 and "the host's", so you can read them to each other and confirm you are looking at the same
 difference. The campaign version opens with "This save is not from the host's co-op campaign.",
 because co-op stamps a campaign with an id the first time a session runs in it, and points you at the
-co-op save from that campaign. Ticking "Start over inside the host's campaign (guest)" in the
-launcher's Advanced section is named there as the way to take the host's world instead, at the cost
-of this save's progress. Neither version offers a "join anyway".
+co-op save from that campaign. Ticking "Start over inside the host's campaign (guest)" on the
+Developer tab of the launcher's Settings window is named there as the way to take the host's world
+instead, at the cost of this save's progress. Neither version offers a "join anyway".
 
 **`COOP-MODS` means the two installs differ.** One line per differing mod, each with its own verdict
 and its own remedy, and the remedy points at whichever side is actually behind rather than always at
@@ -480,8 +482,8 @@ one refusal that does not involve your partner at all: the check runs as the gam
 versions, and tells you to install the version the mod was built for on both PCs or wait for a
 release built for yours. Nothing is started, no port is opened and no connection is made, so the
 campaign behind the dialog plays as single player. The dialog also names the developer flag that
-runs co-op on the wrong version anyway, Allow game version mismatch in the launcher's Advanced card,
-and says it is not supported.
+runs co-op on the wrong version anyway, Allow game version mismatch on the Developer tab of the
+launcher's Settings window, and says it is not supported.
 
 **`COOP-SESSION` means the session itself could not be picked back up.** Seven causes, each with its
 own body: the reconnect window closed, the partner is holding a different session, that place belongs
