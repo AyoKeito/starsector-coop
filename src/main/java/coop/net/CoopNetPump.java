@@ -541,6 +541,30 @@ public class CoopNetPump implements EveryFrameScript {
      */
     private coop.ui.CoopDesyncReason desyncReason;
 
+    // ---- in-game log markers ----------------------------------------------------------------------
+    /**
+     * The note box for a log marker: the lowest-ranked coop dialog, and the only one that is safe to
+     * simply never show. The marker line is already in the log by the time this is asked for.
+     */
+    private final coop.ui.CoopDialogController markDialogs =
+            new coop.ui.CoopDialogController("mark", this::nowMillis);
+    /**
+     * The marker itself: the per-session counter, both log lines, the partner's copy and the HUD
+     * acknowledgement. Every seam is a bound {@code this::} reference rather than a lambda over a
+     * field, because the fields below it are not assigned yet when this initialiser runs.
+     */
+    private final coop.mark.CoopMarkService markService = new coop.mark.CoopMarkService(
+            this::markRole,
+            this::markSessionId,
+            this::markSeq,
+            this::nowMillis,
+            this::markSend,
+            this::markWorld,
+            coop.ui.CoopHudNotice::show,
+            this::requestMarkNoteBox);
+    /** The session the marker counter is counting for; a new one resets it. */
+    private String markSessionKey = "";
+
     // ---- Phase 21 session stats -------------------------------------------------------------------
     /** Host broadcast cadence; the same 30 s the guest snapshot uses, for the same reason. */
     private static final long STATS_BROADCAST_INTERVAL_MILLIS = 30_000L;
@@ -1076,7 +1100,8 @@ public class CoopNetPump implements EveryFrameScript {
      * gives them, so the {@code screen} verb can report the one that would actually be on screen.
      */
     public java.util.List<coop.ui.CoopDialogController> coopDialogsForBridge() {
-        return java.util.List.of(reconnectDialogs, desyncDialogs, lobbyDialogs, connectingDialogs);
+        return java.util.List.of(reconnectDialogs, desyncDialogs, lobbyDialogs, connectingDialogs,
+                markDialogs);
     }
 
     /** Bridge-only: the same predicate the pump gates gameplay replication on. */
@@ -3356,6 +3381,9 @@ public class CoopNetPump implements EveryFrameScript {
         // frame is already in the roster) and before the hold, so the frame that releases the lobby
         // is the frame that unpauses.
         tickLobby();
+        // Last of the dialog controllers: it yields to every other coop dialog, and it has
+        // anything to do only on the handful of frames after the marker key was pressed.
+        tickMarkDialog();
         t = profiler.split(SECTION_LOBBY, t);
         // Phase 21: after the lobby, so the release that starts the session is already visible and
         // isSessionPlayable() is true on the very frame the first sample is taken.
@@ -4463,6 +4491,10 @@ public class CoopNetPump implements EveryFrameScript {
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED,
+                 // A marker records a moment that has already happened; the drop edge does not
+                 // undo it, and a marker the partner pressed a frame before its router died is
+                 // exactly the one a tester will go looking for afterwards.
+                 MARK,
                  // 0.1.1, and the one member of isConnectionScopedControl that survives: a pre-drop
                  // ack is the partner saying it applied those seqs, which stays true after the drop.
                  // Honouring it is what stops the resume replaying messages that already landed.
@@ -5130,6 +5162,18 @@ public class CoopNetPump implements EveryFrameScript {
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
             case SAVE_CHECKPOINT_RESULT -> handleSaveCheckpointResult(message);
             case SESSION_LEAVE -> handleSessionLeave(message);
+            case MARK -> {
+                // Session-only, both directions. The gate is stated here rather than inherited
+                // from the default branch below, because that branch routes through the campaign
+                // replicator and a log marker is not campaign replication - it would be dropped.
+                if (isGameplaySessionActive()) {
+                    markService.applyInbound(message);
+                } else if (!preSessionCampaignDropWarned) {
+                    preSessionCampaignDropWarned = true;
+                    CoopLog.warn(CoopNetPump.class,
+                            "Coop ignoring pre-session campaign message type=" + message.type());
+                }
+            }
             case RESPAWN_PLAYER -> handleRespawnPlayer(message);
             case PING -> {
                 // Red-team A4: a connected stranger must not get a free reply channel.
@@ -8573,9 +8617,150 @@ public class CoopNetPump implements EveryFrameScript {
             if (guest) {
                 timeLock.setInputBlockerSuspended(isGuestScreenOwningInput());
             }
+            // Both roles: either player may be the one who sees something wrong.
+            timeLock.syncMarkInputListener(connectedActive, this::onMarkKey);
+            syncMarkSession();
         } catch (RuntimeException ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync coop campaign input listeners", ex);
         }
+    }
+
+    // ---- in-game log markers ----------------------------------------------------------------------
+
+    /** The marker counter is per session: a new session id starts again at {@code #1}. */
+    private void syncMarkSession() {
+        String session = sessionState.sessionId() == null ? "" : sessionState.sessionId();
+        if (session.equals(markSessionKey)) {
+            return;
+        }
+        markSessionKey = session;
+        markDialogs.close();
+        markService.reset();
+        coop.ui.CoopHudNotice.clear();
+    }
+
+    /** The marker key went down. Wrapped: a marker must never cost the frame it was pressed on. */
+    private void onMarkKey() {
+        try {
+            markService.onKeyPressed();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Coop log marker failed", ex);
+        }
+    }
+
+    private String markRole() {
+        return service.role() == CoopConnectionRole.GUEST
+                ? coop.mark.CoopMarkFormat.ROLE_GUEST : coop.mark.CoopMarkFormat.ROLE_HOST;
+    }
+
+    private String markSessionId() {
+        return sessionState.sessionId();
+    }
+
+    private long markSeq() {
+        return service.nextSeq();
+    }
+
+    private void markSend(CoopMessages.Message message) {
+        service.send(message);
+        log("outbound", message);
+    }
+
+    /**
+     * What the world looked like on the frame the key went down: the campaign day, where the local
+     * player's fleet is, and whether the campaign map is free enough to put a note box on.
+     *
+     * <p>Every read is wrapped and every failure degrades to "unknown" rather than going up the
+     * stack. The marker is pressed when something is already wrong, which is the worst possible
+     * moment for the diagnostic aid to be the thing that throws.
+     */
+    private coop.mark.CoopMarkService.World markWorld() {
+        SectorAPI sector;
+        try {
+            sector = Global.getSector();
+        } catch (RuntimeException | LinkageError ex) {
+            return coop.mark.CoopMarkService.World.unknown();
+        }
+        if (sector == null) {
+            return coop.mark.CoopMarkService.World.unknown();
+        }
+        float day = 0f;
+        try {
+            // Elapsed days rather than the cycle/month/day triple: one monotonic number, the same
+            // number on both installs modulo whatever drift the reconciler has not taken out yet,
+            // and lining the two logs up is the entire job.
+            day = sector.getClock() == null ? 0f : sector.getClock().getElapsedDaysSince(0L);
+        } catch (RuntimeException | LinkageError ignored) {
+            // Keep 0: a marker with no day still marks the spot in both files.
+        }
+        String location = "unknown";
+        try {
+            com.fs.starfarer.api.campaign.CampaignFleetAPI fleet = sector.getPlayerFleet();
+            com.fs.starfarer.api.campaign.LocationAPI containing =
+                    fleet == null ? null : fleet.getContainingLocation();
+            if (containing != null) {
+                location = coop.mark.CoopMarkFormat.location(containing.getName(),
+                        containing.isHyperspace());
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            // Keep "unknown".
+        }
+        boolean mapFree;
+        try {
+            mapFree = !isVanillaBlockingScreenOpen(sector) && !battleBridge.isAnyCoopBattleActive();
+        } catch (RuntimeException | LinkageError ex) {
+            mapFree = false;
+        }
+        return new coop.mark.CoopMarkService.World(day, location, mapFree);
+    }
+
+    /**
+     * Asks for the note box, unless a higher-ranked coop dialog is already asking for the slot. A
+     * marker never waits its turn: the line it exists for is already written, and a box that opened
+     * minutes later would be attached to something the player has stopped thinking about.
+     */
+    private void requestMarkNoteBox(String markerId) {
+        if (!markMayRequest()) {
+            markService.onNoteBoxClosed();
+            return;
+        }
+        markDialogs.request(new coop.ui.CoopMarkDialog(markerId, this::onMarkNoteDone));
+    }
+
+    private void onMarkNoteDone(String markerId, String note) {
+        markService.onNoteEntered(markerId, note);
+        markDialogs.close();
+    }
+
+    private boolean markMayRequest() {
+        return coop.ui.CoopDialogArbiter.mayRequest(coop.ui.CoopDialogArbiter.MARK,
+                reconnectDialogs.isRequested() ? coop.ui.CoopDialogArbiter.RECONNECT : null,
+                desyncDialogs.isRequested() ? coop.ui.CoopDialogArbiter.DESYNC : null,
+                lobbyDialogs.isRequested() ? coop.ui.CoopDialogArbiter.LOBBY : null,
+                connectingDialogs.isRequested() ? coop.ui.CoopDialogArbiter.CONNECTING : null);
+    }
+
+    /**
+     * One {@code showInteractionDialog} attempt for the note box, and a yield if anything that
+     * outranks it turned up while it was waiting. Closing reports a cancel, so the service is never
+     * left holding a marker whose box has gone.
+     */
+    private void tickMarkDialog() {
+        if (markDialogs.isRequested() && !markMayRequest()) {
+            markDialogs.close();
+            return;
+        }
+        markDialogs.tick();
+    }
+
+    /** Test read: whether the marker note box is being asked for. */
+    boolean markDialogRequestedForTest() {
+        return markDialogs.isRequested();
+    }
+
+    /** Test read: the marker service, for the counter and the two-halves protocol. */
+    coop.mark.CoopMarkService markServiceForTest() {
+        return markService;
     }
 
     private boolean isGuestScreenOwningInput() {

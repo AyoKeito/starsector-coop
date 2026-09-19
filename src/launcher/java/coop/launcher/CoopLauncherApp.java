@@ -174,6 +174,7 @@ public final class CoopLauncherApp {
     private JComboBox<String> portMappingBox;
     private JSpinner reconnectGraceSpinner;
     private JComboBox<String> hudCornerBox;
+    private JTextField markKeyField;
     private JCheckBox diagnosticsBox;
     private JCheckBox wiretapBox;
     private JSpinner wiretapSampleSpinner;
@@ -767,6 +768,13 @@ public final class CoopLauncherApp {
         hudCornerBox.setToolTipText("Where the one-line link status sits on screen. Local only.");
         form.pair("Port mapping", portMappingBox, "Link HUD corner", hudCornerBox);
 
+        markKeyField = CoopTheme.textField(CoopOptionsRegistry.require(CoopOptionsRegistry.MARK_KEY)
+                .defaultValue());
+        markKeyField.setToolTipText("Writes a COOP-MARK line into both players' logs when you press"
+                + " it, so a test session can be lined up afterwards. An LWJGL key name such as F11"
+                + " or F9; blank uses F11.");
+        form.full("Log marker key", markKeyField);
+
         reconnectGraceSpinner = spinner(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS, 5);
         reconnectGraceSpinner.setToolTipText("How long a dropped link keeps the session alive."
                 + " Host decides.");
@@ -1030,6 +1038,8 @@ public final class CoopLauncherApp {
                 registryDefault(CoopOptionsRegistry.PORT_MAPPING));
         select(hudCornerBox, config.value(CoopLauncherConfig.HUD_CORNER),
                 registryDefault(CoopOptionsRegistry.HUD_CORNER));
+        markKeyField.setText(orDefault(config.value(CoopLauncherConfig.MARK_KEY),
+                registryDefault(CoopOptionsRegistry.MARK_KEY)));
         select(sectorSizeBox, config.value(CoopLauncherConfig.SECTOR_SIZE), DEFAULT_SECTOR_SIZE);
         select(sectorAgeBox, config.value(CoopLauncherConfig.SECTOR_AGE), DEFAULT_STAR_AGE);
         draftSectorSize = selected(sectorSizeBox);
@@ -2432,6 +2442,7 @@ public final class CoopLauncherApp {
         owned.put(CoopLauncherConfig.RECONNECT_GRACE_SECONDS,
                 String.valueOf(reconnectGraceSpinner.getValue()));
         owned.put(CoopLauncherConfig.HUD_CORNER, selected(hudCornerBox));
+        owned.put(CoopLauncherConfig.MARK_KEY, markKeyField.getText().trim());
         if (host) {
             owned.put(CoopLauncherConfig.SECTOR_SIZE, selected(sectorSizeBox));
             owned.put(CoopLauncherConfig.SECTOR_AGE, selected(sectorAgeBox));

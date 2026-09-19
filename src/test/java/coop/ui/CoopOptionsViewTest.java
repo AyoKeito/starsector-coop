@@ -315,7 +315,8 @@ class CoopOptionsViewTest {
         Set<String> keys = new HashSet<>(CoopOptionsView.resetKeys());
 
         assertEquals(Set.of(CoopOptionsRegistry.HUD_DISABLE, CoopOptionsRegistry.HUD_CORNER,
-                CoopOptionsRegistry.FEED_VERBOSITY, CoopOptionsRegistry.PARTNER_COLOR), keys);
+                CoopOptionsRegistry.FEED_VERBOSITY, CoopOptionsRegistry.PARTNER_COLOR,
+                CoopOptionsRegistry.MARK_KEY), keys);
         for (CoopOptionsRegistry.Option option
                 : CoopOptionsRegistry.byTier(CoopOptionsRegistry.Tier.LAUNCH)) {
             assertFalse(keys.contains(option.key()),

@@ -260,6 +260,7 @@ public final class CoopOptionsRegistry {
     public static final String HUD_CORNER = "coop.hudCorner";
     public static final String FEED_VERBOSITY = "coop.feedVerbosity";
     public static final String PARTNER_COLOR = "coop.partnerColor";
+    public static final String MARK_KEY = "coop.markKey";
 
     // ---- -D only, forever --------------------------------------------------------------------
 
@@ -379,6 +380,15 @@ public final class CoopOptionsRegistry {
         options.add(stringOption(PARTNER_COLOR, Tier.CLIENT, "", true, "Phase 8", "immediately", ApplyBoundary.IMMEDIATE,
                 "Not consulted in this build: your partner's presence marker colour is unused,"
                         + " and there is no named vocabulary to set it to."));
+        // Read once when the marker listener is installed, which is why this is not IMMEDIATE:
+        // resolving it means an option read plus an LWJGL key lookup, and neither belongs on a
+        // per-frame path for a key that gets pressed a handful of times a session.
+        options.add(stringOption(MARK_KEY, Tier.CLIENT, "F11", false, "Log markers",
+                "next game load", ApplyBoundary.NEXT_CONNECTION,
+                "Which key writes a COOP-MARK line into BOTH players' logs, so a two-player test"
+                        + " session can be lined up afterwards. An LWJGL key name (F11, F9, HOME,"
+                        + " ...); an unknown name is warned about in the log and falls back to"
+                        + " F11."));
 
         // -- -D only, forever ------------------------------------------------------------------
         // One-shot consent gestures (the friction IS the feature) and debug escape hatches. They

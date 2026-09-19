@@ -137,6 +137,7 @@ public record CoopOptionsView(List<Section> sections) {
         LABELS.put(CoopOptionsRegistry.HUD_CORNER, "Link HUD corner");
         LABELS.put(CoopOptionsRegistry.FEED_VERBOSITY, "Event feed detail");
         LABELS.put(CoopOptionsRegistry.PARTNER_COLOR, "Partner marker colour");
+        LABELS.put(CoopOptionsRegistry.MARK_KEY, "Log marker key");
 
         // 15 s is the granularity a reconnect window is actually chosen at; 1 s steps would mean 60
         // presses to cross the default. Ports get no stepper at all - nobody finds 7777 by clicking.

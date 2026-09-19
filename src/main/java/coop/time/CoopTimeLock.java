@@ -7,7 +7,10 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.listeners.ListenerManagerAPI;
 import coop.input.CoopCampaignInputBlocker;
 import coop.input.CoopHostPauseInputListener;
+import coop.input.CoopMarkInputListener;
+import coop.mark.CoopMarkKey;
 import coop.net.CoopMessages;
+import coop.util.CoopLog;
 
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -134,6 +137,44 @@ public class CoopTimeLock {
             listeners.addListener(new CoopHostPauseInputListener(pauseCoordinator), true);
         } else if (!active && installed) {
             listeners.removeListenerOfClass(CoopHostPauseInputListener.class);
+        }
+    }
+
+    /**
+     * Installs or removes the log-marker hotkey listener. Both roles get it for the length of a
+     * session: either player may be the one who sees something wrong.
+     *
+     * <p>The key name is resolved once, at install, rather than per frame - the resolution reads the
+     * option stack and asks LWJGL for a key index, and neither belongs on a 60 Hz path. A changed
+     * {@code coop.markKey} therefore applies on the next game load, which is what the registry entry
+     * says it does.
+     *
+     * <p>{@link CoopMarkInputListener#setPassThroughKeyCode} is published here rather than in the
+     * listener's constructor so the guest input blocker's exemption appears and disappears with the
+     * listener itself: with no marker listener installed, no key is exempt.
+     */
+    public void syncMarkInputListener(boolean active, Runnable onMark) {
+        if (onMark == null) {
+            return;
+        }
+        SectorAPI sector = sectorOrNull();
+        if (sector == null) {
+            return;
+        }
+        ListenerManagerAPI listeners = sector.getListenerManager();
+        if (listeners == null) {
+            return;
+        }
+        boolean installed = listeners.hasListenerOfClass(CoopMarkInputListener.class);
+        if (active && !installed) {
+            CoopMarkKey key = CoopMarkKey.resolve();
+            listeners.addListener(new CoopMarkInputListener(key, onMark), true);
+            CoopMarkInputListener.setPassThroughKeyCode(key.code());
+            CoopLog.info(CoopTimeLock.class, "Coop log marker key is " + key.name()
+                    + " (code " + key.code() + ")");
+        } else if (!active && installed) {
+            listeners.removeListenerOfClass(CoopMarkInputListener.class);
+            CoopMarkInputListener.setPassThroughKeyCode(CoopMarkKey.KEY_NONE);
         }
     }
 

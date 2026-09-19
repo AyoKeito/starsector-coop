@@ -152,5 +152,13 @@
 	# Colour used for your partner's presence marker. Empty is the built-in preset; Phase 8 defines
 	# the named vocabulary when it wires the key.
 	# text | applies: immediately | Phase 8 | INERT until Phase 8 wires the key
-	"coop.partnerColor":""
+	"coop.partnerColor":"",
+
+	# Which key writes a COOP-MARK line into BOTH players' logs. Press it during a test session
+	# when you see something wrong, and the same marker lands in your partner's log too, so the two
+	# files can be lined up afterwards (rg COOP-MARK). If the campaign map is free you also get a
+	# box to type a short note into. An LWJGL key name - F11, F9, HOME, INSERT and so on; an
+	# unknown name is warned about in starsector.log and falls back to F11.
+	# text | applies: next game load | Log markers
+	"coop.markKey":"F11"
 }

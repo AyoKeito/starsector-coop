@@ -255,7 +255,30 @@ public final class CoopMessages {
          * before the socket closed, read on the frame after the grace window opened, is exactly the
          * case that turns a sixty second wait into an immediate, explained ending.
          */
-        SESSION_LEAVE
+        SESSION_LEAVE,
+        /**
+         * The in-game log marker, either direction: "I pressed the marker key just now, and this is
+         * what my world looked like when I did."
+         *
+         * <p>It exists because a two-player smoke produces two logs and nothing that lines them up.
+         * A tester who sees something wrong can describe it afterwards, but the two files are tens of
+         * thousands of lines long and the only shared landmark is the campaign clock - which is
+         * exactly the thing under suspicion when the clock is what went wrong. A marker is a landmark
+         * the tester plants on purpose: one {@code COOP-MARK} line in <em>both</em> logs, carrying the
+         * presser's marker id, day, location and envelope seq, so {@code rg COOP-MARK} on either file
+         * finds every marker either player pressed.
+         *
+         * <p>Sent twice for one marker when the presser types a note: once immediately with an empty
+         * note, once again with the same marker id and the text. The second send is not a correction
+         * of the first - the first line is already in both files by then, and the pair is what says
+         * the note was typed after the press rather than being part of it.
+         *
+         * <p>Session-only, both directions, and on {@link #isReliableOneShot}: nothing ever sends a
+         * marker again, and a marker that reached only one of the two logs is exactly the failure the
+         * feature exists to prevent. Deliberately <em>not</em> on the reconnect-grace whitelist - a
+         * diagnostic aid is not something an unproven peer needs to be able to write into your log.
+         */
+        MARK
     }
 
     /**
@@ -305,7 +328,9 @@ public final class CoopMessages {
         return switch (type) {
             case MARKET_TXN, CREDITS_GRANT, WORLD_DELTA, RAID_RESULT, SHIP_LOST,
                  COLONY_FOUNDED, COLONY_ABANDONED, COLONY_MGMT,
-                 REP_DELTA, GUEST_REP_DELTA, FACTION_REL_DELTA -> true;
+                 REP_DELTA, GUEST_REP_DELTA, FACTION_REL_DELTA,
+                 // A marker no producer ever sends again, whose point is to be in both logs.
+                 MARK -> true;
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
                  SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
@@ -2296,5 +2321,69 @@ public final class CoopMessages {
     /** Why the peer left, or "" when it did not say. */
     public static String parseSessionLeaveReason(Message message) {
         return optionalPayloadString(message, "reason", "");
+    }
+
+    // ---- in-game log marker ----------------------------------------------------------------------
+
+    /**
+     * One log marker, either direction. See {@link Type#MARK}.
+     *
+     * <p>Everything in the payload is the <em>sender's</em> view of its own world, because the
+     * receiver renders the sender's line verbatim: a marker whose two copies disagreed about the day
+     * or the place would be worse than no marker at all, since lining the two logs up is the whole
+     * job. {@code markSeq} is carried explicitly rather than read off the envelope so the decoded
+     * record is self-contained and a resend on a replacement socket still reports the seq the
+     * presser's own log line named.
+     *
+     * @param markerId {@code host#3} / {@code guest#1}, minted by
+     *                 {@link coop.mark.CoopMarkFormat#markerId}
+     * @param day      the sender's campaign day, two decimals in the rendered line
+     * @param location the sender's location field, already suffixed by
+     *                 {@link coop.mark.CoopMarkFormat#location}
+     * @param markSeq  the sender's outbound envelope seq for this marker
+     * @param note     the typed note, or {@code ""} for the immediate half of a marker
+     */
+    public static Message mark(String sessionId, long seq, long sentAtMillis, String markerId,
+                               float day, String location, long markSeq, String note) {
+        return new Message(Type.MARK, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"markerId\":\"" + escapeJson(requireText(markerId, "markerId")) + "\","
+                        + "\"day\":\"" + day + "\","
+                        + "\"location\":\"" + escapeJson(location == null ? "" : location) + "\","
+                        + "\"markSeq\":" + markSeq + ","
+                        + "\"note\":\"" + escapeJson(coop.mark.CoopMarkFormat.note(note)) + "\"}");
+    }
+
+    /**
+     * Decoded {@link Type#MARK}. A malformed {@code day} reads as 0 rather than throwing: a marker
+     * with a wrong number in it is still a landmark in both files, and refusing it would lose the
+     * one line the tester pressed a key to get.
+     */
+    public record Mark(String markerId, float day, String location, long markSeq, String note) {
+        public Mark {
+            markerId = markerId == null ? "" : markerId;
+            location = location == null ? "" : location;
+            note = note == null ? "" : note;
+        }
+
+        /** True when this is the follow-up half carrying the typed text. */
+        public boolean hasNote() {
+            return !note.isEmpty();
+        }
+    }
+
+    public static Mark parseMark(Message message) {
+        Payload payload = payload(message);
+        float day;
+        try {
+            day = payload.requiredFloat("day");
+        } catch (RuntimeException ex) {
+            day = 0f;
+        }
+        return new Mark(
+                payload.optionalString("markerId", ""),
+                day,
+                payload.optionalString("location", ""),
+                payload.optionalLong("markSeq", message.seq()),
+                payload.optionalString("note", ""));
     }
 }

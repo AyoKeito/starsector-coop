@@ -46,6 +46,7 @@ public final class CoopLauncherConfig {
     public static final String PORT_MAPPING = CoopOptionsRegistry.PORT_MAPPING;
     public static final String RECONNECT_GRACE_SECONDS = CoopOptionsRegistry.RECONNECT_GRACE_SECONDS;
     public static final String HUD_CORNER = CoopOptionsRegistry.HUD_CORNER;
+    public static final String MARK_KEY = CoopOptionsRegistry.MARK_KEY;
     public static final String SECTOR_SIZE = CoopOptionsRegistry.SECTOR_SIZE;
     public static final String SECTOR_AGE = CoopOptionsRegistry.SECTOR_AGE;
 
@@ -77,6 +78,7 @@ public final class CoopLauncherConfig {
             PORT_MAPPING,
             RECONNECT_GRACE_SECONDS,
             HUD_CORNER,
+            MARK_KEY,
             SECTOR_SIZE,
             SECTOR_AGE,
             FULL_FIDELITY_GUEST_SYSTEM,

@@ -63,6 +63,13 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
      */
     private static final Color NET_FAULT_COLOR = new Color(255, 170, 90);
 
+    /**
+     * The transient {@link CoopHudNotice} row. A cool blue, deliberately neither of the two warning
+     * colours above: "your partner pressed the marker key" is an acknowledgement, not a problem, and
+     * it appears next to a line that is amber when the world is paused.
+     */
+    private static final Color NOTICE_COLOR = new Color(150, 200, 255);
+
     private final CoopNetPump pump;
     /**
      * Phase 28 milestone 3: no longer fixed at install. {@code coop.hudCorner} and
@@ -88,6 +95,8 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
     private boolean cachedPaused;
     /** The 0.1.1 netfault countdown, or {@code ""} when no fault is armed or running. */
     private String cachedNetFaultLine = "";
+    /** The transient notice, or {@code ""}; read on the refresh tick like everything else here. */
+    private String cachedNoticeLine = "";
 
     private CoopLinkHud(CoopNetPump pump, CoopHudCorner corner) {
         this.pump = pump;
@@ -177,20 +186,20 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         }
 
         refreshIfDue(sector);
-        if (hiddenByOption || (cachedLine.isEmpty() && cachedNetFaultLine.isEmpty())) {
+        if (hiddenByOption
+                || (cachedLine.isEmpty() && cachedNetFaultLine.isEmpty() && cachedNoticeLine.isEmpty())) {
             return;
         }
 
         float screenWidth = Global.getSettings().getScreenWidth();
         float screenHeight = Global.getSettings().getScreenHeight();
         float lineHeight = font.lineHeight();
-        float y = 0f;
         if (!cachedLine.isEmpty()) {
             float badgeWidth = font.width(cachedBadge);
             float totalWidth = font.width(cachedLine);
             HudAnchor anchor = anchor(corner, screenWidth, screenHeight, totalWidth, lineHeight);
             float x = anchor.x();
-            y = anchor.y();
+            float y = anchor.y();
 
             // Two draws so the badge keeps the player colour while the rest carries the pause state.
             // formatLine always leads with the badge, so this split is exact.
@@ -199,13 +208,22 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
             font.draw(remainder, x + badgeWidth, y, cachedPaused ? PAUSED_COLOR : TEXT_COLOR);
         }
 
+        int row = cachedLine.isEmpty() ? 0 : 1;
         if (!cachedNetFaultLine.isEmpty()) {
             // Its own row, never the link line's: the whole reason it exists is to be read at a
             // glance, and a warning drawn over the readout it is warning about is worse than none.
             float faultWidth = font.width(cachedNetFaultLine);
             HudAnchor faultAnchor = anchor(corner, screenWidth, screenHeight, faultWidth, lineHeight);
-            float faultY = cachedLine.isEmpty() ? faultAnchor.y() : secondRowY(corner, y, lineHeight);
-            font.draw(cachedNetFaultLine, faultAnchor.x(), faultY, NET_FAULT_COLOR);
+            font.draw(cachedNetFaultLine, faultAnchor.x(),
+                    rowY(corner, faultAnchor.y(), lineHeight, row), NET_FAULT_COLOR);
+            row++;
+        }
+
+        if (!cachedNoticeLine.isEmpty()) {
+            float noticeWidth = font.width(cachedNoticeLine);
+            HudAnchor noticeAnchor = anchor(corner, screenWidth, screenHeight, noticeWidth, lineHeight);
+            font.draw(cachedNoticeLine, noticeAnchor.x(),
+                    rowY(corner, noticeAnchor.y(), lineHeight, row), NOTICE_COLOR);
         }
     }
 
@@ -217,9 +235,20 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
      * <p>Pure and GL-free, like {@link #anchor}, so the stacking is unit-testable.
      */
     static float secondRowY(CoopHudCorner corner, float firstRowY, float lineHeight) {
+        return rowY(corner, firstRowY, lineHeight, 1);
+    }
+
+    /**
+     * Generalised {@link #secondRowY}: row 0 is the anchor row, and each row after it grows away
+     * from the screen edge. Three lines can be on screen at once since the marker notice arrived
+     * (link, netfault countdown, notice), and stacking by index is what keeps any two of them from
+     * landing on each other whichever ones are present.
+     */
+    static float rowY(CoopHudCorner corner, float firstRowY, float lineHeight, int row) {
         CoopHudCorner effective = corner == null ? CoopHudCorner.DEFAULT : corner;
         boolean top = effective == CoopHudCorner.TOP_LEFT || effective == CoopHudCorner.TOP_RIGHT;
-        return top ? firstRowY - lineHeight : firstRowY + lineHeight;
+        float offset = lineHeight * Math.max(0, row);
+        return top ? firstRowY - offset : firstRowY + offset;
     }
 
     /**
@@ -265,6 +294,8 @@ public final class CoopLinkHud implements CampaignUIRenderingListener {
         cachedLine = CoopHudState.formatLine(state, separator);
         // 100 ms is well inside a one-second countdown step, so the armed line never skips a number.
         cachedNetFaultLine = CoopHudState.formatNetFaultLine(state);
+        // The notice expires on its own clock; the tick only decides how often the HUD asks.
+        cachedNoticeLine = CoopHudNotice.current(now);
     }
 
     /**

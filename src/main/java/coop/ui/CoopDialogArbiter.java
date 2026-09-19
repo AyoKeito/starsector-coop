@@ -13,6 +13,8 @@ package coop.ui;
  *   <li>{@link #DESYNC} — the session ended for a named, unrecoverable reason.</li>
  *   <li>{@link #LOBBY} — the session exists and is waiting for the players to start it.</li>
  *   <li>{@link #CONNECTING} — the session does not exist yet.</li>
+ *   <li>{@link #MARK} — the log marker's note box, which is the only one of these a player asked
+ *   for on purpose and the only one that is safe to simply not show.</li>
  * </ol>
  *
  * <p>Higher in that list wins: a lower-priority controller must not <em>request</em> while a
@@ -22,7 +24,8 @@ public enum CoopDialogArbiter {
     RECONNECT,
     DESYNC,
     LOBBY,
-    CONNECTING;
+    CONNECTING,
+    MARK;
 
     /** True when {@code kind} outranks {@code other}. */
     public boolean outranks(CoopDialogArbiter other) {

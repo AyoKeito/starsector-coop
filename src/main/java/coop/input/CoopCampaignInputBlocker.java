@@ -104,6 +104,12 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
         if (event.isMouseMoveEvent() || event.isMouseScrollEvent()) {
             return false;
         }
+        if (isMarkKey(event)) {
+            // The log-marker hotkey is never world input. Both listeners sit at Integer.MAX_VALUE
+            // and the engine gives equal priorities no defined order, so "install the marker
+            // listener first" would be a race; the blocker declining this one key is a fact instead.
+            return false;
+        }
         return event.isMouseEvent() || event.isKeyboardEvent();
     }
 
@@ -113,6 +119,19 @@ public class CoopCampaignInputBlocker implements CampaignInputListener {
 
     @Override
     public void processCampaignInputPostCore(List<InputEventAPI> events) {
+    }
+
+    /** True for the key {@code CoopMarkInputListener} is currently watching, if any. */
+    private boolean isMarkKey(InputEventAPI event) {
+        int code = CoopMarkInputListener.passThroughKeyCode();
+        if (code == coop.mark.CoopMarkKey.KEY_NONE || !event.isKeyboardEvent()) {
+            return false;
+        }
+        try {
+            return event.getEventValue() == code;
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
     }
 
     private boolean isLockedControl(InputEventAPI event) {

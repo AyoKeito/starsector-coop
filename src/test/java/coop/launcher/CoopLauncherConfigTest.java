@@ -60,6 +60,26 @@ class CoopLauncherConfigTest {
     }
 
     @Test
+    void theLogMarkerKeyRoundTripsAndBlankRemovesIt() {
+        CoopLauncherConfig config = CoopLauncherConfig.parse("{}");
+
+        JSONObject written = reparse(config.compose(true, owned(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.MARK_KEY, " F9 ")));
+        assertEquals("F9", written.optString(CoopLauncherConfig.MARK_KEY),
+                "a launcher-owned key is trimmed and written as text");
+
+        CoopLauncherConfig reread = CoopLauncherConfig.parse(written.toString());
+        assertEquals("F9", reread.value(CoopLauncherConfig.MARK_KEY));
+
+        JSONObject blanked = reparse(reread.compose(true, owned(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.MARK_KEY, "")));
+        assertFalse(blanked.has(CoopLauncherConfig.MARK_KEY),
+                "blank drops the key so the shipped F11 default applies again");
+    }
+
+    @Test
     void anUnparsableFileIsRefusedRatherThanTreatedAsEmpty() {
         CoopLauncherConfig config = CoopLauncherConfig.parse("{ \"coop.hudCorner\": ");
 

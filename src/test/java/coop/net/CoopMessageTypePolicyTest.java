@@ -65,7 +65,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.SHIP_LOST, CoopMessages.Type.OPTIONS_SNAPSHOT,
             CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT,
             CoopMessages.Type.RELIABLE_ACK, CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
-            CoopMessages.Type.SESSION_LEAVE);
+            CoopMessages.Type.SESSION_LEAVE, CoopMessages.Type.MARK);
 
     // ---- table: CoopNetService.coalesceKey(Message) ------------------------------------------
     // Whitelist of whole-state snapshots that may supersede a queued copy of themselves; every
@@ -130,7 +130,10 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.SHIP_LOST, CoopMessages.Type.COLONY_FOUNDED,
             CoopMessages.Type.COLONY_ABANDONED, CoopMessages.Type.COLONY_MGMT,
             CoopMessages.Type.REP_DELTA, CoopMessages.Type.GUEST_REP_DELTA,
-            CoopMessages.Type.FACTION_REL_DELTA);
+            CoopMessages.Type.FACTION_REL_DELTA,
+            // A log marker: pressed once, sent once, and worthless if it reaches only one of
+            // the two logs it exists to be greppable in.
+            CoopMessages.Type.MARK);
 
     // ---- table: CoopNetPump.allowedDuringReconnectGrace(Type) --------------------------------
     // The only vocabulary an unproven peer may speak while a reconnect grace window is open: the
@@ -180,7 +183,10 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
             // 0.1.1: the whole point. A leave written a frame before the socket died, read after the
             // grace window opened, is what turns a 60 s hold into an immediate, explained ending.
-            CoopMessages.Type.SESSION_LEAVE);
+            CoopMessages.Type.SESSION_LEAVE,
+            // A marker describes a moment that already happened, which the drop edge does not
+            // undo; it is also reliable, and every reliable type survives the edge.
+            CoopMessages.Type.MARK);
 
     // ---- table: CoopNetPump.isTerminalRejectType(Type) ---------------------------------------
     // The peer's verdicts on a join, dispatched a few lines early out of the pre-drop drain so
