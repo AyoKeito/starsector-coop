@@ -43,8 +43,9 @@ public final class CoopReconnectGuestDialog extends CoopReconnectDialogPlugin {
 
     @Override
     String waitMoreOptionTooltip() {
-        return "Keeps retrying for five more minutes. Press it as often as you like - your campaign"
-                + " stays held meanwhile, so nothing drifts while you wait.";
+        return "Keeps retrying for five more minutes. Your campaign stays held meanwhile, so nothing"
+                + " drifts while you wait, but the clock can hold for at most thirty minutes; presses"
+                + " past that do nothing.";
     }
 
     @Override
