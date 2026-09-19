@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>Opt in with {@code -Dcoop.spike.upnp=true} (build.gradle forwards the property into the test
  * JVM). It is off by default because it talks to real network hardware and briefly opens a port on
- * it; the recorded outcome lives in {@code docs/CONNECTIVITY.md} under "Spike results".
+ * it; the recorded outcome lives in {@code docs/PHASE20_SPIKE_RESULTS.md}.
  *
  * <p>The test asserts only that the state machine reaches a terminal state. A router refusing to map
  * is a legitimate, interesting result — the point of the spike is to find out and write it down, not

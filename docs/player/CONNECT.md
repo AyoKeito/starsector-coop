@@ -159,7 +159,7 @@ Coop port mapper: mapped 203.0.113.7:7777 (TCP+UDP) via UPNP on gateway 192.168.
 That address is what you send the guest. Failure looks like this:
 
 ```text
-Coop port mapper gave up: NAT-PMP gateway 192.168.1.1 did not answer -- host the session on a manual port forward, IPv6, or a VPN (see docs/CONNECTIVITY.md)
+Coop port mapper gave up: NAT-PMP gateway 192.168.1.1 did not answer -- host the session on a manual port forward, IPv6, or a VPN (see docs/player/CONNECT.md)
 ```
 
 The usual cause is UPnP switched off in the router's admin page, under Advanced, NAT, or WAN,

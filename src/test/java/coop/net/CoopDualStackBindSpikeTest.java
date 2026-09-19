@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * NAT at all, only a firewall rule. But it is only free if the existing wildcard binds in
  * {@code CoopNetService} are dual-stack; if they are v4-only, Tier 1 needs code, not documentation.
  * This test answers that on whatever machine it runs, and the answers are written up in
- * {@code docs/CONNECTIVITY.md}.
+ * {@code docs/PHASE20_SPIKE_RESULTS.md}.
  *
  * <p>Skipped rather than failed where IPv6 is absent: a machine with no IPv6 loopback cannot answer
  * the question, and pretending otherwise would be a false negative.
@@ -122,7 +122,7 @@ class CoopDualStackBindSpikeTest {
         // RFC 2732 bracketed one, so coop.connectHost takes either. What it does NOT take is the
         // address and port jammed together -- the port always goes in coop.connectPort.
         assertTrue(!bare.isUnresolved() && bare.getAddress() instanceof Inet6Address,
-                "the bare literal must work: it is what docs/CONNECTIVITY.md tells hosts to share");
+                "the bare literal must work: it is what docs/player/CONNECT.md tells hosts to share");
         assertTrue(!bracketed.isUnresolved() && bracketed.getAddress() instanceof Inet6Address,
                 "the bracketed literal is accepted too, so the doc need not forbid it");
         assertTrue(bogus.isUnresolved(), "address:port in one string must not silently resolve");

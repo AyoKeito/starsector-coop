@@ -165,7 +165,7 @@ public final class CoopConnectionDoctor {
     }
 
     /**
-     * Tier the host ended up on. See {@code docs/CONNECTIVITY.md} for what each one means; 0 is the
+     * Tier the host ended up on. See {@code docs/player/CONNECT.md} for what each one means; 0 is the
      * honest "we cannot tell from here" answer, which includes a working VPN.
      */
     static int reachedTier(CoopPortMapper.Result result, LocalAddresses addresses) {
@@ -228,7 +228,7 @@ public final class CoopConnectionDoctor {
         if (addresses.hasPublicIpv4()) {
             return publicIpv4(addresses) + ":" + port;
         }
-        return "nothing shareable yet - see docs/CONNECTIVITY.md";
+        return "nothing shareable yet - see docs/player/CONNECT.md";
     }
 
     private static String nextStep(int tier, CoopPortMapper.Result result, LocalAddresses addresses, int port) {
@@ -240,7 +240,7 @@ public final class CoopConnectionDoctor {
                     ? "IPv4 is a dead end behind CGNAT. Use IPv6: allow TCP+UDP " + port
                     + " through the firewall and give the guest " + addresses.globalIpv6().get(0) + "."
                     : "IPv4 is a dead end behind CGNAT and there is no IPv6 here."
-                    + " Use a VPN pseudo-LAN (Tailscale) - docs/CONNECTIVITY.md tier 0.";
+                    + " Use a VPN pseudo-LAN (Tailscale) - docs/player/CONNECT.md tier 0.";
         }
         if (tier == 2) {
             return "Forward TCP+UDP " + port + " to " + publicIpv4(addresses)
@@ -251,13 +251,13 @@ public final class CoopConnectionDoctor {
                     + addresses.globalIpv6().get(0) + ".";
         }
         return "Automatic mapping did not work. Forward TCP+UDP " + port + " manually on the router"
-                + " (docs/CONNECTIVITY.md tier 2), or use a VPN pseudo-LAN (tier 0).";
+                + " (docs/player/CONNECT.md tier 2), or use a VPN pseudo-LAN (tier 0).";
     }
 
     private static String guestNextStep(String host, int port, boolean tcpUp, boolean udpPathUp) {
         if (!tcpUp) {
             return "The host port is not reachable. Check that the host shared the address this log names ("
-                    + host + ":" + port + "), and that their tier is not 0 - docs/CONNECTIVITY.md.";
+                    + host + ":" + port + "), and that their tier is not 0 - docs/player/CONNECT.md.";
         }
         if (!udpPathUp) {
             return "Something between the two machines drops UDP. The session works over TCP;"

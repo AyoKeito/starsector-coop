@@ -38,7 +38,7 @@ import java.util.function.LongSupplier;
  *
  * <p><strong>Failure is never fatal.</strong> {@link #tick(long)} does not throw; every dead end
  * lands in {@link Result#failureText()} with {@link Result#finished()} true, and the host simply
- * falls back to the manual tiers documented in {@code docs/CONNECTIVITY.md}. Hosting is never
+ * falls back to the manual tiers documented in {@code docs/player/CONNECT.md}. Hosting is never
  * blocked on this class succeeding.
  *
  * <p><strong>CGNAT.</strong> If the address the router calls "external" is itself private or in
@@ -1064,7 +1064,7 @@ public final class CoopPortMapper {
             stage = Stage.FAILED;
         }
         CoopLog.warn(CoopPortMapper.class, "Coop port mapper gave up: " + reason
-                + " -- host the session on a manual port forward, IPv6, or a VPN (see docs/CONNECTIVITY.md)");
+                + " -- host the session on a manual port forward, IPv6, or a VPN (see docs/player/CONNECT.md)");
     }
 
     private void logSuccess() {
@@ -1075,7 +1075,7 @@ public final class CoopPortMapper {
         if (isUnroutableExternalAddress(externalAddress) && !cgnatWarned) {
             cgnatWarned = true;
             CoopLog.warn(CoopPortMapper.class, "CGNAT/double NAT: direct IPv4 impossible; use IPv6 or a VPN"
-                    + " (see docs/CONNECTIVITY.md). The router mapped " + externalAddress
+                    + " (see docs/player/CONNECT.md). The router mapped " + externalAddress
                     + ", which is not a public address -- something upstream is doing a second layer of NAT.");
         }
     }

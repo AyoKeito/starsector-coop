@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and the {@code DeletePortMapping} release on shutdown.
  *
  * <p>This exists because the LAN the spike ran on has no UPnP gateway at all (see the spike results
- * in {@code docs/CONNECTIVITY.md}), so nothing else proves the SOAP conversation actually works
+ * in {@code docs/PHASE20_SPIKE_RESULTS.md}), so nothing else proves the SOAP conversation actually works
  * end to end. Unit tests of the envelope bytes cannot catch a state machine that never advances.
  */
 class CoopPortMapperUpnpExchangeTest {

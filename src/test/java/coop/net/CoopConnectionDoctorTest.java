@@ -62,7 +62,7 @@ class CoopConnectionDoctorTest {
         String report = CoopConnectionDoctor.hostReport(27015, mapped("100.71.4.9"), PRIVATE_ONLY);
 
         assertTrue(report.contains("Tailscale"), report);
-        assertTrue(report.contains("docs/CONNECTIVITY.md"), report);
+        assertTrue(report.contains("docs/player/CONNECT.md"), report);
     }
 
     @Test
