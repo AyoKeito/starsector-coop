@@ -245,15 +245,13 @@ background window that is still visible runs its clock slow and looks from the o
 other client running fast. Keep both windows visible and the drift pulls back together within a
 minute.
 
-Minimising a window is a harder stop than a slow clock: Starsector stops advancing frames in that game
-entirely, and the other side hears nothing from it. After about 15 seconds of silence the other side
-declares the link dead: a guest sees `Connection to <name> lost`, a host sees the
-`disconnected, holding the game` dialog, and either way its world is held paused (see "When the link
-drops" in `CONNECT.md`). Restoring the minimised window resumes the stalled game on its own; in a
-verified test the socket reconnected within half a second and the session was back within a few
-seconds, nine times out of nine, with nothing rolled back. This holds for either role: a minimised
-host stalls the guest's session and a minimised guest stalls the host's. Whether windowed or
-borderless mode avoids this is untested; fullscreen is where it was observed.
+Minimising a window is a harder stop than a slow clock: that game stops advancing frames entirely,
+and the other side hears nothing from it. After about 15 seconds of silence the other side declares
+the link dead: a guest sees `Connection to <name> lost`, a host sees the `disconnected, holding the
+game` dialog, and either way its world is held paused (see "When the link drops" in `CONNECT.md`).
+Restoring the window resumes the stalled game on its own within a few seconds, with nothing rolled
+back. This holds for either role: a minimised host stalls the guest's session and a minimised guest
+stalls the host's. Fullscreen is where it was observed; whether windowed mode avoids it is untested.
 
 ## Networking
 
