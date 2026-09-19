@@ -1,10 +1,10 @@
-# Starsector 2-Player Coop Multiplayer Mod — Design & Findings
+# Starsector 2-Player Coop Multiplayer Mod: Design & Findings
 
-**Document status:** complete reference, self-contained. Updated 2026-05-28.
-**Target:** Starsector 0.98a (current at time of writing).
-**Audience:** the author (across machines), future Claude sessions, anyone joining the project.
+**Document status:** describes the code at HEAD (`e089b8f`, 2026-09-19, mod version 0.1.2 as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
+**Target:** Starsector 0.98a-RC8. `CoopPresenceRegistry.PINNED_VERSION` holds that string; the handshake refuses any other version unless `-Dcoop.allowGameVersionMismatch=true` is set.
+**Audience:** the author across machines, future Claude sessions, anyone joining the project.
 
-This document is the canonical source for the design. Any earlier files / memory entries / chat history that conflict with this doc are out of date — this wins.
+Player-facing behaviour lives in `docs/player/LIMITATIONS.md`, `docs/player/CONNECT.md` and `docs/player/INSTALL.md`. Engine and sandbox facts live in `docs/starsector-runtime-limitations.md`. This document does not repeat them.
 
 ---
 
@@ -12,16 +12,16 @@ This document is the canonical source for the design. Any earlier files / memory
 
 1. [Project scope and decision log](#1-project-scope-and-decision-log)
 2. [Design principles](#2-design-principles)
-3. [Prior art (read this first if you're new)](#3-prior-art)
+3. [Prior art](#3-prior-art)
 4. [Architecture summary](#4-architecture-summary)
 5. [Starsector moddability baseline](#5-starsector-moddability-baseline)
-6. [API surface inventory](#6-api-surface-inventory)
+6. [API surfaces the mod uses](#6-api-surfaces-the-mod-uses)
 7. [Determinism strategy](#7-determinism-strategy)
-8. [Subsystem-by-subsystem plan](#8-subsystem-by-subsystem-plan)
+8. [Subsystem-by-subsystem, as built](#8-subsystem-by-subsystem-as-built)
 9. [Risk register](#9-risk-register)
-10. [Research items (not decisions)](#10-research-items-not-decisions)
-11. [Execution phase sketch](#11-execution-phase-sketch)
-12. [Open questions for v2+](#12-open-questions-for-v2)
+10. [Research items, answered](#10-research-items-answered)
+11. [Execution order that shipped](#11-execution-order-that-shipped)
+12. [Still open](#12-still-open)
 13. [Glossary](#13-glossary)
 14. [Appendix: paths & resources](#14-appendix-paths--resources)
 
@@ -29,176 +29,137 @@ This document is the canonical source for the design. Any earlier files / memory
 
 ## 1. Project scope and decision log
 
-### Core scope (locked)
+> **This section is the record of decisions made**, starting 2026-05-28. Rows later reversed carry a dated `Reversed:` note in place rather than being deleted, because the reason for the reversal is usually the useful part.
+
+### Core scope
 
 | Aspect | Decision |
 |---|---|
-| Players | Exactly 2 |
-| Spatial model | Independent fleets, free roam (each player can be anywhere in the sector) |
-| Authority | Host-authoritative |
-| PvP | Disallowed |
-| Concurrent battles | Max 1 active; non-engaged player spectates. The engaged player's combat-start auto-pauses the **shared** clock so the other player is held, not running ahead. If a single engagement would pull *both* players' fleets into one battle (before v2/v3 joint combat), the **host controls the engagement** — the host pilots the combined battle, the guest's fleet fights host/AI-controlled, and the guest spectates |
-| Combat target | **Solo own-fleet combat in v1:** each player pilots their *own* fleet in their *own* battles; the non-engaged player spectates live. The engaging client is authoritative for that battle's outcome and reports the result for the host to integrate. **Joint combat** (both players piloting in *one* battle) via tomatopaste's CMC architecture stays a **v2/v3 stretch** — not v1 |
-| Time / clock | Host clock is absolute. Guest cannot fast-forward and cannot freely/manually pause, **except** that entering combat auto-asserts a shared pause (guest→host pause-intent) so a solo battle holds the other player. Voice channel (Discord) still handles discretionary pause requests |
-| Spectator UX | Read-only camera + own UI menus (Intel, Cargo, Officers, Refit on docked state). Cannot move fleet or interact with NPCs while spectating |
-| Both-players-present rule | **Hard.** No solo continuation. Disconnect ends session |
-| Mod compatibility | Vanilla + utility mods. Handshake uses Starsector's enabled mod list plus file checksums. Best-effort with Nex (warn-don't-block) |
-| Disconnect handling | Drop immediately, end session. No reconnect grace, no resume |
-| Build system | Gradle to `.jar`, Netty bundled in `jars/`, tomatopaste's project layout as template |
-| Source repo | Public GitHub from day 1 |
+| Players | Exactly 2 in gameplay terms. The wire format is N-ready since Phase 20.5 (`senderId`, the `CoopPeerLink` peer table, `send` as broadcast and `sendTo` as unicast); `coop.maxGuests` ships at `1`. Lifting that clamp is Phase 27, not built. |
+| Spatial model | Independent fleets, free roam. Either player can be anywhere in the sector. |
+| Authority | Host-authoritative for everything shared: clock, NPC fleet population, markets, economy, intel, faction relations, colonies, interaction claims. |
+| PvP | Disallowed. No arbitration, no anti-cheat. |
+| Concurrent battles | Each player fights their own battle on their own machine. Combat start asserts the shared pause, so the other player's campaign is frozen for the duration. `CoopNpcThreatWatcher` hands a host-owned hostile that is chasing the guest mirror over to the guest as `ENGAGE_GUEST` before contact, so the two player fleets are never pulled into one engagement. |
+| Combat target | Solo own-fleet combat. Joint piloting is post-V1 and is now a two-step track: Phase 33 (AI-ally battles, the partner's ships fight under your admiral) then Phase 22 (tactical orders over those ships). Neither is built. |
+| Time / clock | One shared clock. The host applies the effective pause and the guest follows `TIME_SNAPSHOT` at `CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS` = 200 ms, so 5 Hz. *Reversed 2026-09-02 (Phase 7b):* the original "guest cannot fast-forward and cannot pause" became "fast-forward is a shared speed" once vanilla's toggle-mode FF field proved writable, and `coop.allowGuestPause` (default `true`) lets the guest assert a pause intent. |
+| Spectator UX | *Reversed 2026-08-19.* The live spectator screen was cut. The non-engaged player gets two `CampaignUIAPI.addMessage` banners, one at battle start and one at battle end carrying the last reported survivor counts. The reason is recorded in `CoopBattleBridge`: real spectating happens over a Discord screen share, and a full-screen dialog on the watching client is in the way. The `BATTLE_STATUS` stream (`STATUS_INTERVAL_MILLIS` = 400 ms, so 2.5 Hz) and its kill feed are still sent and still parsed; the spectator logs them at debug level. |
+| Both-players-present rule | *Reversed 2026-09-02 (Phase 20.2).* A dropped socket no longer ends the session. `CoopReconnectCoordinator` holds the session and the clock for `coop.reconnectGraceSeconds` (default 60). A peer whose process is still alive resumes the same session; a relaunched peer cannot, because the session id exists only in the dead process's memory, so it gets an ordinary lobby round instead. An authenticated `LOBBY_HELLO` ends the host's wait immediately. |
+| Mod compatibility | Exact match. `CoopHandshakeManifest` carries game version, coop build version, coop git commit, the `coop-forks.jar` build stamp and the enabled-mod list with checksums; `CoopHandshakeDiff` renders the mismatch. No Nex support is claimed. |
+| Disconnect handling | See the reconnect grace above. When the grace expires the session ends, and a reliable message that can never be delivered (a credit transfer, for instance) is refunded with a line in the message feed. |
+| Build system | Gradle produces `jars/coop.jar`, `jars/coop-forks.jar` (the classpath forks, `forksJar` task), `jars/coop-launcher.jar` and `jars/flatlaf.jar`. *Reversed 2026-06-10:* Netty was never bundled. The transport is plain `java.nio` non-blocking channels in `CoopNetService`, because mod-created threads die silently mid-session and the script sandbox blocks `java.io`. |
+| Source repo | Public GitHub (`github.com/AyoKeito/starsector-coop`). Licence CC BY-NC 4.0 with a Fractal Softworks exemption; see `LICENSE`. |
 
 ### Per-player state ownership
 
 | What | Per-player or shared? |
 |---|---|
-| Player fleet (ships, hull state) | Per-player |
-| Credits and cargo | Per-player |
-| Officers, character XP/skills | Per-player |
-| Faction reputation | **Shared** — single rep table. Either player's actions feed in. (Reversed from initial "independent" pick; see [§2 design principles](#2-design-principles).) |
-| Faction commission | Host's commission, guest inherits station access. Guest's own rep stays per-player conceptually but is updated against the shared table |
-| Story missions / progression | Host-only (guest is narratively a sidekick) |
-| Mission boards (bar, contacts, bounties) | Shared pool, first-come-first-served. Mission rewards to accepting player |
-| Market inventory (submarket ship/weapon/fighter stock, hireable officers/mercenaries) | **Shared** — host-authoritative; both players see the same contents, and buy/sell/hire transactions apply to the host's canonical market and re-broadcast |
-| Station storage | **Per-player** — each player has an independent stash, persisted in their own save/export. A private screen, not a shared mutex |
-| Faction-to-faction relationships | **Shared** — host-authoritative, replicated like player rep so both clients agree on who is hostile to whom |
-| Salvage / exploration loot | Loot lands in the salvaging player's own cargo (per-player, own-action resolve like combat spoils); the *world entity's* consumed/looted state is **shared** and host-integrated so it is consumed on both clients |
-| Hyperspace storm cells, slipstreams, abyss layout | Host-authoritative after initial seed-sync; replicate dynamic terrain mutations/outcomes |
-| Time-sensitive event timers (bounty expiry, raid cooldown, faction war ticks) | Shared via sector clock |
-| `PersistentUIDataAPI` (ability slots, refit tags, course target, control groups) | Per-player (local-only) |
-| Camera / UI tab state / sound | Per-player (local-only) |
+| Player fleet (ships, hull state) | Per-player. Each client's `getPlayerFleet()` is its own; the partner is a mirror. |
+| Credits and cargo | Per-player. Phase 32 added `CoopCreditTransfer`, a send-credits row on the Coop Options page. |
+| Officers, character XP/skills | Per-player. |
+| Faction reputation | **Shared.** Host-authoritative full overwrite via `PLAYER_REP_SNAPSHOT`, plus event-driven `REP_DELTA` and `GUEST_REP_DELTA`. Person and contact reputation is deliberately not synced (cosmetic, and it drifts harmlessly). |
+| Faction commission | Host's commission. `CoopCommissionSync` replicates the access so the guest can buy commission-gated military stock; salary and commission bounties stay with the host, and the guest's sign/resign dialog options are removed by the rules.csv rows `CoopStoryChainGate` describes. |
+| Story missions / progression | Host-only. `CoopStoryChainGate` publishes "this client is the guest" into sector memory, and the mod's `data/campaign/rules.csv` re-declares the Galatia Academy rows with that extra condition. The chain's state is entirely per-client memory (`$player.metBaird`, `$global.gaKA_completed`, the `$global.ga*_ref` mission references) and none of it is on the wire, so a guest who started it would get a private second storyline. |
+| Mission boards (bar, contacts, bounties) | Shared pool, first-come. `CoopMissionBoardSync` and `CoopMissionClaim` (`MISSION_POOL_SNAPSHOT`, `MISSION_CLAIM_REQUEST` / `_ACCEPT` / `_REJECT`); `CoopBarPoolCapture`, `CoopBarPoolInjector` and `CoopBarGenerationSuppressor` do the same for bar events. Bounty payouts to the guest are Phase 34, not built. |
+| Market inventory (submarket stock, hireable officers) | **Shared**, host-canonical, keyed by (market, submarket) since Phase 32: open, black, military and the storage locker are four inventories. `CoopMarketSync` snapshots on open (`MARKET_SNAPSHOT`) and the guest applies it as a full replacement, plus per-transaction `MARKET_TXN` deltas. |
+| Station storage | *Reversed 2026-09-05 (Phase 32).* Was per-player. Now shared and host-canonical like any other submarket: either player's 5000-credit unlock opens it for both (`CoopStorageUnlock`, `CoopStorageUnlockSync`), stored hulls carry ids of the form `c_<player>_<id>`, apply is a reconcile rather than a wipe, and each game still bills its own monthly fee. |
+| Faction-to-faction relationships | **Shared**, host-authoritative (`CoopFactionRelations`, `FACTION_REL_DELTA`). |
+| Colonies, industries, ground raids | **Shared** (Phase 24, pulled into V1 on 2026-06-10). One shared player faction, not two. Income is split 50/50 of the local net (`CoopColonyIncome` through `CoopRewardSplitter`, which hardwires the equal split; `coop.incomeSplit` and `coop.lootSplit` ship inert and the registry says so by name). |
+| Salvage / exploration loot | Loot lands in the acting player's own cargo. The world entity's consumed state is shared: `CoopSkeletonMutationWatcher` plus the `WORLD_DELTA(CONSUME)` report make the entity disappear on both clients, with a ledger dedup so the echo does not loop. |
+| Hyperspace storms, slipstreams, abyss layout | Host-owned in principle, still divergent per client in practice. This is an accepted limitation, not a solved problem; Phase 26 owns the fix and is not built. |
+| Time-sensitive event timers | Shared via the sector clock, with `CoopClockReconciler` keeping the guest converged. |
+| `PersistentUIDataAPI`, camera, UI tab state, sound | Per-player, local only. |
 
 ### Combat decisions
 
 | Aspect | Decision |
 |---|---|
-| Triggering combat | Either player can engage. The **engaging player pilots their own battle locally** on their own client and is authoritative for that battle's outcome; the host integrates the reported result into the canonical campaign |
-| Spectator behavior | The non-engaged player spectates live (60 Hz stream sourced from the engaging client). **Joint combat** (both in one battle) is a v2/v3 stretch |
-| Spoils (XP, salvage, credits, recoveries) | **Solo fighter keeps their own** XP, salvage, credits, and recoveries — the engaging client applies its own `EngagementResultAPI` locally (vanilla). There is **no 50/50 split in v1**, because every v1 battle has exactly one piloting player; a `CoopRewardSplitter` is only needed once **joint combat** lands in v2/v3 |
-| Faction reputation deltas | The engaging (piloting) player's combat rep changes apply to the shared table. The spectator gets 0 rep delta (no participation) |
-| Fleet wipe | Vanilla respawn (corrected 2026-08-20: 0.98a `CampaignState.showShuttleDialog()` handles wipes natively — Wayfarer + Kite stock fleet at a size-weighted random friendly market, credits `max(old*0.8, 2000)`, officers/skills/rep carried by the engine). The mod adds only a partner notification and an empty-roster mirror guard (plan Phase 17). Session continues |
-| Iron mode | Disabled in coop sessions. Cannot be enabled at session start; mod refuses to convert existing iron saves (moot since fresh games only in v1) |
-| Combat speed multiplier | Forced to vanilla 1.0x in coop. Combat-speed settings/mods ignored |
-| Host disconnects mid-combat | Combat freezes immediately. 5s banner countdown. Then "Save & Exit" dialog. Guest's fleet rolls back to last campaign-side autosave (pre-battle) |
+| Triggering combat | Either player can engage. The engaging client pilots the battle locally and is authoritative for its outcome; it reports campaign deltas over TCP (`BATTLE_RESULT`) and `CoopBattleResultReconciler` folds them into the host's world. |
+| Partner's view | Banners only; see the scope table above. |
+| Spoils | The fighter keeps its own XP, salvage, credits and recoveries, applied locally by vanilla `EngagementResultAPI`. There is no split, because every battle has exactly one piloting player. `CoopRewardSplitter` exists but serves colony income, not combat. |
+| Faction reputation deltas | The piloting player's combat rep applies to the shared table. The partner gets none. |
+| Fleet wipe | *Corrected 2026-08-20.* Vanilla `CampaignState.showShuttleDialog()` already handles wipes: Wayfarer plus Kite at a size-weighted random friendly market, credits `max(old*0.8, 2000)`, officers, skills and rep carried by the engine. The mod adds only `CoopFleetMirror`'s empty-roster guard (a 0-member mirror despawns as `NO_MEMBERS` on any unpaused frame, and `setNoAutoDespawn` does not cover that branch) and a `RESPAWN_PLAYER` banner. The planned Wolf-plus-5k injection would have suppressed the vanilla flow, whose call sites gate on `!isValidPlayerFleet()`. |
+| Iron mode | Refused. `CoopIronModeGuard` reads the `isIronMode` field and blocks the session. |
+| Campaign speed multiplier | Forced to `CoopFastForwardLock.SESSION_MULT` = 2 (the engine default) for the session, so both clients run identically regardless of local `settings.json`. If a MethodHandles lookup fails, or `-Dcoop.ff.disable=true` is set, the lock degrades to `FALLBACK_MULT` = 1 through public `SettingsAPI` only, which is the old Phase 7 behaviour. |
+| Host disconnects mid-combat | *Reversed 2026-06-10.* The freeze, countdown and roll-back protocol was cancelled: the API has no programmatic save **load**, so rollback was never implementable. Instead the result message is discarded and logged loudly, the partner gets a connection-lost banner, and the reconnect grace decides whether the session survives. |
 
 ### Session lifecycle decisions
 
 | Aspect | Decision |
 |---|---|
-| Starting a session (v1) | Fresh New Coop Game only. Both players do character creation. Seed shared at session start. Existing solo saves remain solo, no conversion |
-| Version handshake | Exact match: Starsector version + runtime enabled mod manifest + checksums + this coop mod's commit hash. Any mismatch → refuse to connect, show diff |
-| Save file | Host owns canonical save. On session end, host serializes guest's fleet state via XStream and sends it back to guest as a `GuestFleetExport` blob. Guest writes to `saves/coop_player_<uuid>.dat` for next session |
-| Same-market dock UI | Serialized in v1 (decided 2026-08-20): the global interaction gate admits one player to any dialog at a time, so shared-screen conflicts cannot arise; the WAN claim race is force-closed (plan Phase 18). Concurrent docking (private screens parallel + shop mutex) deferred post-V1 — requires entity-scoping the gate first; see §8.14 |
-| Concurrent interaction with same entity | First-click wins per packet timestamp. Other player sees "Player X is interacting with this" + wait/move-on options |
-| Player-to-player trade | Out of scope for v1. Cargo-dump-and-pickup is the workaround. Direct trade UI deferred to v2 |
-| In-game text chat | None in v1. Players use Discord/voice |
-| Presence indicator | Other player's fleet always visible on campaign map regardless of sensor range. Rendered in own faction color, labeled with username |
-| Idle-world digest | Not needed. With sector pause + clock fully synced, no "guest missed things" gap exists |
+| Starting a session | Either a fresh coop campaign or loading an existing one. The desktop launcher (Phase 31) writes connection and world settings to the settings file and produces an invite string; `CoopNewGameDialogPlugin` is the coop-aware New Game dialog, and `CoopLobbyDialog` is the in-campaign lobby with per-player ready state (`READY_STATE`). |
+| Version handshake | Exact match on the manifest above; a mismatch shows a diff and refuses. |
+| Save file | *Reversed 2026-08-20 (Phase 16).* The `GuestFleetExport` blob and `saves/coop_player_<uuid>.dat` were cancelled. The guest already owns a real save and `CampaignUIAPI.autosave()` is public, so the host's save triggers a coordinated guest autosave (`SAVE_CHECKPOINT`). `autosave()` silently does nothing while a dialog is open, so the checkpoint parks and retries every frame up to `CoopSaveCheckpoint.SAFETY_CAP_MILLIS` (ten minutes), reporting back over `SAVE_CHECKPOINT_RESULT`. The host's save still embeds `coop.guestFleetSnapshot` as its record of what the guest owned. |
+| Rejoining | The guest loads its own coordinated save; `coop.campaignId` matches and the seed lock accepts. Starting a new game on the same seed is refused by the Phase 6b lock ("already in flight") unless launched with `-AdoptCampaign`, a fresh-start escape hatch that loses guest progress. `CoopCampaignGuard` warns, never blocks, when the loaded save's campaign id is not the one the invite named. |
+| Same-market docking | Serialized. `CoopInteractionGate` admits one player to any interaction at a time, globally, first-come by host receive sequence (`hostSeq`), not by sender wall clock. |
+| Concurrent interaction with the same entity | Rejected claims carry `already_claimed_by:<id>`; `CoopClaimWaitTracker` shows the wait, and `CoopRejectTracker` force-closes a dialog that opened optimistically before the host's rejection arrived (Phase 18). |
+| Player-to-player transfer | Cargo jettison and pickup (Phase 12d), ships through the shared storage locker (Phase 32), credits through the Coop Options page (Phase 32 addition B). A direct trade dialog stays out of V1: it needs an interaction dialog on the partner's mirror plus an escrow protocol. |
+| In-game text chat | None. What shipped in 0.1.2 instead is the `COOP-MARK` log marker: a configurable key (`coop.markKey`, default F11) writes one identical line into both players' logs with a marker number, campaign day, location and sync sequence, plus an optional typed note when the campaign map is free. `CoopMarkService` writes the local line before attempting anything else, so every later step is allowed to fail. |
+| Presence indicator | The partner's fleet is always visible on the campaign map regardless of sensor range, in the local player's faction colour, labelled `partner <Name>`. Vanilla prefixes player-faction fleets with the article "Your" and that label is unrenamable, which is why the partner form reads the way it does. |
 
-### Out of scope for v1 (deferred to v2 or beyond)
+### Out of scope for V1
 
-- Joint combat / joint piloting / CMC integration (v2/v3 stretch)
-- Colonies, ground raids, industries (deferred to v3)
-- Faction war (Nex compatibility) (deferred to v2)
-- Player-to-player direct trade UI (v2)
-- Iron mode coop (no plan)
-- Save conversion from existing solo save (v2)
-- Reconnect / resume mid-session (v2 if needed)
-- 3+ players (no plan)
-- PvP (no plan)
-- In-game chat (v2 candidate)
-- Cross-version play (no plan — exact match enforced)
+Each has a phase number in the plan. None are built.
+
+- Joint piloting: Phase 33 (AI-ally battles) then Phase 22 (tactical orders). 22 is gated on 33 being built and smoke-passed.
+- Hyperspace and abyss ambient replication: Phase 26, ordered first among post-V1 work.
+- Guest-side bounty payouts: Phase 34.
+- Finer time control, including a guest fast-forward intent policy: Phase 25.
+- Three or more players: Phase 27. The wire is ready; the clamp is not lifted.
+- PvP, cross-version play, converting an existing solo save: no plan.
+- Nex or broad mod compatibility: no plan. The handshake demands identical mod lists.
 
 ---
 
 ## 2. Design principles
 
-These principles emerged during design discussion. They are the lens through which to resolve future ambiguity.
+These are the lens for resolving future ambiguity. All five still hold in the shipped code.
 
 ### 2.1 Function-richness is the goal, bounded by cost
 
-> Keep as many gameplay functions as possible. When choosing between "build this feature" and "cut for simplicity," prefer build — but only when the cost is bounded. Some features (colonies, full Nex) are too expensive for v1 and are explicitly deferred.
+Prefer building a feature over cutting it when the cost is bounded. Colonies were the test case: deferred to v3 in the original scope, then measured and pulled into V1 as Phase 24 on 2026-06-10, because one shared player faction turned out to be much cheaper than two.
 
 ### 2.2 PvE, not PvP
 
-> Both players are friends cooperating against the world. No fairness arbitration. No anti-cheat. No contested-action mechanics. Voice channel is assumed for coordination.
+Both players are friends. No fairness arbitration, no anti-cheat, no contested-action mechanics. A voice channel is assumed for coordination, which is also why there is no text chat.
 
 ### 2.3 Host-authoritative for choices
 
-> When a choice / arbitration is needed, host decides. Voice channel handles social coordination beforehand. Don't build voting / consent UI.
+Where a choice needs arbitration, the host decides and the guest reconciles. No voting or consent UI exists anywhere in the mod.
 
 ### 2.4 Seed-sync makes initial convergence cheap; dynamic divergence is expensive
 
-> **This is the most important architectural principle.** Both clients run identical seed-based worldgen at session start. That gives them the same broad sector structure without serializing the whole `Sector`.
->
-> That does **not** make the whole campaign deterministic. Current 0.98a-RC8 has gameplay-visible unseeded/random-seed sites in open scripts and API-source implementations. Therefore: prefer **shared host-authoritative outcomes** over per-player recomputation by default. The cost of "make both clients agree on this outcome" is bounded. The cost of "let them disagree, then reconcile" is high.
->
-> Pick per-player state only when gameplay genuinely demands it (e.g., per-player cargo means no atomic-transfer protocol; per-player fleet means each player has agency).
+Both clients run identical seed-based worldgen at session start. That gives the same sector structure without serializing `Sector` over the wire. It does not make the campaign deterministic: 0.98a-RC8 has gameplay-visible unseeded sites in open scripts (`Math.random()`, `new Random()`, `Misc.genRandomSeed()`). So the default is shared host-authoritative outcomes, not per-client recomputation.
 
-This principle drove these decisions (and reversals):
-- **Reputation: shared** (originally picked independent; reversed when cost picture clarified)
-- **Mission boards: shared first-come** (over independent boards, which would have required forking mission gen + maintaining per-player pools)
-- **Hyperspace storms/slipstreams/abyss: host-authoritative after initial seed-sync**
-- **Commission: host-owned shared access** (over independent commissions)
+This principle drove these decisions and reversals: reputation shared (originally independent); mission and bar boards shared first-come, over per-player pools that would have meant forking mission generation; commission host-owned; storage shared (reversed 2026-09-05, the same logic applied one layer deeper); hyperspace terrain host-owned in principle, though Phase 26 has yet to make that true in practice.
 
 ### 2.5 Replicate, don't recompute
 
-> Host owns event outcomes. Guest receives outcomes. Guest's local code never re-runs randomness for events that originated on host. Avoids most divergence in practice.
+The host owns event outcomes; the guest receives them and never re-rolls. Applied to NPC fleet inflation, bounty levels, encounter spawns, mission and bar generation, market stock, faction relations, colony state.
 
-Applied to: NPC fleet inflation, salvage rolls, bounty levels, encounter spawns, mission generation, storm strike resolution.
+### 2.6 Adopt prior art aggressively, and drop it when it stops paying
 
-### 2.6 Adopt prior art aggressively
-
-> The joint-piloting combat netcode is already solved well enough for v2 (tomatopaste's CMC v3.10). Don't reinvent it when that scope starts. V1 should spend invention budget on the campaign layer, spectator bridge, save-export, and host-authoritative event replication.
+The original plan was to depend on tomatopaste's CMC for joint combat. *Revised 2026-09-05:* the Phase 22 source pass (`docs/PHASE22_TACTICAL_FEASIBILITY.md`) found that tactical orders over your own joined ships are reachable through public API, using the side-0 ally task manager, admiral silence, a GL panel and input handling. The joint-combat track was therefore rescoped away from CMC's obfuscated-internals dependency and onto a host-engine joint battle. Nothing from CMC ships in this mod.
 
 ---
 
 ## 3. Prior art
 
-**Read these before writing any code.** Both projects already solved problems we'd otherwise re-derive.
+> **History.** This is the record of what was read before writing code in May 2026. Neither project is a dependency of the shipped mod; one idea was taken from each.
 
-### 3.1 CMC — Cooperative Multiplayer Combat (tomatopaste / automatopaste)
+### 3.1 CMC, Cooperative Multiplayer Combat (tomatopaste / automatopaste)
 
-- **Forum thread**: https://fractalsoftworks.com/forum/index.php?topic=11598.0 (v3.10 dated 2026-05-02, targets 0.98a-RC8). Forum is Cloudflare-gated — if WebFetch hits 402, paste content manually or use `cf_clearance` cookie.
-- **Source repo**: https://github.com/automatopaste/Multiplayer
-- **Companion library**: https://github.com/automatopaste/CMUtils (UI widgets, debug overlays — v2 dependency if adopting CMC)
+- Forum thread: https://fractalsoftworks.com/forum/index.php?topic=11598.0 (v3.10, 2026-05-02, targets 0.98a-RC8). Cloudflare-gated.
+- Source: https://github.com/automatopaste/Multiplayer. Companion library: https://github.com/automatopaste/CMUtils.
 
-**Scope**: combat only, no campaign.
+Combat only, no campaign. Server-authoritative per-ship state replication with client-side interpolation; Netty 4.1.69, TCP for handshake and lobby, UDP for deltas; server tick 60 Hz, client input 30 Hz. Activation trick: name a ship `player2` in refit and it becomes the joinable one. Known limits: the `MPDefault*AIPlugin` classes are empty stubs, there is no UDP loss recovery, and it reaches into obfuscated combat entity classes (`com.fs.starfarer.combat.entities.{BallisticProjectile, MovingRay, Missile, DamagingExplosion}`), so it breaks on version bumps.
 
-**Architecture**:
-- Server-authoritative, per-ship state replication, client-side interpolation
-- Activation trick: in refit, name a ship `player2` → that ship becomes the joinable one
-- Network: Netty 4.1.69. TCP for handshake, lobby, variant data. UDP for high-frequency deltas
-- Tick rates: server 60 Hz, client→server input ~30 Hz, server→client state 60 Hz
-- Threading: `ServerConnectionManager` runs on its own thread at fixed tick rate; combat plugin runs on game thread; duplex buffers shared between
-
-**Per-ship sync payload** (proven shape, we should match):
-- Fleet id, hull id, position, velocity, facing, angular velocity
-- Hull%, flux, CR (combat readiness)
-- Vent/overload state, engine commands (bitmask), mouse target, owner, armor deltas, engine-disabled flags
-- Per-weapon: fire state, aim angle (16-bit precision for beams), autofire flags, group
-- Shield: on/off, facing, arc
-- Per-projectile: position/velocity/facing/owner/hp + weapon spec id + missile engine flags
-
-**Ship handoff**: `PlayerShips` server-side manages who controls what. Client claim → server removes AI from ship. Client relinquish → server reattaches AI. The "player2" ship name triggers handoff.
-
-**Known broken / inherited limits**:
-- `MPDefaultShipAIPlugin`, `MPDefaultAutofireAIPlugin`, `MPDefaultMissileAIPlugin` are empty stubs. Non-piloted ships don't act on client side; autofire effectively disabled on client. Server runs the AI, client renders replicated state. This is acceptable for v2 joint piloting if the server remains authoritative
-- No UDP loss recovery → projectile/ship desync under packet loss. Tolerable on LAN / home internet
-- Concurrency races between Netty threads and combat thread; minimal sync
-- No auth, no timeouts
-- Touches obfuscated internals: `com.fs.starfarer.combat.entities.{BallisticProjectile, MovingRay, Missile, DamagingExplosion}`. Breakage likely on Starsector version bumps
-- Depends on CMUtils, LazyLib, Console Commands (v2/v3 joint-combat concern, not v1 solo own-fleet scope)
+**What was taken:** the per-ship sync payload shape, as a reference for what a combat state stream has to carry. **What was not:** the dependency. See §2.6.
 
 ### 3.2 Matlabmaster's Multiplayer (campaign POC, unfinished)
 
-- **Source**: https://github.com/moi75ts/Multiplayer (GitHub handle `moi75ts`, mod author `MatlabMaster`, package path `src/matlabmaster/multiplayer/`)
-- **Fork with docs**: https://github.com/kirpoly/Multiplayer_Starsector — has `docs/Multiplayer_Mod_Documentation.md`. Note: that doc actually describes tomatopaste's *combat* mod, not matlabmaster's campaign side; the repo blends both
+- Source: https://github.com/moi75ts/Multiplayer. Fork with docs: https://github.com/kirpoly/Multiplayer_Starsector, whose `docs/Multiplayer_Mod_Documentation.md` actually describes tomatopaste's combat mod rather than the campaign side.
 
-**Scope**: experimental campaign POC, never shipped formally.
-
-**Key insight we adopt**: **matching seed at game start.** Both clients re-run worldgen from identical seed, so they have structurally identical galaxies without serializing `Sector` over the wire. This single trick removes the worst sync problem.
-
-**Why it's unfinished**: AI stubs empty, save sync ad hoc, no proper handoff between campaign↔combat. We pick up where they stopped.
+**What was taken:** matching seed at game start, so both clients re-run worldgen instead of serializing `Sector`. That one idea removed the worst sync problem and is still the bootstrap this mod uses (§4.4). Its own campaign sync was ad hoc and never finished.
 
 ---
 
@@ -206,195 +167,163 @@ Applied to: NPC fleet inflation, salvage rolls, bounty levels, encounter spawns,
 
 ### 4.1 Network topology
 
-- **2-player peer-to-peer, one designated host.** No relay server.
-- **Single Netty connection**, TCP + UDP. TCP for handshake, lobby, snapshots, guest fleet export. UDP for high-frequency state stream
-- **No NAT punching for v1.** Use Hamachi / ZeroTier / port forwarding
-- **Drop-on-disconnect**: any connection loss ends session immediately
+Two-player star topology with one designated host and no relay server. `CoopNetService` owns a listening TCP socket, one shared UDP `DatagramChannel`, the session token and the sender id; per-peer state is a `CoopPeerLink` in a table sized by `coop.maxGuests`.
+
+- **TCP control channel**, reliable, newline-delimited JSON: lobby, handshake, seed lock, battle messages, market snapshots and transactions, claims, options, saves. Reliable one-shot messages are acknowledged (`RELIABLE_ACK`), kept until the ack returns, and resent after a reconnect, so they land exactly once.
+- **UDP state stream**: `FLEET_SNAPSHOT` and `NPC_FLEET_MOTION`, at a cadence `CoopCadenceController` chooses per link from p50 RTT, loss and outbound backlog. `CoopCadenceTier` defines `FLOOR` (5 Hz), `DEFAULT` (10 Hz) and `TOP` (20 Hz); `TOP_TIER_ENABLED` is `false`, so the ladder stops at 10. Intervals are measured in game time, so under fast-forward the wall-clock send rate rises with the FF factor and the receiver's interpolation buffer keeps the same depth in game seconds.
+- **TCP fallback**: when UDP is blocked outright, state datagrams are wrapped over the control channel and the cadence pins to the floor.
+- **Inbound UDP filter**, in order: source address pinned from the established TCP connection, then a prefix-only envelope parse (`CoopMessages.parseDatagramHeader`), then the session token. Each rejection increments a counter in `datagramStats()` and warns at most once per reason, so a flood is visible without being able to write the log.
+- **Return-address validation**: a token-valid datagram from a new source is accepted inbound (the watermark defeats replay) but only becomes a candidate send target after a `PATH_PROBE` nonce round trip, which is QUIC's `PATH_CHALLENGE` model (RFC 9000 section 8.2). An off-path attacker cannot redirect the stream; a genuine NAT rebind recovers within one round trip.
+- **Reachability tiers** (`docs/player/CONNECT.md`, `CoopPortMapper`, `CoopConnectionDoctor`): tier 0 a VPN pseudo-LAN, tier 1 IPv6, tier 2 a manually forwarded port, tier 3 UPnP or NAT-PMP done by the game. Only the host needs to be reachable. Tier 0 cannot be auto-detected; every other tier shows up in the `tier reached` log line.
+- **Password**: `coop.password` gates `LOBBY_HELLO`, including during a reconnect grace, so a stranger cannot end the host's wait early.
+
+Everything is non-blocking and pumped from `CoopNetPump.advance()` on the campaign thread. There are no mod threads, because mod-created threads have been observed dying mid-session in this codebase.
 
 ### 4.2 Authority model
 
 | Subsystem | Host | Guest |
 |---|---|---|
-| Campaign clock | drives | reads only |
-| Pause / fast-forward | drives | locked out |
-| NPC fleets, market state, intel, economy, hyperspace storms | authoritative | replicated |
-| Host's player fleet | authoritative | mirror as AI-mode fleet |
-| Guest's player fleet | mirror of guest's intent | drives locally, sends intent |
-| Combat sim | runs and pilots its *own* battles locally; integrates the other player's reported battle results into the canonical campaign | runs and pilots its *own* battles locally; renders a replicated 60 Hz spectator stream of the other player's battle. v2/v3 joint combat: both pilot in one battle |
-| Shared reputation table | authoritative | reads only, applies host's broadcasts |
-| Save file | owns canonical | exports own fleet snapshot at session end |
-| Dialogs (interactions) | own dialog instance | own dialog instance, separately gated |
+| Campaign clock | drives, applies the effective pause | follows `TIME_SNAPSHOT`, converged forward-only by `CoopClockReconciler` |
+| Pause | computes `effectivePaused` as the OR of host intent, guest key intent, guest screen intent and either-in-combat | sends `PAUSE_INTENT`, never calls `setPaused` to drive divergence |
+| Fast-forward | owns the `CampaignState.fastForward` field | receives the bit on `TIME_SNAPSHOT` and writes it through `CoopFastForwardLock` |
+| NPC fleets, markets, intel, economy, faction relations, colonies | authoritative | replicated, with local spawners suppressed |
+| Host's player fleet | authoritative | rendered as an AI-mode mirror |
+| Guest's player fleet | rendered as an AI-mode mirror, and exposed to the forks through `CoopPresenceRegistry` | drives locally, sends `FLEET_SNAPSHOT` |
+| Combat | pilots its own battles; integrates the guest's reported `BATTLE_RESULT` | pilots its own battles; reports the result |
+| Shared reputation | authoritative (`PLAYER_REP_SNAPSHOT` overwrite plus deltas) | applies the host's broadcasts |
+| Save | owns the canonical save | takes a coordinated autosave on the host's `SAVE_CHECKPOINT` |
+| Interactions | arbitrates every claim | mirrors the host's accept and release decisions |
 
 ### 4.3 The two-fleet trick
 
-On each client, `Global.getSector().getPlayerFleet()` returns *that client's* own fleet. The other player's fleet appears as a `CampaignFleetAPI` with:
-- `setAIMode(true)` — disables supplies/fuel/accidents/crew requirements
-- Custom assignment whose movement is driven each tick by network packets via `setMoveDestinationOverride(x, y)`
-- Faction matching the remote player's faction
-- `setNoEngaging(seconds)` or similar to suppress hostile NPC engagement against it
+On each client `Global.getSector().getPlayerFleet()` is that client's own fleet. The partner is a `CampaignFleetAPI` maintained by `CoopFleetMirror`, tagged `$coopMirrorFleet`, with `setAIMode(true)`, the remote player's faction colour and always-visible presence styling from `CoopPresenceIndicator`. The same class serves NPC mirrors (tagged `$coopNpcFleetId`, real faction, normal sensor visibility).
 
-Mechanically a normal NPC fleet that mirrors the remote player's actions.
+Two details are load-bearing and differ from the original sketch:
+
+- **Motion is kinematic, not steered.** *Reversed 2026-09-03 (Phase 29 M1):* `setMoveDestinationOverride` is never called on a mirror. Received samples queue in a `CoopMotionInterpolator` and `advanceMotion` places the fleet on the buffered trajectory about 200 ms behind the sender. Engine steering ran under the mirror's own movement stats and arrival radius, which produced two measured teleport modes at roughly 1 Hz.
+- **The engagement shield is re-asserted every frame.** `assertEngagementShield()` refreshes `setNoEngaging` because the engine's fader expires after about a second. The mirror never starts combat itself; real engagements happen on the authoritative copy.
+
+Roster rebuilds happen only when the snapshot's `fleetHash` changes.
 
 ### 4.4 Matching-seed worldgen
 
-At session start, both clients run `Sector` procgen from the same new-game seed. In the current 0.98a-RC8 API source, `SectorProcGen.prepare(CharacterCreationData data)` seeds `StarSystemGenerator.random` from `CharacterCreationData.getSeed()`; `SectorAPI.setSeedString()` exists, but should not be assumed to drive procgen by itself. Both clients should set/verify the same character-creation seed and seed string, then compare a small structural fingerprint of the generated sector.
+`CoopSectorProcGen` extends the engine's `SectorProcGen` and applies the shared seed to `CharacterCreationData` in both `prepare` and `generate`, then forces the seed string onto the sector afterwards. `CoopSeedSync` persists `coop.seedLong`, `coop.seedString`, `coop.sectorFingerprint`, `coop.campaignId` and this save's own player id; `CoopSectorFingerprint` computes the structural fingerprint that both clients compare, scoped to deterministic content (hidden dynamic base markets are excluded).
 
-Seed sync avoids serializing `Sector` for initial join, but it is only a bootstrap. Dynamic events, terrain mutations, encounters, market transactions, intel events, and rep changes are host-authored deltas.
+The campaign id is what distinguishes "the same campaign, resumed" from "a fresh re-roll of the same seed", because the seed string and the fingerprint are pure functions of the seed and match in both cases. It is minted once by the host at first seed lock and adopted by the guest.
 
-### 4.5 Campaign↔combat bridge
+Seed sync is a bootstrap only. Everything dynamic afterwards is a host-authored delta.
 
-Solo own-fleet model: the player who engages runs and pilots the battle on **their own** client. The other player is held (shared pause) and spectates that battle live; they do not pilot anything. Joint combat (both piloting one battle) is a v2/v3 stretch.
+### 4.5 Campaign to combat bridge
 
-**Both-players-in-one-battle fallback (v1):** if a single engagement's participants include *both* player fleets, the **host controls the engagement** — it pilots the combined battle, the guest's fleet fights as a host/AI-controlled side, and the guest spectates. Because combat-start asserts the shared pause, engagements are serialized, so this only arises from a *simultaneous* trigger (one enemy engaging both fleets at once), never from one player entering another's running battle. This is the v1 stopgap; letting the guest pilot its own ships inside that shared battle is joint combat (v2/v3).
+Solo own-fleet model. The player who engages runs and pilots the battle on their own client. The other player is held by the shared pause and receives banners.
+
+The "both fleets in one battle" case from the original design does not arise, because `CoopNpcThreatWatcher` intercepts before contact. Vanilla pursuit is not an assignment change: `TacticalModule` steers with `fleet.setMoveDestination(...)` after storing the quarry in its own `target` field. The watcher reads that signal and issues `ENGAGE_GUEST` so the guest opens the battle locally.
 
 ```
-Player X triggers combat (interaction or NPC fleet AI reacts to X)
-  ↓
-[CampaignEventListener.reportPlayerEngagement on X's client]
-  ↓
-X asserts a SHARED pause (X is host → set its own clock; X is guest → send PAUSE_INTENT, host pauses its clock)
-X opens the battle locally via InteractionDialogAPI.startBattle() and PILOTS it
-  ↓
-Other player Y:
-  - is held by the shared pause (campaign frozen)
-  - opens a spectator combat dialog (custom InteractionDialogPlugin)
-  - streams combat state from X's client at 60 Hz (camera-only; cannot issue orders)
-  ↓
-[combat runs and is piloted on X's client; Y spectates]
-  ↓
+Player X's fleet is engaged, or X initiates
+  |
+  v
+X asserts the shared pause (host: applies it; guest: sends PAUSE_INTENT)
+X opens the battle locally and pilots it
+  |
+  v
+Partner Y:
+  - campaign frozen by the shared pause
+  - gets a "battle started" banner
+  - receives BATTLE_STATUS every 400 ms and logs it at debug
+  |
+  v
 On combat end (EngagementResultAPI on X's client):
-  - X applies its OWN result locally (vanilla): keeps its own XP, salvage, credits, recoveries
-  - X reports campaign deltas for the host to integrate:
-      * NPC fleets destroyed/damaged → host updates the authoritative NPC fleet set (§Phase 9) and re-broadcasts
-      * shared faction rep delta from the battle (spectator Y gets none)
-  - X releases the shared pause; both clients resume
+  - X applies its own result locally: XP, salvage, credits, recoveries
+  - X sends BATTLE_RESULT over reliable TCP
+  - CoopBattleResultReconciler applies the campaign deltas host-side:
+    destroyed/damaged NPC fleets, shared faction rep
+  - X releases the shared pause; Y gets the end banner with survivor counts
 ```
+
+If the result never arrives, it is discarded with a loud log line and the partner gets a connection-lost banner. There is no rollback: the API has no programmatic save load.
 
 ---
 
 ## 5. Starsector moddability baseline
 
-Recreate this on a new PC by extracting the API source from the install.
+### 5.1 What is open and what is closed
 
-### 5.1 What's open vs closed
+Verified against the 0.98a-RC8 install at `K:\Starsector`.
 
-**Available to mods (source or near-source):**
-- `starsector-core/starfarer.api.zip` — 2,034 zip entries / 1,947 `.java` files in audited 0.98a-RC8 install, full modding API
-- `starsector-core/data/scripts/world/SectorGen.java`, `data/scripts/plugins/LevelupPluginImpl.java` — base game's own sector gen and level-up logic ships as raw editable `.java`
-- `starsector-core/data/` — CSV/JSON for ships, weapons, hullmods, hulls, ship systems, factions, missions, codex entries
-- `starsector-core/janino.jar` + `commons-compiler.jar` — in-game Java compiler; mods can drop `.java` files and the game compiles at runtime
-- `graphics/`, `sounds/` — PNG/OGG, swappable
+**Available to mods:**
+- `starsector-core/starfarer.api.zip`, 2,034 zip entries of which 1,947 are `.java` files: the full modding API as source.
+- `starsector-core/data/scripts/world/SectorGen.java` and `data/scripts/plugins/LevelupPluginImpl.java`: the base game's own sector gen and level-up logic as raw editable source.
+- `starsector-core/data/`: CSV and JSON for ships, weapons, hullmods, systems, factions, missions.
+- `starsector-core/janino.jar` and `commons-compiler.jar`: the in-game compiler for `data/scripts`.
+- `graphics/` and `sounds/`.
 
-**Closed:**
-- `starsector-core/starfarer_obf.jar` (~6 MB, 2,818 classes) — obfuscated engine (rendering, combat sim, AI internals, campaign loop, RNG, serializer). Class paths use 200-576 char names with mostly `O` characters specifically to break standard filesystem extraction (Windows 260-char limit). Decompilable for *understanding* (CFR/Procyon) but extraction requires long-path mode
+**Closed:** `starsector-core/starfarer_obf.jar`, the obfuscated engine (rendering, combat sim, AI internals, campaign loop, serializer). Class paths use very long names built mostly from `O` characters, which defeats plain filesystem extraction on Windows. Decompilable for understanding with CFR or Procyon; no decompiled code is redistributed.
 
-### 5.2 Engine RE — paths and verdicts
+### 5.2 Class override: what works
 
-**Reflection by name**: impossible (obfuscated names are deliberately unstable).
+**The mechanism that shipped is a classpath prepend.** `jars/coop-forks.jar` goes in front of `starfarer.api.jar` on the `vmparams` `-classpath`, so the JVM resolves the mod's copy of any shared FQCN first. The launcher does this edit, with a backup of `vmparams`.
 
-**Reflection by class structure/signature**: works. Tomatopaste does this for `com.fs.starfarer.combat.entities.{BallisticProjectile, MovingRay, Missile, DamagingExplosion}`. Brittle across versions.
+**The `data/scripts/com/fs/starfarer/api/...` override path does not work.** A spike against `AccretionDiskGenPlugin` produced no log evidence the forked source was ever compiled: Starsector's `ScriptStore` (a Janino `JavaSourceClassLoader`) delegates parent-first, so the API jar always wins.
 
-**Java Agent (`-javaagent:` in `vmparams`)**: theoretically can patch any engine method. Investigated for PRNG determinism — verdict: **not worth it.** Most randomness lives in open `.java` files, not the engine. Engine-internal randomness (combat noise) doesn't need determinism in a server-authoritative model. Agent stays in reserve as an "if we hit a wall" escape hatch, not the default plan.
+**Reflection by name is impossible** (obfuscated names are unstable) **and `java.lang.reflect` is blocked outright at runtime** by the script classloader, along with `java.io.*` and `java.nio.file.Files`. Such code compiles and passes unit tests and then throws in-game. Field access goes through `java.lang.invoke.MethodHandles` with a lazy resolve and a `Throwable` catch; `CoopBarSync.resolveHandles()` is the pattern every later user copied.
 
-**Decompiling `starfarer_obf.jar` for read-only understanding**: always fine. Use CFR or Procyon. Helps figure out *why* an API behaves how it does so we pick the right hook. No code from the decompile gets redistributed.
+**A Java agent was investigated and rejected.** It stays in reserve as an escape hatch. See §7.2.
 
 ### 5.3 Simulation timing model
 
-- **Variable-dt-per-frame, not fixed-tick.** `advance(amount)` called once per render frame with elapsed real seconds
-- Default frame cap is 60 FPS (configurable in `settings.json: frameRateLimit`). Effective sim rate ≈ frame rate
-- Pause = `advance` not called
-- Fast-forward = same tick rate, larger `amount` per tick (engine ticks at frame rate but covers more simulated time per tick)
-- For MP networking: 30 Hz state stream + client interpolation = "smooth but slightly floaty". 60 Hz = native feel, more bandwidth. CMC uses 60 Hz server tick, 30 Hz client→server
+- Variable dt per frame, not a fixed tick. `advance(amount)` is called once per render frame with elapsed real seconds.
+- Default frame cap 60 FPS (`settings.json: frameRateLimit`). Pause means `advance` is not called.
+- Fast-forward means the same tick rate with a larger `amount`, scaled by `campaignSpeedupMult`.
+- `CampaignClock.advance(float)` does `cal.add(Calendar.SECOND, (int)(...))`, truncating the fractional calendar-seconds every frame. Two clients therefore drift apart at a shared 1x with zero network fault: about 0.2 game-days over two idle hours, about 2 game-days over a dialog-heavy hour, plus roughly 200 ms plus RTT per pause mirror edge. Prevention is impossible; §8.2 covers the reconciler.
 
 ---
 
-## 6. API surface inventory
+## 6. API surfaces the mod uses
 
-Where in `com.fs.starfarer.api` we'll hang each subsystem. Line refs from extracted API source.
+The original version of this section listed line numbers from an extracted API source tree. Line numbers age badly and cannot be checked from the repo, so this is now a map from engine surface to the coop class that uses it.
 
 ### 6.1 Mod plugin lifecycle
 
-- `BaseModPlugin` / `ModPlugin.java` — extend `BaseModPlugin`. Overrides:
-  - `onApplicationLoad()` — once at game launch
-  - `onGameLoad(boolean newGame)` — every load (incl new game)
-  - `onNewGame()` — only at new game
-  - `beforeGameSave()` / `afterGameSave()` / `onGameSaveFailed()`
-  - `configureXStream(XStream)` — register custom converters/aliases for save serialization
-- `Global.java:65 getSector()`, `Global.java:69 getCombatEngine()` — singletons. `getCombatEngine()` is null outside combat
+`CoopModPlugin` extends `BaseModPlugin`: `onApplicationLoad()` republishes launcher-written settings as system properties, `onGameLoad(boolean)` installs the pump, `configureXStream(XStream)` registers the save-visible types. `Global.getSector()` and `Global.getCombatEngine()` are the singletons; the combat engine is null outside combat.
 
 ### 6.2 Per-frame hooks
 
-- `EveryFrameScript.java`:
-  - `advance(float seconds)` — per-frame
-  - `runWhilePaused()` — boolean: does this script tick while sector paused?
-  - `isDone()` — return true to be cleaned up
-  - Register: `Sector.addScript()` (persisted) or `Sector.addTransientScript()` (not persisted)
-- `combat/EveryFrameCombatPlugin.java`:
-  - `processInputPreCoreControls(amount, events)` — **raw input before engine sees it.** Consume via `event.consume()` to swallow
-  - `advance(amount, events)`, `renderInWorldCoords(viewport)`, `renderInUICoords(viewport)`
-- `campaign/listeners/CampaignInputListener.java`:
-  - `processCampaignInputPreCore(events)`, `processCampaignInputPreFleetControl(events)`, `processCampaignInputPostCore(events)`
+- `EveryFrameScript` with `runWhilePaused() == true`: `CoopNetPump` and every subsystem it drives. Registered as a **transient** script (`addTransientScript`), never a persisted one, because transport objects must not enter the save.
+- `EveryFrameCombatPlugin`: `CoopBattleStatusCombatPlugin` captures the battle snapshot on the engaging client.
+- `CampaignInputListener`: `CoopCampaignInputBlocker` (control names are enum constants on the obfuscated control enum, so the pause control is `GENERAL_PAUSE`, not `PAUSE`; a wrong name throws `IllegalArgumentException` in-game while passing mocked tests), plus `CoopHostPauseInputListener` and `CoopMarkInputListener`.
+- `CampaignUIRenderingListener`: the screen-space HUD (`CoopLinkHud`, `CoopHudNotice`), drawn with `CoopBitmapFont` over a vanilla `.fnt` and raw GL11. No LazyLib dependency.
 
 ### 6.3 Time control
 
-- `campaign/SectorAPI.java:84 setPaused(bool)` / `:85 isPaused()`
-- `campaign/SectorAPI.java:347 setFastForwardIteration(bool)` / `:346 isFastForwardIteration()`
-- `campaign/CampaignUIAPI.java:129 isFastForward()`
-- `combat/CombatEngineAPI.java:275 setPaused(bool)` — combat-side pause. Used to turn guest's combat engine into a renderer
+`SectorAPI.setPaused(boolean)` / `isPaused()` is the whole public surface used for pause. Fast-forward is **not** driven through `setFastForwardIteration`: `CoopFastForwardLock` forces vanilla's toggle-mode input mode on and writes the `CampaignState.fastForward` field through MethodHandles, because in the default hold-Shift mode `CampaignState.processInput` re-polls the raw key every frame and clobbers any value a mod writes. `campaignSpeedupMult` is set through public `SettingsAPI`.
 
-### 6.4 Combat read/write
+### 6.4 Combat read and write
 
-- `combat/CombatEngineAPI.java`:
-  - `:47 getAllShips()`, `:50 getShips()`, `:51 getMissiles()`, `:53 getAsteroids()`, `:55 getBeams()`, `:57 getProjectiles()` — full state read
-  - `:68 getPlayerShip()`, `:247 setPlayerShipExternal(ShipAPI)` — swap which ship is "the player's"
-  - `:238 addPlugin(EveryFrameCombatPlugin)`, `:240 removePlugin(...)`
-  - `:72 endCombat(float delay)`, `:74 endCombat(float delay, FleetSide winner)`, `:73 setDoNotEndCombat(bool)`
-  - `:65 getFleetManager(FleetSide)`, `:66 getFleetManager(int owner)`
-- `combat/InputEventAPI.java` (in `input/` package): rich event with `consume()`, `isLMBEvent()`, `isControlDownEvent()`, etc.
+`CombatEngineAPI.getShips()` and the related collections feed `CoopBattleStatus`; destroyed ships leave `getShips()` entirely, so the kill feed is computed as a set difference between consecutive snapshots. `setPlayerShipExternal` and the projectile-level collections are unused, because no combat state is replicated for rendering.
 
-### 6.5 Campaign state read/write
+### 6.5 Campaign state read and write
 
-- `campaign/SectorAPI.java`:
-  - `:46 getPersistentData()` — `Map<String,Object>` for cross-session mod data
-  - `:53 getStarSystems()`, `:282 getAllLocations()`
-  - `:70 getPlayerFleet()`, `:304 setPlayerFleet(CampaignFleetAPI)`
-  - `:130 getMemory()`, `:131 getMemoryWithoutUpdate()`, `:353 getPlayerMemoryWithoutUpdate()`
-  - `:152 getEconomy()`, `:133 getIntel()`, `:326 getIntelManager()`
-  - `:293 getSeedString()` / `:294 setSeedString(String)` — seed string metadata; current procgen seed is driven by `CharacterCreationData.getSeed()`
-  - `:332 getPlayerBattleSeed()`, `:333 setPlayerBattleSeed(long)` — battle-outcome seed
-- `characters/CharacterCreationData.java`:
-  - `:38 getSeedString()` / `:39 setSeedString(String)`, `:40 getSeed()` / `:41 setSeed(long)` — new-game procgen seed inputs
-- `campaign/CampaignFleetAPI.java`:
-  - `:36 setLocation(x,y)`, `:60 getLocation()`
-  - `:211 setVelocity(x,y)`, `:52 getVelocity()`
-  - `:118 setMoveDestination(x,y)`, `:125 setMoveDestinationOverride(x,y)` — drive fleet, override AI
-  - `:142 setAIMode(bool)` — for mirror fleet
-  - `:64 getContainingLocation()`, `:28 isInCurrentLocation()`, `:29 isInHyperspace()`
-  - `:71 getFleetData()`, `:68 getFlagship()`, `:66 getCommander()`
-  - `:131 getInteractionTarget()`, `:133 setInteractionTarget(...)`
+- `SectorAPI.getPersistentData()` is the save-visible map, used by roughly twenty call sites (`coop.seedLong`, `coop.campaignId`, `coop.guestFleetSnapshot`, the session stats, the options policy).
+- `getMemoryWithoutUpdate()` carries the guest flag that `rules.csv` reads (§1, story gate) and the `$coopDebug` diagnostics flag.
+- `CampaignFleetAPI`: `setLocation`, `setVelocity`, `setAIMode`, `setNoEngaging`, `getFleetData`, `getContainingLocation`. `setMoveDestinationOverride` appears once, in a comment explaining why mirrors do not use it.
+- `CharacterCreationData.getSeed()` / `setSeed(long)` is what actually seeds procgen; `SectorAPI.setSeedString` is metadata and is set for save and debug purposes only.
 
 ### 6.6 Combat entry
 
-- `campaign/InteractionDialogAPI.java:52 startBattle(BattleCreationContext)`
-- `campaign/CampaignUIAPI.java:35 startBattle(BattleCreationContext)`
-- `campaign/InteractionDialogPlugin.java:16 backFromEngagement(EngagementResultAPI)`
-- `campaign/BattleAPI.java` — battle object with side composition, snapshots, primary winner
+`InteractionDialogAPI.startBattle(BattleCreationContext)` and `CampaignUIAPI.startBattle(...)` open battles; `CoopEngageDialogStaging` and `CoopCustomsDialogStaging` synthesize the dialog the guest needs when the host hands an engagement over.
 
 ### 6.7 Listeners
 
-- `campaign/CampaignEventListener.java` — battle events, fleet despawned/spawned/jumped/reached entity, market transactions, dialog shown, ability activated, rep changes, economy ticks. Register: `Sector.addListener()`
-- `campaign/listeners/*` package — `FleetEventListener`, `ColonyInteractionListener`, `EconomyTickListener`, `DetectedEntityListener`, `GateTransitListener`, `DiscoverEntityListener`, etc. Register: `Sector.getListenerManager().addListener()`
+`CampaignEventListener` through `CoopCampaignEventListener` (battle events, fleet spawn and despawn, market transactions, dialog shown, reputation changes, economy ticks). The `campaign/listeners/*` package supplies the narrower interfaces registered through `Sector.getListenerManager()`.
 
 ### 6.8 Persistence
 
-- `ModPlugin.java:132 configureXStream(XStream x)` — register custom converters for our packet types and guest-fleet export
-- `Sector.getPersistentData()` — `Map<String,Object>` saved with the game
+`configureXStream` plus `getPersistentData()`. Save-visible types are plain mutable beans rather than records, because XStream 1.4.10 does not handle records. Transport objects are never stored.
 
-### 6.9 UI gating
+### 6.9 UI surfaces
 
-- `campaign/CampaignUIAPI.java:64 setDisallowPlayerInteractionsForOneFrame()` — call every frame while spectator-locked
-- `:34 isShowingDialog()`, `:62 getCurrentInteractionDialog()` — detect open dialog
-- `:42 showInteractionDialog(plugin, target)`, `:51 showInteractionDialog(target)` — open programmatically
+Verified in the 0.98a API source: there is **no title-screen API**, which is why every launch-tier setting is a file or a `-D` and the launcher exists at all. What does exist and is used: `showConfirmDialog` and `showMessageDialog`; custom widget panels inside dialogs (`VisualPanelAPI.showCustomPanel(width, height, plugin)`, used by `CoopLiveDialogLine` for numbers that change while a dialog is open, because writing to `TextPanelAPI` once a second makes the panel visibly blink); intel `createLargeDescription` pages (`CoopSessionIntel`, `CoopOptionsPage`, `CoopSessionStatsIntel`); `CampaignUIAPI.addMessage` banners; and `setDisallowPlayerInteractionsForOneFrame()`. Dialogs are exclusive, which is the source of the suspend-logic trap in §8.5.
 
 ---
 
@@ -402,464 +331,300 @@ Where in `com.fs.starfarer.api` we'll hang each subsystem. Line refs from extrac
 
 ### 7.1 The two layers of randomness
 
-**Layer A — obfuscated engine** (`starfarer_obf.jar`): combat sim noise, damage variance, particle positions, AI noise. Closed.
+**Layer A, the obfuscated engine:** combat sim noise, damage variance, particle positions, AI noise. Closed.
 
-**Layer B — game-logic code** (in `starsector-core/data/scripts/` and `starfarer.api.zip`): fleet generation, salvage, encounters, market generation, mission outcomes, sector worldgen. **Open source.** Some important paths use seeded `Random` (`Misc.getRandom`, battle seeds, salvage seeds), but 0.98a-RC8 also has gameplay-visible unseeded sites (`Math.random()`, `new Random()`, `Misc.genRandomSeed()`). Do not assume Layer B is deterministic unless the call path has been audited.
+**Layer B, open game-logic code** in `data/scripts/` and `starfarer.api.zip`: fleet generation, salvage, encounters, market generation, worldgen. Some paths use seeded `Random`; 0.98a-RC8 also has gameplay-visible unseeded sites. Do not assume Layer B is deterministic unless the call path has been audited.
 
-### 7.2 Why no Java Agent
+### 7.2 Why no Java agent
 
-- Engine (Layer A) doesn't need to be deterministic across clients — each battle runs and is piloted on a single client, and its outcome is *replicated as data* (not recomputed), so combat RNG only has to be self-consistent on the one machine that ran that battle
-- Layer B is open enough to audit and override, but not fully seeded. Prefer host-authored event results over broad RNG patching
-- Agent path is weeks of RE + ongoing maintenance + still doesn't solve threading/HashMap/float-op non-determinism
-- **Verdict**: Agent in reserve only
+- Layer A does not need to be deterministic across clients. Each battle runs on exactly one machine and its outcome is replicated as data, so combat RNG only has to be self-consistent on the machine that ran it.
+- Layer B is open enough to audit and override by FQCN through the classpath prepend, which is a narrower tool with a shorter failure mode than instrumentation.
+- An agent is weeks of reverse engineering plus ongoing maintenance and still does not solve threading, hash-order or float-op non-determinism.
 
-### 7.3 Strategy: replicate, don't recompute (primary)
+Verdict held: agent in reserve only, and it has not been needed.
 
-> Host computes outcomes. Guest receives outcomes. Guest's local code never re-runs randomness for events that originated on host.
+### 7.3 Replicate, don't recompute
 
-Practically:
-- **NPC fleet inflation**: host snapshots dmods/variants/officers; sends full packet. Guest does NOT call `FleetInflater` locally
-- **Salvage / exploration outcomes**: own-action model (consistent with solo own-fleet combat) — the player performing the salvage/exploration resolves it locally via vanilla and keeps the loot in their own cargo; they report only the *world delta* (the entity is now consumed/looted) for the host to integrate and re-broadcast so it is consumed on both clients. The loot RNG is per-player and need not match. (This supersedes the earlier "host rolls all salvage" framing, which predated the own-fleet combat pivot.)
-- **Bounty levels, encounter pirate counts, mine spawn counts**: host rolls, broadcasts
-- **Special bar events & market contents**: host-authored pool (like missions) — both clients see the same one-time offers / shop stock / hireable officers, with first-come claims; the item lands in the acting player's own cargo
-- **NPC-initiated dialogs (customs / inspection)**: when a host-owned patrol stops the *guest*, the host pushes the dialog; the guest resolves it against its **own** cargo (local) and reports rep/fleet deltas. *Guest-initiated proactive parley* (tribute/demand-surrender) is **host-only** in v1 (avoids replicating full fleet disposition ≈ dialog replication)
-- **Self-healing backstop**: because the host continuously re-broadcasts authoritative state (NPC fleet set, economy, rep, faction relations), most *un-enumerated* rules-dialog divergences self-correct on the next rebroadcast. v1 does **not** enumerate every `rules.csv` `CommandPlugin`; explicit replication is only for guest-driven outcomes the host can't otherwise observe, funneled through one `WORLD_DELTA` guest→host report
-- **Worldgen**: same new-game seed → both clients arrive at the same broad world independently; verify with a structural fingerprint and host-author dynamic changes after that
+The primary strategy, expressed on the wire.
 
-### 7.4 Strategy: matching-seed worldgen (foundation)
+- **NPC fleets**: the host sends `NPC_FLEET_SET` (full set) and `NPC_FLEET_MOTION` (high-frequency positions). The guest never calls `FleetInflater`. `CoopNpcFleetSuppressor` stops guest-side spawners from creating fleets of their own, with a coverage diagnostic to catch spawners it does not yet know about.
+- **Salvage and exploration**: own-action. The acting player resolves it locally with vanilla and keeps the loot; only the world delta (this entity is consumed) is reported, integrated by the host and re-broadcast, with a ledger dedup.
+- **Bar events, mission offers, market stock, hireable officers**: host-authored pools with first-come claims. The item lands in the acting player's own cargo.
+- **NPC-initiated dialogs (customs, inspection)**: `DIALOG_BEGIN` from the host, resolved by the guest against its own cargo, with rep and fleet deltas reported back.
+- **Self-healing backstop**: the host re-broadcasts authoritative state continuously (NPC set, economy, rep, faction relations), so most un-enumerated rules-dialog divergences self-correct on the next rebroadcast. V1 deliberately does not enumerate every `rules.csv` `CommandPlugin`; explicit replication exists only for guest-driven outcomes the host cannot otherwise observe, funnelled through `WORLD_DELTA`.
+- **Worldgen**: same seed, then a structural fingerprint comparison, then host-authored deltas (§4.4).
 
-Both clients must use the same `CharacterCreationData` seed for procgen. `SectorAPI.setSeedString(sharedSeed)` should still be set for save/debug metadata, but current open-source procgen uses `CharacterCreationData.getSeed()` to seed `StarSystemGenerator.random`. Identical worlds are expected only for audited deterministic parts of new-game generation; dynamic campaign outcomes remain host-authoritative.
+### 7.4 Matching-seed worldgen, and how the forks see the seed
 
-### 7.5 The fork list (unseeded `Random` sites)
+The seed the forks read is **not** an API call. `CoopRandom` lives in `coop-forks.jar` and is loaded by the system classloader alongside `starfarer.api.jar`, so it cannot see anything in `coop.jar`. It reads `-Dcoop.newGameSeed`, the JVM property the launch scripts and the launcher set. `CoopPresenceRegistry` has the same constraint and the same reason, which is why it lives in its own package.
 
-For cases where host can't broadcast (because the call site doesn't have a network hook) and guest must compute the same result, we fork the file and replace `new Random()` with a seeded version.
+Seed derivation: SHA-256 over UTF-8 text, first 8 bytes big-endian, sign bit masked, because vanilla `SectorProcGen.prepare` skips `setSeed` when the seed is `<= 0`. Per-topic streams hash `seedString \0 topic \0 key0 \0 key1 ...`. `CoopRandom.ofOrDefault(topic, keys...)` returns a plain unseeded `new Random()` outside a coop session, so a non-coop launch is byte-for-byte vanilla, including from a forked static initializer.
 
-Convention: place forked `.java` under `mods/coop/data/scripts/com/fs/starfarer/api/impl/.../FileName.java`. Starsector's classloader picks the mod's class over the core's when package paths match.
+### 7.5 The forks that shipped
 
-**Seeding helper** (define once in our mod):
-```java
-public class CoopRandom {
-  public static Random of(String topic, Object... keys) {
-    long seed = topic.hashCode();
-    for (Object k : keys) seed = seed * 31 + (k == null ? 0 : k.hashCode());
-    seed ^= Global.getSector().getClock().getTimestamp();
-    return new Random(seed);
-  }
-}
-```
+*Superseded 2026-05-29 and again 2026-09-03.* The original plan here was a long list of Layer B files to fork for RNG seeding, graded HIGH / MEDIUM / LOW. Most of that list is **retired**: replication (§7.3) made the fleet, economy and combat entries unnecessary, and each retired fork is one less file to re-apply on an engine update. Ten files are forked, in two families.
 
-**Forked file pattern**:
-```java
-// before:
-Random random = new Random();
-// after:
-Random random = CoopRandom.of("FleetFactoryV3.create", fleetId);
-```
+**RNG determinism, so both clients generate the same one-time world content:**
 
-#### HIGH-impact files to fork
+| Fork | Why |
+|---|---|
+| `util/Misc.java` | The static `random` field and `genRandomSeed()` (which used `System.nanoTime()`). One file covers a large number of call sites. |
+| `impl/campaign/world/GateHaulerLocation.java`, `NamelessRock.java` | One-time deep-space content whose placement must match. |
+| `impl/campaign/enc/AbyssalRogueStellarObjectEPEC.java` | Abyss exploration content; reseeds the encounter's RNG from an independent session-seeded stream. |
 
-Locations are `com/fs/starfarer/api/impl/`:
+**Guest presence, so the host engine treats the guest as a player:**
 
-- `campaign/procgen/StarSystemGenerator.java:161` — *static* `Random` used by worldgen. Critical
-- `util/Misc.java:241` — `public static Random random = new Random();` — used widely as default. Single line covers many call sites
-- `util/Misc.java:3481-3482` — `genRandomSeed()` uses `System.nanoTime()`. Critical when callers affect shared gameplay
-- `campaign/fleets/FleetFactoryV3.java:249, 1167` — fleet construction
-- `campaign/fleets/DefaultFleetInflater.java:226, 235, 654` — variant/dmod assignment during inflation. Critical (without this, two clients see different dmods on the same fleet)
-- `campaign/fleets/RouteManager.java:341`
-- `campaign/fleets/EconomyFleetAssignmentAI.java:216`
-- `campaign/fleets/EconomyFleetRouteManager.java:506`
-- `campaign/fleets/MercFleetManagerV2.java:39`
-- `campaign/CoreScript.java:843, 875` — `prodRandom` for economy production
-- `campaign/FleetEncounterContext.java:1269, 1825` — battle context
+| Fork | Why |
+|---|---|
+| `impl/campaign/fleets/RouteManager.java` | Spawn and despawn tests become "nearest player" rather than "the host", and `daysSinceSeenByPlayer` resets for fleets the guest sees. |
+| `impl/campaign/fleets/SourceBasedFleetManager.java`, `DisposableFleetManager.java` | Same min-over-players change, so the system the guest is in keeps its population. `DisposableFleetManager` also fixes a spawn position set synchronously by the AI constructor. |
+| `impl/campaign/fleets/PlayerVisibleFleetManager.java` | A fleet the guest can see is being watched by a real player and must not be culled. |
+| `impl/campaign/intel/events/DisposableHostileActivityFleetManager.java`, `impl/combat/threat/DisposableThreatFleetManager.java` | The same rule for the two event-driven managers. |
 
-#### MEDIUM-impact files (fork if convenient)
+Every edit is tagged `COOP FORK` inline and every file carries an audit header. `CoopPresenceRegistry` is one static slot defaulting to null: null means "no second player" and every guarded fork behaves exactly as vanilla, which is what makes solo play, the guest side and a launch without `coop-forks.jar` provably unchanged. The slot holds a live engine entity, is re-asserted every tick, released on the first frame the assert stops arriving, and is never persisted.
 
-- `campaign/abilities/DistressCallAbility.java:204, 402` — pirate response counts
-- `campaign/abilities/GenerateSlipsurgeAbility.java:224, 472`
-- `campaign/fleets/EconomyFleetRouteManager.java:116` — `Misc.genRandomSeed()` caller
-- `campaign/ghosts/SensorGhostManager.java:79` — `Misc.genRandomSeed()` caller
-- `campaign/intel/bar/events/BarEventManager.java:60, 85` — `Misc.genRandomSeed()` caller
-- `hullmods/StealthMinefield.java:92`
-- `campaign/events/nearby/NearbyEventsEvent.java:170, 346, 381, 486, 500`
-- `campaign/intel/PersonBountyIntel.java:170` — bounty level
-- `data/scripts/world/systems/Galatia.java:390-391` — fixed-system derelict orbit uses `Math.random()`
-- `campaign/terrain/AsteroidFieldTerrainPlugin.java:46`
-- `campaign/terrain/HyperspaceAutomaton.java:147, 150`
-- `campaign/velfield/SlipstreamManager.java:442`
-- `campaign/terrain/BaseTiledTerrain.java:74`
-- `campaign/terrain/HyperspaceAbyssPluginImpl.java:59, 67`
-- `campaign/terrain/FlareManager.java:307`
-- `campaign/submarkets/BaseSubmarketPlugin.java:83` — `itemGenRandom`
-- `campaign/HassleNPCScript.java:140`
-- `campaign/missions/hub/BaseMissionHub.java:289`
-- `campaign/rulecmd/salvage/CargoPods.java:251`
-- `campaign/rulecmd/NGCAddStandardStartingScript.java:129, 258`
+Re-applying on an engine update: copy the vanilla source over byte-identically, re-apply only the `COOP FORK` hunks, bump `CoopPresenceRegistry.PINNED_VERSION`.
 
-#### LOW-impact / cosmetic (skip)
+### 7.6 Residual divergence, as observed
 
-- `impl/combat/BlinkerEffect.java:29` — visual blinker
-- `campaign/tutorial/*` — tutorial-only
-- `impl/SimulatorPluginImpl.java:886, 947, 1010, 1016, 1023, 1263` — simulator only
-- `campaign/rulecmd/AddText.java:24`, `AddTextSmall.java:27` — random NPC chat lines
-- `campaign/events/TradeInfoUpdateEvent.java:120`
+The theoretical list (identity hashes, hash iteration order, float ops, thread interleaving) never became the practical problem. What actually diverges in play is enumerated in `docs/player/LIMITATIONS.md` and `docs/starsector-runtime-limitations.md`: hyperspace storms, star flares and slipstreams differ per client (Phase 26); sensor ghosts and deep-space content are host-only; per-engine commodity and shortage display can differ at a colony, with the host canonical; `SystemBountyManager` state diverges (Phase 34).
 
-#### Null-fallback sites (audit individually)
-
-Pattern `if (random == null) random = new Random();` only fires when no seed is passed. Audit whether the caller seeds before this triggers. Mostly safe but spot-check:
-
-`AICoreOfficerPluginImpl:52`, `CoreScript:870`, `DModManager:67,176`, `DerelictShipEntityPlugin:66,86,97,110,183`, `OfficerManagerEvent:323,476,610`, `OfficerLevelupPluginImpl:104,168,231`, `MilitaryBase:552`, `BaseEventManager:41`, `RaidIntel:641`, `PunitiveExpeditionIntel:539`, `RemnantSeededFleetManager:274`, `RemnantOfficerGeneratorPlugin:347`, `MarkovNames:141`, `DropGroupRow:331`, `OmegaOfficerGeneratorPlugin:73`, `SalvageSpecialAssigner:212,218,580`, `RuinsFleetRouteManager:132`, `BaseSalvageSpecial:137`, `SalvageEntity:780,932`, `MarketCMD:1547`, `FleetFactoryV3:1164`
-
-### 7.6 Residual non-determinism
-
-Even with seeded RNG, divergence sources remain:
-- `IdentityHashMap` / `System.identityHashCode` — different `Object` instances have different hashes across JVMs
-- HashMap iteration order with same-hash collisions
-- Float ops sensitive to JIT decisions (rare in practice)
-- Multi-threading interleaving (Starsector has render thread + main thread)
-
-**Mitigation**: replicate-don't-recompute covers most of these. Where it doesn't, document the divergence class when first observed and adjust. Don't pre-emptively fight every theoretical case.
+The policy that held: document a divergence class when first observed, decide whether it is a defect or vanilla behaviour, and only then decide whether to fix it. Do not pre-emptively fight theoretical cases.
 
 ---
 
-## 8. Subsystem-by-subsystem plan
+## 8. Subsystem-by-subsystem, as built
 
-### 8.1 Net pump (Netty embedded in mod)
+### 8.1 Net pump
 
-Bundle Netty 4.1.69 jars under `mods/coop/jars/netty/` and reference in `mod_info.json`. CMC proves it works in Starsector's classloader.
+`CoopNetPump` is the transient `EveryFrameScript` with `runWhilePaused() == true` that drives everything: the outbound queue, the inbound dispatch, the reliable-message ledger, the reconnect state machine, the port mapper and every subsystem below. `CoopNetService` is the socket layer (§4.1). `CoopNetPumpInstaller` puts it in place on game load.
 
-- `CoopNetPump` — `EveryFrameScript` with `runWhilePaused() == true`. Drives outbound queue, consumes inbound packets at campaign layer
-- TCP channel: handshake, lobby, snapshot pull (initial join), guest-fleet export, version check
-- UDP channel: state stream (campaign 10 Hz, combat 60 Hz)
-- Single connection, no relay. Host opens socket; guest connects to host:port
-
-Confidence: ★★★★★. Proven by CMC.
+The flat JSON envelope has one hard constraint: **the parser has no array support**, so message payloads must not contain JSON arrays. Multi-element data is encoded as a single delimited string through `CoopDelimited` (unit separator, with escaping).
 
 ### 8.2 Time arbitration
 
-Host owns the clock. Guest's `EveryFrameScript`:
-- Read host's pause state from latest packet → call `Sector.setPaused(hostPaused)` on guest each frame
-- Read host's fast-forward state from latest packet → mirror via `Sector.setFastForwardIteration(hostFF)`
-- Intercept guest's input via `CampaignInputListener.processCampaignInputPreCore` and consume any pause/FF keystrokes
-- Combat speed forced to 1.0x on both clients during coop combat
+Three pieces, added in this order.
 
-Confidence: ★★★★★. API-only.
+- **`CoopTimeLock` (Phase 7)**: the host captures pause and fast-forward state into `TIME_SNAPSHOT` every 200 ms; the guest applies it. `CoopCampaignInputBlocker` intercepts `GENERAL_PAUSE` and `FAST_FORWARD`.
+- **`CoopSharedPauseCoordinator` (Phase 11)**: `effectivePaused = hostPauseIntent || guestKeyPauseIntent || guestScreenPauseIntent || eitherInCombat`. The two guest intents differ: a **key pause** is casual and the host may override it, a **screen pause** (map, fleet, character, refit, cargo, intel, menu, dialog) cannot be overridden, because it exists so the guest can read and plan without the world running on. The guest keeps no sticky copy of the key bit and resolves each press against the observed pause state, so a host override can never leave the two out of sync.
+- **`CoopClockReconciler` (Phase 7c)**: converges the guest's clock onto the host's, under three rules. Guest-only, since the host clock is authoritative. **Never backward**, because the engine's month-end fires on `getMonth() != prevMonth`, an inequality, so a backward write across a month boundary pays monthly income twice while a forward jump fires at most once. **Slew while running, snap only when quiescent**: unpaused corrections are bounded to a fraction of the frame's own advance so monotonicity holds by construction, and full snaps happen during a shared pause or, with a persistence gate and a loud log, when unpaused drift exceeds two game-days.
+
+`CoopFastForwardLock` (Phase 7b) is described in §6.3 and §1.
 
 ### 8.3 Campaign state replication
 
-**At session start (matching-seed worldgen)**:
-1. Host generates a new character-creation seed and `seedString`. Sends seed + seed string + game version + enabled mod/checksum manifest to guest in handshake
-2. Guest applies the same `CharacterCreationData` seed before procgen; mod also stores `seedString` in sector metadata
-3. Both clients run new-game worldgen and compare a structural fingerprint (system ids, market ids, hyperspace anchor positions). Mismatch refuses session start
+`CoopCampaignReplicator` is the largest single class and owns the host-to-guest campaign stream: market snapshots and transactions, reputation, faction relations, intel, economy ticks, world deltas, colony messages, credit grants. `CoopMarketSyncGate` decides when a snapshot is owed. `CoopOrbitSync` resolves the jump-point orbit non-determinism found in Phase 8 by matching id first and resetting the full orbit.
 
-**Per-tick (campaign, ~10 Hz)**:
-- Host → Guest: snapshot of all `CampaignFleetAPI` in guest's sensor range (position, velocity, faction, AI mode, visibility) — delta-encoded
-- Host → Guest: market state changes, economy ticks, intel events, shared rep changes
-- Host → Guest: pause/FF state, sector time
-- Guest → Host: own fleet `MoveIntent{x,y,abilities[],course}`, interaction requests, dialog selections
-
-**Per-event (TCP)**:
-- Interaction request → host opens dialog → host runs RuleCmd → host pushes dialog state to guest
-- Ability activate → host applies, broadcasts effect
-- Dynamic terrain/abyss/slipstream mutations and sensor-ghost outcomes originate on host and are broadcast; guest does not rely on local RNG for these
-
-Confidence: ★★★. Real work, less prior art for campaign side.
+Guest to host: `FLEET_SNAPSHOT` for its own fleet, interaction claims, `WORLD_DELTA` reports, `BATTLE_RESULT`, `GUEST_REP_DELTA`.
 
 ### 8.4 Fleet mirroring
 
-On each client:
-- Local player fleet = `Global.getSector().getPlayerFleet()` — the actual player's fleet
-- Other player's fleet = a `CampaignFleetAPI` maintained by mod:
-  - `setAIMode(true)`
-  - `setMoveDestinationOverride(x, y)` each tick from packets
-  - Faction matches remote player's faction
-  - Roster updates lazily — only when remote player's fleet composition changes (battles, refits, dock transactions)
-  - Hostility suppression via `setNoEngaging` or faction trickery
-
-Confidence: ★★★. Edge cases around transponder, faction hostility resolution.
+See §4.3. `CoopFleetMirrorRegistry` tracks the live mirrors, `CoopMirrorOrphanSweeper` removes mirrors whose source is gone, `CoopNpcActionTextCapture` replicates the action line vanilla resolves in `StandardTooltipV2` so a mirrored NPC fleet does not show a blank one, and `CoopSensorSync` carries the visibility model (detection is `dist <= observer.getMaxSensorRangeToDetect(target)`).
 
 ### 8.5 Interaction gating
 
-When host is in combat or dialog:
-- Guest's `CampaignInputListener.processCampaignInputPreCore` consumes input except camera-pan
-- Guest's `CampaignUIAPI.setDisallowPlayerInteractionsForOneFrame()` called every frame
-- Guest's HUD shows "Host in combat — spectating" banner
-- Race resolution: first-click wins per packet timestamp. Loser sees "PlayerX is interacting with this" + wait/move-on options
+`CoopInteractionGate` (§1). Two traps are worth keeping in view because both produced live bugs:
 
-Confidence: ★★★★★.
+- The guest's `CoopCampaignInputBlocker` must be **suspended** while a blocking screen or dialog is open, or the guest is trapped with no options and a dead Escape key.
+- The guest must not force `setPaused` while its own interaction dialog is open, and pause must be applied only on change. Doing otherwise froze the trade-tab exit and produced blank option lists.
 
-### 8.6 Combat handoff (campaign → combat → campaign)
+### 8.6 Combat handoff
 
-See [§4.5 architecture](#45-campaigncombat-bridge). Highest-risk new subsystem.
+`CoopBattleBridge` owns both halves (§4.5). `CoopPreBattleAutosave` takes the pre-battle checkpoint, deferring while a dialog is open for the same engine reason as the coordinated save. `CoopNpcThreatWatcher` is the pre-contact handoff. `CoopBattleResultReconciler` applies the reported deltas.
 
-Confidence: ★★★. New code, complex state transfer.
+One accepted hole closed in Phase 13 and re-verified since: a mirror must not be engageable. The gate is `driveMovement`'s `setNoEngaging` and `canBeEngaged`, and the pull-in path bypasses it, so the mirror also carries a per-frame shield, the `FLEET_IGNORES_OTHER_FLEETS` flag and a load-bearing `leave()`.
 
-### 8.7 Spectator combat
+### 8.7 Partner battle reporting
 
-Implementation:
-- Open spectator `InteractionDialogPlugin` on the non-engaged player
-- Receive ship + projectile + beam + missile state from the **engaging client** (whichever player is piloting the battle — host or guest) at 60 Hz
-- Interpolate between latest two received frames; brief extrapolation if packet drop
-- Render directly via `EveryFrameCombatPlugin`. Camera-only input. All other input consumed
-- Overlay: "Spectating PlayerName's battle" + disconnect option
+*Renamed from "Spectator combat", reversed 2026-08-19.* What ships is two banners plus a `BATTLE_STATUS` stream the spectator logs rather than renders. The stream and codec were kept deliberately, so the panel can come back without re-deriving the wire format. `CoopBattleBridge.STATUS_INTERVAL_MILLIS` is 400 ms and the silence timeout is 75 intervals.
 
-Strategy: open a real `CombatEngine` and use `setPaused(true)` + manual entity manipulation. Engine renders normally; we just drive entity transforms ourselves.
+### 8.8 Joint combat
 
-Confidence: ★★★★. CMC's state stream is a useful reference, but v1 should not require CMC.
+Post-V1, and no longer a CMC integration (§2.6). The track is Phase 33 then Phase 22: real losses, an owner-side toggle ability, deploy everything, no spoils split. `CoopAllyPullInSpike` is the on-main debug switch (`-Dcoop.debug.allyPullIn`) for the live feasibility run.
 
-### 8.8 Joint combat (joint piloting)
+### 8.9 Save and reload
 
-**Deferred to v2/v3 stretch.** v1 ships with *solo own-fleet* combat: each player pilots their own battles and the other spectates. Joint combat — **both players piloting their own flagships in the *same* battle simultaneously** — is the harder real-time problem and is explicitly out of v1. CMC remains the preferred path when this stretch is taken, but it is not on the v1 critical path.
+`CoopSaveCheckpoint` (§1), `CoopGuestSnapshot` and `CoopGuestSnapshotFactory` for the `coop.guestFleetSnapshot` blob, `CoopSaveIndex` and `CoopSaveIndexSchema` for the launcher's save finder (the launcher must stay free of Starsector API types, so the schema is shared as plain data), `CoopCampaignGuard` for the wrong-save warning.
 
-v2/v3 direction:
-1. Depend on CMC mod (or fork if upstream stalls)
-2. Wire CMC's "player2" detection through our coop session — when a battle starts and guest opts to join, mark guest's flagship as the "player2" ship
-3. CMC handles input replication, ship handoff, AI removal
-4. We add: guest's `processInputPreCoreControls` captures all combat input → ships to host. Host applies guest input to guest's flagship. State streams back
+Guest saves are co-op only: the scripts that generate the world are not in them, so opening one without a host is unsupported.
 
-**Accepted limitations**:
-- Guest's flagship has ~50-100ms input lag (RTT/2). Tolerable in Starsector
-- Non-piloted ships rendered from host state; guest can't issue orders to its own AI ships during battle
-- Autofire on guest's flagship runs server-side
-- No rollback, no determinism. Server-authoritative collisions; host's truth wins on desync
+### 8.10 UI and lobby
 
-Confidence for v2: ★★★★. Proven by CMC v3.10 in May 2026, but not part of v1.
+- **Launcher (Phase 31)**: a dark FlatLaf desktop app. Invite with seed and world settings, every `-Dcoop.*` flag in Advanced, the install check and Fix button (including the `vmparams` classpath edit with a backup), a connection check, a bug-report ZIP, and an update check. It reads `releases/latest`, which is why releases are never marked prerelease.
+- **In-campaign lobby (Phase 21)**: `CoopLobbyDialog`, a plain interaction dialog because `advance()` ticks every frame while a dialog is open, the option panel can be rebuilt in place, and the text panel has `clear()`. Per-player ready state, a two-stage start gate.
+- **HUD**: `CoopLinkHud` in a configurable corner (`coop.hudCorner`), drawn with `CoopBitmapFont` over GL11.
+- **Intel pages**: Coop Session (`CoopSessionIntel`), Coop Options (`CoopOptionsPage`), Coop Stats (`CoopSessionStatsIntel`).
+- **Options (Phase 28)**: `CoopOptionsRegistry` is the typed schema, `CoopOptionsStore` the file reader, `CoopOptionsPolicy` the host-authoritative per-campaign tier. The governing rule is **expose preferences, never correctness**: cadences, gate semantics and fingerprint checks are absent by design, and `notConfigurable()` records that list by name so it cannot erode one knob at a time. Precedence is `-D`, then `saves/common/coop_options.json.data`, then the shipped `data/config/coop_options.json`, then the compiled default.
 
-### 8.9 Save / reload (fresh games v1)
+### 8.11 Shared reputation
 
-**At session start**:
-- Host clicks "New Coop Game", generates seed, opens lobby
-- Guest connects, both do character creation
-- Both clients write fresh game; mod stamps `Sector.getPersistentData()` with session id, seed, host/guest role
+`CoopRepDelta` plus the host's `PLAYER_REP_SNAPSHOT` overwrite. Faction standings only; person and contact reputation is not synced. The overwrite model is what fixed guest-side drift from transponder-off events.
 
-**Host save (during session)**:
-- Standard Starsector save. Includes mod's persistent data and the guest fleet snapshot
-- On `beforeGameSave`: serialize guest fleet via XStream into `persistentData["coop.guestFleetSnapshot"]`
+### 8.12 Hyperspace and dynamic terrain
 
-**Guest export (at session end)**:
-- Host serializes guest's fleet via XStream → sends to guest as `GuestFleetExport`
-- Guest writes to `saves/coop_player_<uuid>.dat`
-- Next session: guest's mod loads this and re-injects into the fresh sector
+The design intent is host-authoritative after the seed bootstrap. The shipped state is weaker: storms, flares and slipstreams are each client's own. The Phase 26 review (2026-09-05) corrected two assumptions worth keeping here, because they are why the naive fix does not work:
 
-**Reload**:
-- Host loads save, opens session
-- Guest connects → host pushes session id + seed
-- Guest applies own `coop_player_<uuid>.dat` to local sector
-- Version handshake validates exact match from Starsector version + enabled mod manifest/checksums + coop mod commit hash
+- Rebuilding a slipstream guest-side through `SlipstreamBuilder` does not give parity, because the builder itself consumes RNG (angle variance, width wiggle, fluctuations). The finished segment polyline has to be replicated instead; `addSegment(Vector2f, float)` is public.
+- Abyss encounter points are transient per-player probe points, regenerated in a ring around the local fleet every 1000 units travelled. They are not shared world state. What must replicate is the outcome of each encounter creation, with the point's identity recoverable from position.
 
-Confidence: ★★. XStream is historic source of obscure bugs. Reduced by only persisting deltas + guest fleet, not whole `Sector`.
+### 8.13 Fleet wipe and respawn
 
-### 8.10 UI / lobby
-
-**Pre-game**:
-- "Host coop session" — opens port, shows IP/port for connect
-- "Join coop session" — enter IP:port, optional guest-fleet import file picker
-- Seed shown for verification
-
-**In-game HUD**:
-- Connection status indicator (top-right)
-- Other player's location pill ("Player2 — Corvus II, 12.4 LY away")
-- Other player's fleet always visible on campaign map regardless of sensor range, own faction color, username label
-- No text chat (Discord covers it)
-
-**Version handshake**: exact match. Use `Global.getSettings().getGameVersion()`, `Global.getSettings().getModManager().getEnabledModsCopy()`, each enabled mod's id/name/version/path/jar list, file checksums for relevant mod files, and this coop mod's commit hash. `enabled_mods.json` format is `{"enabledMods":[]}` in the reference install, but runtime `ModManagerAPI` should be the source of truth. Mismatch → refuse to connect, show diff.
-
-Confidence: ★★★★.
-
-### 8.11 Shared reputation table
-
-- Reputation managed via the standard `SectorAPI.adjustPlayerReputation(...)` calls
-- Mod intercepts rep changes (via `CampaignEventListener.reportPlayerReputationChange`) and broadcasts deltas to guest
-- Both clients apply deltas to their local `Sector` rep table — they converge
-- In v1 battles: only triggering player's rep changes are processed. Spectating player → no rep delta
-
-Confidence: ★★★★.
-
-### 8.12 Hyperspace / dynamic terrain
-
-- Initial hyperspace layout comes from seed-sync, then host owns dynamic terrain state
-- Storm cells, slipstreams, abyss effects, abyssal lights, sensor ghosts, and abyssal contacts are not assumed seed-deterministic in 0.98a-RC8
-- Lightning strike on a player fleet resolves on host (CR damage etc); discharge state and damage result replicate to guest
-- Guest applies host terrain/event packets and does not attempt to re-roll dynamic terrain outcomes locally
-
-Confidence: ★★★.
-
-### 8.13 Fleet wipe / respawn
-
-> **Corrected 2026-08-20.** The bullets below assumed the mod must build a respawn; vanilla 0.98a already has one (`CampaignState.showShuttleDialog()`, fires on LEAVE after "no ships left", iron and non-iron alike): removes the wiped fleet, grants the `"shuttle"` stock fleet (Wayfarer + Kite), teleports to a size-weighted random friendly market, credits `max(old*0.8, 2000)`, carries officers/skills/abilities/rep/mission cargo. Confirmed live in the 2026-08-19 session (guest wipe, partner mirror recovered clean). Building the planned Wolf + 5k injection would have suppressed this flow, since its call sites gate on `!isValidPlayerFleet()`. Decided 2026-08-20: ride vanilla unchanged, keep the random destination (no `setRespawnLocation` override). The mod's remaining work is coop plumbing only — see plan Phase 17: an empty-roster mirror guard (a 0-member mirror despawns as `NO_MEMBERS` on any unpaused frame; `setNoAutoDespawn` does not cover that branch) and a `RESPAWN_PLAYER` banner so the partner learns where the wiped player reappeared.
-
-- ~~Detect when a player's fleet is empty (all ships destroyed/lost)~~ vanilla detects
-- ~~Apply respawn: Wolf-class frigate + 5k credits, place at last visited friendly station~~ vanilla respawns (Wayfarer + Kite, random friendly market)
-- Preserve: officers, character skills, shared rep — vanilla carries all of these
-- Session continues; partner is notified and the mirror never commits an empty roster
-
-Confidence: ★★★★★ (observed live).
+Vanilla does the respawn (§1). The mod contributes the empty-roster mirror guard and the `RESPAWN_PLAYER` banner. Observed live 2026-08-19: a guest wipe, with the partner's mirror recovering clean.
 
 ### 8.14 Same-dock concurrent UI
 
-> **Deferred post-V1 (decided 2026-08-20).** V1 ships serialized docking instead: the plan's Phase 10 gate is a global one-dialog-at-a-time lockout, so no two players are ever inside dock UI at once, and the market sync model depends on that (host purchases are not pushed to an already-open guest screen). The rescoped plan Phase 18 closes the WAN-latency race where a rejected dialog stayed open. The bullets below remain the design for the post-V1 follow-up, which starts by entity-scoping the gate.
+*Cancelled as designed, 2026-08-20.* There are no `UI_LOCK_*` messages and no lock classes. The Phase 10 global gate serializes every dialog instead, and the market sync model depends on that: host purchases are not pushed into an already-open guest screen. Phase 18 closed the WAN-latency race where a rejected dialog stayed open.
 
-- Both players can be docked at the same station simultaneously
-- Private screens (own refit, own officers, own cargo, own intel) concurrent — no conflicts
-- Shared-state screens (shop inventory, submarkets — host-authoritative market contents) mutually exclusive — only one player at a time. Other sees "PlayerX is using the shop" + wait/move-on options. ~~Station storage is per-player (private), so it is not mutexed~~ *(2026-09-05, plan Phase 32: storage is shared and host-canonical like the other submarkets, so it is inside the same lockout as the rest of the dock)*
-- Bar listing shows other player's presence
-
-Confidence: ★★★★.
+The post-V1 follow-up, if ever taken, starts by entity-scoping the gate so private screens (own refit, officers, cargo, intel) can run in parallel while shared-state screens stay mutually exclusive. Note that storage is now inside the shared set (§1), so it would be inside the mutex rather than outside it.
 
 ### 8.15 Build system
 
-- Gradle project. Mod compiles to `.jar` placed in `jars/`
-- Netty 4.1.69 jars bundled under `jars/netty/`
-- IDE: IntelliJ project (use CMC's setup as template)
-- Iteration: edit → `./gradlew build` → restart game (~10-15s total)
+Gradle, four jars (§1). `.\gradlew.bat clean test build` from the repo root, or `scripts\build.ps1`. Worktree builds need `-PstarsectorCore=K:\Starsector\starsector-core`. Deploy with `scripts\deploy-to-test-clients.ps1`, which copies the whole mod including `data/` into `K:\Starsector-coop-test\host` and `\guest`; never hand-copy jars. `README_DEV.md` has the full commands.
+
+### 8.16 Shared-faction colonies (Phase 24)
+
+One shared player faction. `CoopColonySync` replicates the colony set and its lifecycle, `CoopColonyManagement` mirrors the management screen both ways, `CoopColonyIncome` splits the local net 50/50 at month end with each side deducting its own half, `CoopRaidOutcomeSync` covers raids in both directions, and `CoopExpeditionWarning` plus its intel entry is coop-owned rather than vanilla-owned. Per-player factions were rejected.
+
+### 8.17 Shared markets, storage and credits (Phase 32)
+
+Market stock is keyed by (market, submarket): open, black, military and the storage locker. Storage apply is a reconcile rather than a wipe, so a concurrent local change is not destroyed; hull ids are `c_<player>_<id>`; credits refund on discard. Pirate and Luddic Path hidden bases share their shop, and their traffic is held until both sides have the base paired, because each game names and orbits its base itself. `CoopCreditTransfer` is the send-credits row: the money leaves on send, lands once, and a transfer made while the link is down goes through on resume or is refunded at session end.
+
+### 8.18 Dev tooling (Phase 30)
+
+`CoopAgentBridge` and `CoopAgentCommands` expose campaign state to `tools/starsector-mcp`, which is how a smoke session is verified without reading the screen. The verification ladder is bridge state first, then log lines, then eyes. `CoopWiretap`, `CoopFrameProfiler` and `CoopOwnFleetProbe` are the opt-in diagnostics; all of it is dormant unless `-Dcoop.debug.diagnostics=true` or the `$coopDebug` sector flag is set.
 
 ---
 
 ## 9. Risk register
 
-Ordered by combined likelihood × impact:
+Ordered as originally written, with what actually happened.
 
-| # | Risk | Mitigation |
+| # | Risk | Outcome |
 |---|---|---|
-| 1 | **Campaign↔combat handoff bugs.** New code, complex state transfer, no prior art for this seam | V1 is solo own-fleet combat (exactly one piloting player per battle; the other spectates). Heavy testing on canonical scenarios before adding the v2/v3 joint-combat stretch |
-| 2 | **State divergence between host and guest over a long session** (economy, faction state, intel) | Periodic full resync. Replicate-don't-recompute principle |
-| 3 | **Starsector version bumps break CMC.** Inherited obfuscated-class dependence once v2 joint piloting starts | Pin to specific Starsector version. Track upstream. V1 should not depend on CMC |
-| 4 | **Save/reload of guest fleet corrupts state.** XStream surprises with object graph identity | Test save→reload→save round-trip extensively. Keep guest fleet snapshot minimal (no transient/cached fields) |
-| 5 | **Network packet loss desyncs combat** (UDP without retransmit) | TCP for critical events (destruction, weapon swaps). UDP only for high-freq smoothable state |
-| 6 | **HashMap/identity hash divergence between clients** | Document; investigate first time observed. Use `LinkedHashMap` and id-based comparisons rather than identity |
-| 7 | **CMC's known concurrency races** — inherited in v2 joint piloting | Audit duplex-buffer access when CMC integration starts. Add `synchronized` blocks if needed |
-| 8 | **Best-effort Nex compatibility breaks** in subtle ways | "Warn, don't block" at connect time. Document known interactions. Don't promise Nex support |
-| 9 | **Guest's fleet export file corrupted between sessions** | Backup-before-write on guest side. Fallback: regenerate starter fleet (Wolf + 5k) |
-| 10 | **Required deps drift** (Netty in v1; CMUtils, LazyLib, Console Commands once v2 CMC starts) | Pin dependency versions in `mod_info.json` |
+| 1 | Campaign to combat handoff bugs, no prior art for this seam | Materialized and was resolved. Phase 14 shipped after five live scenarios, with two in-session fixes (a shield release and a sentinel overflow). Phase 14b then rebuilt the pursuit model after the original one watched the wrong engine signal (§4.5). |
+| 2 | State divergence over a long session | Managed by continuous host re-broadcast plus full snapshots on open. The residue is enumerated, not open-ended (§7.6). |
+| 3 | Starsector version bumps break an obfuscated-class dependency | Reduced by dropping CMC. What remains version-pinned is the fork set, the MethodHandles field names and the control enum names, all behind the exact-version handshake and one `PINNED_VERSION` constant. |
+| 4 | XStream surprises with the guest fleet snapshot | Real, and shaped the code: save-visible types are plain mutable beans, not records. The bigger mitigation was cancelling the custom export format entirely (§1). |
+| 5 | Packet loss desyncs state | Handled at two layers: reliable acked TCP for anything that must land exactly once, and adaptive cadence with depth-2 redundancy on the lossy floor for the UDP stream. A confirmed 0.1.0 bug (three messages lost across a drop: a purchase, a 3,000 credit transfer, a 50 supply deposit) is what forced the reliable layer. |
+| 6 | Hash and identity divergence | Did not materialize in play. |
+| 7 | CMC concurrency races | Moot; CMC is not a dependency. |
+| 8 | Nex compatibility | Moot; the handshake demands identical mod lists. |
+| 9 | Guest export file corruption | Moot; there is no export file. |
+| 10 | Dependency drift | Only FlatLaf, and only in the launcher. The mod itself has no runtime dependency beyond the game. |
+
+The risk the register did not anticipate: **the script sandbox**. `java.io`, `java.nio.file` and `java.lang.reflect` being blocked at runtime while compiling and unit-testing green cost more rework than any item above, and is the reason `CoopPortMapper` is a per-frame NIO state machine rather than twenty lines with a socket timeout.
 
 ---
 
-## 10. Research items (not decisions)
+## 10. Research items, answered
 
-These are do-when-relevant, not user-decisions:
-
-- **Bandwidth budget**: estimate KB/s for a heavy combat sim. CMC's design doc hints at sizes; verify with quick math. Rough: ~40 ships × 80 bytes × 60Hz = ~190 KB/s per direction at peak. Should be fine on home internet
-- **CMC license (v2)**: confirm fork-or-depend permission. Tomatopaste's GitHub repo license file
-- **CMC 0.98a compatibility (v2)**: verify v3.10 actually builds & runs against 0.98a. The forum thread says "targets 0.98a-RC8" but spot-check before depending
-- **Performance impact**: ballpark CPU/memory cost on host running combat sim + serializing state. Probably negligible on modern hardware but worth a single profiling pass
-- **Mod checksum manifest**: `enabled_mods.json` format is confirmed as `{"enabledMods":[]}` in the reference install; implementation should prefer `Global.getSettings().getModManager().getEnabledModsCopy()` plus checksums of each enabled mod's `mod_info.json`, jar list, and relevant data files
-- **XStream config**: investigate which classes need explicit aliasing; CMC's `MPModPlugin.configureXStream` is the reference
-- **Two-instance testing setup on one PC**: separate save dirs, separate settings dirs, two Starsector windows. Practical for solo dev
+- **Bandwidth budget.** Measured rather than estimated. Phase 20.1 found datagrams three to four times over the 1.2 KB budget and put them on a diet: roster split, range filter, sensor change flags, short tokens, quantized positions. The state stream now runs at 5 or 10 Hz (§4.1), not the 60 Hz the combat-spectator design assumed.
+- **CMC licence and 0.98a compatibility.** Not needed. CMC is not a dependency (§2.6).
+- **Performance impact.** `CoopFrameProfiler` exists for this and the answer has been "not the bottleneck" every time it was run. The measured cost that did matter was per-frame work in the mirror path, fixed by kinematic interpolation (§4.3).
+- **Mod checksum manifest.** Answered: `Global.getSettings().getModManager().getEnabledModsCopy()` plus checksums, assembled by `CoopHandshakeManifest`. `enabled_mods.json` is not read at runtime.
+- **XStream config.** Answered: register through `configureXStream`, and keep save-visible types as plain mutable beans (XStream 1.4.10 does not handle records).
+- **Two-instance testing on one PC.** Solved by `scripts\deploy-to-test-clients.ps1` into `K:\Starsector-coop-test\host` and `\guest`, launched with `scripts\launch-host.ps1` and `scripts\launch-guest.ps1`, with `-Diagnostics -Bridge` for a verified session. Network conditions are shaped with clumsy 0.3 on the loopback port.
 
 ---
 
-## 11. Execution phase sketch
+## 11. Execution order that shipped
 
-Multi-stage plan to be derived separately. This is a sketch.
+The plan's **Phase Status Ledger** is the authoritative record, phase by phase, with dates and commits. What follows is only the shape of the order, for orientation.
 
-- **Phase 0 — Setup & first contact.** Mod skeleton, Gradle project, `BaseModPlugin`, Netty embed, "hello world" ping between two local Starsector instances. (~1 week)
-- **Phase 1 — Seed lock.** Both clients use the same character-creation seed, then compare a structural sector fingerprint. (~3 days)
-- **Phase 2 — Time lock.** Host clock authoritative. Guest pause/FF locked. Visual indicators. (~2 days)
-- **Phase 3 — Mirror fleet.** Other player visible as AI-mode fleet on each client, position-replicated. Both fleets share same sector. (~1 week)
-- **Phase 4 — Shared rep table.** Both clients converge on a single rep table. Host broadcasts deltas. (~3 days)
-- **Phase 5 — UI gating.** Block guest interaction while host in dialog/combat. Spectator banner. (~3 days)
-- **Phase 6 — Combat handoff (solo own-fleet).** Either player enters combat and pilots it locally; the other is held by the shared pause and opens a spectator dialog, seeing combat unfolding. No joint combat yet (v2/v3). (~2 weeks)
-- **Phase 7 — Combat results propagate.** The solo fighter keeps its own salvage/XP/credits/recoveries (applied locally); the engaging client reports campaign deltas (destroyed NPC fleets, shared rep) for the host to integrate and re-broadcast. No 50/50 split in v1 (that arrives with v2/v3 joint combat). (~1 week)
-- **Phase 8 — Dynamic terrain/event authority.** Host-authoritative storm/slipstream/abyss/sensor-ghost outcomes. (~1 week)
-- **Phase 9 — Markets / economy / intel sync.** Replicate-don't-recompute pattern for ~10 listener events. Shared mission boards with first-come acceptance. (~2 weeks)
-- **Phase 10 — Random fork list.** Apply seeded forks to HIGH-impact files in [§7.5](#75-the-fork-list-unseeded-random-sites). (~3 days)
-- **Phase 11 — Same-dock concurrent UI.** Private screens parallel (incl. per-player storage); shop/submarket mutex. (~3 days)
-- **Phase 12 — Hyperspace storm polish.** Visual consistency and edge-case resync for host-authored terrain packets. (~3 days)
-- **Phase 13 — Fleet wipe / respawn.** Detect, Wolf + 5k + station. (~3 days)
-- **Phase 14 — Save / reload + guest fleet export.** XStream config, export blob, import flow. (~1-2 weeks)
-- **Phase 15 — Version handshake.** Exact-match check at connect time. (~3 days)
-- **Phase 16 — Polish, error handling, UX.** Long tail
+Foundations first (1 to 6b): mod skeleton, transport, seed lock with campaign identity, time lock, mirror fleet, shared reputation, interaction gate. Then the campaign layer (8 to 12d): fleet and NPC replication, markets, missions, bar pools, world deltas, item transfer. Then combat (13 to 15): the suppressor and forks, the battle bridge, the pursuit handoff, result reconciliation. Then sessions (16 to 18): coordinated saves, wipe handling, the claim-race force close.
 
-**Realistic single-developer-with-AI estimate to private playable v1 prototype**: **8-13 weeks part-time.** Phases 6-9 dominate; v2 joint piloting is not included in this estimate.
+Two blocks were pulled forward out of "v2 or v3" into V1 on user decision: **colonies** (Phase 24, 2026-06-10) and **player-facing docs plus options plus the launcher** (Phases 23, 28, 31, 2026-09-03). Networking (Phase 20) and adaptive cadence (Phase 29) landed in early September, followed by the lobby (21) and the shared-market and storage work (32).
+
+Release 0.1.0 shipped 2026-09-05, 0.1.1 on 2026-09-15 after five two-player test sessions, 0.1.2 on 2026-09-19 with the log marker. **Phase 19, the final sign-off, is still the last unbuilt V1 item.**
+
+The original estimate in this section was 8 to 13 weeks part-time to a private playable prototype. Actual: first commit to 0.1.0 was roughly fourteen weeks, with the scope grown by colonies, the launcher, WAN networking and the options system, none of which were in the estimate.
 
 ---
 
-## 12. Open questions for v2+
+## 12. Still open
 
-Explicitly out of scope for v1, but worth designing extensibility hooks for now:
+Each item names the phase that owns it. Anything not listed here is either built or has no plan (§1).
 
-- **Joint combat / joint piloting / CMC integration** — v2/v3 stretch
-- **Colonies, ground raids, industries** — v3. Architecture should not hard-code "no colonies" assumptions
-- **Faction war (Nex compatibility)** — v2
-- **Player-to-player trade UI** — v2
-- **Save conversion** from existing solo save — v2
-- **Reconnect / resume mid-session** — v2 if user demand
-- **In-game text chat** — v2 candidate (adopt CMC's combat chatbox if integrating CMC anyway)
-- **3+ players** — no plan
-- **PvP** — no plan
-- **Mod compatibility beyond vanilla + utility + best-effort-Nex** — case-by-case
+- **Joint piloting.** Phase 33 (AI-ally battles) then Phase 22 (tactical orders over your own joined ships). 22 is gated on 33 being built and smoke-passed. The live `-Dcoop.debug.allyPullIn` spike run has not happened yet.
+- **Hyperspace and abyss ambience.** Phase 26, milestones 1 and 2 in scope, milestone 3 and the storms stretch still open decisions. Ordered first among post-V1 work, after the Phase 19 sign-off.
+- **Guest bounty payouts.** Phase 34. Person and system bounties replicated to the guest, paid from the reconciled battle result through a pre-reconcile hook and `CREDITS_GRANT`.
+- **Finer time control.** Phase 25. The `FF_INTENT` message and a guest fast-forward policy row; the key is already inert in the options registry.
+- **Three or more players.** Phase 27. The wire is N-ready; the `coop.maxGuests` clamp and the gameplay questions are not.
+- **Concurrent docking.** Post-V1 and unowned by a phase number; it starts by entity-scoping the interaction gate (§8.14).
+- **Hidden-base names on discovery.** Open question from the Phase 24 smoke: each engine names its own hidden bases, so the two can disagree on a name the players say out loud.
 
 ---
 
 ## 13. Glossary
 
-- **CMC** — Cooperative Multiplayer Combat, tomatopaste's mod ([§3.1](#31-cmc--cooperative-multiplayer-combat-tomatopaste--automatopaste))
-- **The two-fleet trick** — local player fleet is real, remote player's fleet is an `AI-mode CampaignFleetAPI` ([§4.3](#43-the-two-fleet-trick))
-- **Matching-seed worldgen** — both clients regenerate same sector from shared seed at session start ([§4.4](#44-matching-seed-worldgen))
-- **Replicate-don't-recompute** — host owns outcomes, guest receives them, guest's local code doesn't reroll ([§7.3](#73-strategy-replicate-dont-recompute-primary))
-- **Joint combat / joint piloting** — v2/v3 stretch where both players fly their own flagships in the *same* battle simultaneously ([§8.8](#88-joint-combat-joint-piloting)). v1 is *solo own-fleet* combat instead: one piloting player per battle, the other spectates
-- **Host-authoritative** — host's state is canonical, guest reconciles to it
-- **Layer A / Layer B** — Layer A = obfuscated engine, Layer B = open game-logic scripts ([§7.1](#71-the-two-layers-of-randomness))
-- **Seed-sync bootstrap** — same new-game seed gives both clients the same broad initial sector; host-authoritative replication handles dynamic outcomes ([§2.4](#24-seed-sync-makes-initial-convergence-cheap-dynamic-divergence-is-expensive))
+- **CMC**: Cooperative Multiplayer Combat, tomatopaste's combat-only mod ([§3.1](#31-cmc-cooperative-multiplayer-combat-tomatopaste--automatopaste)). Read as prior art, not used as a dependency.
+- **The two-fleet trick**: the local player fleet is real, the partner is an AI-mode `CampaignFleetAPI` driven by interpolated snapshots ([§4.3](#43-the-two-fleet-trick)).
+- **Matching-seed worldgen**: both clients regenerate the same sector from a shared seed at session start, then compare a structural fingerprint ([§4.4](#44-matching-seed-worldgen)).
+- **Replicate, don't recompute**: the host owns outcomes, the guest applies them and never re-rolls ([§7.3](#73-replicate-dont-recompute)).
+- **Solo own-fleet combat**: the shipped combat model. One piloting player per battle; the partner is held by the shared pause and gets banners.
+- **Joint piloting**: both players flying in one battle. Post-V1, Phase 33 then 22 ([§8.8](#88-joint-combat)).
+- **Host-authoritative**: the host's state is canonical and the guest reconciles to it.
+- **Layer A / Layer B**: Layer A is the obfuscated engine, Layer B the open game-logic scripts ([§7.1](#71-the-two-layers-of-randomness)).
+- **Classpath fork**: a vanilla class copied into `forks/`, edited only inside `COOP FORK` hunks, compiled into `jars/coop-forks.jar` and resolved ahead of `starfarer.api.jar` by a `vmparams` classpath prepend ([§5.2](#52-class-override-what-works), [§7.5](#75-the-forks-that-shipped)).
+- **Pause holder**: whichever intent is currently keeping `effectivePaused` true ([§8.2](#82-time-arbitration)). The agent bridge reports it by name.
+- **COOP-MARK**: the log marker written into both players' logs by the `coop.markKey` hotkey ([§1](#session-lifecycle-decisions)).
 
 ---
 
 ## 14. Appendix: paths & resources
 
-### 14.1 Machine-specific paths (current PC: Windows)
+### 14.1 Machine-specific paths
 
-Adjust for your install. These are not portable across machines.
+Not portable. Verified present 2026-09-19.
 
 | What | Path |
 |---|---|
 | Game install under audit | `K:\Starsector\` |
-| Reference/modded install | `C:\Program Files (x86)\Fractal Softworks\Starsector\` |
-| Core jar (obfuscated) | `<install>\starsector-core\starfarer_obf.jar` |
-| API jar (compiled) | `<install>\starsector-core\starfarer.api.jar` |
-| API source zip | `<install>\starsector-core\starfarer.api.zip` (2,034 zip entries; 1,947 `.java` files in 0.98a-RC8) |
-| Mods folder | `<install>\mods\` |
-| Saves folder | `<install>\saves\` |
-| API source extracted (this session) | `C:\Users\mistd\AppData\Local\Temp\ssapi_extract_current\com\fs\starfarer\api\` (temporary; regenerate as needed) |
-| Project plan dir (this PC) | `K:\Starsector\` |
+| Repo (this project) | `K:\Starsector\mods\coop\` |
+| Core jar (obfuscated) | `K:\Starsector\starsector-core\starfarer_obf.jar` |
+| API jar (compiled) | `K:\Starsector\starsector-core\starfarer.api.jar` |
+| API source zip | `K:\Starsector\starsector-core\starfarer.api.zip` (2,034 entries, 1,947 `.java`) |
+| Mods folder | `K:\Starsector\mods\` |
+| Saves folder | `K:\Starsector\saves\` |
+| Two-instance test installs | `K:\Starsector-coop-test\host\` and `K:\Starsector-coop-test\guest\` |
+| Test-client logs | `K:\Starsector-coop-test\<role>\starsector-core\starsector.log` |
+| Reference vanilla install | `C:\Program Files (x86)\Fractal Softworks\Starsector\` |
 
-Local audit note: `C:\Program Files (x86)\Fractal Softworks\Starsector\mods\enabled_mods.json` exists and currently contains `{"enabledMods":[]}`; no `mod_info.json` files were present in that reference install during the 2026-05-28 audit.
+To read the API source on a new machine, extract `starfarer.api.zip` anywhere readable.
 
-To extract API source on a new PC:
-```
-mkdir <somewhere>/ssapi_extract
-cd <somewhere>/ssapi_extract
-unzip "<install>/starsector-core/starfarer.api.zip"
-```
+### 14.2 Documents in this repo
 
-### 14.2 External resources (portable)
+| File | What it is canonical for |
+|---|---|
+| `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` | Phase ledger and every agreed decision. |
+| `docs/COOP_MP_DESIGN.md` | This file. Design rationale. |
+| `docs/starsector-runtime-limitations.md` | Engine and sandbox facts, accepted divergences. Current facts only. |
+| `docs/CODEBASE_MAP.md` | Orientation map: which package and class owns what. |
+| `docs/PHASE22_TACTICAL_FEASIBILITY.md` | The 2026-09-05 source pass behind the Phase 22 rescope. |
+| `docs/PHASE20_SPIKE_RESULTS.md` | Connectivity spike measurements. |
+| `docs/player/INSTALL.md`, `CONNECT.md`, `LIMITATIONS.md`, `REPORTING.md`, `LISTING.md` | Player-facing install, networking, what is shared, bug reports, forum listing. |
+| `docs/roadmap.html` | Generated from `roadmap.data.json` by `roadmap_gen.js`. Never hand-edited. |
+| `README.md`, `README_DEV.md`, `CHANGELOG.md` | Player overview, developer commands, release notes. |
 
-- **Tomatopaste's CMC source**: https://github.com/automatopaste/Multiplayer
-- **CMUtils (CMC dep)**: https://github.com/automatopaste/CMUtils
-- **CMC forum thread**: https://fractalsoftworks.com/forum/index.php?topic=11598.0 (Cloudflare-gated; use `cf_clearance` cookie or paste content)
-- **Matlabmaster campaign POC**: https://github.com/moi75ts/Multiplayer
-- **Kirpoly's fork (has docs)**: https://github.com/kirpoly/Multiplayer_Starsector
-- **Mod design doc (in kirpoly's repo)**: `docs/Multiplayer_Mod_Documentation.md`
-- **Starsector forum modding board**: https://fractalsoftworks.com/forum/index.php?board=8.0
-- **Starsector wiki (modding)**: https://starsector.wiki.gg/
+### 14.3 External resources
 
-### 14.3 Memory files (also on this PC)
-
-The Claude memory directory `<userprofile>/.claude/projects/.../memory/` holds:
-- `project_coop_mp_mod.md` — scope & decisions (this doc supersedes it)
-- `reference_starsector_mp_priors.md` — prior art (this doc has the canonical version)
-- `reference_starsector_moddability.md` — moddability baseline (this doc has the canonical version)
-- `MEMORY.md` — index
-
-These memory files are a *convenience* for future Claude sessions on this machine. This doc is the canonical reference. If they conflict, this doc wins.
+- Tomatopaste's CMC source: https://github.com/automatopaste/Multiplayer
+- CMUtils: https://github.com/automatopaste/CMUtils
+- CMC forum thread: https://fractalsoftworks.com/forum/index.php?topic=11598.0 (Cloudflare-gated)
+- Matlabmaster campaign POC: https://github.com/moi75ts/Multiplayer
+- Kirpoly's fork with docs: https://github.com/kirpoly/Multiplayer_Starsector
+- Starsector modding board: https://fractalsoftworks.com/forum/index.php?board=8.0
+- Starsector wiki: https://starsector.wiki.gg/
+- This project: https://github.com/AyoKeito/starsector-coop
 
 ### 14.4 Bringing this project to a new machine
 
-1. Install Starsector at any path
-2. Extract `starfarer.api.zip` somewhere readable (for source navigation, optional)
-3. Clone CMC and CMUtils repos for v2 joint-piloting reference when needed
-4. Clone (or create) this project's repo
-5. Drop this doc in the project root
-6. (Optional) Create the Claude memory files using this doc as the source
-7. Update [§14.1 paths](#141-machine-specific-paths-current-pc-windows) for the new machine
+1. Install Starsector 0.98a-RC8.
+2. Clone the repo into `<install>\mods\coop`.
+3. Build with `.\gradlew.bat clean test build`.
+4. Prepend `..\mods\coop\jars\coop-forks.jar;` to the `-classpath` in `vmparams`, or let the launcher's Fix button do it.
+5. Update the paths in [§14.1](#141-machine-specific-paths) and the `starsectorCore` Gradle property.
+6. Read `README_DEV.md` for the two-client setup, the agent bridge and release packaging.
 
 ---
 
