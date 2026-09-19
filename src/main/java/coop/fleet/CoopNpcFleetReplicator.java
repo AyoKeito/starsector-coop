@@ -286,22 +286,33 @@ public final class CoopNpcFleetReplicator {
 
     /** Forget the last-sent hash so the next tick rebroadcasts the full set (session (re)start). */
     public void reset() {
-        lastSetHash = "";
-        lastNearHash = "";
-        lastSoftHash = "";
-        nextSoftResendAtMillis = 0L;
-        lastFleetCount = 0;
+        rearmFullBroadcast();
         loggedFleetHashes.clear();
         guestPresence.reset();
         motionSmoother.reset();
         motionCadence.reset();
-        previousChunks.clear();
         redundancyDepth = coop.net.CoopDatagramRedundancy.DEFAULT_DEPTH;
         radiusCache.clear();
         radiusCacheExpiresAtMillis = 0L;
         nextRangeLogAtMillis = 0L;
         oversizedRecordWarned = false;
         CoopFullFidelitySystemDriver.reset();
+    }
+
+    /**
+     * The resume variant of {@link #reset()}: forgets the last-sent hashes so the next tick
+     * rebroadcasts the full NPC set, without touching the guest's presence registration or any other
+     * state the session was carrying before the drop. A resume must never unregister the guest from
+     * the vanilla fleet managers, even for the width of one tick, because an unregistered guest is
+     * exactly what lets those managers despawn the fleets around it.
+     */
+    public void rearmFullBroadcast() {
+        lastSetHash = "";
+        lastNearHash = "";
+        lastSoftHash = "";
+        nextSoftResendAtMillis = 0L;
+        lastFleetCount = 0;
+        previousChunks.clear();
     }
 
     /**
@@ -326,6 +337,15 @@ public final class CoopNpcFleetReplicator {
 
     public int lastFleetCount() {
         return lastFleetCount;
+    }
+
+    /**
+     * Test-only: exposes the presence pass so a test can observe it without a live engine. Public
+     * because {@code coop.net.CoopNetPumpTest} needs it across the package boundary to verify a resume
+     * leaves the guest registered.
+     */
+    public CoopGuestPresence guestPresenceForTest() {
+        return guestPresence;
     }
 
     /** Package-private, like the motion packer beside it, so the send triggers are testable. */
