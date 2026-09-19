@@ -278,7 +278,49 @@ public final class CoopMessages {
          * feature exists to prevent. Deliberately <em>not</em> on the reconnect-grace whitelist - a
          * diagnostic aid is not something an unproven peer needs to be able to write into your log.
          */
-        MARK
+        MARK,
+        /**
+         * Phase 33: piloting engine &rarr; owner, "vanilla just pulled your fleet into a fight I am
+         * about to run." Sent once per battle, the moment {@code CoopFleetMirror} reports the join,
+         * which is well before the owner's own {@code BATTLE_BEGIN} banner explains why its campaign
+         * stopped.
+         *
+         * <p>It exists because the owner has no other way to learn this. Its ships are in the fight
+         * on the <em>partner's</em> engine; the owner's screen shows a paused campaign and, until
+         * this message, said nothing about whose fleet was in it. The 2026-09-20 spike measured the
+         * gap: the guest's join landed 1.8 s before its {@code BATTLE_BEGIN} and the host's 24 s
+         * before, so "wait for the battle banner" would have been up to half a minute of silence
+         * while the owner's ships were already being shot at.
+         *
+         * <p>Informational, so deliberately <b>off</b> {@link #isReliableOneShot}: it announces a
+         * battle that {@code ALLY_BATTLE_RESULT} reports the outcome of a minute later, and a lost
+         * copy costs one HUD line rather than a fact. The result is the reliable half of the pair.
+         */
+        ALLY_BATTLE_JOIN,
+        /**
+         * Phase 33: piloting engine &rarr; owner, what the battle did to the owner's ships. The
+         * second message on the wire that changes another player's property without asking
+         * ({@code CREDITS_GRANT} is the first), and it is built the same way: a sender-minted
+         * {@code ledgerId} of {@code <sessionId>-<pilotPlayerId>-<seq>} that the receiver applies
+         * exactly once.
+         *
+         * <p>The piloting engine is the authority. Its battle happened, its numbers are final, and
+         * the owner removes the destroyed ships and writes the reported hull and CR onto the
+         * survivors without arguing (see {@link coop.combat.CoopAllyLossApplier}). Nothing in the
+         * reverse direction exists: the owner's next fleet snapshot changes its {@code fleetHash} and
+         * the piloting engine's mirror rebuilds from it.
+         *
+         * <p>Sent even when the outcome {@code isEmpty()}. An empty result is not a wasted message:
+         * it is how the owner learns the fight is over and gets its "came through untouched" banner,
+         * and the engine leaves a mirror untouched often enough (the ally deployed and nothing
+         * reached it) that treating silence as "no losses" would leave the owner waiting.
+         *
+         * <p>On {@link #isReliableOneShot}: losing it means the owner's real fleet keeps flying ships
+         * that were destroyed on the other engine, until the next roster change papers over part of
+         * it. The ledger makes the replay free — {@code CoopAllyLossApplier} is idempotent on its own,
+         * and the pump's ledger means a re-send does not even reach it.
+         */
+        ALLY_BATTLE_RESULT
     }
 
     /**
@@ -312,6 +354,10 @@ public final class CoopMessages {
      *   toggle, a battle, an open dialog) that the drop edge has already ended and reset.</li>
      *   <li><b>{@code SAVE_CHECKPOINT}, {@code STALL_NOTICE}, {@code RESPAWN_PLAYER}</b> — orders
      *   about right now; obeying one late is worse than never hearing it.</li>
+     *   <li><b>{@code ALLY_BATTLE_JOIN}</b> — the announcement half of the Phase 33 pair. The
+     *   {@code ALLY_BATTLE_RESULT} behind it is reliable and carries every fact; losing the
+     *   announcement costs one HUD line about a battle the owner is about to be told the result of
+     *   anyway.</li>
      *   <li><b>{@code SAVE_CHECKPOINT_RESULT}</b> — informational. It describes a save state that
      *   the next checkpoint describes again, and the guest's log carries the whole story regardless,
      *   so a lost copy costs one feed line rather than a fact.</li>
@@ -330,7 +376,10 @@ public final class CoopMessages {
                  COLONY_FOUNDED, COLONY_ABANDONED, COLONY_MGMT,
                  REP_DELTA, GUEST_REP_DELTA, FACTION_REL_DELTA,
                  // A marker no producer ever sends again, whose point is to be in both logs.
-                 MARK -> true;
+                 MARK,
+                 // Phase 33: the only report of what a battle on the other engine did to this
+                 // player's ships. Nothing re-sends it and nothing else carries the same facts.
+                 ALLY_BATTLE_RESULT -> true;
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
                  SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
@@ -347,6 +396,9 @@ public final class CoopMessages {
                  SAVE_CHECKPOINT, SAVE_CHECKPOINT_RESULT, RESPAWN_PLAYER, STALL_NOTICE,
                  SESSION_LEAVE,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED, SESSION_STATS, LINK_STATUS,
+                 // Phase 33: the announcement half of the ally pair. The result that follows carries
+                 // the facts and is reliable; this one costs a HUD line if it is lost.
+                 ALLY_BATTLE_JOIN,
                  PING, PONG, UDP_PROBE, PATH_PROBE -> false;
         };
     }
@@ -2172,6 +2224,180 @@ public final class CoopMessages {
         String text = requireText(reason, "reason");
         return text.length() <= MAX_CREDITS_REASON_CHARS
                 ? text : text.substring(0, MAX_CREDITS_REASON_CHARS);
+    }
+
+    // ---- Phase 33: AI-ally battles ---------------------------------------------------------------
+
+    /**
+     * Ships named in one {@code ALLY_BATTLE_RESULT} list, decoded and encoded. A player fleet holds
+     * far fewer, so this is not a limit any real battle reaches — it is what stops a peer from
+     * handing the applier an arbitrarily long list to walk. Entries past it are dropped rather than
+     * the whole message being rejected: a truncated result still removes the ships it did name, and
+     * the owner's next snapshot resyncs the rest.
+     */
+    public static final int MAX_ALLY_BATTLE_MEMBERS = 256;
+
+    /**
+     * Decoded {@link Type#ALLY_BATTLE_JOIN}.
+     *
+     * @param ownerPlayerId  whose real fleet the joined mirror stands for; only that player acts on it
+     * @param pilotPlayerId  who is running the battle, for the owner's "fighting alongside ..." line
+     * @param enemySummary   the other side's primary fleet name as the engine named it, possibly blank
+     */
+    public record AllyBattleJoin(String ownerPlayerId, String pilotPlayerId, String enemySummary) {
+        public AllyBattleJoin {
+            ownerPlayerId = requireText(ownerPlayerId, "ownerPlayerId");
+            pilotPlayerId = requireText(pilotPlayerId, "pilotPlayerId");
+            enemySummary = enemySummary == null ? "" : enemySummary;
+        }
+    }
+
+    /**
+     * Decoded {@link Type#ALLY_BATTLE_RESULT}. {@code outcome} carries the owner id, so there is one
+     * copy of it rather than two that could disagree.
+     *
+     * @param ledgerId      sender-minted, {@code <sessionId>-<pilotPlayerId>-<seq>}; applied once
+     * @param pilotPlayerId who fought the battle, for the banner wording
+     */
+    public record AllyBattleResult(String ledgerId, String pilotPlayerId,
+                                   coop.combat.CoopAllyBattleOutcome outcome) {
+        public AllyBattleResult {
+            ledgerId = requireText(ledgerId, "ledgerId");
+            pilotPlayerId = requireText(pilotPlayerId, "pilotPlayerId");
+            Objects.requireNonNull(outcome, "outcome");
+        }
+    }
+
+    /** Piloting engine &rarr; owner: vanilla pulled the owner's mirror into a fight here. */
+    public static Message allyBattleJoin(String sessionId, long seq, long sentAtMillis,
+                                         String ownerPlayerId, String pilotPlayerId,
+                                         String enemySummary) {
+        return new Message(Type.ALLY_BATTLE_JOIN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"ownerPlayerId\":\"" + escapeJson(requireText(ownerPlayerId, "ownerPlayerId")) + "\","
+                        + "\"pilotPlayerId\":\"" + escapeJson(requireText(pilotPlayerId, "pilotPlayerId")) + "\","
+                        + "\"enemySummary\":\"" + escapeJson(enemySummary == null ? "" : enemySummary) + "\"}");
+    }
+
+    public static AllyBattleJoin parseAllyBattleJoin(Message message) {
+        Payload payload = payload(message);
+        return new AllyBattleJoin(payload.requiredString("ownerPlayerId"),
+                payload.requiredString("pilotPlayerId"),
+                payload.optionalString("enemySummary", ""));
+    }
+
+    /**
+     * Piloting engine &rarr; owner: what the battle did to the owner's ships.
+     *
+     * <p>The two lists ride in one string field apiece, in the {@link coop.campaign.CoopDelimited}
+     * encoding every list-bearing coop payload uses, because the envelope's JSON parser is flat and
+     * has no arrays. Destroyed ids are one per line; a survivor line is
+     * {@code memberId|hullFraction|cr}.
+     */
+    public static Message allyBattleResult(String sessionId, long seq, long sentAtMillis,
+                                           String ledgerId, String pilotPlayerId,
+                                           coop.combat.CoopAllyBattleOutcome outcome) {
+        Objects.requireNonNull(outcome, "outcome");
+        return new Message(Type.ALLY_BATTLE_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"ledgerId\":\"" + escapeJson(requireText(ledgerId, "ledgerId")) + "\","
+                        + "\"ownerPlayerId\":\""
+                        + escapeJson(requireText(outcome.ownerPlayerId(), "ownerPlayerId")) + "\","
+                        + "\"pilotPlayerId\":\"" + escapeJson(requireText(pilotPlayerId, "pilotPlayerId")) + "\","
+                        + "\"destroyed\":\"" + escapeJson(encodeAllyDestroyed(outcome.destroyedMemberIds())) + "\","
+                        + "\"survivors\":\"" + escapeJson(encodeAllySurvivors(outcome.survivors())) + "\"}");
+    }
+
+    /**
+     * Throws on a payload missing the ids or the ledger, which the caller logs and drops — writing
+     * an unattributed loss onto somebody's fleet is worse than applying nothing. A malformed
+     * <em>row</em> inside either list is skipped instead, the way the lobby roster's decoder skips
+     * one: the ships that did decode are still real losses.
+     */
+    public static AllyBattleResult parseAllyBattleResult(Message message) {
+        Payload payload = payload(message);
+        coop.combat.CoopAllyBattleOutcome outcome = new coop.combat.CoopAllyBattleOutcome(
+                payload.requiredString("ownerPlayerId"),
+                decodeAllyDestroyed(payload.optionalString("destroyed", "")),
+                decodeAllySurvivors(payload.optionalString("survivors", "")));
+        return new AllyBattleResult(payload.requiredString("ledgerId"),
+                payload.requiredString("pilotPlayerId"), outcome);
+    }
+
+    static String encodeAllyDestroyed(List<String> memberIds) {
+        StringBuilder out = new StringBuilder();
+        int written = 0;
+        for (String id : memberIds) {
+            if (written >= MAX_ALLY_BATTLE_MEMBERS) {
+                break;
+            }
+            if (written > 0) {
+                out.append('\n');
+            }
+            out.append(coop.campaign.CoopDelimited.field(id));
+            written++;
+        }
+        return out.toString();
+    }
+
+    static List<String> decodeAllyDestroyed(String encoded) {
+        List<String> ids = new ArrayList<>();
+        if (encoded == null || encoded.isEmpty()) {
+            return ids;
+        }
+        for (String line : encoded.split("\n", -1)) {
+            if (line.isEmpty() || ids.size() >= MAX_ALLY_BATTLE_MEMBERS) {
+                continue;
+            }
+            String id = coop.campaign.CoopDelimited.split(line).get(0);
+            if (!id.isEmpty()) {
+                ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    static String encodeAllySurvivors(List<coop.combat.CoopAllyBattleOutcome.Survivor> survivors) {
+        StringBuilder out = new StringBuilder();
+        int written = 0;
+        for (coop.combat.CoopAllyBattleOutcome.Survivor survivor : survivors) {
+            if (written >= MAX_ALLY_BATTLE_MEMBERS) {
+                break;
+            }
+            if (written > 0) {
+                out.append('\n');
+            }
+            out.append(coop.campaign.CoopDelimited.field(survivor.memberId())).append('|')
+                    .append(survivor.hullFraction()).append('|')
+                    .append(survivor.cr());
+            written++;
+        }
+        return out.toString();
+    }
+
+    static List<coop.combat.CoopAllyBattleOutcome.Survivor> decodeAllySurvivors(String encoded) {
+        List<coop.combat.CoopAllyBattleOutcome.Survivor> survivors = new ArrayList<>();
+        if (encoded == null || encoded.isEmpty()) {
+            return survivors;
+        }
+        for (String line : encoded.split("\n", -1)) {
+            if (line.isEmpty() || survivors.size() >= MAX_ALLY_BATTLE_MEMBERS) {
+                continue;
+            }
+            List<String> fields = coop.campaign.CoopDelimited.split(line);
+            if (fields.size() < 3 || fields.get(0).isEmpty()) {
+                // One unreadable row must not cost the whole result; the rest still applies.
+                continue;
+            }
+            float hull;
+            float cr;
+            try {
+                hull = Float.parseFloat(fields.get(1));
+                cr = Float.parseFloat(fields.get(2));
+            } catch (NumberFormatException ex) {
+                continue;
+            }
+            survivors.add(new coop.combat.CoopAllyBattleOutcome.Survivor(fields.get(0), hull, cr));
+        }
+        return survivors;
     }
 
     // ---- 0.1.1 reliable delivery -----------------------------------------------------------------
