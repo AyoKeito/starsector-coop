@@ -6,7 +6,8 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
 
 ## The short list
 
-- **You fight your own battles.** Two players in one battle is not in this release.
+- **One of you pilots every battle.** Your fleet can join your partner's fight as an AI ally, with
+  real losses, but two players piloting in one battle is not in this release.
 - **Hyperspace weather and slipstreams differ between you.** Each PC rolls its own storms, flares and
   slipstream map. A storm that costs you combat readiness is invisible on your partner's screen.
 - **Deep space and sensor ghosts are host-only.** The abyss content exists on the host's engine, and
@@ -26,13 +27,35 @@ of it is a bug report; these are the places where two co-op campaigns differ fro
 
 ## Battles
 
-**You fight your own battles.** Whoever gets engaged runs the fight on their own PC and pilots it as
-normal. Your partner's fleet on your screen is a mirror, not a participant, and it cannot be pulled
-into your battle.
+**Whoever gets engaged pilots the fight** on their own PC, as normal. Your partner's campaign is
+paused for the duration.
 
-**Your partner is paused and gets a banner**, one when your battle starts and one when it ends.
-There is no in-game view of the fight; people watch over a Discord screen share, where a full-screen
-panel on the watching client would be in the way anyway.
+**Your fleet can join as an AI ally.** The toggle ability on your ability bar decides it: off, your
+fleet is a mirror on your partner's screen and nothing pulls it in; on, your partner's encounters
+pull it in the way a friendly patrol is pulled in, within the same 700 unit radius. The fleet AI
+runs your ships and deploys what it wants, your flagship included. Your partner does not get a vote,
+and neither do you once the fight starts.
+
+**The ally joins only against a side your fleet is already hostile to.** This is vanilla's rule for
+allies, not a co-op restriction: a player-faction fleet under AI control wants no part of a fight
+against someone it is not hostile to. If your partner opens on a neutral independent trader, the
+fight is solo even with your fleet next to it and the toggle on.
+
+**Losses are real and one-way.** Ships destroyed in your partner's battle are removed from your
+fleet, and the hull and CR the fight left your survivors at are written onto your real ships. You
+get a line naming what you lost. Nobody can recover an allied wreck; vanilla offers no recovery
+dialog for one.
+
+**The pilot keeps the spoils.** XP, salvage, credits and ship recoveries all go to the player who
+fought, as vanilla does for a battle with allies. Kills your ships make count for your partner's
+officers, not yours.
+
+**You cannot direct your ships while they fight.** No retreat, no orders, no tactical map. That is
+the next step in this line of work and it is not in this release.
+
+**Your partner gets a banner**, one when a battle starts, one when it ends, and one more if their
+fleet was in it. There is no in-game view of the fight; people watch over a Discord screen share,
+where a full-screen panel on the watching client would be in the way anyway.
 
 **Both players piloting in one battle is not in this release.** It is the largest single item on the
 list of things that could come later.

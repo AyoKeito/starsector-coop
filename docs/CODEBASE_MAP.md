@@ -28,7 +28,8 @@ K:\Starsector\mods\coop
 |-- src/launcher/java/    coop.launcher, the FlatLaf desktop launcher (no Starsector API on its classpath)
 |-- src/test/java/coop/   JUnit 5 suite, mirrors the main packages + coop/launcher + coop/testing
 |-- forks/                classpath-shadow copies of 10 vanilla classes -> coop-forks.jar
-|-- data/                 rules.csv, config/coop_options.json, config/settings.json, version/
+|-- data/                 rules.csv, campaign/abilities.csv, config/coop_options.json,
+|                         config/settings.json, version/
 |-- docs/                 design, plan ledger, generated roadmap, player guides
 |-- scripts/              build, clean, deploy, launch host/guest, two-client setup, package-release
 |-- tools/starsector-mcp/ Node MCP server wrapping the in-game agent bridge
@@ -105,7 +106,8 @@ service.beginFrame() -> CoopDebug.pollFrame / CoopWiretap.pollFrame -> streamClo
   -> drainInbound -> flushReliableAcks -> drainDelayedGuestMessages
   -> assertMirrorEngagementShields -> maybeSendHandshakeManifest -> maybeSendSeedLockRequest
   -> tickDesyncDialog -> tickLobby -> tickMarkDialog -> tickSessionStats -> tickOptionsPolicy
-  -> maybeHoldPausedUntilSessionReady -> tickBattleBridge -> syncSharedPause -> syncFastForwardLock
+  -> maybeHoldPausedUntilSessionReady -> tickBattleBridge -> tickAllyBattle -> syncSharedPause
+  -> syncFastForwardLock
   -> maybeApplyTimeSnapshot -> tickClockReconciler -> maybeSendTimeSnapshot
   -> syncFleetMirror -> drainFleetDatagrams -> advanceMirrorMotion -> maybeSendFleetSnapshot
   -> tickRespawnNotifier -> maybeSendGuestSnapshot -> tickSaveCheckpoint
@@ -143,7 +145,7 @@ republish.
   and the Phase 20.4 abuse limits.
 - `CoopNetPump` - the `EveryFrameScript` that drives everything: ~9.5k lines, the frame order above.
 - `CoopNetPumpInstaller` - installs it as a transient script.
-- `CoopMessages` - the `Type` enum (71 constants), the envelope codec, datagram header parse,
+- `CoopMessages` - the `Type` enum (73 constants), the envelope codec, datagram header parse,
   `isReliableOneShot`, `wireToken`, `MAX_DATAGRAM_CHUNKS`.
 - `CoopPeerLink` - everything known about one peer: TCP channel, half-written frame, inbound
   assembly, validated send address, watermarks.
@@ -181,7 +183,7 @@ Owns: every wire type, since the enum lives here.
   `CoopMotionSpeedProbe`, `CoopAllyPullInSpike`. Owns `FLEET_SNAPSHOT`, `FLEET_ROSTER`,
   `FLEET_ROSTER_REQUEST`, `NPC_FLEET_SET`, `NPC_FLEET_MOTION`, `RESPAWN_PLAYER`.
 
-### `coop.campaign` (31 classes) - shared world state
+### `coop.campaign` (32 classes) - shared world state
 
 - `CoopCampaignReplicator` - the hub; the pump calls its `tickWorldDeltas`, `tickOrbitSync`,
   `tickPlayerRepSync`, `tickBarAcceptance`, `tickBarPool`, `tickColony*`, `tickExpeditionWarnings`,
@@ -197,7 +199,8 @@ Owns: every wire type, since the enum lives here.
   Luddic-Path bases, campaign objectives, gates.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
-  `CoopStoryChainGate` / `CoopDelimited`. Owns `MARKET_OPEN`, `MARKET_SNAPSHOT`, `MARKET_TXN`,
+  `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
+  `data/campaign/abilities.csv`, a toggle whose effect is nothing and whose state is everything). Owns `MARKET_OPEN`, `MARKET_SNAPSHOT`, `MARKET_TXN`,
   `WORLD_DELTA`, `MISSION_POOL_SNAPSHOT`, `MISSION_CLAIM_*`, `REP_DELTA`, `GUEST_REP_DELTA`,
   `PLAYER_REP_SNAPSHOT`, `FACTION_REL_DELTA`, `ABILITY_ACTIVATE`, `ORBIT_SNAPSHOT`, `BASE_SET`,
   `CREDITS_GRANT`.
@@ -224,11 +227,15 @@ Owns: every wire type, since the enum lives here.
   installs the input listeners; `CoopSharedPauseCoordinator` computes the effective pause;
   `CoopFastForwardLock` owns every `MethodHandles` touch of the engine's fast-forward state;
   `CoopClockReconciler` converges the guest's clock. Owns `TIME_SNAPSHOT`, `PAUSE_INTENT`.
-- **`coop.combat`** (9) - solo own-fleet battles. `CoopBattleBridge`; `CoopBattleStatus` +
-  `CoopBattleStatusCombatPlugin` (the only mod code running inside a battle); `CoopBattleResult` +
-  `CoopBattleResultReconciler`; `CoopNpcThreatWatcher` (vanilla pursuit AI -> guest local combat);
-  `CoopEngageDialogStaging` / `CoopCustomsDialogStaging`; `CoopPreBattleAutosave`. Owns
-  `BATTLE_BEGIN`, `BATTLE_STATUS`, `BATTLE_END`, `BATTLE_RESULT`, `ENGAGE_GUEST`, `DIALOG_BEGIN`.
+- **`coop.combat`** (12) - own-fleet battles plus the Phase 33 AI ally. `CoopBattleBridge`;
+  `CoopBattleStatus` + `CoopBattleStatusCombatPlugin` (the only mod code running inside a battle);
+  `CoopBattleResult` + `CoopBattleResultReconciler`; `CoopNpcThreatWatcher` (vanilla pursuit AI ->
+  guest local combat); `CoopEngageDialogStaging` / `CoopCustomsDialogStaging`;
+  `CoopPreBattleAutosave`. Phase 33: `CoopAllyBattleJoin` and `CoopAllyBattleOutcome` are what the
+  partner's mirror hands the pump when vanilla pulls it into a fight and when that fight ends;
+  `CoopAllyLossApplier` is the one place allowed to remove ships from, or write hull and CR on, the
+  local player's real fleet. Owns `BATTLE_BEGIN`, `BATTLE_STATUS`, `BATTLE_END`, `BATTLE_RESULT`,
+  `ENGAGE_GUEST`, `DIALOG_BEGIN`, `ALLY_BATTLE_JOIN`, `ALLY_BATTLE_RESULT`.
 - **`coop.colony`** (7) - shared player faction. `CoopColonySync` (found/abandon),
   `CoopColonyManagement` (industries, construction queue, toggles), `CoopColonyIncome`,
   `CoopRaidOutcomeSync`, `CoopExpeditionWarning` + `Sync` + `Intel`. Owns `COLONY_FOUNDED`,
@@ -277,8 +284,7 @@ Owns: every wire type, since the enum lives here.
 
 ## Wire Protocol
 
-Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **71 constants** as of
-0.1.3. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
+Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **73 constants**. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
 payloads use the `CoopDelimited` unit-separator encoding instead):
 
 ```text
@@ -298,7 +304,7 @@ depth-2 redundancy on a lossy floor (`CoopDatagramRedundancy`).
   rate rise and the fallback pinning the floor.
 - **Reliable one-shots:** `MARKET_TXN`, `CREDITS_GRANT`, `WORLD_DELTA`, `RAID_RESULT`, `SHIP_LOST`,
   `COLONY_FOUNDED`, `COLONY_ABANDONED`, `COLONY_MGMT`, `REP_DELTA`, `GUEST_REP_DELTA`,
-  `FACTION_REL_DELTA`, `MARK`. Campaign events with no producer that would resend them, so the
+  `FACTION_REL_DELTA`, `MARK`, `ALLY_BATTLE_RESULT`. Campaign events with no producer that would resend them, so the
   transport acks (`RELIABLE_ACK`) and replays them across a socket replacement.
 - **Pre-session gating:** campaign traffic that arrives before a session is live is dropped with one
   warn per session (`preSessionCampaignDropWarned`). During a reconnect grace only
@@ -466,13 +472,13 @@ Order line, everything else from `docs/roadmap.data.json`; design lives in
 
 ```text
 src/test/java/coop/   .java counts, 2026-09-20
-  campaign/ 48   net/ 35   fleet/ 31   ui/ 22   launcher/ 19   combat/ 10   testing/ 8   save/ 6
+  campaign/ 48   net/ 37   fleet/ 31   ui/ 22   launcher/ 19   combat/ 10   testing/ 8   save/ 6
   colony/ 5   debug/ 5   config/ 4   time/ 4   handshake/ 3   interaction/ 3   mark/ 3   seed/ 3
   session/ 3   util/ 3   input/ 2   newgame/ 2   stats/ 2   presence/ 1   rewards/ 1   rng/ 1
   CoopModPluginTest.java   CoopScaffoldTest.java
 ```
 
-3693 tests green on the last full run (2026-09-20). The suite is the only safety net between a change
+3726 tests green on the last full run. The suite is the only safety net between a change
 and a two-instance smoke.
 
 `coop.testing` holds the shared fixtures rather than a ninth copy of the same proxy:

@@ -12,9 +12,9 @@ Your ships, cargo, credits, officers, and skills stay yours.
 </p>
 
 > [!IMPORTANT]
-> **Version 0.1.3 is in private testing.** Each player fights their own battles on their own PC;
-> the other player waits on a paused campaign. Two players piloting in the same battle is not
-> supported in this release.
+> **Version 0.1.3 is in private testing.** One player pilots each battle on their own PC; the other
+> player waits on a paused campaign, and can send their fleet in as an AI ally. Two players piloting
+> in the same battle is not supported in this release.
 
 ## What you share
 
@@ -22,6 +22,7 @@ Your ships, cargo, credits, officers, and skills stay yours.
 | --- | --- |
 | Sector and exploration | See your partner's fleet and the same NPC fleets. Survey progress, explored ruins, and salvaged wrecks are shared. |
 | Campaign time | Pause and fast-forward together. Battles and interaction screens pause the campaign for your partner. |
+| Battles | One of you pilots the fight. A toggle ability sends your fleet in as an AI ally, with real losses and no share of the spoils. |
 | Markets and storage | Buy from shared open, black, and military markets. Use the same storage locker, including stored ships. Take turns docking at a market. |
 | Colonies and reputation | Govern the same colonies under one faction. Faction reputation changes affect both players. |
 | Player transfers | Jettison cargo for your partner to collect, exchange ships through storage, or send credits from **Intel → Coop Options**. |

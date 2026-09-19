@@ -713,6 +713,26 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopBattleBridge battleBridge;
     private final CoopNpcThreatWatcher npcThreatWatcher;
     private final CoopBattleResultReconciler battleResultReconciler;
+    /**
+     * Phase 33: {@code ALLY_BATTLE_RESULT} ledger ids already applied to the local fleet, oldest
+     * first. {@link coop.combat.CoopAllyLossApplier} is idempotent on its own - a second pass finds
+     * the destroyed ships gone and the survivors already at the reported numbers - but idempotent is
+     * not the same as free: the second pass would still post a second banner and a second feed line
+     * naming losses the player already read about. The ledger stops it a step earlier.
+     *
+     * <p>A duplicate can only arrive inside one session, so this is not saved, and the ring is the
+     * same shape and size as the credit ledger's for the same reason.
+     */
+    private final java.util.Set<String> appliedAllyLedgerIds = new java.util.LinkedHashSet<>();
+    /** How many applied ally ledger ids to remember; see {@link #appliedAllyLedgerIds}. */
+    static final int ALLY_LEDGER_CAPACITY = 512;
+    /**
+     * Phase 33 test seam: the owner's real fleet as {@link coop.combat.CoopAllyLossApplier} needs it.
+     * The production value reads {@code Global.getSector().getPlayerFleet()}; a test hands in a fake
+     * so the real applier still runs and the assertions are about what it was asked to do.
+     */
+    private Supplier<coop.combat.CoopAllyLossApplier.PlayerFleetOps> allyFleetOps =
+            CoopNetPump::localPlayerFleetOps;
     private final CoopCampaignReplicator campaignReplicator;
     /** Phase 17: watches the local player fleet for the vanilla wipe respawn's object swap. */
     private final CoopRespawnNotifier respawnNotifier = new CoopRespawnNotifier();
@@ -3409,6 +3429,10 @@ public class CoopNetPump implements EveryFrameScript {
         // Phase 14 runs before syncSharedPause so a battle that began (or ended) this frame is already
         // reflected in the combat intent when the host computes its effective pause.
         tickBattleBridge();
+        // Phase 33, in the battle-bridge slot and ahead of syncFleetMirror: taking the mirror's
+        // outcome is what releases its member-state freeze, so reading it here means the owner's
+        // snapshot resumes applying this frame rather than the next one.
+        tickAllyBattle();
         t = profiler.split(SECTION_BATTLE_BRIDGE, t);
         syncSharedPause();
         // Phase 28 M2: immediately behind it, because syncGuestSharedPauseIntent is where the
@@ -4507,6 +4531,11 @@ public class CoopNetPump implements EveryFrameScript {
                  // undo it, and a marker the partner pressed a frame before its router died is
                  // exactly the one a tester will go looking for afterwards.
                  MARK,
+                 // Phase 33. Both halves describe a battle on the other engine that the drop edge
+                 // does not un-fight. The result is reliable, so it has to survive by the
+                 // cross-table rule anyway; the join is here for the same reason a battle banner is,
+                 // and the owner would rather learn a frame late why its campaign stopped.
+                 ALLY_BATTLE_JOIN, ALLY_BATTLE_RESULT,
                  // 0.1.1, and the one member of isConnectionScopedControl that survives: a pre-drop
                  // ack is the partner saying it applied those seqs, which stays true after the drop.
                  // Honouring it is what stops the resume replaying messages that already landed.
@@ -5181,6 +5210,8 @@ public class CoopNetPump implements EveryFrameScript {
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
+            case ALLY_BATTLE_JOIN -> handleAllyBattleJoin(message);
+            case ALLY_BATTLE_RESULT -> handleAllyBattleResult(message);
             case GUEST_SNAPSHOT -> handleGuestSnapshot(message);
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
             case SAVE_CHECKPOINT_RESULT -> handleSaveCheckpointResult(message);
@@ -8510,6 +8541,226 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply BATTLE_RESULT", ex);
         }
+    }
+
+    // ---- Phase 33: AI-ally battles ---------------------------------------------------------------
+
+    /**
+     * The piloting side, once per frame: ask the partner's mirror whether vanilla pulled it into a
+     * battle here, and whether that battle has finished.
+     *
+     * <p>Both halves are one-shot by construction - {@code takeAllyBattleJoin} and
+     * {@code takeAllyBattleOutcome} hand their value over once per battle and then answer null - so
+     * this is a poll rather than a listener, and a frame that has nothing to report costs two null
+     * checks.
+     *
+     * <p><b>Why a poll at all, and why here.</b> The 2026-09-20 spike measured the join landing on
+     * the guest's engine only after the encounter dialog closed, because no per-frame mod code runs
+     * under a blocking screen. There is no callback for "vanilla added a fleet to a battle", so the
+     * mirror watches its own {@code getBattle()} and the pump reads what it saw the next frame it
+     * gets one. The step sits in the battle-bridge slot, immediately behind
+     * {@link #tickBattleBridge()} and ahead of {@link #syncFleetMirror()}: the bridge has already
+     * settled this frame's battle lifecycle, and taking the outcome is what releases the mirror's
+     * member-state freeze, so doing it before the snapshot apply means the freeze ends and the
+     * owner's next snapshot lands in the same frame instead of one later.
+     */
+    private void tickAllyBattle() {
+        if (!isGameplaySessionActive()) {
+            return;
+        }
+        try {
+            coop.combat.CoopAllyBattleJoin join = fleetMirror.takeAllyBattleJoin();
+            if (join != null) {
+                sendAllyBattleJoin(join);
+            }
+            coop.combat.CoopAllyBattleOutcome outcome = fleetMirror.takeAllyBattleOutcome();
+            if (outcome != null) {
+                sendAllyBattleResult(outcome);
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to poll the coop ally battle surface", ex);
+        }
+    }
+
+    private void sendAllyBattleJoin(coop.combat.CoopAllyBattleJoin join) {
+        long now = clockMillis.getAsLong();
+        CoopMessages.Message message = CoopMessages.allyBattleJoin(sessionState.sessionId(),
+                service.nextSeq(), now, join.ownerPlayerId(), sessionState.localPlayerId(),
+                join.enemySummary());
+        service.send(message);
+        service.flushOutbound();
+        CoopLog.info(CoopNetPump.class, "Coop ALLY_BATTLE_JOIN sent owner=" + join.ownerPlayerId()
+                + " enemy=" + (join.enemySummary().isEmpty() ? "(unnamed)" : join.enemySummary()));
+    }
+
+    /**
+     * Sent whether or not the battle cost the owner anything. An empty outcome is the owner's only
+     * word that the fight is over - the alternative is a HUD line about a battle that never gets an
+     * ending - and it is cheap: one message per battle, not per frame.
+     */
+    private void sendAllyBattleResult(coop.combat.CoopAllyBattleOutcome outcome) {
+        long now = clockMillis.getAsLong();
+        // The same shape the credit ledger mints, for the same reason: nextSeq restarts at 1 on a
+        // fresh service, so the session id is what keeps a rejoined session from reusing an id the
+        // owner already applied.
+        String ledgerId = sessionState.sessionId() + "-" + sessionState.localPlayerId()
+                + "-" + service.nextSeq();
+        CoopMessages.Message message = CoopMessages.allyBattleResult(sessionState.sessionId(),
+                service.nextSeq(), now, ledgerId, sessionState.localPlayerId(), outcome);
+        service.send(message);
+        service.flushOutbound();
+        CoopLog.info(CoopNetPump.class, "Coop ALLY_BATTLE_RESULT sent ledger=" + ledgerId
+                + " owner=" + outcome.ownerPlayerId()
+                + " destroyed=" + outcome.destroyedMemberIds().size()
+                + " survivors=" + outcome.survivors().size()
+                + (outcome.isEmpty() ? " (nothing to apply; the owner still gets its banner)" : ""));
+    }
+
+    /**
+     * Owner side: the partner's engine has this player's fleet in a fight. One HUD line, because the
+     * campaign is about to stop and the owner deserves to know whose battle stopped it.
+     */
+    private void handleAllyBattleJoin(CoopMessages.Message message) {
+        if (droppedBeforeTheSession(message.type())) {
+            return;
+        }
+        CoopMessages.AllyBattleJoin join;
+        try {
+            join = CoopMessages.parseAllyBattleJoin(message);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to read an ALLY_BATTLE_JOIN", ex);
+            return;
+        }
+        if (!isLocalAllyOwner(join.ownerPlayerId(), message.type())) {
+            return;
+        }
+        String pilot = displayNameFor(join.pilotPlayerId());
+        String line = join.enemySummary().isEmpty()
+                ? "Your fleet is fighting alongside " + pilot
+                : "Your fleet is fighting alongside " + pilot + " against " + join.enemySummary();
+        coop.ui.CoopHudNotice.show(line);
+        CoopLog.info(CoopNetPump.class, "Coop ALLY_BATTLE_JOIN pilot=" + join.pilotPlayerId()
+                + " enemy=" + (join.enemySummary().isEmpty() ? "(unnamed)" : join.enemySummary()));
+    }
+
+    /**
+     * Owner side: apply what the partner's battle did to this player's real fleet, once per ledger
+     * id, then say so on the HUD and - when something actually changed - in the campaign feed.
+     *
+     * <p>The feed line goes through {@link coop.ui.CoopFeed} directly rather than through
+     * {@link #postFeed}. That helper exists to keep a flapping link from spamming the feed and
+     * carries a thirty second minimum per kind; two battles inside thirty seconds is an ordinary
+     * afternoon, and swallowing the second one would lose the only record of what it cost.
+     */
+    private void handleAllyBattleResult(CoopMessages.Message message) {
+        if (droppedBeforeTheSession(message.type())) {
+            return;
+        }
+        CoopMessages.AllyBattleResult result;
+        try {
+            result = CoopMessages.parseAllyBattleResult(message);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to read an ALLY_BATTLE_RESULT", ex);
+            return;
+        }
+        if (!isLocalAllyOwner(result.outcome().ownerPlayerId(), message.type())) {
+            return;
+        }
+        if (!appliedAllyLedgerIds.add(result.ledgerId())) {
+            CoopLog.info(CoopNetPump.class, "Coop ALLY_BATTLE_RESULT already applied ledger="
+                    + result.ledgerId() + "; nothing changed");
+            return;
+        }
+        while (appliedAllyLedgerIds.size() > ALLY_LEDGER_CAPACITY) {
+            java.util.Iterator<String> oldest = appliedAllyLedgerIds.iterator();
+            oldest.next();
+            oldest.remove();
+        }
+        String pilot = displayNameFor(result.pilotPlayerId());
+        coop.combat.CoopAllyLossApplier.Report report;
+        try {
+            report = coop.combat.CoopAllyLossApplier.apply(result.outcome(), allyFleetOps.get());
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply an ALLY_BATTLE_RESULT ledger="
+                    + result.ledgerId(), ex);
+            return;
+        }
+        String banner = coop.combat.CoopAllyLossApplier.banner(pilot, report);
+        coop.ui.CoopHudNotice.show(banner);
+        if (report.changedAnything()) {
+            coop.ui.CoopFeed.post(banner, FEED_WARN_COLOR);
+        }
+        CoopLog.info(CoopNetPump.class, "Coop ALLY_BATTLE_RESULT applied ledger=" + result.ledgerId()
+                + " pilot=" + result.pilotPlayerId()
+                + " removed=" + report.removed()
+                + " damaged=" + report.damaged().size());
+        if (!report.unknownIds().isEmpty() || report.failedWrites() > 0) {
+            // Either the two engines disagree about this fleet's roster or the engine refused a
+            // write. Both mean the owner's fleet is not what the battle left, and the next snapshot
+            // will not fix it: the owner is the snapshot's source.
+            CoopLog.warn(CoopNetPump.class, "Coop ALLY_BATTLE_RESULT ledger=" + result.ledgerId()
+                    + " did not apply in full: unknownIds=" + report.unknownIds()
+                    + " failedWrites=" + report.failedWrites());
+        }
+    }
+
+    /**
+     * The pre-session gate the dispatch switch's {@code default} branch applies, stated here because
+     * these two types have their own cases and would otherwise inherit nothing. Same one warn per
+     * session: a peer speaking campaign vocabulary before the lobby, handshake and seed lock have run
+     * on this connection is worth a line, not a line per frame.
+     */
+    private boolean droppedBeforeTheSession(CoopMessages.Type type) {
+        if (isGameplaySessionActive()) {
+            return false;
+        }
+        if (!preSessionCampaignDropWarned) {
+            preSessionCampaignDropWarned = true;
+            CoopLog.warn(CoopNetPump.class, "Coop ignoring pre-session campaign message type=" + type);
+        }
+        return true;
+    }
+
+    /**
+     * Whether an ally message is addressed to this player. N-guest scaffolding: today the only two
+     * ids in a session are the local one and the partner's, so a third id is a bug rather than a
+     * neighbour's battle - but the check is by id, not by role, so the day a second guest exists
+     * this routes instead of mis-applying.
+     */
+    private boolean isLocalAllyOwner(String ownerPlayerId, CoopMessages.Type type) {
+        String local = sessionState.localPlayerId();
+        if (local != null && local.equals(ownerPlayerId)) {
+            return true;
+        }
+        CoopLog.debug(CoopNetPump.class, "Coop ignoring " + type + " for owner=" + ownerPlayerId
+                + "; this client is " + local);
+        return false;
+    }
+
+    /** A player id as a person: the two names the session knows, or the raw id for anything else. */
+    private String displayNameFor(String playerId) {
+        if (playerId == null || playerId.isEmpty()) {
+            return "your partner";
+        }
+        if (playerId.equals(sessionState.localPlayerId())) {
+            String local = sessionState.localName();
+            return local == null || local.isEmpty() ? playerId : local;
+        }
+        if (playerId.equals(sessionState.remotePlayerId())) {
+            return remoteDisplayName();
+        }
+        return playerId;
+    }
+
+    /** Production {@link #allyFleetOps}: the local player's real fleet, or null when there is none. */
+    private static coop.combat.CoopAllyLossApplier.PlayerFleetOps localPlayerFleetOps() {
+        SectorAPI sector = Global.getSector();
+        return coop.combat.CoopAllyLossApplier.ops(sector == null ? null : sector.getPlayerFleet());
+    }
+
+    /** Test seam for {@link #allyFleetOps}; the real applier still runs against what this returns. */
+    void installAllyFleetOpsForTest(Supplier<coop.combat.CoopAllyLossApplier.PlayerFleetOps> ops) {
+        this.allyFleetOps = Objects.requireNonNull(ops, "ops");
     }
 
     /**

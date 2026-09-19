@@ -65,7 +65,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.SHIP_LOST, CoopMessages.Type.OPTIONS_SNAPSHOT,
             CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT,
             CoopMessages.Type.RELIABLE_ACK, CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
-            CoopMessages.Type.SESSION_LEAVE, CoopMessages.Type.MARK);
+            CoopMessages.Type.SESSION_LEAVE, CoopMessages.Type.MARK,
+            CoopMessages.Type.ALLY_BATTLE_JOIN, CoopMessages.Type.ALLY_BATTLE_RESULT);
 
     // ---- table: CoopNetService.coalesceKey(Message) ------------------------------------------
     // Whitelist of whole-state snapshots that may supersede a queued copy of themselves; every
@@ -133,7 +134,10 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.FACTION_REL_DELTA,
             // A log marker: pressed once, sent once, and worthless if it reaches only one of
             // the two logs it exists to be greppable in.
-            CoopMessages.Type.MARK);
+            CoopMessages.Type.MARK,
+            // Phase 33: the only report of what a battle on the other engine did to this player's
+            // ships. Nothing re-sends it, and losing it leaves the owner flying wrecks.
+            CoopMessages.Type.ALLY_BATTLE_RESULT);
 
     // ---- table: CoopNetPump.allowedDuringReconnectGrace(Type) --------------------------------
     // The only vocabulary an unproven peer may speak while a reconnect grace window is open: the
@@ -186,7 +190,10 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.SESSION_LEAVE,
             // A marker describes a moment that already happened, which the drop edge does not
             // undo; it is also reliable, and every reliable type survives the edge.
-            CoopMessages.Type.MARK);
+            CoopMessages.Type.MARK,
+            // Phase 33: both halves describe a battle on the other engine that the drop edge does
+            // not un-fight.
+            CoopMessages.Type.ALLY_BATTLE_JOIN, CoopMessages.Type.ALLY_BATTLE_RESULT);
 
     // ---- table: CoopNetPump.isTerminalRejectType(Type) ---------------------------------------
     // The peer's verdicts on a join, dispatched a few lines early out of the pre-drop drain so

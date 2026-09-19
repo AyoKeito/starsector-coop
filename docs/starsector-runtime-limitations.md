@@ -304,6 +304,14 @@ Mirror pods are created with `setNeverExpire(true)` so the creating client is th
 
 ## NPC mirrors and patrol encounters
 
+### Battle pull-in asks the fleet AI, so an ally joins only against a side it is hostile to
+
+`FleetInteractionDialogPluginImpl.pullInNearbyFleets` does not simply add every nearby fleet to the battle. It filters on `fleet.getAI().wantsToJoin(battle, true)`, and a player-faction fleet under AI control wants nothing from a fight against someone it is not hostile to. Measured on two clients 2026-09-20: with the partner's mirror 330 su from an independent Smuggler the host was attacking, the mirror joined on the player's side (`mirrorSide=ONE mirrorSideIsPlayerSide=true`); with the mirror sitting on top of a neutral independent Prospector, the same dialog did not list it. There is no flag for "join anyway" short of calling `battle.join` directly, which Phase 33 decided against because it would put a player's fleet into a fight vanilla would never have offered. Consequence for the player: attacking a neutral with the ally toggle on is still a solo fight, and the absence of the ally in the dialog is the engine agreeing with itself, not a failed join.
+
+### A mirror's member state is written per snapshot, so battle results must be frozen out
+
+`CoopFleetMirror.updateMemberState` writes every member's hull fraction and CR from the owner's snapshot on every apply, several times a second. The engine writes its own numbers onto the mirror when a battle ends. The snapshot wins, within a frame: measured 2026-09-20, the post-battle roster of a mirror that had just fought for two minutes matched its pre-battle roster to three decimals, CR included. Destroyed ships are a different case and survive by accident: `updateMemberState` returns early on a roster size mismatch and the roster itself is only rebuilt when the owner's `fleetHash` changes, so a gutted mirror stays gutted until the owner's roster moves. Anything reading a battle's effect off a mirror therefore has to stop the per-snapshot member-state write from the moment `mirrorFleet.getBattle()` goes non-null until it has read the roster, not merely stop the roster rebuild.
+
 ### Mirrors of inflated fleets carry d-mods but not the autofit loadout
 
 When a player fleet comes near an NPC fleet the engine inflates it: `DefaultFleetInflater.inflate` autofits every ship onto a runtime variant named from the fleet id and member index, which exists in no other engine. The host therefore streams the stock variant the inflater autofit *from* (`setOriginalVariant`) plus the d-mod hullmod ids per member (`CoopShipMods`), and the guest clones the stock variant, applies the d-mods and runs `DModManager`'s damaged-hull swap. Weapon slots and fighter bays are not captured for NPC mirrors, so a scavenged loadout mirrors as the stock one. CR and hull fraction are replicated per member and battle outcomes are host-authoritative, so this is a sizing-up error only.

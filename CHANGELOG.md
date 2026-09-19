@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+**Battles**
+
+- Your fleet can fight in your partner's battles as an AI ally. A toggle ability on your ability
+  bar controls it, one per fleet, off by default and saved with the campaign. Turn it on and your
+  partner's encounters may pull your fleet in, exactly as a friendly patrol is pulled in. Your
+  partner has no say in it either way.
+- It joins only a fight against a side your fleet is already hostile to. That is the vanilla rule
+  for allies: attacking a neutral trader with your partner parked on top of it is still a solo
+  fight, and nothing goes wrong, nothing is listed in the dialog.
+- Losses are real. Ships destroyed in your partner's battle are removed from your fleet, and the
+  hull and CR the fight left your survivors at are written onto your real ships. You get one line
+  naming what was lost. Destroyed is destroyed: vanilla offers no recovery dialog for allied
+  wrecks and neither does this.
+- No spoils are split. The player who pilots the fight keeps the XP, the salvage, the credits and
+  the ship recoveries, as vanilla does for a battle fought with allies.
+- Your officers go with your ships. The fleet snapshot now carries each ship's officer and your
+  own fleet-wide skills, so the ally fights near the strength it has on your screen.
+- You get a line on the HUD when your fleet is pulled into a fight, naming your partner and what
+  they are fighting, and a second line with the result when the battle ends.
+
 ## 0.1.3
 
 Fixes from the first two-player Internet session on 0.1.2 (68 minutes, nine link drops from
