@@ -64,9 +64,9 @@
     {
       "sev": "revisit",
       "sevLabel": "Phase 19 checklist",
-      "head": "Phase 12c manual residue: two click-throughs",
-      "state": "open",
-      "body": "With the partner on the same market screen: sell a ship back to the market and hire an officer out of the pool. Pass = the partner's next open shows the sold hull in stock and the hired officer gone, with no duplicate. Then the feel pass from <span class=\"rp\" data-jump=\"12c\">Phase 12c</span>'s manual list."
+      "head": "Phase 12c manual residue: hire an officer with the partner on the same market",
+      "state": "open; the sold-hull half PASSED live 2026-09-19",
+      "body": "Sell-back PASSED 2026-09-19 at Jangala Station: the host sold a Colossus, the guest's reopen showed the identical 31-item open market with the hull once. Still owed, at a market that has officers in its comm directory (Jangala had none): the host hires one, the guest reopens the directory. Pass = the officer is gone on the guest with no duplicate. Then the feel pass from <span class=\"rp\" data-jump=\"12c\">Phase 12c</span>'s manual list."
     },
     {
       "sev": "gap",
