@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.2
+
+A hotkey that stamps a marker into both players' logs, for the first sessions played over the
+Internet. No gameplay changes.
+
+**Log markers**
+
+- Press F11 in the campaign when something looks wrong. The mod writes one line into your log and
+  the same line into your partner's, carrying a marker number, the campaign day, the system you are
+  in and the sync sequence number. Search either file for `COOP-MARK` afterwards and every marker
+  from both players is there, in the same words on both sides.
+- On the open map the key also opens a note box. What you type goes under the same marker number
+  in both logs. In combat, inside a market or in any other dialog there is no box; the marker still
+  lands, so say the number out loud or write it down.
+- Both players see it on the link readout for five seconds: `marked host#3: the note` on the one
+  who pressed it, `partner marked host#3: the note` on the other.
+- The key is the **Log marker key** field in the launcher's Settings window, an LWJGL key name such
+  as `F11` or `F10`. An unknown name is logged and falls back to F11. `REPORTING.md` describes what
+  to do with the markers.
+
+**Documentation**
+
+- The README was rewritten around what the mod does today, and three internal notes files were
+  folded into the runtime-limitations section of the plan.
+
 ## 0.1.1
 
 Shared storage, shared submarkets and player-to-player credits, plus everything five two-player test

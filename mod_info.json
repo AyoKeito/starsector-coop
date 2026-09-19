@@ -2,7 +2,7 @@
   "id": "coop",
   "name": "Starsector Coop V1",
   "author": "AyoKeito",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Two-player co-op campaign: one shared sector on one clock, the host's game as the authority, each player piloting their own battles.",
   "gameVersion": "0.98a-RC8",
   "jars": [

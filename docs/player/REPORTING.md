@@ -56,6 +56,30 @@ What comes after `reason` depends on the code: seeds, fingerprints and campaign 
 not the version the mod was built for, so no port was opened and no connection was attempted. Both
 players get it independently, and each log names that machine's own pair.
 
+## Marking the moment while you play
+
+Press **F11** when you see something wrong. One line goes into your log and the same line into your
+partner's:
+
+```text
+COOP-MARK host#3 | day 206.41 | Corvus (hyperspace) | seq 48120 | ""
+```
+
+`host#3` is the third marker the host made this session; the guest's are `guest#1` and up. The day,
+the system and the sequence number are the presser's, copied verbatim into the other file, so
+searching both logs for `COOP-MARK host#3` finds the same moment in each. On the open campaign map
+the key also opens a note box; what you type is written under the same marker as a second line:
+
+```text
+COOP-MARK host#3 note | "guest fleet snapped back after the jump"
+```
+
+There is no box in combat, inside a market or in any other dialog. The marker still lands, so say
+the number out loud or write it down and put the words in your post. Both players see
+`marked host#3` or `partner marked host#3` on the link readout for five seconds. Another key can be
+set in the launcher's Settings window under **Log marker key** (an LWJGL key name, `F10` for
+example); the bug report zip carries the markers with the rest of the log.
+
 ## When the launcher cannot run
 
 Do it by hand. The log is here, and the game rewrites it on every launch, so copy it before
