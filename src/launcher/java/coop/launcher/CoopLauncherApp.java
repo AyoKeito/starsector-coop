@@ -8,9 +8,11 @@ import java.awt.Desktop;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.Container;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.LayoutManager;
 import java.awt.Toolkit;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.DataFlavor;
@@ -31,7 +33,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.swing.BorderFactory;
-import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -863,9 +864,9 @@ public final class CoopLauncherApp {
         card.trailing.add(folder);
         card.trailing.add(guide);
 
-        rowsPanel = new JPanel();
-        rowsPanel.setOpaque(false);
-        rowsPanel.setLayout(new BoxLayout(rowsPanel, BoxLayout.Y_AXIS));
+        // A wrapping detail is only as tall as the width it is given, so the rows are measured
+        // after they have one; a BoxLayout here caps every row at a single line.
+        rowsPanel = CoopLauncherUi.wrappingStack();
 
         showAllButton = CoopTheme.ghost("Show all checks");
         showAllButton.addActionListener(event -> {
@@ -1669,55 +1670,148 @@ public final class CoopLauncherApp {
     }
 
     private JComponent renderRow(CoopInstallCheck.Row row, JComponent trailing) {
-        JPanel panel = new JPanel(new GridBagLayout());
-        panel.setOpaque(false);
-        panel.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
-        GridBagConstraints c = new GridBagConstraints();
-        c.gridx = 0;
-        c.gridy = 0;
-        c.anchor = GridBagConstraints.NORTHWEST;
-        c.insets = new Insets(5, 2, 0, 10);
-        panel.add(new Dot(CoopTheme.statusColor(row.status())), c);
+        Dot dot = new Dot(CoopTheme.statusColor(row.status()));
 
         JLabel label = new JLabel(row.label());
         label.setForeground(CoopTheme.TEXT);
-        c.gridx = 1;
-        c.insets = new Insets(0, 0, 0, 8);
-        panel.add(label, c);
 
         JTextArea detail = CoopTheme.paragraph(row.detail());
         detail.setToolTipText(row.detail());
-        c.gridx = 2;
-        c.weightx = 1;
-        c.fill = GridBagConstraints.HORIZONTAL;
-        c.insets = new Insets(0, 0, 0, 0);
-        panel.add(detail, c);
 
-        if (trailing != null) {
-            c.gridx = 3;
-            c.weightx = 0;
-            c.fill = GridBagConstraints.NONE;
-            c.insets = new Insets(0, 8, 0, 0);
-            panel.add(trailing, c);
-        }
+        JLabel fix = null;
         if (!row.fix().isEmpty()) {
-            JLabel fix = new JLabel("<html><body style='width: 460px'>" + escape(row.fix())
+            fix = new JLabel("<html><body style='width: 460px'>" + escape(row.fix())
                     + "</body></html>");
             fix.setForeground(CoopTheme.MUTED);
             fix.setFont(fix.getFont().deriveFont(Font.ITALIC, (float) fix.getFont().getSize() - 1f));
-            c = new GridBagConstraints();
-            c.gridx = 1;
-            c.gridy = 1;
-            c.gridwidth = 3;
-            c.weightx = 1;
-            c.fill = GridBagConstraints.HORIZONTAL;
-            c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(2, 0, 0, 0);
-            panel.add(fix, c);
         }
-        panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, panel.getPreferredSize().height));
+
+        JPanel panel = new JPanel(new InstallRowLayout(dot, label, detail, trailing, fix));
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
+        panel.add(dot);
+        panel.add(label);
+        panel.add(detail);
+        if (trailing != null) {
+            panel.add(trailing);
+        }
+        if (fix != null) {
+            panel.add(fix);
+        }
         return panel;
+    }
+
+    /**
+     * One install row: a status dot, the check's name, the wrapping detail, an optional button on
+     * the same line, and the italic fix line under the name.
+     *
+     * <p>Laid out by hand because the detail's height is a function of the width the dialog hands
+     * the row - a 200-character detail is one line in a wide window and four in a narrow one - and
+     * every stock layout manager wants a preferred height before anything has a width. Measured
+     * that way, a row is capped at one line and the rest of its text is drawn over the rows above
+     * and below it.
+     */
+    private static final class InstallRowLayout implements LayoutManager {
+        /** Cell padding from the GridBagLayout this replaced; unscaled, as it was there. */
+        private static final int DOT_LEFT = 2;
+        private static final int DOT_TOP = 5;
+        private static final int DOT_GAP = 10;
+        private static final int LABEL_GAP = 8;
+        private static final int TRAILING_GAP = 8;
+        private static final int FIX_GAP = 2;
+
+        private final Component dot;
+        private final Component label;
+        private final Component detail;
+        private final Component trailing;
+        private final Component fix;
+
+        InstallRowLayout(Component dot, Component label, Component detail, Component trailing,
+                         Component fix) {
+            this.dot = dot;
+            this.label = label;
+            this.detail = detail;
+            this.trailing = trailing;
+            this.fix = fix;
+        }
+
+        @Override
+        public void addLayoutComponent(String name, Component child) {
+        }
+
+        @Override
+        public void removeLayoutComponent(Component child) {
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container parent) {
+            synchronized (parent.getTreeLock()) {
+                Insets insets = parent.getInsets();
+                int given = parent.getWidth() - insets.left - insets.right;
+                // Before the first layout the row has no width. Measure against a plausible one
+                // rather than an unwrapped line: too tall leaves a gap for one pass, too short
+                // overlaps the neighbours.
+                int width = given > 0 ? given : com.formdev.flatlaf.util.UIScale.scale(360);
+                return new Dimension(width + insets.left + insets.right,
+                        arrange(parent, width, false) + insets.top + insets.bottom);
+            }
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container parent) {
+            return preferredLayoutSize(parent);
+        }
+
+        @Override
+        public void layoutContainer(Container parent) {
+            synchronized (parent.getTreeLock()) {
+                Insets insets = parent.getInsets();
+                arrange(parent, Math.max(1, parent.getWidth() - insets.left - insets.right), true);
+            }
+        }
+
+        /** Returns the height this row needs at {@code width}, placing its parts when asked to. */
+        private int arrange(Container parent, int width, boolean place) {
+            Insets insets = parent.getInsets();
+            int left = insets.left;
+            int top = insets.top;
+            int right = left + width;
+
+            Dimension dotSize = dot.getPreferredSize();
+            Dimension labelSize = label.getPreferredSize();
+            int labelX = left + DOT_LEFT + dotSize.width + DOT_GAP;
+            int detailX = labelX + labelSize.width + LABEL_GAP;
+            Dimension trailingSize = trailing == null ? new Dimension() : trailing.getPreferredSize();
+            int detailRight = right - (trailing == null ? 0 : trailingSize.width + TRAILING_GAP);
+            int detailWidth = Math.max(1, detailRight - detailX);
+            // The wrapped height is only knowable once the text area has been told how wide it is.
+            detail.setSize(detailWidth, Math.max(1, detail.getHeight()));
+            int detailHeight = detail.getPreferredSize().height;
+
+            int firstLine = Math.max(Math.max(DOT_TOP + dotSize.height, labelSize.height),
+                    Math.max(detailHeight, trailingSize.height));
+            if (place) {
+                dot.setBounds(left + DOT_LEFT, top + DOT_TOP, dotSize.width, dotSize.height);
+                label.setBounds(labelX, top, labelSize.width, labelSize.height);
+                detail.setBounds(detailX, top, detailWidth, detailHeight);
+                if (trailing != null) {
+                    trailing.setBounds(detailRight + TRAILING_GAP, top,
+                            trailingSize.width, trailingSize.height);
+                }
+            }
+            int height = firstLine;
+            if (fix != null) {
+                // The fix line is html with its own wrap width, so it is drawn at the width it was
+                // measured at; anything wider and it would re-wrap into fewer lines than measured.
+                Dimension fixSize = fix.getPreferredSize();
+                int fixWidth = Math.min(Math.max(1, right - labelX), fixSize.width);
+                if (place) {
+                    fix.setBounds(labelX, top + firstLine + FIX_GAP, fixWidth, fixSize.height);
+                }
+                height += FIX_GAP + fixSize.height;
+            }
+            return height;
+        }
     }
 
     // ---- fixing the install ---------------------------------------------------------------------

@@ -31,6 +31,11 @@ minimized windows, no gameplay fault seen), plus documentation work. No gameplay
   starts with the 127.0.0.1 socket the developer tooling talks to, on port 7801 for a host launch and
   7802 for a guest launch unless the port field beside it says otherwise. The typed port survives
   unticking the box.
+- A check in the Installation window whose detail runs past one line now wraps inside its own row.
+  Each row was measured before the window had a width, so it was given one line of room and drew the
+  rest of its text over the rows above and below it, hiding their dots and names. The stale
+  `-Dcoop.*` warning, which lists every flag it found on the java line, did this on every install
+  that had one.
 
 **Developer tooling**
 
