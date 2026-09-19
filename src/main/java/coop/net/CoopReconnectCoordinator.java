@@ -129,6 +129,15 @@ public final class CoopReconnectCoordinator {
      */
     public static final long WAIT_MORE_MILLIS = 300_000L;
 
+    /**
+     * The most a window is ever allowed to hold, measured from the moment of the press (2026-09-19
+     * live evidence: a mashed "wait more" option, 53 presses in 16 seconds, drove the window to
+     * 15,917 seconds). Unlimited presses were the point of {@link #WAIT_MORE_MILLIS}, but a session
+     * held for hours by a stuck or mashed button is not a feature; thirty minutes is well past any
+     * outage the option is meant for and still covers the slow case it exists for, a host restart.
+     */
+    public static final long MAX_REMAINING_MILLIS = 1_800_000L;
+
     private final long graceMillis;
     private final Listener listener;
 
@@ -254,7 +263,9 @@ public final class CoopReconnectCoordinator {
      *
      * <p>Measured from the later of the current deadline and {@code nowMillis}: an extension pressed
      * on the frame the window was already due to expire still buys the full {@code extraMillis}
-     * rather than a fraction of it.
+     * rather than a fraction of it. The result is then capped at {@link #MAX_REMAINING_MILLIS} from
+     * {@code nowMillis} — presses are still unlimited, but they cannot push the window past that
+     * ceiling.
      *
      * @return true when a window was open and the deadline actually moved
      */
@@ -262,7 +273,12 @@ public final class CoopReconnectCoordinator {
         if (state == State.IDLE || extraMillis <= 0L) {
             return false;
         }
-        graceEndsAtMillis = Math.max(graceEndsAtMillis, nowMillis) + extraMillis;
+        long proposed = Math.max(graceEndsAtMillis, nowMillis) + extraMillis;
+        long capped = Math.min(proposed, nowMillis + MAX_REMAINING_MILLIS);
+        if (capped <= graceEndsAtMillis) {
+            return false;
+        }
+        graceEndsAtMillis = capped;
         return true;
     }
 

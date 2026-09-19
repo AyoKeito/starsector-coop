@@ -294,6 +294,69 @@ class CoopReconnectCoordinatorTest {
         assertEquals(GRACE, reconnect.remainingMillis(1_000L));
     }
 
+    // ---- thirty-minute ceiling (2026-09-19 live evidence: 53 presses in 16 s, window reached
+    // 15,917 s) -------------------------------------------------------------------------------------
+
+    @Test
+    void oneExtensionFromAFreshWindowLandsAtTheGracePlusFiveMinutes() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 0L);
+
+        assertTrue(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 0L));
+
+        assertEquals(GRACE + CoopReconnectCoordinator.WAIT_MORE_MILLIS, reconnect.remainingMillis(0L));
+    }
+
+    @Test
+    void repeatedExtensionsStopAtExactlyThirtyMinutesRemainingAndThenReturnFalse() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 0L);
+
+        // Mirrors the live report: far more presses than it takes to reach the ceiling, all on
+        // (effectively) the same instant.
+        for (int press = 0; press < 60; press++) {
+            reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 0L);
+        }
+
+        assertEquals(CoopReconnectCoordinator.MAX_REMAINING_MILLIS, reconnect.remainingMillis(0L));
+        assertFalse(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 0L),
+                "once the ceiling is reached, a further press does nothing");
+        assertEquals(CoopReconnectCoordinator.MAX_REMAINING_MILLIS, reconnect.remainingMillis(0L),
+                "and the deadline is unchanged by the rejected press");
+    }
+
+    @Test
+    void timePassingAfterTheCeilingLetsANewPressExtendAgainUpToTheCeiling() {
+        CoopReconnectCoordinator reconnect = coordinator();
+        reconnect.beginHostWait(SESSION, GUEST, 0L);
+        for (int press = 0; press < 10; press++) {
+            reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 0L);
+        }
+        assertEquals(CoopReconnectCoordinator.MAX_REMAINING_MILLIS, reconnect.remainingMillis(0L));
+
+        // Fifteen real minutes pass; the ceiling is measured from "now", so it moves forward too, and
+        // the old deadline is no longer sitting at it.
+        long later = 900_000L;
+        assertTrue(reconnect.remainingMillis(later) < CoopReconnectCoordinator.MAX_REMAINING_MILLIS);
+
+        for (int press = 0; press < 10; press++) {
+            reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, later);
+        }
+
+        assertEquals(CoopReconnectCoordinator.MAX_REMAINING_MILLIS, reconnect.remainingMillis(later));
+        assertFalse(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, later));
+    }
+
+    @Test
+    void anExtensionOnAnIdleCoordinatorReturnsFalseEvenWithinTheCeiling() {
+        CoopReconnectCoordinator reconnect = coordinator();
+
+        assertFalse(reconnect.extend(CoopReconnectCoordinator.WAIT_MORE_MILLIS, 0L));
+
+        assertFalse(reconnect.active());
+        assertEquals(0L, reconnect.remainingMillis(0L));
+    }
+
     // ---- guards ----------------------------------------------------------------------------------
 
     @Test

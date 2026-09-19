@@ -43,8 +43,9 @@ public final class CoopReconnectHostDialog extends CoopReconnectDialogPlugin {
 
     @Override
     String waitMoreOptionTooltip() {
-        return "Adds five more minutes to the hold. Press it as often as you like - the sector stays"
-                + " frozen while you wait, so nothing is lost by waiting longer.";
+        return "Adds five more minutes to the hold. The sector stays frozen while you wait, so nothing"
+                + " is lost by waiting longer, but the hold can run for at most thirty minutes; presses"
+                + " past that do nothing.";
     }
 
     @Override
