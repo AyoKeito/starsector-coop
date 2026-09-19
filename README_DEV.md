@@ -333,9 +333,11 @@ Steps:
 1. Bump `version` in `mod_info.json`. `build.gradle` reads it automatically, so there is nothing to
    edit there. Bump `modVersion`'s `major`/`minor`/`patch` in `coop.version` to match, so Version
    Checker reports the release players actually have.
-2. Update `CHANGELOG.md` and anything in `docs/player/` the release changes. Re-check
-   `docs/CODEBASE_MAP.md` against the tree if a package, message type or script was added, and
-   move its "Last checked" line to the release version and commit.
+2. Update `CHANGELOG.md`. Verify every file in `docs/player/` against the code (quoted strings,
+   numbers, behaviour, cross-references) and fix it in place. Update `docs/CODEBASE_MAP.md` and move
+   its "Last checked" line to the new version. These docs are current instructions, not a record of
+   what changed: edit wrong text and delete stale text, never append a new paragraph beside an old
+   one.
    `LICENSE` (CC BY-NC 4.0 with the Fractal Softworks exception) ships in the release archive; any
    code vendored since the last release needs its own notice next to it and a line in `LICENSE`'s
    "does not cover" list.

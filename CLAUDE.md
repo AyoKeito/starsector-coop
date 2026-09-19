@@ -16,6 +16,7 @@ Java mod for Starsector 0.98a-RC8 that runs one shared campaign across two clien
 - `docs/roadmap.html` is generated; never edit it. Before every push: refresh `hereHead`, `here`, `attention` and the bucket notes in `docs/roadmap.data.json`, then run `node docs/roadmap_gen.js` and commit both. "You are here" states where the project stands today and what comes next, nothing else. Every ATTENTION entry is an open item with a concrete action and a pass criterion; when it lands, delete it. History belongs in the plan's ledger, not here.
 - `docs/CODEBASE_MAP.md` is the orientation map: packages, per-frame pump order, wire protocol contract, read-first files by task, in-game traps. Read it before exploring the source; update its "Last checked" line when you add a package, message type or script.
 - `docs/COOP_MP_DESIGN.md` is the design rationale; `docs/player/CONNECT.md` is the player-facing networking guide.
+- Standing rule for every release: verify each file in `docs/player/` against the code and fix it in place, and update `docs/CODEBASE_MAP.md` at every version bump. These docs and the map are current instructions, not an archive. Edit wrong text, delete stale text, never append a new paragraph where an old one should change, and never let them grow with history.
 
 ## Build, test, deploy
 
