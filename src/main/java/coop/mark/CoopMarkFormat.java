@@ -93,9 +93,12 @@ public final class CoopMarkFormat {
     }
 
     /**
-     * One line, no quotes, bounded. Quotes become apostrophes because the note is written inside
-     * quotes and a nested one would make the line ambiguous to read; newlines and tabs become
-     * spaces because a marker is one line by definition.
+     * One line, no quotes, bounded, printable ASCII. Quotes become apostrophes because the note is
+     * written inside quotes and a nested one would make the line ambiguous to read; newlines and
+     * tabs become spaces because a marker is one line by definition. Anything outside printable
+     * ASCII is written as {@code \\uXXXX}: the log is written in the machine's default code page,
+     * so Cyrillic or CJK typed into the box would otherwise reach the file mangled on a Windows
+     * whose code page is not UTF-8, and the two players' files must carry identical characters.
      */
     public static String note(String note) {
         if (note == null) {
@@ -111,6 +114,11 @@ public final class CoopMarkFormat {
             } else if (c < 0x20) {
                 // Control characters would be invisible in the log and could confuse a terminal.
                 out.append(' ');
+            } else if (c > 0x7e) {
+                if (out.length() + 6 > MAX_NOTE_CHARS) {
+                    break;
+                }
+                out.append(String.format(java.util.Locale.ROOT, "\\u%04x", (int) c));
             } else {
                 out.append(c);
             }

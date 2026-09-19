@@ -72,9 +72,15 @@ class CoopMarkFormatTest {
         assertEquals("a b", CoopMarkFormat.note("a\tb"));
         assertEquals("", CoopMarkFormat.note(null));
         assertEquals("", CoopMarkFormat.note("   "));
+        assertEquals("\\u0444\\u043b\\u043e\\u0442 ok", CoopMarkFormat.note("\u0444\u043b\u043e\u0442 ok"));
+        assertEquals("\\u4e2d\\u6587", CoopMarkFormat.note("\u4e2d\u6587"));
+        assertEquals("\\u007f", CoopMarkFormat.note("\u007f"));
 
         String long_ = "x".repeat(CoopMarkFormat.MAX_NOTE_CHARS + 40);
         assertEquals(CoopMarkFormat.MAX_NOTE_CHARS, CoopMarkFormat.note(long_).length());
+        String escaped = CoopMarkFormat.note("\u0444".repeat(CoopMarkFormat.MAX_NOTE_CHARS));
+        assertTrue(escaped.length() <= CoopMarkFormat.MAX_NOTE_CHARS, escaped.length() + " chars");
+        assertTrue(escaped.endsWith("\\u0444"), "never cut inside an escape: " + escaped);
     }
 
     @Test
