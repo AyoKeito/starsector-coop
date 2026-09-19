@@ -241,8 +241,19 @@ seconds per frame, so two machines drift apart structurally even at the same spe
 itself continuously and the status line shows the gap once it reaches an hour of game time.
 
 Running both games on one PC has its own version of this: Starsector caps its per-frame step, so a
-minimised or background window runs its clock slow and looks from the other side like the other client
-running fast. Keep both windows restored and visible.
+background window that is still visible runs its clock slow and looks from the other side like the
+other client running fast. Keep both windows visible and the drift pulls back together within a
+minute.
+
+Minimising a window is a harder stop than a slow clock: Starsector stops advancing frames in that game
+entirely, and the other side hears nothing from it. After about 15 seconds of silence the other side
+declares the link dead: a guest sees `Connection to <name> lost`, a host sees the
+`disconnected, holding the game` dialog, and either way its world is held paused (see "When the link
+drops" in `CONNECT.md`). Restoring the minimised window resumes the stalled game on its own; in a
+verified test the socket reconnected within half a second and the session was back within a few
+seconds, nine times out of nine, with nothing rolled back. This holds for either role: a minimised
+host stalls the guest's session and a minimised guest stalls the host's. Whether windowed or
+borderless mode avoids this is untested; fullscreen is where it was observed.
 
 ## Networking
 
@@ -252,6 +263,8 @@ password stops strangers from joining an open port; it is a gate, not encryption
 
 One guest. The wire format can carry more and the setting exists, but any value other than 1 is
 clamped back to 1 with a warning, because the gameplay side of a third player is not built.
+
+A minimised window looks like the link going dead, not the clock running slow. See Clocks, above.
 
 The 60 second reconnect wait ends for whoever clears the lobby password first. The host runs the
 password gate on an incoming hello and nothing else: it does not check that the client knocking is

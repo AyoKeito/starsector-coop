@@ -395,7 +395,9 @@ broken. A partner who is in a battle, who just announced a save, or whose proces
 for as long as that lasts.
 
 Both players get a countdown, the world is held paused on both sides, and each of you can choose to
-end the session or wait another five minutes. If the guest gets back inside the window, the session
+end the session or press to wait another five minutes. The countdown holds at 30 minutes remaining at
+most: once it is there, pressing wait again does nothing and the countdown stays put. If the guest
+gets back inside the window, the session
 carries on: the whole world state is rebroadcast so both sides restart from one picture, and nothing
 is rolled back.
 
@@ -434,7 +436,8 @@ not the save.
 | `UPnPError 725` | The router refuses timed leases | Nothing to do; the mod retries with a permanent lease and deletes it on exit. |
 | Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both firewall rules from tier 1. |
 | Fine but choppy | Latency, not reachability | Check round trip on the intel page. Above about 250 ms, try a VPN with a closer relay. |
-| One clock runs ahead, both games on one PC | Starsector caps its frame step, so a background window runs its clock slow | Keep both windows restored and visible. The drift pulls back together within a minute. |
+| One clock runs ahead, both games on one PC, both windows visible | Starsector caps its frame step, so a background window runs its clock slow | Keep both windows visible. The drift pulls back together within a minute. |
+| The reconnect countdown appears and your partner is alt-tabbed away or minimized | The minimized game has stopped advancing frames; it is not running | Restore the window. The session reconnects and resumes on its own within a few seconds. |
 
 ---
 
