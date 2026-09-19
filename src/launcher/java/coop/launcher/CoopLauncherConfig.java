@@ -56,6 +56,8 @@ public final class CoopLauncherConfig {
     public static final String CLOCK_DISABLE = CoopOptionsRegistry.CLOCK_DISABLE;
     public static final String DEBUG_DIAGNOSTICS = CoopOptionsRegistry.DEBUG_DIAGNOSTICS;
     public static final String DEBUG_BRIDGE = CoopOptionsRegistry.DEBUG_BRIDGE;
+    public static final String LAUNCHER_BRIDGE_ENABLED = CoopOptionsRegistry.LAUNCHER_BRIDGE_ENABLED;
+    public static final String LAUNCHER_BRIDGE_PORT = CoopOptionsRegistry.LAUNCHER_BRIDGE_PORT;
     public static final String DEBUG_WIRETAP = CoopOptionsRegistry.DEBUG_WIRETAP;
     public static final String DEBUG_WIRETAP_SAMPLE = CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE;
     public static final String DEBUG_FRAME_PROFILE = CoopOptionsRegistry.DEBUG_FRAME_PROFILE;
@@ -85,6 +87,8 @@ public final class CoopLauncherConfig {
             FF_DISABLE,
             CLOCK_DISABLE,
             DEBUG_DIAGNOSTICS,
+            LAUNCHER_BRIDGE_ENABLED,
+            LAUNCHER_BRIDGE_PORT,
             DEBUG_BRIDGE,
             DEBUG_WIRETAP,
             DEBUG_WIRETAP_SAMPLE,
@@ -93,6 +97,36 @@ public final class CoopLauncherConfig {
             ALLOW_GAME_VERSION_MISMATCH,
             ADOPT_CAMPAIGN_ID,
             EXPECTED_CAMPAIGN_ID);
+
+    /** The bridge port a hosting launcher uses when no port was typed. */
+    public static final int HOST_BRIDGE_PORT = 7801;
+
+    /** The bridge port a joining launcher uses when no port was typed. */
+    public static final int GUEST_BRIDGE_PORT = 7802;
+
+    /**
+     * The {@code coop.debug.bridge} value a launch should publish, or {@code 0} for no bridge.
+     *
+     * <p>The checkbox decides whether there is a bridge at all, so an unticked box publishes nothing
+     * however the port field is set - which is what lets the field keep a port the player typed. A
+     * ticked box with a port publishes that port. A ticked box with {@code 0} publishes the port the
+     * dev tooling expects for this role: {@value #HOST_BRIDGE_PORT} hosting,
+     * {@value #GUEST_BRIDGE_PORT} joining, the same two ports {@code launch-host.ps1 -Bridge} and
+     * {@code launch-guest.ps1 -Bridge} use, so both instances can be driven at once.
+     *
+     * @param enabled        the Agent bridge checkbox
+     * @param configuredPort the port field; {@code 0} or less means "whatever this role uses"
+     * @param hosting        true when this launch hosts, false when it joins
+     */
+    public static int bridgePortFor(boolean enabled, int configuredPort, boolean hosting) {
+        if (!enabled) {
+            return 0;
+        }
+        if (configuredPort > 0) {
+            return configuredPort;
+        }
+        return hosting ? HOST_BRIDGE_PORT : GUEST_BRIDGE_PORT;
+    }
 
     private final Map<String, Object> existing;
     private final boolean fileExisted;

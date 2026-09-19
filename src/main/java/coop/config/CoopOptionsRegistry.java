@@ -283,6 +283,14 @@ public final class CoopOptionsRegistry {
     public static final String DEBUG_INTERACTION_DELAY_MS = "coop.debug.interactionDelayMs";
     public static final String DEBUG_ALLY_PULL_IN = "coop.debug.allyPullIn";
     public static final String DEBUG_ALLY_PULL_IN_DROP_SHIELD = "coop.debug.allyPullInDropShield";
+    /**
+     * Launcher memory rather than game settings: the Settings window's Agent bridge checkbox and the
+     * port typed beside it. Nothing in the game reads either one; the launcher turns the pair into
+     * the {@link #DEBUG_BRIDGE} value it writes at Launch. They are registered here so the settings
+     * file the launcher writes has no entry the game would report as unknown.
+     */
+    public static final String LAUNCHER_BRIDGE_ENABLED = "coop.launcher.bridgeEnabled";
+    public static final String LAUNCHER_BRIDGE_PORT = "coop.launcher.bridgePort";
 
     private static final Map<String, Option> BY_KEY;
     private static final List<Option> ORDERED;
@@ -443,6 +451,17 @@ public final class CoopOptionsRegistry {
                 "next campaign load", ApplyBoundary.NEXT_CONNECTION,
                 "Port for the 127.0.0.1 agent bridge. Absent, 0 or unparsable means no socket"
                         + " ever."));
+        // The two halves of the launcher's Agent bridge checkbox. Keeping the typed port in its own
+        // key is what lets a player untick the box without losing the port they chose: the published
+        // key above is removed while the box is off, this one is not.
+        options.add(dOnly(LAUNCHER_BRIDGE_ENABLED, Type.BOOL, "false", "Phase 30",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
+                "Launcher only. Whether Launch writes an agent bridge port at all. The game reads"
+                        + " coop.debug.bridge and ignores this."));
+        options.add(dOnly(LAUNCHER_BRIDGE_PORT, Type.INT, "0", 0, 65535, "Phase 30",
+                "next launch", ApplyBoundary.NEXT_CONNECTION,
+                "Launcher only. The port typed beside the agent bridge checkbox; 0 means the role"
+                        + " default, 7801 hosting and 7802 joining. The game ignores this."));
         options.add(dOnly(DEBUG_WIRETAP, Type.BOOL, "false", "Phase 20.1",
                 "immediately", ApplyBoundary.IMMEDIATE,
                 "Datagram wiretap: per-type size histograms against the 1200 B WAN budget."));

@@ -306,4 +306,77 @@ class CoopLauncherConfigTest {
         assertEquals("quote\" back\\slash\ttab",
                 CoopLauncherConfig.read(file).value("coop.password"));
     }
+
+    @Test
+    void anUntickedAgentBridgePublishesNothingWhateverThePortSaysAndAPortOfItsOwnIsARoleDefault() {
+        assertEquals(0, CoopLauncherConfig.bridgePortFor(false, 7805, true),
+                "the box is what decides there is a bridge at all");
+        assertEquals(7805, CoopLauncherConfig.bridgePortFor(true, 7805, true));
+        assertEquals(CoopLauncherConfig.HOST_BRIDGE_PORT,
+                CoopLauncherConfig.bridgePortFor(true, 0, true));
+        assertEquals(CoopLauncherConfig.GUEST_BRIDGE_PORT,
+                CoopLauncherConfig.bridgePortFor(true, 0, false));
+        assertEquals(0, CoopLauncherConfig.bridgePortFor(false, 0, false));
+
+        assertEquals(7801, CoopLauncherConfig.HOST_BRIDGE_PORT,
+                "the port tools/starsector-mcp and launch-host.ps1 -Bridge expect");
+        assertEquals(7802, CoopLauncherConfig.GUEST_BRIDGE_PORT,
+                "the port tools/starsector-mcp and launch-guest.ps1 -Bridge expect");
+    }
+
+    @Test
+    void theAgentBridgeCheckboxAndItsPortSurviveALauncherRestart(@TempDir Path temp)
+            throws IOException {
+        File file = temp.resolve("coop_options.json.data").toFile();
+
+        // Ticked, with a port typed by hand: the game gets that port, and both halves are remembered.
+        CoopLauncherConfig.read(file).write(file, true, owned(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED, "true",
+                CoopLauncherConfig.LAUNCHER_BRIDGE_PORT, "7805",
+                CoopLauncherConfig.DEBUG_BRIDGE, "7805"));
+        CoopLauncherConfig reread = CoopLauncherConfig.read(file);
+        assertEquals("true", reread.value(CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED));
+        assertEquals("7805", reread.value(CoopLauncherConfig.LAUNCHER_BRIDGE_PORT));
+        assertEquals("7805", reread.value(CoopLauncherConfig.DEBUG_BRIDGE));
+
+        // Unticked afterwards. No bridge for the game, and the typed port is still there to come
+        // back to, which is why the port is not the on/off flag.
+        reread.write(file, true, owned(
+                CoopLauncherConfig.HOST_PORT, "7777",
+                CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED, "",
+                CoopLauncherConfig.LAUNCHER_BRIDGE_PORT, "7805",
+                CoopLauncherConfig.DEBUG_BRIDGE, ""));
+        CoopLauncherConfig off = CoopLauncherConfig.read(file);
+        assertEquals("", off.value(CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED));
+        assertEquals("7805", off.value(CoopLauncherConfig.LAUNCHER_BRIDGE_PORT));
+        assertEquals("", off.value(CoopLauncherConfig.DEBUG_BRIDGE));
+    }
+
+    @Test
+    void theRoleDefaultPortIsWhatReachesTheGameWhenTheFieldIsLeftAtZero() {
+        // What CoopLauncherApp does at Launch, on the two settings the brief names: the port field
+        // at 0 with the box ticked, and a typed port with the box unticked.
+        assertEquals("7801", bridgeKeyFor(true, 0, true));
+        assertEquals("7802", bridgeKeyFor(true, 0, false));
+        assertEquals("", bridgeKeyFor(false, 7805, true),
+                "an unticked box leaves the key out of the file, so the game opens no socket");
+    }
+
+    /** The {@code coop.debug.bridge} entry a launch with these settings leaves in the file. */
+    private static String bridgeKeyFor(boolean enabled, int port, boolean host) {
+        int published = CoopLauncherConfig.bridgePortFor(enabled, port, host);
+        Map<String, String> values = owned(
+                CoopLauncherConfig.LAUNCHER_BRIDGE_ENABLED, enabled ? "true" : "",
+                CoopLauncherConfig.LAUNCHER_BRIDGE_PORT, port == 0 ? "" : String.valueOf(port),
+                CoopLauncherConfig.DEBUG_BRIDGE, published == 0 ? "" : String.valueOf(published));
+        if (host) {
+            values.put(CoopLauncherConfig.HOST_PORT, "7777");
+        } else {
+            values.put(CoopLauncherConfig.CONNECT_HOST, "host.example");
+            values.put(CoopLauncherConfig.CONNECT_PORT, "7777");
+        }
+        return reparse(CoopLauncherConfig.parse("{}").compose(host, values))
+                .optString(CoopLauncherConfig.DEBUG_BRIDGE);
+    }
 }
