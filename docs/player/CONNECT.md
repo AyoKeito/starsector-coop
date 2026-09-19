@@ -35,22 +35,22 @@ next, rather than sending you to a log file to go find. Open **Logs** for the fu
 block; read it the way "Reading the log" at the end of this page reads it: the tier line says which
 of the four routes you are on, and the `next step` line says what to do when the answer is bad. It
 takes a few seconds, and the router mapping is released afterwards so the game can make its own at
-launch. Once it is holding the port for the guest's test a `listening on <port>` chip appears, and
-the launcher keeps the port open, and says so, until you press LAUNCH.
+startup. Once it is holding the port for the guest's test a `listening on <port>` chip appears, and
+the launcher keeps the port open, and says so, until you press Launch.
 
 **The guest presses Check connection** while that is up, with the invite already pasted in. Click the circular status icon for four
 chips, green when good, red when failed, grey when not measured:
 
 | Chip | Reading it |
 |---|---|
-| TCP | The port is open from where you are sitting. A failure here is the host's port forward, the host's firewall, or a wrong address, and everything below it is moot. |
-| launcher \<version\> | What accepted the connection was the host's co-op launcher, and it prints the mod version it is running. |
-| UDP | Fleet movement will go over UDP. Without it the session still runs over TCP, which costs latency; a router that forwards TCP but not UDP is the usual cause. |
-| \<n\> ms | Milliseconds, measured over that TCP connection. |
+| `TCP passed` / `TCP failed` | The port is open from where you are sitting. A failure here is the host's port forward, the host's firewall, or a wrong address, and everything below it is moot. |
+| `launcher <version>` | What accepted the connection was the host's co-op launcher, and it prints the mod version it is running. |
+| `UDP passed` / `UDP failed` / `UDP not tested` | Fleet movement will go over UDP. Without it the session still runs over TCP, which costs latency; a router that forwards TCP but not UDP is the usual cause. |
+| `<n> ms` / `no round trip` | Milliseconds, measured over that TCP connection. |
 
-TCP green and no launcher answer means something else is listening on that port. Nearly always that
-is the host's game already running instead of the host's launcher, in which case there is nothing to
-test: press LAUNCH and join.
+`TCP passed` with `Not a launcher` beside it means something else is listening on that port. Nearly
+always that is the host's game already running instead of the host's launcher, in which case there
+is nothing to test: press Launch and join.
 
 The test connects once and does not retry. The game counts connection attempts per address, five to
 a window, and a prober that hammered the port would spend the guest's budget before the real session
@@ -140,7 +140,7 @@ then the fleets stand still.
 Get the address to give the guest from <https://ifconfig.me> on the host PC. Check the forward from
 outside by pasting that address and port into
 <https://www.yougetsignal.com/tools/open-ports/> while the host game is running. That checker only
-tests TCP; the UDP half is confirmed by the guest's `UDP path up` line.
+tests TCP; the UDP half is confirmed by the guest's `UDP path` line reading `up`.
 
 Add the two firewall rules from tier 1 as well. A forwarded port still dies at Windows Firewall.
 
@@ -169,9 +169,10 @@ actually holds the LAN address. On a bridge-VLAN setup the bridge carries no add
 UPnP at the bridge produces a responder nothing ever reaches. RouterOS does not implement NAT-PMP at
 all, so its failure line there is a red herring.
 
-If a crashed session left a mapping behind, the next launch hits `UPnPError 718` on that port. The
-mod then asks the router who owns the entry and deletes it only when the router names this machine;
-a port held by another device on the LAN is reported, not evicted, and you pick a different
+If a crashed session left a mapping behind, the router refuses the new one and the log says
+`external port 7777/TCP already mapped; asking the router who owns it`. The mod deletes the entry
+only when the router names this machine (`is our own stale entry; deleting it and retrying`); a port
+held by another device on the LAN is reported, not evicted, and you pick a different
 `coop.hostPort`.
 
 `-Dcoop.portMapping=off` turns the attempt off. The only other accepted value is `auto`.
@@ -268,14 +269,16 @@ Three failures are named on the screen rather than left spinning:
 
 - `This install and the host's do not match, so the session cannot start.` then
   `Match the host's game version and mod list, then reconnect.`
-- `The host turned this connection down.` then `The host's own words are below. Nothing here retries
-  on its own.`, then the host's reason text.
+- `The host turned this connection down.` then the host's reason text. The line above it depends on
+  whether the refusal can change without a relaunch: `The host's own words are below. This keeps
+  retrying every 5 seconds; Cancel to stop.` when it can, and `The host's own words are below.
+  Nothing here retries on its own - fix it and relaunch.` when it cannot.
 - `The host's port answered but the session never started.` after 30 seconds with no answer from the
   lobby, then `Nothing arrived in 30 seconds. Check that the host is still on the lobby screen, then
   try again.`
 
 Seed and install mismatches do not stop here. They take the screen over with a dialog of their own,
-covered under "The three refusal dialogs".
+covered under "The refusal dialogs".
 
 Past step 4 the guest gets the same roster the host is reading, with `Ready` where the host has
 Start. Taking it back is `Not ready`, allowed at any point before the session starts; taking it back
@@ -296,7 +299,9 @@ already owns the clock and forcing a pause underneath it caused the frozen-dialo
 
 One line in a corner of the campaign screen (top right by default; `-Dcoop.hudCorner=TL|BR|BL`
 moves it, `-Dcoop.hud.disable=true` removes it). Segments are separated by a dot and only appear
-when they mean something:
+when they mean something. A second line joins it for five seconds whenever either of you presses the
+log marker key, reading `marked host#3: the note` on the side that pressed it and
+`partner marked host#3: the note` on the other; `REPORTING.md` covers what the markers are for:
 
 ```text
 HOST · session active · paused by guest's screen · 42 ms · loss 0% · udp
@@ -304,7 +309,7 @@ GUEST · session active · paused by host · guest 2h behind · 118 ms · loss 3
 ```
 
 - **Badge and status.** `HOST` or `GUEST`, then one of: no session, waiting for guest, connecting,
-  handshaking, in lobby, session active, reconnecting, guest disconnected holding, or
+  handshaking, in lobby, session active, reconnecting, `guest disconnected, holding`, or
   `rejected: <reason>`. `in lobby` is the window between the handshake finishing and somebody
   pressing Start; a refusal fills the reason in as `rejected: COOP-SEED, seed mismatch`.
 - **paused by ...** names whoever is holding the shared pause, worded from your side, so you read as
@@ -395,9 +400,15 @@ broken. A partner who is in a battle, who just announced a save, or whose proces
 for as long as that lasts.
 
 Both players get a countdown, the world is held paused on both sides, and each of you can choose to
-end the session or wait another five minutes. If the guest gets back inside the window, the session
-carries on: the whole world state is rebroadcast so both sides restart from one picture, and nothing
-is rolled back.
+end the session or wait another five minutes. `Wait 5 more minutes` may be pressed as often as you
+like. If the guest gets back inside the window, the session carries on: the whole world state is
+rebroadcast so both sides restart from one picture, nothing is rolled back, and anything that was
+still on its way when the link died, a purchase, a credit transfer, a storage deposit, is resent and
+lands exactly once.
+
+All of that is for a link that died. A partner who quits to the menu or closes the game says so on
+the way out, so there is no countdown to sit through: the session ends at once and the dialog says
+`the host left the game.` or `the guest left the game.`
 
 You do not have to sit the window out. If the game on the dropped side went down rather than just
 the connection, load the co-op save from that campaign and let it reconnect. Which save that is, the
@@ -430,18 +441,18 @@ not the save.
 | `CGNAT/double NAT` in the host log | The ISP, not your router | Tier 1 if you have IPv6, tier 0 otherwise. |
 | "no UPnP gateway answered" | UPnP is off, or the router does not speak it | Turn UPnP on, or use tier 2. |
 | "no UPnP gateway answered" on a router with VLANs | UPnP is pointed at the bridge, which holds no LAN address | Point it at the interface that holds the LAN address. |
-| `UPnPError 718`, then `already mapped to <device>` | Another device on the LAN owns that external port | Pick a different `coop.hostPort`, for example 7778. A stale mapping of your own is deleted and retried without you. |
-| `UPnPError 725` | The router refuses timed leases | Nothing to do; the mod retries with a permanent lease and deletes it on exit. |
+| `already mapped to <device>; set coop.hostPort to a free port` | Another device on the LAN owns that external port | Pick a different `coop.hostPort`, for example 7778. A stale mapping of your own is deleted and retried without you. |
+| `router only supports permanent leases; retrying TCP with lease 0` | The router refuses timed leases | Nothing to do; the mod retries with a permanent lease and deletes it on exit. |
 | Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both firewall rules from tier 1. |
 | Fine but choppy | Latency, not reachability | Check round trip on the intel page. Above about 250 ms, try a VPN with a closer relay. |
 | One clock runs ahead, both games on one PC | Starsector caps its frame step, so a background window runs its clock slow | Keep both windows restored and visible. The drift pulls back together within a minute. |
 
 ---
 
-## The three refusal dialogs
+## The refusal dialogs
 
 When a session is refused or ends with a reason, you get a dialog written for that reason, and a code
-you can search the log for. There are three codes.
+you can search the log for. There are four codes.
 
 **`COOP-SEED` means the two of you are not in the same sector, or not in the same campaign.** The
 sector version opens with "Your sector and the host's sector are not the same." and gives each side
@@ -451,8 +462,9 @@ sit both seeds and the first 8 characters of each sector fingerprint, side by si
 and "the host's", so you can read them to each other and confirm you are looking at the same
 difference. The campaign version opens with "This save is not from the host's co-op campaign.",
 because co-op stamps a campaign with an id the first time a session runs in it, and points you at the
-co-op save from that campaign. `launch-guest.ps1 -AdoptCampaign` is named there as the way to take
-the host's world instead, at the cost of this save's progress. Neither version offers a "join anyway".
+co-op save from that campaign. Ticking "Start over inside the host's campaign (guest)" in the
+launcher's Advanced section is named there as the way to take the host's world instead, at the cost
+of this save's progress. Neither version offers a "join anyway".
 
 **`COOP-MODS` means the two installs differ.** One line per differing mod, each with its own verdict
 and its own remedy, and the remedy points at whichever side is actually behind rather than always at
@@ -461,21 +473,30 @@ a line above the mod list. The list is capped, with "... and N more" pointing at
 matches on version but not on file contents is called out separately, in its own paragraph, because
 that is the case people refuse to believe: a partial download does it.
 
-**`COOP-SESSION` means the session itself could not be picked back up.** Six causes, each with its
+**`COOP-GAME` means this install's Starsector is not the version the mod was built for.** It is the
+one refusal that does not involve your partner at all: the check runs as the game loads, names both
+versions, and tells you to install the version the mod was built for on both PCs or wait for a
+release built for yours. Nothing is started, no port is opened and no connection is made, so the
+campaign behind the dialog plays as single player. The dialog also names the developer flag that
+runs co-op on the wrong version anyway, Allow game version mismatch in the launcher's Advanced card,
+and says it is not supported.
+
+**`COOP-SESSION` means the session itself could not be picked back up.** Seven causes, each with its
 own body: the reconnect window closed, the partner is holding a different session, that place belongs
 to a different player id, the partner is mid-grace for somebody else, a player pressed the end
-option, or something that did not classify. The grace window is always printed as a number of
-seconds. An unrecognised reason lands here too and prints the raw text verbatim, so a session never
-ends in silence. Only one cause is marked retryable (the partner being mid-grace for someone else)
+option, the partner quit the game on purpose, or something that did not classify. The grace window
+is always printed as a number of seconds. An unrecognised reason lands here too and prints the raw
+text verbatim, so a session never ends in silence. Only one cause is marked retryable (the partner being mid-grace for someone else)
 and even that ships without a "Try again" button, on purpose: the guest's connect loop was never
 stopped for it, it is still dialling every few seconds, and the dialog closes itself the moment a
 fresh handshake goes through.
 
 After `COOP-SEED` and `COOP-MODS` the guest stops reconnecting. Both are deterministic, so retrying
 earns the identical refusal every 5 seconds and buries the dialog under a stack of new ones; fix the
-save or the mod list and relaunch. `COOP-SESSION` leaves the retry loop alone, because a fresh lobby
-round is the documented way back in after a grace expiry. The host is untouched by all three: it
-rewinds to waiting and keeps its lobby open for a corrected guest.
+save or the mod list and relaunch. `COOP-GAME` never gets as far as a retry loop, because it fires
+before anything opens a socket. `COOP-SESSION` leaves the retry loop alone, because a fresh lobby
+round is the documented way back in after a grace expiry. The host is untouched by the refusals that
+involve it: it rewinds to waiting and keeps its lobby open for a corrected guest.
 
 Every one of these dialogs ends with the same line, naming the file and the exact string to search:
 
@@ -576,7 +597,9 @@ minutes. Practical consequence for the guest: after fixing the password, wait ou
 corrected client looks broken while the host is still refusing the address, and relaunching during
 the cooldown extends it.
 
-Other rejects read as plain sentences. `Lobby already has a guest` and `session in reconnect grace`
-are retried automatically every 5 seconds. The seed and install mismatches from `INSTALL.md`
+Other rejects read as plain sentences. `Lobby already has a guest` is retried automatically every 5
+seconds. So is `session in reconnect grace`, which a host on this build no longer sends at all, since
+a guest who gets through the password ends the wait instead of being turned away; you will only see
+it from a host running an older build. The seed and install mismatches from `INSTALL.md`
 section 8 are not: they stop the guest's retry loop and open a dialog of their own, covered under
-"The three refusal dialogs".
+"The refusal dialogs".
