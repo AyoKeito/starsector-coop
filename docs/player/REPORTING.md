@@ -62,7 +62,7 @@ Press **F11** when you see something wrong. One line goes into your log and the 
 partner's:
 
 ```text
-COOP-MARK host#3 | day 206.41 | Corvus (hyperspace) | seq 48120 | ""
+COOP-MARK host#3 | day 74418.38 | Corvus (hyperspace) | seq 48120 | ""
 ```
 
 `host#3` is the third marker the host made this session; the guest's are `guest#1` and up. The day,

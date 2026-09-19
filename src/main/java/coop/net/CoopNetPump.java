@@ -8736,10 +8736,17 @@ public class CoopNetPump implements EveryFrameScript {
         }
         float day = 0f;
         try {
-            // Elapsed days rather than the cycle/month/day triple: one monotonic number, the same
-            // number on both installs modulo whatever drift the reconciler has not taken out yet,
-            // and lining the two logs up is the entire job.
-            day = sector.getClock() == null ? 0f : sector.getClock().getElapsedDaysSince(0L);
+            // One monotonic number rather than the cycle/month/day triple, the same on both installs
+            // modulo whatever drift the reconciler has not taken out yet, because lining the two
+            // logs up is the entire job. Built from the calendar fields: a cycle is twelve 30-day
+            // months. getElapsedDaysSince(0L) is not usable here; the engine treats a zero
+            // timestamp as "never" and answers Float.MAX_VALUE (live-verified 2026-09-19, both logs
+            // carried a 39-digit day).
+            com.fs.starfarer.api.campaign.CampaignClockAPI clock = sector.getClock();
+            if (clock != null) {
+                day = clock.getCycle() * 360f + (clock.getMonth() - 1) * 30f + (clock.getDay() - 1)
+                        + clock.getHour() / 24f;
+            }
         } catch (RuntimeException | LinkageError ignored) {
             // Keep 0: a marker with no day still marks the spot in both files.
         }

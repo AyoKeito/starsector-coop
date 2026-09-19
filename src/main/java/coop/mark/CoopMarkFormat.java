@@ -44,11 +44,12 @@ public final class CoopMarkFormat {
      * The marker line, written by the presser the instant the key goes down and by the partner the
      * instant the message lands.
      *
-     * <p>{@code COOP-MARK host#3 | day 206.41 | Corvus (hyperspace) | seq 48120 | ""}
+     * <p>{@code COOP-MARK host#3 | day 74418.38 | Corvus (hyperspace) | seq 48120 | ""}
      *
      * @param markerId marker id from {@link #markerId}
-     * @param day      campaign days elapsed, two decimals; the same number on both clocks modulo
-     *                 whatever drift the reconciler has not taken out yet, which is the point
+     * @param day      campaign day count (cycle times 360 plus the day into the cycle, hours as a
+     *                 fraction), two decimals; the same number on both clocks modulo whatever drift
+     *                 the reconciler has not taken out yet, which is the point
      * @param location containing location of the presser's fleet, already suffixed by
      *                 {@link #location}
      * @param seq      the <em>sender's</em> outbound envelope sequence, so a marker can be found in
