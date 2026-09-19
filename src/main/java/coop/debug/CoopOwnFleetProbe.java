@@ -338,6 +338,34 @@ public final class CoopOwnFleetProbe {
         return sector != null && owner == sector.getPlayerFleet();
     }
 
+    /**
+     * Phase 33: the one sanctioned mod write on the player fleet. {@code CoopAllyLossApplier} applies
+     * the partner engine's battle result to the owner's real ships, which is the owner's own decision
+     * (the ally toggle) carried out late. Recorded in the probe's history at INFO, never as a WARN, so
+     * a log reader can tell this path from a bug.
+     */
+    public static void noteSanctionedWrite(FleetMemberAPI member, String reason) {
+        if (member == null) {
+            return;
+        }
+        INSTANCE.reportSanctionedWrite(member, reason);
+    }
+
+    private void reportSanctionedWrite(FleetMemberAPI member, String reason) {
+        String line;
+        try {
+            line = "Coop ownfleet SANCTIONED WRITE reason=" + reason
+                    + " member=" + safeId(member)
+                    + " hull=" + safeHullId(member)
+                    + " cr=" + fmt(safeCr(member))
+                    + " hull%=" + fmt(safeHullFraction(member));
+        } catch (RuntimeException | LinkageError ex) {
+            line = "Coop ownfleet SANCTIONED WRITE reason=" + reason + " (member unreadable)";
+        }
+        push(line);
+        CoopLog.info(CoopOwnFleetProbe.class, line);
+    }
+
     private void reportModWrite(FleetMemberAPI member, String reason) {
         modWriteCount++;
         String line;

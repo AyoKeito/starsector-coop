@@ -688,6 +688,33 @@ public class CoopFleetMirror implements CoopNpcMirror {
         }
     }
 
+    // ---- Phase 33 ally battle surface (stubs; the mirror worker fills them in) ---------------------
+
+    /**
+     * Phase 33: whether the owner of this player mirror currently allows it to fight as an AI ally.
+     * False for NPC mirrors and until the owner's snapshot says otherwise.
+     */
+    public boolean allyAllowed() {
+        return false;
+    }
+
+    /**
+     * Phase 33: the join event of the battle this mirror was just pulled into, once per battle, or null.
+     * Polled every frame by the pump on the piloting engine and sent to the owner as ALLY_BATTLE_JOIN.
+     */
+    public coop.combat.CoopAllyBattleJoin takeAllyBattleJoin() {
+        return null;
+    }
+
+    /**
+     * Phase 33: what the battle did to this mirror, read once when its battle went null and before
+     * snapshot applies resume, or null. Polled every frame by the pump on the piloting engine and
+     * sent to the owner as ALLY_BATTLE_RESULT. Taking it releases the member-state freeze.
+     */
+    public coop.combat.CoopAllyBattleOutcome takeAllyBattleOutcome() {
+        return null;
+    }
+
     /**
      * The re-assert gate, pure so the timing is unit-tested rather than reasoned about: assert on the
      * first call and whenever the last one is at least an interval old. A clock that moved backwards

@@ -3128,6 +3128,13 @@ Added by the red-team pass (2026-09-05), each aimed at a fix that is unit-verifi
 - **Deploy everything.** The fleet AI decides what to deploy, flagship included.
 - **No spoils sharing.** The piloting player keeps XP, salvage, credits and recoveries, as vanilla does for a battle with allies. `CoopRewardSplitter` stays out of combat.
 
+**Decisions (2026-09-20, user, after the spike):**
+
+- **Vanilla join rule kept.** The partner joins only fights against a side its fleet is hostile to. No forced `battle.join`; attacking a neutral stays a solo fight.
+- **Officers ship in this phase, not in Phase 22 M4.** The fleet snapshot carries each ship's officer (name, level, personality, skills with elite flags) and the owner's commander skills; the mirror creates matching officers and gives the placeholder commander the owner's fleet-wide skills, so the ally fights near its real strength and pays real losses for it.
+- **Owner notice at both ends.** One HUD line when the owner's fleet is pulled into the partner's fight ("your fleet is fighting alongside <partner>"), the loss banner when the result lands.
+- **Ships as 0.1.4** after its own two-instance smoke.
+
 **Live spike (code on main 2026-09-05; RUN 2026-09-20, results below):** `-Dcoop.debug.allyPullIn=true` on both instances creates the player mirror without the flag, stops re-asserting it, and turns the threat watcher's eject into log lines (`Coop SPIKE ally pull-in: mirror is in a battle` with sides and the pre-battle roster, `mirror left the battle` with the post-battle roster). `-Dcoop.debug.allyPullInDropShield=true` also drops the per-frame `setNoEngaging`, for a second run if the first shows no join. Runbook: `tmp_ff_analysis\ally-pullin-spike\RUNBOOK.md`. Facts to collect: whether the mirror joins and on which side, whether it deploys under a placeholder commander, what the mirror's roster looks like after the battle, and whether the owner's next snapshot rebuilds a gutted mirror. The design below assumes the join works; if it does not, the fallback is an explicit `battle.join(mirror, side)` from `CoopBattleBridge` when the engage dialog opens.
 
 **Spike results (2026-09-20, two local test clients, run 1 only; `allyPullInDropShield` was never needed):**
@@ -3161,7 +3168,7 @@ Added by the red-team pass (2026-09-05), each aimed at a fix that is unit-verifi
 
 **Accepted limitations:**
 
-- The ally has no officers and no commander skills; it fights below its owner's real strength until the Phase 22 manifest lands.
+- Officer and commander skills are replicated from the owner's snapshot (2026-09-20 decision); anything the snapshot does not carry (hullmod-granting skills' side effects, s-mods already in the variant) is whatever the mirror's variant already reproduces.
 - The ally joins only fights against a side it is hostile to (vanilla `wantsToJoin`). Attacking a neutral fleet is a solo fight even with the partner adjacent and allowed.
 - Allied wrecks are not recoverable by anyone (vanilla).
 - The owner cannot retreat or direct its ships; the fleet AI runs them.
