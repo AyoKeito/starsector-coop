@@ -416,9 +416,9 @@ src/launcher/java/coop/launcher/   22 classes
 
 - **Agent bridge.** `coop.debug.CoopAgentBridge`, gated on `-Dcoop.debug.bridge=<port>`; absent,
   unparsable or `0` means no socket and no log line. Binds 127.0.0.1 only, four clients, a few
-  commands per frame on the campaign thread. 28 verbs in `CoopAgentCommands`: `status`, `fleets`,
-  `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `landmarks`,
-  `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`, `setcr`, `give`,
+  commands per frame on the campaign thread. 29 verbs in `CoopAgentCommands`: `status`, `fleets`,
+  `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `colonizable`, `hirable`,
+  `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`, `setcr`, `give`,
   `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`, `mark`, `memory` act.
   Four things are deliberately **not** verbs (market buy/sell, officer hire, bar-offer accept, market
   open/close) because a UI listener drives each and a verb would bypass the listener under test.

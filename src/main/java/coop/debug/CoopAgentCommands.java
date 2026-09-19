@@ -8,6 +8,8 @@ import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainPlugin;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
+import com.fs.starfarer.api.campaign.CommDirectoryAPI;
+import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
 import com.fs.starfarer.api.campaign.CoreUITabId;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
@@ -26,6 +28,9 @@ import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
+import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
+import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.characters.PersonalityAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberStatusAPI;
 import com.fs.starfarer.api.fleet.FleetMemberType;
@@ -35,6 +40,7 @@ import com.fs.starfarer.api.impl.campaign.econ.impl.Cryorevival;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ItemEffectsRepo;
 import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.ids.Ranks;
 import com.fs.starfarer.api.impl.campaign.ids.Submarkets;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.ids.Terrain;
@@ -234,6 +240,7 @@ public final class CoopAgentCommands {
         map.put("visibility", CoopAgentCommands::visibility);
         map.put("ownfleet", CoopAgentCommands::ownfleet);
         map.put("colonizable", CoopAgentCommands::colonizable);
+        map.put("hirable", CoopAgentCommands::hirable);
         map.put("landmarks", CoopAgentCommands::landmarks);
         map.put("entities", CoopAgentCommands::entities);
         map.put("intel", CoopAgentCommands::intel);
@@ -1378,6 +1385,257 @@ public final class CoopAgentCommands {
             }
         }
         return new ArrayList<>(ids);
+    }
+
+    // ---- hirable: finding a market that actually has an officer on offer -------------------------
+
+    /** Rows returned when the caller does not say. */
+    static final int HIRABLE_DEFAULT_LIMIT = 10;
+
+    /** Hard ceiling on {@code limit}: the economy runs to a few hundred markets. */
+    static final int HIRABLE_MAX_LIMIT = 200;
+
+    /** The {@code post} value for a {@link Ranks#POST_OFFICER_FOR_HIRE} person. */
+    static final String HIRABLE_POST_OFFICER = "officer";
+
+    /** The {@code post} value for a {@link Ranks#POST_FREELANCE_ADMIN} person. */
+    static final String HIRABLE_POST_ADMIN = "admin";
+
+    /** One person on offer, reduced to what picking between two of them turns on. */
+    record HirablePerson(String name, String post, int level, String personality) {
+    }
+
+    /**
+     * One market holding at least one person for hire.
+     *
+     * <p>{@code distanceLy} is hyperspace distance from the player fleet and is {@code 0} for a market
+     * in the fleet's own system, the same measure {@code colonizable} uses and for the same reason:
+     * every market in one system is equidistant, so "here first, then nearest" falls out of it.
+     */
+    record HirableMarket(String marketId, String name, String factionId, String system,
+                         String locationId, float distanceLy, int officers, int admins,
+                         List<HirablePerson> people) {
+    }
+
+    /** Nearest first, then market id so two runs of the same query never reorder. */
+    static final Comparator<HirableMarket> HIRABLE_ORDER =
+            Comparator.comparingDouble(HirableMarket::distanceLy)
+                    .thenComparing(HirableMarket::marketId);
+
+    /**
+     * The markets holding officers or administrators for hire, nearest the local player fleet first,
+     * so a smoke can fly to one in a single query instead of docking at markets until it finds one.
+     *
+     * <p><b>Pure query, any role.</b> It reads local engine state and writes nothing, so it answers on
+     * host, guest and a session-less instance alike — same contract as {@code markets} and
+     * {@code colonizable}.
+     *
+     * <p><b>Who counts is vanilla's own test.</b> A person on offer is a {@code PERSON} entry in the
+     * market's comm directory ({@link MarketAPI#getCommDirectory()}) whose post id is one of the two
+     * that {@code OfficerManagerEvent} stamps on what it puts there:
+     * {@link Ranks#POST_OFFICER_FOR_HIRE} ({@code "officer_for_hire"}) for an officer and
+     * {@link Ranks#POST_FREELANCE_ADMIN} ({@code "freeAdmin"}) for an administrator. There is no
+     * {@code POST_ADMINISTRATOR_FOR_HIRE} in the API: {@link Ranks#POST_ADMINISTRATOR} is the post of a
+     * colony's <em>sitting</em> administrator, which is not something anyone can hire off a directory.
+     *
+     * <p><b>No faction filter, and hidden markets are in.</b> A Pather or pirate base with an officer
+     * on offer is exactly as hirable-from as a Hegemony world, and the player's own colony can carry a
+     * freelance admin too. The one thing that removes a market from the answer is holding nobody.
+     *
+     * <p><b>{@code people} keeps the directory's own order</b>, which is the order the comm-directory
+     * screen lists them in, so the row reads the same way the dialog the caller is about to open does.
+     *
+     * <p>Args: {@code limit} (default {@value #HIRABLE_DEFAULT_LIMIT}, 1..{@value #HIRABLE_MAX_LIMIT})
+     * and {@code maxLy} (0 or absent = no range filter).
+     */
+    static JSONObject hirable(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        CampaignFleetAPI player = requirePlayerFleet(sector);
+        int limit = optionalInt(args, "limit", HIRABLE_DEFAULT_LIMIT);
+        if (limit < 1 || limit > HIRABLE_MAX_LIMIT) {
+            throw new IllegalArgumentException("limit must be between 1 and " + HIRABLE_MAX_LIMIT
+                    + ", got " + limit);
+        }
+        double maxLy = optionalDouble(args, "maxLy", 0d);
+
+        List<HirableMarket> all = hirableMarkets(sector, player);
+        List<HirableMarket> inRange = selectHirable(all, maxLy);
+        boolean truncated = inRange.size() > limit;
+        List<HirableMarket> shown =
+                truncated ? new ArrayList<>(inRange.subList(0, limit)) : inRange;
+
+        LocationAPI here = player.getContainingLocation();
+        JSONObject out = new JSONObject();
+        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("limit", limit);
+        out.put("maxLy", round((float) maxLy));
+        // Everything holding somebody, before maxLy and limit trimmed the list: "none nearby" and
+        // "nobody is offering anywhere" are different answers and the caller has to tell them apart.
+        out.put("candidateCount", all.size());
+        out.put("truncated", truncated);
+        out.put("count", shown.size());
+
+        JSONArray markets = new JSONArray();
+        for (HirableMarket market : shown) {
+            JSONObject row = new JSONObject();
+            row.put("marketId", market.marketId());
+            row.put("name", market.name());
+            row.put("factionId", market.factionId());
+            row.put("system", market.system());
+            row.put("locationId", market.locationId());
+            row.put("distanceLy", round(market.distanceLy()));
+            row.put("officers", market.officers());
+            row.put("admins", market.admins());
+            JSONArray people = new JSONArray();
+            for (HirablePerson person : market.people()) {
+                JSONObject entry = new JSONObject();
+                entry.put("name", person.name());
+                entry.put("post", person.post());
+                entry.put("level", person.level());
+                entry.put("personality", person.personality());
+                people.put(entry);
+            }
+            row.put("people", people);
+            markets.put(row);
+        }
+        out.put("markets", markets);
+        return out;
+    }
+
+    /**
+     * The range filter and the nearest-first order, without the cap. No markets is an empty list, not
+     * an error.
+     */
+    static List<HirableMarket> selectHirable(List<HirableMarket> candidates, double maxLy) {
+        List<HirableMarket> kept = new ArrayList<>();
+        for (HirableMarket candidate : candidates) {
+            if (candidate == null) {
+                continue;
+            }
+            if (maxLy > 0d && candidate.distanceLy() > maxLy) {
+                continue;
+            }
+            kept.add(candidate);
+        }
+        kept.sort(HIRABLE_ORDER);
+        return kept;
+    }
+
+    /** Every economy market holding at least one person for hire, unsorted and untrimmed. */
+    static List<HirableMarket> hirableMarkets(SectorAPI sector, CampaignFleetAPI player) {
+        EconomyAPI economy = sector.getEconomy();
+        List<MarketAPI> all = economy == null ? List.<MarketAPI>of() : economy.getMarketsCopy();
+        List<HirableMarket> found = new ArrayList<>();
+        if (all == null) {
+            return found;
+        }
+        for (MarketAPI market : all) {
+            HirableMarket candidate = hirableMarket(market, player);
+            if (candidate != null) {
+                found.add(candidate);
+            }
+        }
+        return found;
+    }
+
+    /** One market's offer, or null if it is holding nobody — or if reading it threw. */
+    private static HirableMarket hirableMarket(MarketAPI market, CampaignFleetAPI player) {
+        try {
+            if (market == null || market.getId() == null) {
+                return null;
+            }
+            List<HirablePerson> people = hirablePeople(market);
+            if (people.isEmpty()) {
+                return null;
+            }
+            int officers = 0;
+            for (HirablePerson person : people) {
+                if (HIRABLE_POST_OFFICER.equals(person.post())) {
+                    officers++;
+                }
+            }
+            LocationAPI location = market.getContainingLocation();
+            if (location == null && market.getPrimaryEntity() != null) {
+                location = market.getPrimaryEntity().getContainingLocation();
+            }
+            return new HirableMarket(
+                    nullSafe(market.getId()),
+                    nullSafe(market.getName()),
+                    nullSafe(market.getFactionId()),
+                    location == null ? "" : nullSafe(location.getName()),
+                    marketLocationId(market),
+                    hirableDistanceLy(market, player),
+                    officers,
+                    people.size() - officers,
+                    people);
+        } catch (RuntimeException | LinkageError ex) {
+            // One unreadable market must not cost the caller every other one.
+            return null;
+        }
+    }
+
+    /**
+     * The comm-directory entries that are people for hire, in the directory's own order. An entry
+     * whose data is not a {@code PersonAPI} is skipped rather than trusted: {@code getEntryData()} is
+     * declared {@code Object} and the type flag and the payload are set independently.
+     */
+    private static List<HirablePerson> hirablePeople(MarketAPI market) {
+        List<HirablePerson> people = new ArrayList<>();
+        CommDirectoryAPI directory = market.getCommDirectory();
+        if (directory == null) {
+            return people;
+        }
+        List<CommDirectoryEntryAPI> entries = directory.getEntriesCopy();
+        if (entries == null) {
+            return people;
+        }
+        for (CommDirectoryEntryAPI entry : entries) {
+            if (entry == null || entry.getType() != CommDirectoryEntryAPI.EntryType.PERSON) {
+                continue;
+            }
+            if (!(entry.getEntryData() instanceof PersonAPI person)) {
+                continue;
+            }
+            String post = hirablePost(person.getPostId());
+            if (post.isEmpty()) {
+                continue;
+            }
+            MutableCharacterStatsAPI stats = person.getStats();
+            PersonalityAPI personality = person.getPersonalityAPI();
+            people.add(new HirablePerson(
+                    nullSafe(person.getNameString()),
+                    post,
+                    stats == null ? 0 : stats.getLevel(),
+                    personality == null ? "" : nullSafe(personality.getId())));
+        }
+        return people;
+    }
+
+    /** The two posts that mean "on offer", mapped to the short names the row reports. */
+    private static String hirablePost(String postId) {
+        if (postId == null) {
+            return "";
+        }
+        if (postId.equals(Ranks.POST_OFFICER_FOR_HIRE)) {
+            return HIRABLE_POST_OFFICER;
+        }
+        if (postId.equals(Ranks.POST_FREELANCE_ADMIN)) {
+            return HIRABLE_POST_ADMIN;
+        }
+        return "";
+    }
+
+    /**
+     * Hyperspace distance to a market, measured off its primary entity — the token that actually has a
+     * position. A market with no entity reads as zero rather than as unreachable: it is still a market
+     * the caller can be told about, and no distance is better than a fabricated one.
+     */
+    private static float hirableDistanceLy(MarketAPI market, CampaignFleetAPI player) {
+        SectorEntityToken entity = market.getPrimaryEntity();
+        if (entity == null) {
+            return 0f;
+        }
+        return distanceLy(entity, player);
     }
 
     // ---- landmarks: the unique objects a colony site is chosen relative to ------------------------

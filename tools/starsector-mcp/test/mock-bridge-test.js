@@ -222,12 +222,12 @@ test('does not retry a mutating command after a mid-request drop; throws BridgeO
   assert.equal(bridge.requests[0].cmd, 'give');
 });
 
-test('READ_ONLY_COMMANDS is exactly the fourteen read verbs and none of the mutations', () => {
+test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutations', () => {
   assert.deepEqual(
     [...READ_ONLY_COMMANDS].sort(),
     [
-      'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'intel', 'landmarks',
-      'market', 'markets', 'screen', 'status', 'survey', 'visibility'
+      'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'hirable', 'intel',
+      'landmarks', 'market', 'markets', 'screen', 'status', 'survey', 'visibility'
     ]
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and

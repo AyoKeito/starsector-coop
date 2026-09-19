@@ -4,6 +4,8 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.CommDirectoryAPI;
+import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
 import com.fs.starfarer.api.campaign.CoreUITabId;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
@@ -21,7 +23,11 @@ import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.AbilityPlugin;
+import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
+import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.characters.PersonalityAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Ranks;
 import coop.campaign.CoopCreditTransfer;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorTags;
@@ -861,6 +867,206 @@ class CoopAgentQueryVerbsTest {
         assertTrue(assertThrows(IllegalArgumentException.class,
                 () -> CoopAgentCommands.colonizable(args("maxLy", "nearby"), context))
                 .getMessage().contains("maxLy must be numeric"));
+    }
+
+    // ---- hirable: which markets are actually offering somebody, and in what order ----------------
+
+    @Test
+    void onlyMarketsHoldingSomeoneForHireListAndTheyComeBackNearestFirst() throws JSONException {
+        JSONObject out = CoopAgentCommands.hirable(new JSONObject(), hirableSector());
+
+        assertEquals(2, out.getInt("candidateCount"));
+        assertEquals(2, out.getInt("count"));
+        assertFalse(out.getBoolean("truncated"));
+        assertEquals(List.of("jangala", "kantas_den"), marketIds(out),
+                "out: the market whose only directory person is a sitting administrator. In: both"
+                        + " markets offering somebody, the fleet's own system first - and the economy"
+                        + " handed them over in the other order, so this is the sort, not the walk");
+        assertEquals("corvus", out.getString("fromLocationId"));
+    }
+
+    @Test
+    void aHirableRowNamesTheMarketTheDistanceAndEveryPersonOnOffer() throws JSONException {
+        JSONObject out = CoopAgentCommands.hirable(new JSONObject(), hirableSector());
+
+        JSONObject jangala = out.getJSONArray("markets").getJSONObject(0);
+        assertEquals("Jangala", jangala.getString("name"));
+        assertEquals("hegemony", jangala.getString("factionId"));
+        assertEquals("Corvus Star System", jangala.getString("system"));
+        assertEquals("corvus", jangala.getString("locationId"));
+        assertEquals(0d, jangala.getDouble("distanceLy"), 0d, "the fleet's own system is at zero LY");
+        assertEquals(1, jangala.getInt("officers"));
+        assertEquals(0, jangala.getInt("admins"));
+
+        JSONObject hiro = jangala.getJSONArray("people").getJSONObject(0);
+        assertEquals("Hiro Hashimoto", hiro.getString("name"));
+        assertEquals("officer", hiro.getString("post"));
+        assertEquals(3, hiro.getInt("level"));
+        assertEquals("aggressive", hiro.getString("personality"));
+
+        JSONObject kantas = out.getJSONArray("markets").getJSONObject(1);
+        assertEquals(4d, kantas.getDouble("distanceLy"), 1e-6, "8000 su / 2000 su per LY");
+        assertEquals("pirates", kantas.getString("factionId"),
+                "a pirate base with an officer on offer is as hirable-from as a Hegemony world");
+        assertEquals(1, kantas.getInt("officers"));
+        assertEquals(1, kantas.getInt("admins"),
+                "Ranks.POST_FREELANCE_ADMIN is the admin-for-hire post; there is no"
+                        + " POST_ADMINISTRATOR_FOR_HIRE in the API");
+        assertEquals(List.of("officer", "admin"), posts(kantas),
+                "the comm directory's own order, which is the order the screen lists them in");
+    }
+
+    @Test
+    void limitTrimsToTheNearestAndSaysThatItDid() throws JSONException {
+        JSONObject out = CoopAgentCommands.hirable(args("limit", "1"), hirableSector());
+
+        assertEquals(2, out.getInt("candidateCount"),
+                "candidateCount stays every market offering somebody, so \"none nearby\" and \"nobody"
+                        + " is offering anywhere\" still read differently");
+        assertEquals(1, out.getInt("count"));
+        assertTrue(out.getBoolean("truncated"));
+        assertEquals(List.of("jangala"), marketIds(out),
+                "the cap takes the nearest, not the first one the economy walk happened to hand over");
+
+        JSONObject untrimmed = CoopAgentCommands.hirable(args("limit", "5"), hirableSector());
+        assertFalse(untrimmed.getBoolean("truncated"), "a limit nothing hit is not a truncation");
+    }
+
+    @Test
+    void maxLyFiltersHirableMarketsAndZeroIsNoFilter() {
+        CoopAgentCommands.HirableMarket here = hirableMarket("here", 0f);
+        CoopAgentCommands.HirableMarket mid = hirableMarket("mid", 4f);
+        CoopAgentCommands.HirableMarket far = hirableMarket("far", 9f);
+        List<CoopAgentCommands.HirableMarket> all = List.of(far, mid, here);
+
+        assertEquals(List.of("here", "mid", "far"),
+                hirableIds(CoopAgentCommands.selectHirable(all, 0d)),
+                "maxLy 0 is no filter, not a filter that excludes everything");
+        assertEquals(List.of("here", "mid"), hirableIds(CoopAgentCommands.selectHirable(all, 5d)));
+        assertEquals(List.of("here"), hirableIds(CoopAgentCommands.selectHirable(all, 0.5d)),
+                "a market in the fleet's own system is at zero LY, so no range filter excludes it");
+    }
+
+    @Test
+    void aSectorWhereNobodyIsOfferingAnswersAnEmptyListNotAnError() throws JSONException {
+        LocationAPI corvus = system("corvus", "Corvus Star System", List.of());
+        EconomyAPI economy = proxy(EconomyAPI.class, answers("getMarketsCopy", args -> List.of()));
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getPlayerFleet", args -> fleetAt(corvus, 0f, 0f, 0f, 0f),
+                "getEconomy", args -> economy));
+
+        JSONObject out = CoopAgentCommands.hirable(new JSONObject(), contextFor(sector));
+
+        assertEquals(0, out.getInt("candidateCount"));
+        assertEquals(0, out.getInt("count"));
+        assertFalse(out.getBoolean("truncated"));
+        assertEquals(0, out.getJSONArray("markets").length());
+    }
+
+    @Test
+    void anUnusableHirableLimitIsRefusedRatherThanQuietlyClamped() {
+        CoopAgentCommands.Context context = hirableSector();
+
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.hirable(args("limit", "0"), context))
+                .getMessage().contains("limit must be between 1 and 200"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.hirable(args("maxLy", "nearby"), context))
+                .getMessage().contains("maxLy must be numeric"));
+    }
+
+    // ---- hirable fakes ---------------------------------------------------------------------------
+
+    /**
+     * Corvus (the fleet's own system) holds Jangala with one officer on offer and Chicomoztoc with
+     * nobody; Kanta's Den is 4 LY out with an officer and a freelance admin. The economy hands them
+     * over farthest first, so the answer's order is the verb's sort rather than the walk's.
+     */
+    private static CoopAgentCommands.Context hirableSector() {
+        LocationAPI corvus = system("corvus", "Corvus Star System", List.of());
+        LocationAPI aleph = system("aleph", "Aleph Star System", List.of());
+
+        MarketAPI jangala = hireMarket("jangala", "Jangala", "hegemony", corvus, 0f,
+                List.of(person("Hiro Hashimoto", Ranks.POST_OFFICER_FOR_HIRE, 3, "aggressive")));
+        MarketAPI kantas = hireMarket("kantas_den", "Kanta's Den", "pirates", aleph, 8000f,
+                List.of(person("Ako Sen", Ranks.POST_OFFICER_FOR_HIRE, 5, "reckless"),
+                        person("Bral Voss", Ranks.POST_FREELANCE_ADMIN, 1, "timid")));
+        // A sitting colony administrator is in the directory too, and is not for hire.
+        MarketAPI chicomoztoc = hireMarket("chicomoztoc", "Chicomoztoc", "hegemony", corvus, 0f,
+                List.of(person("Daud", Ranks.POST_ADMINISTRATOR, 4, "cautious")));
+
+        EconomyAPI economy = proxy(EconomyAPI.class,
+                answers("getMarketsCopy", args -> List.of(kantas, chicomoztoc, jangala)));
+        return contextFor(proxy(SectorAPI.class, answers(
+                "getPlayerFleet", args -> fleetAt(corvus, 0f, 0f, 0f, 0f),
+                "getEconomy", args -> economy)));
+    }
+
+    private static MarketAPI hireMarket(String marketId, String name, String factionId,
+                                        LocationAPI location, float hyperX, List<PersonAPI> people) {
+        List<CommDirectoryEntryAPI> entries = new ArrayList<>();
+        for (PersonAPI person : people) {
+            entries.add(proxy(CommDirectoryEntryAPI.class, answers(
+                    "getType", args -> CommDirectoryEntryAPI.EntryType.PERSON,
+                    "getEntryData", args -> person)));
+        }
+        CommDirectoryAPI directory = proxy(CommDirectoryAPI.class,
+                answers("getEntriesCopy", args -> entries));
+        SectorEntityToken entity = proxy(SectorEntityToken.class, answers(
+                "getContainingLocation", args -> location,
+                "getLocationInHyperspace", args -> new Vector2f(hyperX, 0f)));
+
+        Map<String, Answer> answers = answers();
+        answers.put("getId", args -> marketId);
+        answers.put("getName", args -> name);
+        answers.put("getFactionId", args -> factionId);
+        answers.put("getContainingLocation", args -> location);
+        answers.put("getPrimaryEntity", args -> entity);
+        answers.put("getCommDirectory", args -> directory);
+        return proxy(MarketAPI.class, answers);
+    }
+
+    private static PersonAPI person(String name, String postId, int level, String personality) {
+        Map<String, Answer> answers = answers();
+        answers.put("getNameString", args -> name);
+        answers.put("getPostId", args -> postId);
+        answers.put("getStats", args -> proxy(MutableCharacterStatsAPI.class,
+                answers("getLevel", statArgs -> level)));
+        answers.put("getPersonalityAPI", args -> proxy(PersonalityAPI.class,
+                answers("getId", personalityArgs -> personality)));
+        return proxy(PersonAPI.class, answers);
+    }
+
+    private static CoopAgentCommands.HirableMarket hirableMarket(String marketId, float ly) {
+        return new CoopAgentCommands.HirableMarket(marketId, marketId, "hegemony", "System",
+                "system", ly, 1, 0,
+                List.of(new CoopAgentCommands.HirablePerson("Someone", "officer", 1, "steady")));
+    }
+
+    private static List<String> hirableIds(List<CoopAgentCommands.HirableMarket> markets) {
+        List<String> out = new ArrayList<>();
+        for (CoopAgentCommands.HirableMarket market : markets) {
+            out.add(market.marketId());
+        }
+        return out;
+    }
+
+    private static List<String> marketIds(JSONObject out) throws JSONException {
+        List<String> ids = new ArrayList<>();
+        JSONArray markets = out.getJSONArray("markets");
+        for (int i = 0; i < markets.length(); i++) {
+            ids.add(markets.getJSONObject(i).getString("marketId"));
+        }
+        return ids;
+    }
+
+    private static List<String> posts(JSONObject market) throws JSONException {
+        List<String> out = new ArrayList<>();
+        JSONArray people = market.getJSONArray("people");
+        for (int i = 0; i < people.length(); i++) {
+            out.add(people.getJSONObject(i).getString("post"));
+        }
+        return out;
     }
 
     // ---- landmarks: the unique objects, found by vanilla's own tags -------------------------------

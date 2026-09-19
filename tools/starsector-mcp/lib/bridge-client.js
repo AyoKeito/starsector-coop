@@ -69,6 +69,7 @@ export const READ_ONLY_COMMANDS = Object.freeze(
     'survey',
     'visibility',
     'colonizable',
+    'hirable',
     'landmarks',
     'entities',
     'intel',
