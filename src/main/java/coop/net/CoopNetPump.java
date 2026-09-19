@@ -350,7 +350,7 @@ public class CoopNetPump implements EveryFrameScript {
      * {@link #advanceMirrorMotion}; reset on the session edges beside the watermark.
      */
     private final coop.fleet.CoopMotionTimeline motionTimeline = new coop.fleet.CoopMotionTimeline();
-    private final CoopFleetMirror fleetMirror = new CoopFleetMirror();
+    private CoopFleetMirror fleetMirror = new CoopFleetMirror();
     /**
      * Phase 20 M4 roster split: the remote player's last {@code FLEET_ROSTER}, recombined with each
      * UDP tick into the full snapshot the mirror consumes. See {@link coop.fleet.CoopRosterCache}.
@@ -6741,11 +6741,19 @@ public class CoopNetPump implements EveryFrameScript {
         if (!shouldStreamFleet()) {
             // Both halves of the roster split reset on the same edge (Phase 20 M4): a new session
             // owes the peer a fresh FLEET_ROSTER, and a cached roster from the last one would be
-            // matched against ticks from a different fleet entirely.
+            // matched against ticks from a different fleet entirely. A resume re-sends FLEET_ROSTER
+            // on its own, so resetting these on every link drop costs nothing extra.
             lastSentRosterHash = "";
             rosterCache.reset();
             nextRosterRequestAtMillis = 0L;
-            if (fleetMirror.hasMirrorFleet()) {
+            // The mirror itself is disposed only on a real session end (b2c1988's sessionHeld rule),
+            // not on a drop inside a reconnect grace window. Live evidence 2026-09-19: the partner's
+            // player mirror was disposed on every blip alongside the NPC mirrors that fix already
+            // covers, so the host's CoopGuestPresence logged "released (no guest mirror)" and every
+            // vanilla disposable-fleet manager despawned the guest's fleets, which respawned under new
+            // ids on resume. reconnect.end() and a SESSION_LEAVE both still run this dispose, because
+            // reconnect.active() is false by then while shouldStreamFleet() still is too.
+            if (fleetMirror.hasMirrorFleet() && !reconnect.active()) {
                 fleetMirror.dispose();
             }
         }
@@ -8916,6 +8924,19 @@ public class CoopNetPump implements EveryFrameScript {
      */
     void installNpcFleetRegistryForTest(CoopFleetMirrorRegistry registry) {
         this.npcFleetRegistry = Objects.requireNonNull(registry, "registry");
+    }
+
+    /** The partner player's mirror; test read for the reconnect-grace hold. */
+    CoopFleetMirror fleetMirrorForTest() {
+        return fleetMirror;
+    }
+
+    /**
+     * Test seam: swaps in a fake player mirror, so a test can watch what a drop does and does not
+     * dispose without standing up an engine fleet.
+     */
+    void installFleetMirrorForTest(CoopFleetMirror mirror) {
+        this.fleetMirror = Objects.requireNonNull(mirror, "mirror");
     }
 
     /** The guest spawner suppressor; test read for the once-per-session arming. */

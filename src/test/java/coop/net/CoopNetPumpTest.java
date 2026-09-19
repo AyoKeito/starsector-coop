@@ -8418,6 +8418,106 @@ class CoopNetPumpTest {
         assertFalse(pump.baseReplicationStreamingForTest());
     }
 
+    // ---- 0.1.2 follow-up: the partner's player mirror gets the same held-drop treatment ----------
+
+    /**
+     * b2c1988 held the NPC mirrors and mirrored bases across a reconnect grace window but missed the
+     * partner's own player mirror: {@code syncFleetMirror} disposed it on {@code !shouldStreamFleet()}
+     * alone, with no {@code sessionHeld} check. Live evidence, 2026-09-19: the same blips that
+     * rebuilt the NPC mirrors also disposed the partner's player mirror on both sides, which on the
+     * host also released {@code CoopGuestPresence} ("released (no guest mirror)") and let vanilla's
+     * disposable-fleet managers despawn every fleet that existed for the guest's presence, so they
+     * respawned under new ids on resume.
+     */
+    @Test
+    void aDropInsideTheGraceWindowHoldsThePartnerMirror() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        FakeFleetMirror mirror = new FakeFleetMirror();
+        pump.installFleetMirrorForTest(mirror);
+        pump.advance(0f);
+        assertTrue(pump.fleetMirrorForTest().hasMirrorFleet());
+
+        service.connected = false;
+        now.addAndGet(100L);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting(), "the window opened");
+        assertEquals(0, mirror.disposeCalls,
+                "the partner mirror is held across the window along with the NPC mirrors");
+        assertTrue(pump.fleetMirrorForTest().hasMirrorFleet());
+    }
+
+    /**
+     * The teardown is evaluated every frame rather than only on the drop edge, so it still runs -
+     * exactly once - when the window expires minutes after {@code isConnected()} went false.
+     */
+    @Test
+    void theGraceExpiryDisposesThePartnerMirrorExactlyOnce() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+        FakeFleetMirror mirror = new FakeFleetMirror();
+        pump.installFleetMirrorForTest(mirror);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertEquals(0, mirror.disposeCalls, "nothing while the window is open");
+
+        now.set(1_000L + 61_000L);
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "the window expired");
+        assertEquals(1, mirror.disposeCalls, "the session is really over, so the partner mirror goes");
+
+        for (int frame = 0; frame < 5; frame++) {
+            now.addAndGet(100L);
+            pump.advance(0f);
+        }
+        assertEquals(1, mirror.disposeCalls, "once, not once per frame after the expiry");
+    }
+
+    /** A partner that says it is leaving gets no window, so the teardown runs on that frame. */
+    @Test
+    void aSessionLeaveDisposesThePartnerMirror() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = activeHostPump(service, now::get);
+        FakeFleetMirror mirror = new FakeFleetMirror();
+        pump.installFleetMirrorForTest(mirror);
+        pump.advance(0f);
+
+        service.inbound.add(CoopMessages.sessionLeave("session-a", 9L, now.get(),
+                CoopMessages.LEAVE_REASON_MENU));
+        pump.advance(0f);
+
+        assertFalse(pump.gameplaySessionActiveForBridge(), "the session is over on the same frame");
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "no window is owed");
+        assertEquals(1, mirror.disposeCalls);
+        assertFalse(pump.fleetMirrorForTest().hasMirrorFleet());
+    }
+
+    /** A player mirror with no engine fleet behind it, so a test can watch disposal. */
+    private static final class FakeFleetMirror extends coop.fleet.CoopFleetMirror {
+        private boolean hasMirror = true;
+        private int disposeCalls;
+
+        @Override
+        public boolean hasMirrorFleet() {
+            return hasMirror;
+        }
+
+        @Override
+        public void dispose() {
+            disposeCalls++;
+            hasMirror = false;
+        }
+    }
+
     /** Installs a registry over one fake mirror and returns it; see {@link FakeNpcMirror}. */
     private static FakeNpcMirror mirrorInRegistryOf(CoopNetPump pump, AtomicLong now) {
         FakeNpcMirror mirror = new FakeNpcMirror();
