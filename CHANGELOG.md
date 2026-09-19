@@ -32,6 +32,11 @@ minimized windows, no gameplay fault seen), plus documentation work. No gameplay
   7802 for a guest launch unless the port field beside it says otherwise. The typed port survives
   unticking the box.
 
+**Developer tooling**
+
+- New read-only bridge verb `hirable`: the markets that currently hold officers or administrators for
+  hire, nearest the player fleet first, with each person's name, level and personality.
+
 **Documentation**
 
 - `docs/player/LIMITATIONS.md` and `docs/player/CONNECT.md` explain the minimized-window stall:
