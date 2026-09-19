@@ -1,5 +1,7 @@
 package coop.net;
 
+import coop.testing.LogCapture;
+import coop.util.CoopLog;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -2881,6 +2883,113 @@ class CoopNetServiceTest {
         } finally {
             service.shutdown();
         }
+    }
+
+    // ---- 0.1.2: the socket reset that follows a clean quit ---------------------------------------
+
+    /**
+     * Live evidence from 2026-09-19: the guest quit the game, the host logged the leave and ended the
+     * session, and a few milliseconds later the same second carried a WARN with a
+     * {@code java.net.SocketException: Connection reset} stack trace out of {@code readAvailableLocked}.
+     * The partner had already said it was going; the reset was the announced end of the link, and the
+     * stack trace was what players pasted into bug reports as "the crash".
+     */
+    @Test
+    void aResetAfterThePartnerAnnouncedItsLeaveIsOneInfoLineNotAWarning() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        LogCapture log = new LogCapture().attachTo(CoopLog.getLogger(CoopNetService.class));
+        try {
+            host.startHost(port);
+            SocketChannel partner = SocketChannel.open(
+                    new java.net.InetSocketAddress("127.0.0.1", port));
+            try {
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host accepted the partner's socket");
+
+                writeFrame(partner, CoopMessages.sessionLeave(SESSION_ID, 1L, 1_000L,
+                        CoopMessages.LEAVE_REASON_EXIT));
+                assertEquals(CoopMessages.Type.SESSION_LEAVE,
+                        waitForMessage(host, "host inbound session leave").type(),
+                        "the leave has to reach the transport before the socket dies");
+
+                // The quitting process writes and then dies: bytes the host has not drained yet, then
+                // an abortive close. That pairing is what turns the next read into a reset.
+                writeFrame(partner, CoopMessages.ping(null, 2L, 1_100L));
+                hardClose(partner);
+            } finally {
+                partner.close();
+            }
+
+            waitUntil(() -> {
+                host.flushOutbound();
+                return !host.isConnected();
+            }, "host closed the link the partner reset");
+
+            assertEquals(List.of(), log.matching("Coop TCP polling failed"),
+                    "an announced leave must not produce a stack trace that reads like a crash");
+            assertTrue(log.messages().stream()
+                            .anyMatch(line -> line.startsWith("Coop TCP link closed by the partner after it left")),
+                    "the reset is still logged, as one info line: " + log.messages());
+        } finally {
+            log.detach();
+            host.shutdown();
+        }
+    }
+
+    /** No leave was announced, so the reset is unexplained and the stack trace is the only evidence. */
+    @Test
+    void aResetWithNoAnnouncedLeaveStillWarnsWithTheException() throws Exception {
+        int port = reserveLocalPort();
+        CoopNetService host = new CoopNetService();
+        LogCapture log = new LogCapture().attachTo(CoopLog.getLogger(CoopNetService.class));
+        try {
+            host.startHost(port);
+            SocketChannel partner = SocketChannel.open(
+                    new java.net.InetSocketAddress("127.0.0.1", port));
+            try {
+                waitUntil(() -> {
+                    host.flushOutbound();
+                    return host.isConnected();
+                }, "host accepted the partner's socket");
+
+                writeFrame(partner, CoopMessages.ping(null, 1L, 1_000L));
+                hardClose(partner);
+            } finally {
+                partner.close();
+            }
+
+            waitUntil(() -> {
+                host.flushOutbound();
+                return !host.isConnected();
+            }, "host closed the link the partner reset");
+
+            assertEquals(1, log.matching("Coop TCP polling failed").size(),
+                    "a link that dies without a word still owes the log its exception: " + log.messages());
+        } finally {
+            log.detach();
+            host.shutdown();
+        }
+    }
+
+    /** Writes one message as the transport frames it: encoded, newline-terminated, in full. */
+    private void writeFrame(SocketChannel channel, CoopMessages.Message message) throws IOException {
+        ByteBuffer frame = ByteBuffer.wrap((CoopMessages.encode(message) + "\n")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        while (frame.hasRemaining()) {
+            channel.write(frame);
+        }
+    }
+
+    /**
+     * Closes {@code channel} the way a dying process does: {@code SO_LINGER} at zero makes the close
+     * abortive, so the far end sees a reset rather than a tidy end of stream.
+     */
+    private void hardClose(SocketChannel channel) throws IOException {
+        channel.setOption(java.net.StandardSocketOptions.SO_LINGER, 0);
+        channel.close();
     }
 
     /** Drives the sending end while waiting on the receiving end's dispatch. */

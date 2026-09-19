@@ -2587,7 +2587,20 @@ public class CoopNetService {
                 closeLinkLocked(peer);
             }
         } catch (Exception ex) {
-            CoopLog.warn(CoopNetService.class, "Coop TCP polling failed", ex);
+            // 0.1.2: a partner that quit cleanly writes SESSION_LEAVE and then lets its process close
+            // the socket, which lands here as "Connection reset" in the same second. That reset is the
+            // announced end of the link, not a fault, and the WARN with a stack trace it used to print
+            // is what a player pastes into a bug report as "the crash". One info line, then the same
+            // close as before. A socket that dies without a leave keeps the WARN and the exception:
+            // there the stack trace is the only evidence of why the link went away.
+            if (peer.peerAnnouncedLeave()) {
+                String reason = ex.getMessage();
+                CoopLog.info(CoopNetService.class, "Coop TCP link closed by the partner after it left ("
+                        + (reason == null || reason.isEmpty() ? ex.getClass().getSimpleName() : reason)
+                        + ") on peer slot " + peer.slot());
+            } else {
+                CoopLog.warn(CoopNetService.class, "Coop TCP polling failed", ex);
+            }
             closeLinkLocked(peer);
         }
     }
@@ -2672,6 +2685,12 @@ public class CoopNetService {
             return;
         }
         peer.learnSenderId(message.senderId());
+        if (message.type() == CoopMessages.Type.SESSION_LEAVE) {
+            // Remembered here rather than in the pump because the transport is what has to explain the
+            // socket reset that follows a clean quit, and this is the only place it sees a frame's
+            // type. See CoopPeerLink#peerAnnouncedLeave and the catch in readAvailableLocked.
+            peer.notePeerAnnouncedLeave();
+        }
         // Stamped with the generation of the channel it came off, never with "the current" one: by the
         // time the pump reads this the slot may hold a different socket entirely (net-fix-5).
         inbound.add(new Inbound(message, peer.attachGeneration()));
