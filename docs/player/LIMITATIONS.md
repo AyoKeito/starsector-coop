@@ -195,11 +195,13 @@ guest until the next pool update drops it, so an accept can come back "already t
 Pather base rumour is generated locally on each side, which can shuffle the whole list into a
 different order, so the two bars occasionally show different picks out of the same pool.
 
-**Hidden bases share their shop, not their name.** A pirate or Luddic Path base is built by whichever
-game found it, and each game names it and places its orbit itself, so the same base can read
-differently on your two maps. The shop is shared: dock in turn and the second of you sees the first's
-leftovers. A base carries an open market and a black market and nothing else, so there is no storage
-locker to share there.
+**Hidden bases share their shop, nothing else.** A pirate or Luddic Path base exists in the same star
+system on both games, but each game builds its own copy: the name, the body it orbits and where in
+the system it sits are all rolled per game, and only the base's size is copied from the host. The two
+of you can be docked at "the same base" while sitting thousands of units apart on the map, next to
+different planets. Only the market underneath is one shared thing: dock in turn and the second of you
+sees the first's leftovers. A base carries an open market and a black market and nothing else, so
+there is no storage locker to share there.
 
 **Surveying.** A system can be remote-surveyed once by each of you, where a solo campaign allows one
 sweep. The survey data commodity goes to whoever ran the survey; the other player gets the survey
