@@ -3753,7 +3753,10 @@ one pre-existing skip. Deployed to both test profiles.
   for the whole suite. No new fields on the manager. **Smoke:** guest parks alone on a jump point in
   a populated system at least 2 LY from the host and lets 10 to 20 days pass; ambient fleets still
   appear, never inside the guest's sensor circle; grep the host log for
-  `spawn nudged off the guest` (one line per rescued spawn).
+  `spawn nudged off the guest` (one line per rescued spawn). **Live 2026-09-20: PASSED**, three
+  rescued pirate spawns in Valhalla while the guest sat there alone and the host was in Corvus;
+  the line only fires after the move, so each one is a spawn placed at least the sensor range
+  plus 500 units away.
 
 **Suppressor (`coop.fleet.CoopNpcFleetSuppressor`):**
 
