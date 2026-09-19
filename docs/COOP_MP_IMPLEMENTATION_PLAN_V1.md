@@ -3135,7 +3135,7 @@ Added by the red-team pass (2026-09-05), each aimed at a fix that is unit-verifi
 - **Owner notice at both ends.** One HUD line when the owner's fleet is pulled into the partner's fight ("your fleet is fighting alongside <partner>"), the loss banner when the result lands.
 - **Ships as 0.1.4** after its own two-instance smoke.
 
-**Live spike (code on main 2026-09-05; RUN 2026-09-20, results below):** `-Dcoop.debug.allyPullIn=true` on both instances creates the player mirror without the flag, stops re-asserting it, and turns the threat watcher's eject into log lines (`Coop SPIKE ally pull-in: mirror is in a battle` with sides and the pre-battle roster, `mirror left the battle` with the post-battle roster). `-Dcoop.debug.allyPullInDropShield=true` also drops the per-frame `setNoEngaging`, for a second run if the first shows no join. Runbook: `tmp_ff_analysis\ally-pullin-spike\RUNBOOK.md`. Facts to collect: whether the mirror joins and on which side, whether it deploys under a placeholder commander, what the mirror's roster looks like after the battle, and whether the owner's next snapshot rebuilds a gutted mirror. The design below assumes the join works; if it does not, the fallback is an explicit `battle.join(mirror, side)` from `CoopBattleBridge` when the engage dialog opens.
+**Live spike (code on main 2026-09-05, run 2026-09-20, retired with the build the same day):** `-Dcoop.debug.allyPullIn` created the player mirror without the pull-in flag and turned the watcher's eject into log lines; the posture apply below replaced it and the switch, its registry rows and `CoopAllyPullInSpike` are gone. The runbook stays in `tmp_ff_analysislly-pullin-spike`.
 
 **Spike results (2026-09-20, two local test clients, run 1 only; `allyPullInDropShield` was never needed):**
 
@@ -3177,11 +3177,12 @@ Added by the red-team pass (2026-09-05), each aimed at a fix that is unit-verifi
 **Steps:**
 
 - [x] Run the spike on both instances: done 2026-09-20, results recorded above.
-- [ ] Ability row, plugin, add-at-session-start; test.
-- [ ] Ally bit on the fleet snapshot (if absent); posture apply in `CoopFleetMirror`; posture-aware threat watcher and customs restore; tests including "an NPC mirror is never joinable".
-- [ ] `ALLY_BATTLE_RESULT` codec, capture in `CoopBattleBridge`, owner apply with banner, policy-table classification; tests.
-- [ ] Post-battle forced roster rebuild; test.
-- [ ] Docs: `starsector-runtime-limitations.md` entries above; player docs paragraph on the toggle.
+- [x] Ability row, plugin, add-at-session-start; test. (2026-09-20: `data/campaign/abilities.csv` row `coop_ally` "Fight Alongside", `CoopAllyToggleAbility`, added in `CoopModPlugin.onGameLoad`; excluded from `CoopAbilityArbiter` mirroring.)
+- [x] Ally bit on the fleet snapshot; posture apply in `CoopFleetMirror`; posture-aware threat watcher and customs restore; tests including "an NPC mirror is never joinable". (2026-09-20: bit on the tick and the full snapshot, `$coopAllyAllowed` on the mirror memory, `FLEET_IGNORES_OTHER_FLEETS` unset while allowed.)
+- [x] `ALLY_BATTLE_JOIN` + `ALLY_BATTLE_RESULT` codecs, capture in `CoopAllyBattleTracker` (not the battle bridge: the mirror owns the freeze), owner apply through `CoopAllyLossApplier` with HUD + feed banner, ledger dedup, policy tables; tests. (2026-09-20.)
+- [x] Post-battle forced roster rebuild: taking the outcome nulls the mirror's hash latch; test. (2026-09-20.)
+- [x] Docs: `starsector-runtime-limitations.md` entries, `LIMITATIONS.md` Battles section, README row, changelog. (2026-09-20.)
+- [ ] Two-instance smoke (below), then ship as 0.1.4.
 
 **Smoke (two instances):**
 

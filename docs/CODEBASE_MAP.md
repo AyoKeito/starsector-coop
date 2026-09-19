@@ -163,7 +163,7 @@ republish.
 
 Owns: every wire type, since the enum lives here.
 
-### `coop.fleet` (35 classes) - player and NPC fleet replication
+### `coop.fleet` (36 classes) - player and NPC fleet replication
 
 - `CoopFleetSnapshot` / `CoopFleetRoster` / `CoopFleetSnapshotFactory` / `CoopRosterCache` - the
   Phase 20 M4 split: volatile tick on UDP, immutable roster on TCP, recombined at the receiver.
@@ -179,8 +179,10 @@ Owns: every wire type, since the enum lives here.
   `CoopSystemPhaseSlots` - run the guest's system at host fidelity.
 - `CoopGuestPresence`, `CoopSensorSync`, `CoopRespawnNotifier`, `CoopMirrorOrphanSweeper`,
   `CoopLocations`, `CoopInflationLatch`, `CoopShipMods`, `CoopNpcActionTextCapture`,
-  `CoopFleetCodec`, `CoopRosterSummary`; diagnostics `CoopFleetVisibilityProbe`,
-  `CoopMotionSpeedProbe`, `CoopAllyPullInSpike`. Owns `FLEET_SNAPSHOT`, `FLEET_ROSTER`,
+  `CoopFleetCodec`, `CoopRosterSummary`, `CoopOfficerSkills` (officer skill codec),
+  `CoopAllyBattleTracker` (Phase 33: freezes the partner mirror while it is in a battle and reads
+  the roster once when it leaves); diagnostics `CoopFleetVisibilityProbe`,
+  `CoopMotionSpeedProbe`. Owns `FLEET_SNAPSHOT`, `FLEET_ROSTER`,
   `FLEET_ROSTER_REQUEST`, `NPC_FLEET_SET`, `NPC_FLEET_MOTION`, `RESPAWN_PLAYER`.
 
 ### `coop.campaign` (32 classes) - shared world state
@@ -472,7 +474,7 @@ Order line, everything else from `docs/roadmap.data.json`; design lives in
 
 ```text
 src/test/java/coop/   .java counts, 2026-09-20
-  campaign/ 48   net/ 37   fleet/ 31   ui/ 22   launcher/ 19   combat/ 10   testing/ 8   save/ 6
+  campaign/ 49   net/ 37   fleet/ 37   ui/ 22   launcher/ 19   combat/ 11   testing/ 8   save/ 6
   colony/ 5   debug/ 5   config/ 4   time/ 4   handshake/ 3   interaction/ 3   mark/ 3   seed/ 3
   session/ 3   util/ 3   input/ 2   newgame/ 2   stats/ 2   presence/ 1   rewards/ 1   rng/ 1
   CoopModPluginTest.java   CoopScaffoldTest.java

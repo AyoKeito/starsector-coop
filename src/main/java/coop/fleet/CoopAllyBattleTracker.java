@@ -80,6 +80,13 @@ final class CoopAllyBattleTracker {
         if (battle == observedBattle) {
             return;
         }
+        if (observedBattle != null) {
+            // A new battle object before this poll ever saw the old one go null: the engine can chain
+            // an encounter straight into the next (a pursuit that catches its target, a second fleet
+            // engaging on the same frame). Close the first one out first, so its result is not lost
+            // under the second join; the pump takes the pending outcome before the next poll.
+            noteBattleEnded(mirror, ownerPlayerId, senderIdsByEngineId);
+        }
         noteBattleJoined(mirror, battle, ownerPlayerId, senderIdsByEngineId);
     }
 

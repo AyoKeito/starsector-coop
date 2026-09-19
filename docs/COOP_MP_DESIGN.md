@@ -440,7 +440,7 @@ One accepted hole closed in Phase 13 and re-verified since: a mirror must not be
 
 ### 8.8 Joint combat
 
-Post-V1, and no longer a CMC integration (§2.6). The track is Phase 33 then Phase 22: real losses, an owner-side toggle ability, deploy everything, no spoils split. `CoopAllyPullInSpike` is the on-main debug switch (`-Dcoop.debug.allyPullIn`) for the live feasibility run.
+Post-V1, and no longer a CMC integration (§2.6). The track is Phase 33 then Phase 22: real losses, an owner-side toggle ability, deploy everything, no spoils split. Built 2026-09-20: the `coop_ally` toggle ability, the ally bit on the fleet snapshot, `CoopAllyBattleTracker` (member-state freeze while the mirror is in a battle, one roster read when it leaves), `ALLY_BATTLE_JOIN` / `ALLY_BATTLE_RESULT`, and `CoopAllyLossApplier` on the owner. Officers and commander skills ride the roster.
 
 ### 8.9 Save and reload
 
@@ -545,7 +545,7 @@ The original estimate in this section was 8 to 13 weeks part-time to a private p
 
 Each item names the phase that owns it. Anything not listed here is either built or has no plan (§1).
 
-- **Joint piloting.** Phase 33 (AI-ally battles) then Phase 22 (tactical orders over your own joined ships). 22 is gated on 33 being built and smoke-passed. The live `-Dcoop.debug.allyPullIn` spike run has not happened yet.
+- **Joint piloting.** Phase 33 (AI-ally battles) then Phase 22 (tactical orders over your own joined ships). 22 is gated on 33 being built and smoke-passed. Phase 33 is built (2026-09-20) and awaits its two-instance smoke.
 - **Hyperspace and abyss ambience.** Phase 26, milestones 1 and 2 in scope, milestone 3 and the storms stretch still open decisions. Ordered first among post-V1 work, after the Phase 19 sign-off.
 - **Guest bounty payouts.** Phase 34. Person and system bounties replicated to the guest, paid from the reconciled battle result through a pre-reconcile hook and `CREDITS_GRANT`.
 - **Finer time control.** Phase 25. The `FF_INTENT` message and a guest fast-forward policy row; the key is already inert in the options registry.
