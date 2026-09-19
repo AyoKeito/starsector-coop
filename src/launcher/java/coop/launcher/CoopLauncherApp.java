@@ -780,10 +780,9 @@ public final class CoopLauncherApp {
         reconnectGraceSpinner = spinner(CoopOptionsRegistry.RECONNECT_GRACE_SECONDS, 5);
         reconnectGraceSpinner.setToolTipText("How long a dropped link keeps the session alive."
                 + " Host decides.");
-        bridgeEnabledBox = flag("Agent bridge", "Opens a 127.0.0.1 socket that the dev tooling in"
-                + " tools/starsector-mcp talks to. Off for normal play. With the port below at 0 it"
-                + " uses 7801 when this launcher hosts and 7802 when it joins.");
-        bridgeEnabledBox.setBorder(BorderFactory.createEmptyBorder(0, 2, 8, 0));
+        bridgeEnabledBox = flag("Enabled", "Opens a 127.0.0.1 socket that the dev tooling in"
+                + " tools/starsector-mcp talks to. Off for normal play. With the port beside it at 0"
+                + " it uses 7801 when this launcher hosts and 7802 when it joins.");
         bridgeEnabledBox.addActionListener(event ->
                 bridgePortSpinner.setEnabled(bridgeEnabledBox.isSelected()));
         bridgePortSpinner = spinner(CoopOptionsRegistry.LAUNCHER_BRIDGE_PORT, 1);
@@ -792,8 +791,8 @@ public final class CoopLauncherApp {
         form.full("Reconnect grace (seconds)", reconnectGraceSpinner);
         JPanel developer = CoopLauncherUi.panel();
         form = new Form(developer);
-        form.raw(bridgeEnabledBox);
-        form.full("Agent bridge port (0 = the port for this role)", bridgePortSpinner);
+        form.pair("Agent bridge", bridgeEnabledBox,
+                "Agent bridge port (0 = the port for this role)", bridgePortSpinner);
 
         wiretapSampleSpinner = spinner(CoopOptionsRegistry.DEBUG_WIRETAP_SAMPLE, 1);
         wiretapSampleSpinner.setToolTipText("Log every Nth datagram per type when the wiretap is"
