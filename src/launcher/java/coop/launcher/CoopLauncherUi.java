@@ -1,9 +1,13 @@
 package coop.launcher;
 
 import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Container;
 import java.awt.Dimension;
 import java.awt.FontMetrics;
 import java.awt.GridBagLayout;
+import java.awt.Insets;
+import java.awt.LayoutManager;
 import java.awt.Rectangle;
 import java.awt.event.ActionEvent;
 
@@ -18,6 +22,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.KeyStroke;
 import javax.swing.ScrollPaneConstants;
+import javax.swing.SwingUtilities;
 
 import com.formdev.flatlaf.util.UIScale;
 
@@ -37,6 +42,100 @@ final class CoopLauncherUi {
         panel.add(content, BorderLayout.CENTER);
         panel.add(action, BorderLayout.EAST);
         return panel;
+    }
+
+    /**
+     * A vertical stack that hands every child the full width first and only then asks how tall it
+     * needs to be. {@link javax.swing.BoxLayout} asks the other way round, and a child holding
+     * wrapping text has no idea how many lines it takes until it has been given a width: it
+     * answers "one line", is laid out that short, and draws the rest of its text over its
+     * neighbours.
+     */
+    static JPanel wrappingStack() {
+        JPanel panel = new JPanel(new WrappingStack());
+        panel.setOpaque(false);
+        return panel;
+    }
+
+    /** The layout behind {@link #wrappingStack()}. */
+    private static final class WrappingStack implements LayoutManager {
+
+        /** The width the height last reported from {@link #preferredLayoutSize} was measured at. */
+        private int measuredWidth = -1;
+        private int measuredHeight = -1;
+        private boolean remeasuring;
+
+        @Override
+        public void addLayoutComponent(String name, Component child) {
+        }
+
+        @Override
+        public void removeLayoutComponent(Component child) {
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container parent) {
+            synchronized (parent.getTreeLock()) {
+                Insets insets = parent.getInsets();
+                int width = parent.getWidth() - insets.left - insets.right;
+                int widest = 0;
+                int height = 0;
+                for (Component child : parent.getComponents()) {
+                    if (!child.isVisible()) {
+                        continue;
+                    }
+                    Dimension size = width > 0 ? sizeAt(child, width) : child.getPreferredSize();
+                    widest = Math.max(widest, size.width);
+                    height += size.height;
+                }
+                measuredWidth = width;
+                measuredHeight = height;
+                return new Dimension(widest + insets.left + insets.right,
+                        height + insets.top + insets.bottom);
+            }
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container parent) {
+            Dimension preferred = preferredLayoutSize(parent);
+            return new Dimension(0, preferred.height);
+        }
+
+        @Override
+        public void layoutContainer(Container parent) {
+            synchronized (parent.getTreeLock()) {
+                Insets insets = parent.getInsets();
+                int width = Math.max(0, parent.getWidth() - insets.left - insets.right);
+                int y = insets.top;
+                for (Component child : parent.getComponents()) {
+                    if (!child.isVisible()) {
+                        continue;
+                    }
+                    int height = sizeAt(child, width).height;
+                    child.setBounds(insets.left, y, width, height);
+                    y += height;
+                }
+                int height = y - insets.top;
+                if (!remeasuring && (width != measuredWidth || height != measuredHeight)) {
+                    // The height this stack was given came from a measurement taken at another
+                    // width - the very first one always does, because nothing has a width before
+                    // it has been laid out once. Ask for one more pass, now that it has.
+                    measuredWidth = width;
+                    measuredHeight = height;
+                    remeasuring = true;
+                    SwingUtilities.invokeLater(() -> {
+                        remeasuring = false;
+                        parent.revalidate();
+                    });
+                }
+            }
+        }
+
+        /** The size a child wants once it knows how wide it is allowed to be. */
+        private static Dimension sizeAt(Component child, int width) {
+            child.setSize(width, Math.max(1, child.getHeight()));
+            return child.getPreferredSize();
+        }
     }
 
     /** Keep controls at their natural height and centered beside multiline content. */
