@@ -64,6 +64,12 @@ class CoopNetPumpTest {
         // Phase 20.6: every pump installs itself as the static intel feed, so one test's session
         // would otherwise still be on the page when the next one asks.
         coop.ui.CoopSessionIntelFeed.uninstall();
+        // The resume-presence test below drives coop.fleet.CoopGuestPresence's static slot for real,
+        // so it must not leak into a later test.
+        coop.presence.CoopPresenceRegistry.clear();
+        coop.fleet.CoopGuestMirrorHandle.clear();
+        coop.fleet.CoopGuestPresence.frameBoundary();
+        coop.fleet.CoopGuestPresence.frameBoundary();
     }
 
     @Test
@@ -3618,6 +3624,84 @@ class CoopNetPumpTest {
         // returning guest wait out the cadence with a frozen clock.
         assertTrue(countOf(service, CoopMessages.Type.TIME_SNAPSHOT) >= 1,
                 "a resume must re-seed the guest's clock immediately");
+    }
+
+    /**
+     * 2026-09-19 live smoke: {@code forceFullRebroadcast()} used to call the NPC fleet replicator's
+     * full {@code reset()}, which unregisters the guest's presence with the vanilla fleet managers
+     * before the next pass re-registers it. An unregistered guest is exactly what lets those managers
+     * despawn the fleets around it, so a resume must never do that, not even for one frame. The
+     * presence pass itself is driven directly here rather than through {@code pump.advance()}, because
+     * that needs a live {@code Global.getSector()} this fixture does not have; what matters is that
+     * neither {@code forceFullRebroadcast()}'s own call nor the same-frame (re)start edge in {@code
+     * syncNpcReplication()} clears it out from under that direct registration.
+     */
+    @Test
+    void aResumeInsideTheGraceWindowDoesNotUnregisterTheGuestsPresence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState session = activeHostSession();
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = livePump(service, session, now::get);
+        pump.advance(0f);
+
+        coop.fleet.CoopGuestMirrorHandle.clear();
+        SectorAPI sector = sectorWithOneMirroredGuest();
+        pump.npcFleetReplicatorForTest().guestPresenceForTest().tick(sector, now.get());
+        assertEquals("corvus", pump.npcFleetReplicatorForTest().guestPresenceForTest().armedSystemId(),
+                "presence has to be registered before the resume can be exercised against it");
+
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().hostWaiting(), "the window opened");
+
+        service.connected = true;
+        now.addAndGet(4_000L);
+        service.inbound.add(CoopMessages.sessionResumeRequest("session-a", 9L, now.get(), "guest-player"));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active(), "the request resumed the session");
+        assertEquals("corvus", pump.npcFleetReplicatorForTest().guestPresenceForTest().armedSystemId(),
+                "a resume must not unregister the guest's presence, even for the width of one frame");
+        assertNotNull(coop.presence.CoopPresenceRegistry.get(),
+                "the registry slot itself must still hold the mirror, not just the diagnostic field");
+    }
+
+    /** One location holding one fleet tagged as the guest's player mirror, nothing else. */
+    private static SectorAPI sectorWithOneMirroredGuest() {
+        Object[] location = new Object[1];
+        MemoryAPI mirrorMemory = (MemoryAPI) stub(MemoryAPI.class, (name, args) ->
+                "getBoolean".equals(name)
+                        && coop.fleet.CoopNpcFleetReplicator.PLAYER_MIRROR_TAG.equals(args[0])
+                        ? Boolean.TRUE : null);
+        com.fs.starfarer.api.campaign.CampaignFleetAPI mirror =
+                (com.fs.starfarer.api.campaign.CampaignFleetAPI) stub(
+                        com.fs.starfarer.api.campaign.CampaignFleetAPI.class, (name, args) -> switch (name) {
+                            case "getId" -> "guest-mirror";
+                            case "isAlive" -> true;
+                            case "getContainingLocation" -> location[0];
+                            case "getMemoryWithoutUpdate" -> mirrorMemory;
+                            default -> null;
+                        });
+        location[0] = stub(com.fs.starfarer.api.campaign.LocationAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "corvus";
+            case "getName" -> "Corvus";
+            case "getFleets" -> new ArrayList<>(List.of(mirror));
+            default -> null;
+        });
+        return (SectorAPI) stub(SectorAPI.class, (name, args) -> switch (name) {
+            case "getCurrentLocation" -> location[0];
+            case "getAllLocations" -> new ArrayList<>(List.of(location[0]));
+            default -> null;
+        });
+    }
+
+    private static Object stub(Class<?> type,
+                                java.util.function.BiFunction<String, Object[], Object> answers) {
+        return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                (proxy, method, args) -> {
+                    Object answer = answers.apply(method.getName(), args);
+                    return answer == null ? defaultValue(method.getReturnType()) : answer;
+                });
     }
 
     /**

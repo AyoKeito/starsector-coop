@@ -1019,6 +1019,11 @@ public class CoopNetPump implements EveryFrameScript {
         return reconnect;
     }
 
+    /** Test-only read of the NPC fleet replicator, e.g. to observe the guest presence pass. */
+    CoopNpcFleetReplicator npcFleetReplicatorForTest() {
+        return npcFleetReplicator;
+    }
+
     /** Test read: pre-drop messages applied after a grace window opened; see {@link #survivesTheDropEdge}. */
     long preDropMessagesAppliedForTest() {
         return preDropMessagesApplied;
@@ -4588,10 +4593,16 @@ public class CoopNetPump implements EveryFrameScript {
      * on the guest the very spawner-suppression re-run this change exists to stop. The two resets the
      * host actually owes the returning peer are the two right below, which the start edge would have
      * called anyway.
+     *
+     * <p>The NPC replicator gets {@link CoopNpcFleetReplicator#rearmFullBroadcast()} rather than the
+     * full {@link CoopNpcFleetReplicator#reset()} the start edge itself would call: a full reset also
+     * unregisters the guest's presence with the vanilla fleet managers, and an unregistered guest is
+     * exactly what lets those managers despawn the fleets around it. Presence must stay registered
+     * through a resume.
      */
     private void forceFullRebroadcast() {
         barSuppressionArmed = false;
-        npcFleetReplicator.reset();
+        npcFleetReplicator.rearmFullBroadcast();
         baseAuthority.reset();
         datagramWatermark.reset();
         datagramRedundancy.reset();
@@ -7671,7 +7682,9 @@ public class CoopNetPump implements EveryFrameScript {
         boolean sessionHeld = reconnect.active();
         if (active && !npcReplicationStreaming) {
             // Fresh session start (first connect, or a new session after a window really expired):
-            // rebroadcast the full set and re-arm the guest suppressor.
+            // rebroadcast the full set and re-arm the guest suppressor. A resume never reaches this
+            // branch (sessionHeld keeps npcReplicationStreaming true across the window), so the full
+            // reset here - including the guest's presence registration - is always the right call.
             npcFleetReplicator.reset();
             npcFleetSuppressor.reset();
             npcThreatWatcher.reset();

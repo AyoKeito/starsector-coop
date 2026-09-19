@@ -3,6 +3,7 @@ package coop.fleet;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.FleetInflater;
@@ -12,11 +13,13 @@ import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.net.CoopStreamClock;
+import coop.presence.CoopPresenceRegistry;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.testing.ProxyDefaults;
 import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.util.vector.Vector2f;
 
@@ -29,6 +32,8 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -44,6 +49,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CoopNpcFleetReplicatorTest {
 
     private final List<String> sent = new ArrayList<>();
+
+    @AfterEach
+    void clearPresenceRegistry() {
+        // The resume-rearm tests below drive CoopGuestPresence for real, so the static slot it and
+        // CoopGuestMirrorHandle back onto must not leak into a later test.
+        CoopPresenceRegistry.clear();
+        CoopGuestMirrorHandle.clear();
+        CoopGuestPresence.frameBoundary();
+        CoopGuestPresence.frameBoundary();
+    }
 
     private CoopNpcFleetReplicator replicator() {
         return replicator(new CoopStreamClock());
@@ -521,6 +536,84 @@ class CoopNpcFleetReplicatorTest {
         replicator.sendSetIfChanged(world.sector, 1_100L);
 
         assertEquals(2, service.sent.size(), "an unchanged set is exactly the signal the guest waits on");
+    }
+
+    // ---- resume: rearm without dropping guest presence (2026-09-19) -------------------------------
+
+    /**
+     * The live smoke defect: {@code forceFullRebroadcast()} used to call the full {@link
+     * CoopNpcFleetReplicator#reset()}, which un-registers the guest's presence with the vanilla fleet
+     * managers via {@link CoopGuestPresence#reset()}. {@link CoopNpcFleetReplicator#rearmFullBroadcast()}
+     * is the resume-safe replacement: it still forces a full {@code NPC_FLEET_SET} resend, but it must
+     * leave the presence registration exactly as it was.
+     */
+    @Test
+    void rearmFullBroadcastLeavesPresenceRegisteredAndResendsTheFullSet() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+        SectorAPI sector = sectorWithOneMirroredGuest();
+
+        replicator.guestPresenceForTest().tick(sector, 0L);
+        assertEquals("corvus", replicator.guestPresenceForTest().armedSystemId(),
+                "presence has to be registered before a resume can be exercised against it");
+        replicator.sendSetIfChanged(sector, 0L);
+        assertEquals(1, service.sent.size(), "the first set is always structural");
+
+        replicator.rearmFullBroadcast();
+
+        assertEquals("corvus", replicator.guestPresenceForTest().armedSystemId(),
+                "a resume re-arm must not unregister the guest's presence");
+        assertNotNull(CoopPresenceRegistry.get(),
+                "the registry slot itself must still hold the mirror, not just the diagnostic field");
+
+        replicator.sendSetIfChanged(sector, 1L);
+        assertEquals(2, service.sent.size(),
+                "the re-arm must force a full NPC_FLEET_SET again even though nothing changed");
+        assertEquals(CoopMessages.Type.NPC_FLEET_SET, service.sent.get(1).type());
+    }
+
+    /** {@link CoopNpcFleetReplicator#reset()} is the session-start variant and still clears presence. */
+    @Test
+    void resetStillClearsPresence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+        SectorAPI sector = sectorWithOneMirroredGuest();
+
+        replicator.guestPresenceForTest().tick(sector, 0L);
+        assertEquals("corvus", replicator.guestPresenceForTest().armedSystemId());
+
+        replicator.reset();
+
+        assertEquals("", replicator.guestPresenceForTest().armedSystemId());
+        assertNull(CoopPresenceRegistry.get());
+    }
+
+    /** One location holding one fleet tagged as the guest's player mirror, nothing else. */
+    private static SectorAPI sectorWithOneMirroredGuest() {
+        Object[] location = new Object[1];
+        MemoryAPI mirrorMemory = (MemoryAPI) stub(MemoryAPI.class, (name, args) ->
+                "getBoolean".equals(name) && CoopNpcFleetReplicator.PLAYER_MIRROR_TAG.equals(args[0])
+                        ? Boolean.TRUE : null);
+        CampaignFleetAPI mirror = (CampaignFleetAPI) stub(CampaignFleetAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "guest-mirror";
+            case "isAlive" -> true;
+            case "getContainingLocation" -> location[0];
+            case "getMemoryWithoutUpdate" -> mirrorMemory;
+            default -> null;
+        });
+        location[0] = stub(LocationAPI.class, (name, args) -> switch (name) {
+            case "getId" -> "corvus";
+            case "getName" -> "Corvus";
+            case "getFleets" -> new ArrayList<>(List.of(mirror));
+            default -> null;
+        });
+        return (SectorAPI) stub(SectorAPI.class, (name, args) -> switch (name) {
+            case "getCurrentLocation" -> location[0];
+            case "getAllLocations" -> new ArrayList<>(List.of(location[0]));
+            default -> null;
+        });
     }
 
     /** Host player parked in Corvus with one NPC fleet; a second NPC fleet churning in Arcadia. */
