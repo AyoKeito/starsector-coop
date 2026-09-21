@@ -378,37 +378,109 @@ public class CoopModPlugin extends BaseModPlugin {
     }
 
     /**
-     * Puts {@code coop_ally} on the local player's fleet when it is not already there (Phase 33).
+     * Gives the local player the {@code coop_ally} toggle the way vanilla grants an ability
+     * (Phase 33): through {@code CharacterDataAPI.addAbility}, which the engine mirrors onto the
+     * player fleet, plus a free ability-bar slot so the toggle is visible without a trip through the
+     * bar editor. The first build added it to the fleet only; the fleet held the ability, the bar
+     * never showed it, and nobody could turn it on.
      *
      * <p>Every load rather than only a new game, because the ability has to appear in saves that
-     * predate it — and because it is the only way a player who started the campaign solo, before
-     * enabling the mod, ever gets the toggle. {@code addAbility} on a fleet that already has one
-     * would replace the plugin and with it the player's answer, so the presence check is the whole
-     * point of the method rather than an optimisation.
+     * predate it, and because it is the only way a player who started the campaign solo, before
+     * enabling the mod, ever gets the toggle. Each step is guarded by its own presence check: the
+     * plugin instance on the fleet holds the player's on/off answer, and a slot the player moved
+     * the toggle to is theirs to keep.
      *
-     * <p>Total: a sector or a fleet that cannot be read costs a log line. The snapshot capture reads
-     * the toggle through {@code getAbility}, which answers null for an absent ability, so the worst
-     * case of this failing is a player whose fleet is never pulled into their partner's fights.
+     * <p>Total: a sector, character or fleet that cannot be read costs a log line. The snapshot
+     * capture reads the toggle through {@code getAbility}, which answers null for an absent
+     * ability, so the worst case of this failing is a player whose fleet is never pulled into their
+     * partner's fights. A bar with no free slot leaves the ability known but unplaced; the log says
+     * so, and the bar editor lists it.
      *
-     * @return true when the ability was added on this call (test seam)
+     * @return true when this call changed anything: the character list, the fleet or a bar slot
+     *         (test seam)
      */
     static boolean ensureAllyAbility(com.fs.starfarer.api.campaign.SectorAPI sector) {
+        String id = CoopAllyToggleAbility.ABILITY_ID;
         try {
             if (sector == null) {
                 return false;
             }
             com.fs.starfarer.api.campaign.CampaignFleetAPI fleet = sector.getPlayerFleet();
-            if (fleet == null || fleet.getAbility(CoopAllyToggleAbility.ABILITY_ID) != null) {
+            com.fs.starfarer.api.campaign.CharacterDataAPI character = sector.getCharacterData();
+            if (fleet == null || character == null) {
                 return false;
             }
-            fleet.addAbility(CoopAllyToggleAbility.ABILITY_ID);
-            CoopLog.info(CoopModPlugin.class, "Coop added the " + CoopAllyToggleAbility.ABILITY_ID
-                    + " toggle to the player fleet; it is off until the player turns it on");
-            return true;
+            boolean changed = false;
+            java.util.Set<String> known = character.getAbilities();
+            if (known == null || !known.contains(id)) {
+                character.addAbility(id);
+                changed = true;
+            }
+            if (fleet.getAbility(id) == null) {
+                fleet.addAbility(id);
+                changed = true;
+            }
+            String slot = ensureAbilitySlot(sector.getUIData(), id);
+            if (slot != null) {
+                changed = true;
+            }
+            if (changed) {
+                CoopLog.info(CoopModPlugin.class, "Coop gave the player the " + id + " toggle"
+                        + (slot == null ? "" : " on ability bar slot " + slot)
+                        + "; it is off until the player turns it on");
+            }
+            return changed;
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopModPlugin.class, "Coop could not add the ally toggle to the player fleet;"
                     + " this fleet will never be pulled into the partner's battles", ex);
             return false;
+        }
+    }
+
+    /** How many ability bars the campaign UI keeps; vanilla's {@code AddAbility} scans this many. */
+    static final int ABILITY_BARS = 5;
+
+    /**
+     * Places {@code abilityId} in the first empty ability-bar slot unless some slot on some bar
+     * already holds it. Mirrors vanilla's {@code AddAbility} rule command, including restoring the
+     * bar the player had selected.
+     *
+     * @return "bar/slot" of the slot written, or null when nothing was written (already placed, no
+     *         free slot, or no UI data to write to)
+     */
+    static String ensureAbilitySlot(com.fs.starfarer.api.campaign.PersistentUIDataAPI uiData,
+                                    String abilityId) {
+        if (uiData == null) {
+            return null;
+        }
+        com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI slots = uiData.getAbilitySlotsAPI();
+        if (slots == null) {
+            return null;
+        }
+        int current = slots.getCurrBarIndex();
+        try {
+            for (int bar = 0; bar < ABILITY_BARS; bar++) {
+                slots.setCurrBarIndex(bar);
+                for (com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI slot : slots.getCurrSlotsCopy()) {
+                    if (abilityId.equals(slot.getAbilityId())) {
+                        return null;
+                    }
+                }
+            }
+            for (int bar = 0; bar < ABILITY_BARS; bar++) {
+                slots.setCurrBarIndex(bar);
+                for (com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI slot : slots.getCurrSlotsCopy()) {
+                    if (slot.getAbilityId() == null) {
+                        slot.setAbilityId(abilityId);
+                        return bar + "/" + slot.getSlotId();
+                    }
+                }
+            }
+            CoopLog.warn(CoopModPlugin.class, "Coop found no free ability-bar slot for " + abilityId
+                    + "; the player can place it from the ability bar editor");
+            return null;
+        } finally {
+            slots.setCurrBarIndex(current);
         }
     }
 
