@@ -388,7 +388,7 @@ public final class CoopLauncherApp {
             writingGuestInvite = false;
             applyInviteText(guestInviteField.getText(), false);
             guestInviteField.setCaretPosition(0);
-            setChips(List.of(new Chip("TCP passed", CoopTheme.OK), new Chip("launcher 0.1.3", CoopTheme.OK),
+            setChips(List.of(new Chip("TCP passed", CoopTheme.OK), new Chip("launcher 0.1.4", CoopTheme.OK),
                     new Chip("UDP passed", CoopTheme.OK), new Chip("3 ms", CoopTheme.OK)));
             note("The host's launcher answered on TCP and UDP. Press Launch when your host does.");
         } else {

@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-09-20 (0.1.3, 7f88aac).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-09-25 (0.1.4, 4f88272).
 
 ## Stack
 
@@ -66,6 +66,7 @@ CoopModPlugin.onApplicationLoad()
 CoopModPlugin.onGameLoad(newGame)
   -> CoopSaveCheckpoint.notifySessionEnding() + sendSessionLeaveInline() + netService.shutdown()
   -> tearDownPreviousPump(), CoopGuestSnapshotStore/CoopSessionStatsStore/CoopLocations clear
+  -> ensureAllyAbility(sector)       Phase 33: grants coop_ally + a bar slot, idempotent
   -> new CoopNetService()
   -> CoopMirrorOrphanSweeper.sweep()
   -> CoopSystemDriveFrameHook.install()
@@ -134,8 +135,10 @@ CoopStoryChainGate          publishes "this client is the guest" into sector mem
 ### `coop` (root)
 
 `CoopModPlugin` - the only `BaseModPlugin`. Owns the lifecycle above plus `configureXStream`
-(save aliases), `beforeGameSave` / `afterGameSave` / `onGameSaveFailed`, and the launcher-property
-republish.
+(save aliases), `beforeGameSave` / `afterGameSave` / `onGameSaveFailed`, the launcher-property
+republish, and `ensureAllyAbility` (Phase 33: grants the `coop_ally` toggle and an ability-bar slot
+on every load, the way vanilla's `AddAbility` rule command does, so a pre-0.1.4 save gets the
+toggle too).
 
 ### `coop.net` (31 classes) - transport and pump
 
@@ -169,6 +172,11 @@ Owns: every wire type, since the enum lives here.
   Phase 20 M4 split: volatile tick on UDP, immutable roster on TCP, recombined at the receiver.
 - `CoopFleetMirror`, `CoopGuestMirrorHandle`, `CoopPresenceIndicator`, `CoopMirrorTags` - the
   partner's fleet as a local AI fleet, always visible, tagged so nothing mistakes it for real.
+  Phase 33: the player mirror also carries an ally *posture* (`applyPlayerMirrorPosture`, from the
+  owner's `coop_ally` toggle on the snapshot) that clears `FLEET_IGNORES_OTHER_FLEETS` and sets
+  `CoopMirrorTags.ALLY_ALLOWED_FLAG` while the owner allows it, plus a member-state freeze
+  (`CoopAllyBattleTracker`) that stops hull/CR/roster writes for the duration of a battle the mirror
+  is pulled into and rebuilds officers and the commander's skills from the roster on release.
 - `CoopNpcFleetReplicator` (host) / `CoopNpcFleetSuppressor` (guest) / `CoopNpcMirror` /
   `CoopFleetMirrorRegistry` / `CoopNpcFleetSetSnapshot` / `CoopNpcFleetSnapshot` - the whole NPC
   population, host-authoritative.
@@ -232,7 +240,11 @@ Owns: every wire type, since the enum lives here.
 - **`coop.combat`** (12) - own-fleet battles plus the Phase 33 AI ally. `CoopBattleBridge`;
   `CoopBattleStatus` + `CoopBattleStatusCombatPlugin` (the only mod code running inside a battle);
   `CoopBattleResult` + `CoopBattleResultReconciler`; `CoopNpcThreatWatcher` (vanilla pursuit AI ->
-  guest local combat); `CoopEngageDialogStaging` / `CoopCustomsDialogStaging`;
+  guest local combat; its per-frame battle eject skips a partner mirror whose
+  `CoopMirrorTags.ALLY_ALLOWED_FLAG` is set, since that mirror is in the fight because its owner
+  turned `coop_ally` on); `CoopEngageDialogStaging` / `CoopCustomsDialogStaging` (its shield restore
+  writes the posture back, not a hard `true`, so a staged customs stop cannot switch the ally feature
+  off for the rest of the session);
   `CoopPreBattleAutosave`. Phase 33: `CoopAllyBattleJoin` and `CoopAllyBattleOutcome` are what the
   partner's mirror hands the pump when vanilla pulls it into a fight and when that fight ends;
   `CoopAllyLossApplier` is the one place allowed to remove ships from, or write hull and CR on, the
@@ -501,7 +513,7 @@ game's own `vmparams` do, because XStream 1.4.10 reflects into `java.base` durin
 | `README.md` | the player-facing pitch and release links |
 | `README_DEV.md` | every command: build, test, package, launch, two-client test, bridge verbs, release checklist, save-visible state |
 | `CLAUDE.md` | the short version an agent session gets wrong without being told |
-| `CHANGELOG.md` | per-release notes; 0.1.3 at the head |
+| `CHANGELOG.md` | per-release notes; 0.1.4 at the head |
 | `docs/COOP_MP_DESIGN.md` | design rationale |
 | `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` | the phase ledger and every agreed decision. **Canonical for status** - when it and a phase's checkboxes disagree, the ledger wins |
 | `docs/starsector-runtime-limitations.md` | engine and sandbox facts plus accepted divergences; current facts only, entries are deleted when their fix lands |

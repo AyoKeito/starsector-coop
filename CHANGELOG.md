@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
+
+Your partner's fleet can now fight beside you as an AI ally. The toggle is called Fight Alongside
+and sits on your ability bar.
 
 **Battles**
 

@@ -1,9 +1,10 @@
-# Starsector Coop V1 (0.1.3)
+# Starsector Coop V1 (0.1.4)
 
 Two people, two copies of Starsector 0.98a-RC8, one campaign. The sector is generated once from a
 shared seed and both of you fly around in it at the same time, on one calendar. The host's game is
 the authority: it runs the NPC fleets, the markets, the economy and the colonies, and the guest's
-game mirrors them. Each player pilots their own battles on their own PC. Author: AyoKeito.
+game mirrors them. One of you pilots each battle; the other can send their fleet in as an AI ally.
+Author: AyoKeito.
 
 ## Requirements
 
@@ -64,8 +65,10 @@ screen. Monthly income splits evenly. Raids and bombardments work in both
 directions, and an incoming expedition raises a warning with a countdown on both screens.
 
 **Combat.** Whoever gets engaged fights on their own PC and pilots it as normal. The other player is
-held paused and gets a banner when the fight starts and another when it ends. The result is
-reconciled back into the shared world: ship losses, salvage, reputation, bounties.
+held paused and gets a banner when the fight starts and another when it ends. A toggle ability, off
+by default, lets your fleet join your partner's fight as an AI ally against a side it is already
+hostile to, within vanilla's usual join range. Losses are real and the pilot keeps the spoils. The
+result is reconciled back into the shared world: ship losses, salvage, reputation, bounties.
 
 **Connecting.** Only the host has to be reachable. At startup the host's game asks the router to open
 its port over UPnP, then NAT-PMP, and writes what happened to the log. Before the first session the
@@ -95,8 +98,9 @@ settings file for you.
 
 The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before you download:
 
-- **Both players in one battle is not in this release.** There is no in-game view of your partner's
-  fight either. People watch over Discord screen share.
+- **Both players piloting in one battle is not in this release.** There is no in-game view of your partner's
+  fight either, ally battles included. People watch over Discord screen share. Once your fleet joins
+  as an ally the fleet AI flies it; you cannot give it orders or pull it back.
 - **Hyperspace is only partly shared.** Storm cells, star flares and slipstreams are rolled on each PC
   separately, so the two of you see different weather and different slipstream maps, and your
   partner's fleet can appear to cross empty hyperspace faster than it should. A storm only hits the

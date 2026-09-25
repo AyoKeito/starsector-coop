@@ -1,6 +1,6 @@
 # Starsector 2-Player Coop Multiplayer Mod: Design & Findings
 
-**Document status:** describes the code at HEAD (`7f88aac`, 2026-09-20, mod version 0.1.3 as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
+**Document status:** describes the code at HEAD (`4f88272`, 2026-09-25, mod version 0.1.4 as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
 **Target:** Starsector 0.98a-RC8. `CoopPresenceRegistry.PINNED_VERSION` holds that string; the handshake refuses any other version unless `-Dcoop.allowGameVersionMismatch=true` is set.
 **Audience:** the author across machines, future Claude sessions, anyone joining the project.
 
@@ -40,7 +40,7 @@ Player-facing behaviour lives in `docs/player/LIMITATIONS.md`, `docs/player/CONN
 | Authority | Host-authoritative for everything shared: clock, NPC fleet population, markets, economy, intel, faction relations, colonies, interaction claims. |
 | PvP | Disallowed. No arbitration, no anti-cheat. |
 | Concurrent battles | Each player fights their own battle on their own machine. Combat start asserts the shared pause, so the other player's campaign is frozen for the duration. `CoopNpcThreatWatcher` hands a host-owned hostile that is chasing the guest mirror over to the guest as `ENGAGE_GUEST` before contact, so the two player fleets are never pulled into one engagement. |
-| Combat target | Solo own-fleet combat. Joint piloting is post-V1 and is now a two-step track: Phase 33 (AI-ally battles, the partner's ships fight under your admiral) then Phase 22 (tactical orders over those ships). Neither is built. |
+| Combat target | Solo own-fleet combat, with the partner's fleet able to join as an AI ally. Joint piloting is a two-step track: Phase 33 (AI-ally battles, the partner's ships fight under your admiral) shipped in 0.1.4; Phase 22 (tactical orders over those ships) is not built. |
 | Time / clock | One shared clock. The host applies the effective pause and the guest follows `TIME_SNAPSHOT` at `CoopTimeLock.SNAPSHOT_INTERVAL_MILLIS` = 200 ms, so 5 Hz. *Reversed 2026-09-02 (Phase 7b):* the original "guest cannot fast-forward and cannot pause" became "fast-forward is a shared speed" once vanilla's toggle-mode FF field proved writable, and `coop.allowGuestPause` (default `true`) lets the guest assert a pause intent. |
 | Spectator UX | *Reversed 2026-08-19.* The live spectator screen was cut. The non-engaged player gets two `CampaignUIAPI.addMessage` banners, one at battle start and one at battle end carrying the last reported survivor counts. The reason is recorded in `CoopBattleBridge`: real spectating happens over a Discord screen share, and a full-screen dialog on the watching client is in the way. The `BATTLE_STATUS` stream (`STATUS_INTERVAL_MILLIS` = 400 ms, so 2.5 Hz) and its kill feed are still sent and still parsed; the spectator logs them at debug level. |
 | Both-players-present rule | *Reversed 2026-09-02 (Phase 20.2).* A dropped socket no longer ends the session. `CoopReconnectCoordinator` holds the session and the clock for `coop.reconnectGraceSeconds` (default 60). A peer whose process is still alive resumes the same session; a relaunched peer cannot, because the session id exists only in the dead process's memory, so it gets an ordinary lobby round instead. An authenticated `LOBBY_HELLO` ends the host's wait immediately. |
@@ -98,9 +98,9 @@ Player-facing behaviour lives in `docs/player/LIMITATIONS.md`, `docs/player/CONN
 
 ### Out of scope for V1
 
-Each has a phase number in the plan. None are built.
+Each has a phase number in the plan. Phase 33 is built; the rest are not.
 
-- Joint piloting: Phase 33 (AI-ally battles) then Phase 22 (tactical orders). 22 is gated on 33 being built and smoke-passed.
+- Joint piloting: Phase 33 (AI-ally battles, shipped in 0.1.4) then Phase 22 (tactical orders). 22 is gated on 33 being built and smoke-passed, which it now is, and is not started.
 - Hyperspace and abyss ambient replication: Phase 26, ordered first among post-V1 work.
 - Guest-side bounty payouts: Phase 34.
 - Finer time control, including a guest fast-forward intent policy: Phase 25.
@@ -432,7 +432,7 @@ See §4.3. `CoopFleetMirrorRegistry` tracks the live mirrors, `CoopMirrorOrphanS
 
 `CoopBattleBridge` owns both halves (§4.5). `CoopPreBattleAutosave` takes the pre-battle checkpoint, deferring while a dialog is open for the same engine reason as the coordinated save. `CoopNpcThreatWatcher` is the pre-contact handoff. `CoopBattleResultReconciler` applies the reported deltas.
 
-One accepted hole closed in Phase 13 and re-verified since: a mirror must not be engageable. The gate is `driveMovement`'s `setNoEngaging` and `canBeEngaged`, and the pull-in path bypasses it, so the mirror also carries a per-frame shield, the `FLEET_IGNORES_OTHER_FLEETS` flag and a load-bearing `leave()`.
+One accepted hole closed in Phase 13 and re-verified since: a mirror must not be engageable by anything hostile to it. The gate is `driveMovement`'s `setNoEngaging` and `canBeEngaged`, unconditional in both Phase 33 postures and never released, plus a load-bearing `leave()`. The pull-in path bypasses that gate entirely and consults only `FLEET_IGNORES_OTHER_FLEETS`, which an NPC mirror still carries unconditionally; a partner mirror carries it only while its owner's `coop_ally` toggle is off, since clearing it on request is what lets vanilla pull the mirror in as an ally (§8.8).
 
 ### 8.7 Partner battle reporting
 
@@ -440,7 +440,7 @@ One accepted hole closed in Phase 13 and re-verified since: a mirror must not be
 
 ### 8.8 Joint combat
 
-Post-V1, and no longer a CMC integration (§2.6). The track is Phase 33 then Phase 22: real losses, an owner-side toggle ability, deploy everything, no spoils split. Built 2026-09-20: the `coop_ally` toggle ability, the ally bit on the fleet snapshot, `CoopAllyBattleTracker` (member-state freeze while the mirror is in a battle, one roster read when it leaves), `ALLY_BATTLE_JOIN` / `ALLY_BATTLE_RESULT`, and `CoopAllyLossApplier` on the owner. Officers and commander skills ride the roster.
+Post-V1, and no longer a CMC integration (§2.6). The track is Phase 33 then Phase 22: real losses, an owner-side toggle ability, deploy everything, no spoils split. Phase 33 shipped in 0.1.4, two-instance smoke passed: the `coop_ally` toggle ability, the ally bit on the fleet snapshot, `CoopAllyBattleTracker` (member-state freeze while the mirror is in a battle, one roster read when it leaves), `ALLY_BATTLE_JOIN` / `ALLY_BATTLE_RESULT`, and `CoopAllyLossApplier` on the owner. Officers and commander skills ride the roster, so the ally fights near its owner's real strength. Phase 22 (tactical orders over those ships) is not built.
 
 ### 8.9 Save and reload
 
@@ -535,7 +535,7 @@ Foundations first (1 to 6b): mod skeleton, transport, seed lock with campaign id
 
 Two blocks were pulled forward out of "v2 or v3" into V1 on user decision: **colonies** (Phase 24, 2026-06-10) and **player-facing docs plus options plus the launcher** (Phases 23, 28, 31, 2026-09-03). Networking (Phase 20) and adaptive cadence (Phase 29) landed in early September, followed by the lobby (21) and the shared-market and storage work (32).
 
-Release 0.1.0 shipped 2026-09-05, 0.1.1 on 2026-09-15 after five two-player test sessions, 0.1.2 on 2026-09-19 with the log marker. **Phase 19, the final sign-off, is still the last unbuilt V1 item.**
+Release 0.1.0 shipped 2026-09-05, 0.1.1 on 2026-09-15 after five two-player test sessions, 0.1.2 on 2026-09-19 with the log marker, 0.1.3 on 2026-09-20 with reconnect-grace hardening and launcher fixes, 0.1.4 on 2026-09-25 with AI-ally battles (Phase 33). **Phase 19, the final sign-off, is still the last unbuilt V1 item.**
 
 The original estimate in this section was 8 to 13 weeks part-time to a private playable prototype. Actual: first commit to 0.1.0 was roughly fourteen weeks, with the scope grown by colonies, the launcher, WAN networking and the options system, none of which were in the estimate.
 
@@ -545,7 +545,7 @@ The original estimate in this section was 8 to 13 weeks part-time to a private p
 
 Each item names the phase that owns it. Anything not listed here is either built or has no plan (§1).
 
-- **Joint piloting.** Phase 33 (AI-ally battles) then Phase 22 (tactical orders over your own joined ships). 22 is gated on 33 being built and smoke-passed. Phase 33 is built (2026-09-20) and awaits its two-instance smoke.
+- **Joint piloting.** Phase 33 (AI-ally battles) shipped in 0.1.4, built and two-instance smoke-passed. Phase 22 (tactical orders over your own joined ships) is gated on that and is not started.
 - **Hyperspace and abyss ambience.** Phase 26, milestones 1 and 2 in scope, milestone 3 and the storms stretch still open decisions. Ordered first among post-V1 work, after the Phase 19 sign-off.
 - **Guest bounty payouts.** Phase 34. Person and system bounties replicated to the guest, paid from the reconciled battle result through a pre-reconcile hook and `CREDITS_GRANT`.
 - **Finer time control.** Phase 25. The `FF_INTENT` message and a guest fast-forward policy row; the key is already inert in the options registry.
