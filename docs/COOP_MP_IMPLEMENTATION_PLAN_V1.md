@@ -69,6 +69,8 @@ Authoritative build status per phase. Checkbox state inside the early phases pre
 
 **2026-10-12 bug fix pass:** credit grants are acknowledged only after the receiving wallet accepts them; refused writes remain eligible for the sender's reliable replay. Transfer wallets stay bound to their originating sector so loading another save cannot receive an outgoing campaign's shutdown refund. Gift ledger registration now precedes transport send, including synchronous queue-cap discard and failed-refund handling. Resume accepts must come from the live connection generation. Consuming an earlier ally battle's outcome preserves the next battle's freeze and starting roster, and completed outcomes remain ordered until consumed. The launcher retains and renews its mapping during connection checks, releases it before game startup, preserves settings changed in-game between launches, and consumes campaign adoption consent after a successful launch. Regression tests cover these sequences; the two-instance gameplay check remains a manual smoke step.
 
+**0.1.5 release (2026-10-12):** ships the bug fix pass above. Version metadata, player guides, the codebase map and the roadmap are refreshed. The release build runs the full clean test/build and the packager checks version agreement, commit identity and the classloader split. No new third-party code was added. The user reported the two-player check completed on 2026-10-12; the individual checks of narrow timing cases remain covered by regression tests.
+
 ## Source Layout
 
 All implementation work for v1 goes under `K:\Starsector\mods\coop`.

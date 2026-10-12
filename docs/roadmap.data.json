@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified in-game. Per-phase dates, commits and smoke results are in the plan's Phase Status Ledger"
+      "note": "code-complete and smoke-verified per phase. The 0.1.5 two-player check is complete. Dates, commits and results are in the plan's Phase Status Ledger"
     },
     {
       "key": "partial",
@@ -34,11 +34,11 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "after the private soak / public release; order revised 2026-09-20: 33 (built, shipped in 0.1.4) → 22 (next) → 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 25 → 27, as appetite allows"
+      "note": "beyond V1: 33 (built) → 22 (next) → 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 25 → 27, as appetite allows"
     }
   ],
-  "hereHead": "You are here: 0.1.4 is published (v0.1.4, 2026-09-25) with Phase 33, AI-ally battles. Next: Phase 22 (tactical orders for your own joined ships). Remaining before V1 sign-off: Phase 23 (forum-thread URL, COOP TEST Ziggurat start) and the Phase 19 and Phase 33 checklist items under ATTENTION.",
-  "here": "<b>0.1.4 is published</b> (<code>v0.1.4</code>, 2026-09-25) with <span class=\"rp\" data-jump=\"33\">Phase 33</span>, AI-ally battles. <b>Next:</b> <span class=\"rp\" data-jump=\"22\">Phase 22</span>, tactical orders for your own joined ships; its seven live checks run in a Phase 33 ally battle. <b>Remaining for V1:</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code>, and remove or dev-gate the COOP TEST Ziggurat start. <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"33\">Phase 33</span>: the checklist items under ATTENTION, each waiting on a trigger.",
+  "hereHead": "You are here: 0.1.5 (v0.1.5, 2026-10-12) fixes credit transfers, reconnects, consecutive ally battles and launcher lifecycle bugs. Automated checks pass and the two-player check is complete. Next: Phase 22 (tactical orders for your own joined ships). Remaining before V1 sign-off: Phase 23 (forum-thread URL, COOP TEST Ziggurat start) and the Phase 19 and Phase 33 checklist items under ATTENTION.",
+  "here": "<b>0.1.5</b> (<code>v0.1.5</code>, 2026-10-12) fixes credit transfers, reconnects, consecutive ally battles and launcher lifecycle bugs. <b>Automated checks pass and the two-player check is complete.</b> <b>Next:</b> <span class=\"rp\" data-jump=\"22\">Phase 22</span>, tactical orders for your own joined ships; its seven live checks run in a Phase 33 ally battle. <b>Remaining for V1:</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code>, and remove or dev-gate the COOP TEST Ziggurat start. <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"33\">Phase 33</span>: the checklist items under ATTENTION, each waiting on a trigger.",
   "attention": [
     {
       "sev": "scope",

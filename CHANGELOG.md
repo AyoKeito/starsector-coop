@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.5
+
+Fixes to credit transfers, reconnects, consecutive ally battles, and the launcher.
+
+**Credits and reconnecting**
+
+- A credit transfer is marked delivered only after the recipient's balance is updated. A refused
+  balance update leaves the gift eligible for delivery when the connection resumes.
+- An undelivered gift is refunded to the campaign it came from. Loading another save no longer
+  puts the old campaign's refund into that save's balance.
+- A gift rejected by a full outgoing message queue now returns the sender's credits.
+- A late reconnect reply from a replaced connection can no longer resume the wrong connection.
+
+**Battles**
+
+- Moving straight from one ally battle into another preserves the second battle's starting roster.
+  Each battle's damage and ship losses are reported in order.
+
+**Launcher**
+
+- The host's connection check keeps its router mapping open and renews it while the launcher waits
+  for the guest. Repeated guest checks can reach it. The mapping is released before the game starts.
+- Launching again from the same open launcher preserves preferences changed in-game, including
+  **Hide the link HUD** and **Event feed detail**.
+- **Start over inside the host's campaign** is cleared after a successful launch, so the next launch
+  requires fresh consent.
+
+Automated checks: 3,791 tests passed, one skipped. The two-player check is complete.
+
 ## 0.1.4
 
 Your partner's fleet can now fight beside you as an AI ally. The toggle is called Fight Alongside

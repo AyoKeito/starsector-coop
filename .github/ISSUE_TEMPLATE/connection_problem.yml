@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Read `docs/player/CONNECT.md` first. Only the host needs to be reachable. The host's launcher has **Check my connection** and the guest's has **Test connection**; run both before filing and paste what they printed.
+        Read `docs/player/CONNECT.md` first. Only the host needs to be reachable. Both launchers have **Check connection**; the host checks first and leaves the launcher open, then the guest checks. Run both before filing and paste what they printed.
   - type: dropdown
     id: reach
     attributes:
@@ -24,7 +24,7 @@ body:
     id: doctor
     attributes:
       label: Connection doctor output
-      description: The host's `Coop connection doctor:` block from the launcher status pane or report.txt, and the guest's Test connection result.
+      description: The host's `Coop connection doctor:` block from the launcher Logs window or report.txt, and the guest's Check connection result.
       render: text
     validations:
       required: true
@@ -39,7 +39,7 @@ body:
     id: version
     attributes:
       label: Mod version
-      placeholder: "0.1.4"
+      placeholder: "0.1.5"
     validations:
       required: true
   - type: checkboxes

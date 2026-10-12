@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-09-25 (0.1.4, 4f88272).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-12 (0.1.5).
 
 ## Stack
 
@@ -175,8 +175,10 @@ Owns: every wire type, since the enum lives here.
   Phase 33: the player mirror also carries an ally *posture* (`applyPlayerMirrorPosture`, from the
   owner's `coop_ally` toggle on the snapshot) that clears `FLEET_IGNORES_OTHER_FLEETS` and sets
   `CoopMirrorTags.ALLY_ALLOWED_FLAG` while the owner allows it, plus a member-state freeze
-  (`CoopAllyBattleTracker`) that stops hull/CR/roster writes for the duration of a battle the mirror
-  is pulled into and rebuilds officers and the commander's skills from the roster on release.
+  (`CoopAllyBattleTracker`) that stops hull/CR/roster writes during a battle and until its outcome is
+  consumed. Consecutive battles keep separate starting rosters and queued outcomes; consuming an
+  earlier outcome preserves the current battle's freeze. Release rebuilds officers and the
+  commander's skills from the roster.
 - `CoopNpcFleetReplicator` (host) / `CoopNpcFleetSuppressor` (guest) / `CoopNpcMirror` /
   `CoopFleetMirrorRegistry` / `CoopNpcFleetSetSnapshot` / `CoopNpcFleetSnapshot` - the whole NPC
   population, host-authoritative.
@@ -214,6 +216,10 @@ Owns: every wire type, since the enum lives here.
   `WORLD_DELTA`, `MISSION_POOL_SNAPSHOT`, `MISSION_CLAIM_*`, `REP_DELTA`, `GUEST_REP_DELTA`,
   `PLAYER_REP_SNAPSHOT`, `FACTION_REL_DELTA`, `ABILITY_ACTIVATE`, `ORBIT_SNAPSHOT`, `BASE_SET`,
   `CREDITS_GRANT`.
+
+  Credit transfers bind their wallet to the originating sector, register outgoing gifts before
+  sending, and refund discarded gifts there. `CoopNetPump` acknowledges a grant only after the
+  wallet applies it; a refused write remains eligible for reliable replay after reconnect.
 
 ### `coop.ui` (29 classes) - dialogs, HUD, intel pages
 
@@ -319,7 +325,8 @@ depth-2 redundancy on a lossy floor (`CoopDatagramRedundancy`).
 - **Reliable one-shots:** `MARKET_TXN`, `CREDITS_GRANT`, `WORLD_DELTA`, `RAID_RESULT`, `SHIP_LOST`,
   `COLONY_FOUNDED`, `COLONY_ABANDONED`, `COLONY_MGMT`, `REP_DELTA`, `GUEST_REP_DELTA`,
   `FACTION_REL_DELTA`, `MARK`, `ALLY_BATTLE_RESULT`. Campaign events with no producer that would resend them, so the
-  transport acks (`RELIABLE_ACK`) and replays them across a socket replacement.
+  transport acks (`RELIABLE_ACK`) and replays them across a socket replacement. Credit grants are
+  acknowledged after wallet application. Resume accepts must match the live connection generation.
 - **Pre-session gating:** campaign traffic that arrives before a session is live is dropped with one
   warn per session (`preSessionCampaignDropWarned`). During a reconnect grace only
   `SESSION_RESUME_*`, `LOBBY_HELLO`, `LOBBY_CHALLENGE`, `PING`, `PONG` are accepted from an unproven
@@ -485,14 +492,14 @@ Order line, everything else from `docs/roadmap.data.json`; design lives in
 ## Tests
 
 ```text
-src/test/java/coop/   .java counts, 2026-09-20
-  campaign/ 49   net/ 37   fleet/ 37   ui/ 22   launcher/ 19   combat/ 11   testing/ 8   save/ 6
+src/test/java/coop/   .java counts, 2026-10-12
+  campaign/ 51   net/ 38   fleet/ 37   ui/ 22   launcher/ 20   combat/ 11   testing/ 8   save/ 6
   colony/ 5   debug/ 5   config/ 4   time/ 4   handshake/ 3   interaction/ 3   mark/ 3   seed/ 3
   session/ 3   util/ 3   input/ 2   newgame/ 2   stats/ 2   presence/ 1   rewards/ 1   rng/ 1
-  CoopModPluginTest.java   CoopScaffoldTest.java
+  CoopAllyAbilityInstallTest.java   CoopModPluginTest.java   CoopScaffoldTest.java
 ```
 
-3726 tests green on the last full run. The suite is the only safety net between a change
+3,791 tests passed and one skipped on the last full run. The suite is the only safety net between a change
 and a two-instance smoke.
 
 `coop.testing` holds the shared fixtures rather than a ninth copy of the same proxy:
@@ -513,7 +520,7 @@ game's own `vmparams` do, because XStream 1.4.10 reflects into `java.base` durin
 | `README.md` | the player-facing pitch and release links |
 | `README_DEV.md` | every command: build, test, package, launch, two-client test, bridge verbs, release checklist, save-visible state |
 | `CLAUDE.md` | the short version an agent session gets wrong without being told |
-| `CHANGELOG.md` | per-release notes; 0.1.4 at the head |
+| `CHANGELOG.md` | per-release notes; 0.1.5 at the head |
 | `docs/COOP_MP_DESIGN.md` | design rationale |
 | `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` | the phase ledger and every agreed decision. **Canonical for status** - when it and a phase's checkboxes disagree, the ledger wins |
 | `docs/starsector-runtime-limitations.md` | engine and sandbox facts plus accepted divergences; current facts only, entries are deleted when their fix lands |

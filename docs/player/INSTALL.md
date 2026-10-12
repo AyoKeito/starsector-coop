@@ -230,8 +230,9 @@ then checks with the invite pasted in. The main screen shows progress and the ne
 reserved status area. Click the circular status icon to open **Connection details**, including TCP and UDP pass/fail labels,
 the responding launcher version and the round trip in milliseconds.
 
-The temporary router mapping is released before launching. Changing the role or endpoint discards
-the old result. **Launch Starsector** waits for an active check or mapping cleanup to finish.
+The host keeps the temporary router mapping open while the guest checks the connection. It is
+released before launching. Changing the role or endpoint discards the old result.
+**Launch Starsector** waits for an active check or mapping cleanup to finish.
 `CONNECT.md` explains the results and how to fix a failed connection.
 
 ### The install check
@@ -277,8 +278,8 @@ and the existing developer flags. **Agent bridge** is off for normal play; ticki
 with a 127.0.0.1 socket open for the developer tooling, on port 7801 when this launcher hosts and
 7802 when it joins, unless you type a port of your own in the field beside it. Unticking the box
 leaves that port in the field for next time. **Allow game version mismatch** is
-an unsupported testing override; **Start over inside the host's campaign** remains a one-launch
-consent that discards the guest's co-op progress. These controls retain their existing defaults.
+an unsupported testing override; **Start over inside the host's campaign** is a one-launch
+consent that discards the guest's co-op progress. Its checkbox is cleared after a successful launch.
 
 **Launch Starsector** writes the settings, releases the launcher's listener and starts
 `starsector.exe`. Press **Play** in the vanilla launcher that follows, then start or load the
@@ -440,9 +441,9 @@ guests has no buttons at all: 1 is both its bounds in this build.
 
 ### The settings file
 
-The same `coop.*` names live in a JSON file. Yours is here. The launcher rewrites it every time you
-press LAUNCH, the options page creates it the first time you change a setting there, and you can
-write it yourself:
+The same `coop.*` names live in a JSON file. Yours is here. The launcher updates it when you press
+**Launch Starsector**, preserving preferences changed in-game that it does not control. The options
+page creates it the first time you change a setting there, and you can write it yourself:
 
 ```text
 <Starsector>\saves\common\coop_options.json.data

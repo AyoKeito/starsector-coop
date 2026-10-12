@@ -1,6 +1,6 @@
 # Starsector 2-Player Coop Multiplayer Mod: Design & Findings
 
-**Document status:** describes the code at HEAD (`4f88272`, 2026-09-25, mod version 0.1.4 as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
+**Document status:** describes the 0.1.5 release code (2026-10-12, mod version as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
 **Target:** Starsector 0.98a-RC8. `CoopPresenceRegistry.PINNED_VERSION` holds that string; the handshake refuses any other version unless `-Dcoop.allowGameVersionMismatch=true` is set.
 **Audience:** the author across machines, future Claude sessions, anyone joining the project.
 
@@ -535,7 +535,7 @@ Foundations first (1 to 6b): mod skeleton, transport, seed lock with campaign id
 
 Two blocks were pulled forward out of "v2 or v3" into V1 on user decision: **colonies** (Phase 24, 2026-06-10) and **player-facing docs plus options plus the launcher** (Phases 23, 28, 31, 2026-09-03). Networking (Phase 20) and adaptive cadence (Phase 29) landed in early September, followed by the lobby (21) and the shared-market and storage work (32).
 
-Release 0.1.0 shipped 2026-09-05, 0.1.1 on 2026-09-15 after five two-player test sessions, 0.1.2 on 2026-09-19 with the log marker, 0.1.3 on 2026-09-20 with reconnect-grace hardening and launcher fixes, 0.1.4 on 2026-09-25 with AI-ally battles (Phase 33). **Phase 19, the final sign-off, is still the last unbuilt V1 item.**
+Release 0.1.0 shipped 2026-09-05, 0.1.1 on 2026-09-15 after five two-player test sessions, 0.1.2 on 2026-09-19 with the log marker, 0.1.3 on 2026-09-20 with reconnect-grace hardening and launcher fixes, 0.1.4 on 2026-09-25 with AI-ally battles (Phase 33), and 0.1.5 on 2026-10-12 with credit, reconnect, ally-battle and launcher fixes. **Phase 19, the final sign-off, is still the last unbuilt V1 item.**
 
 The original estimate in this section was 8 to 13 weeks part-time to a private playable prototype. Actual: first commit to 0.1.0 was roughly fourteen weeks, with the scope grown by colonies, the launcher, WAN networking and the options system, none of which were in the estimate.
 
