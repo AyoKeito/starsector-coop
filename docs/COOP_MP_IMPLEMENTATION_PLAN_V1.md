@@ -2572,9 +2572,9 @@ Implement Phase 21 from COOP_MP_IMPLEMENTATION_PLAN_V1.md. Build the multiplayer
 - The stretch milestone: is solo-guest ambient content worth a replaced host manager, or does "encounters happen around the host" suffice for the co-op fantasy. **Open (user, 2026-09-05), same decision as milestone 3.**
 - Milestone 5 (sensor ghosts): ships or not, option A (local cosmetic subset, recommended) vs B. **Open (user, 2026-09-05).** Independent of milestones 1-4.
 - Milestone 4 (storms): ships or not, and option A vs B for the trackers. **Open (user, 2026-09-05, added the same day); recommendation is B.** Independent of milestones 1-3: it touches neither the slipstream manager nor the encounter path, so it can be built in any order once milestone 1 has proven the terrain-capture pattern.
-- Slipsurges (user, 2026-10-12): host surges replicate to the guest under M1. Guest surges stay guest-local and documented, and the `CoopAbilityEffectApplier` comment says so instead of deferring to Phase 26.
+- Slipsurges (user, 2026-10-12): host surges replicate to the guest under M1. Guest surges stay guest-local and documented, and the `CoopAbilityEffectApplier` comment says so instead of deferring to Phase 26. A guest fleet inside a host surge is carried along on its own screen, the same vanilla physics that throws NPC fleets; no exemption.
 - Leviathan trails (user, 2026-10-12): moved to M5; M1 skips dynamic streams.
-- Ordering: the 2026-09-05 decision put P26 first after V1; Phase 33 subsequently shipped. **Current draft, revised 2026-10-12:** Task 0 (fingerprint fix) first, then M1, then M2 only after M1's bridge and live gate; M2 begins with one rogue-object system end to end. The user reconfirmed M1 + M2 scope, with M3-M5 and guest-proximity triggering left as follow-ups.
+- Ordering: the 2026-09-05 decision put P26 first after V1; Phase 33 subsequently shipped. **Current draft, revised 2026-10-12:** Task 0 (the two shipped-bug fixes) first; they ship with the P26 release, not a separate patch release (user, 2026-10-12); then M1, then M2 only after M1's bridge and live gate; M2 begins with one rogue-object system end to end. The user reconfirmed M1 + M2 scope, with M3-M5 and guest-proximity triggering left as follow-ups.
 
 **Files:**
 
