@@ -298,8 +298,9 @@ Owns: every wire type, since the enum lives here.
   the campaign day count (cycle times 360 plus the day into the cycle). Owns `MARK`.
 - **`coop.newgame`** (3) - `CoopNewGameDialogPlugin` (guest-aware New Game dialog),
   `CoopNewGameChoices`, `CoopWorldSettings` (the two settings a sector cannot be asked for later).
-- **`coop.debug`** (3) - `CoopAgentBridge` (dormant localhost TCP listener), `CoopAgentCommands`
-  (verb -> handler registry + JSON codec), `CoopOwnFleetProbe`.
+- **`coop.debug`** (4) - `CoopAgentBridge` (dormant localhost TCP listener), `CoopAgentCommands`
+  (verb -> handler registry + JSON codec), `CoopOwnFleetProbe`, `CoopDebugClockAlignment`
+  (paused, forward-only clock alignment for paired QA samples).
 - **`coop.util`** (5) - `CoopLog`, `CoopDebug` (diagnostics opt-in), `CoopText`, `CoopFrameProfiler`,
   `CoopIntelFacts`.
 - **`coop.rewards`** (1) - `CoopRewardSplitter`, the co-op share policy as pure arithmetic.
@@ -458,20 +459,27 @@ src/launcher/java/coop/launcher/   22 classes
 
 - **Agent bridge.** `coop.debug.CoopAgentBridge`, gated on `-Dcoop.debug.bridge=<port>`; absent,
   unparsable or `0` means no socket and no log line. Binds 127.0.0.1 only, four clients, a few
-  commands per frame on the campaign thread. 30 verbs in `CoopAgentCommands`: `status`, `fleets`,
+  commands per frame on the campaign thread. 34 verbs in `CoopAgentCommands`: `status`, `fleets`,
   `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `ownfleet`, `colonizable`,
-  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`,
+  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen`, `streams` read; `teleport`, `pause`,
+  `clockalign`, `ability`,
   `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`,
-  `mark`, `memory` act.
+  `mark`, `memory`, `streamadd`, `streamdespawn` act. Stream creation/despawn is host-only.
+  `clockalign` requires a paused active session, refuses backward movement or a jump over one day,
+  and verifies both the calendar and cached timestamp after the write.
   Four things are deliberately **not** verbs (market buy/sell, officer hire, bar-offer accept, market
   open/close) because a UI listener drives each and a verb would bypass the listener under test.
 - **MCP server.** `tools/starsector-mcp` (Node, stdio) wraps host port 7801 and guest 7802 into
-  `ss_status`, `ss_dump`, `ss_diff`, `ss_act`, `ss_advance_days`. All state comparison lives there;
+  `ss_status`, `ss_dump`, `ss_diff`, `ss_act`, `ss_advance_days`, `ss_align_clocks`.
+  The alignment tool checks the shared pause and matching session, then advances only the earlier
+  clock to the later timestamp. `ss_diff` requires equal campaign timestamps for stream samples.
+  All state comparison lives there;
   the bridge only serializes. `ss_diff` excludes `role`, `engineId`, `lines` by default. Setup and a
   worked example per tool: `tools/starsector-mcp/README.md`.
 - **Diagnostics switches.** `coop.util.CoopDebug` gates the dormant probes (orbit dump, dialog state,
   `CoopFleetVisibilityProbe`, `CoopMotionSpeedProbe`, `CoopOwnFleetProbe`) behind
   `-Dcoop.debug.diagnostics=true` or the `$coopDebug` sector-memory flag, polled every 300 frames;
+  diagnostics also dumps the host's canonical fingerprint after a successful seed lock;
   `CoopFrameProfiler` behind `-Dcoop.debug.frameProfile=true` or `$coopFrameProfile`;
   `coop.net.CoopWiretap` (UDP stream dump + size histogram) behind `-Dcoop.debug.wiretap` and
   `-Dcoop.debug.wiretapSample`. `netfault{mode, seconds, lossPercent, delaySeconds}` makes *this*

@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 and M1 code are implemented; live verification is next. Phase 23 is complete; its publication reminders remain under ATTENTION"
+      "note": "Phase 26 Task 0 and M1 code are implemented. Nameless Rock placement and static stream geometry passed live; the remaining live gates are open. Phase 23 is complete; its publication reminders remain under ATTENTION"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: Phase 26 Task 0 live checks and M1 terrain parity, then M2 abyssal temporary systems after M1 passes its live gate"
+      "note": "the V1 build queue is complete. Next: Phase 26 temporary-system seed-lock verification and paired M1 fade checks, then M2 abyssal temporary systems after M1 passes its live gate"
     },
     {
       "key": "queued",
@@ -34,11 +34,11 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world, awaiting live checks before M2. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
+      "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world; Nameless Rock placement and static stream geometry passed live, with further checks pending before M2. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 fixes and M1 slipstream code are implemented on codex/p26-ambient-world. Next: verify seed lock with a temporary system, Nameless Rock mirror placement, and paired stream geometry/fades in both games. M2 waits for the M1 live gate. Publication reminders and optional QA probes remain under ATTENTION.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. Task 0 fixes and M1 seasonal-stream/host-slipsurge code are implemented. <b>Next:</b> verify seed lock with a temporary system, Nameless Rock mirror placement, and paired stream geometry/fades in both games. M2 abyssal temporary systems waits for M1's live gate. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 fixes and M1 slipstream code are implemented on codex/p26-ambient-world. Nameless Rock mirror placement and 12,769 static stream values passed live. Both games are paused at the user's request. Next: deploy the clock-alignment QA helper on the next relaunch, verify temporary-system seed lock and complete the paired fade and lifecycle checks. M2 waits for the M1 live gate. Publication reminders and optional QA probes remain under ATTENTION.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. Task 0 fixes and M1 seasonal-stream/host-slipsurge code are implemented. <b>Passed live:</b> Nameless Rock mirror placement and 12,769 static stream values. Both games are paused at the user's request. <b>Next:</b> deploy the clock-alignment QA helper on the next relaunch, verify temporary-system seed lock and complete the paired fade and lifecycle checks. M2 abyssal temporary systems waits for M1's live gate. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
   "attention": [
     {
       "sev": "gap",
@@ -48,18 +48,11 @@
       "body": "<code>CoopSectorFingerprint</code> now excludes <code>Tags.TEMPORARY_LOCATION</code> systems and their markets. Action: the host travels into the abyss until a rogue-object system appears, saves and reloads; join the guest. Pass: seed lock succeeds and the canonical fingerprint excludes the temporary system."
     },
     {
-      "sev": "gap",
-      "sevLabel": "known gap",
-      "head": "Fleets in the Nameless Rock system or an abyssal temporary system appear in the wrong \"Deep Space\" system on the other client",
-      "state": "fix implemented and unit-tested; live verification open",
-      "body": "Cross-client location paths now use <code>CoopLocations.keyOf</code>, selecting a star system's optional unique id when present. Action: teleport the guest into <code>nameless_rock_location</code>. Pass: the host bridge shows the guest mirror in Nameless Rock, distinct from Gate Hauler's raw <code>deep space</code> id."
-    },
-    {
       "sev": "gate",
       "sevLabel": "before M2",
       "head": "P26 M1 terrain parity still needs the two-instance live gate",
-      "state": "code and bridge probes implemented; live gate open",
-      "body": "Compare <code>streams</code> under the shared pause with matching campaign timestamps through full spawn/despawn and host-surge travel. Pass: geometry/params match, effective brightness differs by at most 0.05, guest-local surges survive, mirrors stay smooth, and reconnect/save/reload creates no duplicates. Repeat with players in different locations. Start M2 only after this gate passes."
+      "state": "static geometry passed live; fade and lifecycle gate open; games paused",
+      "body": "Static geometry/params matched across 12,769 values on 2026-10-12. The first fade comparison correctly rejected unequal campaign timestamps. On the next relaunch, deploy the QA helper and run <code>ss_align_clocks</code> under the shared pause before comparing <code>streams</code> through full spawn/despawn and host-surge travel. Pass: effective brightness differs by at most 0.05, guest-local surges survive, mirrors stay smooth, and reconnect/save/reload creates no duplicates. Repeat with players in different locations. Start M2 only after this gate passes."
     },
     {
       "sev": "scope",
@@ -919,7 +912,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0 fixes and M1 code implemented 2026-10-12: temporary-system fingerprint exclusion, optional-unique location keys, seasonal streams and host slipsurges with live fade state. Task 0 checks and the M1 live gate remain open; M2 starts afterward. M3-M5 and guest-proximity triggering remain follow-ups.",
+      "summary": "Task 0 fixes and M1 code implemented 2026-10-12: temporary-system fingerprint exclusion, optional-unique location keys, seasonal streams and host slipsurges with live fade state. Nameless Rock placement and static stream geometry passed live. Temporary-system seed lock and the remaining M1 live gate are open; M2 starts afterward. M3-M5 and guest-proximity triggering remain follow-ups.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopEncounterAuthority",
@@ -929,11 +922,12 @@
         "$coopStreamId / $coopEncId",
         "segment polyline + live per-segment fader state replication",
         "generation recipe carrying the host's effective EPEC seed",
-        "bridge stream table (timestamp-paired) + temp-system manifest"
+        "bridge stream table (timestamp-paired) + temp-system manifest",
+        "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "Task 0 live checks: seed lock after temporary-system save/reload, Nameless Rock mirror placement",
-        "M1 live gate: paired stream geometry/fades, seasonal turnover, host-surge travel, guest-local surges, mirror motion, reconnect/save/reload",
+        "Task 0 live check: seed lock after temporary-system save/reload (Nameless Rock mirror placement passed)",
+        "M1 live gate: map/discovery parity, timestamp-paired fades, seasonal turnover, host-surge travel, guest-local surges, mirror motion, reconnect/save/reload (static bridge geometry passed)",
         "M2 (after M1 live gate): fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity triggering: follow-up, outside the M1 + M2 draft scope",

@@ -198,7 +198,7 @@ class CoopAgentCommandsTest {
                         "expedition", "feed", "fleets", "give", "hirable", "intel", "landmarks",
                         "mark", "market", "markets", "memory", "netfault", "objective", "ownfleet",
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
-                        "teleport", "visibility", "streams", "streamadd", "streamdespawn"),
+                        "teleport", "visibility", "streams", "streamadd", "streamdespawn", "clockalign"),
                 new CoopAgentCommands().verbs());
     }
 

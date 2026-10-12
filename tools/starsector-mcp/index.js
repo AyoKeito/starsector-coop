@@ -16,6 +16,7 @@ import {
   INSTANCES,
   QUERY_VERBS,
   ssAct,
+  ssAlignClocks,
   ssAdvanceDays,
   ssDiff,
   ssDump,
@@ -97,7 +98,7 @@ const TOOLS = [
     description:
       'Run the same read-only verb against both instances and diff the two JSON trees field by field. ' +
       'Keyed collections (fleets by coopFleetId, stock by id) compare order-insensitively. ' +
-      'streams refuses unmatched campaign timestamps: hold the shared pause before sampling fades. ' +
+      'streams refuses unmatched campaign timestamps: hold the shared pause and use ss_align_clocks before sampling fades. ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',
@@ -138,6 +139,9 @@ const TOOLS = [
       'the current month; invoked confirms the call, while streams confirms any resulting terrain), ' +
       'streamdespawn (host only, no args: starts a 10 game-day fade with zero delay on each live ' +
       'seasonal stream that is not already despawning; started is the count), ' +
+      'clockalign{targetTimestamp} (active coop session and paused campaign required; advances this ' +
+      'clock forward by at most one game day and verifies exact readback; prefer ss_align_clocks to ' +
+      'check both instances and choose the target), ' +
       'rep{factionId, value|points} (host only: sets the player faction\'s standing with factionId; ' +
       'value is -1..1 in API units, points is -100..100 as shown in the UI, exactly one is required), ' +
       'netfault{mode: discard|loss|clear, seconds, lossPercent, delaySeconds} (makes THIS instance ' +
@@ -177,6 +181,15 @@ const TOOLS = [
     }
   },
   {
+    name: 'ss_align_clocks',
+    description:
+      'While both campaigns hold the shared pause in the same active session, advance only the ' +
+      'lower campaign clock to the greater timestamp, by at most one game day. Rechecks both ' +
+      'paused states, session ids and exact timestamps after the action. An already equal pair ' +
+      'is a no-op. Use before comparing slipstream fade brightness with ss_diff streams.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  },
+  {
     name: 'ss_advance_days',
     description:
       'Unpause the host, wait for its campaign clock to advance N game days, then pause it again. ' +
@@ -209,6 +222,8 @@ async function dispatch(name, args) {
       return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance, ignore: args.ignore });
     case 'ss_act':
       return ssAct(bridges, args.instance, args.verb, args.args);
+    case 'ss_align_clocks':
+      return ssAlignClocks(bridges);
     case 'ss_advance_days':
       return ssAdvanceDays(bridges, args.days, { timeoutSeconds: args.timeoutSeconds });
     default:

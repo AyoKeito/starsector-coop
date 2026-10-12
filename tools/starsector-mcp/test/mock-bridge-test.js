@@ -22,6 +22,7 @@ import {
   NON_VERBS,
   QUERY_VERBS,
   ssAct,
+  ssAlignClocks,
   ssAdvanceDays,
   ssDiff,
   ssDump,
@@ -247,7 +248,7 @@ test('the read-only allowlist and the ss_dump verb table are the same set', () =
     'a verb ss_dump accepts but the client will not retry, or vice versa, is a wiring slip');
 });
 
-test('a dropped streams query retries once, while neither stream trigger is replayed', async (t) => {
+test('a dropped streams query retries once, while stream triggers and clock alignment are not replayed', async (t) => {
   const calls = new Map();
   const bridge = new MockBridge((request) => {
     const count = (calls.get(request.cmd) ?? 0) + 1;
@@ -263,9 +264,9 @@ test('a dropped streams query retries once, while neither stream trigger is repl
 
   assert.equal((await client.send('streams')).campaignTimestamp, 123);
   assert.equal(calls.get('streams'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn']) {
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
-    assert.equal(calls.get(cmd), 1, `${cmd} must not create or redraw a second fade after a lost response`);
+    assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
 });
 
@@ -1522,6 +1523,133 @@ test('refuses the non-verbs with the reason, and unknown verbs with the verb lis
   await assert.rejects(() => ssDump(bridges, 'host', 'teleport', {}), /unknown query verb "teleport".*status, fleets/s);
   await assert.rejects(() => ssAct(bridges, 'host', 'fleets', {}), /unknown action verb "fleets".*teleport, pause/s);
   bridges.closeAll();
+});
+
+function clockAlignmentFixture({ hostTimestamp = -55_644_500_923_000,
+  guestTimestamp = -55_644_499_345_400, onStatus, onAlign } = {}) {
+  const statuses = { host: statusFor('HOST', { ...HOST_PAUSE }), guest: statusFor('GUEST', {}) };
+  statuses.host.clock.timestamp = hostTimestamp;
+  statuses.guest.clock.timestamp = guestTimestamp;
+  const requests = [];
+  const reads = { host: 0, guest: 0 };
+  const bridges = { get(instance) {
+    return { async send(cmd, args) {
+      requests.push({ instance, cmd, args });
+      if (cmd === 'status') {
+        onStatus?.(instance, ++reads[instance], statuses);
+        return structuredClone(statuses[instance]);
+      }
+      if (cmd === 'clockalign') {
+        const beforeTimestamp = statuses[instance].clock.timestamp;
+        if (onAlign) onAlign(instance, args, statuses);
+        else statuses[instance].clock.timestamp = args.targetTimestamp;
+        return { beforeTimestamp, afterTimestamp: statuses[instance].clock.timestamp,
+          advanced: beforeTimestamp !== statuses[instance].clock.timestamp };
+      }
+      throw new Error(`unexpected clock alignment command ${cmd}`);
+    } };
+  } };
+  return { bridges, statuses, requests };
+}
+
+test('ss_align_clocks advances only the lower clock to max, including negative timestamps and either role', async () => {
+  for (const lower of ['host', 'guest']) {
+    const low = -55_644_500_923_000;
+    const high = -55_644_499_345_400;
+    const fixture = clockAlignmentFixture({ hostTimestamp: lower === 'host' ? low : high,
+      guestTimestamp: lower === 'guest' ? low : high });
+    const result = await ssAlignClocks(fixture.bridges);
+    assert.equal(result.sessionId, 's-1');
+    assert.equal(result.targetTimestamp, high);
+    assert.equal(result.alignedInstance, lower);
+    assert.equal(result.advanced, true);
+    assert.deepEqual(result.after, { host: high, guest: high });
+    assert.deepEqual(fixture.requests.filter((request) => request.cmd !== 'status'),
+      [{ instance: lower, cmd: 'clockalign', args: { targetTimestamp: high } }]);
+    assert.equal(fixture.requests.filter((request) => request.cmd === 'status').length, 4,
+      'both statuses are read before and after the single action');
+  }
+});
+
+test('ss_align_clocks equal timestamps are a no-op with fresh two-instance verification', async () => {
+  const timestamp = -55_644_499_345_400;
+  const fixture = clockAlignmentFixture({ hostTimestamp: timestamp, guestTimestamp: timestamp });
+  const result = await ssAlignClocks(fixture.bridges);
+  assert.equal(result.alignedInstance, null);
+  assert.equal(result.advanced, false);
+  assert.deepEqual(result.before, result.after);
+  assert.equal(fixture.requests.length, 4);
+  assert.ok(fixture.requests.every((request) => request.cmd === 'status'));
+});
+
+test('ss_align_clocks refuses foreign or inactive sessions, wrong roles, unsafe clocks and missing shared pause before writes', async () => {
+  const cases = [
+    [(s) => { s.host.role = 'GUEST'; }, /host role HOST/],
+    [(s) => { s.guest.role = 'HOST'; }, /guest role GUEST/],
+    [(s) => { s.host.sessionActive = false; }, /active session/],
+    [(s) => { s.guest.sessionActive = false; }, /active session/],
+    [(s) => { s.guest.sessionId = 'foreign-session'; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = ''; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = '  '; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = 17; }, /same nonempty sessionId/],
+    [(s) => { delete s.host.sessionId; delete s.guest.sessionId; }, /same nonempty sessionId/],
+    [(s) => { s.host.paused = false; }, /both campaigns paused/],
+    [(s) => { s.guest.paused = false; }, /both campaigns paused/],
+    [(s) => { s.host.pause.effective = false; }, /shared pause effective/],
+    [(s) => { delete s.host.pause; }, /shared pause effective/],
+    [(s) => { s.host.clock.timestamp = Number.MAX_SAFE_INTEGER + 1; }, /safe integer/],
+    [(s) => { s.guest.clock.timestamp = 1.5; }, /safe integer/],
+    [(s) => { s.host.clock.timestamp = '123'; }, /safe integer/],
+    [(s) => { delete s.guest.clock.timestamp; }, /safe integer/]
+  ];
+  for (const [change, error] of cases) {
+    const fixture = clockAlignmentFixture();
+    change(fixture.statuses);
+    await assert.rejects(() => ssAlignClocks(fixture.bridges), error);
+    assert.ok(fixture.requests.every((request) => request.cmd === 'status'), 'a refused pair cannot write');
+  }
+});
+
+test('ss_align_clocks accepts a one-day gap and refuses a larger gap without advancing', async () => {
+  const allowed = clockAlignmentFixture({ hostTimestamp: -MS_PER_GAME_DAY, guestTimestamp: 0 });
+  assert.equal((await ssAlignClocks(allowed.bridges)).after.host, 0);
+  const oversized = clockAlignmentFixture({ hostTimestamp: -MS_PER_GAME_DAY - 1, guestTimestamp: 0 });
+  await assert.rejects(() => ssAlignClocks(oversized.bridges), /exceeds one game day/);
+  assert.ok(oversized.requests.every((request) => request.cmd === 'status'));
+});
+
+test('ss_align_clocks rejects readback drift, changed sessions or a released pause after the action', async () => {
+  const cases = [
+    [(s) => { s.host.clock.timestamp++; }, /readback differs from target/],
+    [(s) => { s.host.clock.timestamp++; s.guest.clock.timestamp++; }, /readback differs from target/],
+    [(s) => { s.guest.sessionId = 'foreign-session'; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = 'new-session'; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionActive = false; }, /active session/],
+    [(s) => { s.guest.role = 'NONE'; }, /guest role GUEST/],
+    [(s) => { s.host.paused = false; }, /both campaigns paused/],
+    [(s) => { s.guest.paused = false; }, /both campaigns paused/],
+    [(s) => { s.host.pause.effective = false; }, /shared pause effective/]
+  ];
+  for (const [change, error] of cases) {
+    const fixture = clockAlignmentFixture({ onStatus(instance, count, statuses) {
+      if (instance === 'host' && count === 2) change(statuses);
+    } });
+    await assert.rejects(() => ssAlignClocks(fixture.bridges), error);
+    assert.equal(fixture.requests.filter((request) => request.cmd === 'clockalign').length, 1);
+  }
+  const ignored = clockAlignmentFixture({ onAlign() {} });
+  await assert.rejects(() => ssAlignClocks(ignored.bridges), /readback differs from target/);
+});
+
+test('clockalign stays an action verb even when the target would be a no-op', async () => {
+  const fixture = clockAlignmentFixture();
+  assert.ok(ACTION_VERBS.includes('clockalign'));
+  assert.ok(!QUERY_VERBS.includes('clockalign'));
+  assert.ok(!READ_ONLY_COMMANDS.has('clockalign'));
+  const result = await ssAct(fixture.bridges, 'host', 'clockalign',
+    { targetTimestamp: fixture.statuses.host.clock.timestamp });
+  assert.equal(result.advanced, false);
+  await assert.rejects(() => ssDump(fixture.bridges, 'host', 'clockalign'), /unknown query verb/);
 });
 
 test('ss_advance_days unpauses, waits out the clock, and pauses again', async (t) => {

@@ -1,4 +1,4 @@
-// Instance registry, verb tables and the five MCP tool implementations.
+// Instance registry, verb tables and the MCP tool implementations.
 // Kept free of the MCP SDK so the test suite can drive it against a mock bridge.
 
 import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
@@ -48,7 +48,8 @@ export const ACTION_VERBS = [
   'mark',
   'memory',
   'streamadd',
-  'streamdespawn'
+  'streamdespawn',
+  'clockalign'
 ];
 
 /**
@@ -158,6 +159,60 @@ export async function ssDiff(bridges, what, args, options = {}) {
     }
   }
   return { what, args: args ?? {}, ...diffJson(host, guest, options) };
+}
+
+/** Pair paused QA samples explicitly by moving only the lower clock forward. */
+export async function ssAlignClocks(bridges) {
+  const readBoth = async () => {
+    const [host, guest] = await Promise.all(INSTANCES.map((instance) => bridges.get(instance).send('status')));
+    return { host, guest };
+  };
+  const beforeStatus = await readBoth();
+  const sessionId = requirePausedSession(beforeStatus);
+  const before = alignmentTimestamps(beforeStatus);
+  const targetTimestamp = Math.max(before.host, before.guest);
+  if (Math.abs(before.host - before.guest) > MS_PER_GAME_DAY) {
+    throw new Error('clock alignment exceeds one game day; no clock was changed');
+  }
+  const alignedInstance = before.host === before.guest ? null : before.host < before.guest ? 'host' : 'guest';
+  if (alignedInstance !== null) {
+    await bridges.get(alignedInstance).send('clockalign', { targetTimestamp });
+  }
+  const afterStatus = await readBoth();
+  requirePausedSession(afterStatus, sessionId);
+  const after = alignmentTimestamps(afterStatus);
+  if (after.host !== targetTimestamp || after.guest !== targetTimestamp) {
+    throw new Error(`clock alignment readback differs from target ${targetTimestamp} ` +
+      `(host=${after.host}, guest=${after.guest}); read both statuses before another action`);
+  }
+  return { sessionId, targetTimestamp, alignedInstance, advanced: alignedInstance !== null, before, after };
+}
+
+function requirePausedSession({ host, guest }, expectedSessionId) {
+  if (host?.role !== 'HOST' || guest?.role !== 'GUEST') {
+    throw new Error('clock alignment requires host role HOST and guest role GUEST');
+  }
+  if (host.sessionActive !== true || guest.sessionActive !== true) {
+    throw new Error('clock alignment requires an active session on both instances');
+  }
+  if (typeof host.sessionId !== 'string' || host.sessionId.trim().length === 0 ||
+      host.sessionId !== guest.sessionId || (expectedSessionId !== undefined && host.sessionId !== expectedSessionId)) {
+    throw new Error('clock alignment requires the same nonempty sessionId on both instances');
+  }
+  if (host.paused !== true || guest.paused !== true || host.pause?.effective !== true) {
+    throw new Error('clock alignment requires both campaigns paused and the host shared pause effective');
+  }
+  return host.sessionId;
+}
+
+function alignmentTimestamps(status) {
+  const timestamps = Object.fromEntries(INSTANCES.map((instance) => [instance, status[instance]?.clock?.timestamp]));
+  for (const instance of INSTANCES) {
+    if (!Number.isSafeInteger(timestamps[instance])) {
+      throw new Error(`clock alignment requires an exact safe integer clock.timestamp on ${instance}`);
+    }
+  }
+  return timestamps;
 }
 
 /**

@@ -251,6 +251,7 @@ public final class CoopAgentCommands {
         map.put("streams", CoopAgentCommands::streams);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
+        map.put("clockalign", CoopAgentCommands::clockalign);
         map.put("ability", CoopAgentCommands::ability);
         map.put("setcr", CoopAgentCommands::setcr);
         map.put("give", CoopAgentCommands::give);
@@ -2422,6 +2423,29 @@ public final class CoopAgentCommands {
         return out;
     }
 
+    /** Explicit paused QA action; the two-client caller chooses the greater observed timestamp. */
+    static JSONObject clockalign(JSONObject args, Context context) throws JSONException {
+        long targetTimestamp = requiredLong(args, "targetTimestamp");
+        CoopNetPump pump = context == null ? null : context.pump();
+        CoopConnectionRole role = roleOf(pump);
+        if ((role != CoopConnectionRole.HOST && role != CoopConnectionRole.GUEST)
+                || !pump.gameplaySessionActiveForBridge()) {
+            throw new IllegalStateException("clock alignment requires an active coop session"
+                    + " (role=" + role.name() + ")");
+        }
+        if (role == CoopConnectionRole.HOST && !pump.pauseCoordinatorForBridge().effectivePaused()) {
+            throw new IllegalStateException("clock alignment requires the shared pause");
+        }
+        CoopDebugClockAlignment.Result result = CoopDebugClockAlignment.align(
+                requireSector(context), targetTimestamp);
+        JSONObject out = new JSONObject();
+        out.put("role", role.name());
+        out.put("beforeTimestamp", result.beforeTimestamp());
+        out.put("afterTimestamp", result.afterTimestamp());
+        out.put("advanced", result.advanced());
+        return out;
+    }
+
     /**
      * UI-faithful on purpose: this is the same {@code AbilityPlugin#activate()} the toolbar button
      * calls, so the engine's {@code isPlayerFleet} check, its
@@ -4276,6 +4300,18 @@ public final class CoopAgentCommands {
             throw new IllegalArgumentException("missing or non-numeric argument " + key);
         }
         return value;
+    }
+
+    private static long requiredLong(JSONObject args, String key) {
+        Object raw = args.opt(key);
+        if (raw instanceof Number) {
+            try {
+                return new java.math.BigDecimal(raw.toString()).longValueExact();
+            } catch (NumberFormatException | ArithmeticException invalid) {
+                throw new IllegalArgumentException(key + " must be an exact signed 64-bit integer");
+            }
+        }
+        throw new IllegalArgumentException("missing or non-integer argument " + key);
     }
 
     private static boolean requiredPauseState(JSONObject args) {

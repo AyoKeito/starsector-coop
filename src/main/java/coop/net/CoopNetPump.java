@@ -6221,6 +6221,9 @@ public class CoopNetPump implements EveryFrameScript {
         commitMintedCampaignId();
         CoopLog.info(CoopNetPump.class,
                 "Coop seed lock accepted by guest sectorFingerprint=" + guestFingerprint);
+        if (CoopDebug.diagnosticsEnabled()) {
+            dumpCanonicalFingerprint("host seed lock accepted");
+        }
     }
 
     private void handleSeedLockReject(CoopMessages.Message message) {

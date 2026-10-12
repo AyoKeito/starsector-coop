@@ -116,6 +116,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `colonizable` | `{limit?, maxLy?, neutralOnly?}` | uncolonized planets nearest the local player fleet, nearest first |
 | `hirable` | `{limit?, maxLy?}` | markets holding officers or administrators for hire, nearest the local player fleet first; the game only rolls officers when a player opens a market screen, so `candidateCount: 0` on a fresh campaign means dock at a big hub first |
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
+| `streams` | none | campaign timestamp, stream ids/kinds, params, segment geometry/faders, native fade state and effective brightness sampled every 1,000 units |
 
 ```
 ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
@@ -232,6 +233,11 @@ How to read the output:
 
 The two player fleets carry the same key on both instances: `coopFleetId` is `player:<playerId>` for a player fleet and for its mirror on the other client, so one logical fleet is one row in the diff. `engineId` keeps the local engine id.
 
+`streams` comparisons require exactly matching campaign timestamps, even when `ignore` or
+`tolerance` would otherwise hide the difference. Pause both clients and run `ss_align_clocks`
+before collecting paired fade samples. Geometry and params should match exactly; P26's live fade
+gate allows an effective-brightness difference of at most 0.05 at each sampled point.
+
 ### `ss_act(instance, verb, args?)`
 
 One state-changing verb against one instance.
@@ -240,6 +246,7 @@ One state-changing verb against one instance.
 | --- | --- |
 | `teleport` | `{entityId}` or `{x, y, locationId}` — not both |
 | `pause` | `{on: true}` or `{on: false}` |
+| `clockalign` | `{targetTimestamp}` — paused active session only; forward by at most one game day |
 | `ability` | `{abilityId}` or `{abilityId, on: true}` / `{abilityId, on: false}` |
 | `setcr` | `{value, memberIndex}` or `{value, memberIndex: "all"}` |
 | `give` | `{commodityId?, qty?, credits?}` |
@@ -247,6 +254,8 @@ One state-changing verb against one instance.
 | `objective` | `{entityId, factionId}` |
 | `surveyset` | `{planetId, level}` |
 | `expedition` | `{}` or `{factionId}` — host only |
+| `streamadd` | `{}` — host only; invokes native seasonal stream creation |
+| `streamdespawn` | `{}` — host only; starts native seasonal despawn with no delay and a ten-day fade |
 
 ```
 ss_act(instance: "guest", verb: "ability", args: { "abilityId": "interdiction_pulse" })
@@ -290,6 +299,24 @@ ss_act(instance: "host", verb: "expedition")
 ```
 
 `createExpedition` returns `void` and bails silently from five places, so success is read off `PunExData.intel` afterwards rather than assumed. Every failure comes back as an error naming the cause: no faction carries `punitiveExpeditionData`, the named faction has none, the faction has no live reason, one is already running, or vanilla picked a reason and then found no colony at or above `punExMinColonySizeForNonTerritorial`, no market to stage from, or no raidable spaceport. The reason a caller can create on demand is free port: turn it on at any player colony outside hyperspace and every `vsFreePort` faction (`hegemony`, `luddic_church`, `sindrian_diktat` in vanilla) gets a reason with no other preconditions, weighted `max(1, size - 2) * 5`.
+
+### `ss_align_clocks()`
+
+Aligns the clocks for paired QA samples while keeping the games paused. Both clients must report
+an active session with the same nonempty session id, HOST/GUEST roles, and local pause; the host
+must also report effective shared pause. The helper advances only the earlier timestamp to the
+later one, refuses a gap over one game day, then rereads both clients to verify the same session,
+pause and exact target timestamp. Already equal clocks produce a no-op result.
+
+```
+ss_align_clocks()
+ss_diff(what: "streams", tolerance: 0.05)
+```
+
+The result includes `sessionId`, `targetTimestamp`, `alignedInstance`, `advanced`, and the `before`
+and `after` timestamp pairs. Normal clock reconciliation permits a small offset; shared pause
+alone does not make the timestamps identical. This tool is an explicit QA action. Like other
+mutating commands, `clockalign` is not automatically retried after a dropped response.
 
 ### `ss_advance_days(days, timeoutSeconds?)`
 
