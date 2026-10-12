@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -82,6 +83,69 @@ class CoopCreditTransferTest {
 
         assertEquals(100_000L, engine.credits,
                 "the debit is only safe because the send is reliable; an unsent grant must refund");
+        assertFalse(transfer.hasSent("ledger-1"), "the rolled-back debit must not refund again later");
+    }
+
+    @Test
+    void aSynchronousQueueCapDiscardRefundsTheGiftBeforeSendReturns() {
+        link.onSend = grant -> transfer.onOutboundDiscarded(
+                coop.net.CoopMessages.creditsGrant("session-a", 1L, 1_000L,
+                        grant.ledgerId(), grant.amount(), grant.reason()), "queue-cap");
+
+        assertEquals(CoopCreditTransfer.Result.SEND_FAILED, transfer.send(25_000));
+
+        assertEquals(100_000L, engine.credits, "the callback must see the debit's ledger entry");
+        assertFalse(transfer.hasSent("ledger-1"), "a refunded gift is no longer in flight");
+        assertTrue(engine.feed.stream().anyMatch(line -> line.contains("were returned")));
+        assertTrue(engine.feed.stream().noneMatch(line -> line.startsWith("Sent ")),
+                "a gift discarded inside send must not be announced as delivered: " + engine.feed);
+    }
+
+    @Test
+    void aTransportExceptionAfterASynchronousRefundDoesNotReturnTheMoneyTwice() {
+        link.onSend = grant -> transfer.onOutboundDiscarded(
+                coop.net.CoopMessages.creditsGrant("session-a", 1L, 1_000L,
+                        grant.ledgerId(), grant.amount(), grant.reason()), "queue-cap");
+        link.throwOnSend = true;
+
+        assertEquals(CoopCreditTransfer.Result.SEND_FAILED, transfer.send(25_000));
+
+        assertEquals(100_000L, engine.credits);
+        assertEquals(2, engine.writeAttempts, "one debit and one refund, even when send then throws");
+        assertFalse(transfer.hasSent("ledger-1"));
+    }
+
+    @Test
+    void aSynchronousDiscardWithARefusedRefundIsStillASendFailure() {
+        link.onSend = grant -> {
+            engine.failNextWrites = 1;
+            transfer.onOutboundDiscarded(coop.net.CoopMessages.creditsGrant("session-a", 1L,
+                    1_000L, grant.ledgerId(), grant.amount(), grant.reason()), "queue-cap");
+        };
+
+        assertEquals(CoopCreditTransfer.Result.SEND_FAILED, transfer.send(25_000));
+
+        assertEquals(75_000L, engine.credits);
+        assertTrue(transfer.hasSent("ledger-1"), "a refused refund must still be retryable");
+        assertTrue(engine.feed.stream().noneMatch(line -> line.startsWith("Sent ")));
+        assertTrue(engine.feed.stream().anyMatch(line -> line.contains("could not be returned")));
+        assertTrue(transfer.refund("ledger-1", 25_000, "retry"));
+        assertEquals(100_000L, engine.credits);
+        assertFalse(transfer.refund("ledger-1", 25_000, "duplicate-retry"));
+        assertEquals(100_000L, engine.credits);
+    }
+
+    @Test
+    void discardingAnEarlierGrantDuringSendDoesNotFailTheCurrentGift() {
+        assertEquals(CoopCreditTransfer.Result.SENT, transfer.send(10_000));
+        link.onSend = grant -> transfer.onOutboundDiscarded(coop.net.CoopMessages.creditsGrant(
+                "session-a", 1L, 1_000L, "ledger-1", 10_000, "gift"), "queue-cap");
+
+        assertEquals(CoopCreditTransfer.Result.SENT, transfer.send(25_000));
+
+        assertEquals(75_000L, engine.credits);
+        assertFalse(transfer.hasSent("ledger-1"));
+        assertTrue(transfer.hasSent("ledger-2"));
     }
 
     // ---- receiving -------------------------------------------------------------------------------
@@ -300,6 +364,7 @@ class CoopCreditTransferTest {
     private static final class FakeLink implements CoopCreditTransfer.Link {
         private boolean canSend = true;
         private boolean throwOnSend;
+        private Consumer<Grant> onSend;
         private int minted;
         private final List<Grant> sent = new ArrayList<>();
 
@@ -315,10 +380,14 @@ class CoopCreditTransferTest {
 
         @Override
         public void sendGrant(String ledgerId, int amount, String reason) {
+            Grant grant = new Grant(ledgerId, amount, reason);
+            if (onSend != null) {
+                onSend.accept(grant);
+            }
             if (throwOnSend) {
                 throw new IllegalStateException("transport is down");
             }
-            sent.add(new Grant(ledgerId, amount, reason));
+            sent.add(grant);
         }
     }
 }

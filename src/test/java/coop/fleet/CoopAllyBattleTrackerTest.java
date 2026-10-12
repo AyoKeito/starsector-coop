@@ -123,6 +123,90 @@ class CoopAllyBattleTrackerTest {
     }
 
     @Test
+    void takingAnEarlierOutcomePreservesAnActiveChainedBattlesFreezeAndLosses() {
+        assertEarlierOutcomePreservesSecondBattle(false);
+    }
+
+    @Test
+    void takingAnEarlierOutcomeAfterANullEdgePreservesTheNewBattlesFreezeAndLosses() {
+        assertEarlierOutcomePreservesSecondBattle(true);
+    }
+
+    private static void assertEarlierOutcomePreservesSecondBattle(boolean pollBetweenBattles) {
+        FakeMirror mirror = new FakeMirror("a", "b", "c");
+        CoopAllyBattleTracker tracker = new CoopAllyBattleTracker();
+        mirror.battle = battleNamed("First");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        assertNotNull(tracker.takeJoin());
+
+        mirror.destroy("b");
+        mirror.member("a").hullFraction = 0.7f;
+        if (pollBetweenBattles) {
+            mirror.battle = null;
+            tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        }
+        mirror.battle = battleNamed("Second");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        assertEquals("Second", tracker.takeJoin().enemySummary());
+
+        CoopAllyBattleOutcome first = tracker.takeOutcome();
+        assertNotNull(first);
+        assertEquals(List.of("owner-b"), first.destroyedMemberIds());
+        assertTrue(tracker.frozen(), "taking the first result must leave the second battle frozen");
+        assertNull(tracker.takeOutcome());
+        assertTrue(tracker.frozen(), "an empty outcome poll must leave the active battle frozen");
+
+        mirror.destroy("c");
+        mirror.member("a").hullFraction = 0.4f;
+        mirror.member("a").cr = 0.2f;
+        mirror.battle = null;
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        assertTrue(tracker.frozen());
+
+        CoopAllyBattleOutcome second = tracker.takeOutcome();
+        assertNotNull(second);
+        assertEquals(List.of("owner-c"), second.destroyedMemberIds());
+        assertEquals(List.of(new CoopAllyBattleOutcome.Survivor("owner-a", 0.4f, 0.2f)),
+                second.survivors());
+        assertFalse(tracker.frozen());
+        assertNull(tracker.takeOutcome());
+    }
+
+    @Test
+    void completingTwoBattlesBeforeTakingTheirResultsPreservesBothInOrder() {
+        FakeMirror mirror = new FakeMirror("a", "b", "c");
+        CoopAllyBattleTracker tracker = new CoopAllyBattleTracker();
+        mirror.battle = battleNamed("First");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        tracker.takeJoin();
+
+        mirror.destroy("b");
+        mirror.member("a").hullFraction = 0.7f;
+        mirror.battle = battleNamed("Second");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        tracker.takeJoin();
+        mirror.destroy("c");
+        mirror.member("a").hullFraction = 0.4f;
+        mirror.battle = null;
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+
+        CoopAllyBattleOutcome first = tracker.takeOutcome();
+        assertNotNull(first);
+        assertEquals(List.of("owner-b"), first.destroyedMemberIds());
+        assertEquals(0.7f, first.survivors().get(0).hullFraction());
+        assertTrue(tracker.frozen(), "the second result still needs to be taken");
+
+        CoopAllyBattleOutcome second = tracker.takeOutcome();
+        assertNotNull(second);
+        assertEquals(List.of("owner-c"), second.destroyedMemberIds());
+        assertEquals(0.4f, second.survivors().get(0).hullFraction());
+        assertFalse(tracker.frozen());
+        assertNull(tracker.takeOutcome());
+    }
+
+    @Test
     void aResetWhileFrozenDropsThePendingResult() {
         // The mirror was disposed or the session ended: the engine that would have received this has
         // no mirror any more, so there is nothing to apply the losses to.
@@ -138,6 +222,37 @@ class CoopAllyBattleTrackerTest {
         assertFalse(tracker.frozen());
         assertNull(tracker.takeOutcome());
         assertNull(tracker.takeJoin());
+    }
+
+    @Test
+    void resettingQueuedResultsAndAnActiveBattleLeavesTheNextBattleIndependent() {
+        FakeMirror mirror = new FakeMirror("a", "b", "c");
+        CoopAllyBattleTracker tracker = new CoopAllyBattleTracker();
+        mirror.battle = battleNamed("First");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        mirror.destroy("b");
+        mirror.battle = battleNamed("Second");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        mirror.battle = battleNamed("Interrupted");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+
+        tracker.reset();
+
+        assertFalse(tracker.frozen());
+        assertNull(tracker.takeOutcome());
+        assertNull(tracker.takeJoin());
+        mirror.battle = battleNamed("New session");
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+        assertEquals("New session", tracker.takeJoin().enemySummary());
+        mirror.destroy("c");
+        mirror.battle = null;
+        tracker.poll(mirror.fleet(), OWNER, mirror.senderIds);
+
+        CoopAllyBattleOutcome outcome = tracker.takeOutcome();
+        assertNotNull(outcome);
+        assertEquals(List.of("owner-c"), outcome.destroyedMemberIds());
+        assertFalse(tracker.frozen());
+        assertNull(tracker.takeOutcome());
     }
 
     @Test

@@ -199,6 +199,46 @@ class CoopLauncherConfigTest {
     }
 
     @Test
+    void anotherLaunchKeepsPreferencesChangedByTheGameWhileTheLauncherStayedOpen(@TempDir Path temp)
+            throws Exception {
+        File file = temp.resolve("coop_options.json.data").toFile();
+        Files.writeString(file.toPath(), "{\"coop.feedVerbosity\":\"all\","
+                + "\"coop.partnerColor\":\"orange\"}");
+        CoopLauncherConfig openLauncher = CoopLauncherConfig.read(file);
+        openLauncher.write(file, true, owned(CoopLauncherConfig.HOST_PORT, "7777"));
+
+        // The in-game options page rewrites the same file while the launcher remains open.
+        JSONObject inGame = reparse(Files.readString(file.toPath()));
+        inGame.put("coop.feedVerbosity", "minimal");
+        inGame.put("coop.hud.disable", "true");
+        inGame.remove("coop.partnerColor");
+        Files.writeString(file.toPath(), inGame.toString());
+
+        openLauncher.write(file, false, owned(CoopLauncherConfig.CONNECT_HOST, "127.0.0.1",
+                CoopLauncherConfig.CONNECT_PORT, "8888"));
+
+        CoopLauncherConfig nextLaunch = CoopLauncherConfig.read(file);
+        assertEquals("minimal", nextLaunch.value("coop.feedVerbosity"));
+        assertEquals("true", nextLaunch.value("coop.hud.disable"));
+        assertFalse(nextLaunch.keys().contains("coop.partnerColor"));
+        assertEquals("", nextLaunch.value(CoopLauncherConfig.HOST_PORT));
+        assertEquals("8888", nextLaunch.value(CoopLauncherConfig.CONNECT_PORT));
+    }
+
+    @Test
+    void aFileThatBecameUnreadableSinceOpeningIsNotReplaced(@TempDir Path temp) throws IOException {
+        File file = temp.resolve("coop_options.json.data").toFile();
+        Files.writeString(file.toPath(), "{}");
+        CoopLauncherConfig openLauncher = CoopLauncherConfig.read(file);
+        String broken = "{\"coop.feedVerbosity\": ";
+        Files.writeString(file.toPath(), broken);
+
+        assertThrows(IllegalStateException.class, () -> openLauncher.write(file, true,
+                owned(CoopLauncherConfig.HOST_PORT, "7777")));
+        assertEquals(broken, Files.readString(file.toPath()));
+    }
+
+    @Test
     void theOutputIsStableAcrossRuns() {
         CoopLauncherConfig config = CoopLauncherConfig.parse(
                 "{\"coop.partnerColor\":\"orange\",\"coop.hudCorner\":\"BL\"}");

@@ -95,7 +95,7 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
         NO_SESSION,
         /** The local player cannot cover it; nothing happened. */
         INSUFFICIENT_FUNDS,
-        /** The transport threw. The debit was rolled back, so the sender still has the money. */
+        /** The transport threw or discarded the grant while sending it. */
         SEND_FAILED
     }
 
@@ -108,7 +108,7 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
          * Adds {@code delta} to the local player's credits; negative debits.
          *
          * <p><b>Reports whether the write landed, and every caller checks</b> (credit red-team P0-1).
-         * The wallet is reached through {@code Global.getSector().getPlayerFleet().getCargo()}, and
+         * The wallet is reached through the owning sector's player fleet and cargo, and
          * there are frames where the sector exists and the fleet does not — the Phase 17 wipe/respawn
          * window is the concrete one. This used to return {@code void} and log a warning on that
          * path, so an inbound grant was marked applied, credited nothing, and told the player it had
@@ -195,6 +195,9 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
      * the id the refund needs. Bounded by the same ring, so it cannot grow without limit either.
      */
     private final Set<String> sent = new LinkedHashSet<>();
+    /** A discard can be reported synchronously inside sendGrant, even when its refund fails. */
+    private String sendingLedgerId;
+    private boolean sendingDiscarded;
 
     public CoopCreditTransfer(Engine engine, Link link) {
         this.engine = engine;
@@ -244,12 +247,20 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
             engine.feed("Coop: could not send credits.");
             return Result.SEND_FAILED;
         }
+        // Queue-cap enforcement can call the discard listener inside sendGrant, before it returns.
+        // Register the debit first so that callback can refund the gift it just discarded.
+        rememberSent(ledgerId);
+        sendingLedgerId = ledgerId;
+        sendingDiscarded = false;
+        boolean discardedDuringSend;
         try {
             link.sendGrant(ledgerId, amount, REASON_GIFT);
+            discardedDuringSend = sendingDiscarded;
         } catch (RuntimeException | LinkageError ex) {
             // The debit is only safe because the send is reliable. If the send did not happen at
-            // all, the debit must not stand either.
-            if (!engine.addCredits(amount)) {
+            // all, the debit must not stand either. A synchronous discard may already have refunded
+            // it before the send threw, so only roll back a debit the ledger still holds.
+            if (sent.contains(ledgerId) && !engine.addCredits(amount)) {
                 CoopLog.warn(CoopCreditTransfer.class, "Coop credits send failed amount=" + amount
                         + " ledger=" + ledgerId + " AND THE ROLLBACK ALSO FAILED: the wallet could not"
                         + " be written, so this amount is debited with nothing on the wire", ex);
@@ -257,12 +268,24 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
                         + " your account. See the log.");
                 return Result.SEND_FAILED;
             }
+            sent.remove(ledgerId);
             CoopLog.warn(CoopCreditTransfer.class, "Coop credits send failed amount=" + amount
                     + " ledger=" + ledgerId + "; the debit was rolled back", ex);
             engine.feed("Coop: could not send credits.");
             return Result.SEND_FAILED;
+        } finally {
+            sendingLedgerId = null;
+            sendingDiscarded = false;
         }
-        rememberSent(ledgerId);
+        if (discardedDuringSend || !sent.contains(ledgerId)) {
+            // A failed refund leaves its ledger entry available for a later retry, but the grant
+            // was still discarded and must never be announced as sent.
+            if (sent.contains(ledgerId)) {
+                engine.feed("Coop: could not send credits, and the amount could not be returned to"
+                        + " your account. See the log.");
+            }
+            return Result.SEND_FAILED;
+        }
         CoopLog.info(CoopCreditTransfer.class, "Coop credits sent amount=" + amount
                 + " ledger=" + ledgerId + " reason=" + REASON_GIFT);
         engine.feed("Sent " + format(amount) + " credits to " + partnerLabel() + ".");
@@ -377,6 +400,9 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
                     + "; this engine did not send it or it was already refunded");
             return false;
         }
+        if (id.equals(sendingLedgerId)) {
+            sendingDiscarded = true;
+        }
         if (!engine.addCredits(amount)) {
             // Deliberately left in the sent set: the wallet is unreadable right now, and a later
             // notification for the same id is the one chance left to pay it back.
@@ -468,7 +494,7 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
         return true;
     }
 
-    /** Records a grant handed to the transport, so a discard of it can be refunded. */
+    /** Records a debit before handing its grant to the transport, so synchronous discards refund it. */
     private void rememberSent(String ledgerId) {
         sent.add(ledgerId);
         evictOldest(sent);
@@ -515,6 +541,10 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
      * that received the message.
      */
     public static final class LiveEngine implements Engine {
+
+        // A game load replaces Global's sector before it shuts the previous transport down. Refunds
+        // from that transport belong to this sector, even while Global already points at another save.
+        private final SectorAPI sector = Global.getSector();
 
         @Override
         public long credits() {
@@ -563,9 +593,8 @@ public final class CoopCreditTransfer implements coop.net.CoopOutboundDiscardLis
             }
         }
 
-        private static MutableValue wallet() {
+        private MutableValue wallet() {
             try {
-                SectorAPI sector = Global.getSector();
                 if (sector == null) {
                     return null;
                 }

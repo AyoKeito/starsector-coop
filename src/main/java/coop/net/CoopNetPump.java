@@ -4419,6 +4419,12 @@ public class CoopNetPump implements EveryFrameScript {
                     + " the reconnect window keeps running and the request goes out again");
             return;
         }
+        if (dispatchingConnectionGeneration != service.connectionGeneration()) {
+            CoopLog.info(CoopNetPump.class, "Coop ignoring SESSION_RESUME_ACCEPT from connection "
+                    + dispatchingConnectionGeneration + ": the live connection is "
+                    + service.connectionGeneration() + "; the reconnect window keeps running");
+            return;
+        }
         String accepted = CoopMessages.parseResumeSessionId(message);
         if (!accepted.equals(sessionState.sessionId())) {
             CoopLog.warn(CoopNetPump.class, "Coop SESSION_RESUME_ACCEPT named session " + accepted
@@ -4872,8 +4878,9 @@ public class CoopNetPump implements EveryFrameScript {
      * <p>Marked <em>before</em> the handler runs, deliberately. A handler that throws is caught and
      * logged by {@link #dispatchOneInbound} and the message is gone either way; treating it as
      * applied means a replay of the same broken message is dropped rather than thrown again on every
-     * resume. The ack is queued in both branches, including the duplicate one — a sender whose ack
-     * went missing must be told again or it replays forever.
+     * resume. Credit grants are the exception: their caller records them only after the wallet
+     * accepts the payment. The ack is queued in both branches, including the duplicate one — a
+     * sender whose ack went missing must be told again or it replays forever.
      *
      * @return false when this seq has already been applied, i.e. the caller must not dispatch it
      */
@@ -4890,6 +4897,42 @@ public class CoopNetPump implements EveryFrameScript {
         pendingReliableAcks.computeIfAbsent(sender, key -> new java.util.ArrayList<>())
                 .add(message.seq());
         return fresh;
+    }
+
+    private boolean wasReliableApplied(CoopMessages.Message message) {
+        java.util.Set<Long> applied = appliedReliableSeqs.get(reliableSenderKey(message.senderId()));
+        return applied != null && applied.contains(message.seq());
+    }
+
+    /** A grant may be received while respawn temporarily leaves the player without a wallet. */
+    private void handleReliableCreditGrant(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()) {
+            if (!preSessionCampaignDropWarned) {
+                preSessionCampaignDropWarned = true;
+                CoopLog.warn(CoopNetPump.class,
+                        "Coop ignoring pre-session campaign message type=" + message.type());
+            }
+            return;
+        }
+        if (wasReliableApplied(message)) {
+            noteReliableApplied(message);
+            reliableDuplicatesDropped++;
+            return;
+        }
+        CoopMessages.CreditsGrant grant;
+        try {
+            grant = CoopMessages.parseCreditsGrant(message);
+        } catch (RuntimeException | LinkageError ex) {
+            // A malformed grant can never become payable; acknowledge its terminal rejection.
+            noteReliableApplied(message);
+            throw ex;
+        }
+        campaignReplicator.handle(message);
+        if (campaignReplicator.creditTransfer().hasApplied(grant.ledgerId())) {
+            noteReliableApplied(message);
+        }
+        // Refusal leaves the sender owing this grant. Its reliable replay can retry the payment;
+        // retaining a recipient-side copy could pay it after the sender discards and refunds it.
     }
 
     /**
@@ -5180,7 +5223,8 @@ public class CoopNetPump implements EveryFrameScript {
         // peer has proved itself. Note the pre-drop path a few lines up leads here too — that ack
         // dies with the socket, the sender replays, and this dedup absorbs the copy. That sequence
         // is the design, not a wasted round trip.
-        if (CoopMessages.isReliableOneShot(message.type())) {
+        if (CoopMessages.isReliableOneShot(message.type())
+                && message.type() != CoopMessages.Type.CREDITS_GRANT) {
             if (!noteReliableApplied(message)) {
                 reliableDuplicatesDropped++;
                 CoopLog.info(CoopNetPump.class, "Coop dropping duplicate reliable type="
@@ -5253,6 +5297,7 @@ public class CoopNetPump implements EveryFrameScript {
             case LOBBY_STATUS -> handleLobbyStatus(message);
             case SESSION_RESUME_ACCEPT -> handleSessionResumeAccept(message);
             case SESSION_RESUME_REJECT -> handleSessionResumeReject(message);
+            case CREDITS_GRANT -> handleReliableCreditGrant(message);
             case RELIABLE_ACK ->
                     service.acknowledgeReliable(message.senderId(),
                             CoopMessages.parseReliableAckSeqs(message));

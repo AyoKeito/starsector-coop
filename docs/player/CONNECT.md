@@ -34,9 +34,10 @@ address, a carrier-grade NAT warning when it applies), with a sentence under the
 next, rather than sending you to a log file to go find. Open **Logs** for the full
 block; read it the way "Reading the log" at the end of this page reads it: the tier line says which
 of the four routes you are on, and the `next step` line says what to do when the answer is bad. It
-takes a few seconds, and the router mapping is released afterwards so the game can make its own at
-startup. Once it is holding the port for the guest's test a `listening on <port>` chip appears, and
-the launcher keeps the port open, and says so, until you press Launch.
+takes a few seconds. Once it is holding the port for the guest's test a `listening on <port>` chip
+appears. The launcher keeps the port and router mapping open while your partner tests the invite.
+Pressing Launch releases both before starting the game, which makes its own mapping. Changing the
+connection, starting another check, or closing the launcher also releases the test mapping.
 
 **The guest presses Check connection** while that is up, with the invite already pasted in. Click the circular status icon for four
 chips, green when good, red when failed, grey when not measured:

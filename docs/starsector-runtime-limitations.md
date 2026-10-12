@@ -257,7 +257,9 @@ The host's commission faction is mirrored to the guest as the `$fcm_faction` mem
 
 ### Credits
 
-The engine wallet is a `float`, so above 2^24 credits a small transfer can land a credit or two off. That is vanilla arithmetic. On the transfer design: a grant already written to the OS socket counts as delivered, so a receiving process that dies before applying it loses the money the way it loses any other unsaved state; a grant that never reaches the socket (queue cap, session end, shutdown) is refunded to the sender with a feed line. Gifts are counted nowhere in the session stats.
+The engine wallet is a `float`, so above 2^24 credits a small transfer can land a credit or two off. That is vanilla arithmetic. Gifts are counted nowhere in the session stats.
+
+A gift stays pending until the recipient pays it and acknowledges it. A refused wallet write, including the wipe/respawn window without a player fleet, is left unacknowledged so the sender can replay it after a resume. Terminal transport discards refund the sender through that transfer's originating sector, including when loading another save replaces the current sector. There is still no escrow: if the recipient paid a gift but its acknowledgement was lost and the session ends before a resume delivers the acknowledgement, the sender's refund can duplicate the money. That is the accepted refund tradeoff.
 
 ### For the runbooks
 

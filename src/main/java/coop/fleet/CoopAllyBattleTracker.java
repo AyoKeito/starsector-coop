@@ -7,7 +7,9 @@ import coop.combat.CoopAllyBattleJoin;
 import coop.combat.CoopAllyBattleOutcome;
 import coop.util.CoopLog;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -47,9 +49,7 @@ final class CoopAllyBattleTracker {
     /** Sender-side ids of the ships the mirror took into the battle, for the destroyed diff. */
     private List<String> preBattleSenderIds = List.of();
     private CoopAllyBattleJoin pendingJoin;
-    private CoopAllyBattleOutcome pendingOutcome;
-    /** True from the frame the battle is seen until the outcome is taken. */
-    private boolean frozen;
+    private final Deque<CoopAllyBattleOutcome> pendingOutcomes = new ArrayDeque<>();
 
     /**
      * Polls the mirror's battle. Idempotent and safe to call more than once per frame: it acts only
@@ -84,7 +84,8 @@ final class CoopAllyBattleTracker {
             // A new battle object before this poll ever saw the old one go null: the engine can chain
             // an encounter straight into the next (a pursuit that catches its target, a second fleet
             // engaging on the same frame). Close the first one out first, so its result is not lost
-            // under the second join; the pump takes the pending outcome before the next poll.
+            // under the second join. Completed results remain queued if another poll runs before the
+            // pump takes them.
             noteBattleEnded(mirror, ownerPlayerId, senderIdsByEngineId);
         }
         noteBattleJoined(mirror, battle, ownerPlayerId, senderIdsByEngineId);
@@ -95,7 +96,7 @@ final class CoopAllyBattleTracker {
      * battle itself and the window between the battle ending and the outcome being taken.
      */
     boolean frozen() {
-        return frozen;
+        return observedBattle != null || !pendingOutcomes.isEmpty();
     }
 
     /** The join to send, or null. Returned once. */
@@ -106,18 +107,11 @@ final class CoopAllyBattleTracker {
     }
 
     /**
-     * The outcome to send, or null. Returned once, and taking it releases {@link #frozen()} — the
-     * caller has the numbers, so the owner's snapshots may drive the mirror again.
+     * The oldest outcome to send, or null. Returned once. The owner's snapshots may drive the mirror
+     * again once every completed result has been taken and no newer battle is active.
      */
     CoopAllyBattleOutcome takeOutcome() {
-        CoopAllyBattleOutcome outcome = pendingOutcome;
-        if (outcome == null) {
-            return null;
-        }
-        pendingOutcome = null;
-        frozen = false;
-        preBattleSenderIds = List.of();
-        return outcome;
+        return pendingOutcomes.pollFirst();
     }
 
     /**
@@ -128,14 +122,12 @@ final class CoopAllyBattleTracker {
         observedBattle = null;
         preBattleSenderIds = List.of();
         pendingJoin = null;
-        pendingOutcome = null;
-        frozen = false;
+        pendingOutcomes.clear();
     }
 
     private void noteBattleJoined(CampaignFleetAPI mirror, BattleAPI battle, String ownerPlayerId,
                                   Map<String, String> senderIdsByEngineId) {
         observedBattle = battle;
-        frozen = true;
         preBattleSenderIds = new ArrayList<>(liveSenderIds(mirror, senderIdsByEngineId));
         pendingJoin = new CoopAllyBattleJoin(ownerPlayerId, enemySummary(mirror, battle));
         CoopLog.info(CoopAllyBattleTracker.class, "Coop ally mirror pulled into a battle owner="
@@ -169,10 +161,9 @@ final class CoopAllyBattleTracker {
             }
         } catch (RuntimeException | LinkageError ex) {
             // Half a survivor list would read as "everything unnamed is destroyed" on the owner, so
-            // an unreadable roster produces no outcome at all and the freeze lifts on the next reset.
+            // an unreadable roster produces no outcome. Earlier completed results stay queued.
             CoopLog.warn(CoopAllyBattleTracker.class, "Coop could not read the ally mirror's roster"
                     + " after the battle; no loss result goes to " + ownerPlayerId, ex);
-            frozen = false;
             preBattleSenderIds = List.of();
             return;
         }
@@ -182,7 +173,8 @@ final class CoopAllyBattleTracker {
                 destroyed.add(senderId);
             }
         }
-        pendingOutcome = new CoopAllyBattleOutcome(ownerPlayerId, destroyed, survivors);
+        pendingOutcomes.addLast(new CoopAllyBattleOutcome(ownerPlayerId, destroyed, survivors));
+        preBattleSenderIds = List.of();
         CoopLog.info(CoopAllyBattleTracker.class, "Coop ally mirror left its battle owner="
                 + ownerPlayerId + " destroyed=" + destroyed.size() + " survivors=" + survivors.size()
                 + "; the mirror stays frozen until the result is taken");

@@ -312,7 +312,14 @@ public final class CoopLauncherConfig {
             throw new IllegalStateException("refusing to rewrite " + file
                     + ": it exists but could not be read (" + readError + ")");
         }
-        String text = compose(host, owned);
+        // The game can edit this file while the launcher stays open. Preserve the values on disk
+        // now, rather than the snapshot used to prefill the window before the previous game.
+        CoopLauncherConfig current = read(file);
+        if (current.readError != null) {
+            throw new IllegalStateException("refusing to rewrite " + file
+                    + ": it exists but could not be read (" + current.readError + ")");
+        }
+        String text = current.compose(host, owned);
         CoopAtomicFiles.writeAtomically(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
     }
 

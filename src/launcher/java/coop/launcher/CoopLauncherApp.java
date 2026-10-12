@@ -227,6 +227,7 @@ public final class CoopLauncherApp {
     private JButton publicLookupButton;
     private String copiedInvite = "";
     private boolean checkingConnection;
+    private boolean closing;
     private boolean connectionChecked;
     private boolean addressLookupRunning;
     private CoopPortMapper connectionMapper;
@@ -2191,8 +2192,20 @@ public final class CoopLauncherApp {
             return;
         }
         LOG.info("Check my connection pressed for port " + port);
-        cancelConnectionCheck("a new connection check started");
-        int generation = checkGeneration;
+        int generation = checkGeneration + 1;
+        closeListener("a new connection check started");
+        cancelConnectionCheck("a new connection check started", () -> {
+            if (!closing && checkResultStillApplies(generation, checkGeneration, gameRunning,
+                    hostSegment.isSelected())) {
+                boolean mappingEnabled = !"off".equalsIgnoreCase(selected(portMappingBox));
+                beginHostConnectionCheck(port, generation,
+                        CoopPortMapper.start(port, mappingEnabled, System::currentTimeMillis));
+            }
+        });
+    }
+
+    /** Starts after any previous check has finished releasing its router mapping. */
+    void beginHostConnectionCheck(int port, int generation, CoopPortMapper mapper) {
         checkingConnection = true;
         connectionChecked = false;
         setConnectionStatus("Checking connection…", CoopIcons.Symbol.BUSY, CoopTheme.MUTED);
@@ -2203,8 +2216,6 @@ public final class CoopLauncherApp {
         setChips(List.of(working));
         note("Asking your router to open port " + port + ", the way the game does at startup.");
 
-        boolean mappingEnabled = !"off".equalsIgnoreCase(selected(portMappingBox));
-        CoopPortMapper mapper = CoopPortMapper.start(port, mappingEnabled, System::currentTimeMillis);
         connectionMapper = mapper;
         long started = System.currentTimeMillis();
         AtomicInteger ticks = new AtomicInteger();
@@ -2219,7 +2230,6 @@ public final class CoopLauncherApp {
             }
             checkTimer.stop();
             checkTimer = null;
-            connectionMapper = null;
             CoopPortMapper.Result result = mapper.result();
             if (timedOut && !result.finished()) {
                 append("The router did not answer within 20 seconds; reporting what is known.");
@@ -2240,23 +2250,25 @@ public final class CoopLauncherApp {
                     updatingConnectionAddress = false;
                 }
             }
-            // shutdown() drives its own bounded release loop (up to 1.2 s of busy waiting against
-            // the injected clock), so it has to leave the event dispatch thread. The mapper is not
-            // being ticked any more at this point, so handing it over is a clean transfer.
-            releaseMapper(mapper, () -> {
-                append("Released the router mapping so the game can make its own at startup.");
-                if (!checkResultStillApplies(generation, checkGeneration, gameRunning,
-                        hostSegment.isSelected())) {
-                    // A role or endpoint change invalidates the result while cleanup is running.
-                    LOG.info("Connection check " + generation + " is no longer current; not"
-                            + " opening the launcher listener on port " + port);
-                    return;
-                }
-                boolean listening = openListener(port);
-                checkingConnection = false;
-                connectionChecked = true;
-                showHostChips(port, result, listening);
-            });
+            if (!checkResultStillApplies(generation, checkGeneration, gameRunning,
+                    hostSegment.isSelected()) || closing) {
+                cancelConnectionCheck("the finished check is no longer current");
+                return;
+            }
+            // The remote guest needs both the listener and the router forward. Keep renewing the
+            // mapping until Launch, an endpoint change, another check, or window shutdown releases it.
+            boolean listening = openListener(port);
+            checkingConnection = false;
+            connectionChecked = true;
+            showHostChips(port, result, listening);
+            if (listening) {
+                checkTimer = new javax.swing.Timer(CHECK_TICK_MILLIS,
+                        tick -> mapper.tick(System.currentTimeMillis()));
+                checkTimer.start();
+            } else {
+                cancelConnectionCheck("the launcher could not hold the port");
+            }
+            updateLaunchGate();
         });
         checkTimer.start();
     }
@@ -2470,6 +2482,9 @@ public final class CoopLauncherApp {
     }
 
     private void launch() {
+        if (gameRunning || checkingConnection || mappingCleanupPending || closing) {
+            return;
+        }
         LOG.info("Launch pressed");
         if (layout == null) {
             fail("Point the launcher at your Starsector install first.");
@@ -2611,19 +2626,42 @@ public final class CoopLauncherApp {
                 + " with keys " + owned.keySet());
         append("Settings saved to " + layout.coopOptions() + ".");
 
-        cancelConnectionCheck("the game is starting");
+        handoffToGame(layout, CoopGameProcess::launch);
+    }
+
+    /** Release the probe's forward before the game can create its own on the same port. */
+    void handoffToGame(CoopInstallLayout launched, GameStarter starter) {
         closeListener("the game is starting");
+        cancelConnectionCheck("the game is starting", () -> {
+            if (closing) {
+                clearAdoptConsent(launched, "the launcher closed before the game started");
+                return;
+            }
+            startGame(launched, starter);
+        });
+    }
+
+    @FunctionalInterface
+    interface GameStarter {
+        Process launch(CoopInstallLayout layout) throws java.io.IOException;
+    }
+
+    /** The process boundary, injectable so consecutive launches can be tested without a game. */
+    private void startGame(CoopInstallLayout launched, GameStarter starter) {
         try {
-            gameProcess = CoopGameProcess.launch(layout);
+            gameProcess = starter.launch(launched);
         } catch (Exception ex) {
             LOG.error("Could not start starsector.exe", ex);
             // The tick was consumed by the settings file this launch just wrote, and nothing is
             // going to exit to clear it: without this, a launch that never started leaves the
             // one-shot consent in coop_options.json.data for the next plain start of the game.
-            clearAdoptConsent(layout, "the launch failed to start");
+            clearAdoptConsent(launched, "the launch failed to start");
             fail("Could not start the game:\n\n" + ex.getMessage());
             return;
         }
+        // The settings file already carries this launch's choice. The checkbox is a new gesture
+        // for the next launch, even if the launcher window stays open between games.
+        adoptCampaignBox.setSelected(false);
         long pid = gameProcess.pid();
         LOG.info("Started starsector.exe pid " + pid);
         append("Starsector started (pid " + pid + "). This window keeps showing the co-op lines from"
@@ -2631,7 +2669,6 @@ public final class CoopLauncherApp {
         launchButton.setText("Game running");
         gameRunning = true;
         updateLaunchGate();
-        CoopInstallLayout launched = layout;
         gameProcess.onExit().thenAccept(process -> {
             // Off the event dispatch thread, and before the UI catches up: the tick meant "this
             // launch", so the consent goes as soon as the launch that consumed it is over.
@@ -2648,15 +2685,15 @@ public final class CoopLauncherApp {
                 refreshSaveIndex("the game exited");
             });
         });
-        startLogTail();
+        startLogTail(launched);
     }
 
-    private void startLogTail() {
+    private void startLogTail(CoopInstallLayout launched) {
         if (logTail != null) {
             logTail.close();
             logTail = null;
         }
-        File log = layout.starsectorLog();
+        File log = launched.starsectorLog();
         logTail = CoopLogTail.start(log, line -> SwingUtilities.invokeLater(() -> append(line)));
         LOG.info("Tailing " + log);
         append("Tailing " + log + ".");
@@ -2699,6 +2736,7 @@ public final class CoopLauncherApp {
     }
 
     private void shutdown() {
+        closing = true;
         LOG.info("Launcher window closing");
         cancelConnectionCheck("the launcher is closing");
         closeListener("the launcher is closing");
@@ -2759,6 +2797,10 @@ public final class CoopLauncherApp {
      * a role switch, a newer check, the window closing.
      */
     private void cancelConnectionCheck(String reason) {
+        cancelConnectionCheck(reason, () -> { });
+    }
+
+    private void cancelConnectionCheck(String reason, Runnable afterCleanup) {
         checkGeneration++;
         if (checkTimer != null) {
             LOG.info("Stopping the connection check because " + reason);
@@ -2768,13 +2810,16 @@ public final class CoopLauncherApp {
         if (connectionMapper != null) {
             CoopPortMapper mapper = connectionMapper;
             connectionMapper = null;
-            releaseMapper(mapper, () -> { });
+            releaseMapper(mapper, afterCleanup);
+        } else {
+            afterCleanup.run();
         }
     }
 
     /** Cleanup is bounded and independent of slow lookups or report writing on the worker. */
     private void releaseMapper(CoopPortMapper mapper, Runnable then) {
         mappingCleanupPending = true;
+        updateLaunchGate();
         Thread release = new Thread(() -> {
             try {
                 mapper.shutdown();

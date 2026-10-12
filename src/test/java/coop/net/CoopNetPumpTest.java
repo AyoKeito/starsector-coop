@@ -3854,6 +3854,7 @@ class CoopNetPumpTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         AtomicLong now = new AtomicLong(1000L);
         CoopNetPump pump = activeGuestPump(service, now::get);
+        installCreditEngine(pump, new coop.testing.FakeCreditEngine(0L));
 
         pump.advance(0f);
         service.connected = false;
@@ -3891,6 +3892,7 @@ class CoopNetPumpTest {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         AtomicLong now = new AtomicLong(1000L);
         CoopNetPump pump = activeGuestPump(service, now::get);
+        installCreditEngine(pump, new coop.testing.FakeCreditEngine(0L));
 
         pump.advance(0f);
         service.inbound.add(CoopMessages.creditsGrant("session-a", 77L, 2000L,
@@ -7736,6 +7738,32 @@ class CoopNetPumpTest {
                 "the same accept on a live socket resumes normally");
     }
 
+    @Test
+    void aResumeAcceptFromThePreviousSocketDoesNotProveItsReplacement() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        pump.advance(0f);
+        long previousGeneration = service.connectionGeneration;
+        service.connected = false;
+        pump.advance(0f);
+
+        service.connected = true;
+        service.connectionGeneration++;
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 3L, 2000L));
+        service.inboundGenerations.add(previousGeneration);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+        assertTrue(pump.pauseCoordinatorForBridge().reconnectHold(),
+                "a stale verdict cannot unpause a socket that has not proved its session");
+
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 4L, 3000L));
+        pump.advance(0f);
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.pauseCoordinatorForBridge().reconnectHold());
+    }
+
     /**
      * The parked messages arrived over the connection that WAS the partner, before the drop edge
      * existed. The grace whitelist exists to filter whoever holds the slot after it, and used to
@@ -7943,6 +7971,117 @@ class CoopNetPumpTest {
             }
         }
         return seqs;
+    }
+
+    private static void installCreditEngine(CoopNetPump pump, coop.testing.FakeCreditEngine engine) {
+        coop.campaign.CoopCreditTransferTestSupport.installEngine(
+                pump.campaignReplicatorForBridge(), engine);
+    }
+
+    @Test
+    void aRefusedCreditPaymentIsRetriedBeforeItIsAcknowledged() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = livePump(service, activeGuestSession(), () -> 1000L);
+        coop.testing.FakeCreditEngine wallet = new coop.testing.FakeCreditEngine(1000L);
+        wallet.failNextWrites = 1;
+        installCreditEngine(pump, wallet);
+        CoopMessages.Message gift = CoopMessages.creditsGrant("session-a", 99L, 1000L,
+                "gift-a", 500, "gift").withSenderId("host-player");
+        service.inbound.add(gift);
+
+        pump.advance(0f);
+
+        assertEquals(1000L, wallet.credits);
+        assertEquals(1, wallet.writeAttempts);
+        assertEquals(List.of(), ackedSeqs(service));
+        assertEquals(0, pump.appliedReliableSeqCount("host-player"));
+        service.inbound.add(gift);
+        pump.advance(0f);
+
+        assertEquals(1500L, wallet.credits);
+        assertEquals(2, wallet.writeAttempts);
+        assertEquals(List.of(99L), ackedSeqs(service));
+        assertEquals(1, pump.appliedReliableSeqCount("host-player"));
+
+        service.sent.clear();
+        service.inbound.add(gift);
+        pump.advance(0f);
+        assertEquals(1500L, wallet.credits, "replay cannot pay the same gift twice");
+        assertEquals(2, wallet.writeAttempts);
+        assertEquals(List.of(99L), ackedSeqs(service));
+        assertEquals(1, pump.reliableDuplicatesDropped());
+    }
+
+    @Test
+    void aPaidCreditLedgerIsAcknowledgedUnderANewEnvelopeSequence() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = livePump(service, activeGuestSession(), () -> 1000L);
+        coop.testing.FakeCreditEngine wallet = new coop.testing.FakeCreditEngine(1000L);
+        installCreditEngine(pump, wallet);
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 99L, 1000L,
+                "gift-a", 500, "gift").withSenderId("host-player"));
+        pump.advance(0f);
+        service.sent.clear();
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 100L, 1000L,
+                "gift-a", 500, "gift").withSenderId("host-player"));
+
+        pump.advance(0f);
+
+        assertEquals(1500L, wallet.credits);
+        assertEquals(1, wallet.writeAttempts);
+        assertEquals(List.of(100L), ackedSeqs(service), "a paid ledger is terminal, not retryable");
+    }
+
+    @Test
+    void aRefusedCreditPaymentWaitsForTheReconnectToProveItself() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1000L);
+        CoopNetPump pump = activeGuestPump(service, now::get);
+        coop.testing.FakeCreditEngine wallet = new coop.testing.FakeCreditEngine(1000L);
+        wallet.failNextWrites = 1;
+        installCreditEngine(pump, wallet);
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 99L, 1000L,
+                "gift-a", 500, "gift").withSenderId("host-player"));
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        service.connected = true;
+        service.connectionGeneration++;
+        pump.advance(0f);
+
+        assertEquals(1000L, wallet.credits);
+        assertEquals(1, wallet.writeAttempts, "the new connection must prove itself before payment");
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 99L, 2000L,
+                "gift-a", 500, "gift").withSenderId("host-player"));
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 100L, 2000L));
+        pump.advance(0f);
+        pump.advance(0f);
+
+        assertEquals(1500L, wallet.credits);
+        assertEquals(List.of(99L), ackedSeqs(service));
+    }
+
+    @Test
+    void endingTheSessionDropsRefusedPaymentsBeforeTheyCanReachTheNextCampaign() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopNetPump pump = activeGuestPump(service, () -> 1000L);
+        coop.testing.FakeCreditEngine wallet = new coop.testing.FakeCreditEngine(1000L);
+        wallet.failNextWrites = 1;
+        installCreditEngine(pump, wallet);
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.creditsGrant("session-a", 99L, 1000L,
+                "gift-a", 500, "gift").withSenderId("host-player"));
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        pump.reconnectCoordinatorForTest().end("give up");
+
+        service.connected = true;
+        pump.advance(0f);
+        assertEquals(1000L, wallet.credits);
+        assertEquals(1, wallet.writeAttempts);
+        assertEquals(List.of(), ackedSeqs(service));
     }
 
     /**
