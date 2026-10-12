@@ -80,6 +80,10 @@ public final class CoopNpcFleetSuppressor {
             "PunitiveExpeditionManager",
             "FactionHostilityManager",
 
+            // Phase 26: seasonal slipstreams now arrive as resolved host terrain. The manager has
+            // no cached sector-memory handle; guest-local ability surges do not use it.
+            "SlipstreamManager",
+
             // Phase 13 coverage pass: story/SDF fleet spawners. All extend PersonalFleetScript
             // (unseeded `new Random()`, respawn-on-death timers) and none end in a matched suffix.
             "PersonalFleetHoracioCaden",

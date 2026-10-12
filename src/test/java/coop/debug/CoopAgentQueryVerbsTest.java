@@ -128,6 +128,19 @@ class CoopAgentQueryVerbsTest {
     }
 
     @Test
+    void theNamelessRockUniqueIdResolvesBesideTheGateHaulerDeepSpaceId() {
+        StarSystemAPI gateHauler = proxy(StarSystemAPI.class, answers("getId", args -> "deep space"));
+        StarSystemAPI namelessRock = proxy(StarSystemAPI.class, answers(
+                "getId", args -> "deep space", "getOptionalUniqueId", args -> "nameless_rock_location"));
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getStarSystems", args -> List.of(gateHauler, namelessRock),
+                "getAllLocations", args -> List.of(gateHauler, namelessRock)));
+
+        assertSame(namelessRock, CoopAgentCommands.resolveSurveyScope(sector, "nameless_rock_location"));
+        assertSame(gateHauler, CoopAgentCommands.resolveSurveyScope(sector, "deep space"));
+    }
+
+    @Test
     void theOldNameLookupStaysAsTheFallback() {
         StarSystemAPI system = proxy(StarSystemAPI.class, answers("getId", args -> "system_04ab"));
         SectorAPI sector = proxy(SectorAPI.class, answers(

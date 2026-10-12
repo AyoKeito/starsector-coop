@@ -58,6 +58,8 @@ import coop.campaign.CoopCreditTransfer;
 import coop.campaign.CoopMarketSync;
 import coop.campaign.CoopMissionBoardSync;
 import coop.campaign.CoopSkeletonMutationWatcher;
+import coop.campaign.CoopSlipstreamRecord;
+import coop.campaign.CoopSlipstreamWorld;
 import coop.combat.CoopPreBattleAutosave;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
@@ -246,6 +248,7 @@ public final class CoopAgentCommands {
         map.put("intel", CoopAgentCommands::intel);
         map.put("feed", CoopAgentCommands::feed);
         map.put("screen", CoopAgentCommands::screen);
+        map.put("streams", CoopAgentCommands::streams);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("ability", CoopAgentCommands::ability);
@@ -260,10 +263,157 @@ public final class CoopAgentCommands {
         map.put("save", CoopAgentCommands::save);
         map.put("mark", CoopAgentCommands::mark);
         map.put("memory", CoopAgentCommands::memory);
+        map.put("streamadd", CoopAgentCommands::streamadd);
+        map.put("streamdespawn", CoopAgentCommands::streamdespawn);
         return map;
     }
 
     // ---- Queries --------------------------------------------------------------------------------
+
+    static JSONObject streams(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        return streamTable(new CoopSlipstreamWorld(() -> sector).captureTable(),
+                sector.getClock().getTimestamp());
+    }
+
+    /** Rows use the host terrain id on both clients; brightness already includes bMult. */
+    static JSONObject streamTable(List<CoopSlipstreamWorld.TableRow> rows, long timestamp)
+            throws JSONException {
+        JSONObject table = new JSONObject();
+        for (CoopSlipstreamWorld.TableRow captured : rows) {
+            if (captured.campaignTimestamp() != timestamp) {
+                throw new IllegalStateException("stream rows have unmatched campaign timestamps");
+            }
+            CoopSlipstreamRecord stream = captured.stream();
+            if (table.has(stream.hostId())) {
+                throw new IllegalStateException("duplicate canonical stream id: " + stream.hostId());
+            }
+            JSONObject row = new JSONObject();
+            row.put("id", stream.hostId());
+            row.put("version", stream.version());
+            row.put("kind", stream.kind().name());
+            row.put("campaignTimestamp", captured.campaignTimestamp());
+            row.put("segmentCount", stream.segments().size());
+            row.put("params", streamParamsJson(stream.params()));
+            row.put("terrainTags", new JSONArray(stream.terrainTags()));
+            row.put("unfinishedSurgeFadeIn", stream.unfinishedSurgeFadeIn());
+            JSONArray segments = new JSONArray();
+            for (CoopSlipstreamRecord.Segment segment : stream.segments()) {
+                JSONObject geometry = new JSONObject();
+                geometry.put("x", segment.x());
+                geometry.put("y", segment.y());
+                geometry.put("width", segment.width());
+                geometry.put("bMult", segment.bMult());
+                CoopSlipstreamRecord.Fader fader = segment.fader();
+                JSONObject fade = new JSONObject();
+                fade.put("brightness", fader.brightness());
+                fade.put("durationIn", fader.durationIn());
+                fade.put("durationOut", fader.durationOut());
+                fade.put("state", fader.state().name());
+                fade.put("bounceUp", fader.bounceUp());
+                fade.put("bounceDown", fader.bounceDown());
+                geometry.put("fader", fade);
+                segments.put(geometry);
+            }
+            row.put("segments", segments);
+            CoopSlipstreamRecord.Fade fade = stream.fade();
+            JSONObject fadeState = new JSONObject();
+            fadeState.put("spawnNoise", streamNoiseJson(fade.spawnNoise()));
+            fadeState.put("spawnDays", fade.spawnDays());
+            fadeState.put("spawnElapsed", fade.spawnElapsed());
+            fadeState.put("despawnNoise", streamNoiseJson(fade.despawnNoise()));
+            fadeState.put("despawnDelay", fade.despawnDelay());
+            fadeState.put("despawnDays", fade.despawnDays());
+            fadeState.put("despawnElapsed", fade.despawnElapsed());
+            row.put("fade", fadeState);
+            JSONArray brightness = new JSONArray();
+            for (CoopSlipstreamWorld.BrightnessSample sample : captured.brightness()) {
+                JSONObject value = new JSONObject();
+                value.put("distance", sample.distance());
+                value.put("brightness", sample.brightness());
+                brightness.put(value);
+            }
+            row.put("brightness", brightness);
+            table.put(stream.hostId(), row);
+        }
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", timestamp);
+        out.put("count", rows.size());
+        out.put("streams", table);
+        return out;
+    }
+
+    private static Object streamNoiseJson(float[] noise) throws JSONException {
+        if (noise == null) return JSONObject.NULL;
+        JSONArray values = new JSONArray();
+        for (float value : noise) values.put(value);
+        return values;
+    }
+
+    private static JSONObject streamParamsJson(CoopSlipstreamRecord.Params params)
+            throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("enteringSlipstreamTextOverride", params.enteringSlipstreamTextOverride() == null
+                ? JSONObject.NULL : params.enteringSlipstreamTextOverride());
+        out.put("enteringSlipstreamTextDurationOverride", params.enteringSlipstreamTextDurationOverride() == null
+                ? JSONObject.NULL : params.enteringSlipstreamTextDurationOverride());
+        out.put("forceNoWindVisualEffectOnFleets", params.forceNoWindVisualEffectOnFleets());
+        out.put("spriteKey1", params.spriteKey1());
+        out.put("spriteKey2", params.spriteKey2());
+        out.put("spriteKey3", params.spriteKey3());
+        out.put("edgeKey", params.edgeKey());
+        out.put("baseWidth", params.baseWidth());
+        out.put("widthForMaxSpeed", params.widthForMaxSpeed());
+        out.put("edgeWidth", params.edgeWidth());
+        out.put("areaPerParticle", params.areaPerParticle());
+        out.put("maxParticles", params.maxParticles());
+        out.put("minSpeed", params.minSpeed());
+        out.put("maxSpeed", params.maxSpeed());
+        out.put("minDur", params.minDur());
+        out.put("maxDur", params.maxDur());
+        out.put("particleFadeInTime", params.particleFadeInTime());
+        out.put("lineLengthFractionOfSpeed", params.lineLengthFractionOfSpeed());
+        out.put("burnLevel", params.burnLevel());
+        out.put("maxBurnLevelForTextureScroll", params.maxBurnLevelForTextureScroll());
+        out.put("slowDownInWiderSections", params.slowDownInWiderSections());
+        out.put("widthForMaxSpeedMinMult", params.widthForMaxSpeedMinMult());
+        out.put("widthForMaxSpeedMaxMult", params.widthForMaxSpeedMaxMult());
+        out.put("accelerationMult", params.accelerationMult());
+        out.put("name", params.name() == null ? JSONObject.NULL : params.name());
+        out.put("texScrollMult0", params.texScrollMult0());
+        out.put("texScrollMult1", params.texScrollMult1());
+        out.put("texScrollMult2", params.texScrollMult2());
+        return out;
+    }
+
+    static JSONObject streamadd(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        requireStreamAuthority(roleOf(context.pump()));
+        boolean invoked = new CoopSlipstreamWorld(() -> sector).addSeasonal();
+        if (!invoked) throw new IllegalStateException("no live SlipstreamManager on the host");
+        JSONObject out = new JSONObject();
+        out.put("invoked", true);
+        out.put("month", sector.getClock().getMonth());
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    static JSONObject streamdespawn(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        requireStreamAuthority(roleOf(context.pump()));
+        JSONObject out = new JSONObject();
+        out.put("started", new CoopSlipstreamWorld(() -> sector).despawnSeasonal());
+        out.put("delayDays", 0);
+        out.put("fadeDays", 10);
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    static void requireStreamAuthority(CoopConnectionRole role) {
+        if (role != CoopConnectionRole.HOST) {
+            throw new IllegalStateException("stream triggers are host-only; current role=" + role);
+        }
+    }
 
     static JSONObject status(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
@@ -295,7 +445,7 @@ public final class CoopAgentCommands {
         JSONObject fleetJson = new JSONObject();
         if (player != null) {
             LocationAPI location = player.getContainingLocation();
-            fleetJson.put("locationId", location == null ? "" : location.getId());
+            fleetJson.put("locationId", nullSafe(CoopLocations.keyOf(location)));
             fleetJson.put("x", round(player.getLocation() == null ? 0f : player.getLocation().x));
             fleetJson.put("y", round(player.getLocation() == null ? 0f : player.getLocation().y));
         }
@@ -460,7 +610,7 @@ public final class CoopAgentCommands {
             if (location == null) {
                 return;
             }
-            if (!locationFilter.isEmpty() && !locationFilter.equals(location.getId())) {
+            if (!locationFilter.isEmpty() && !locationFilter.equals(CoopLocations.keyOf(location))) {
                 return;
             }
             List<CampaignFleetAPI> present = location.getFleets();
@@ -500,7 +650,7 @@ public final class CoopAgentCommands {
                     coopFleetKey(fleet, playerFleet, guestMirror, localPlayerId, remotePlayerId));
             row.put("name", nullSafe(fleet.getName()));
             row.put("factionId", fleet.getFaction() == null ? "" : nullSafe(fleet.getFaction().getId()));
-            row.put("locationId", location.getId() == null ? "" : location.getId());
+            row.put("locationId", nullSafe(CoopLocations.keyOf(location)));
             row.put("x", round(fleet.getLocation() == null ? 0f : fleet.getLocation().x));
             row.put("y", round(fleet.getLocation() == null ? 0f : fleet.getLocation().y));
             row.put("vx", round(fleet.getVelocity() == null ? 0f : fleet.getVelocity().x));
@@ -738,7 +888,7 @@ public final class CoopAgentCommands {
         if (location == null && market.getPrimaryEntity() != null) {
             location = market.getPrimaryEntity().getContainingLocation();
         }
-        return location == null ? "" : nullSafe(location.getId());
+        return nullSafe(CoopLocations.keyOf(location));
     }
 
     /**
@@ -827,7 +977,7 @@ public final class CoopAgentCommands {
         List<StarSystemAPI> systems = sector.getStarSystems();
         if (systems != null) {
             for (StarSystemAPI system : systems) {
-                if (system != null && systemId.equals(system.getId())) {
+                if (system != null && systemId.equals(CoopLocations.keyOf(system))) {
                     return system;
                 }
             }
@@ -947,7 +1097,7 @@ public final class CoopAgentCommands {
             return out;
         }
         LocationAPI location = fleet.getContainingLocation();
-        out.put("locationId", location == null || location.getId() == null ? "" : location.getId());
+        out.put("locationId", nullSafe(CoopLocations.keyOf(location)));
         out.put("inHyperspace", fleet.isInHyperspace());
         out.put("paused", sector.isPaused());
         CargoAPI cargo = fleet.getCargo();
@@ -1126,7 +1276,7 @@ public final class CoopAgentCommands {
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
-        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("fromLocationId", nullSafe(CoopLocations.keyOf(here)));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
         out.put("neutralOnly", neutralOnly);
@@ -1202,7 +1352,7 @@ public final class CoopAgentCommands {
             if (planets == null) {
                 return;
             }
-            int markets = marketsByLocation.getOrDefault(nullSafe(location.getId()), 0);
+            int markets = marketsByLocation.getOrDefault(nullSafe(CoopLocations.keyOf(location)), 0);
             for (PlanetAPI planet : planets) {
                 ColonizableCandidate candidate =
                         colonizableCandidate(planet, location, player, here, markets);
@@ -1319,7 +1469,7 @@ public final class CoopAgentCommands {
                     nullSafe(planet.getName()),
                     nullSafe(planet.getTypeId()),
                     planet.isGasGiant(),
-                    nullSafe(location.getId()),
+                    nullSafe(CoopLocations.keyOf(location)),
                     nullSafe(location.getName()),
                     at == null ? 0f : at.x,
                     at == null ? 0f : at.y,
@@ -1466,7 +1616,7 @@ public final class CoopAgentCommands {
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
-        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("fromLocationId", nullSafe(CoopLocations.keyOf(here)));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
         // Everything holding somebody, before maxLy and limit trimmed the list: "none nearby" and
@@ -1761,7 +1911,7 @@ public final class CoopAgentCommands {
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
-        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("fromLocationId", nullSafe(CoopLocations.keyOf(here)));
         out.put("kinds", new JSONArray(landmarkKindKeys(kinds)));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
@@ -1919,7 +2069,7 @@ public final class CoopAgentCommands {
                     nullSafe(entity.getId()),
                     nullSafe(entity.getName()),
                     nullSafe(entity.getCustomEntityType()),
-                    nullSafe(location.getId()),
+                    nullSafe(CoopLocations.keyOf(location)),
                     nullSafe(location.getName()),
                     location.isHyperspace(),
                     at == null ? 0f : at.x,
@@ -2137,10 +2287,10 @@ public final class CoopAgentCommands {
         }
 
         JSONObject out = new JSONObject();
-        out.put("locationId", nullSafe(target.location().getId()));
+        out.put("locationId", nullSafe(CoopLocations.keyOf(target.location())));
         out.put("x", round(target.x()));
         out.put("y", round(target.y()));
-        out.put("movedFrom", current == null ? "" : nullSafe(current.getId()));
+        out.put("movedFrom", nullSafe(CoopLocations.keyOf(current)));
         out.put("entityId", target.entityId());
         out.put("entityName", target.entityName());
         out.put("transition", jump ? "jump" : "local");
@@ -3123,7 +3273,7 @@ public final class CoopAgentCommands {
                 .thenComparing(row -> row.optString("id", "")));
 
         JSONObject out = new JSONObject();
-        out.put("locationId", nullSafe(location.getId()));
+        out.put("locationId", nullSafe(CoopLocations.keyOf(location)));
         out.put("locationName", nullSafe(location.getName()));
         out.put("kinds", new JSONArray(kinds));
         out.put("clutterExcluded", excludeClutter);

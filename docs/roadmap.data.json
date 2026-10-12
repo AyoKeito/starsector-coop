@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "partially built phases appear here. Phase 23 is complete; its publication reminders remain under ATTENTION"
+      "note": "Phase 26 Task 0 and M1 code are implemented; live verification is next. Phase 23 is complete; its publication reminders remain under ATTENTION"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Current planning focus: Phase 26 M1 slipstreams, then M2 abyssal temporary systems after M1 passes its live gate; the draft is in the Post-V1 bucket"
+      "note": "the V1 build queue is complete. Next: Phase 26 Task 0 live checks and M1 terrain parity, then M2 abyssal temporary systems after M1 passes its live gate"
     },
     {
       "key": "queued",
@@ -34,25 +34,32 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "current plan: 26 M1 slipstreams → M2 abyssal temporary systems on codex/p26-ambient-world. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
+      "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world, awaiting live checks before M2. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: 0.1.5 (v0.1.5, 2026-10-12); the two-player check is complete, and Phases 19 and 23 are signed off. V1 is complete. Current focus: Phase 26 on codex/p26-ambient-world. Task 0 fixes two shipped bugs (fingerprint with temporary systems; systems sharing the id deep space); M1 slipstreams and host slipsurges must pass the live gate before M2 abyssal temporary systems starts. Publication reminders and optional QA probes remain under ATTENTION.",
-  "here": "<b>0.1.5</b> (<code>v0.1.5</code>, 2026-10-12): the two-player check is complete. <b>V1 is complete:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are closed by user sign-off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>: Task 0 fixes two shipped bugs (the seed-lock fingerprint with temporary systems, and systems sharing the id <code>deep space</code>), then M1 slipstreams and host slipsurges, then M2 abyssal temporary systems after M1 passes its bridge and two-instance smoke gate. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes retain their pass criteria under ATTENTION.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 fixes and M1 slipstream code are implemented on codex/p26-ambient-world. Next: verify seed lock with a temporary system, Nameless Rock mirror placement, and paired stream geometry/fades in both games. M2 waits for the M1 live gate. Publication reminders and optional QA probes remain under ATTENTION.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. Task 0 fixes and M1 seasonal-stream/host-slipsurge code are implemented. <b>Next:</b> verify seed lock with a temporary system, Nameless Rock mirror placement, and paired stream geometry/fades in both games. M2 abyssal temporary systems waits for M1's live gate. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
   "attention": [
     {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Seed lock rejects every guest join while the host's loaded save holds an abyssal temporary system",
-      "state": "open; shipped in 0.1.5; fix is Phase 26 Task 0",
-      "body": "<code>CoopSectorFingerprint.includeSystem</code> accepts every system, and the host stores the fingerprint at load, so a save made within about 10 days of visiting a rogue-object system rejects the guest with a fingerprint mismatch. Action: exclude <code>Tags.TEMPORARY_LOCATION</code> systems (<span class=\"rp\" data-jump=\"26\">Phase 26</span> Task 0). Pass: the host travels into the abyss until a rogue-object system appears, saves and reloads; the guest's seed lock succeeds."
+      "state": "fix implemented and unit-tested; live verification open",
+      "body": "<code>CoopSectorFingerprint</code> now excludes <code>Tags.TEMPORARY_LOCATION</code> systems and their markets. Action: the host travels into the abyss until a rogue-object system appears, saves and reloads; join the guest. Pass: seed lock succeeds and the canonical fingerprint excludes the temporary system."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Fleets in the Nameless Rock system or an abyssal temporary system appear in the wrong \"Deep Space\" system on the other client",
-      "state": "open; shipped in 0.1.5; fix is Phase 26 Task 0",
-      "body": "Gate Hauler, Nameless Rock and every rogue-object system share the engine id <code>deep space</code>. The mod sends <code>location.getId()</code> as its cross-client key and <code>CoopLocations</code> keeps the first match, so fleets, orbit snapshots and cargo pods in the others land in the first one. Action: key star systems by <code>getOptionalUniqueId()</code> when set, as vanilla's <code>getStarSystem</code> does (<span class=\"rp\" data-jump=\"26\">Phase 26</span> Task 0). Pass: with the guest teleported into the Nameless Rock system, the host's bridge shows the guest's mirror there."
+      "state": "fix implemented and unit-tested; live verification open",
+      "body": "Cross-client location paths now use <code>CoopLocations.keyOf</code>, selecting a star system's optional unique id when present. Action: teleport the guest into <code>nameless_rock_location</code>. Pass: the host bridge shows the guest mirror in Nameless Rock, distinct from Gate Hauler's raw <code>deep space</code> id."
+    },
+    {
+      "sev": "gate",
+      "sevLabel": "before M2",
+      "head": "P26 M1 terrain parity still needs the two-instance live gate",
+      "state": "code and bridge probes implemented; live gate open",
+      "body": "Compare <code>streams</code> under the shared pause with matching campaign timestamps through full spawn/despawn and host-surge travel. Pass: geometry/params match, effective brightness differs by at most 0.05, guest-local surges survive, mirrors stay smooth, and reconnect/save/reload creates no duplicates. Repeat with players in different locations. Start M2 only after this gate passes."
     },
     {
       "sev": "scope",
@@ -911,8 +918,8 @@
       "title": "Hyperspace Ambient-World Replication",
       "theme": "terrain",
       "track": "post-v1",
-      "status": "not-built",
-      "summary": "Drafted 2026-10-12 and revised the same day: Task 0 fixes two shipped bugs (fingerprint with temporary systems, the `deep space` location key); M1 replicates seasonal slipstreams and host slipsurges (polylines plus live fade state); M2 replays abyssal temporary systems from a captured recipe after M1 passes its live gate. Leviathan trails moved to M5; M3-M5 and guest-proximity triggering remain follow-ups.",
+      "status": "partial",
+      "summary": "Task 0 fixes and M1 code implemented 2026-10-12: temporary-system fingerprint exclusion, optional-unique location keys, seasonal streams and host slipsurges with live fade state. Task 0 checks and the M1 live gate remain open; M2 starts afterward. M3-M5 and guest-proximity triggering remain follow-ups.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopEncounterAuthority",
@@ -925,8 +932,8 @@
         "bridge stream table (timestamp-paired) + temp-system manifest"
       ],
       "residue": [
-        "Task 0: exclude TEMPORARY_LOCATION systems from the seed-lock fingerprint, and key star systems by optional unique id across clients (both shipped bugs)",
-        "M1: stream record + manifest/upsert wire, host scan (seasonal streams + slipsurges), guest suppression/apply/lifecycle, bridge + live gate",
+        "Task 0 live checks: seed lock after temporary-system save/reload, Nameless Rock mirror placement",
+        "M1 live gate: paired stream geometry/fades, seasonal turnover, host-surge travel, guest-local surges, mirror motion, reconnect/save/reload",
         "M2 (after M1 live gate): fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity triggering: follow-up, outside the M1 + M2 draft scope",

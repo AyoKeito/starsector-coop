@@ -222,12 +222,12 @@ test('does not retry a mutating command after a mid-request drop; throws BridgeO
   assert.equal(bridge.requests[0].cmd, 'give');
 });
 
-test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutations', () => {
+test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', () => {
   assert.deepEqual(
     [...READ_ONLY_COMMANDS].sort(),
     [
       'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'hirable', 'intel',
-      'landmarks', 'market', 'markets', 'screen', 'status', 'survey', 'visibility'
+      'landmarks', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility'
     ]
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and
@@ -236,7 +236,7 @@ test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutat
   // alone, so it is classed by its worst case.
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
-    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory'
+    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -245,6 +245,113 @@ test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutat
 test('the read-only allowlist and the ss_dump verb table are the same set', () => {
   assert.deepEqual([...READ_ONLY_COMMANDS].sort(), [...QUERY_VERBS].sort(),
     'a verb ss_dump accepts but the client will not retry, or vice versa, is a wiring slip');
+});
+
+test('a dropped streams query retries once, while neither stream trigger is replayed', async (t) => {
+  const calls = new Map();
+  const bridge = new MockBridge((request) => {
+    const count = (calls.get(request.cmd) ?? 0) + 1;
+    calls.set(request.cmd, count);
+    return count === 1 ? { drop: true } : { ok: true, data: { campaignTimestamp: 123, count: 0, streams: {} } };
+  });
+  await bridge.start();
+  const client = clientFor(bridge);
+  t.after(async () => {
+    client.close();
+    await bridge.stop();
+  });
+
+  assert.equal((await client.send('streams')).campaignTimestamp, 123);
+  assert.equal(calls.get('streams'), 2);
+  for (const cmd of ['streamadd', 'streamdespawn']) {
+    await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
+    assert.equal(calls.get(cmd), 1, `${cmd} must not create or redraw a second fade after a lost response`);
+  }
+});
+
+test('streams dump and host triggers relay their results; guest trigger refusals reach the caller', async (t) => {
+  const table = { campaignTimestamp: 123, count: 1, streams: {
+    'host-7': { id: 'host-7', kind: 'SEASONAL', segmentCount: 3, params: { burnLevel: 30 },
+      brightness: [{ distance: 0, brightness: 0.35 }] }
+  } };
+  const response = (request, instance) => {
+    if (request.cmd === 'streams') return { ok: true, data: table };
+    if (instance !== 'host') return { ok: false, error: 'IllegalStateException: stream triggers are host-only' };
+    return { ok: true, data: request.cmd === 'streamadd' ? { invoked: true, month: 4 } : { started: 1 } };
+  };
+  const hostBridge = new MockBridge((request) => response(request, 'host'));
+  const guestBridge = new MockBridge((request) => response(request, 'guest'));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssDump(bridges, 'guest', 'streams'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'streamadd'), { invoked: true, month: 4 });
+  assert.deepEqual(await ssAct(bridges, 'host', 'streamdespawn'), { started: 1 });
+  for (const verb of ['streamadd', 'streamdespawn']) {
+    await assert.rejects(() => ssAct(bridges, 'guest', verb), /host-only/);
+    await assert.rejects(() => ssDump(bridges, 'host', verb), /unknown query verb/);
+  }
+  await assert.rejects(() => ssAct(bridges, 'host', 'streams'), /unknown action verb/);
+});
+
+test('stream diffs require timestamp pairing even if a tolerance or ignore list would hide it', async (t) => {
+  const hostBridge = new MockBridge(() => ({ ok: true, data: {
+    campaignTimestamp: 123, count: 0, streams: {}
+  } }));
+  let guestTimestamp = 124;
+  const guestBridge = new MockBridge(() => ({ ok: true, data: {
+    campaignTimestamp: guestTimestamp, count: 0, streams: {}
+  } }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  await assert.rejects(() => ssDiff(bridges, 'streams', {}, {
+    tolerance: 100, ignore: ['campaignTimestamp']
+  }), /unmatched campaign timestamps.*shared pause/);
+  guestTimestamp = undefined;
+  await assert.rejects(() => ssDiff(bridges, 'streams'), /unmatched campaign timestamps/);
+  guestTimestamp = 123;
+  assert.equal((await ssDiff(bridges, 'streams')).equal, true);
+});
+
+test('paired stream diffs retain canonical identity, geometry and zero-brightness gap differences', async (t) => {
+  const host = { campaignTimestamp: 123, count: 1, streams: { 'host-7': {
+    id: 'host-7', kind: 'SEASONAL', segmentCount: 3, params: { burnLevel: 30 },
+    segments: [{ x: 0, y: 0, width: 600, bMult: 0.5 }],
+    brightness: [{ distance: 0, brightness: 0.35 }, { distance: 1000, brightness: 0 }]
+  } } };
+  const guest = structuredClone(host);
+  guest.streams['host-7'].brightness[0].brightness = 0.38;
+  guest.streams['host-7'].brightness[1].brightness = 0.08;
+  guest.streams['host-7'].segments[0].width = 650;
+  const hostBridge = new MockBridge(() => ({ ok: true, data: host }));
+  const guestBridge = new MockBridge(() => ({ ok: true, data: guest }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  const compared = await ssDiff(bridges, 'streams', {}, { tolerance: 0.05 });
+  assert.equal(compared.equal, false);
+  assert.equal(compared.differences.length, 2);
+  assert.ok(compared.differences.some((entry) => entry.path.includes('host-7') && entry.path.endsWith('.width')));
+  assert.ok(compared.differences.some((entry) => entry.host === 0 && entry.guest === 0.08));
 });
 
 test('reuses one connection across sequential requests', async (t) => {

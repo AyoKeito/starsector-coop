@@ -3,9 +3,12 @@ package coop.net;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.campaign.CoopSlipstreamAuthority;
+import coop.campaign.CoopSlipstreamRecord;
 import coop.config.CoopOptionsRegistry;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
@@ -5422,6 +5425,7 @@ class CoopNetPumpTest {
         private boolean paused;
         private final RecordingCampaignUi campaignUi;
         private final RecordingFleet playerFleet;
+        private final LocationAPI hyperspace = emptyHyperspace();
         /** Phase 28: where the campaign's option policy is stored, beside coop.campaignId. */
         private final java.util.Map<String, Object> persistentData = new java.util.LinkedHashMap<>();
         /**
@@ -5468,6 +5472,9 @@ class CoopNetPumpTest {
                             case "getPlayerFleet" -> {
                                 return playerFleet == null ? null : playerFleet.proxy();
                             }
+                            case "getHyperspace" -> {
+                                return hyperspace;
+                            }
                             // Phase 21 red-team item 13 re-registers the intel pages off the stats
                             // tick; no manager is the headless answer and the pump has to take it.
                             case "getIntelManager", "getClock" -> {
@@ -5487,6 +5494,24 @@ class CoopNetPumpTest {
                             }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
+                    });
+        }
+
+        private static LocationAPI emptyHyperspace() {
+            return (LocationAPI) Proxy.newProxyInstance(
+                    LocationAPI.class.getClassLoader(),
+                    new Class<?>[]{LocationAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) return objectMethod;
+                        return switch (method.getName()) {
+                            case "getId" -> "hyperspace";
+                            case "isHyperspace" -> true;
+                            // A readable empty world lets the real seasonal sweep finish before
+                            // the guest's once-per-session NPC manager suppression can arm.
+                            case "getTerrainCopy" -> new ArrayList<>();
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        };
                     });
         }
     }
@@ -8639,6 +8664,194 @@ class CoopNetPumpTest {
         assertFalse(pump.npcReplicationStreamingForTest(),
                 "the next connect is a fresh session start, not a resume");
         assertFalse(pump.baseReplicationStreamingForTest());
+    }
+
+    @Test
+    void anInitialStreamSetConsumesTheLifecycleEdgeBeforeTheFramesSyncPass() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.tagged.add("stale-host-stream");
+        CoopSlipstreamRecord stream = oneStream("host-stream-1");
+        service.inbound.add(CoopMessages.streamSet("session-a", 1L, now.get(),
+                CoopSlipstreamRecord.encodeIds(List.of(stream.hostId()))));
+        service.inbound.add(CoopMessages.streamAdd("session-a", 2L, now.get(), stream.encode()));
+
+        pump.advance(0f);
+
+        assertEquals(1, world.sweepAttempts,
+                "dispatch prepares once; the later frame lifecycle must not reset and sweep again");
+        assertEquals(List.of("stale-host-stream"), world.removed);
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+        assertEquals(1, world.upserts);
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+
+        now.addAndGet(100L);
+        pump.advance(0f);
+        assertEquals(1, world.sweepAttempts);
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+    }
+
+    @Test
+    void streamTerrainAndItsStreamingFlagSurviveGraceAndResumeWithoutAnotherSeasonalSweep() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.tagged.add("host-stream-1");
+        pump.advance(0f);
+        assertEquals(1, world.sweepAttempts);
+
+        service.connected = false;
+        now.addAndGet(100L);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+        assertTrue(world.removed.isEmpty());
+        assertEquals(1, world.sweepAttempts);
+
+        service.connected = true;
+        service.connectionGeneration++;
+        now.addAndGet(2_000L);
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 9L, now.get()));
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.streamSet("session-a", 10L, now.get(),
+                CoopSlipstreamRecord.encodeIds(List.of("host-stream-1"))));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(1, world.sweepAttempts,
+                "resume re-arms the full manifest, not the guest's once-per-session sweep");
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+        assertTrue(world.removed.isEmpty());
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+    }
+
+    @Test
+    void graceExpiryClearsTheSlipstreamStreamingFlagWithoutRepeatingTheSeasonalSweep() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+
+        now.set(1_000L + 61_000L);
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.slipstreamReplicationStreamingForTest(),
+                "a new session must take the start edge after a real expiry");
+        for (int frame = 0; frame < 3; frame++) {
+            now.addAndGet(100L);
+            pump.advance(0f);
+        }
+        assertFalse(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(1, world.sweepAttempts);
+    }
+
+    @Test
+    void aFailedInitialSeasonalSweepDefersNpcManagerSuppressionUntilTheRetrySucceeds() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.failSweep = true;
+
+        pump.advance(0f);
+
+        assertEquals(1, world.sweepAttempts);
+        assertFalse(pump.npcReplicationStreamingForTest());
+        assertFalse(pump.npcFleetSuppressorForTest().spawnersSuppressed());
+        assertEquals(0, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns(),
+                "the manager must remain readable while its seasonal membership sweep is unavailable");
+
+        world.failSweep = false;
+        now.addAndGet(100L);
+        pump.advance(0f);
+
+        assertEquals(2, world.sweepAttempts);
+        assertEquals(1, world.successfulSweeps);
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertTrue(pump.npcReplicationStreamingForTest());
+        assertTrue(pump.npcFleetSuppressorForTest().spawnersSuppressed());
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+
+        now.addAndGet(100L);
+        pump.advance(0f);
+        assertEquals(2, world.sweepAttempts);
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+    }
+
+    private static RecordingStreamWorld installStreamWorld(CoopNetPump pump,
+                                                            RecordingNetService service,
+                                                            CoopSessionState session, AtomicLong now) {
+        RecordingStreamWorld world = new RecordingStreamWorld();
+        pump.setSlipstreamAuthorityForTest(new CoopSlipstreamAuthority(service, session, now::get, world));
+        return world;
+    }
+
+    private static CoopSlipstreamRecord oneStream(String id) {
+        CoopSlipstreamRecord.Fader fader = new CoopSlipstreamRecord.Fader(1f, 1f, 1f,
+                CoopSlipstreamRecord.FaderState.IDLE, false, false);
+        return new CoopSlipstreamRecord(id, CoopSlipstreamRecord.Kind.SEASONAL,
+                CoopSlipstreamRecord.Params.defaults(), List.of(), List.of(
+                new CoopSlipstreamRecord.Segment(0f, 0f, 600f, 1f, fader),
+                new CoopSlipstreamRecord.Segment(1000f, 0f, 600f, 1f, fader),
+                new CoopSlipstreamRecord.Segment(2000f, 0f, 600f, 1f, fader)),
+                new CoopSlipstreamRecord.Fade(null, 0f, 0f, null, 0f, 0f, 0f), false);
+    }
+
+    private static final class RecordingStreamWorld implements CoopSlipstreamAuthority.StreamWorld {
+        private final java.util.Set<String> tagged = new java.util.LinkedHashSet<>();
+        private final List<String> removed = new ArrayList<>();
+        private boolean failSweep;
+        private int sweepAttempts;
+        private int successfulSweeps;
+        private int upserts;
+
+        @Override public List<CoopSlipstreamRecord> captureHost() {
+            return List.of();
+        }
+
+        @Override public java.util.Set<String> taggedIds() {
+            return java.util.Set.copyOf(tagged);
+        }
+
+        @Override public void upsert(CoopSlipstreamRecord record) {
+            upserts++;
+            tagged.add(record.hostId());
+        }
+
+        @Override public void despawn(CoopSlipstreamRecord.Despawn record) {
+        }
+
+        @Override public void remove(String id) {
+            removed.add(id);
+            tagged.remove(id);
+        }
+
+        @Override public void sweepSeasonal() {
+            sweepAttempts++;
+            if (failSweep) throw new IllegalStateException("seasonal membership is not readable yet");
+            successfulSweeps++;
+        }
     }
 
     // ---- 0.1.2 follow-up: the partner's player mirror gets the same held-drop treatment ----------

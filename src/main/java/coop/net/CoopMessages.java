@@ -68,6 +68,14 @@ public final class CoopMessages {
         NPC_FLEET_SET,
         NPC_FLEET_MOTION,
         BASE_SET,
+        /** Phase 26: host live-id manifest, immediately followed by one upsert per stream. */
+        STREAM_SET,
+        /** Phase 26: one resolved host stream, including geometry and current live fade state. */
+        STREAM_ADD,
+        /** Phase 26: only the noise and timers changed when the host starts despawning a stream. */
+        STREAM_DESPAWN,
+        /** Phase 26: host terrain has expired; remove the replica with this stream id. */
+        STREAM_REMOVE,
         BATTLE_BEGIN,
         BATTLE_STATUS,
         BATTLE_END,
@@ -387,6 +395,9 @@ public final class CoopMessages {
                  READY_STATE, FLEET_ROSTER_REQUEST, RELIABLE_ACK,
                  TIME_SNAPSHOT, PAUSE_INTENT, FLEET_SNAPSHOT, FLEET_ROSTER, GUEST_SNAPSHOT,
                  ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, STATE_DATAGRAM,
+                 // Phase 26: resume sends a fresh manifest and every live stream. Replaying an old
+                 // upsert after that set could recreate terrain the host has already removed.
+                 STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE,
                  PLAYER_REP_SNAPSHOT, MISSION_POOL_SNAPSHOT,
                  MISSION_CLAIM_REQUEST, MISSION_CLAIM_ACCEPT, MISSION_CLAIM_REJECT,
                  MARKET_OPEN, MARKET_SNAPSHOT, COLONY_INCOME, EXPEDITION_WARNING,
@@ -1175,6 +1186,30 @@ public final class CoopMessages {
     public static Message baseSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
         return new Message(Type.BASE_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    /** Phase 26 id manifest; an empty manifest removes every tagged guest replica. */
+    public static Message streamSet(String sessionId, long seq, long sentAtMillis, String encodedIds) {
+        return new Message(Type.STREAM_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"streams\":\"" + escapeJson(encodedIds == null ? "" : encodedIds) + "\"}");
+    }
+
+    public static Message streamAdd(String sessionId, long seq, long sentAtMillis, String encodedStream) {
+        return new Message(Type.STREAM_ADD, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"stream\":\"" + escapeJson(requireText(encodedStream, "stream")) + "\"}");
+    }
+
+    public static Message streamDespawn(String sessionId, long seq, long sentAtMillis,
+                                        String encodedDespawn) {
+        return new Message(Type.STREAM_DESPAWN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"stream\":\"" + escapeJson(requireText(encodedDespawn, "stream")) + "\"}");
+    }
+
+    public static Message streamRemove(String sessionId, long seq, long sentAtMillis, String streamId) {
+        // Validate presence without trimming identity bytes that the record/manifest preserved.
+        requireText(streamId, "streamId");
+        return new Message(Type.STREAM_REMOVE, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"streamId\":\"" + escapeJson(streamId) + "\"}");
     }
 
     // ---- Phase 21: lobby / ready-up ---------------------------------------------------------------

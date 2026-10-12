@@ -51,6 +51,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.EXPEDITION_WARNING, CoopMessages.Type.ABILITY_ACTIVATE,
             CoopMessages.Type.ORBIT_SNAPSHOT, CoopMessages.Type.NPC_FLEET_SET,
             CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET,
+            CoopMessages.Type.STREAM_SET, CoopMessages.Type.STREAM_ADD,
+            CoopMessages.Type.STREAM_DESPAWN, CoopMessages.Type.STREAM_REMOVE,
             CoopMessages.Type.BATTLE_BEGIN, CoopMessages.Type.BATTLE_STATUS,
             CoopMessages.Type.BATTLE_END, CoopMessages.Type.BATTLE_RESULT,
             CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.DIALOG_BEGIN,
@@ -170,6 +172,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.RESPAWN_PLAYER, CoopMessages.Type.STALL_NOTICE,
             CoopMessages.Type.ORBIT_SNAPSHOT, CoopMessages.Type.NPC_FLEET_SET,
             CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET,
+            CoopMessages.Type.STREAM_SET, CoopMessages.Type.STREAM_ADD,
+            CoopMessages.Type.STREAM_DESPAWN, CoopMessages.Type.STREAM_REMOVE,
             CoopMessages.Type.FLEET_SNAPSHOT, CoopMessages.Type.FLEET_ROSTER,
             CoopMessages.Type.GUEST_SNAPSHOT, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,
@@ -412,6 +416,25 @@ class CoopMessageTypePolicyTest {
         for (CoopMessages.Type type : ALL_KNOWN_TYPES) {
             assertEquals(RELIABLE_ONE_SHOT.contains(type),
                     CoopMessages.isReliableOneShot(type), type.name());
+        }
+    }
+
+    /**
+     * Resume replaces slipstream state from the host. Keeping these out of replay and coalescing
+     * prevents stale upserts from resurrecting terrain and queued removes from being dropped.
+     */
+    @Test
+    void slipstreamTrafficHasTheBaseSetPolicies() {
+        for (CoopMessages.Type type : List.of(CoopMessages.Type.STREAM_SET,
+                CoopMessages.Type.STREAM_ADD, CoopMessages.Type.STREAM_DESPAWN,
+                CoopMessages.Type.STREAM_REMOVE)) {
+            assertFalse(CoopMessages.isReliableOneShot(type), type.name());
+            assertNull(CoopNetService.coalesceKey(message(type)), type.name());
+            assertTrue(CoopNetPump.survivesTheDropEdge(type), type.name());
+            assertFalse(CoopNetPump.allowedDuringReconnectGrace(type), type.name());
+            assertFalse(CoopNetService.isConnectionScopedControl(type), type.name());
+            assertFalse(CoopNetPump.isControlPlane(type), type.name());
+            assertFalse(CoopNetPump.isHighFrequency(type), type.name());
         }
     }
 

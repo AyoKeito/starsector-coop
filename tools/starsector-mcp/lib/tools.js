@@ -20,7 +20,8 @@ export const QUERY_VERBS = [
   'entities',
   'intel',
   'feed',
-  'screen'
+  'screen',
+  'streams'
 ];
 
 /**
@@ -45,7 +46,9 @@ export const ACTION_VERBS = [
   'netfault',
   'save',
   'mark',
-  'memory'
+  'memory',
+  'streamadd',
+  'streamdespawn'
 ];
 
 /**
@@ -146,6 +149,14 @@ export async function ssDiff(bridges, what, args, options = {}) {
     bridges.get('host').send(what, args),
     bridges.get('guest').send(what, args)
   ]);
+  if (what === 'streams') {
+    const hostStamp = host.campaignTimestamp;
+    const guestStamp = guest.campaignTimestamp;
+    if (!Number.isSafeInteger(hostStamp) || !Number.isSafeInteger(guestStamp) || hostStamp !== guestStamp) {
+      throw new Error(`stream samples have unmatched campaign timestamps (host=${hostStamp}, guest=${guestStamp}); ` +
+        'hold the shared pause and read both tables again before comparing brightness');
+    }
+  }
   return { what, args: args ?? {}, ...diffJson(host, guest, options) };
 }
 

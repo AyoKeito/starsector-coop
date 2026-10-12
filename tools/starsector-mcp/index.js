@@ -76,6 +76,9 @@ const TOOLS = [
       'when the link died), ' +
       'screen (state, paused, dialogOpen, interactionDialog + target, coreTab, menuOpen, the coop ' +
       'dialog requested or shown, and the same pause block ss_status carries); ' +
+      'streams (no args: hyperspace streams keyed by canonical host id, with kind, full params, ' +
+      'segment geometry and faders, fade state, and effective brightness sampled every 1000 units ' +
+      'plus the endpoint; each row and the table carry their campaignTimestamp); ' +
       'status, markets and barpool take none. ' +
       'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
       'teleport takes alongside systemId.',
@@ -94,6 +97,7 @@ const TOOLS = [
     description:
       'Run the same read-only verb against both instances and diff the two JSON trees field by field. ' +
       'Keyed collections (fleets by coopFleetId, stock by id) compare order-insensitively. ' +
+      'streams refuses unmatched campaign timestamps: hold the shared pause before sampling fades. ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',
@@ -130,6 +134,10 @@ const TOOLS = [
       'local player fleet; an unknown variant is refused by name and count is capped at 20), ' +
       'objective{entityId, factionId}, surveyset{planetId, level}, ' +
       'expedition{factionId?} (host only: forces a punitive expedition against a player colony), ' +
+      'streamadd (host only, no args: asks the live SlipstreamManager to add a seasonal stream for ' +
+      'the current month; invoked confirms the call, while streams confirms any resulting terrain), ' +
+      'streamdespawn (host only, no args: starts a 10 game-day fade with zero delay on each live ' +
+      'seasonal stream that is not already despawning; started is the count), ' +
       'rep{factionId, value|points} (host only: sets the player faction\'s standing with factionId; ' +
       'value is -1..1 in API units, points is -100..100 as shown in the UI, exactly one is required), ' +
       'netfault{mode: discard|loss|clear, seconds, lossPercent, delaySeconds} (makes THIS instance ' +
