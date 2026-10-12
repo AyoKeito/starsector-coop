@@ -12,7 +12,7 @@ Your ships, cargo, credits, officers, and skills stay yours.
 </p>
 
 > [!IMPORTANT]
-> **Version 0.1.4 is in private testing.** One player pilots each battle on their own PC; the other
+> **Version 0.1.4 is in public testing.** One player pilots each battle on their own PC; the other
 > player waits on a paused campaign, and can send their fleet in as an AI ally. Two players piloting
 > in the same battle is not supported in this release.
 
