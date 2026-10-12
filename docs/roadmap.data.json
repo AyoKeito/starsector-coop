@@ -37,9 +37,16 @@
       "note": "current plan: 26 M1 slipstreams → M2 abyssal temporary systems on codex/p26-ambient-world. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: 0.1.5 (v0.1.5, 2026-10-12); the two-player check is complete, and Phases 19 and 23 are signed off. V1 is complete. Current focus: the Phase 26 M1 + M2 implementation draft on codex/p26-ambient-world. M1 slipstreams must pass the live gate before M2 abyssal temporary systems starts. Publication reminders and optional QA probes remain under ATTENTION.",
-  "here": "<b>0.1.5</b> (<code>v0.1.5</code>, 2026-10-12): the two-player check is complete. <b>V1 is complete:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are closed by user sign-off. <b>Current focus:</b> the <span class=\"rp\" data-jump=\"26\">Phase 26</span> implementation draft on <code>codex/p26-ambient-world</code>: M1 slipstreams, then M2 abyssal temporary systems after M1 passes its bridge and two-instance smoke gate. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes retain their pass criteria under ATTENTION.",
+  "hereHead": "You are here: 0.1.5 (v0.1.5, 2026-10-12); the two-player check is complete, and Phases 19 and 23 are signed off. V1 is complete. Current focus: Phase 26 on codex/p26-ambient-world. Task 0 fixes the shipped fingerprint bug with temporary systems; M1 slipstreams and host slipsurges must pass the live gate before M2 abyssal temporary systems starts. Publication reminders and optional QA probes remain under ATTENTION.",
+  "here": "<b>0.1.5</b> (<code>v0.1.5</code>, 2026-10-12): the two-player check is complete. <b>V1 is complete:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are closed by user sign-off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>: Task 0 fixes the seed-lock fingerprint bug with temporary systems, then M1 slipstreams and host slipsurges, then M2 abyssal temporary systems after M1 passes its bridge and two-instance smoke gate. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes retain their pass criteria under ATTENTION.",
   "attention": [
+    {
+      "sev": "gap",
+      "sevLabel": "known gap",
+      "head": "Seed lock rejects every guest join while the host's loaded save holds an abyssal temporary system",
+      "state": "open; shipped in 0.1.5; fix is Phase 26 Task 0",
+      "body": "<code>CoopSectorFingerprint.includeSystem</code> accepts every system, and the host stores the fingerprint at load, so a save made within about 10 days of visiting a rogue-object system rejects the guest with a fingerprint mismatch. Action: exclude <code>Tags.TEMPORARY_LOCATION</code> systems (<span class=\"rp\" data-jump=\"26\">Phase 26</span> Task 0). Pass: the host travels into the abyss until a rogue-object system appears, saves and reloads; the guest's seed lock succeeds."
+    },
     {
       "sev": "scope",
       "sevLabel": "before public listing",
@@ -898,29 +905,30 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "not-built",
-      "summary": "Drafted M1 + M2 on 2026-10-12: replicate slipstream polylines and live fade state, then abyssal temporary systems through keyed EPEC re-execution after M1 passes its live gate. M3-M5 and guest-proximity triggering remain follow-ups.",
+      "summary": "Drafted 2026-10-12 and revised the same day: Task 0 fixes the shipped fingerprint bug with temporary systems; M1 replicates seasonal slipstreams and host slipsurges (polylines plus live fade state); M2 replays abyssal temporary systems from a captured recipe after M1 passes its live gate. Leviathan trails moved to M5; M3-M5 and guest-proximity triggering remain follow-ups.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopEncounterAuthority",
         "CoopAbyssalDespawner",
-        "STREAM_ADD/UPDATE/SET/DESPAWN/REMOVE",
-        "ENC_SPAWN/SET/REMOVE",
-        "AbyssalRogueStellarObjectDireHintsEPEC fork",
-        "$coopStreamId / $coopEncId / $coopEncOrdinal",
+        "STREAM_SET/ADD/DESPAWN/REMOVE",
+        "ENC_SET",
+        "$coopStreamId / $coopEncId",
         "segment polyline + live per-segment fader state replication",
-        "bridge stream table + temp-system manifest"
+        "generation recipe carrying the host's effective EPEC seed",
+        "bridge stream table (timestamp-paired) + temp-system manifest"
       ],
       "residue": [
-        "M1: source/API gate, bounded TCP records/sets, seasonal streams + revisioned dynamic trails, suppression + lifecycle + bridge, live smoke",
-        "M2 (after M1 live smoke): persisted generation recipe + immutable ordinals + live overlays, canonical keys, despawner + replay, fingerprint exclusion, live smoke",
+        "Task 0: exclude TEMPORARY_LOCATION systems from the seed-lock fingerprint (shipped bug)",
+        "M1: stream record + manifest/upsert wire, host scan (seasonal streams + slipsurges), guest suppression/apply/lifecycle, bridge + live gate",
+        "M2 (after M1 live gate): fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity triggering: follow-up, outside the M1 + M2 draft scope",
         "M4 hyperspace storm replication: follow-up; existing design retained",
-        "M5 guest sensor ghosts: follow-up; existing design retained",
+        "M5 guest sensor ghosts and Leviathan trails: follow-up",
         "document residual divergences + retire v1 accept-divergence entries",
         "commit"
       ],
-      "note": "User confirmed M1 + M2 scope on 2026-10-12; draft lives in the canonical plan on codex/p26-ambient-world. Builds on Phases 8/9/13/30. Capture live per-segment FaderUtil state as well as fade noise/counters; getFaderBrightness already includes bMult. M2 persists a distinct encounter-instance id, original threat branch, complete resolved specials, immutable ordinals and current consumption/survey overlays. Existing pre-P26 systems without a recipe need an explicit migration boundary. Temporary systems and their markets are excluded from the handshake fingerprint. Bounded TCP SET assembly is required; the existing datagram chunker is a different path. M2 starts only after M1 passes the bridge and two-instance gate."
+      "note": "User confirmed M1 + M2 scope on 2026-10-12 and, after a review the same day, put the fingerprint fix first, added host slipsurges to M1 and moved Leviathan trails to M5. Builds on Phases 8/9/13/30. Capture live per-segment FaderUtil state with the fade noise/counters; getFaderBrightness already includes bMult. M2 records the seed the host's EPEC used, because the fork's keyed seed depends on -Dcoop.newGameSeed. Fade-gate samples are paired by campaign timestamp under the shared pause. M2 starts only after M1 passes the bridge and two-instance gate."
     },
     {
       "id": "27",
