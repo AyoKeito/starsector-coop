@@ -3,6 +3,7 @@ package coop.fleet;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
@@ -328,6 +329,19 @@ class CoopNpcFleetReplicatorTest {
      * datagram does not carry it, so before the health trigger this fleet produced no wire traffic at
      * all and the guest's mirror showed the damage indefinitely.
      */
+    @Test
+    void anNpcSetCapturesTheNamelessRockUniqueLocationKey() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        SectorAPI sector = sectorWithOneDamagedFleet(new MutableHealth(1f, 1f),
+                new String[]{""}, "deep space", "nameless_rock_location");
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(sector, 0L);
+
+        assertEquals("nameless_rock_location", decodeSet(service.sent.get(0)).fleets().get(0).locationId());
+    }
+
     @Test
     void aCrOnlyChangeResendsTheSetOnceTheFloorHasPassed() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
@@ -871,6 +885,11 @@ class CoopNpcFleetReplicatorTest {
      * through {@code getNullAIActionText}, so one answer drives the captured text.
      */
     private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health, String[] actionText) {
+        return sectorWithOneDamagedFleet(health, actionText, "corvus", null);
+    }
+
+    private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health, String[] actionText,
+                                                       String locationId, String uniqueId) {
         Object repairTracker = stub(RepairTrackerAPI.class, (name, args) ->
                 "getCR".equals(name) ? health.cr : null);
         Object status = stub(FleetMemberStatusAPI.class, (name, args) ->
@@ -897,8 +916,9 @@ class CoopNpcFleetReplicatorTest {
             case "getNullAIActionText" -> actionText[0];
             default -> null;
         });
-        location[0] = stub(LocationAPI.class, (name, args) -> switch (name) {
-            case "getId" -> "corvus";
+        location[0] = stub(StarSystemAPI.class, (name, args) -> switch (name) {
+            case "getId" -> locationId;
+            case "getOptionalUniqueId" -> uniqueId;
             case "getFleets" -> new ArrayList<>(List.of(fleet));
             default -> null;
         });

@@ -69,6 +69,7 @@ import coop.colony.CoopExpeditionWarningSync;
 import coop.colony.CoopRaidOutcomeSync;
 import coop.debug.CoopOwnFleetProbe;
 import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopLocations;
 import coop.rewards.CoopRewardSplitter;
 import coop.ui.CoopFeed;
 import coop.net.CoopConnectionRole;
@@ -5053,8 +5054,8 @@ public final class CoopCampaignReplicator
             }
             // Entering a new location: re-seed the baseline silently (the old location's entities are
             // "gone" only because the player moved, not because they were salvaged).
-            if (!Objects.equals(location.getId(), watchedLocationId)) {
-                watchedLocationId = location.getId();
+            if (!Objects.equals(CoopLocations.keyOf(location), watchedLocationId)) {
+                watchedLocationId = CoopLocations.keyOf(location);
                 trackedSalvageables.clear();
                 trackedSalvageables.addAll(current);
                 constructionScratch.clear();
@@ -5214,9 +5215,9 @@ public final class CoopCampaignReplicator
                     firstLocation = false;
                 }
                 if (!entries.isEmpty()) {
-                    sentThisTick.add(location.getId());
+                    sentThisTick.add(CoopLocations.keyOf(location));
                     send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
-                            location.getId(), CoopOrbitSync.encode(entries)));
+                            CoopLocations.keyOf(location), CoopOrbitSync.encode(entries)));
                 }
             }
             tickOrbitSweep(sector, nowMillis, sentThisTick);
@@ -5242,7 +5243,7 @@ public final class CoopCampaignReplicator
         }
         List<String> systemIds = new ArrayList<>(systems.size());
         for (StarSystemAPI system : systems) {
-            systemIds.add(system == null ? null : system.getId());
+            systemIds.add(CoopLocations.keyOf(system));
         }
         OrbitSweepStep step = nextOrbitSweepSystem(systemIds, orbitSweepCursor, sentThisTick);
         orbitSweepCursor = step.nextCursor();
@@ -5253,7 +5254,7 @@ public final class CoopCampaignReplicator
                 orbitSweepSystemsSent++;
                 orbitSweepJumpPointsSent += entries.size();
                 send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
-                        system.getId(), CoopOrbitSync.encode(entries)));
+                        CoopLocations.keyOf(system), CoopOrbitSync.encode(entries)));
                 if (CoopDebug.diagnosticsEnabled()) {
                     CoopLog.info(CoopCampaignReplicator.class, "Coop jump-point orbit sweep sent loc="
                             + system.getId() + " jumpPoints=" + entries.size());
@@ -5346,8 +5347,8 @@ public final class CoopCampaignReplicator
         if (a == null || b == null) {
             return false;
         }
-        String aId = a.getId();
-        return aId != null && aId.equals(b.getId());
+        String aId = CoopLocations.keyOf(a);
+        return aId != null && aId.equals(CoopLocations.keyOf(b));
     }
 
     /** Guest: snap local orbiting bodies to the host's angles (string-id first, then orbit signature). */
@@ -5446,7 +5447,7 @@ public final class CoopCampaignReplicator
             return null;
         }
         for (StarSystemAPI system : systems) {
-            if (system != null && locationId.equals(system.getId())) {
+            if (system != null && locationId.equals(CoopLocations.keyOf(system))) {
                 return system;
             }
         }
@@ -5703,7 +5704,7 @@ public final class CoopCampaignReplicator
             CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn(
                     coopEntityId,
                     Entities.CARGO_PODS,
-                    location.getId(),
+                    CoopLocations.keyOf(location),
                     pods.getLocation() == null ? 0f : pods.getLocation().x,
                     pods.getLocation() == null ? 0f : pods.getLocation().y,
                     pods.getVelocity() == null ? 0f : pods.getVelocity().x,
@@ -5788,7 +5789,7 @@ public final class CoopCampaignReplicator
             CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn(
                     coopEntityId,
                     built.getCustomEntityType(),
-                    location.getId(),
+                    CoopLocations.keyOf(location),
                     built.getLocation() == null ? 0f : built.getLocation().x,
                     built.getLocation() == null ? 0f : built.getLocation().y,
                     0f, 0f,
@@ -6043,12 +6044,12 @@ public final class CoopCampaignReplicator
             return null;
         }
         for (LocationAPI location : sector.getAllLocations()) {
-            if (location != null && locationId.equals(location.getId())) {
+            if (location != null && locationId.equals(CoopLocations.keyOf(location))) {
                 return location;
             }
         }
         LocationAPI hyperspace = sector.getHyperspace();
-        return hyperspace != null && locationId.equals(hyperspace.getId()) ? hyperspace : null;
+        return hyperspace != null && locationId.equals(CoopLocations.keyOf(hyperspace)) ? hyperspace : null;
     }
 
     /** Test seam: replaces the {@code COLONY_MGMT} engine write, so a test can make it fail. */

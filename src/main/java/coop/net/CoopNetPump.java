@@ -1797,7 +1797,7 @@ public class CoopNetPump implements EveryFrameScript {
             return null;
         }
         com.fs.starfarer.api.campaign.LocationAPI location = fleet.getContainingLocation();
-        String locationId = location == null ? null : location.getId();
+        String locationId = CoopLocations.keyOf(location);
         if (locationId != null && !locationId.isEmpty()) {
             stats.noteSystemVisited(playerId, locationId);
         }
