@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainPlugin;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.CharacterDataAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
@@ -2497,8 +2498,9 @@ public final class CoopAgentCommands {
      * {@code isActiveOrInProgress} rather than {@code isActive} so an ability mid-turn-on is treated
      * as on, which is what the toolbar shows.
      *
-     * <p>Explicit {@code grantMissing:true} installs a registered native ability for QA setup before
-     * applying that same button/state request. Existing plugins are retained.
+     * <p>Explicit {@code grantMissing:true} grants a registered native ability through the saved
+     * character list before applying that same button/state request. The engine removes fleet-only
+     * grants when it reconciles abilities. Existing plugins are retained.
      */
     static JSONObject ability(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
@@ -2518,20 +2520,39 @@ public final class CoopAgentCommands {
 
         Boolean desired = optionalAbilityState(args);
         boolean grantedMissing = false;
-        if (plugin == null) {
-            SettingsAPI settings = Global.getSettings();
-            if (settings == null) {
-                throw new IllegalStateException("ability grant requires game settings");
+        if (grantMissing) {
+            CharacterDataAPI character = sector.getCharacterData();
+            if (character == null || character.getAbilities() == null) {
+                throw new IllegalStateException("ability grant requires the character ability list");
             }
-            if (settings.getAbilitySpec(abilityId) == null) {
-                throw new IllegalArgumentException("no ability spec " + abilityId);
+            boolean characterMissing = !character.getAbilities().contains(abilityId);
+            if (characterMissing || plugin == null) {
+                SettingsAPI settings = Global.getSettings();
+                if (settings == null) {
+                    throw new IllegalStateException("ability grant requires game settings");
+                }
+                if (settings.getAbilitySpec(abilityId) == null) {
+                    throw new IllegalArgumentException("no ability spec " + abilityId);
+                }
+                AbilityPlugin existing = plugin;
+                if (characterMissing) {
+                    // Native addAbility also installs the fleet plugin, retaining one already there.
+                    character.addAbility(abilityId);
+                    if (character.getAbilities() == null || !character.getAbilities().contains(abilityId)) {
+                        throw new IllegalStateException("character did not acquire ability " + abilityId);
+                    }
+                } else {
+                    player.addAbility(abilityId);
+                }
+                plugin = player.getAbility(abilityId);
+                if (plugin == null) {
+                    throw new IllegalStateException("player fleet did not acquire ability " + abilityId);
+                }
+                if (existing != null && plugin != existing) {
+                    throw new IllegalStateException("ability grant replaced the existing plugin " + abilityId);
+                }
+                grantedMissing = true;
             }
-            player.addAbility(abilityId);
-            plugin = player.getAbility(abilityId);
-            if (plugin == null) {
-                throw new IllegalStateException("player fleet did not acquire ability " + abilityId);
-            }
-            grantedMissing = true;
         }
         if (desired == null) {
             plugin.activate();

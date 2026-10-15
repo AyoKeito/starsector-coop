@@ -260,8 +260,10 @@ One state-changing verb against one instance.
 
 `ability` normally refuses an ability the player does not own. For test setup,
 `{abilityId:"generate_slipsurge", grantMissing:true, on:false}` validates the native ability spec,
-adds it only if missing, and leaves it inactive. The response reports `grantedMissing`; an existing
-ability is preserved. This grants the ability to the test fleet and persists through native saves.
+adds missing ownership to the character's saved ability list, obtains the native fleet plugin, and
+leaves it inactive. The engine removes fleet-only grants when it reconciles abilities. The response
+reports `grantedMissing`; repeated requests preserve an existing plugin and its state. A missing
+character list, ownership readback, or native plugin fails the request.
 
 Vanilla remembers which seasonal routes it has used. Default `streamadd` can therefore return
 `created:false` with `reason: "routes_exhausted"`. After all seasonal terrain is gone, explicit
