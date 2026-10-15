@@ -163,6 +163,81 @@ class CoopSlipstreamAuthorityTest {
     }
 
     @Test
+    void terminalFaderEnumsStayQuietWithoutABounceInTheNextDirection() {
+        Fixture f = new Fixture();
+        f.world.host = List.of(
+                faderStream("in", CoopSlipstreamRecord.FaderState.IN, 1, false, false),
+                faderStream("out", CoopSlipstreamRecord.FaderState.OUT, 0, false, false),
+                faderStream("in-wrong-bounce", CoopSlipstreamRecord.FaderState.IN, 1, true, false),
+                faderStream("out-wrong-bounce", CoopSlipstreamRecord.FaderState.OUT, 0, false, true),
+                faderStream("idle", CoopSlipstreamRecord.FaderState.IDLE, .5f, true, true));
+        f.authority.tickHost();
+        assertEquals(6, f.net.sent.size(), "the initial manifest still includes every settled stream");
+        f.net.sent.clear();
+
+        for (long time : List.of(250L, 500L, 750L)) {
+            f.now.set(time);
+            f.authority.tickHost();
+            assertTrue(f.net.sent.isEmpty(), "terminal enum and irrelevant bounce flag cannot keep broadcasting");
+        }
+    }
+
+    @Test
+    void partialAndCorrectlyDirectedBouncingFadersKeepSendingCheckpoints() {
+        Fixture f = new Fixture();
+        f.world.host = List.of(
+                faderStream("in-partial", CoopSlipstreamRecord.FaderState.IN, .999f, false, false),
+                faderStream("out-partial", CoopSlipstreamRecord.FaderState.OUT, .001f, false, false),
+                faderStream("in-bounce-down", CoopSlipstreamRecord.FaderState.IN, 1, false, true),
+                faderStream("out-bounce-up", CoopSlipstreamRecord.FaderState.OUT, 0, true, false));
+        f.authority.tickHost();
+        f.net.sent.clear();
+
+        for (long time : List.of(250L, 500L)) {
+            f.now.set(time);
+            f.authority.tickHost();
+            assertEquals(List.of("in-partial", "out-partial", "in-bounce-down", "out-bounce-up"),
+                    f.net.sent.stream().map(message -> CoopSlipstreamRecord.decode(
+                            CoopMessages.requiredPayloadString(message, "stream")).hostId()).toList());
+            assertTrue(f.types().stream().allMatch(type -> type == CoopMessages.Type.STREAM_ADD));
+            f.net.sent.clear();
+        }
+    }
+
+    @Test
+    void noiseClearingAtATerminalNonIdleFaderPublishesOneFinalCheckpointThenStaysQuiet() {
+        for (CoopSlipstreamRecord.FaderState state : List.of(
+                CoopSlipstreamRecord.FaderState.IN, CoopSlipstreamRecord.FaderState.OUT)) {
+            Fixture f = new Fixture();
+            CoopSlipstreamRecord partial = faderStream("settled", state, .5f, false, false);
+            CoopSlipstreamRecord.Fade noisy = state == CoopSlipstreamRecord.FaderState.IN
+                    ? new CoopSlipstreamRecord.Fade(new float[]{0, 1}, 2, 1.99f, null, 0, 0, 0)
+                    : new CoopSlipstreamRecord.Fade(null, 0, 0, new float[]{0, 1}, 0, 2, 1.99f);
+            f.world.host = List.of(withState(partial, partial.hostId(), noisy, partial.segments(),
+                    partial.surgeWave(), partial.timeline()));
+            f.authority.tickHost();
+            f.net.sent.clear();
+            CoopSlipstreamRecord terminal = faderStream("settled", state,
+                    state == CoopSlipstreamRecord.FaderState.IN ? 1 : 0, false, false);
+            f.world.host = List.of(terminal);
+
+            f.now.set(250);
+            f.authority.tickHost();
+
+            assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+            CoopSlipstreamRecord sent = CoopSlipstreamRecord.decode(
+                    CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream"));
+            assertEquals(terminal, sent, "the final checkpoint retains the actual native terminal enum");
+            f.net.sent.clear();
+            for (long time : List.of(500L, 750L, 1000L)) {
+                f.now.set(time);
+                f.authority.tickHost();
+                assertTrue(f.net.sent.isEmpty(), "the final terminal checkpoint is sent only once");
+            }
+        }
+    }
+
+    @Test
     void matureMetadataChangesStayQuietAndResumePreservesTheGridOrigin() {
         Fixture f = new Fixture();
         CoopSlipstreamRecord mature = stream("grid", false);
@@ -271,6 +346,17 @@ class CoopSlipstreamAuthorityTest {
                 despawning ? new float[]{0, .5f, 1} : null, -1, 10, 2);
         return new CoopSlipstreamRecord(id, CoopSlipstreamRecord.Kind.SEASONAL,
                 CoopSlipstreamRecord.Params.defaults(), List.of(), segments, fade, false);
+    }
+
+    private static CoopSlipstreamRecord faderStream(String id, CoopSlipstreamRecord.FaderState state,
+                                                    float brightness, boolean bounceUp, boolean bounceDown) {
+        CoopSlipstreamRecord base = stream(id, false);
+        var fader = new CoopSlipstreamRecord.Fader(brightness, 1, 1, state, bounceUp, bounceDown);
+        List<CoopSlipstreamRecord.Segment> segments = base.segments().stream().map(segment ->
+                new CoopSlipstreamRecord.Segment(segment.x(), segment.y(), segment.width(), segment.bMult(), fader))
+                .toList();
+        return withState(base, id, CoopSlipstreamRecord.Fade.idle(), segments,
+                CoopSlipstreamRecord.SurgeWaveState.absent(), base.timeline());
     }
 
     private static CoopSlipstreamRecord withState(CoopSlipstreamRecord base, String id,

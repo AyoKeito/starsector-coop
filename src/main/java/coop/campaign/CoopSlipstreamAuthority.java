@@ -116,8 +116,15 @@ public final class CoopSlipstreamAuthority {
     private static boolean activeTransition(CoopSlipstreamRecord record) {
         if (record.fade().spawnNoise() != null || record.fade().despawnNoise() != null
                 || record.unfinishedSurgeFadeIn()) return true;
-        return record.segments().stream().anyMatch(segment ->
-                segment.fader().state() != CoopSlipstreamRecord.FaderState.IDLE);
+        // Native background fades can stop at an endpoint before the next advance clears the enum.
+        return record.segments().stream().anyMatch(segment -> {
+            CoopSlipstreamRecord.Fader fader = segment.fader();
+            return switch (fader.state()) {
+                case IN -> fader.brightness() < 1f || fader.bounceDown();
+                case OUT -> fader.brightness() > 0f || fader.bounceUp();
+                case IDLE -> false;
+            };
+        });
     }
 
     private static boolean despawnChanged(CoopSlipstreamRecord previous,
