@@ -6,13 +6,14 @@ import com.fs.starfarer.api.campaign.BattleAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
-import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.SectorAPI; // used by join coordinator probe
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.BattleCreationContext;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.fleet.FleetGoal;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import coop.combat.join.CoopCombatJoinCoordinator;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopMirrorTags;
@@ -170,6 +171,8 @@ public final class CoopBattleBridge {
     private final LongSupplier clock;
     private final CoopSharedPauseCoordinator pauseCoordinator;
     private final CoopPreBattleAutosave autosave = new CoopPreBattleAutosave();
+    /** Phase-2 join package: proximity vs hyperspace-remote support. */
+    private final CoopCombatJoinCoordinator joinCoordinator = new CoopCombatJoinCoordinator();
 
     // ---- engaging side ----
     private boolean localBattleActive;
@@ -277,11 +280,17 @@ public final class CoopBattleBridge {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.pauseCoordinator = Objects.requireNonNull(pauseCoordinator, "pauseCoordinator");
         activeBridge = this;
+        joinCoordinator.attachAsActive();
     }
 
     /** The bridge the in-combat plugin reports to, or null when no coop pump exists. */
     public static CoopBattleBridge active() {
         return activeBridge;
+    }
+
+    /** Optional combat-join package (proximity / remote support). */
+    public CoopCombatJoinCoordinator joinCoordinator() {
+        return joinCoordinator;
     }
 
     public void setBattleResultSink(Consumer<CoopBattleResult> sink) {
@@ -532,6 +541,18 @@ public final class CoopBattleBridge {
         remoteStatus = null;
         remoteStatusDigest = "";
         queueBanner(battleBeginBanner(partnerName(), enemy, location));
+        try {
+            SectorAPI sector = null;
+            try {
+                sector = Global.getSector();
+            } catch (Throwable ignored) {
+            }
+            for (String extra : joinCoordinator.onPartnerBattleBegin(sector, battleId, partnerName(), enemy)) {
+                queueBanner(extra);
+            }
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBattleBridge.class, "Coop join coordinator failed on BATTLE_BEGIN", t);
+        }
         CoopLog.info(CoopBattleBridge.class, "Coop BATTLE_BEGIN received battleId=" + battleId
                 + " enemy=" + enemy + " location=" + location);
     }
@@ -595,6 +616,11 @@ public final class CoopBattleBridge {
         String outcome = payload.requiredString("outcome");
         // The survivor line rides on the last status that arrived — no new message fields.
         queueBanner(battleEndBanner(partnerName(), outcome, survivorSummary(remoteStatus)));
+        try {
+            joinCoordinator.onPartnerBattleEnd(battleId);
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBattleBridge.class, "Coop join coordinator failed on BATTLE_END", t);
+        }
         remoteBattleActive = false;
         lastCombatEndedAtMillis = clock.getAsLong();
         remoteBattleSignalAtMillis = 0L;

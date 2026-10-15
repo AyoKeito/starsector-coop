@@ -57,8 +57,12 @@ the next step in this line of work and it is not in this release.
 fleet was in it. There is no in-game view of the fight; people watch over a Discord screen share,
 where a full-screen panel on the watching client would be in the way anyway.
 
-**Both players piloting in one battle is not in this release.** It is the largest single item on the
-list of things that could come later.
+**Both players piloting in one battle is experimental join-mode work.** When your partner engages,
+the mod measures distance to their fleet mirror (vanilla ally pull-in is 700 units). Within range you
+get a proximity notice (side-by-side fleets). Farther away you get a hyperspace support call — Accept /
+Decline on the ability bar — instead of teleporting your fleet into the fight. Mark non-flagships with
+the Hyperspace Comm Seat hullmod so a remote claim has a target. Full same-battle multi-pilot sync is
+still layered on separately; remote accept currently records the decision and banners for that path.
 
 ## Saves
 
