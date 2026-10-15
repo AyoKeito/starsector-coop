@@ -2,6 +2,7 @@ package coop.debug;
 
 import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
@@ -2495,18 +2496,43 @@ public final class CoopAgentCommands {
      * a setup step can be re-run without flipping what it just set. The guard reads
      * {@code isActiveOrInProgress} rather than {@code isActive} so an ability mid-turn-on is treated
      * as on, which is what the toolbar shows.
+     *
+     * <p>Explicit {@code grantMissing:true} installs a registered native ability for QA setup before
+     * applying that same button/state request. Existing plugins are retained.
      */
     static JSONObject ability(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
         CampaignFleetAPI player = requirePlayerFleet(sector);
         String abilityId = requiredString(args, "abilityId");
+        boolean grantArgumentPresent = args.has("grantMissing");
+        Object grantArgument = args.opt("grantMissing");
+        if (grantArgumentPresent && !(grantArgument instanceof Boolean)) {
+            throw new IllegalArgumentException("grantMissing must be boolean");
+        }
+        boolean grantMissing = Boolean.TRUE.equals(grantArgument);
 
         AbilityPlugin plugin = player.getAbility(abilityId);
-        if (plugin == null) {
+        if (plugin == null && !grantMissing) {
             throw new IllegalArgumentException("player fleet has no ability " + abilityId);
         }
 
         Boolean desired = optionalAbilityState(args);
+        boolean grantedMissing = false;
+        if (plugin == null) {
+            SettingsAPI settings = Global.getSettings();
+            if (settings == null) {
+                throw new IllegalStateException("ability grant requires game settings");
+            }
+            if (settings.getAbilitySpec(abilityId) == null) {
+                throw new IllegalArgumentException("no ability spec " + abilityId);
+            }
+            player.addAbility(abilityId);
+            plugin = player.getAbility(abilityId);
+            if (plugin == null) {
+                throw new IllegalStateException("player fleet did not acquire ability " + abilityId);
+            }
+            grantedMissing = true;
+        }
         if (desired == null) {
             plugin.activate();
         } else if (desired) {
@@ -2521,6 +2547,9 @@ public final class CoopAgentCommands {
         out.put("abilityId", abilityId);
         out.put("active", plugin.isActive());
         out.put("activeOrInProgress", plugin.isActiveOrInProgress());
+        if (grantArgumentPresent) {
+            out.put("grantedMissing", grantedMissing);
+        }
         return out;
     }
 

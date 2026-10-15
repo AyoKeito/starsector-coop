@@ -248,7 +248,7 @@ One state-changing verb against one instance.
 | `teleport` | `{entityId}` or `{x, y, locationId}` — not both |
 | `pause` | `{on: true}` or `{on: false}` |
 | `clockalign` | `{targetTimestamp}` — paused active session only; forward by at most one game day |
-| `ability` | `{abilityId}` or `{abilityId, on: true}` / `{abilityId, on: false}` |
+| `ability` | `{abilityId}` or `{abilityId, on: true}` / `{abilityId, on: false}`; explicit `grantMissing:true` can add a missing native ability for test setup |
 | `setcr` | `{value, memberIndex}` or `{value, memberIndex: "all"}` |
 | `give` | `{commodityId?, qty?, credits?}` |
 | `addship` | `{variantId, count?}` — count defaults to 1, capped at 20 |
@@ -257,6 +257,11 @@ One state-changing verb against one instance.
 | `expedition` | `{}` or `{factionId}` — host only |
 | `streamadd` | `{rearmUsedRoute?}` — host only; invokes native seasonal stream creation, reports actual new ids/configuration state |
 | `streamdespawn` | `{}` — host only; starts native seasonal despawn with no delay and a ten-day fade |
+
+`ability` normally refuses an ability the player does not own. For test setup,
+`{abilityId:"generate_slipsurge", grantMissing:true, on:false}` validates the native ability spec,
+adds it only if missing, and leaves it inactive. The response reports `grantedMissing`; an existing
+ability is preserved. This grants the ability to the test fleet and persists through native saves.
 
 Vanilla remembers which seasonal routes it has used. Default `streamadd` can therefore return
 `created:false` with `reason: "routes_exhausted"`. After all seasonal terrain is gone, explicit
