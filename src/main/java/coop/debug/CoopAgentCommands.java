@@ -390,12 +390,28 @@ public final class CoopAgentCommands {
     static JSONObject streamadd(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
         requireStreamAuthority(roleOf(context.pump()));
-        boolean invoked = new CoopSlipstreamWorld(() -> sector).addSeasonal();
-        if (!invoked) throw new IllegalStateException("no live SlipstreamManager on the host");
+        boolean rearmUsedRoute = optionalBoolean(args, "rearmUsedRoute", false);
+        CoopSlipstreamWorld.SeasonalAddResult result = new CoopSlipstreamWorld(() -> sector)
+                .addSeasonal(rearmUsedRoute);
+        return streamAddResult(result, sector.getClock().getMonth(), sector.getClock().getTimestamp());
+    }
+
+    static JSONObject streamAddResult(CoopSlipstreamWorld.SeasonalAddResult result, int month,
+                                      long campaignTimestamp) throws JSONException {
         JSONObject out = new JSONObject();
-        out.put("invoked", true);
-        out.put("month", sector.getClock().getMonth());
-        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        out.put("invoked", result.invoked());
+        out.put("created", result.created());
+        out.put("rearmedUsedRoute", result.rearmedUsedRoute());
+        out.put("configPresent", result.configPresent());
+        out.put("routeId", result.routeId() == null ? JSONObject.NULL : result.routeId());
+        out.put("configuredRoutes", result.configuredRoutes());
+        out.put("unusedBefore", result.unusedBefore());
+        out.put("unusedAfter", result.unusedAfter());
+        out.put("newCount", result.newIds().size());
+        out.put("newIds", new JSONArray(result.newIds()));
+        out.put("reason", result.reason());
+        out.put("month", month);
+        out.put("campaignTimestamp", campaignTimestamp);
         return out;
     }
 

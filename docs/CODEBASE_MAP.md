@@ -465,6 +465,8 @@ src/launcher/java/coop/launcher/   22 classes
   `clockalign`, `ability`,
   `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`,
   `mark`, `memory`, `streamadd`, `streamdespawn` act. Stream creation/despawn is host-only.
+  `streamadd` reports actual creation and native route exhaustion; explicit `rearmUsedRoute`
+  permits a native QA spawn after all seasonal terrain is gone, with the route flag restored.
   `clockalign` requires a paused active session, refuses backward movement or a jump over one day,
   and verifies both the calendar and cached timestamp after the write.
   Four things are deliberately **not** verbs (market buy/sell, officer hire, bar-offer accept, market
@@ -472,7 +474,8 @@ src/launcher/java/coop/launcher/   22 classes
 - **MCP server.** `tools/starsector-mcp` (Node, stdio) wraps host port 7801 and guest 7802 into
   `ss_status`, `ss_dump`, `ss_diff`, `ss_act`, `ss_advance_days`, `ss_align_clocks`.
   The alignment tool checks the shared pause and matching session, then advances only the earlier
-  clock to the later timestamp. `ss_diff` requires equal campaign timestamps for stream samples.
+  clock to the later timestamp. It does not advance terrain timers, so use it before starting a
+  fade, never repeatedly during one. `ss_diff` requires equal campaign timestamps for stream samples.
   All state comparison lives there;
   the bridge only serializes. `ss_diff` excludes `role`, `engineId`, `lines` by default. Setup and a
   worked example per tool: `tools/starsector-mcp/README.md`.

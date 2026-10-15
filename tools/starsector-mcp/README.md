@@ -235,7 +235,8 @@ The two player fleets carry the same key on both instances: `coopFleetId` is `pl
 
 `streams` comparisons require exactly matching campaign timestamps, even when `ignore` or
 `tolerance` would otherwise hide the difference. Pause both clients and run `ss_align_clocks`
-before collecting paired fade samples. Geometry and params should match exactly; P26's live fade
+before triggering a new fade. During a fade, compare naturally equal timestamps; do not align
+again, because the helper changes the calendar without advancing native fade timers. Geometry and params should match exactly; P26's live fade
 gate allows an effective-brightness difference of at most 0.05 at each sampled point.
 
 ### `ss_act(instance, verb, args?)`
@@ -254,8 +255,14 @@ One state-changing verb against one instance.
 | `objective` | `{entityId, factionId}` |
 | `surveyset` | `{planetId, level}` |
 | `expedition` | `{}` or `{factionId}` — host only |
-| `streamadd` | `{}` — host only; invokes native seasonal stream creation |
+| `streamadd` | `{rearmUsedRoute?}` — host only; invokes native seasonal stream creation, reports actual new ids/configuration state |
 | `streamdespawn` | `{}` — host only; starts native seasonal despawn with no delay and a ten-day fade |
+
+Vanilla remembers which seasonal routes it has used. Default `streamadd` can therefore return
+`created:false` with `reason: "routes_exhausted"`. After all seasonal terrain is gone, explicit
+`rearmUsedRoute:true` temporarily rearms one used route and calls the native builder, restoring
+the used flag even if generation fails. It refuses missing/empty configuration, live seasonal
+terrain or remaining unused routes, and fails if no genuinely new terrain appears.
 
 ```
 ss_act(instance: "guest", verb: "ability", args: { "abilityId": "interdiction_pulse" })
@@ -317,6 +324,10 @@ The result includes `sessionId`, `targetTimestamp`, `alignedInstance`, `advanced
 and `after` timestamp pairs. Normal clock reconciliation permits a small offset; shared pause
 alone does not make the timestamps identical. This tool is an explicit QA action. Like other
 mutating commands, `clockalign` is not automatically retried after a dropped response.
+
+Use it before a fade starts, not repeatedly during the fade. Calendar jumps leave native terrain
+timers unchanged. The 2026-10-15 test demonstrated that repeated alignment alone created a
+0.025-day fade-age difference and a misleading brightness failure.
 
 ### `ss_advance_days(days, timeoutSeconds?)`
 

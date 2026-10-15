@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,6 +21,43 @@ class CoopAgentStreamsTest {
                 () -> CoopAgentCommands.requireStreamAuthority(CoopConnectionRole.GUEST));
         assertThrows(IllegalStateException.class,
                 () -> CoopAgentCommands.requireStreamAuthority(CoopConnectionRole.NONE));
+    }
+
+    @Test
+    void defaultNoOpReportsAnExhaustedConfigurationAndNoCreatedTerrain() throws Exception {
+        CoopSlipstreamWorld.SeasonalAddResult result = new CoopSlipstreamWorld.SeasonalAddResult(
+                true, false, false, true, null, 7, 0, 0, List.of(), "routes_exhausted");
+
+        JSONObject response = CoopAgentCommands.streamAddResult(result, 9, -55_644_499_345_400L);
+
+        assertTrue(response.getBoolean("invoked"));
+        assertFalse(response.getBoolean("created"));
+        assertFalse(response.getBoolean("rearmedUsedRoute"));
+        assertTrue(response.getBoolean("configPresent"));
+        assertTrue(response.isNull("routeId"));
+        assertEquals(7, response.getInt("configuredRoutes"));
+        assertEquals(0, response.getInt("unusedBefore"));
+        assertEquals(0, response.getInt("newCount"));
+        assertEquals(0, response.getJSONArray("newIds").length());
+        assertEquals("routes_exhausted", response.getString("reason"));
+        assertEquals(9, response.getInt("month"));
+        assertEquals(-55_644_499_345_400L, response.getLong("campaignTimestamp"));
+    }
+
+    @Test
+    void rearmedNativeCreationReportsTheChosenRouteAndOnlyTheNewIds() throws Exception {
+        CoopSlipstreamWorld.SeasonalAddResult result = new CoopSlipstreamWorld.SeasonalAddResult(
+                true, true, true, true, "A", 7, 0, 0, List.of("new-native"), "created");
+
+        JSONObject response = CoopAgentCommands.streamAddResult(result, 9, 123L);
+
+        assertTrue(response.getBoolean("created"));
+        assertTrue(response.getBoolean("rearmedUsedRoute"));
+        assertEquals("A", response.getString("routeId"));
+        assertEquals(0, response.getInt("unusedAfter"));
+        assertEquals(1, response.getInt("newCount"));
+        assertEquals("new-native", response.getJSONArray("newIds").getString(0));
+        assertEquals("created", response.getString("reason"));
     }
 
     @Test

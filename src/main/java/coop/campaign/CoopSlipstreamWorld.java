@@ -235,8 +235,103 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         SectorAPI sector = sector();
         SlipstreamManager manager = manager(sector);
         if (manager == null) return false;
-        manager.addStream(sector.getClock().getMonth());
-        return true;
+        return addSeasonal(false).created();
+    }
+
+    /** Diagnostics for the explicit bridge trigger, never for normal manager advancement. */
+    public record SeasonalAddResult(boolean invoked, boolean created, boolean rearmedUsedRoute,
+                                    boolean configPresent, String routeId, int configuredRoutes,
+                                    int unusedBefore, int unusedAfter, List<String> newIds,
+                                    String reason) {
+        public SeasonalAddResult {
+            newIds = List.copyOf(newIds);
+        }
+    }
+
+    /**
+     * Calls the native builder. The optional QA setup reuses one exhausted route only after the
+     * season's old terrain has gone; every generated point, parameter and fade remains native.
+     */
+    public SeasonalAddResult addSeasonal(boolean rearmUsedRoute) {
+        SectorAPI sector = sector();
+        SlipstreamManager manager = manager(sector);
+        if (manager == null) throw new IllegalStateException("No live SlipstreamManager on the host");
+        SlipstreamManager.StreamConfig config = seasonalConfig(manager);
+        List<SlipstreamManager.StreamData> routes = config == null ? List.of() : List.copyOf(config.streams);
+        int unusedBefore = unusedRoutes(routes);
+        SlipstreamManager.StreamData rearmed = null;
+        if (rearmUsedRoute) {
+            if (!seasonal(sector).isEmpty()) {
+                throw new IllegalStateException("Cannot rearm a used route while live seasonal streams remain");
+            }
+            if (config == null || routes.isEmpty()) {
+                throw new IllegalStateException("Cannot rearm a used route: no nonempty native stream configuration");
+            }
+            if (unusedBefore != 0) {
+                throw new IllegalStateException("Native stream configuration still has unused routes; use the default trigger");
+            }
+            // Native configs have unique letter ids. Stable stream order also breaks any id ties.
+            rearmed = routes.stream().filter(route -> route.wasUsed)
+                    .min(Comparator.comparing((SlipstreamManager.StreamData route) -> route.id,
+                            Comparator.nullsLast(Comparator.naturalOrder())))
+                    .orElseThrow(() -> new IllegalStateException("Native stream configuration has no used route"));
+        }
+        LocationAPI hyper = hyperspace(sector);
+        Set<CampaignTerrainAPI> before = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<String> beforeIds = new LinkedHashSet<>();
+        for (CampaignTerrainAPI terrain : hyper.getTerrainCopy()) {
+            before.add(terrain);
+            beforeIds.add(terrain.getId());
+        }
+        String routeId = rearmed == null ? null : rearmed.id;
+        if (rearmed == null) {
+            manager.addStream(sector.getClock().getMonth());
+        } else {
+            boolean originalWasUsed = rearmed.wasUsed;
+            rearmed.wasUsed = false;
+            try {
+                manager.addStream(sector.getClock().getMonth());
+            } finally {
+                rearmed.wasUsed = originalWasUsed;
+            }
+        }
+        List<String> newIds = new ArrayList<>();
+        for (CampaignTerrainAPI terrain : hyper.getTerrainCopy()) {
+            if (!before.contains(terrain) && eligible(terrain) && !beforeIds.contains(terrain.getId())) {
+                String id = terrain.getId();
+                if (id == null || id.isBlank() || newIds.contains(id)) {
+                    throw new IllegalStateException("Native stream builder produced an invalid or duplicate terrain id");
+                }
+                newIds.add(id);
+            }
+        }
+        newIds.sort(Comparator.naturalOrder());
+        if (rearmUsedRoute && newIds.isEmpty()) {
+            throw new IllegalStateException("Rearmed native route " + routeId
+                    + " produced no new live slipstream; native generation may have discarded the terrain");
+        }
+        String reason = !newIds.isEmpty() ? "created" : config == null ? "config_absent"
+                : routes.isEmpty() ? "no_routes" : unusedBefore == 0 ? "routes_exhausted"
+                : "native_builder_returned_without_live_stream";
+        return new SeasonalAddResult(true, !newIds.isEmpty(), rearmUsedRoute, config != null,
+                routeId, routes.size(), unusedBefore, unusedRoutes(routes), newIds, reason);
+    }
+
+    private static int unusedRoutes(List<SlipstreamManager.StreamData> routes) {
+        int unused = 0;
+        for (SlipstreamManager.StreamData route : routes) if (!route.wasUsed) unused++;
+        return unused;
+    }
+
+    /** Bound only by the explicit debug action; normal replication never reads this field. */
+    private static SlipstreamManager.StreamConfig seasonalConfig(SlipstreamManager manager) {
+        try {
+            MethodHandle getter = MethodHandles.privateLookupIn(SlipstreamManager.class, MethodHandles.lookup())
+                    .findGetter(SlipstreamManager.class, "config", SlipstreamManager.StreamConfig.class);
+            return (SlipstreamManager.StreamConfig) getter.invoke(manager);
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Cannot read native slipstream configuration", failure);
+        }
     }
 
     public int despawnSeasonal() {

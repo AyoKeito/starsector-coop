@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -229,6 +230,208 @@ class CoopSlipstreamWorldTest {
         assertThrows(IllegalStateException.class, f.world::captureHost);
     }
 
+    @Test
+    void defaultSeasonalTriggerReportsAnAbsentOrExhaustedConfigurationWithoutClaimingCreation() {
+        Fixture f = new Fixture();
+        TestManager manager = new TestManager();
+        f.scripts.add(manager);
+
+        CoopSlipstreamWorld.SeasonalAddResult absent = f.world.addSeasonal(false);
+        assertTrue(absent.invoked());
+        assertFalse(absent.created());
+        assertFalse(absent.configPresent());
+        assertEquals("config_absent", absent.reason());
+        assertTrue(absent.newIds().isEmpty());
+
+        manager.configure(route("A", true));
+        CoopSlipstreamWorld.SeasonalAddResult exhausted = f.world.addSeasonal(false);
+        assertFalse(exhausted.created());
+        assertTrue(exhausted.configPresent());
+        assertEquals(1, exhausted.configuredRoutes());
+        assertEquals(0, exhausted.unusedBefore());
+        assertEquals("routes_exhausted", exhausted.reason());
+        assertFalse(f.world.addSeasonal(), "the compatibility return value means terrain was actually created");
+        assertEquals(3, manager.addCalls);
+    }
+
+    @Test
+    void defaultSeasonalTriggerDetectsOnlyGenuinelyNewLiveTerrainAndReportsRouteConsumption() {
+        Fixture f = new Fixture();
+        FakeTerrain existing = f.nativeStream("existing");
+        TestManager manager = new TestManager();
+        manager.include(existing.plugin);
+        SlipstreamManager.StreamData unused = route("A", false);
+        manager.configure(unused);
+        f.scripts.add(manager);
+        manager.onAdd = () -> {
+            assertFalse(unused.wasUsed);
+            manager.include(f.nativeStream("new-native").plugin);
+            unused.wasUsed = true;
+        };
+
+        CoopSlipstreamWorld.SeasonalAddResult result = f.world.addSeasonal(false);
+
+        assertTrue(result.created());
+        assertFalse(result.rearmedUsedRoute());
+        assertEquals(1, result.unusedBefore());
+        assertEquals(0, result.unusedAfter());
+        assertEquals(List.of("new-native"), result.newIds());
+        assertEquals("created", result.reason());
+        assertEquals(3, manager.lastMonth);
+        assertThrows(UnsupportedOperationException.class, () -> result.newIds().clear());
+    }
+
+    @Test
+    void defaultTriggerCanDistinguishANativeBuilderDiscardFromExhaustedRoutes() {
+        Fixture f = new Fixture();
+        TestManager manager = new TestManager();
+        manager.configure(route("A", false));
+        f.scripts.add(manager);
+
+        CoopSlipstreamWorld.SeasonalAddResult result = f.world.addSeasonal(false);
+
+        assertFalse(result.created());
+        assertEquals(1, result.unusedBefore());
+        assertEquals(1, result.unusedAfter());
+        assertEquals("native_builder_returned_without_live_stream", result.reason());
+    }
+
+    @Test
+    void rearmUsesExactlyOneDeterministicRouteAndRestoresItsFlagAfterSuccess() {
+        Fixture f = new Fixture();
+        f.nativeStream("host-surge"); // Non-seasonal terrain does not prohibit the explicit setup.
+        TestManager manager = new TestManager();
+        SlipstreamManager.StreamData z = route("Z", true);
+        SlipstreamManager.StreamData a = route("A", true);
+        manager.configure(z, a);
+        manager.onAdd = () -> {
+            assertTrue(z.wasUsed, "no unrelated route flag may change");
+            assertFalse(a.wasUsed, "the lexically first used route is the sole candidate");
+            manager.include(f.nativeStream("rearmed-native").plugin);
+            // Deliberately leave this false to prove the wrapper's finally restores it.
+        };
+        f.scripts.add(manager);
+
+        CoopSlipstreamWorld.SeasonalAddResult result = f.world.addSeasonal(true);
+
+        assertTrue(result.created());
+        assertTrue(result.rearmedUsedRoute());
+        assertEquals("A", result.routeId());
+        assertEquals(2, result.configuredRoutes());
+        assertEquals(0, result.unusedBefore());
+        assertEquals(0, result.unusedAfter());
+        assertEquals(List.of("rearmed-native"), result.newIds());
+        assertTrue(a.wasUsed);
+        assertTrue(z.wasUsed);
+        assertEquals(1, manager.addCalls);
+    }
+
+    @Test
+    void rearmRefusesAnyRemainingLiveSeasonalStreamBeforeTouchingRouteFlags() {
+        Fixture f = new Fixture();
+        TestManager manager = new TestManager();
+        SlipstreamManager.StreamData used = route("A", true);
+        manager.configure(used);
+        manager.include(f.nativeStream("old-seasonal").plugin);
+        f.scripts.add(manager);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> f.world.addSeasonal(true));
+
+        assertTrue(failure.getMessage().contains("live seasonal streams remain"));
+        assertTrue(used.wasUsed);
+        assertEquals(0, manager.addCalls);
+    }
+
+    @Test
+    void rearmRefusesMissingEmptyAndUnexhaustedConfigurations() {
+        Fixture f = new Fixture();
+        TestManager manager = new TestManager();
+        f.scripts.add(manager);
+        assertThrows(IllegalStateException.class, () -> f.world.addSeasonal(true));
+        manager.configure();
+        assertThrows(IllegalStateException.class, () -> f.world.addSeasonal(true));
+        SlipstreamManager.StreamData used = route("A", true);
+        SlipstreamManager.StreamData unused = route("B", false);
+        manager.configure(used, unused);
+        assertThrows(IllegalStateException.class, () -> f.world.addSeasonal(true));
+        assertTrue(used.wasUsed);
+        assertFalse(unused.wasUsed);
+        assertEquals(0, manager.addCalls);
+    }
+
+    @Test
+    void rearmRestoresTheRouteWhenNativeCodeThrowsAnExceptionOrAnError() {
+        for (boolean throwError : List.of(false, true)) {
+            Fixture f = new Fixture();
+            TestManager manager = new TestManager();
+            SlipstreamManager.StreamData route = route("A", true);
+            manager.configure(route);
+            manager.onAdd = () -> {
+                assertFalse(route.wasUsed);
+                if (throwError) throw new AssertionError("native error");
+                throw new IllegalStateException("native exception");
+            };
+            f.scripts.add(manager);
+            if (throwError) assertThrows(AssertionError.class, () -> f.world.addSeasonal(true));
+            else assertThrows(IllegalStateException.class, () -> f.world.addSeasonal(true));
+            assertTrue(route.wasUsed);
+            assertEquals(1, manager.addCalls);
+        }
+    }
+
+    @Test
+    void rearmRestoresTheRouteAndFailsLoudlyIfNativeGenerationProducesNothing() {
+        Fixture f = new Fixture();
+        TestManager manager = new TestManager();
+        SlipstreamManager.StreamData route = route("A", true);
+        manager.configure(route);
+        f.scripts.add(manager);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> f.world.addSeasonal(true));
+
+        assertTrue(failure.getMessage().contains("produced no new live slipstream"));
+        assertTrue(route.wasUsed);
+        assertEquals(1, manager.addCalls);
+    }
+
+    @Test
+    void rearmIgnoresDeadMembershipButRequiresANewIdOnNewLiveNondynamicTerrain() {
+        for (String kind : List.of("dead", "dynamic", "duplicate", "valid")) {
+            Fixture f = new Fixture();
+            FakeTerrain old = f.nativeStream("old");
+            old.alive = false;
+            TestManager manager = new TestManager();
+            manager.include(old.plugin);
+            SlipstreamManager.StreamData route = route("A", true);
+            manager.configure(route);
+            manager.onAdd = () -> {
+                FakeTerrain created = f.nativeStream("duplicate".equals(kind) ? "old" : "new");
+                if ("dead".equals(kind)) created.alive = false;
+                if ("dynamic".equals(kind)) created.plugin.setDynamic(true);
+                manager.include(created.plugin);
+            };
+            f.scripts.add(manager);
+            if ("valid".equals(kind)) assertEquals(List.of("new"), f.world.addSeasonal(true).newIds());
+            else assertThrows(IllegalStateException.class, () -> f.world.addSeasonal(true));
+            assertTrue(route.wasUsed);
+        }
+    }
+
+    @Test
+    void debugSeasonalTriggerFailsClearlyWhenTheNativeManagerIsMissing() {
+        Fixture f = new Fixture();
+        assertThrows(IllegalStateException.class, () -> f.world.addSeasonal(false));
+        assertFalse(f.world.addSeasonal());
+    }
+
+    private static SlipstreamManager.StreamData route(String id, boolean used) {
+        SlipstreamManager.StreamData route = new SlipstreamManager.StreamData(id);
+        route.wasUsed = used;
+        return route;
+    }
+
     private static CoopSlipstreamRecord record(String id, boolean surge, float offset) {
         CoopSlipstreamRecord.Params params = new CoopSlipstreamRecord.Params("enter", 1.5f, true,
                 "slipstream0", "slipstream1", "slipstream2", "slipstream_edge", 700f, 600f, 120f,
@@ -377,6 +580,21 @@ class CoopSlipstreamWorldTest {
     }
 
     private static final class TestManager extends SlipstreamManager {
+        int addCalls;
+        int lastMonth;
+        Runnable onAdd;
+
+        @Override public void addStream(int month) {
+            addCalls++;
+            lastMonth = month;
+            if (onAdd != null) onAdd.run();
+        }
+
+        void configure(StreamData... routes) {
+            config = new StreamConfig("", new Random(1L));
+            config.streams.addAll(List.of(routes));
+        }
+
         void include(TestPlugin plugin) {
             active.add(new AddedStream(plugin));
         }
