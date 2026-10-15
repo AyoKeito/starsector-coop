@@ -35,7 +35,7 @@ class CoopSlipstreamAuthorityTest {
     }
 
     @Test
-    void pollsEvery250msAndSendsOnlyLifecycleTransitions() {
+    void pollsEvery250msRefreshesActiveFadesAndKeepsMatureStreamsQuiet() {
         Fixture f = new Fixture();
         f.world.host = List.of(stream("a", false));
         f.authority.tickHost();
@@ -46,15 +46,18 @@ class CoopSlipstreamAuthorityTest {
         assertTrue(f.net.sent.isEmpty());
         f.now.set(250);
         f.authority.tickHost();
-        assertEquals(List.of(CoopMessages.Type.STREAM_DESPAWN, CoopMessages.Type.STREAM_ADD), f.types());
-        CoopSlipstreamRecord.Despawn d = CoopSlipstreamRecord.Despawn.decode(
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD, CoopMessages.Type.STREAM_ADD), f.types());
+        CoopSlipstreamRecord d = CoopSlipstreamRecord.decode(
                 CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream"));
         assertEquals("a", d.hostId());
-        assertEquals(-1f, d.delay());
+        assertEquals(-1f, d.fade().despawnDelay());
         f.net.sent.clear();
         f.now.set(500);
         f.authority.tickHost();
-        assertTrue(f.net.sent.isEmpty());
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals("a", CoopSlipstreamRecord.decode(CoopMessages.requiredPayloadString(
+                f.net.sent.get(0), "stream")).hostId());
+        f.net.sent.clear();
         f.world.host = List.of(stream("b", false));
         f.now.set(750);
         f.authority.tickHost();
@@ -79,7 +82,7 @@ class CoopSlipstreamAuthorityTest {
     }
 
     @Test
-    void aSurgeCanReplaceItsAlreadyRunningDespawnScheduleWithoutPeriodicSpam() {
+    void despawnResetsAndProgressCarryFullNativeCheckpointsInsteadOfPartialEvents() {
         Fixture f = new Fixture();
         CoopSlipstreamRecord initial = stream("surge", true);
         f.world.host = List.of(initial);
@@ -91,9 +94,12 @@ class CoopSlipstreamAuthorityTest {
                 initial.params(), initial.terrainTags(), initial.segments(), changed, true));
         f.now.set(250);
         f.authority.tickHost();
-        assertEquals(List.of(CoopMessages.Type.STREAM_DESPAWN), f.types());
-        assertEquals(.2f, CoopSlipstreamRecord.Despawn.decode(
-                CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream")).days());
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        CoopSlipstreamRecord reset = CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream"));
+        assertEquals(.2f, reset.fade().despawnDays());
+        assertEquals(initial.segments(), reset.segments());
+        assertTrue(reset.unfinishedSurgeFadeIn());
         f.net.sent.clear();
         var progressing = new CoopSlipstreamRecord.Fade(null, 0, 0,
                 new float[]{1, .1f, 0}, -.01f, .2f, .01f);
@@ -101,7 +107,106 @@ class CoopSlipstreamAuthorityTest {
                 initial.params(), initial.terrainTags(), initial.segments(), progressing, true));
         f.now.set(500);
         f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals(progressing, CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream")).fade());
+    }
+
+    @Test
+    void spawnNoiseSegmentFadersAndNativeSurgeWavesAllReceiveActiveCheckpoints() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord mature = stream("mature", false);
+        CoopSlipstreamRecord spawn = withState(mature, "spawn",
+                new CoopSlipstreamRecord.Fade(new float[]{0, 1}, 2, .2f, null, 0, 0, 0),
+                mature.segments(), CoopSlipstreamRecord.SurgeWaveState.absent(), mature.timeline());
+        var fading = new CoopSlipstreamRecord.Fader(.5f, 1, 1,
+                CoopSlipstreamRecord.FaderState.OUT, false, false);
+        List<CoopSlipstreamRecord.Segment> segments = new ArrayList<>(mature.segments());
+        segments.set(1, new CoopSlipstreamRecord.Segment(1000, 0, 200, 1, fading));
+        CoopSlipstreamRecord segment = withState(mature, "segment", CoopSlipstreamRecord.Fade.idle(),
+                segments, CoopSlipstreamRecord.SurgeWaveState.absent(), mature.timeline());
+        CoopSlipstreamRecord wave = withState(mature, "wave", CoopSlipstreamRecord.Fade.idle(),
+                mature.segments(), new CoopSlipstreamRecord.SurgeWaveState(true, false, 1, .1f, 4),
+                mature.timeline());
+        f.world.host = List.of(mature, spawn, segment, wave);
+        f.authority.tickHost();
+        f.net.sent.clear();
+
+        f.now.set(250);
+        f.authority.tickHost();
+
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD, CoopMessages.Type.STREAM_ADD,
+                CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals(List.of("spawn", "segment", "wave"), f.net.sent.stream().map(message ->
+                CoopSlipstreamRecord.decode(CoopMessages.requiredPayloadString(message, "stream")).hostId()).toList());
+    }
+
+    @Test
+    void finalIdleCheckpointClosesAnActiveTransitionExactlyOnce() {
+        Fixture f = new Fixture();
+        f.world.host = List.of(stream("settled", true));
+        f.authority.tickHost();
+        f.net.sent.clear();
+        CoopSlipstreamRecord mature = stream("settled", false);
+        f.world.host = List.of(withState(mature, mature.hostId(), CoopSlipstreamRecord.Fade.idle(),
+                mature.segments(), CoopSlipstreamRecord.SurgeWaveState.absent(), mature.timeline()));
+
+        f.now.set(250);
+        f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        assertNull(CoopSlipstreamRecord.decode(CoopMessages.requiredPayloadString(
+                f.net.sent.get(0), "stream")).fade().despawnNoise());
+        f.net.sent.clear();
+        f.now.set(500);
+        f.authority.tickHost();
         assertTrue(f.net.sent.isEmpty());
+    }
+
+    @Test
+    void matureMetadataChangesStayQuietAndResumePreservesTheGridOrigin() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord mature = stream("grid", false);
+        long origin = -1_000_000L;
+        CoopSlipstreamRecord first = withState(mature, mature.hostId(), mature.fade(), mature.segments(),
+                CoopSlipstreamRecord.SurgeWaveState.absent(),
+                new CoopSlipstreamRecord.Timeline(origin, 2, origin + 144_999, false, true));
+        f.world.host = List.of(first);
+        f.authority.tickHost();
+        f.net.sent.clear();
+        CoopSlipstreamRecord later = withState(mature, mature.hostId(), mature.fade(), mature.segments(),
+                CoopSlipstreamRecord.SurgeWaveState.absent(),
+                new CoopSlipstreamRecord.Timeline(origin, 10, origin + 720_999, true, false));
+        f.world.host = List.of(later);
+        f.now.set(250);
+        f.authority.tickHost();
+        assertTrue(f.net.sent.isEmpty(), "capture time and host mode do not restart a settled stream");
+
+        f.authority.rearmFullBroadcast();
+        f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STREAM_SET, CoopMessages.Type.STREAM_ADD), f.types());
+        CoopSlipstreamRecord resumed = CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(1), "stream"));
+        assertEquals(origin, resumed.timeline().originCampaignMillis());
+        assertEquals(later.timeline(), resumed.timeline());
+    }
+
+    @Test
+    void activeCheckpointsCarryPauseAndLocationModeChangesAtTheNextPoll() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord fading = stream("active", true);
+        f.world.host = List.of(fading);
+        f.authority.tickHost();
+        f.net.sent.clear();
+        var timeline = new CoopSlipstreamRecord.Timeline(0, 1, 72_100, true, false);
+        f.world.host = List.of(withState(fading, fading.hostId(), fading.fade(), fading.segments(),
+                fading.surgeWave(), timeline));
+
+        f.now.set(250);
+        f.authority.tickHost();
+
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals(timeline, CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream")).timeline());
     }
 
     @Test
@@ -166,6 +271,15 @@ class CoopSlipstreamAuthorityTest {
                 despawning ? new float[]{0, .5f, 1} : null, -1, 10, 2);
         return new CoopSlipstreamRecord(id, CoopSlipstreamRecord.Kind.SEASONAL,
                 CoopSlipstreamRecord.Params.defaults(), List.of(), segments, fade, false);
+    }
+
+    private static CoopSlipstreamRecord withState(CoopSlipstreamRecord base, String id,
+                                                  CoopSlipstreamRecord.Fade fade,
+                                                  List<CoopSlipstreamRecord.Segment> segments,
+                                                  CoopSlipstreamRecord.SurgeWaveState wave,
+                                                  CoopSlipstreamRecord.Timeline timeline) {
+        return new CoopSlipstreamRecord(id, base.kind(), base.params(), base.terrainTags(),
+                segments, fade, timeline, wave);
     }
 
     private static final class Fixture {

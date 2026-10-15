@@ -12,6 +12,7 @@ import com.fs.starfarer.api.characters.PersonAPI;
 import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopSlipstreamAuthority;
+import coop.campaign.CoopSlipstreamWorld;
 import coop.campaign.CoopCampaignReplicator;
 import coop.combat.CoopBattleBridge;
 import coop.combat.CoopBattleResult;
@@ -3449,6 +3450,9 @@ public class CoopNetPump implements EveryFrameScript {
         maybeApplyTimeSnapshot();
         t = profiler.split(SECTION_TIME_APPLY, t);
         tickClockReconciler(amount);
+        // Native terrain fade hooks are suppressed only for registered streams. Commit both
+        // roles' canonical grid from the FINAL clock, before bridge and save snapshot readers.
+        tickSlipstreamFadeControl();
         t = profiler.split(SECTION_TIME_CLOCK_RECONCILE, t);
         maybeSendTimeSnapshot();
         t = profiler.split(SECTION_TIME_SEND, t);
@@ -7923,6 +7927,28 @@ public class CoopNetPump implements EveryFrameScript {
             return service.role() != CoopConnectionRole.GUEST;
         }
         return true;
+    }
+
+    private void tickSlipstreamFadeControl() {
+        CoopConnectionRole role = service.role();
+        if (!isGameplaySessionActive() && !reconnect.active()) {
+            if (!slipstreamReplicationStreaming
+                    && (role == CoopConnectionRole.HOST || role == CoopConnectionRole.GUEST)) {
+                // Loaded native objects were preregistered before the first engine frame. Keep
+                // their saved grid frozen through the initial lobby, not raw-advancing underneath it.
+                CoopSlipstreamWorld.holdLoadedControlled(Global.getSector());
+            } else {
+                CoopSlipstreamWorld.releaseControlled();
+            }
+            return;
+        }
+        if (role != CoopConnectionRole.HOST && role != CoopConnectionRole.GUEST) {
+            CoopSlipstreamWorld.releaseControlled();
+            return;
+        }
+        CoopSlipstreamWorld.tickControlled(Global.getSector(), role == CoopConnectionRole.HOST,
+                reconnect.active(), role == CoopConnectionRole.GUEST && latestTimeSnapshot != null
+                        ? latestTimeSnapshot.paused() : null);
     }
 
     private void handleStream(CoopMessages.Message message) {

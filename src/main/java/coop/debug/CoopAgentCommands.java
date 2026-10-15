@@ -298,6 +298,24 @@ public final class CoopAgentCommands {
             row.put("params", streamParamsJson(stream.params()));
             row.put("terrainTags", new JSONArray(stream.terrainTags()));
             row.put("unfinishedSurgeFadeIn", stream.unfinishedSurgeFadeIn());
+            CoopSlipstreamRecord.Timeline timeline = stream.timeline();
+            JSONObject grid = new JSONObject();
+            grid.put("originCampaignMillis", timeline.originCampaignMillis());
+            grid.put("committedTick", timeline.committedTick());
+            grid.put("committedCampaignMillis", timeline.committedCampaignMillis());
+            grid.put("captureCampaignMillis", timeline.captureCampaignMillis());
+            grid.put("hostPaused", timeline.hostPaused());
+            grid.put("hostInHyperspace", timeline.hostInHyperspace());
+            grid.put("quantumCampaignMillis", CoopSlipstreamRecord.QUANTUM_CAMPAIGN_MILLIS);
+            row.put("timeline", grid);
+            CoopSlipstreamRecord.SurgeWaveState surgeWave = stream.surgeWave();
+            JSONObject wave = new JSONObject();
+            wave.put("present", surgeWave.present());
+            wave.put("done", surgeWave.done());
+            wave.put("index", surgeWave.index());
+            wave.put("elapsed", surgeWave.elapsed());
+            wave.put("maxElapsed", surgeWave.maxElapsed());
+            row.put("surgeWave", wave);
             JSONArray segments = new JSONArray();
             for (CoopSlipstreamRecord.Segment segment : stream.segments()) {
                 JSONObject geometry = new JSONObject();

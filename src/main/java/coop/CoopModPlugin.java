@@ -5,6 +5,7 @@ import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
 import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
+import coop.campaign.CoopSlipstreamWorld;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopGuestPresence;
@@ -341,6 +342,8 @@ public class CoopModPlugin extends BaseModPlugin {
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
         CoopMirrorOrphanSweeper.sweep(Global.getSector());
+        // Recreate transient control before the first terrain frame, including background batches.
+        CoopSlipstreamWorld.prepareLoad(Global.getSector());
         // Before the pump, so it sits earlier in the transient script list and runs first each frame:
         // it captures the engine's per-frame delta for the full-fidelity guest-system drive and is the
         // always-on observer that releases the drive when the pump stops ticking it.
@@ -533,6 +536,7 @@ public class CoopModPlugin extends BaseModPlugin {
      * clears, and a failed save must not carry it into the next campaign.
      */
     static void clearPreviousGameStatics() {
+        CoopSlipstreamWorld.releaseControlled();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();
     }

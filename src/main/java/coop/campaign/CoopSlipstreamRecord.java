@@ -18,8 +18,10 @@ import java.util.Set;
  */
 public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params params,
                                   List<String> terrainTags, List<Segment> segments, Fade fade,
-                                  boolean unfinishedSurgeFadeIn) {
-    public static final int VERSION = 1;
+                                  Timeline timeline, SurgeWaveState surgeWave) {
+    public static final int VERSION = 2;
+    public static final long QUANTUM_CAMPAIGN_MILLIS = 72_000L;
+    public static final long MAX_COMMITTED_TICK = Long.MAX_VALUE / QUANTUM_CAMPAIGN_MILLIS;
     public static final int MIN_SEGMENTS = 3;
     public static final int MAX_SEGMENTS = 4096;
     public static final int MAX_NOISE_POINTS = 512;
@@ -45,9 +47,14 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
         kind = Objects.requireNonNull(kind, "kind");
         params = Objects.requireNonNull(params, "params");
         fade = Objects.requireNonNull(fade, "fade");
+        timeline = Objects.requireNonNull(timeline, "timeline");
+        surgeWave = Objects.requireNonNull(surgeWave, "surgeWave");
         terrainTags = checkedStrings(terrainTags, "terrain tags", MAX_TAGS);
         segments = List.copyOf(Objects.requireNonNull(segments, "segments"));
         checkCount(segments.size(), MIN_SEGMENTS, MAX_SEGMENTS, "segments");
+        if (surgeWave.index() > segments.size()) {
+            throw new IllegalArgumentException("Surge wave cursor exceeds segment count");
+        }
         double totalLength = 0;
         for (int i = 1; i < segments.size(); i++) {
             Segment a = segments.get(i - 1);
@@ -62,7 +69,81 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
 
     public CoopSlipstreamRecord(String hostId, Kind kind, Params params, List<String> terrainTags,
                                List<Segment> segments, Fade fade, boolean unfinishedSurgeFadeIn) {
-        this(VERSION, hostId, kind, params, terrainTags, segments, fade, unfinishedSurgeFadeIn);
+        this(VERSION, hostId, kind, params, terrainTags, segments, fade,
+                Timeline.atOrigin(0L, false, true), initialWave(segments, unfinishedSurgeFadeIn));
+    }
+
+    public CoopSlipstreamRecord(int version, String hostId, Kind kind, Params params,
+                               List<String> terrainTags, List<Segment> segments, Fade fade,
+                               boolean unfinishedSurgeFadeIn) {
+        this(version, hostId, kind, params, terrainTags, segments, fade,
+                Timeline.atOrigin(0L, false, true), initialWave(segments, unfinishedSurgeFadeIn));
+    }
+
+    public CoopSlipstreamRecord(String hostId, Kind kind, Params params, List<String> terrainTags,
+                               List<Segment> segments, Fade fade, Timeline timeline,
+                               SurgeWaveState surgeWave) {
+        this(VERSION, hostId, kind, params, terrainTags, segments, fade, timeline, surgeWave);
+    }
+
+    public boolean unfinishedSurgeFadeIn() {
+        return surgeWave.present() && !surgeWave.done();
+    }
+
+    private static SurgeWaveState initialWave(List<Segment> segments, boolean unfinished) {
+        Objects.requireNonNull(segments, "segments");
+        return unfinished ? new SurgeWaveState(true, false, 0, 0f,
+                0.2f * segments.size() * 0.34f + 3f) : SurgeWaveState.absent();
+    }
+
+    /** Native fields correspond to the committed fixed-grid tick, not the later capture time. */
+    public record Timeline(long originCampaignMillis, long committedTick,
+                           long captureCampaignMillis, boolean hostPaused,
+                           boolean hostInHyperspace) {
+        public Timeline {
+            if (committedTick < 0 || committedTick > MAX_COMMITTED_TICK) {
+                throw new IllegalArgumentException("Slipstream committed tick out of bounds");
+            }
+            try {
+                long committed = Math.addExact(originCampaignMillis,
+                        Math.multiplyExact(committedTick, QUANTUM_CAMPAIGN_MILLIS));
+                long span = Math.subtractExact(captureCampaignMillis, originCampaignMillis);
+                if (span < 0 || committed > captureCampaignMillis) {
+                    throw new IllegalArgumentException("Slipstream capture precedes committed grid state");
+                }
+            } catch (ArithmeticException failure) {
+                throw new IllegalArgumentException("Slipstream timeline overflows campaign time", failure);
+            }
+        }
+
+        public static Timeline atOrigin(long campaignMillis, boolean paused, boolean inHyperspace) {
+            return new Timeline(campaignMillis, 0L, campaignMillis, paused, inHyperspace);
+        }
+
+        public long committedCampaignMillis() {
+            return Math.addExact(originCampaignMillis,
+                    Math.multiplyExact(committedTick, QUANTUM_CAMPAIGN_MILLIS));
+        }
+    }
+
+    /** The actual native sweep cursor; absence differs from a retained completed script. */
+    public record SurgeWaveState(boolean present, boolean done, int index,
+                                 float elapsed, float maxElapsed) {
+        public SurgeWaveState {
+            checkCount(index, 0, MAX_SEGMENTS, "surge wave index");
+            nonnegative(elapsed, "surge wave elapsed");
+            nonnegative(maxElapsed, "surge wave maxElapsed");
+            if (!present && (!done || index != 0 || elapsed != 0f || maxElapsed != 0f)) {
+                throw new IllegalArgumentException("Absent surge wave carries native state");
+            }
+            if (present && maxElapsed <= 0f) {
+                throw new IllegalArgumentException("Present surge wave has no lifetime");
+            }
+        }
+
+        public static SurgeWaveState absent() {
+            return new SurgeWaveState(false, true, 0, 0f, 0f);
+        }
     }
 
     /** All non-Color fields of SlipstreamParams2, in their source declaration order. */
@@ -268,7 +349,12 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
         }
         w.noise(fade.spawnNoise); w.add(fade.spawnDays()); w.add(fade.spawnElapsed());
         w.noise(fade.despawnNoise); w.add(fade.despawnDelay()); w.add(fade.despawnDays());
-        w.add(fade.despawnElapsed()); w.add(unfinishedSurgeFadeIn);
+        w.add(fade.despawnElapsed());
+        w.add(timeline.originCampaignMillis()); w.add(timeline.committedTick());
+        w.add(timeline.captureCampaignMillis()); w.add(timeline.hostPaused());
+        w.add(timeline.hostInHyperspace());
+        w.add(surgeWave.present()); w.add(surgeWave.done()); w.add(surgeWave.index());
+        w.add(surgeWave.elapsed()); w.add(surgeWave.maxElapsed());
         return w.finish();
     }
 
@@ -303,9 +389,13 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
         }
         Fade fade = new Fade(r.noise(), r.number(), r.number(), r.noise(),
                 r.number(), r.number(), r.number());
-        boolean surgeFade = r.bool();
+        Timeline timeline = new Timeline(r.longInteger(), r.longInteger(), r.longInteger(),
+                r.bool(), r.bool());
+        SurgeWaveState surgeWave = new SurgeWaveState(r.bool(), r.bool(), r.integer(),
+                r.number(), r.number());
         r.end();
-        return new CoopSlipstreamRecord(version, id, kind, params, tags, segments, fade, surgeFade);
+        return new CoopSlipstreamRecord(version, id, kind, params, tags, segments, fade,
+                timeline, surgeWave);
     }
 
     /** Deterministic helpers for saved recipes and tests; M1's live SET is an id manifest. */
@@ -487,6 +577,7 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
         }
 
         int integer() { return Integer.parseInt(next()); }
+        long longInteger() { return Long.parseLong(next()); }
         float number() { return parseFloat(next()); }
         boolean bool() {
             String value = next();

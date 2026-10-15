@@ -72,7 +72,9 @@ class CoopAgentStreamsTest {
                 new CoopSlipstreamRecord.Segment(1000f, 0f, 650f, 0.5f, fader),
                 new CoopSlipstreamRecord.Segment(2000f, 0f, 700f, 0.5f, fader)),
                 new CoopSlipstreamRecord.Fade(new float[]{0.1f, 0.9f}, 2f, 1f,
-                        null, 0f, 0f, 0f), false);
+                        null, 0f, 0f, 0f),
+                new CoopSlipstreamRecord.Timeline(0L, 1L, 123456L, true, false),
+                new CoopSlipstreamRecord.SurgeWaveState(true, false, 1, 0.08f, 4.2f));
         CoopSlipstreamWorld.TableRow sample = new CoopSlipstreamWorld.TableRow(123456L, record,
                 List.of(new CoopSlipstreamWorld.BrightnessSample(0f, 0.35f),
                         new CoopSlipstreamWorld.BrightnessSample(1000f, 0.35f),
@@ -86,6 +88,22 @@ class CoopAgentStreamsTest {
         assertEquals("host-stream-7", row.getString("id"));
         assertEquals("SEASONAL", row.getString("kind"));
         assertEquals(123456L, row.getLong("campaignTimestamp"));
+        assertEquals(2, row.getInt("version"));
+        JSONObject timeline = row.getJSONObject("timeline");
+        assertEquals(0L, timeline.getLong("originCampaignMillis"));
+        assertEquals(1L, timeline.getLong("committedTick"));
+        assertEquals(72_000L, timeline.getLong("committedCampaignMillis"));
+        assertEquals(123456L, timeline.getLong("captureCampaignMillis"));
+        assertEquals(72_000L, timeline.getLong("quantumCampaignMillis"));
+        assertTrue(timeline.getBoolean("hostPaused"));
+        assertFalse(timeline.getBoolean("hostInHyperspace"));
+        JSONObject wave = row.getJSONObject("surgeWave");
+        assertTrue(wave.getBoolean("present"));
+        assertFalse(wave.getBoolean("done"));
+        assertEquals(1, wave.getInt("index"));
+        assertEquals(.08, wave.getDouble("elapsed"), 1e-6);
+        assertEquals(4.2, wave.getDouble("maxElapsed"), 1e-6);
+        assertTrue(row.getBoolean("unfinishedSurgeFadeIn"));
         assertEquals(3, row.getInt("segmentCount"));
         assertEquals(28, row.getJSONObject("params").length());
         assertTrue(row.getJSONObject("params").isNull("enteringSlipstreamTextOverride"));

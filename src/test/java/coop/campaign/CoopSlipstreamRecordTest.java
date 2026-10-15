@@ -7,6 +7,8 @@ import coop.campaign.CoopSlipstreamRecord.FaderState;
 import coop.campaign.CoopSlipstreamRecord.Kind;
 import coop.campaign.CoopSlipstreamRecord.Params;
 import coop.campaign.CoopSlipstreamRecord.Segment;
+import coop.campaign.CoopSlipstreamRecord.SurgeWaveState;
+import coop.campaign.CoopSlipstreamRecord.Timeline;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import org.junit.jupiter.api.Test;
@@ -44,6 +46,8 @@ class CoopSlipstreamRecordTest {
         assertEquals(FaderState.IN, decoded.segments().get(0).fader().state());
         assertEquals(FaderState.OUT, decoded.segments().get(1).fader().state());
         assertEquals(FaderState.IDLE, decoded.segments().get(2).fader().state());
+        assertEquals(record.timeline(), decoded.timeline());
+        assertEquals(record.surgeWave(), decoded.surgeWave());
     }
 
     @Test
@@ -59,6 +63,76 @@ class CoopSlipstreamRecordTest {
                 "the transport hard cap includes envelope escaping");
         assertEquals(record, CoopSlipstreamRecord.decode(encoded));
         assertEquals(encoded, CoopMessages.requiredPayloadString(CoopMessages.decode(frame), "stream"));
+        int bytes = frame.getBytes(StandardCharsets.UTF_8).length;
+        System.out.println("P26 v2 400-segment checkpoint: payload="
+                + encoded.getBytes(StandardCharsets.UTF_8).length + " bytes, TCP envelope=" + bytes
+                + " bytes, seven active streams at 4Hz=" + (7L * 4L * bytes) + " bytes/s");
+    }
+
+    @Test
+    void timelineKeepsItsOriginAcrossCheckpointsAndAllowsNegativeCampaignEpochs() {
+        CoopSlipstreamRecord base = surge("timeline", 3, 2);
+        long origin = -2_000_000L;
+        Timeline initial = new Timeline(origin, 7, origin + 7 * CoopSlipstreamRecord.QUANTUM_CAMPAIGN_MILLIS
+                + 123L, true, false);
+        Timeline later = new Timeline(origin, 18, origin + 18 * CoopSlipstreamRecord.QUANTUM_CAMPAIGN_MILLIS
+                + 456L, false, true);
+        CoopSlipstreamRecord first = checkpoint(base, initial, base.surgeWave());
+        CoopSlipstreamRecord next = checkpoint(base, later,
+                new SurgeWaveState(true, true, 3, 4.1f, 4f));
+
+        CoopSlipstreamRecord decodedFirst = CoopSlipstreamRecord.decode(first.encode());
+        CoopSlipstreamRecord decodedNext = CoopSlipstreamRecord.decode(next.encode());
+
+        assertEquals(origin, decodedFirst.timeline().originCampaignMillis());
+        assertEquals(origin, decodedNext.timeline().originCampaignMillis());
+        assertEquals(18, decodedNext.timeline().committedTick());
+        assertEquals(origin + 18 * CoopSlipstreamRecord.QUANTUM_CAMPAIGN_MILLIS,
+                decodedNext.timeline().committedCampaignMillis());
+        assertTrue(decodedFirst.timeline().hostPaused());
+        assertFalse(decodedFirst.timeline().hostInHyperspace());
+        assertFalse(decodedNext.unfinishedSurgeFadeIn());
+        assertEquals(new SurgeWaveState(true, true, 3, 4.1f, 4f), decodedNext.surgeWave(),
+                "native completion may overshoot maxElapsed and must retain the actual cursor");
+        assertEquals(Timeline.atOrigin(Long.MIN_VALUE, true, true),
+                CoopSlipstreamRecord.decode(checkpoint(base,
+                        Timeline.atOrigin(Long.MIN_VALUE, true, true), SurgeWaveState.absent()).encode()).timeline());
+    }
+
+    @Test
+    void timelineRejectsNegativeTicksFutureCommittedStatesAndOverflow() {
+        assertThrows(IllegalArgumentException.class, () -> new Timeline(0, -1, 0, false, true));
+        assertThrows(IllegalArgumentException.class, () -> new Timeline(0,
+                CoopSlipstreamRecord.MAX_COMMITTED_TICK + 1, Long.MAX_VALUE, false, true));
+        assertThrows(IllegalArgumentException.class, () -> new Timeline(0, 1,
+                CoopSlipstreamRecord.QUANTUM_CAMPAIGN_MILLIS - 1, false, true));
+        assertThrows(IllegalArgumentException.class, () -> new Timeline(100, 0, 99, false, true));
+        assertThrows(IllegalArgumentException.class, () -> new Timeline(Long.MAX_VALUE,
+                1, Long.MAX_VALUE, false, true));
+        assertThrows(IllegalArgumentException.class, () -> new Timeline(Long.MIN_VALUE,
+                0, Long.MAX_VALUE, false, true));
+    }
+
+    @Test
+    void malformedTimelineLongsAndNativeSurgeCursorsAreRejectedBeforeApply() {
+        CoopSlipstreamRecord source = surge("id", 3, 2);
+        List<String> fields = CoopDelimited.split(source.encode());
+        int start = fields.size() - 10;
+        for (int position : List.of(start, start + 1, start + 2)) {
+            for (String bad : List.of("", "1.0", "NaN", "9223372036854775808")) {
+                assertRejected(fields, position, bad);
+            }
+        }
+        assertRejected(fields, start + 1, "-1");
+        assertRejected(fields, start + 7, "4");
+        assertRejected(fields, start + 8, "-0.1");
+        assertRejected(fields, start + 9, "0");
+        assertThrows(IllegalArgumentException.class, () -> new SurgeWaveState(false, false, 0, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new SurgeWaveState(false, true, 1, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new SurgeWaveState(true, false, -1, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new SurgeWaveState(true, false, 0, Float.NaN, 1));
+        assertThrows(IllegalArgumentException.class, () -> checkpoint(source, source.timeline(),
+                new SurgeWaveState(true, false, 4, 0, 1)));
     }
 
     @Test
@@ -171,14 +245,17 @@ class CoopSlipstreamRecordTest {
     @Test
     void rejectsMalformedVersionKindNullableFieldsAndBooleans() {
         List<String> fields = CoopDelimited.split(surge("id", 3, 2).encode());
-        assertRejected(fields, 0, "2");
+        assertRejected(fields, 0, "1");
+        assertRejected(fields, 0, "3");
         assertRejected(fields, 0, "1.0");
         assertRejected(fields, 1, "");
         assertRejected(fields, 2, "DYNAMIC");
         assertRejected(fields, 3, "null");
         assertRejected(fields, 27, "00");
         int segmentStart = segmentStart(fields);
-        for (int index : List.of(5, 23, segmentStart + 8, segmentStart + 9, fields.size() - 1)) {
+        int timelineStart = fields.size() - 10;
+        for (int index : List.of(5, 23, segmentStart + 8, segmentStart + 9,
+                timelineStart + 3, timelineStart + 4, timelineStart + 5, timelineStart + 6)) {
             for (String value : List.of("TRUE", "1", "yes", "")) assertRejected(fields, index, value);
         }
         assertRejected(fields, segmentStart + 7, "FADE_IN");
@@ -197,6 +274,7 @@ class CoopSlipstreamRecordTest {
         // Each 2-entry noise block has its count first; all remaining fade fields are floats.
         floats.addAll(List.of(noiseStart + 1, noiseStart + 2, noiseStart + 3, noiseStart + 4,
                 noiseStart + 6, noiseStart + 7, noiseStart + 8, noiseStart + 9, noiseStart + 10));
+        floats.addAll(List.of(fields.size() - 2, fields.size() - 1));
         for (int index : floats) {
             for (String value : List.of("NaN", "Infinity", "-Infinity", "1e1000")) {
                 assertRejected(fields, index, value);
@@ -323,9 +401,9 @@ class CoopSlipstreamRecordTest {
             changed.set(index, "NaN");
             assertThrows(IllegalArgumentException.class, () -> Despawn.decode(join(changed)));
         }
-        fields.set(0, "2");
-        assertThrows(IllegalArgumentException.class, () -> Despawn.decode(join(fields)));
         fields.set(0, "1");
+        assertThrows(IllegalArgumentException.class, () -> Despawn.decode(join(fields)));
+        fields.set(0, Integer.toString(CoopSlipstreamRecord.VERSION));
         fields.set(2, "513");
         assertThrows(IllegalArgumentException.class, () -> Despawn.decode(join(fields)));
     }
@@ -338,7 +416,15 @@ class CoopSlipstreamRecordTest {
         Fade f = new Fade(noise(noiseCount), 2.3f, 0.35f,
                 noise(noiseCount), -0.35f, 0.2f, 0.11f);
         return new CoopSlipstreamRecord(id, Kind.OTHER, p,
-                List.of("visible|\\\n\r", "second"), segments(segmentCount), f, true);
+                List.of("visible|\\\n\r", "second"), segments(segmentCount), f,
+                new Timeline(-2_000_000L, 12L, -1_000_000L, false, true),
+                new SurgeWaveState(true, false, 2, 0.13f, 4.2f));
+    }
+
+    private static CoopSlipstreamRecord checkpoint(CoopSlipstreamRecord source,
+                                                   Timeline timeline, SurgeWaveState wave) {
+        return new CoopSlipstreamRecord(source.hostId(), source.kind(), source.params(),
+                source.terrainTags(), source.segments(), source.fade(), timeline, wave);
     }
 
     private static List<Segment> segments(int count) {

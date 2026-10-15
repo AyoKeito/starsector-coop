@@ -27,7 +27,7 @@ K:\Starsector\mods\coop
 |-- src/main/java/coop/   the mod: 22 packages + CoopModPlugin
 |-- src/launcher/java/    coop.launcher, the FlatLaf desktop launcher (no Starsector API on its classpath)
 |-- src/test/java/coop/   JUnit 5 suite, mirrors the main packages + coop/launcher + coop/testing
-|-- forks/                classpath-shadow copies of 10 vanilla classes -> coop-forks.jar
+|-- forks/                classpath-shadow copies of 12 vanilla classes -> coop-forks.jar
 |-- data/                 rules.csv, campaign/abilities.csv, config/coop_options.json,
 |                         config/settings.json, version/
 |-- docs/                 design, plan ledger, generated roadmap, player guides
@@ -41,9 +41,9 @@ K:\Starsector\mods\coop
 |-- tmp_ff_analysis/      scratch + decompiled sources; never committed, never shipped
 ```
 
-The `forks` source set is `forks/` plus `src/main/java/coop/rng` and `src/main/java/coop/presence`,
+The `forks` source set is `forks/` plus `src/main/java/coop/rng`, `coop/presence` and `coop/ambient`,
 which must share the system classloader with the forks. The `jar` task excludes `coop/rng/**`,
-`coop/presence/**` and `coop/build/CoopForksBuildInfo*` from `coop.jar` so exactly one copy of each
+`coop/presence/**`, `coop/ambient/**` and `coop/build/CoopForksBuildInfo*` from `coop.jar` so exactly one copy of each
 exists on disk.
 
 **The script classloader shapes the code.** It refuses `java.lang.reflect.*`, `java.io.*` (allow-list
@@ -211,7 +211,12 @@ Owns: every wire type, since the enum lives here.
   Luddic-Path bases, campaign objectives, gates.
 - `CoopSlipstreamAuthority` / `CoopSlipstreamRecord` / `CoopSlipstreamWorld` - non-dynamic host
   slipstreams and slipsurges. A 250 ms scan sends lifecycle messages, with an ordered manifest and
-  complete records on connect/resume. The guest sweeps seasonal terrain before manager suppression;
+  complete records on connect/resume and during active fades. Version 2 records include a fixed
+  campaign-clock grid and the native slipsurge sweep cursor. `CoopSlipstreamFadeDriver` commits
+  1/120-second native fade steps after clock reconciliation on both roles; two native forks skip
+  only their raw frame-time fade work for registered terrain. `coop.ambient.CoopSlipstreamFadeBridge`
+  owns the transient system-loader registry. Guest expiry waits for the host's remove event.
+  The guest sweeps seasonal terrain before manager suppression;
   an unreadable sweep delays suppression. Saved terrain tags rebuild lookup and same-geometry
   upserts retain local discovery. The live M1 gate remains open before M2.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
@@ -609,7 +614,7 @@ Things that compile, pass the suite, and fail in-game.
 - **Two people building from their own checkouts cannot connect.** `coopGitCommit` is compared in the
   handshake, and a dirty tree reports `<hash>-dirty`. A release is one built artifact both players
   install. (`README_DEV.md`, "Release Checklist".)
-- **`coop/rng/` or `coop/presence/` entries inside `coop.jar` break the forks silently.** Check with
+- **`coop/rng/`, `coop/presence/` or `coop/ambient/` entries inside `coop.jar` break the forks.** Check with
   `jar -tf` before shipping; `package-release.ps1` refuses a broken split.
 - **Every repo file is LF.** `.gitattributes` (`* text=auto eol=lf`) and `.editorconfig`
   (`end_of_line = lf`) are committed; do not write CRLF.

@@ -2,6 +2,7 @@ package coop.campaign;
 
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
@@ -10,7 +11,9 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.abilities.GenerateSlipsurgeAbility;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamManager;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
+import coop.ambient.CoopSlipstreamFadeBridge;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.util.vector.Vector2f;
 
@@ -24,12 +27,26 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class CoopSlipstreamWorldTest {
+    private SettingsAPI previousSettings;
+
+    @BeforeEach
+    void pinnedNativeHooks() {
+        previousSettings = Global.getSettings();
+        Global.setSettings(proxy(SettingsAPI.class, (self, method, args) -> switch (method.getName()) {
+            case "getVersionString" -> "Starsector 0.98a-RC8";
+            default -> coop.testing.ProxyDefaults.defaultValue(method.getReturnType());
+        }));
+    }
+
     @AfterEach
     void clearSector() {
+        CoopSlipstreamWorld.releaseControlled();
+        Global.setSettings(previousSettings);
         Global.setSector(null);
     }
 
@@ -74,7 +91,7 @@ class CoopSlipstreamWorldTest {
         assertEquals(Set.of("host"), f.world.taggedIds());
         CoopSlipstreamWorld.TableRow row = f.world.captureTable().get(0);
         assertEquals(123L, row.campaignTimestamp());
-        assertEquals(source, row.stream());
+        assertRecipe(source, row.stream());
         assertEquals(List.of(0f, 1000f, 1200f), row.brightness().stream()
                 .map(CoopSlipstreamWorld.BrightnessSample::distance).toList());
         assertTrue(row.brightness().stream().allMatch(sample -> sample.brightness() == 0.375f),
@@ -119,11 +136,12 @@ class CoopSlipstreamWorldTest {
         assertEquals(List.of(script), replica.scripts);
         assertEquals(0.4f, replica.plugin.getSegments().get(0).fader.getBrightness(),
                 "an upsert restores the received fader rather than rerunning the script constructor");
-        script.advance(1f); // Outside the current location the native script completes in one tick.
+        CoopSlipstreamFadeBridge.unregister(replica.plugin);
+        script.advance(1f); // Released native scripts resume normal solo advancement.
         assertTrue(script.isDone());
         replica.scripts.clear();
         f.world.upsert(source);
-        assertTrue(replica.scripts.isEmpty(), "a finished sweep must not restart on a repeated add");
+        assertEquals(1, replica.scripts.size(), "an explicit unfinished checkpoint restores its native sweep cursor");
     }
 
     @Test
@@ -144,13 +162,12 @@ class CoopSlipstreamWorldTest {
 
         f.world.upsert(source);
 
-        assertEquals(source, f.world.captureTable().get(0).stream(),
-                "the constructor must not overwrite any transmitted live fader or bMult");
+        assertRecipe(source, f.world.captureTable().get(0).stream());
         assertEquals(1, f.lastCreated.scripts.size());
         EveryFrameScript script = f.lastCreated.scripts.get(0);
         f.world.upsert(source);
         assertEquals(List.of(script), f.lastCreated.scripts);
-        assertEquals(source, f.world.captureTable().get(0).stream());
+        assertRecipe(source, f.world.captureTable().get(0).stream());
     }
 
     @Test
@@ -426,10 +443,104 @@ class CoopSlipstreamWorldTest {
         assertFalse(f.world.addSeasonal());
     }
 
+    @Test
+    void hostCanonicalTicksAdoptGenuineDespawnCommandsWithoutChangingTheGridOrigin() {
+        Fixture f = new Fixture();
+        FakeTerrain stream = f.nativeStream("canonical-host");
+        CoopSlipstreamWorld.tickControlled(f.sector, true, false);
+        long origin = (long) stream.saved.get(CoopSlipstreamWorld.FADE_ORIGIN);
+        f.timestamp.addAndGet(2 * CoopSlipstreamFadeDriver.QUANTUM_CAMPAIGN_MILLIS);
+        CoopSlipstreamWorld.tickControlled(f.sector, true, false);
+        assertEquals(2L, stream.saved.get(CoopSlipstreamWorld.FADE_TICK));
+
+        stream.plugin.despawn(0f, 10f, new Random(7));
+        CoopSlipstreamWorld.tickControlled(f.sector, true, false);
+        assertEquals(0f, f.world.captureTable().get(0).stream().fade().despawnElapsed());
+        f.timestamp.addAndGet(CoopSlipstreamFadeDriver.QUANTUM_CAMPAIGN_MILLIS);
+        CoopSlipstreamWorld.tickControlled(f.sector, true, false);
+        CoopSlipstreamRecord captured = f.world.captureTable().get(0).stream();
+        assertEquals(origin, captured.timeline().originCampaignMillis());
+        assertEquals(3L, captured.timeline().committedTick());
+        assertTrue(captured.fade().despawnElapsed() > 0f);
+        assertTrue(stream.saved.values().stream().allMatch(v -> v instanceof String
+                || v instanceof Number || v instanceof Boolean), "saved control metadata is primitive only");
+    }
+
+    @Test
+    void aFutureRunningCheckpointIsDeferredUntilItsCommittedCampaignTick() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord base = record("future", false, 0);
+        long future = f.timestamp.get() + 2 * CoopSlipstreamFadeDriver.QUANTUM_CAMPAIGN_MILLIS;
+        CoopSlipstreamRecord source = new CoopSlipstreamRecord(base.hostId(), base.kind(), base.params(),
+                base.terrainTags(), base.segments(), base.fade(),
+                CoopSlipstreamRecord.Timeline.atOrigin(future, false, true), base.surgeWave());
+        f.world.upsert(source);
+        assertTrue(f.terrains.isEmpty());
+        assertEquals(Set.of("future"), f.world.taggedIds());
+        f.timestamp.set(future);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false);
+        assertEquals(1, f.terrains.size());
+        assertEquals(source.fade(), f.world.captureTable().get(0).stream().fade());
+        assertTrue(CoopSlipstreamFadeBridge.isControlled(f.lastCreated.plugin));
+    }
+
+    @Test
+    void aPausedAuthoritativeCheckpointSurvivesCalendarCatchupAndReconnectGrace() {
+        Fixture f = new Fixture();
+        f.paused = true;
+        CoopSlipstreamRecord base = record("paused", false, 0);
+        long future = f.timestamp.get() + 2 * CoopSlipstreamFadeDriver.QUANTUM_CAMPAIGN_MILLIS;
+        CoopSlipstreamRecord source = new CoopSlipstreamRecord(base.hostId(), base.kind(), base.params(),
+                base.terrainTags(), base.segments(), base.fade(),
+                CoopSlipstreamRecord.Timeline.atOrigin(future, true, true), base.surgeWave());
+        f.world.upsert(source);
+        FakeTerrain replica = f.lastCreated;
+        f.timestamp.set(future + 4_320_000L);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false);
+        assertEquals(source.fade(), f.world.captureTable().get(0).stream().fade());
+        assertEquals(0L, replica.saved.get(CoopSlipstreamWorld.FADE_TICK));
+        CoopSlipstreamWorld.tickControlled(f.sector, false, true);
+        assertTrue(CoopSlipstreamFadeBridge.isControlled(replica.plugin));
+        assertEquals(source.segments(), f.world.captureTable().get(0).stream().segments());
+    }
+
+    @Test
+    void loadedGridStaysRegisteredThroughThePreHandshakeLobbyAndSoloTeardownReleasesIt() {
+        Fixture f = new Fixture();
+        f.world.upsert(record("saved-grid", false, 0));
+        FakeTerrain replica = f.lastCreated;
+        f.timestamp.set(2 * CoopSlipstreamFadeDriver.QUANTUM_CAMPAIGN_MILLIS);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false);
+        Map<String, Object> savedMetadata = new HashMap<>(replica.saved);
+        CoopSlipstreamWorld.releaseControlled();
+        replica.saved.putAll(savedMetadata); // What deserialization restores on the native object.
+
+        CoopSlipstreamWorld.prepareLoad(f.sector);
+        assertTrue(CoopSlipstreamFadeBridge.isControlled(replica.plugin));
+        CoopSlipstreamWorld.holdLoadedControlled(f.sector);
+        assertEquals(savedMetadata.get(CoopSlipstreamWorld.FADE_ORIGIN),
+                replica.saved.get(CoopSlipstreamWorld.FADE_ORIGIN));
+        assertEquals(savedMetadata.get(CoopSlipstreamWorld.FADE_TICK),
+                replica.saved.get(CoopSlipstreamWorld.FADE_TICK));
+
+        CoopSlipstreamWorld.releaseControlled();
+        assertFalse(CoopSlipstreamFadeBridge.isControlled(replica.plugin));
+        assertFalse(replica.saved.containsKey(CoopSlipstreamWorld.FADE_ORIGIN));
+        assertEquals("saved-grid", replica.saved.get(CoopSlipstreamWorld.STREAM_ID));
+    }
+
     private static SlipstreamManager.StreamData route(String id, boolean used) {
         SlipstreamManager.StreamData route = new SlipstreamManager.StreamData(id);
         route.wasUsed = used;
         return route;
+    }
+
+    private static void assertRecipe(CoopSlipstreamRecord expected, CoopSlipstreamRecord actual) {
+        assertEquals(expected, new CoopSlipstreamRecord(actual.version(), actual.hostId(), actual.kind(),
+                actual.params(), actual.terrainTags(), actual.segments(), actual.fade(),
+                expected.timeline(), actual.surgeWave()));
+        assertEquals(expected.timeline().originCampaignMillis(), actual.timeline().originCampaignMillis());
+        assertEquals(expected.timeline().committedTick(), actual.timeline().committedTick());
     }
 
     private static CoopSlipstreamRecord record(String id, boolean surge, float offset) {
@@ -454,18 +565,26 @@ class CoopSlipstreamWorldTest {
     private static final class Fixture {
         final List<CampaignTerrainAPI> terrains = new ArrayList<>();
         final List<EveryFrameScript> scripts = new ArrayList<>();
+        final List<EveryFrameScript> locationScripts = new ArrayList<>();
+        final AtomicLong timestamp = new AtomicLong(123L);
+        boolean paused;
         final SectorAPI sector;
         final CoopSlipstreamWorld world;
         FakeTerrain lastCreated;
 
         Fixture() {
             CampaignClockAPI clock = proxy(CampaignClockAPI.class, (self, method, args) -> switch (method.getName()) {
-                case "getTimestamp" -> 123L;
+                case "getTimestamp" -> timestamp.get();
                 case "getMonth" -> 3;
+                case "convertToDays" -> (float) args[0] / 10f;
+                case "convertToSeconds" -> (float) args[0] * 10f;
                 default -> throw unexpected("clock", method.getName());
             });
             LocationAPI hyper = proxy(LocationAPI.class, (self, method, args) -> switch (method.getName()) {
                 case "getTerrainCopy" -> new ArrayList<>(terrains);
+                case "getScripts" -> new ArrayList<>(locationScripts);
+                case "addScript" -> { locationScripts.add((EveryFrameScript) args[0]); yield null; }
+                case "removeScript" -> { locationScripts.remove(args[0]); yield null; }
                 case "addTerrain" -> {
                     lastCreated = new FakeTerrain("guest_" + terrains.size(),
                             (SlipstreamTerrainPlugin2.SlipstreamParams2) args[1]);
@@ -481,6 +600,8 @@ class CoopSlipstreamWorldTest {
             sector = proxy(SectorAPI.class, (self, method, args) -> switch (method.getName()) {
                 case "getClock" -> clock;
                 case "getHyperspace" -> hyper;
+                case "getCurrentLocation" -> hyper;
+                case "isPaused" -> paused;
                 case "getScripts" -> new ArrayList<>(scripts);
                 default -> throw unexpected("sector", method.getName());
             });
@@ -512,6 +633,7 @@ class CoopSlipstreamWorldTest {
                     saved.put((String) args[0], args[1]);
                     yield null;
                 }
+                case "unset" -> { saved.remove(args[0]); yield null; }
                 default -> throw unexpected("memory", method.getName());
             });
             terrain = proxy(CampaignTerrainAPI.class, (self, method, args) -> switch (method.getName()) {
@@ -535,6 +657,7 @@ class CoopSlipstreamWorldTest {
                     scripts.add((EveryFrameScript) args[0]);
                     yield null;
                 }
+                case "removeScript" -> { scripts.remove(args[0]); yield null; }
                 default -> throw unexpected("terrain", method.getName());
             });
             plugin.init("slipstream", terrain, params);

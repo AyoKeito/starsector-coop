@@ -89,15 +89,12 @@ public final class CoopSlipstreamAuthority {
             } else {
                 for (CoopSlipstreamRecord record : current.values()) {
                     CoopSlipstreamRecord previous = known.get(record.hostId());
-                    if (previous == null) {
+                    if (previous == null || despawnChanged(previous, record)
+                            || activeTransition(record) || activeTransition(previous)) {
+                        // A full checkpoint keeps native counters, live faders and surge cursor on
+                        // the same committed grid tick. A compact DESPAWN alone cannot do that.
+                        // previous-active also publishes the final settled state exactly once.
                         service.send(adds.get(record.hostId()));
-                    } else if (despawnChanged(previous, record)) {
-                        CoopSlipstreamRecord.Fade fade = record.fade();
-                        CoopSlipstreamRecord.Despawn despawn = new CoopSlipstreamRecord.Despawn(
-                                record.hostId(), fade.despawnNoise(), fade.despawnDelay(),
-                                fade.despawnDays(), fade.despawnElapsed());
-                        service.send(CoopMessages.streamDespawn(session.sessionId(),
-                                service.nextSeq(), now, despawn.encode()));
                     }
                 }
                 for (String id : known.keySet()) {
@@ -114,6 +111,13 @@ public final class CoopSlipstreamAuthority {
         } finally {
             nextHostPollAtMillis = now + HOST_POLL_INTERVAL_MILLIS;
         }
+    }
+
+    private static boolean activeTransition(CoopSlipstreamRecord record) {
+        if (record.fade().spawnNoise() != null || record.fade().despawnNoise() != null
+                || record.unfinishedSurgeFadeIn()) return true;
+        return record.segments().stream().anyMatch(segment ->
+                segment.fader().state() != CoopSlipstreamRecord.FaderState.IDLE);
     }
 
     private static boolean despawnChanged(CoopSlipstreamRecord previous,

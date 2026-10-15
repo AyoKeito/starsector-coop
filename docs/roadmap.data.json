@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 and M1 code are implemented. Nameless Rock placement and static stream geometry passed live; the remaining live gates are open. Phase 23 is complete; its publication reminders remain under ATTENTION"
+      "note": "Phase 26 Task 0 passed live. M1 geometry, mature brightness and the running spawn control passed; a clean reconnect/despawn exposed fade timing divergence. Its correction and remaining live gates precede M2. Phase 23 is complete; publication reminders remain under ATTENTION"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: Phase 26 temporary-system seed-lock verification and paired M1 fade checks, then M2 abyssal temporary systems after M1 passes its live gate"
+      "note": "the V1 build queue is complete. Next: correct and retest Phase 26 M1 fade timing, then finish its live gate before M2 abyssal temporary systems"
     },
     {
       "key": "queued",
@@ -37,22 +37,22 @@
       "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world; Nameless Rock placement and static stream geometry passed live, with further checks pending before M2. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 live testing resumed on 2026-10-15. Nameless Rock placement, 12,769 static stream values and 724 mature brightness samples passed. Repeated QA clock alignment was found to distort native fade timing; the next pass uses naturally matching timestamps. A guarded native-route QA trigger is built and tested. Next: temporary-system save/reload seed lock, then the remaining M1 fade and lifecycle gates. M2 waits for M1. Publication reminders and optional QA probes remain under ATTENTION.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>; live testing resumed on 2026-10-15. <b>Passed:</b> Nameless Rock placement, 12,769 static stream values and 724 mature brightness samples. Repeated QA clock alignment distorted native fade timing, so the next pass compares naturally equal timestamps. A guarded native-route QA trigger is built and tested. <b>Next:</b> temporary-system save/reload seed lock, then the remaining M1 fade and lifecycle gates. M2 waits for M1. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 passed live, including temporary-system save/reload seed lock. Static geometry, mature brightness and a 94-pair running spawn control passed. The clean reconnect/despawn timing failure has a correction with a passing clean build (3,911 passed, one skipped); live regression comes next. M2 waits for the full M1 gate. Publication reminders and optional QA probes remain under ATTENTION.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. <b>Passed on 2026-10-15:</b> both Task 0 checks, 12,769 static stream values, 724 mature brightness samples and a 94-pair running spawn control. A clean reconnect/despawn exposed real fade timing divergence. <b>Next:</b> retest the timing correction and finish the M1 live gate. M2 waits for M1. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
   "attention": [
     {
-      "sev": "gap",
-      "sevLabel": "known gap",
-      "head": "Seed lock rejects every guest join while the host's loaded save holds an abyssal temporary system",
-      "state": "fix unit-tested; natural temporary-system checkpoint ready for reload",
-      "body": "<code>CoopSectorFingerprint</code> excludes <code>Tags.TEMPORARY_LOCATION</code> systems and their markets. A natural rogue was saved on 2026-10-15 (Oct 3, c206): host XML has temporary system <code>17c5e</code> and its planet; guest XML has neither the temporary tag nor that planet. Next: reload both coordinated saves and join. Pass: seed lock succeeds and the successful canonical-fingerprint dump excludes the temporary system."
+      "sev": "gate",
+      "sevLabel": "regression found",
+      "head": "M1 native fade timers drift from the shared campaign clock",
+      "state": "timing correction passes clean build; retained checkpoint awaits live regression",
+      "body": "On <code>5a79d78</code>, with no clock writes after the trigger, a genuine reconnect/despawn reached identical paused timestamps but a native-age gap of 0.05168 days. Sampled brightness differed by 0.23907, above the unchanged 0.05 gate. The correction uses a shared fixed fade-clock grid, native surge cursors and active checkpoints; its clean build passed 3,911 tests with one skipped. Both late-fade checkpoints are retained for live regression. Task 0 temporary-system save/reload seed lock passed: fingerprint <code>7095bdba611a27c4…</code>, 281 canonical entries, no host-only temporary-system record."
     },
     {
       "sev": "gate",
       "sevLabel": "before M2",
       "head": "P26 M1 terrain parity still needs the two-instance live gate",
-      "state": "static geometry and mature brightness passed; fade and lifecycle gate open",
-      "body": "Static geometry/params matched across 12,769 values; the 2026-10-15 mature baseline also matched all 724 brightness samples, including 187 zero gaps. Repeated calendar-only QA alignment created a misleading late-fade failure: align before triggering, then compare naturally equal timestamps. The native route list was exhausted, so a guarded explicit route-rearm QA option is ready for the next relaunch. Pass: full-fade effective brightness differs by at most 0.05, guest-local surges survive, mirrors stay smooth, and reconnect/save/reload creates no duplicates. Repeat with players in different locations. Start M2 only after this gate passes."
+      "state": "geometry, mature brightness and running spawn control passed; paused fade and lifecycle gate open",
+      "body": "Static geometry/params matched across 12,769 values; the mature baseline matched all 724 brightness samples, including 187 zero gaps. A clean native spawn matched exactly at 94 naturally equal timestamps, including 92 partial-fade pairs; no naturally equal paused pair was captured, so the strict paused gate remains open. The clean despawn found the separate production regression above. Pass: full-fade effective brightness differs by at most 0.05, guest-local surges survive, mirrors stay smooth, and reconnect/save/reload creates no duplicates. Repeat with players in different locations. Start M2 only after this gate passes."
     },
     {
       "sev": "scope",
@@ -912,9 +912,10 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0 fixes and M1 code implemented 2026-10-12: temporary-system fingerprint exclusion, optional-unique location keys, seasonal streams and host slipsurges with live fade state. Nameless Rock placement and static stream geometry passed live. Temporary-system seed lock and the remaining M1 live gate are open; M2 starts afterward. M3-M5 and guest-proximity triggering remain follow-ups.",
+      "summary": "Task 0 passed live, including temporary-system save/reload seed lock and optional-unique location keys. M1 static geometry, mature brightness and a running spawn control passed. A clean reconnect/despawn exposed native fade timing divergence; its correction and remaining M1 live gates precede M2. M3-M5 and guest-proximity triggering remain follow-ups.",
       "introduces": [
         "CoopSlipstreamAuthority",
+        "CoopSlipstreamFadeDriver + transient native fade bridge",
         "CoopEncounterAuthority",
         "CoopAbyssalDespawner",
         "STREAM_SET/ADD/DESPAWN/REMOVE",
@@ -926,7 +927,7 @@
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "Task 0 live check: seed lock after temporary-system save/reload (Nameless Rock mirror placement passed)",
+        "Retest the fixed-clock fade correction against the retained clean reconnect/despawn failure (clean build passes)",
         "M1 live gate: map/discovery parity, timestamp-paired fades, seasonal turnover, host-surge travel, guest-local surges, mirror motion, reconnect/save/reload (static bridge geometry passed)",
         "M2 (after M1 live gate): fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
