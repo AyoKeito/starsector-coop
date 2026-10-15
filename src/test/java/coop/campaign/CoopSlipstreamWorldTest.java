@@ -494,6 +494,9 @@ class CoopSlipstreamWorldTest {
                 base.terrainTags(), base.segments(), base.fade(),
                 CoopSlipstreamRecord.Timeline.atOrigin(future, true, true), base.surgeWave());
         f.world.upsert(source);
+        assertTrue(f.terrains.isEmpty(), "a paused host checkpoint must also wait for its committed tick");
+        f.timestamp.set(future);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false);
         FakeTerrain replica = f.lastCreated;
         f.timestamp.set(future + 4_320_000L);
         CoopSlipstreamWorld.tickControlled(f.sector, false, false);
@@ -502,6 +505,53 @@ class CoopSlipstreamWorldTest {
         CoopSlipstreamWorld.tickControlled(f.sector, false, true);
         assertTrue(CoopSlipstreamFadeBridge.isControlled(replica.plugin));
         assertEquals(source.segments(), f.world.captureTable().get(0).stream().segments());
+    }
+
+    @Test
+    void futurePausedCheckpointCannotPublishNewerFadersUnderAnOlderClockAfterResume() {
+        Fixture f = new Fixture();
+        long quantum = CoopSlipstreamFadeDriver.QUANTUM_CAMPAIGN_MILLIS;
+        f.timestamp.set(0L);
+        CoopSlipstreamRecord initial = record("pause-resume-phase", false, 0);
+        f.world.upsert(initial);
+        f.timestamp.set(10 * quantum);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false, false);
+        CoopSlipstreamRecord atTen = f.world.captureTable().get(0).stream();
+        CoopSlipstreamRecord pausedAtTen = new CoopSlipstreamRecord(atTen.hostId(), atTen.kind(),
+                atTen.params(), atTen.terrainTags(), atTen.segments(), atTen.fade(),
+                new CoopSlipstreamRecord.Timeline(0L, 10L, 10 * quantum, true, true), atTen.surgeWave());
+
+        // Reproduce the live sequence: host pauses ahead of the guest, then the guest resumes
+        // before reaching that pause's authoritative native checkpoint.
+        f.timestamp.set(0L);
+        f.world.upsert(initial);
+        f.timestamp.set(5 * quantum);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false, false);
+        CoopSlipstreamRecord atFive = f.world.captureTable().get(0).stream();
+        f.world.upsert(pausedAtTen);
+        CoopSlipstreamRecord queued = f.world.captureTable().get(0).stream();
+        assertEquals(atFive.fade(), queued.fade());
+        assertEquals(atFive.segments(), queued.segments());
+        assertEquals(5L, queued.timeline().committedTick());
+        assertTrue(queued.timeline().committedCampaignMillis() <= f.timestamp.get());
+
+        f.paused = true;
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false, true);
+        assertEquals(5L, f.world.captureTable().get(0).stream().timeline().committedTick());
+        f.paused = false;
+        f.timestamp.set(6 * quantum);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false, false);
+        CoopSlipstreamRecord resumed = f.world.captureTable().get(0).stream();
+        assertEquals(6L, resumed.timeline().committedTick());
+        assertTrue(resumed.fade().despawnElapsed() < pausedAtTen.fade().despawnElapsed());
+
+        f.timestamp.set(10 * quantum);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false, false);
+        CoopSlipstreamRecord reached = f.world.captureTable().get(0).stream();
+        assertEquals(pausedAtTen.fade(), reached.fade());
+        assertEquals(pausedAtTen.segments(), reached.segments());
+        assertEquals(10L, reached.timeline().committedTick());
+        assertTrue(reached.timeline().committedCampaignMillis() <= f.timestamp.get());
     }
 
     @Test

@@ -290,8 +290,10 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         SectorAPI sector = sector();
         selectControlledSector(sector);
         long timestamp = sector.getClock().getTimestamp();
-        if (!record.timeline().hostPaused()
-                && record.timeline().committedCampaignMillis() > timestamp) {
+        // A host pause freezes its own clock, not the guest's earlier timeline. Applying that
+        // future state now would label newer faders with an older local bridge/save timestamp and
+        // leave no historical checkpoint to rewind to when the guest resumes.
+        if (record.timeline().committedCampaignMillis() > timestamp) {
             List<CoopSlipstreamRecord> queue = PENDING.computeIfAbsent(record.hostId(), ignored -> new ArrayList<>());
             if (!queue.isEmpty() && queue.get(queue.size() - 1).timeline().committedCampaignMillis()
                     == record.timeline().committedCampaignMillis()) queue.remove(queue.size() - 1);

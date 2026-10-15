@@ -44,8 +44,8 @@
       "sev": "gate",
       "sevLabel": "regression found",
       "head": "M1 native fade timers drift from the shared campaign clock",
-      "state": "timing correction passes clean build; retained checkpoint awaits live regression",
-      "body": "On <code>5a79d78</code>, with no clock writes after the trigger, a genuine reconnect/despawn reached identical paused timestamps but a native-age gap of 0.05168 days. Sampled brightness differed by 0.23907, above the unchanged 0.05 gate. The correction uses a shared fixed fade-clock grid, native surge cursors and active checkpoints; its clean build passed 3,911 tests with one skipped. Both late-fade checkpoints are retained for live regression. Task 0 temporary-system save/reload seed lock passed: fingerprint <code>7095bdba611a27c4…</code>, 281 canonical entries, no host-only temporary-system record."
+      "state": "future paused-checkpoint ordering fix passes full build; live regression next",
+      "body": "The clean <code>5a79d78</code> reconnect/despawn found frame-time fade drift (brightness difference 0.23907). The shared fixed-clock correction in <code>788a750</code> then found an ordering edge: a paused host checkpoint at tick 2428 was applied while the guest calendar was at 2418 (difference 0.08333). All future anchors now wait for their committed tick. Full test/build: 3,912 passed, one skipped. Oct 21 saves contain only primitive fade metadata. The unchanged acceptance limit is 0.05. Task 0 temporary-system save/reload seed lock passed: fingerprint <code>7095bdba611a27c4…</code>, 281 canonical entries, no host-only temporary-system record."
     },
     {
       "sev": "gate",
