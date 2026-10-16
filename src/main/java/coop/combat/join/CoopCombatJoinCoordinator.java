@@ -25,6 +25,7 @@ public final class CoopCombatJoinCoordinator {
 
     private CoopCombatJoinMode lastMode = CoopCombatJoinMode.UNKNOWN_FALLBACK_REMOTE;
     private String lastBattleId = "";
+    private String lastPartnerName = "";
 
     /** Process-wide active coordinator (set by the live battle bridge). */
     public static CoopCombatJoinCoordinator active() {
@@ -33,6 +34,10 @@ public final class CoopCombatJoinCoordinator {
 
     public void attachAsActive() {
         ACTIVE = this;
+        // Only auto-link Suite when nothing else registered hooks yet.
+        if (hooks == CoopSharedBattleHooks.NOOP) {
+            CoopSuiteCombatBridge.tryInstall(this);
+        }
     }
 
     public void detachIfActive() {
@@ -51,6 +56,14 @@ public final class CoopCombatJoinCoordinator {
 
     public String lastBattleId() {
         return lastBattleId;
+    }
+
+    public String lastPartnerName() {
+        return lastPartnerName;
+    }
+
+    public CoopSharedBattleHooks hooks() {
+        return hooks;
     }
 
     public void setSeparationProbe(Function<SectorAPI, CoopPartnerSeparation> probe) {
@@ -76,6 +89,7 @@ public final class CoopCombatJoinCoordinator {
         CoopPartnerSeparation separation = separationProbe.apply(sector);
         lastMode = CoopCombatJoinClassifier.classify(separation);
         lastBattleId = battleId == null ? "" : battleId.trim();
+        lastPartnerName = partnerName == null || partnerName.isBlank() ? "" : partnerName.trim();
 
         CoopLog.info(CoopCombatJoinCoordinator.class,
                 "Coop join mode=" + lastMode + " battleId=" + lastBattleId
@@ -87,7 +101,8 @@ public final class CoopCombatJoinCoordinator {
             for (String line : prompt.beginProximityNotice(partnerName, enemySummary)) {
                 banners.add(line);
             }
-            hooks.onProximityJoinAvailable(lastBattleId, partnerName);
+            hooks.onProximityJoinAvailable(lastBattleId, lastPartnerName);
+            banners.addAll(hooks.extraBannersAfterProximity(lastBattleId, lastPartnerName));
             return banners;
         }
 
@@ -107,7 +122,8 @@ public final class CoopCombatJoinCoordinator {
             return banners;
         }
         banners.add(prompt.acceptBanner());
-        hooks.onRemoteSupportAccepted(lastBattleId, "");
+        hooks.onRemoteSupportAccepted(lastBattleId, lastPartnerName);
+        banners.addAll(hooks.extraBannersAfterAccept(lastBattleId, lastPartnerName));
         return banners;
     }
 
@@ -126,6 +142,7 @@ public final class CoopCombatJoinCoordinator {
         hooks.onRemoteBattleEnded(id.isEmpty() ? lastBattleId : id);
         prompt.clear();
         lastBattleId = "";
+        lastPartnerName = "";
         lastMode = CoopCombatJoinMode.UNKNOWN_FALLBACK_REMOTE;
     }
 }

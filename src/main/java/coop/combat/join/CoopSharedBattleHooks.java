@@ -1,10 +1,13 @@
 package coop.combat.join;
 
+import java.util.Collections;
+import java.util.List;
+
 /**
  * Optional multipilot / remote-claim hooks for a Suite-style combat package.
  *
- * <p>Default no-ops keep upstream coop playable without the Suite jar. A future combat addon
- * implements this and registers via {@link CoopCombatJoinCoordinator#setSharedBattleHooks}.
+ * <p>Default no-ops keep upstream coop playable without the Suite jar. {@link CoopSuiteCombatBridge}
+ * installs a reflective Suite adapter when that mod is present.
  */
 public interface CoopSharedBattleHooks {
 
@@ -25,5 +28,15 @@ public interface CoopSharedBattleHooks {
 
     /** Remote battle ended — release any claim / local combat shim. */
     default void onRemoteBattleEnded(String battleId) {
+    }
+
+    /** Extra campaign banners after Accept (Suite present / missing guidance). */
+    default List<String> extraBannersAfterAccept(String battleId, String partnerName) {
+        return Collections.emptyList();
+    }
+
+    /** Extra campaign banners after a proximity notice. */
+    default List<String> extraBannersAfterProximity(String battleId, String partnerName) {
+        return Collections.emptyList();
     }
 }

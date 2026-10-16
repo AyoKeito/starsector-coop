@@ -103,7 +103,7 @@ class CoopCombatJoinCoordinatorTest {
         join.setSharedBattleHooks(new CoopSharedBattleHooks() {
             @Override
             public void onRemoteSupportAccepted(String battleId, String partnerName) {
-                events.add("accept:" + battleId);
+                events.add("accept:" + battleId + ":" + partnerName);
             }
 
             @Override
@@ -115,10 +115,17 @@ class CoopCombatJoinCoordinatorTest {
             public void onRemoteBattleEnded(String battleId) {
                 events.add("end:" + battleId);
             }
+
+            @Override
+            public List<String> extraBannersAfterAccept(String battleId, String partnerName) {
+                return List.of("extra-accept");
+            }
         });
 
         join.onPartnerBattleBegin(null, "battle-a", "Ada", "pirates");
-        assertTrue(join.acceptRemoteSupport().get(0).contains("accepted"));
+        List<String> accepted = join.acceptRemoteSupport();
+        assertTrue(accepted.get(0).contains("accepted"));
+        assertTrue(accepted.contains("extra-accept"));
         assertEquals(CoopRemoteSupportPrompt.State.ACCEPTED, join.prompt().state());
 
         join.onPartnerBattleBegin(null, "battle-d", "Dee", "pirates");
@@ -127,7 +134,7 @@ class CoopCombatJoinCoordinatorTest {
         join.onPartnerBattleEnd("battle-d");
         assertEquals(CoopRemoteSupportPrompt.State.IDLE, join.prompt().state());
         assertEquals("", join.lastBattleId());
-        assertEquals(List.of("accept:battle-a", "unavail:DECLINED", "end:battle-d"), events);
+        assertEquals(List.of("accept:battle-a:Ada", "unavail:DECLINED", "end:battle-d"), events);
     }
 
     @Test

@@ -61,8 +61,12 @@ where a full-screen panel on the watching client would be in the way anyway.
 the mod measures distance to their fleet mirror (vanilla ally pull-in is 700 units). Within range you
 get a proximity notice (side-by-side fleets). Farther away you get a hyperspace support call — Accept /
 Decline on the ability bar — instead of teleporting your fleet into the fight. Mark non-flagships with
-the Hyperspace Comm Seat hullmod so a remote claim has a target. Full same-battle multi-pilot sync is
-still layered on separately; remote accept currently records the decision and banners for that path.
+the Hyperspace Comm Seat hullmod so a remote claim has a target.
+
+If **BattleOnline Suite** is also enabled, Accept/Proximity sync Suite's combat join mode
+(REMOTE_SUPPORT / proximity) so claim piloting can run inside a shared BattleOnline fight. Campaign
+Accept alone does **not** drop you into your partner's vanilla campaign battle — that still needs the
+combat package path. Without Suite, Accept still pauses you correctly and records the decision.
 
 ## Saves
 
