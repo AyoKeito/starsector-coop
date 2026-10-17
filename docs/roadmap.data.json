@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 and M1 stream numeric gates passed. Shared-wreck migration, native QA generation near both players, Guest-only lifetime hold, native drift/expiry, reconnect replay and fade-consumption probes passed live. Dec 5 reload and native loot/trap UI checks remain, alongside earlier M1 visual/map/carry/mirror checks. M2 waits. Phase 23 is complete"
+      "note": "Phase 26 Task 0 and M1 stream numeric gates passed. Shared-wreck migration, native QA generation near both players, Guest-only lifetime hold, drift/expiry, reconnect replay, fade-consumption and native Dec 5 reload passed live. Native loot/trap UI and earlier M1 visual/map/carry/mirror checks remain. M2 waits. Phase 23 is complete"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: reload the Dec 5 shared-wreck checkpoint, check native loot/recovery and traps, and finish Phase 26 M1's manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and normal-picker reload checks before M2 abyssal temporary systems"
+      "note": "the V1 build queue is complete. Next: check native wreck loot/recovery and traps, and finish Phase 26 M1's manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and mid-fade normal-picker reload checks before M2 abyssal temporary systems"
     },
     {
       "key": "queued",
@@ -37,15 +37,15 @@
       "note": "26 Task 0 and the M1 stream numeric gates passed on codex/p26-ambient-world. Shared floating hyperspace wrecks were added after a manual desync report; their verification and the earlier visual/motion/load checks remain open. M1 is incomplete and M2 waits. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity abyss triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 and M1 stream numeric gates passed. The shared-wreck correction passed live migration, separated-player native QA generation, Guest-only expiry hold, drift, consumption and reconnect replay. Both players are paused beside ISS Kaunos in the new Dec 5 checkpoint. Reload, native loot/trap UI and earlier M1 visual/map/carry/mirror checks remain. M1 stays partial; M2 waits.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. Stream numeric gates and the shared-wreck automated live probes passed. Host-native QA generation covers a separated Guest, including Host in a system; native Guest-only lifetime hold, drift/expiry, fade consumption and pending-state reconnect replay passed. <b>Next:</b> reload the Dec 5 checkpoint beside the shared Mudskipper, then check native loot/recovery and trap behavior. Earlier maps/discovery, visible fade/carry, surge screen, mirror motion and normal-picker checks stay open. M1 stays partial; M2 waits. M3-M5 and guest-proximity abyss triggering remain follow-ups.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 and M1 stream numeric gates passed. The shared-wreck correction passed live migration, separated-player native QA generation, Guest-only expiry hold, drift, consumption, reconnect replay and Dec 5 native reload. Both players are paused beside ISS Kaunos. Native loot/trap UI and earlier M1 visual/map/carry/mirror checks remain. M1 stays partial; M2 waits.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. Stream numeric gates and the shared-wreck automated live probes passed, including native Dec 5 reload with three recipes and three tombstones preserved. Host-native QA generation covers a separated Guest, including Host in a system; Guest-only lifetime hold, drift/expiry, fade consumption and pending-state reconnect replay passed. <b>Next:</b> check native loot/recovery and trap behavior beside the shared Mudskipper. Earlier maps/discovery, visible fade/carry, surge screen, mirror motion and mid-fade normal-picker checks stay open. M1 stays partial; M2 waits. M3-M5 and guest-proximity abyss triggering remain follow-ups.",
   "attention": [
     {
       "sev": "gate",
       "sevLabel": "shared-wreck regression",
       "head": "Verify floating hyperspace wreck authority",
-      "state": "automated live probes passed; Dec 5 reload and native loot/trap checks remain",
-      "body": "Build 2d7a3e7 removed the Guest-only Hound and matched full wreck recipes on both clients. Native QA spawn radii passed near separated Guest (4,826 su), Host (3,770 su), and Guest while Host was in a system (3,429 su). A 25-day wreck remained alive at 25.320 days while only Guest could see it, then expired on both after Guest left. Native drift, fade-consumption from both sides, tombstones and a full heartbeat passed. A QA partial-state marker persisted through genuine reconnect grace and fresh accepts in both logs, then committed. These probes do not prove organic spawn cadence or actual native rewards/traps. Both players are paused beside shared Mudskipper ISS Kaunos in the coordinated Dec 5 checkpoint; verify reload and native UI next. Java 4,051 passed, one skipped; bridge/harness 148 passed. M1 remains open; guest-proximity abyssal EPEC triggering is deferred."
+      "state": "automated live probes and native reload passed; native loot/trap checks remain",
+      "body": "Build 2d7a3e7 removed the Guest-only Hound and matched full wreck recipes on both clients. Native QA spawn radii passed near separated Guest (4,826 su), Host (3,770 su), and Guest while Host was in a system (3,429 su). A 25-day wreck remained alive at 25.320 days while only Guest could see it, then expired on both after Guest left. Native drift, fade-consumption from both sides, tombstones and a full heartbeat passed. A QA partial-state marker persisted through genuine reconnect grace and fresh accepts in both logs, then committed. Native Dec 5 reload preserved three canonical recipes/seeds/revisions, three tombstones and empty pending queues, with no resurrected wreck or sync errors. These probes do not prove organic spawn cadence or actual native rewards/traps. Both players are paused beside shared Mudskipper ISS Kaunos for native UI testing. Java 4,051 passed, one skipped; bridge/harness 148 passed. M1 remains open; guest-proximity abyssal EPEC triggering is deferred."
     },
     {
       "sev": "gate",
