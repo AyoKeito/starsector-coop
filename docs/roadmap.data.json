@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0, M1 and shared wrecks are accepted. M2 is implemented; the composite-key parent manifest passes live. A dire ghost's initial position differed; its correction passes automated tests and needs native retesting. Entry, interactions, reconnect, reload and despawn remain open. Phase 26 stays PARTIAL"
+      "note": "Phase 26 Task 0, M1 and shared wrecks are accepted. M2 parent manifest, both-player entry/mirror mapping and a six-ship Threat mirror passed live. Ghost pose/facing and current-phase corrections pass automated checks and await deployment. Native UI, corrected manifest, reconnect, reload and despawn gates remain open. Phase 26 stays PARTIAL"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: release the Guest pause-key hold, finish M2 travel checks and retest the dire ghost pose correction. Then verify interactions, reconnect, native reload and Guest-aware despawn. M1 and shared wrecks remain accepted"
+      "note": "the V1 build queue is complete. Next: finish the prepared Guest story and Host survey checks, save/back up the M2 fixtures, then deploy the tested pose/current-phase correction and repeat native manifest checks. Reconnect, native reload and Guest-aware despawn follow. M1 and shared wrecks remain accepted"
     },
     {
       "key": "queued",
@@ -37,15 +37,15 @@
       "note": "26 Task 0, M1 and shared wrecks are accepted. M2 native acceptance remains open after a parent manifest pass and an initial dire ghost pose failure. Phase 26 stays PARTIAL. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and solo-Guest abyssal encounter triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; P19/P23 and P26 M1/shared wrecks are accepted. M2's parent manifest matches on both clients. The dire encounter exposed an initial ghost position mismatch; the correction passes automated tests and awaits native retesting. Travel is waiting on the Guest pause-key hold. Phase 26 remains PARTIAL.",
-  "here": "<b>V1 is complete at 0.1.5;</b> Phases 19 and 23 are signed off. <b>Phase 26:</b> Task 0, M1 and shared wrecks are accepted. M2 is implemented with composite entity keys. Its parent encounter matched all 173 compared values with no identity-resolution failures. The dire encounter's initial ghost pose differed in two coordinates; the correction passes automated tests and awaits deployment and native retesting. <b>Next:</b> release the Guest pause-key hold, finish entry and orbit checks, then verify interactions, reconnect, native reload and Guest-aware despawn. Phase 26 remains PARTIAL. M3-M5 and solo-Guest abyssal triggering remain follow-ups.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; P19/P23 and P26 M1/shared wrecks are accepted. M2 parent manifest and both-player temporary-system entry/mirror checks passed, including a six-ship Threat mirror. Native story/survey checks are prepared. The tested ghost pose/facing and current-phase correction awaits deployment; Phase 26 remains PARTIAL.",
+  "here": "<b>V1 is complete at 0.1.5;</b> Phases 19 and 23 are signed off. <b>Phase 26:</b> Task 0, M1 and shared wrecks are accepted. M2's parent manifest matched 173 values; both players entered and left it, then entered the dire system with matching partner and six-ship Threat mirrors. Canonical and local identities resolve. The old build still has ghost facing/pose differences; the tested correction awaits deployment. Later manifest diagnostics remain INCONCLUSIVE because raw clocks differ. <b>Next:</b> complete the prepared native Guest story and Host moon survey, save/back up the fixtures, deploy the correction, and verify fresh manifest, reconnect, reload and Guest-aware despawn. Phase 26 remains PARTIAL. M3-M5 and solo-Guest abyssal triggering remain follow-ups.",
   "attention": [
     {
       "sev": "gate",
       "sevLabel": "native live acceptance",
       "head": "Retest the dire ghost pose and finish P26 M2 native acceptance",
-      "state": "parent manifest PASS; pose/current-phase corrections passed clean checks: 4,175 Java plus one skipped, 155 bridge/offline tests; travel held by Guest pause-key intent; M2 acceptance open",
-      "body": "Release the Guest pause-key hold and finish native entry/exit and orbit checks. Deploy the ghost pose correction and repeat dire generation with different local campaign encounter history, timeout keys and pity counters. Pass = matching canonical manifests and resolved specials, working local lookups, player mirrors and NPC orbit targets, salvage/survey outcomes retained through genuine reconnect and native save/reload, and no duplicated system. Verify despawn with the Guest inside, outside and after ending a session inside, including safe relocation if the Host removed that system between sessions. Record new results without changing earlier FAIL/INCONCLUSIVE artifacts. Phase 26 remains PARTIAL until M2 acceptance."
+      "state": "entry/mirrors and Threat location/membership passed; native UI checks prepared; correction passed 4,175 Java plus one skipped and 155 bridge/offline tests; M2 acceptance open",
+      "body": "Finish the prepared Guest story and Host survey checks, save/back up the fixtures and deploy the ghost pose/current-phase correction. Repeat fresh dire generation with different local campaign history, timeout keys and pity counters. Pass = matching canonical manifests and resolved specials at paired paused timestamps, working local lookups and NPC orbit targets, salvage/survey outcomes retained through genuine reconnect and native save/reload, and no duplicated system. Verify despawn with the Guest inside, outside and after ending a session inside, including safe relocation if the Host removed that system between sessions. Record new results without changing earlier FAIL/INCONCLUSIVE artifacts. Phase 26 remains PARTIAL until M2 acceptance."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0, M1 and shared wrecks are accepted. M2 is implemented with composite entity keys: the native parent manifest passes, and a dire ghost initial-pose correction awaits native retesting. Entry, interactions, reconnect, reload and despawn gates remain open. Phase 26 stays PARTIAL; solo-Guest abyssal triggering remains deferred.",
+      "summary": "Task 0, M1 and shared wrecks are accepted. M2 parent manifest, temporary-system entry/mirror mapping and a six-ship Threat mirror passed live. The tested ghost pose/facing and current-phase correction awaits deployment. Native UI, corrected manifest, reconnect, reload and despawn gates remain open. Phase 26 stays PARTIAL; solo-Guest abyssal triggering remains deferred.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -926,7 +926,7 @@
       ],
       "residue": [
         "Retest the corrected dire ghost initial pose with different local campaign history, timeout keys and pity counters; retain parent manifest parity and working composite-key lookups",
-        "M2 native entry/exit and two-way location mapping: player fleet snapshots, salvage/survey and NPC orbit targets",
+        "M2 native salvage/survey and actual NPC orbit targets; both-player temporary-system entry/exit and mirror locations passed",
         "M2 reconnect and native save/reload: fresh offscreen current-phase replay, original membership, consumption, survey/ruins/hint outcomes and primitive saved state",
         "M2 native despawn: Guest inside/outside, saved inside hold after session end and safe relocation when the Host removed the Guest's system",
         "M2 repeated native live evidence and user acceptance; preserve the original 6937022 renaming FAIL artifacts 03-08",
