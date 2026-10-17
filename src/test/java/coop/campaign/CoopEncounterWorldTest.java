@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.econ.MarketAPI;
 import com.fs.starfarer.api.campaign.econ.MarketConditionAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.enc.AbyssalLocationDespawner;
+import com.fs.starfarer.api.impl.campaign.DerelictShipEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.procgen.StarSystemGenerator.StarSystemType;
@@ -150,6 +151,35 @@ class CoopEncounterWorldTest {
             assertSame(original, only(system.entities)); assertTrue(scene.entity(original).discovered);
             assertEquals(record.encode(), system.memory.values.get(CoopEncounterWorld.RECIPE_KEY));
         }
+    }
+
+    @Test void periodicRepairKeepsOccupiedCadenceAndAddsOnlyTheOffscreenManagedTurn() {
+        CoopEncounterWorld world = scene.world();
+        FakeLocation alpha = scene.generated("alpha"), beta = scene.generated("beta");
+        for (FakeLocation system : List.of(alpha, beta)) {
+            FakeEntity center = system.token("center-" + system.uniqueId);
+            FakeEntity planet = system.planet("planet-" + system.uniqueId);
+            planet.focus = center.api; planet.radius = 100; planet.period = 20; planet.angle = 37;
+        }
+        scene.player = alpha.entity(CampaignFleetAPI.class, "player", null);
+        world.captureHost();
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1000);
+        CoopCampaignReplicator replicator = new CoopCampaignReplicator(service, TestSessions.activeHostSession(), now::get);
+
+        replicator.tickOrbitSync();
+        assertEquals(List.of("alpha"), orbitLocations(service), "occupied alpha is not captured twice on its managed turn");
+        replicator.tickOrbitSync(); now.set(1999); replicator.tickOrbitSync();
+        assertEquals(1, service.sent.size(), "both original and extra orbit publication retain the one-second gate");
+        now.set(2000); replicator.tickOrbitSync();
+        assertEquals(List.of("alpha", "alpha", "beta"), orbitLocations(service));
+        now.set(3000); replicator.tickOrbitSync();
+        assertEquals(List.of("alpha", "alpha", "beta", "alpha"), orbitLocations(service));
+    }
+
+    private static List<String> orbitLocations(RecordingNetService service) {
+        return service.sent.stream().filter(message -> message.type() == CoopMessages.Type.ORBIT_SNAPSHOT)
+                .map(message -> CoopMessages.payload(message).requiredString("locationId")).toList();
     }
 
     @Test void metadataOnlySystemsAlreadyPresentAtInitializationRemainLegacy() {
@@ -570,6 +600,132 @@ class CoopEncounterWorldTest {
         assertTrue(scene.api.isPaused());
     }
 
+    @Test void managedOrbitCaptureUsesOnlyRequestedSystemsOriginalCanonicalMembers() {
+        CoopEncounterWorld world = scene.world();
+        FakeLocation alpha = scene.generated("alpha");
+        FakeEntity center = alpha.token("native-center"), planet = alpha.planet("native-planet");
+        planet.api.setCircularOrbit(center.api, 42, 1500, 50);
+        FakeEntity moon = alpha.planet("native-moon"); moon.api.setCircularOrbit(planet.api, 65, 100, 10);
+        FakeLocation beta = scene.generated("beta");
+        FakeEntity otherCenter = beta.token("native-center"), otherPlanet = beta.planet("native-planet");
+        otherPlanet.api.setCircularOrbit(otherCenter.api, 10, 2000, 70);
+        CoopEncounterRecord recipe = world.captureHost().stream()
+                .filter(record -> record.instanceId().equals("alpha")).findFirst().orElseThrow();
+        planet.api.setCircularOrbitAngle(145); moon.api.setCircularOrbitAngle(230);
+        alpha.token("later-dynamic").api.setCircularOrbit(center.api, 20, 100, 10);
+        // Corruption in an unselected system must not cause a sector-wide capture.
+        otherPlanet.angle = Float.NaN; scene.rejectGlobalLookup = true;
+
+        String encoded = CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, alpha.system());
+
+        assertEquals(List.of(
+                new CoopOrbitSync.OrbitEntry(id("alpha", Role.SYSTEM, 1), id("alpha", Role.SYSTEM, 0), 1500, 50, 145),
+                new CoopOrbitSync.OrbitEntry(id("alpha", Role.SYSTEM, 2), id("alpha", Role.SYSTEM, 1), 100, 10, 230)),
+                CoopOrbitSync.decode(encoded));
+        assertEquals(world.captureCurrentOrbits(List.of(recipe)).get("alpha"), encoded);
+        assertEquals(recipe.encode(), alpha.memory.values.get(CoopEncounterWorld.RECIPE_KEY));
+        assertEquals("native-planet", planet.id); assertEquals(0, planet.setIdCalls);
+    }
+
+    @Test void managedOrbitEligibilityRequiresTemporaryAbyssalOwnershipAndSavedRecipe() {
+        FakeLocation legacy = scene.generated("legacy"); legacy.token("legacy-body");
+        CoopEncounterWorld world = scene.world();
+        FakeLocation managed = scene.generated("alpha"); managed.token("original");
+        only(world.captureHost());
+        assertFalse(CoopEncounterWorld.isManagedEncounterSystem(null));
+        assertFalse(CoopEncounterWorld.isManagedEncounterSystem(legacy.system()));
+        assertTrue(CoopEncounterWorld.isManagedEncounterSystem(managed.system()));
+        for (String tag : List.of(Tags.TEMPORARY_LOCATION, Tags.SYSTEM_ABYSSAL)) {
+            managed.tags.remove(tag);
+            assertFalse(CoopEncounterWorld.isManagedEncounterSystem(managed.system()));
+            managed.tags.add(tag);
+        }
+        Object saved = managed.memory.values.remove(CoopEncounterWorld.RECIPE_KEY);
+        assertFalse(CoopEncounterWorld.isManagedEncounterSystem(managed.system()));
+        managed.memory.set(CoopEncounterWorld.RECIPE_KEY, saved);
+        managed.memory.values.remove(CoopEncounterWorld.ENCOUNTER_ID_KEY);
+        assertFalse(CoopEncounterWorld.isManagedEncounterSystem(managed.system()));
+    }
+
+    @Test void managedOrbitCaptureRejectsMalformedOwnershipAndUnmanagedSystems() {
+        CoopEncounterWorld world = scene.world();
+        FakeLocation system = scene.generated("alpha"); system.token("original");
+        only(world.captureHost());
+        system.memory.set(CoopEncounterWorld.ENCOUNTER_ID_KEY, "different-instance");
+        assertThrows(IllegalStateException.class, () -> CoopEncounterWorld.isManagedEncounterSystem(system.system()));
+        assertThrows(IllegalStateException.class, () -> CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, system.system()));
+        system.memory.values.remove(CoopEncounterWorld.ENCOUNTER_ID_KEY);
+        assertThrows(IllegalArgumentException.class, () -> CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, system.system()));
+    }
+
+    @Test void managedOrbitCaptureRejectsFocusOutsideOriginalMembership() {
+        CoopEncounterWorld world = scene.world();
+        FakeLocation system = scene.generated("alpha");
+        FakeEntity center = system.token("native-center"), planet = system.planet("native-planet");
+        planet.api.setCircularOrbit(center.api, 42, 1500, 50); only(world.captureHost());
+        FakeEntity dynamicFocus = system.token("later-focus");
+        planet.api.setCircularOrbit(dynamicFocus.api, 145, 1500, 50);
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, system.system()));
+
+        assertTrue(error.getMessage().contains("outside original system membership"));
+    }
+
+    @Test void managedOrbitCaptureValidatesSavedConsumptionAndGeometryBeforePublishing() {
+        CoopEncounterWorld world = scene.world();
+        FakeLocation system = scene.generated("alpha");
+        FakeEntity center = system.token("native-center"), planet = system.planet("native-planet");
+        planet.api.setCircularOrbit(center.api, 42, 1500, 50);
+        CoopEncounterRecord recipe = only(world.captureHost());
+        CoopEncounterRecord consumedFocus = recipe.withOverlay(new Overlay(
+                List.of(id("alpha", Role.SYSTEM, 0)), recipe.overlay().entities().stream()
+                .filter(state -> !state.entityId().equals(id("alpha", Role.SYSTEM, 0))).toList()));
+        system.memory.set(CoopEncounterWorld.RECIPE_KEY, consumedFocus.encode());
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, system.system()));
+
+        system.memory.set(CoopEncounterWorld.RECIPE_KEY, recipe.encode());
+        planet.radius = 1_000_001;
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, system.system()));
+    }
+
+    @Test void managedOrbitCapturePreservesNativeOpisGhostExactPoseFacingAndVelocity() {
+        FakeLocation system = scene.generated("alpha");
+        FakeEntity focus = system.planet("native-focus");
+        FakeEntity ghost = system.entity(CustomCampaignEntityAPI.class, "native-ghost", "wreck");
+        ghost.plugin = new DerelictShipEntityPlugin();
+        String focusId = id("alpha", Role.SYSTEM, 0), ghostId = id("alpha", Role.SYSTEM, 1);
+        CoopEncounterRecord base = simple("alpha", 2);
+        Special special = new Special(SpecialType.GHOST_WRECK, ghostId,
+                new CoopEncounterRecord.Orbit(focusId, 90, 352, 29.6f),
+                CoopWreckFixtures.sample(CoopEncounterRecord.wreckId(ghostId)),
+                List.of(new CoopWreckRecord.MemoryValue("$gsType", "STRING", "GS_OPIS", -1)));
+        CoopEncounterRecord recipe = new CoopEncounterRecord(base.instanceId(), base.effectiveSeed(),
+                base.encounterPointId(), base.x(), base.y(), base.depth(), base.threatRollRan(), base.creator(),
+                base.threatTag(), List.of(new Entity(Role.SYSTEM, 0, "planet:barren"),
+                new Entity(Role.SYSTEM, 1, "custom:wreck")), List.of(special), base.overlay());
+        system.memory.set(CoopEncounterWorld.ENCOUNTER_ID_KEY, "alpha");
+        system.memory.set(CoopEncounterWorld.RECIPE_KEY, recipe.encode());
+        focus.memory.set(CoopEncounterWorld.ENCOUNTER_ID_KEY, "alpha");
+        focus.memory.set(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, focusId);
+        ghost.memory.set(CoopEncounterWorld.ENCOUNTER_ID_KEY, "alpha");
+        ghost.memory.set(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, ghostId);
+        ghost.memory.set("$gsType", "GS_OPIS");
+        ghost.api.setCircularOrbit(focus.api, 145, 352, 29.6f);
+        // Native ghost creation can leave the wreck at the focus instead of the circular point.
+        ghost.position.set(492, -757); ghost.velocity.set(-8, 11); ghost.facing = 173;
+
+        String encoded = CoopEncounterWorld.captureManagedCurrentOrbits(scene.api, system.system());
+        CoopOrbitSync.OrbitEntry entry = only(CoopOrbitSync.decode(encoded));
+
+        assertEquals(ghostId, entry.entityId()); assertEquals(focusId, entry.focusId());
+        assertEquals(145, entry.angle()); assertEquals(352, entry.radius()); assertEquals(29.6f, entry.period());
+        assertEquals(new CoopOrbitSync.Pose(492, -757, -8, 11, 173), entry.pose());
+        assertEquals(10, CoopDelimited.split(encoded).size());
+    }
+
     private static CoopEncounterRecord simple(String instance, int count) {
         List<Entity> members = new ArrayList<>(); List<EntityState> states = new ArrayList<>();
         for (int i = 0; i < count; i++) {
@@ -682,6 +838,8 @@ class CoopEncounterWorldTest {
                 case "hasTag" -> tags.contains(a[0]);
                 case "addTag" -> { tags.add((String) a[0]); yield null; }
                 case "getAllEntities" -> entities;
+                case "getPlanets" -> entities.stream().filter(PlanetAPI.class::isInstance).map(PlanetAPI.class::cast).toList();
+                case "getCustomEntities" -> entities.stream().filter(CustomCampaignEntityAPI.class::isInstance).map(CustomCampaignEntityAPI.class::cast).toList();
                 case "getScripts" -> scripts;
                 case "addScript" -> { scripts.add((EveryFrameScript) a[0]); yield null; }
                 case "removeScript" -> { scripts.remove(a[0]); yield null; }
@@ -730,7 +888,8 @@ class CoopEncounterWorldTest {
         FakeLocation location;
         SectorEntityToken focus;
         SectorEntityToken target;
-        float angle, radius, period;
+        DerelictShipEntityPlugin plugin;
+        float angle, radius, period, facing;
         boolean discovered, inTransition;
         int setIdCalls;
         FakeEntity(Scene scene, Class<? extends SectorEntityToken> type, String id, String customType) {
@@ -748,6 +907,8 @@ class CoopEncounterWorldTest {
                 case "getLocationInHyperspace" -> location != null && location.api instanceof StarSystemAPI ? location.position : position;
                 case "setLocation" -> { position.set((Float) a[0], (Float) a[1]); yield null; }
                 case "getCustomEntityType" -> customType;
+                case "getCustomPlugin" -> plugin;
+                case "getFacing" -> facing;
                 case "getSpec" -> planetSpec;
                 case "getMarket" -> market == null ? null : market.api;
                 case "isAlive" -> true;

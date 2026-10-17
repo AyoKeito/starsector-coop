@@ -218,6 +218,7 @@ public final class CoopCampaignReplicator
     private int orbitSweepCursor;
     private int orbitSweepSystemsSent;
     private int orbitSweepJumpPointsSent;
+    private final CoopEncounterOrbitSweep encounterOrbitSweep;
 
     // Player faction standings: host re-broadcasts the full set on a slow cadence and the guest
     // force-matches it. Event-driven REP_DELTA covers host-side changes immediately; this snapshot is
@@ -406,6 +407,7 @@ public final class CoopCampaignReplicator
         this.service = Objects.requireNonNull(service, "service");
         this.session = Objects.requireNonNull(session, "session");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.encounterOrbitSweep = new CoopEncounterOrbitSweep(service, session);
         // Learning a mapping is the moment everything that was waiting on this base can proceed.
         marketIds.setListener(this::onMarketIdMapped);
         // Phase 32 addition B: the transport tells the credit transfer about every queued message it
@@ -5182,8 +5184,8 @@ public final class CoopCampaignReplicator
      * clock reconciler. The periodic re-cover is the backstop for anything that is re-created or
      * re-orbited mid-session.
      *
-     * <p><b>Cost stays bounded.</b> At most three snapshots per tick: the host's location, the
-     * guest's when it differs, and one sweep system. The first two use the full
+     * <p><b>Cost stays bounded.</b> At most four snapshots per tick: the host's location, the
+     * guest's when it differs, one managed encounter and one jump-point sweep system. The first two use the full
      * {@link #syncableOrbitBodies} filter; the sweep one uses the jump-point-only filter
      * ({@link #jumpPointOrbitBodies}), so it is a handful of entries rather than a system's worth,
      * and a system already sent as a player location this tick is skipped rather than sent twice.
@@ -5191,7 +5193,8 @@ public final class CoopCampaignReplicator
      * null when no guest is paired or the mirror is not placed. The snapshots are separate
      * {@code ORBIT_SNAPSHOT} messages with their own {@code locationId} and the guest's
      * {@code applyOrbitSnapshot} is idempotent and location-keyed, so they land independently with
-     * no keying change and no new message type.
+     * no keying change and no new message type. The managed encounter turn also repairs original
+     * offscreen bodies, including a ghost's exact pose, after independent native batching.
      */
     public void tickOrbitSync() {
         if (!isHost() || !isActive()) {
@@ -5212,6 +5215,7 @@ public final class CoopCampaignReplicator
             boolean firstLocation = true;
             Set<String> sentThisTick = new HashSet<>();
             for (LocationAPI location : locations) {
+                sentThisTick.add(CoopLocations.keyOf(location));
                 List<SectorEntityToken> bodies = syncableOrbitBodies(location);
                 List<CoopOrbitSync.OrbitEntry> entries = orbitEntries(bodies);
                 // The breakdown tracks a single body count across ticks, so only the first location
@@ -5227,6 +5231,8 @@ public final class CoopCampaignReplicator
                             CoopLocations.keyOf(location), CoopOrbitSync.encode(entries)));
                 }
             }
+            String encounterSent = encounterOrbitSweep.publishNext(sector, nowMillis, sentThisTick);
+            if (encounterSent != null) sentThisTick.add(encounterSent);
             tickOrbitSweep(sector, nowMillis, sentThisTick);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Orbit sync capture failed", ex);
@@ -5283,6 +5289,7 @@ public final class CoopCampaignReplicator
         orbitSweepCursor = 0;
         orbitSweepSystemsSent = 0;
         orbitSweepJumpPointsSent = 0;
+        encounterOrbitSweep.reset();
     }
 
     /**

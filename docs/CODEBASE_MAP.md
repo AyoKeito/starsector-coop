@@ -267,16 +267,20 @@ Owns: every wire type, since the enum lives here.
   `$abyssalBlackHoleReadingsRevisit` state survive stale overlays/deltas; completed black-hole
   readings cannot be rearmed. Optional bridge `encounters {"lifetime":true}` reads Host native visit
   ages, distances, runtime holds and saved Guest inputs without advancing or refreshing anything;
-  default queries stay unchanged. Deployed `43e300f` passes native hint revisits, completed-hint picker
-  reload, actor-reward checks, a primitive saved-state audit and separated Threat movement. Connected
-  lifetime checks preserve occupied systems and remove a control with its original jump point/anchor.
-  Overall reload fails because four Guest systems restore as native `SINGLE` instead of Host's
-  `DEEP_SPACE`. The narrow runtime repair is built: Host capture and new/existing Guest upsert restore
-  the supported creators' native type without recipe/schema changes or legacy mutation. The clean
-  build passes 4,192 Java tests (one existing router skip), zero failures/errors; earlier 155
-  bridge/offline tests were not rerun for this Java-only fix. Native deployment/retest is pending.
-  M2 remains PARTIAL pending corrected reload, strict evolved-time comparison and connected expiry/well
-  cleanup. Co-op-only pause remains:
+  default queries stay unchanged. Deployed `eb0361a` passes native hint revisits, completed-hint/reward
+  picker reload, restored native system types, primitive saved-state audits and separated Threat
+  movement. Runtime Host capture and new/existing Guest upsert restore the supported creators'
+  `DEEP_SPACE` type without recipe/schema changes or legacy mutation. Connected lifetime checks
+  preserve occupied systems; departed systems expire after both native visit windows, with exact
+  native lookups verifying original jump-point/anchor and well/anchor cleanup in separate fixtures.
+  `CoopEncounterOrbitSweep` adds at most one managed system's full orbit snapshot per existing 1 Hz
+  tick. The sorted transient cursor advances one slot even when occupied/empty; full recipe/member
+  capture is limited to the selected system. Canonical ghost pose, 384 KiB payload and exact 1 MiB
+  frame checks apply before queueing. Install/dispose resets the cursor; wire/saved layout is unchanged.
+  The correction is built and tested: 4,208 Java pass, one existing router skip, zero failures/errors;
+  earlier 155 bridge/offline tests were unchanged and not rerun. Native deployment and exact-time
+  retest remain pending; the original strict paired-time orbit FAIL stays preserved and M2 stays PARTIAL.
+  Co-op-only pause remains:
   configured roles hold the campaign paused without a playable session. The primitive saved
   Guest-inside hold stays implemented; Host solo progression is outside acceptance by user decision.
   Dated native evidence, including the retained old-build mining FAIL, belongs

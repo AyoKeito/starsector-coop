@@ -333,21 +333,41 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         Map<String, String> result = new LinkedHashMap<>();
         for (CoopEncounterRecord record : records) {
             StarSystemAPI system = Objects.requireNonNull(findSystem(sector, record.instanceId()), "Missing Host encounter for current orbits");
-            Set<String> systemMembers = new HashSet<>();
-            for (CoopEncounterRecord.Entity member : record.entities())
-                if (member.role() == Role.SYSTEM) systemMembers.add(record.entityId(member));
-            List<SectorEntityToken> circular = new ArrayList<>();
-            for (SectorEntityToken entity : ownedEntities(sector, system, record).values()) {
-                if (!systemMembers.contains(CoopEntityIds.keyOf(entity))) continue;
-                if (entity.getOrbit() != null && entity.getCircularOrbitRadius() > 0 && entity.getCircularOrbitPeriod() > 0) {
-                    if (entity.getOrbitFocus() != null && !systemMembers.contains(CoopEntityIds.keyOf(entity.getOrbitFocus())))
-                        throw new IllegalStateException("Encounter circular orbit focus is outside original system membership");
-                    circular.add(entity);
-                }
-            }
-            result.put(record.instanceId(), CoopOrbitSync.encode(CoopCampaignReplicator.orbitEntries(circular)));
+            result.put(record.instanceId(), captureOrbitTable(sector, system, record));
         }
         return Map.copyOf(result);
+    }
+
+    /** Cheap sweep eligibility; the selected recipe is decoded and validated only when captured. */
+    static boolean isManagedEncounterSystem(StarSystemAPI system) {
+        return system != null && isAbyssal(system) && ownedSystemId(system) != null
+                && system.getMemoryWithoutUpdate().contains(RECIPE_KEY);
+    }
+
+    /** One bounded, read-only current phase capture for the periodic offscreen repair. */
+    static String captureManagedCurrentOrbits(SectorAPI sector, StarSystemAPI system) {
+        Objects.requireNonNull(sector, "sector");
+        if (!isManagedEncounterSystem(system)) throw new IllegalArgumentException("Not a managed encounter system");
+        CoopEncounterRecord record = Objects.requireNonNull(savedRecipe(system), "Missing managed encounter recipe");
+        String encoded = captureOrbitTable(sector, system, record);
+        CoopEncounterOrbitSetCodec.encode(Map.of(record.instanceId(), encoded), List.of(record));
+        return encoded;
+    }
+
+    private static String captureOrbitTable(SectorAPI sector, StarSystemAPI system, CoopEncounterRecord record) {
+        Set<String> systemMembers = new HashSet<>();
+        for (CoopEncounterRecord.Entity member : record.entities())
+            if (member.role() == Role.SYSTEM) systemMembers.add(record.entityId(member));
+        List<SectorEntityToken> circular = new ArrayList<>();
+        for (SectorEntityToken entity : ownedEntities(sector, system, record).values()) {
+            if (!systemMembers.contains(CoopEntityIds.keyOf(entity))) continue;
+            if (entity.getOrbit() != null && entity.getCircularOrbitRadius() > 0 && entity.getCircularOrbitPeriod() > 0) {
+                if (entity.getOrbitFocus() != null && !systemMembers.contains(CoopEntityIds.keyOf(entity.getOrbitFocus())))
+                    throw new IllegalStateException("Encounter circular orbit focus is outside original system membership");
+                circular.add(entity);
+            }
+        }
+        return CoopOrbitSync.encode(CoopCampaignReplicator.orbitEntries(circular));
     }
 
     @Override public void applyCurrentOrbits(CoopEncounterRecord record, String encodedOrbits) {
