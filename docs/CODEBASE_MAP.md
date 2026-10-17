@@ -279,10 +279,11 @@ Owns: every wire type, since the enum lives here.
   frame checks apply before queueing. Install/dispose resets the cursor; wire/saved layout is unchanged.
   Deployed `e7c28df` passes native bounded-convergence verification: three complete 5,024-value
   comparisons at a common frozen epoch remain equal over 47.232 seconds, with zero lookup failures
-  and empty queues. Final native saves/backups pass audit within stated limits. The approved first
-  build (Task 0, M1, shared wrecks and M2) is BUILT. Clean build: 4,208 Java pass, one existing router
-  skip, zero failures/errors; earlier 155 bridge/offline tests unchanged, not rerun. M3 lights, M4
-  storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt follow-ups.
+  and empty queues. Final native saves/backups pass audit within stated limits. Phase 26 remains
+  PARTIAL: Task 0, M1, shared wrecks and M2 are complete; M3 lights, M4 storms and M5 ghosts/Leviathan
+  trails are unbuilt milestones. Clean build: 4,208 Java pass, one existing router skip, zero
+  failures/errors; earlier 155 bridge/offline tests unchanged, not rerun. Guest-proximity abyssal
+  triggering also remains unbuilt.
   Co-op-only pause remains:
   configured roles hold the campaign paused without a playable session. The primitive saved
   Guest-inside hold stays implemented; Host solo progression is outside acceptance by user decision.
