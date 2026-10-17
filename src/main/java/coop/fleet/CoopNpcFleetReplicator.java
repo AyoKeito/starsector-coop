@@ -487,7 +487,7 @@ public final class CoopNpcFleetReplicator {
         int[] filtered = new int[1];
         forEachReplicatedFleet(sector, fleet -> {
             LocationAPI loc = fleet.getContainingLocation();
-            if (loc == null || !playerLocations.contains(loc.getId())) {
+            if (loc == null || !playerLocations.contains(CoopLocations.keyOf(loc))) {
                 return;
             }
             if (!withinStreamRange(observers, fleet, loc)) {
@@ -495,7 +495,7 @@ public final class CoopNpcFleetReplicator {
                 return;
             }
             CoopNpcFleetMotionSmoother.Motion motion = replicatedMotion(fleet, loc, hostLocation);
-            motions.add(new CoopNpcFleetMotion(fleet.getId(), loc.getId(),
+            motions.add(new CoopNpcFleetMotion(fleet.getId(), CoopLocations.keyOf(loc),
                     motion.x(), motion.y(), motion.velocityX(), motion.velocityY(),
                     CoopSensorSync.capture(fleet)));
         });
@@ -672,7 +672,8 @@ public final class CoopNpcFleetReplicator {
         }
         for (CampaignFleetAPI observer : observers) {
             LocationAPI observerLoc = safeContainingLocation(observer);
-            if (observerLoc == null || !loc.getId().equals(observerLoc.getId())) {
+            if (observerLoc == null || !Objects.equals(CoopLocations.keyOf(loc),
+                    CoopLocations.keyOf(observerLoc))) {
                 continue;
             }
             Vector2f eye = safeLocation(observer);
@@ -842,7 +843,7 @@ public final class CoopNpcFleetReplicator {
                 fleet.getId(),
                 factionId(fleet),
                 fleet.getName() == null ? "" : fleet.getName(),
-                loc == null ? "" : loc.getId(),
+                loc == null ? "" : CoopLocations.keyOf(loc),
                 motion.x(), motion.y(),
                 motion.velocityX(), motion.velocityY(),
                 transponderOn(fleet),
@@ -902,7 +903,7 @@ public final class CoopNpcFleetReplicator {
             return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
         }
         try {
-            return motionSmoother.smooth(fleet.getId(), loc.getId(), x, y, vx, vy,
+            return motionSmoother.smooth(fleet.getId(), CoopLocations.keyOf(loc), x, y, vx, vy,
                     motionSampleClockMillis());
         } catch (RuntimeException | LinkageError ex) {
             return new CoopNpcFleetMotionSmoother.Motion(x, y, vx, vy);
@@ -912,7 +913,7 @@ public final class CoopNpcFleetReplicator {
     /** True while {@link CoopFullFidelitySystemDriver} is advancing this location at the real rate. */
     private static boolean isFullFidelityDriven(LocationAPI loc) {
         String driven = CoopFullFidelitySystemDriver.drivenLocationId();
-        return !driven.isEmpty() && driven.equals(loc.getId());
+        return !driven.isEmpty() && driven.equals(CoopLocations.keyOf(loc));
     }
 
     private static LocationAPI hostCurrentLocation(SectorAPI sector) {
@@ -951,7 +952,7 @@ public final class CoopNpcFleetReplicator {
         for (CampaignFleetAPI observer : observers) {
             LocationAPI loc = safeContainingLocation(observer);
             if (loc != null) {
-                ids.add(loc.getId());
+                ids.add(CoopLocations.keyOf(loc));
             }
         }
         return ids;

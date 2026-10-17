@@ -19,6 +19,33 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopMessagesTest {
     @Test
+    void wreckFactoriesRoundTripTheCompleteRecipeAndCanonicalIds() {
+        String ids = coop.campaign.CoopWreckRecord.encodeIds(List.of("wreck:a", "wreck:b"));
+        String recipe = coop.campaign.CoopWreckFixtures.sample("wreck:a").encode();
+        List<CoopMessages.Message> messages = List.of(
+                CoopMessages.wreckSet("session-a", 7, 123, ids),
+                CoopMessages.wreckAdd("session-a", 8, 123, recipe),
+                CoopMessages.wreckRemove("session-a", 9, 123, "wreck:a"),
+                CoopMessages.wreckConsume("session-a", 10, 123, ids),
+                CoopMessages.wreckAdd("session-a", 11, 123, recipe, 42),
+                CoopMessages.wreckMutation("session-a", 12, 123, "opaque-mut:line\n\"quoted\""),
+                CoopMessages.wreckMutationAck("session-a", 13, 123, "opaque-ack:line\n\"quoted\""));
+        for (CoopMessages.Message original : messages) {
+            CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(original));
+            assertEquals(original, decoded);
+        }
+        assertEquals(ids, CoopMessages.requiredPayloadString(messages.get(0), "wrecks"));
+        assertEquals(coop.campaign.CoopWreckFixtures.sample("wreck:a"), coop.campaign.CoopWreckRecord.decode(
+                CoopMessages.requiredPayloadString(messages.get(1), "wreck")));
+        assertEquals("wreck:a", CoopMessages.requiredPayloadString(messages.get(2), "wreckId"));
+        assertEquals(ids, CoopMessages.requiredPayloadString(messages.get(3), "wrecks"));
+        assertEquals(42L, CoopMessages.requiredPayloadLong(messages.get(4), "revision"));
+        assertEquals("opaque-mut:line\n\"quoted\"", CoopMessages.requiredPayloadString(messages.get(5), "mutation"));
+        assertEquals("opaque-ack:line\n\"quoted\"", CoopMessages.requiredPayloadString(messages.get(6), "ack"));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.wreckAdd("session-a", 14, 123, recipe, -1));
+    }
+
+    @Test
     void pingMessageEncodesDeterministicEnvelopeJson() {
         CoopMessages.Message ping = CoopMessages.ping("session-a", 7L, 123456789L);
 

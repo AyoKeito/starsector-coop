@@ -237,6 +237,8 @@ class CoopModPluginTest {
         assertEquals(CoopSessionStats.class, x.aliases().get("coopStats"));
         assertEquals(CoopSessionStats.PlayerStats.class, x.aliases().get("coopStatsPlayer"));
         assertEquals(CoopSessionStats.ShipLoss.class, x.aliases().get("coopStatsLoss"));
+        assertEquals(coop.campaign.CoopAbyssalDespawner.class,
+                x.aliases().get("coopAbyssalDespawner"));
     }
 
     /** Records the alias calls; {@code XStream.alias} is the only method the plugin uses. */

@@ -11,6 +11,11 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
 import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
+import coop.campaign.CoopSlipstreamAuthority;
+import coop.campaign.CoopEncounterAuthority;
+import coop.campaign.CoopSlipstreamWorld;
+import coop.campaign.CoopWreckAuthority;
+import coop.ambient.CoopWreckBridge;
 import coop.campaign.CoopCampaignReplicator;
 import coop.combat.CoopBattleBridge;
 import coop.combat.CoopBattleResult;
@@ -22,6 +27,7 @@ import coop.fleet.CoopFleetMirrorRegistry;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopFleetVisibilityProbe;
+import coop.fleet.CoopLocations;
 import coop.fleet.CoopNpcFleetMotion;
 import coop.fleet.CoopNpcFleetReplicator;
 import coop.fleet.CoopNpcFleetSetSnapshot;
@@ -694,6 +700,9 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopBarGenerationSuppressor barGenerationSuppressor = new CoopBarGenerationSuppressor();
     private final CoopNpcFleetReplicator npcFleetReplicator;
     private final CoopBaseAuthority baseAuthority;
+    private CoopSlipstreamAuthority slipstreamAuthority;
+    private CoopWreckAuthority wreckAuthority;
+    private CoopEncounterAuthority encounterAuthority;
     /**
      * Session-scoped, not link-scoped: true from the first connect of a co-op session until that
      * session is really over, <em>through</em> a reconnect grace window. See
@@ -703,6 +712,9 @@ public class CoopNetPump implements EveryFrameScript {
     /** Link-scoped twin of {@link #npcReplicationStreaming}: true exactly while the link is up. */
     private boolean npcLinkStreaming;
     private boolean baseReplicationStreaming;
+    private boolean slipstreamReplicationStreaming;
+    private boolean wreckReplicationStreaming;
+    private boolean encounterReplicationStreaming;
     private boolean barSuppressionArmed;
     private String lastNpcDebug;
     /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
@@ -957,6 +969,9 @@ public class CoopNetPump implements EveryFrameScript {
         // table and the replicator the only reader, so they share the replicator's instance.
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis,
                 campaignReplicator.marketIds());
+        this.slipstreamAuthority = new CoopSlipstreamAuthority(service, sessionState, clockMillis);
+        this.wreckAuthority = new CoopWreckAuthority(service, sessionState, clockMillis);
+        this.encounterAuthority = new CoopEncounterAuthority(service, sessionState, clockMillis);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
         this.battleResultReconciler = new CoopBattleResultReconciler(
@@ -1797,7 +1812,7 @@ public class CoopNetPump implements EveryFrameScript {
             return null;
         }
         com.fs.starfarer.api.campaign.LocationAPI location = fleet.getContainingLocation();
-        String locationId = location == null ? null : location.getId();
+        String locationId = CoopLocations.keyOf(location);
         if (locationId != null && !locationId.isEmpty()) {
             stats.noteSystemVisited(playerId, locationId);
         }
@@ -3444,6 +3459,9 @@ public class CoopNetPump implements EveryFrameScript {
         maybeApplyTimeSnapshot();
         t = profiler.split(SECTION_TIME_APPLY, t);
         tickClockReconciler(amount);
+        // Native terrain fade hooks are suppressed only for registered streams. Commit both
+        // roles' canonical grid from the FINAL clock, before bridge and save snapshot readers.
+        tickSlipstreamFadeControl();
         t = profiler.split(SECTION_TIME_CLOCK_RECONCILE, t);
         maybeSendTimeSnapshot();
         t = profiler.split(SECTION_TIME_SEND, t);
@@ -3470,7 +3488,10 @@ public class CoopNetPump implements EveryFrameScript {
         // draws, so the render pass never takes the transport's lifecycle lock. Two field reads on
         // the frames that are not an edge, so it gets no profiler section of its own either.
         tickNetFault();
-        syncNpcReplication();
+        // Seasonal membership must be read before NPC suppression removes SlipstreamManager.
+        syncEncounterReplication();
+        if (syncSlipstreamReplication()) syncNpcReplication();
+        syncWreckReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();
         t = profiler.split(SECTION_NPC_THREAT_WATCHER, t);
@@ -4529,7 +4550,9 @@ public class CoopNetPump implements EveryFrameScript {
                  CREDITS_GRANT,
                  // Snapshots. Superseded by the resume's forced rebroadcast when one comes, and the
                  // best available picture of the world when it does not.
-                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, FLEET_SNAPSHOT,
+                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET,
+                 STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE, ENC_SET, FLEET_SNAPSHOT,
+                 WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED,
@@ -4639,6 +4662,9 @@ public class CoopNetPump implements EveryFrameScript {
         barSuppressionArmed = false;
         npcFleetReplicator.rearmFullBroadcast();
         baseAuthority.reset();
+        slipstreamAuthority.rearmFullBroadcast();
+        wreckAuthority.rearmFullBroadcast();
+        encounterAuthority.rearmFullBroadcast();
         datagramWatermark.reset();
         datagramRedundancy.reset();
         // Phase 20 M4: the returning peer holds no roster, so this side owes it one before its next
@@ -5251,6 +5277,9 @@ public class CoopNetPump implements EveryFrameScript {
             case INTERACTION_RELEASE -> handleInteractionRelease(message);
             case NPC_FLEET_SET -> handleNpcFleetSet(message);
             case BASE_SET -> handleBaseSet(message);
+            case STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE -> handleStream(message);
+            case WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK -> handleWreck(message);
+            case ENC_SET -> handleEncounterSet(message);
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
@@ -6212,6 +6241,9 @@ public class CoopNetPump implements EveryFrameScript {
         commitMintedCampaignId();
         CoopLog.info(CoopNetPump.class,
                 "Coop seed lock accepted by guest sectorFingerprint=" + guestFingerprint);
+        if (CoopDebug.diagnosticsEnabled()) {
+            dumpCanonicalFingerprint("host seed lock accepted");
+        }
     }
 
     private void handleSeedLockReject(CoopMessages.Message message) {
@@ -7890,6 +7922,165 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    private void syncEncounterReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !encounterReplicationStreaming) {
+            encounterAuthority.reset();
+            encounterReplicationStreaming = true;
+        } else if (!active && encounterReplicationStreaming && !reconnect.active()) {
+            encounterReplicationStreaming = false;
+        }
+        try {
+            // Saved despawners must retain the last Guest visit even after a session ends.
+            if (service.role() == CoopConnectionRole.HOST) {
+                encounterAuthority.updateGuestPresence(reconnect.active());
+                if (active) encounterAuthority.tickHost();
+                else encounterAuthority.observeHost();
+            } else if (active && service.role() == CoopConnectionRole.GUEST) {
+                encounterAuthority.tickGuest();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync abyssal encounters", ex);
+        }
+    }
+
+    private void handleEncounterSet(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()
+                || !java.util.Objects.equals(sessionState.sessionId(), message.sessionId())) return;
+        try {
+            // Inbound dispatch precedes lifecycle sync; consume the session edge before apply.
+            if (shouldStreamFleet() && !encounterReplicationStreaming) {
+                encounterAuthority.reset();
+                encounterReplicationStreaming = true;
+            }
+            CoopMessages.Payload payload = CoopMessages.payload(message);
+            encounterAuthority.applySet(payload.requiredString("encounters"),
+                    payload.raw().containsKey("orbits") ? payload.requiredString("orbits") : null);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply ENC_SET", ex);
+        }
+    }
+
+    private boolean syncSlipstreamReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !slipstreamReplicationStreaming) {
+            slipstreamAuthority.reset();
+            slipstreamReplicationStreaming = true;
+        } else if (!active && slipstreamReplicationStreaming && !reconnect.active()) {
+            slipstreamReplicationStreaming = false;
+        }
+        if (!active) return true;
+        try {
+            if (service.role() == CoopConnectionRole.HOST) {
+                slipstreamAuthority.tickHost();
+            } else if (service.role() == CoopConnectionRole.GUEST) {
+                slipstreamAuthority.prepareGuest();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync host slipstreams", ex);
+            // Keep the manager available for a retry of its membership sweep.
+            return service.role() != CoopConnectionRole.GUEST;
+        }
+        return true;
+    }
+
+    private void syncWreckReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !wreckReplicationStreaming) {
+            wreckAuthority.reset();
+            wreckReplicationStreaming = true;
+        } else if (!active && wreckReplicationStreaming && !reconnect.active()) {
+            wreckReplicationStreaming = false;
+        }
+        if (!active) {
+            if (service.role() == CoopConnectionRole.GUEST) {
+                try { wreckAuthority.observeGuest(); }
+                catch (RuntimeException | LinkageError ex) {
+                    CoopLog.warn(CoopNetPump.class, "Failed to retain pending wreck salvage", ex);
+                }
+            }
+            return;
+        }
+        CoopWreckBridge.setGuestMode(service.role() == CoopConnectionRole.GUEST);
+        try {
+            if (service.role() == CoopConnectionRole.HOST) wreckAuthority.tickHost();
+            else if (service.role() == CoopConnectionRole.GUEST) wreckAuthority.tickGuest();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync host hyperspace wrecks", ex);
+        }
+    }
+
+    private void handleWreck(CoopMessages.Message message) {
+        if (!isGameplaySessionActive() || !java.util.Objects.equals(sessionState.sessionId(), message.sessionId())) return;
+        boolean guestReport = message.type() == CoopMessages.Type.WRECK_CONSUME
+                || message.type() == CoopMessages.Type.WRECK_MUTATION;
+        if (guestReport ? service.role() != CoopConnectionRole.HOST : service.role() != CoopConnectionRole.GUEST) return;
+        try {
+            if (shouldStreamFleet() && !wreckReplicationStreaming) {
+                wreckAuthority.reset();
+                wreckReplicationStreaming = true;
+            }
+            switch (message.type()) {
+                case WRECK_SET -> wreckAuthority.applySet(CoopMessages.requiredPayloadString(message, "wrecks"));
+                case WRECK_ADD -> wreckAuthority.applyAdd(CoopMessages.requiredPayloadString(message, "wreck"),
+                        CoopMessages.optionalPayloadLong(message, "revision", 0));
+                case WRECK_REMOVE -> wreckAuthority.applyRemove(CoopMessages.requiredPayloadString(message, "wreckId"));
+                case WRECK_CONSUME -> wreckAuthority.applyConsume(CoopMessages.requiredPayloadString(message, "wrecks"));
+                case WRECK_MUTATION -> wreckAuthority.applyMutation(CoopMessages.requiredPayloadString(message, "mutation"));
+                case WRECK_MUTATION_ACK -> wreckAuthority.applyMutationAck(CoopMessages.requiredPayloadString(message, "ack"));
+                default -> throw new IllegalArgumentException("Not a wreck message: " + message.type());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply " + message.type(), ex);
+        }
+    }
+
+    private void tickSlipstreamFadeControl() {
+        CoopConnectionRole role = service.role();
+        if (!isGameplaySessionActive() && !reconnect.active()) {
+            if (!slipstreamReplicationStreaming
+                    && (role == CoopConnectionRole.HOST || role == CoopConnectionRole.GUEST)) {
+                // Loaded native objects were preregistered before the first engine frame. Keep
+                // their saved grid frozen through the initial lobby, not raw-advancing underneath it.
+                CoopSlipstreamWorld.holdLoadedControlled(Global.getSector());
+            } else {
+                CoopSlipstreamWorld.releaseControlled();
+            }
+            return;
+        }
+        if (role != CoopConnectionRole.HOST && role != CoopConnectionRole.GUEST) {
+            CoopSlipstreamWorld.releaseControlled();
+            return;
+        }
+        CoopSlipstreamWorld.tickControlled(Global.getSector(), role == CoopConnectionRole.HOST,
+                reconnect.active(), role == CoopConnectionRole.GUEST && latestTimeSnapshot != null
+                        ? latestTimeSnapshot.paused() : null);
+    }
+
+    private void handleStream(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()) return;
+        try {
+            // Dispatch precedes the frame's lifecycle sync, so consume the edge before applying.
+            if (shouldStreamFleet() && !slipstreamReplicationStreaming) {
+                slipstreamAuthority.reset();
+                slipstreamReplicationStreaming = true;
+            }
+            switch (message.type()) {
+                case STREAM_SET -> slipstreamAuthority.applySet(
+                        CoopMessages.requiredPayloadString(message, "streams"));
+                case STREAM_ADD -> slipstreamAuthority.applyAdd(
+                        CoopMessages.requiredPayloadString(message, "stream"));
+                case STREAM_DESPAWN -> slipstreamAuthority.applyDespawn(
+                        CoopMessages.requiredPayloadString(message, "stream"));
+                case STREAM_REMOVE -> slipstreamAuthority.applyRemove(
+                        CoopMessages.requiredPayloadString(message, "streamId"));
+                default -> throw new IllegalArgumentException("Not a stream message: " + message.type());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply " + message.type(), ex);
+        }
+    }
+
     private void maybeDumpNpcDiagnostics() {
         if (!CoopDebug.diagnosticsEnabled()) {
             return;
@@ -8245,7 +8436,8 @@ public class CoopNetPump implements EveryFrameScript {
         if (dialog != null) {
             SectorEntityToken target = dialog.getInteractionTarget();
             if (target != null) {
-                currentEntityId = target.getId();
+                String sharedWreckId = coop.campaign.CoopWreckWorld.ownedId(target);
+                currentEntityId = sharedWreckId == null ? coop.fleet.CoopEntityIds.keyOf(target) : sharedWreckId;
                 currentEntityName = target.getName();
             }
         }
@@ -9266,6 +9458,26 @@ public class CoopNetPump implements EveryFrameScript {
     /** The host-authoritative base replicator; test read for the stored desired set. */
     CoopBaseAuthority baseAuthorityForTest() {
         return baseAuthority;
+    }
+
+    void setSlipstreamAuthorityForTest(CoopSlipstreamAuthority authority) {
+        slipstreamAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    void setWreckAuthorityForTest(CoopWreckAuthority authority) {
+        wreckAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    void setEncounterAuthorityForTest(CoopEncounterAuthority authority) {
+        encounterAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    boolean wreckReplicationStreamingForTest() {
+        return wreckReplicationStreaming;
+    }
+
+    boolean slipstreamReplicationStreamingForTest() {
+        return slipstreamReplicationStreaming;
     }
 
     /** The peer's cached fleet roster (Phase 20 M4); test/bridge read. */

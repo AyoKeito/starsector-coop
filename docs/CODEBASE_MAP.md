@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-12 (0.1.5).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-17 (0.1.5, P26 M2 branch).
 
 ## Stack
 
@@ -27,7 +27,7 @@ K:\Starsector\mods\coop
 |-- src/main/java/coop/   the mod: 22 packages + CoopModPlugin
 |-- src/launcher/java/    coop.launcher, the FlatLaf desktop launcher (no Starsector API on its classpath)
 |-- src/test/java/coop/   JUnit 5 suite, mirrors the main packages + coop/launcher + coop/testing
-|-- forks/                classpath-shadow copies of 10 vanilla classes -> coop-forks.jar
+|-- forks/                classpath-shadow copies of 12 vanilla classes -> coop-forks.jar
 |-- data/                 rules.csv, campaign/abilities.csv, config/coop_options.json,
 |                         config/settings.json, version/
 |-- docs/                 design, plan ledger, generated roadmap, player guides
@@ -41,9 +41,9 @@ K:\Starsector\mods\coop
 |-- tmp_ff_analysis/      scratch + decompiled sources; never committed, never shipped
 ```
 
-The `forks` source set is `forks/` plus `src/main/java/coop/rng` and `src/main/java/coop/presence`,
+The `forks` source set is `forks/` plus `src/main/java/coop/rng`, `coop/presence` and `coop/ambient`,
 which must share the system classloader with the forks. The `jar` task excludes `coop/rng/**`,
-`coop/presence/**` and `coop/build/CoopForksBuildInfo*` from `coop.jar` so exactly one copy of each
+`coop/presence/**`, `coop/ambient/**` and `coop/build/CoopForksBuildInfo*` from `coop.jar` so exactly one copy of each
 exists on disk.
 
 **The script classloader shapes the code.** It refuses `java.lang.reflect.*`, `java.io.*` (allow-list
@@ -113,7 +113,8 @@ service.beginFrame() -> CoopDebug.pollFrame / CoopWiretap.pollFrame -> streamClo
   -> syncFleetMirror -> drainFleetDatagrams -> advanceMirrorMotion -> maybeSendFleetSnapshot
   -> tickRespawnNotifier -> maybeSendGuestSnapshot -> tickSaveCheckpoint
   -> tickSessionLeaveWatchdog -> tickNetFault
-  -> syncNpcReplication -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
+  -> syncEncounterReplication -> syncSlipstreamReplication -> syncNpcReplication -> syncWreckReplication
+  -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
   -> syncInteractionGate -> syncCampaignReplicator -> campaignReplicator.tick*(...)
   -> maybeSendPing -> tickLinkSupervision -> service.flushOutbound -> tickTerminalStop
 ```
@@ -148,7 +149,7 @@ toggle too).
   and the Phase 20.4 abuse limits.
 - `CoopNetPump` - the `EveryFrameScript` that drives everything: ~9.5k lines, the frame order above.
 - `CoopNetPumpInstaller` - installs it as a transient script.
-- `CoopMessages` - the `Type` enum (73 constants), the envelope codec, datagram header parse,
+- `CoopMessages` - the `Type` enum (84 constants), the envelope codec, datagram header parse,
   `isReliableOneShot`, `wireToken`, `MAX_DATAGRAM_CHUNKS`.
 - `CoopPeerLink` - everything known about one peer: TCP channel, half-written frame, inbound
   assembly, validated send address, watermarks.
@@ -188,14 +189,14 @@ Owns: every wire type, since the enum lives here.
 - `CoopFullFidelitySystemDriver` / `CoopSystemDriveFrameHook` / `CoopSystemDriveState` /
   `CoopSystemPhaseSlots` - run the guest's system at host fidelity.
 - `CoopGuestPresence`, `CoopSensorSync`, `CoopRespawnNotifier`, `CoopMirrorOrphanSweeper`,
-  `CoopLocations`, `CoopInflationLatch`, `CoopShipMods`, `CoopNpcActionTextCapture`,
+  `CoopLocations`, `CoopEntityIds`, `CoopInflationLatch`, `CoopShipMods`, `CoopNpcActionTextCapture`,
   `CoopFleetCodec`, `CoopRosterSummary`, `CoopOfficerSkills` (officer skill codec),
   `CoopAllyBattleTracker` (Phase 33: freezes the partner mirror while it is in a battle and reads
   the roster once when it leaves); diagnostics `CoopFleetVisibilityProbe`,
   `CoopMotionSpeedProbe`. Owns `FLEET_SNAPSHOT`, `FLEET_ROSTER`,
   `FLEET_ROSTER_REQUEST`, `NPC_FLEET_SET`, `NPC_FLEET_MOTION`, `RESPAWN_PLAYER`.
 
-### `coop.campaign` (32 classes) - shared world state
+### `coop.campaign` (40 classes) - shared world state
 
 - `CoopCampaignReplicator` - the hub; the pump calls its `tickWorldDeltas`, `tickOrbitSync`,
   `tickPlayerRepSync`, `tickBarAcceptance`, `tickBarPool`, `tickColony*`, `tickExpeditionWarnings`,
@@ -209,12 +210,94 @@ Owns: every wire type, since the enum lives here.
   mission and bar pools with first-come claims.
 - `CoopBaseAuthority` / `CoopBaseRecord` / `CoopSkeletonMutationWatcher` - dynamic pirate and
   Luddic-Path bases, campaign objectives, gates.
+- `CoopSlipstreamAuthority` / `CoopSlipstreamRecord` / `CoopSlipstreamWorld` - non-dynamic host
+  slipstreams and slipsurges. A 250 ms scan sends lifecycle messages, with an ordered manifest and
+  complete records on connect/resume and during active fades. Version 2 records include a fixed
+  campaign-clock grid and the native slipsurge sweep cursor. `CoopSlipstreamFadeDriver` commits
+  1/120-second native fade steps after clock reconciliation on both roles; two native forks skip
+  only their raw frame-time fade work for registered terrain. `coop.ambient.CoopSlipstreamFadeBridge`
+  owns the transient system-loader registry. Guest expiry waits for the host's remove event.
+  The guest sweeps seasonal terrain before manager suppression;
+  an unreadable sweep delays suppression. Saved terrain tags rebuild lookup and same-geometry
+  upserts retain local discovery. M1 was accepted by user sign-off on 2026-10-17.
+- `CoopWreckAuthority` / `CoopWreckRecord` / `CoopWreckCodec` / `CoopWreckWorld` - shared floating
+  hyperspace wrecks with the exact native `DerelictShipEntityPlugin`. A 250 ms host scan captures
+  pose, age and resolved salvage data; `WRECK_SET` plus `WRECK_ADD` sends a complete manifest on
+  connect/resume and every five seconds, with changed records and `WRECK_REMOVE` between sets.
+  Guest salvage reports `WRECK_CONSUME`; primitive `$coopWreckConsumedIds` tombstones prevent
+  resurrection after reconnect or reload. Native entities retain `$coopWreckId` (`wreck:<UUID>`).
+  In-place updates preserve local discovery and defer to an open native salvage dialog. A complete
+  successfully applied manifest removes unmatched legacy guest wrecks; pods and other plugins stay
+  outside this migration. `coop.ambient.CoopWreckBridge` sets Guest mode before native frames and
+  guards the pinned `NearbyEventsEvent` and `DerelictShipEntityPlugin` hooks. Host wreck generation
+  also checks a Guest in hyperspace when Host is in a system or at least 10,000 su away. Host expiry
+  waits while either player can see the wreck; Guest replicas skip local expiry and stream impulses.
+  Partial Guest salvage updates compare the expected Host revision before changing recovery state.
+  The `TransmitterTrapSpecial` fork records Guest alarm activation as a primitive flag and lets the
+  Host create or redirect native trap fleets toward the Guest, using ordinary NPC replication.
+  Shared-wreck live verification and M1 manual checks were accepted on 2026-10-17.
+- `CoopEncounterAuthority` / `CoopEncounterRecord` / `CoopEncounterCodec` / `CoopEncounterWorld` -
+  Host rogue-object and dire-hint temporary systems. A 250 ms scan captures new generation recipes
+  even while the configured Host is paused without a playable session. `ENC_SET` sends the complete
+  recipe/overlay set on
+  connect, resume and hash changes, with bounded current orbit batches for offscreen fresh replicas.
+  `CoopEncounterOrbitSetCodec` validates instance/member ownership and the escaped batch bounds.
+  Those transient batches stay outside the recipe hash and are retained through creation retries;
+  they apply once after each upsert/overlay before reconciliation accepts the set or removes old
+  systems, so deferred removal cannot rewind a later periodic update.
+  The Guest replays base geometry through the parent EPEC using
+  the effective Host seed and branch inputs, then applies resolved specials without local hint or
+  pity rolls. Original members store `coopenc_<instance>_<role><ordinal>` in `$coopEncEntityId`;
+  `CoopEntityIds.keyOf/byId` resolves these shared keys while preserving native engine ids. Native
+  `LocationToken` centers/anchors cannot safely pass through the sector's global entity lookup.
+  Consumption, survey, orbit bodies/foci and interaction claims use the shared keys. The system keeps
+  the Host's optional unique id. Saved String recipes retain consumed membership and exploration
+  state. Reliable `WORLD_DELTA(ENCOUNTER_STATE)` reports Guest hint/survey/ruins changes; saved
+  native flags and missing members recover outcomes not acknowledged before reload. Existing
+  consume and orbit paths use the canonical entity ids. Native ghost wrecks restore their captured
+  pose after orbit installation; their one-second orbit entries also carry current Host position,
+  velocity and facing to restore the Host's actual result after each orbit update. Ordinary orbit
+  entries keep their existing five-field wire shape. `CoopLocations` invalidates on create/remove.
+  `CoopAbyssalDespawner` is a saved Host script with primitive Guest visit/position history; removal
+  waits for both players' native distance/time criteria and a Guest who ended a session inside.
+  `coop.ambient.CoopEncounterReplayBridge` is the primitive system-loader slot used by the pinned
+  parent EPEC fork. The slot is cleared in `finally` and at campaign changes. Pre-capture systems,
+  other EPEC creators, free-standing lights and solo-Guest triggering are outside this path.
+  Native String `$visited` values normalize to Boolean wire values. True visits and terminal
+  `$abyssalBlackHoleReadingsRevisit` state survive stale overlays/deltas; completed black-hole
+  readings cannot be rearmed. Optional bridge `encounters {"lifetime":true}` reads Host native visit
+  ages, distances, runtime holds and saved Guest inputs without advancing or refreshing anything;
+  default queries stay unchanged. Deployed `eb0361a` passes native hint revisits, completed-hint/reward
+  picker reload, restored native system types, primitive saved-state audits and separated Threat
+  movement. Runtime Host capture and new/existing Guest upsert restore the supported creators'
+  `DEEP_SPACE` type without recipe/schema changes or legacy mutation. Connected lifetime checks
+  preserve occupied systems; departed systems expire after both native visit windows, with exact
+  native lookups verifying original jump-point/anchor and well/anchor cleanup in separate fixtures.
+  `CoopEncounterOrbitSweep` adds at most one managed system's full orbit snapshot per existing 1 Hz
+  tick. The sorted transient cursor advances one slot even when occupied/empty; full recipe/member
+  capture is limited to the selected system. Canonical ghost pose, 384 KiB payload and exact 1 MiB
+  frame checks apply before queueing. Install/dispose resets the cursor; wire/saved layout is unchanged.
+  Deployed `e7c28df` passes native bounded-convergence verification: three complete 5,024-value
+  comparisons at a common frozen epoch remain equal over 47.232 seconds, with zero lookup failures
+  and empty queues. Final native saves/backups pass audit within stated limits. Phase 26 remains
+  PARTIAL: Task 0, M1, shared wrecks and M2 are complete; M3 lights, M4 storms and M5 ghosts/Leviathan
+  trails are unbuilt milestones. Clean build: 4,208 Java pass, one existing router skip, zero
+  failures/errors; earlier 155 bridge/offline tests unchanged, not rerun. Guest-proximity abyssal
+  triggering also remains unbuilt.
+  Co-op-only pause remains:
+  configured roles hold the campaign paused without a playable session. The primitive saved
+  Guest-inside hold stays implemented; Host solo progression is outside acceptance by user decision.
+  Dated native evidence, including the retained old-build mining FAIL, belongs
+  in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md) and `tmp_ff_analysis/p26/2026-10-17/m2-live`.
+  NPC mirror checks cover identity/roster, location and motion; world orbital body/focus keys are
+  checked separately because native NPC assignments and target ids are not replayed.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
   `data/campaign/abilities.csv`, a toggle whose effect is nothing and whose state is everything). Owns `MARKET_OPEN`, `MARKET_SNAPSHOT`, `MARKET_TXN`,
   `WORLD_DELTA`, `MISSION_POOL_SNAPSHOT`, `MISSION_CLAIM_*`, `REP_DELTA`, `GUEST_REP_DELTA`,
   `PLAYER_REP_SNAPSHOT`, `FACTION_REL_DELTA`, `ABILITY_ACTIVATE`, `ORBIT_SNAPSHOT`, `BASE_SET`,
+  `STREAM_SET`, `STREAM_ADD`, `STREAM_DESPAWN`, `STREAM_REMOVE`, `ENC_SET`,
   `CREDITS_GRANT`.
 
   Credit transfers bind their wallet to the originating sector, register outgoing gifts before
@@ -292,8 +375,9 @@ Owns: every wire type, since the enum lives here.
   the campaign day count (cycle times 360 plus the day into the cycle). Owns `MARK`.
 - **`coop.newgame`** (3) - `CoopNewGameDialogPlugin` (guest-aware New Game dialog),
   `CoopNewGameChoices`, `CoopWorldSettings` (the two settings a sector cannot be asked for later).
-- **`coop.debug`** (3) - `CoopAgentBridge` (dormant localhost TCP listener), `CoopAgentCommands`
-  (verb -> handler registry + JSON codec), `CoopOwnFleetProbe`.
+- **`coop.debug`** (4) - `CoopAgentBridge` (dormant localhost TCP listener), `CoopAgentCommands`
+  (verb -> handler registry + JSON codec), `CoopOwnFleetProbe`, `CoopDebugClockAlignment`
+  (paused, forward-only clock alignment for paired QA samples).
 - **`coop.util`** (5) - `CoopLog`, `CoopDebug` (diagnostics opt-in), `CoopText`, `CoopFrameProfiler`,
   `CoopIntelFacts`.
 - **`coop.rewards`** (1) - `CoopRewardSplitter`, the co-op share policy as pure arithmetic.
@@ -304,7 +388,7 @@ Owns: every wire type, since the enum lives here.
 
 ## Wire Protocol
 
-Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **73 constants**. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
+Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **84 constants**. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
 payloads use the `CoopDelimited` unit-separator encoding instead):
 
 ```text
@@ -452,20 +536,33 @@ src/launcher/java/coop/launcher/   22 classes
 
 - **Agent bridge.** `coop.debug.CoopAgentBridge`, gated on `-Dcoop.debug.bridge=<port>`; absent,
   unparsable or `0` means no socket and no log line. Binds 127.0.0.1 only, four clients, a few
-  commands per frame on the campaign thread. 30 verbs in `CoopAgentCommands`: `status`, `fleets`,
+  commands per frame on the campaign thread. 37 verbs in `CoopAgentCommands`: `status`, `fleets`,
   `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `ownfleet`, `colonizable`,
-  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen` read; `teleport`, `pause`, `ability`,
+  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen`, `streams`, `wrecks` read; `teleport`, `pause`,
+  `clockalign`, `ability`,
   `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`,
-  `mark`, `memory` act.
+  `mark`, `memory`, `streamadd`, `streamdespawn`, `wreckspawn`, `wreckconsume` act. Stream
+  creation/despawn and native wreck spawning are host-only. `wreckspawn` tries the native roll at
+  most 20 times near a host or guest anchor; `wreckconsume` starts native fading on a managed wreck
+  to test disappearance propagation. It does not exercise the loot UI.
+  `streamadd` reports actual creation and native route exhaustion; explicit `rearmUsedRoute`
+  permits a native QA spawn after all seasonal terrain is gone, with the route flag restored.
+  `clockalign` requires a paused active session, refuses backward movement or a jump over one day,
+  and verifies both the calendar and cached timestamp after the write.
   Four things are deliberately **not** verbs (market buy/sell, officer hire, bar-offer accept, market
   open/close) because a UI listener drives each and a verb would bypass the listener under test.
 - **MCP server.** `tools/starsector-mcp` (Node, stdio) wraps host port 7801 and guest 7802 into
-  `ss_status`, `ss_dump`, `ss_diff`, `ss_act`, `ss_advance_days`. All state comparison lives there;
+  `ss_status`, `ss_dump`, `ss_diff`, `ss_act`, `ss_advance_days`, `ss_align_clocks`.
+  The alignment tool checks the shared pause and matching session, then advances only the earlier
+  clock to the later timestamp. It does not advance terrain timers, so use it before starting a
+  fade, never repeatedly during one. `ss_diff` requires equal campaign timestamps for stream samples.
+  All state comparison lives there;
   the bridge only serializes. `ss_diff` excludes `role`, `engineId`, `lines` by default. Setup and a
   worked example per tool: `tools/starsector-mcp/README.md`.
 - **Diagnostics switches.** `coop.util.CoopDebug` gates the dormant probes (orbit dump, dialog state,
   `CoopFleetVisibilityProbe`, `CoopMotionSpeedProbe`, `CoopOwnFleetProbe`) behind
   `-Dcoop.debug.diagnostics=true` or the `$coopDebug` sector-memory flag, polled every 300 frames;
+  diagnostics also dumps the host's canonical fingerprint after a successful seed lock;
   `CoopFrameProfiler` behind `-Dcoop.debug.frameProfile=true` or `$coopFrameProfile`;
   `coop.net.CoopWiretap` (UDP stream dump + size histogram) behind `-Dcoop.debug.wiretap` and
   `-Dcoop.debug.wiretapSample`. `netfault{mode, seconds, lossPercent, delaySeconds}` makes *this*
@@ -592,7 +689,7 @@ Things that compile, pass the suite, and fail in-game.
 - **Two people building from their own checkouts cannot connect.** `coopGitCommit` is compared in the
   handshake, and a dirty tree reports `<hash>-dirty`. A release is one built artifact both players
   install. (`README_DEV.md`, "Release Checklist".)
-- **`coop/rng/` or `coop/presence/` entries inside `coop.jar` break the forks silently.** Check with
+- **`coop/rng/`, `coop/presence/` or `coop/ambient/` entries inside `coop.jar` break the forks.** Check with
   `jar -tf` before shipping; `package-release.ps1` refuses a broken split.
 - **Every repo file is LF.** `.gitattributes` (`* text=auto eol=lf`) and `.editorconfig`
   (`end_of_line = lf`) are committed; do not write CRLF.

@@ -64,6 +64,7 @@ class CoopNpcFleetSuppressorTest {
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("MercFleetManagerV2"));
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("RemnantSeededFleetManager"));
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("PersonBountyManager"));
+        assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("SlipstreamManager"));
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("HegemonyPatrolFleetManager"));
     }
 
@@ -110,14 +111,13 @@ class CoopNpcFleetSuppressorTest {
 
     /**
      * The other scripts {@code CoreLifecyclePluginImpl.addScriptsIfNeeded()} registers. These are
-     * per-player, benign, or deliberately deferred (slipstreams = Phase 26, bar/mission sync = its own
-     * phase) — suppressing them would take gameplay away from the guest for no determinism gain.
+     * per-player or benign. Seasonal slipstreams are host-owned under Phase 26 and their manager
+     * belongs to the suppression set; guest ability surges do not run through that manager.
      */
     @Test
-    void keepsBenignAndDeliberatelyDeferredScripts() {
+    void keepsBenignAndPerPlayerScripts() {
         for (String name : Arrays.asList(
                 "StrandedGiveTJScript",
-                "SlipstreamManager",
                 "OfficerManagerEvent",
                 "FieldRepairsScript",
                 "HTFactorTracker",
@@ -193,16 +193,46 @@ class CoopNpcFleetSuppressorTest {
         sector.scripts.add(new PirateBaseManager());
         sector.scripts.add(new SensorGhostManager());
         sector.scripts.add(new SlipstreamManager());
+        sector.scripts.add(new FieldRepairsScript());
         sector.memory.put("$ghostManager", "stale-handle");
 
         new CoopNpcFleetSuppressor().tick(sector.proxy(), 0L);
 
-        assertEquals(2, sector.removed.size(), "only the two spawners are removed");
+        assertEquals(3, sector.removed.size(), "the two spawners and slipstream manager are removed");
         assertEquals(1, sector.scripts.size());
-        assertEquals("SlipstreamManager", sector.scripts.get(0).getClass().getSimpleName());
+        assertEquals("FieldRepairsScript", sector.scripts.get(0).getClass().getSimpleName());
         assertFalse(sector.memory.containsKey("$ghostManager"), "stale ghost handle must be unset");
         assertSame(sector.removed.get(0), sector.memory.get("$core_pirateBaseManager"),
                 "the pirate base manager handle is backfilled, never cleared");
+    }
+
+    @Test
+    void slipstreamManagerIsRemovedFromBothScriptListsAndRearmedAfterLoad() {
+        CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+        RecordingSector sector = new RecordingSector();
+        sector.scripts.add(new SlipstreamManager());
+        sector.transientScripts.add(new SlipstreamManager());
+        sector.scripts.add(new FieldRepairsScript());
+
+        suppressor.tick(sector.proxy(), 0L);
+
+        assertEquals(2, sector.removed.size());
+        assertEquals(1, sector.scripts.size());
+        assertTrue(sector.transientScripts.isEmpty());
+        assertNull(CoopNpcFleetSuppressor.managerHandle("SlipstreamManager"),
+                "vanilla never caches a sector-memory handle for the slipstream manager");
+        assertTrue(sector.memory.isEmpty());
+        assertTrue(suppressor.spawnersSuppressed());
+
+        // Vanilla adds a new manager on load; the new session must remove that instance as well.
+        sector.scripts.add(new SlipstreamManager());
+        suppressor.reset();
+        assertFalse(suppressor.spawnersSuppressed());
+        suppressor.tick(sector.proxy(), 1L);
+
+        assertEquals(3, sector.removed.size());
+        assertEquals(1, sector.scripts.size());
+        assertEquals("FieldRepairsScript", sector.scripts.get(0).getClass().getSimpleName());
     }
 
     // ---- Phase 12b/13: spawner suppression retries and re-arms ---------------------------------
@@ -341,7 +371,7 @@ class CoopNpcFleetSuppressorTest {
     void suppressionRemovesTheHostileActivityManagerScript() {
         RecordingSector sector = new RecordingSector();
         sector.scripts.add(new HostileActivityManager());
-        sector.scripts.add(new SlipstreamManager());
+        sector.scripts.add(new FieldRepairsScript());
 
         new CoopNpcFleetSuppressor().tick(sector.proxy(), 0L);
 
@@ -463,9 +493,11 @@ class CoopNpcFleetSuppressorTest {
     void coverageLineReportsBothStatuses() {
         assertTrue(CoopNpcFleetSuppressor.coverageLine("persistent", "PirateBaseManager", true)
                 .contains("SUPPRESSED"));
-        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", false)
+        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "FieldRepairsScript", false)
                 .contains("KEPT"));
-        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", false)
+        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", true)
+                .contains("SUPPRESSED"));
+        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", true)
                 .contains("[transient] SlipstreamManager"));
     }
 
@@ -552,6 +584,9 @@ class CoopNpcFleetSuppressorTest {
     }
 
     private static final class SlipstreamManager extends NoOpScript {
+    }
+
+    private static final class FieldRepairsScript extends NoOpScript {
     }
 
     private static final class HostileActivityManager extends NoOpScript {
@@ -666,6 +701,7 @@ class CoopNpcFleetSuppressorTest {
     /** SectorAPI recording script removals and sector-memory writes. */
     private static final class RecordingSector {
         private final List<EveryFrameScript> scripts = new ArrayList<>();
+        private final List<EveryFrameScript> transientScripts = new ArrayList<>();
         private final List<EveryFrameScript> removed = new ArrayList<>();
         private final Map<String, Object> memory = new HashMap<>();
 
@@ -698,10 +734,10 @@ class CoopNpcFleetSuppressorTest {
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];
                         case "getScripts" -> new ArrayList<>(scripts);
-                        case "getTransientScripts" -> new ArrayList<EveryFrameScript>();
+                        case "getTransientScripts" -> new ArrayList<>(transientScripts);
                         case "removeScript", "removeTransientScript" -> {
                             EveryFrameScript script = (EveryFrameScript) args[0];
-                            if (scripts.remove(script)) {
+                            if (scripts.remove(script) || transientScripts.remove(script)) {
                                 removed.add(script);
                             }
                             yield null;

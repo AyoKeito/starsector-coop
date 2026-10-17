@@ -170,6 +170,9 @@ sourceSets {
         java {
             srcDir generatedBuildInfoDir
             srcDir generatedForksBuildInfoDir
+            // This bridge calls methods supplied only by the native forks. Its one runtime copy
+            // belongs to the system loader; main code links against the forks output below.
+            exclude 'coop/ambient/**'
         }
     }
     // Forked engine classes (com.fs.starfarer.api.*) plus coop.rng.CoopRandom and
@@ -179,6 +182,7 @@ sourceSets {
     forks {
         java {
             srcDirs = ['forks', 'src/main/java/coop/rng', 'src/main/java/coop/presence',
+                       'src/main/java/coop/ambient',
                        generatedForksBuildInfoDir]
         }
         compileClasspath = forksCompileClasspath
@@ -196,6 +200,12 @@ sourceSets {
         }
     }
 }
+
+// The bridge's native methods do not exist in starfarer.api.jar. Resolve the pinned forks first
+// both while compiling the mod and in tests, just as the game resolves coop-forks.jar first.
+sourceSets.main.compileClasspath = sourceSets.forks.output + sourceSets.main.compileClasspath
+sourceSets.test.compileClasspath = sourceSets.forks.output + sourceSets.test.compileClasspath
+sourceSets.test.runtimeClasspath = sourceSets.forks.output + sourceSets.test.runtimeClasspath
 
 sourceSets.launcher.compileClasspath = sourceSets.main.output + files(
     "${starsectorCore}/json.jar",
@@ -251,6 +261,7 @@ jar {
     // code writes to is the same one the forked RouteManager reads.
     exclude 'coop/rng/**'
     exclude 'coop/presence/**'
+    exclude 'coop/ambient/**'
     // Same rule for the forks build stamp: the one copy on disk has to be the one inside
     // coop-forks.jar, or it would report this jar's identity instead of that one's.
     exclude 'coop/build/CoopForksBuildInfo*'

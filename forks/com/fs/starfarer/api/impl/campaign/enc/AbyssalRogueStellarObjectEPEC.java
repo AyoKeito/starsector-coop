@@ -1,19 +1,18 @@
 /*
  * ==========================================================================================
- * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Targeted RNG determinism fork only.
+ * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Primitive capture and parent-EPEC replay hooks only.
  * ------------------------------------------------------------------------------------------
  * Starsector version : 0.98a-RC8
  * Original source     : starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/enc/AbyssalRogueStellarObjectEPEC.java
  * Compiled into       : mods/coop/jars/coop-forks.jar (classpath-prepended ahead of starfarer.api.jar).
- * RNG replacement:
- *   createEncounter() generates abyssal deep-space content off data.random (and temporarily swaps
- *   StarSystemGenerator.random = data.random for the star/planet gen). data.random is unseeded, so
- *   two clients exploring the same abyssal encounter point produced different content. Fix: in a
- *   coop session, reseed data.random from an independent CoopRandom stream keyed by the stable
- *   encounter-point identity (id + rounded hyperspace location), so both clients at the same point
- *   generate identical content. Unlike the new-game deep-space forks this is encounter-driven, so
- *   it does not affect the session-start seed-lock fingerprint - it is for abyss-exploration parity.
- * Outside a coop session (no -Dcoop.newGameSeed) behaviour is byte-for-byte vanilla.
+ * Capture/replay:
+ *   The exact parent and dire-hints creator draw one effective seed and replace data.random with
+ *   new Random(seed), recording primitive generation inputs on the new system. With a launch seed,
+ *   the draw uses the existing independent encounter-topic stream; otherwise it uses data.random.
+ *   Replay uses its supplied seed, consumes only the host's optional threat draw, forces the host
+ *   threat outcome and bypasses local pity, native despawn installation and addSpecials. The mod
+ *   applies the captured specials afterwards. Other subclasses keep native generation unchanged.
+ *   No instance fields or mod-classloader types are introduced.
  * ==========================================================================================
  */
 package com.fs.starfarer.api.impl.campaign.enc;
@@ -117,13 +116,24 @@ public class AbyssalRogueStellarObjectEPEC extends BaseEPEncounterCreator {
 	public void createEncounter(EncounterManager manager, EncounterPoint point) {
 		
 		AbyssalEPData data = (AbyssalEPData) point.custom;
-		// COOP FORK: reseed this encounter's RNG from an independent session-seeded stream keyed by
-		// the stable encounter-point identity, so both clients generate identical abyssal content
-		// at the same point. data.random is the single source (the method later swaps it into
-		// StarSystemGenerator.random for star/planet gen), so reseeding it here covers everything.
-		if (data != null && coop.rng.CoopRandom.isCoopSession()) {
-			data.random = coop.rng.CoopRandom.of("AbyssalRogueStellarObjectEPEC",
-					point.id, Math.round(point.loc.x), Math.round(point.loc.y));
+		// COOP FORK: replay is the parent EPEC; capture only the two pinned native creator classes.
+		boolean coopCapture = coop.ambient.CoopEncounterReplayBridge.supportsCreator(getClass().getName());
+		boolean coopReplay = coopCapture && coop.ambient.CoopEncounterReplayBridge.isReplaying();
+		long coopSeed = 0L;
+		if (coopCapture) {
+			if (coopReplay) {
+				coopSeed = coop.ambient.CoopEncounterReplayBridge.replaySeed();
+			} else if (coop.ambient.CoopEncounterReplayBridge.hasQaSeed()) {
+				coopSeed = coop.ambient.CoopEncounterReplayBridge.qaSeed();
+			} else {
+				Random seedSource = data.random;
+				if (coop.rng.CoopRandom.isCoopSession()) {
+					seedSource = coop.rng.CoopRandom.of("AbyssalRogueStellarObjectEPEC",
+							point.id, Math.round(point.loc.x), Math.round(point.loc.y));
+				}
+				coopSeed = seedSource.nextLong();
+			}
+			data.random = new Random(coopSeed);
 		}
 		SectorAPI sector = Global.getSector();
 		
@@ -137,9 +147,24 @@ public class AbyssalRogueStellarObjectEPEC extends BaseEPEncounterCreator {
 		system.addTag(Tags.THEME_SPECIAL);
 		system.addTag(Tags.TEMPORARY_LOCATION);
 		system.addTag(Tags.SYSTEM_ABYSSAL);
+		// COOP FORK: strings are safe in saved memory; no recipe or transport object is persisted.
+		if (coopCapture && !coopReplay) {
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.SEED_KEY, Long.toString(coopSeed));
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.POINT_ID_KEY, point.id);
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.POINT_X_KEY, Float.toString(point.loc.x));
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.POINT_Y_KEY, Float.toString(point.loc.y));
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.DEPTH_KEY, Float.toString(data.depth));
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.THREAT_ROLL_RAN_KEY, Boolean.toString(data.nearest == null));
+			system.getMemoryWithoutUpdate().set(coop.ambient.CoopEncounterReplayBridge.CREATOR_KEY, getClass().getName());
+		}
 		
 		
-		if (data.nearest == null) {
+		// COOP FORK: replay ignores local nearest/pity state but preserves the host's RNG position.
+		if (coopReplay) {
+			if (coop.ambient.CoopEncounterReplayBridge.applyReplayThreat(data.random)) {
+				system.addTag(Tags.SYSTEM_CAN_SPAWN_THREAT);
+			}
+		} else if (data.nearest == null) {
 			float prob = (data.depth - 1f) / (MAX_THREAT_PROB_DEPTH - 1f) * MAX_THREAT_PROB;
 			if (prob > MAX_THREAT_PROB) prob = MAX_THREAT_PROB;
 			if (prob > 0 && prob < MIN_THREAT_PROB) prob = 0.25f;
@@ -312,9 +337,11 @@ public class AbyssalRogueStellarObjectEPEC extends BaseEPEncounterCreator {
 		
 		setAbyssalDetectedRanges(system);
 		
-		system.addScript(new AbyssalLocationDespawner(system));
-		
-		addSpecials(system, manager, point, data);
+		// COOP FORK: replica lifetime and specials come from the host's captured recipe.
+		if (!coopReplay) {
+			system.addScript(new AbyssalLocationDespawner(system));
+			addSpecials(system, manager, point, data);
+		}
 	}
 	
 	protected void addSpecials(StarSystemAPI system, EncounterManager manager, EncounterPoint point, AbyssalEPData data) {

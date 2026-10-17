@@ -10,6 +10,7 @@ import com.fs.starfarer.api.characters.OfficerDataAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
+import coop.fleet.CoopLocations;
 import coop.util.CoopLog;
 
 import java.util.ArrayList;
@@ -227,7 +228,7 @@ public final class CoopGuestSnapshotFactory {
     private static String locationId(CampaignFleetAPI fleet) {
         try {
             LocationAPI location = fleet.getContainingLocation();
-            return location == null ? "" : normalize(location.getId());
+            return normalize(CoopLocations.keyOf(location));
         } catch (RuntimeException | LinkageError ignored) {
             return "";
         }

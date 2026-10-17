@@ -3,9 +3,15 @@ package coop.net;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.campaign.CoopSlipstreamAuthority;
+import coop.campaign.CoopSlipstreamRecord;
+import coop.campaign.CoopWreckAuthority;
+import coop.campaign.CoopWreckFixtures;
+import coop.campaign.CoopWreckRecord;
 import coop.config.CoopOptionsRegistry;
 import coop.handshake.CoopHandshakeManifest;
 import coop.seed.CoopSeedSync;
@@ -70,6 +76,7 @@ class CoopNetPumpTest {
         coop.fleet.CoopGuestMirrorHandle.clear();
         coop.fleet.CoopGuestPresence.frameBoundary();
         coop.fleet.CoopGuestPresence.frameBoundary();
+        coop.ambient.CoopWreckBridge.clear();
     }
 
     @Test
@@ -630,6 +637,112 @@ class CoopNetPumpTest {
         assertEquals("market-1", CoopMessages.requiredPayloadString(release, "entityId"));
         assertEquals("guest-player", CoopMessages.requiredPayloadString(release, "playerId"));
         assertTrue(timeLock.inputBlockerStates.contains(true));
+    }
+
+    @Test
+    void simultaneousWreckDialogsWithDifferentEngineIdsCompeteForOneCanonicalClaim() {
+        AtomicLong now = new AtomicLong(1_000L);
+        RecordingNetService hostService = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopSessionState hostSession = activeHostSession();
+        RecordingCampaignUi hostUi = new RecordingCampaignUi(new RecordingEntity("native-host", "Wreck",
+                sharedWreckTarget("native-host", "wreck:shared")));
+        SectorAPI hostSector = new RecordingSector(false, hostUi).proxy();
+        Global.setSector(hostSector);
+        CoopNetPump host = livePump(hostService, hostSession, now::get);
+        installWreckWorld(host, hostService, hostSession, now);
+        host.advance(0f);
+        assertEquals("wreck:shared", CoopMessages.requiredPayloadString(
+                lastOfType(hostService, CoopMessages.Type.INTERACTION_ACCEPT), "entityId"));
+
+        RecordingNetService guestService = new RecordingNetService(CoopConnectionRole.GUEST);
+        CoopSessionState guestSession = activeGuestSession();
+        RecordingCampaignUi guestUi = new RecordingCampaignUi(new RecordingEntity("native-guest", "Wreck",
+                sharedWreckTarget("native-guest", "wreck:shared")));
+        SectorAPI guestSector = new RecordingSector(false, guestUi).proxy();
+        Global.setSector(guestSector);
+        CoopNetPump guest = livePump(guestService, guestSession, now::get);
+        installWreckWorld(guest, guestService, guestSession, now);
+        guest.advance(0f); // Opens optimistically before receiving the host's claim.
+        CoopMessages.Message claim = lastOfType(guestService, CoopMessages.Type.INTERACTION_CLAIM);
+        assertEquals("wreck:shared", CoopMessages.requiredPayloadString(claim, "entityId"));
+
+        Global.setSector(hostSector);
+        hostService.inbound.add(claim);
+        host.advance(0f);
+        CoopMessages.Message reject = lastOfType(hostService, CoopMessages.Type.INTERACTION_REJECT);
+        Global.setSector(guestSector);
+        guestService.inbound.add(reject);
+        guest.advance(0f);
+        assertEquals(1, guestUi.dismissCount);
+        assertEquals(0, hostUi.dismissCount);
+    }
+
+    private static SectorEntityToken sharedWreckTarget(String engineId, String canonicalId) {
+        LocationAPI hyper = (LocationAPI) Proxy.newProxyInstance(LocationAPI.class.getClassLoader(),
+                new Class<?>[]{LocationAPI.class}, (p, m, a) -> m.getName().equals("isHyperspace")
+                        ? true : defaultValue(m.getReturnType()));
+        MemoryAPI memory = (MemoryAPI) Proxy.newProxyInstance(MemoryAPI.class.getClassLoader(),
+                new Class<?>[]{MemoryAPI.class}, (p, m, a) -> m.getName().equals("get")
+                        ? (coop.campaign.CoopWreckWorld.WRECK_ID.equals(a[0]) ? canonicalId : null)
+                        : defaultValue(m.getReturnType()));
+        Object plugin = new com.fs.starfarer.api.impl.campaign.DerelictShipEntityPlugin();
+        return (SectorEntityToken) Proxy.newProxyInstance(SectorEntityToken.class.getClassLoader(),
+                new Class<?>[]{com.fs.starfarer.api.campaign.CustomCampaignEntityAPI.class}, (p, m, a) -> switch (m.getName()) {
+                    case "getId" -> engineId;
+                    case "getName" -> "Wreck";
+                    case "getCustomEntityType" -> com.fs.starfarer.api.impl.campaign.ids.Entities.WRECK;
+                    case "getCustomPlugin" -> plugin;
+                    case "getMemoryWithoutUpdate" -> memory;
+                    case "getContainingLocation" -> hyper;
+                    default -> defaultValue(m.getReturnType());
+                });
+    }
+
+    @Test
+    void encounterDialogsClaimTheCompositeIdentityInsteadOfTheirDifferentNativeIds() {
+        AtomicLong now = new AtomicLong(1_000);
+        String key = "coopenc_instance-a_system3";
+        RecordingNetService hostNet = new RecordingNetService(CoopConnectionRole.HOST);
+        RecordingCampaignUi hostUi = new RecordingCampaignUi(new RecordingEntity("host-native", "Derelict",
+                encounterTarget("host-native", key)));
+        SectorAPI hostSector = new RecordingSector(false, hostUi).proxy();
+        Global.setSector(hostSector);
+        CoopNetPump host = livePump(hostNet, activeHostSession(), now::get);
+        host.advance(0);
+        assertEquals(key, CoopMessages.requiredPayloadString(
+                lastOfType(hostNet, CoopMessages.Type.INTERACTION_ACCEPT), "entityId"));
+
+        RecordingNetService guestNet = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingCampaignUi guestUi = new RecordingCampaignUi(new RecordingEntity("guest-native", "Derelict",
+                encounterTarget("guest-native", key)));
+        SectorAPI guestSector = new RecordingSector(false, guestUi).proxy();
+        Global.setSector(guestSector);
+        CoopNetPump guest = livePump(guestNet, activeGuestSession(), now::get);
+        guest.advance(0);
+        CoopMessages.Message claim = lastOfType(guestNet, CoopMessages.Type.INTERACTION_CLAIM);
+        assertEquals(key, CoopMessages.requiredPayloadString(claim, "entityId"));
+        Global.setSector(hostSector);
+        hostNet.inbound.add(claim);
+        host.advance(0);
+        Global.setSector(guestSector);
+        guestNet.inbound.add(lastOfType(hostNet, CoopMessages.Type.INTERACTION_REJECT));
+        guest.advance(0);
+        assertEquals(1, guestUi.dismissCount);
+        assertEquals(0, hostUi.dismissCount);
+    }
+
+    private static SectorEntityToken encounterTarget(String nativeId, String sharedId) {
+        MemoryAPI memory = (MemoryAPI) Proxy.newProxyInstance(MemoryAPI.class.getClassLoader(),
+                new Class<?>[]{MemoryAPI.class}, (p,m,a) -> m.getName().equals("get")
+                        ? (coop.fleet.CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY.equals(a[0]) ? sharedId : null)
+                        : defaultValue(m.getReturnType()));
+        return (SectorEntityToken) Proxy.newProxyInstance(SectorEntityToken.class.getClassLoader(),
+                new Class<?>[]{SectorEntityToken.class}, (p,m,a) -> switch (m.getName()) {
+                    case "getId" -> nativeId;
+                    case "getName" -> "Derelict";
+                    case "getMemoryWithoutUpdate" -> memory;
+                    default -> defaultValue(m.getReturnType());
+                });
     }
 
     @Test
@@ -5422,6 +5535,7 @@ class CoopNetPumpTest {
         private boolean paused;
         private final RecordingCampaignUi campaignUi;
         private final RecordingFleet playerFleet;
+        private final LocationAPI hyperspace = emptyHyperspace();
         /** Phase 28: where the campaign's option policy is stored, beside coop.campaignId. */
         private final java.util.Map<String, Object> persistentData = new java.util.LinkedHashMap<>();
         /**
@@ -5468,6 +5582,9 @@ class CoopNetPumpTest {
                             case "getPlayerFleet" -> {
                                 return playerFleet == null ? null : playerFleet.proxy();
                             }
+                            case "getHyperspace" -> {
+                                return hyperspace;
+                            }
                             // Phase 21 red-team item 13 re-registers the intel pages off the stats
                             // tick; no manager is the headless answer and the pump has to take it.
                             case "getIntelManager", "getClock" -> {
@@ -5479,6 +5596,9 @@ class CoopNetPumpTest {
                             case "getScripts", "getTransientScripts" -> {
                                 return new ArrayList<>();
                             }
+                            case "getStarSystems" -> {
+                                return List.of();
+                            }
                             case "getPersistentData" -> {
                                 return persistentData;
                             }
@@ -5487,6 +5607,24 @@ class CoopNetPumpTest {
                             }
                             default -> throw new UnsupportedOperationException(method.getName());
                         }
+                    });
+        }
+
+        private static LocationAPI emptyHyperspace() {
+            return (LocationAPI) Proxy.newProxyInstance(
+                    LocationAPI.class.getClassLoader(),
+                    new Class<?>[]{LocationAPI.class},
+                    (proxy, method, args) -> {
+                        Object objectMethod = objectMethodResult(proxy, method.getName(), args);
+                        if (objectMethod != UNHANDLED) return objectMethod;
+                        return switch (method.getName()) {
+                            case "getId" -> "hyperspace";
+                            case "isHyperspace" -> true;
+                            // A readable empty world lets the real seasonal sweep finish before
+                            // the guest's once-per-session NPC manager suppression can arm.
+                            case "getTerrainCopy" -> new ArrayList<>();
+                            default -> throw new UnsupportedOperationException(method.getName());
+                        };
                     });
         }
     }
@@ -5602,13 +5740,20 @@ class CoopNetPumpTest {
     private static final class RecordingEntity {
         private final String id;
         private final String name;
+        private final SectorEntityToken override;
 
         private RecordingEntity(String id, String name) {
+            this(id, name, null);
+        }
+
+        private RecordingEntity(String id, String name, SectorEntityToken override) {
             this.id = id;
             this.name = name;
+            this.override = override;
         }
 
         private SectorEntityToken proxy() {
+            if (override != null) return override;
             return (SectorEntityToken) Proxy.newProxyInstance(
                     SectorEntityToken.class.getClassLoader(),
                     new Class<?>[]{SectorEntityToken.class},
@@ -5620,6 +5765,7 @@ class CoopNetPumpTest {
                         return switch (method.getName()) {
                             case "getId" -> id;
                             case "getName" -> name;
+                            case "getMemoryWithoutUpdate" -> null;
                             default -> throw new UnsupportedOperationException(method.getName());
                         };
                     });
@@ -8639,6 +8785,416 @@ class CoopNetPumpTest {
         assertFalse(pump.npcReplicationStreamingForTest(),
                 "the next connect is a fresh session start, not a resume");
         assertFalse(pump.baseReplicationStreamingForTest());
+    }
+
+    @Test
+    void initialEncounterSetSurvivesTheLifecycleEdgeAndReportsLaterHintEdits() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        var record = new coop.campaign.CoopEncounterRecord("enc-1", 12, "abyssal_0_0", 0, 0, 3,
+                true, coop.campaign.CoopEncounterRecord.Creator.PARENT, false,
+                List.of(new coop.campaign.CoopEncounterRecord.Entity(
+                        coop.campaign.CoopEncounterRecord.Role.SYSTEM, 0, "planet")),
+                List.of(), coop.campaign.CoopEncounterRecord.Overlay.empty());
+        var world = new RecordingEncounterWorld(record);
+        pump.setEncounterAuthorityForTest(new coop.campaign.CoopEncounterAuthority(
+                service, session, now::get, world));
+        service.inbound.add(CoopMessages.encounterSet("session-a", 1, now.get(),
+                coop.campaign.CoopEncounterCodec.encodeSet(List.of(record))));
+
+        pump.advance(0f);
+
+        assertEquals(1, world.upserts);
+        world.visited = true;
+        now.addAndGet(250);
+        pump.advance(0f);
+        assertTrue(service.sent.stream().anyMatch(message -> message.type() == CoopMessages.Type.WORLD_DELTA
+                && "ENCOUNTER_STATE".equals(CoopMessages.requiredPayloadString(message, "kind"))),
+                "the lifecycle pass must retain the receiver baseline created during dispatch");
+    }
+
+    private static final class RecordingEncounterWorld implements coop.campaign.CoopEncounterAuthority.EncounterWorld {
+        final coop.campaign.CoopEncounterRecord record;
+        int upserts;
+        boolean visited;
+        RecordingEncounterWorld(coop.campaign.CoopEncounterRecord record) { this.record = record; }
+        @Override public List<coop.campaign.CoopEncounterRecord> captureHost() { return List.of(record); }
+        @Override public java.util.Set<String> taggedIds() { return java.util.Set.of(record.instanceId()); }
+        @Override public void upsert(coop.campaign.CoopEncounterRecord value) { upserts++; }
+        @Override public void remove(String id) { throw new AssertionError("unexpected encounter removal"); }
+        @Override public void updateGuestPresence(boolean grace) { }
+        @Override public List<coop.campaign.CoopEncounterRecord.EntityState> guestStates() {
+            return List.of(new coop.campaign.CoopEncounterRecord.EntityState(
+                    record.entityId(record.entities().get(0)), null, null, visited
+                    ? List.of(new coop.campaign.CoopWreckRecord.MemoryValue("$visited", "BOOLEAN", "true", 0))
+                    : List.of()));
+        }
+    }
+
+    @Test
+    void anInitialStreamSetConsumesTheLifecycleEdgeBeforeTheFramesSyncPass() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.tagged.add("stale-host-stream");
+        CoopSlipstreamRecord stream = oneStream("host-stream-1");
+        service.inbound.add(CoopMessages.streamSet("session-a", 1L, now.get(),
+                CoopSlipstreamRecord.encodeIds(List.of(stream.hostId()))));
+        service.inbound.add(CoopMessages.streamAdd("session-a", 2L, now.get(), stream.encode()));
+
+        pump.advance(0f);
+
+        assertEquals(1, world.sweepAttempts,
+                "dispatch prepares once; the later frame lifecycle must not reset and sweep again");
+        assertEquals(List.of("stale-host-stream"), world.removed);
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+        assertEquals(1, world.upserts);
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+
+        now.addAndGet(100L);
+        pump.advance(0f);
+        assertEquals(1, world.sweepAttempts);
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+    }
+
+    @Test
+    void streamTerrainAndItsStreamingFlagSurviveGraceAndResumeWithoutAnotherSeasonalSweep() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.tagged.add("host-stream-1");
+        pump.advance(0f);
+        assertEquals(1, world.sweepAttempts);
+
+        service.connected = false;
+        now.addAndGet(100L);
+        pump.advance(0f);
+
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+        assertTrue(world.removed.isEmpty());
+        assertEquals(1, world.sweepAttempts);
+
+        service.connected = true;
+        service.connectionGeneration++;
+        now.addAndGet(2_000L);
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 9L, now.get()));
+        pump.advance(0f);
+        service.inbound.add(CoopMessages.streamSet("session-a", 10L, now.get(),
+                CoopSlipstreamRecord.encodeIds(List.of("host-stream-1"))));
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(1, world.sweepAttempts,
+                "resume re-arms the full manifest, not the guest's once-per-session sweep");
+        assertEquals(java.util.Set.of("host-stream-1"), world.tagged);
+        assertTrue(world.removed.isEmpty());
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+    }
+
+    @Test
+    void graceExpiryClearsTheSlipstreamStreamingFlagWithoutRepeatingTheSeasonalSweep() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        pump.advance(0f);
+        service.connected = false;
+        pump.advance(0f);
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+
+        now.set(1_000L + 61_000L);
+        pump.advance(0f);
+
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertFalse(pump.slipstreamReplicationStreamingForTest(),
+                "a new session must take the start edge after a real expiry");
+        for (int frame = 0; frame < 3; frame++) {
+            now.addAndGet(100L);
+            pump.advance(0f);
+        }
+        assertFalse(pump.slipstreamReplicationStreamingForTest());
+        assertEquals(1, world.sweepAttempts);
+    }
+
+    @Test
+    void aFailedInitialSeasonalSweepDefersNpcManagerSuppressionUntilTheRetrySucceeds() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.failSweep = true;
+
+        pump.advance(0f);
+
+        assertEquals(1, world.sweepAttempts);
+        assertFalse(pump.npcReplicationStreamingForTest());
+        assertFalse(pump.npcFleetSuppressorForTest().spawnersSuppressed());
+        assertEquals(0, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns(),
+                "the manager must remain readable while its seasonal membership sweep is unavailable");
+
+        world.failSweep = false;
+        now.addAndGet(100L);
+        pump.advance(0f);
+
+        assertEquals(2, world.sweepAttempts);
+        assertEquals(1, world.successfulSweeps);
+        assertTrue(pump.slipstreamReplicationStreamingForTest());
+        assertTrue(pump.npcReplicationStreamingForTest());
+        assertTrue(pump.npcFleetSuppressorForTest().spawnersSuppressed());
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+
+        now.addAndGet(100L);
+        pump.advance(0f);
+        assertEquals(2, world.sweepAttempts);
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+    }
+
+    @Test
+    void anInitialWreckManifestConsumesTheLifecycleEdgeBeforeTheFramesSyncPass() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingWreckWorld world = installWreckWorld(pump, service, session, now);
+        world.tagged.add("wreck:stale");
+        CoopWreckRecord wreck = CoopWreckFixtures.sample("wreck:a");
+        service.inbound.add(CoopMessages.wreckSet("session-a", 1, now.get(),
+                CoopWreckRecord.encodeIds(List.of(wreck.id()))));
+        service.inbound.add(CoopMessages.wreckAdd("session-a", 2, now.get(), wreck.encode()));
+
+        pump.advance(0f);
+
+        assertEquals(List.of("wreck:stale"), world.removed);
+        assertEquals(java.util.Set.of(wreck.id()), world.tagged);
+        assertEquals(1, world.upserts);
+        assertEquals(1, world.reconciliations,
+                "the later lifecycle pass must not reset the manifest staged during dispatch");
+        assertTrue(pump.wreckReplicationStreamingForTest());
+        now.addAndGet(100); pump.advance(0f);
+        assertEquals(1, world.reconciliations); assertEquals(1, world.upserts);
+    }
+
+    @Test
+    void aGuestRejectsWreckUpdatesFromAnotherSessionAndRejectsConsumeRequests() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingWreckWorld world = installWreckWorld(pump, service, session, now);
+        world.tagged.add("wreck:keep"); pump.advance(0f);
+        service.inbound.add(CoopMessages.wreckSet("other-session", 1, now.get(), CoopWreckRecord.encodeIds(List.of())));
+        service.inbound.add(CoopMessages.wreckAdd("other-session", 2, now.get(), CoopWreckFixtures.sample("wreck:wrong").encode()));
+        service.inbound.add(CoopMessages.wreckRemove("other-session", 3, now.get(), "wreck:keep"));
+        service.inbound.add(CoopMessages.wreckConsume("session-a", 4, now.get(), CoopWreckRecord.encodeIds(List.of("wreck:keep"))));
+
+        pump.advance(0f);
+
+        assertEquals(java.util.Set.of("wreck:keep"), world.tagged);
+        assertEquals(0, world.upserts); assertEquals(0, world.reconciliations);
+        assertTrue(world.removed.isEmpty()); assertTrue(world.consumed.isEmpty());
+    }
+
+    @Test
+    void theHostAcceptsOnlyCurrentSessionWreckConsumptionAndRepliesWithRemoval() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeHostSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingWreckWorld world = installWreckWorld(pump, service, session, now);
+        CoopWreckRecord wreck = CoopWreckFixtures.sample("wreck:a");
+        world.hostRecords = List.of(wreck); world.tagged.add(wreck.id()); pump.advance(0f);
+        service.sent.clear();
+        service.inbound.add(CoopMessages.wreckSet("session-a", 10, now.get(), CoopWreckRecord.encodeIds(List.of())));
+        service.inbound.add(CoopMessages.wreckAdd("session-a", 11, now.get(), CoopWreckFixtures.sample("wreck:foreign").encode()));
+        service.inbound.add(CoopMessages.wreckRemove("session-a", 12, now.get(), wreck.id()));
+        service.inbound.add(CoopMessages.wreckConsume("other-session", 13, now.get(), CoopWreckRecord.encodeIds(List.of(wreck.id()))));
+        pump.advance(0f);
+        assertEquals(java.util.Set.of(wreck.id()), world.tagged);
+        assertEquals(0, world.upserts); assertTrue(world.consumed.isEmpty());
+
+        service.inbound.add(CoopMessages.wreckConsume("session-a", 14, now.get(), CoopWreckRecord.encodeIds(List.of(wreck.id()))));
+        pump.advance(0f);
+
+        assertEquals(java.util.Set.of(wreck.id()), world.consumed);
+        assertTrue(world.tagged.isEmpty());
+        assertEquals(wreck.id(), CoopMessages.requiredPayloadString(onlyOf(service, CoopMessages.Type.WRECK_REMOVE), "wreckId"));
+    }
+
+    @Test
+    void wreckMessagesCannotMutateTheWorldBeforeGameplayIsActive() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = guestSessionReadyForSeedLock();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingWreckWorld world = installWreckWorld(pump, service, session, now);
+        service.inbound.add(CoopMessages.wreckSet("session-a", 1, now.get(), CoopWreckRecord.encodeIds(List.of("wreck:a"))));
+        service.inbound.add(CoopMessages.wreckAdd("session-a", 2, now.get(), CoopWreckFixtures.sample("wreck:a").encode()));
+
+        pump.advance(0f);
+
+        assertEquals(0, world.upserts); assertEquals(0, world.reconciliations);
+        assertFalse(pump.wreckReplicationStreamingForTest());
+    }
+
+    @Test
+    void wreckConsumptionDuringGraceSurvivesResumeAndAStaleHostUpsert() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingWreckWorld world = installWreckWorld(pump, service, session, now);
+        CoopWreckRecord wreck = CoopWreckFixtures.sample("wreck:a");
+        service.inbound.add(CoopMessages.wreckSet("session-a", 1, now.get(), CoopWreckRecord.encodeIds(List.of(wreck.id()))));
+        service.inbound.add(CoopMessages.wreckAdd("session-a", 2, now.get(), wreck.encode()));
+        pump.advance(0f); service.sent.clear();
+
+        service.connected = false; now.addAndGet(100); pump.advance(0f);
+        assertTrue(pump.reconnectCoordinatorForTest().guestReconnecting());
+        assertTrue(pump.wreckReplicationStreamingForTest());
+        world.disappeared.add(wreck.id()); world.tagged.remove(wreck.id());
+        now.addAndGet(100); pump.advance(0f);
+        assertEquals(java.util.Set.of(wreck.id()), world.consumed,
+                "a locally recovered wreck must become durable while transport is held");
+        assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.WRECK_CONSUME));
+
+        service.connected = true; service.connectionGeneration++; now.addAndGet(2_000); pump.advance(0f);
+        service.inbound.add(CoopMessages.sessionResumeAccept("session-a", 9, now.get())); pump.advance(0f);
+        assertFalse(pump.reconnectCoordinatorForTest().active());
+        assertEquals(List.of(wreck.id()), CoopWreckRecord.decodeIds(CoopMessages.requiredPayloadString(
+                onlyOf(service, CoopMessages.Type.WRECK_CONSUME), "wrecks")));
+        service.inbound.add(CoopMessages.wreckAdd("session-a", 10, now.get(), wreck.encode())); pump.advance(0f);
+        assertTrue(world.tagged.isEmpty()); assertEquals(1, world.upserts,
+                "the stale host recipe must not resurrect a locally consumed identity");
+        assertEquals(1, world.reconciliations, "resume must retain the already reconciled world");
+    }
+
+    private static RecordingWreckWorld installWreckWorld(CoopNetPump pump, RecordingNetService service,
+                                                         CoopSessionState session, AtomicLong now) {
+        RecordingWreckWorld world = new RecordingWreckWorld();
+        pump.setWreckAuthorityForTest(new CoopWreckAuthority(service, session, now::get, world));
+        return world;
+    }
+
+    @Test
+    void wreckConsumptionAfterGameplayEndsIsStillPersistedWithoutSending() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingWreckWorld world = installWreckWorld(pump, service, session, now);
+        CoopWreckRecord wreck = CoopWreckFixtures.sample("wreck:a");
+        service.inbound.add(CoopMessages.wreckAdd("session-a", 1, now.get(), wreck.encode()));
+        pump.advance(0f);
+        session.reset();
+        service.connected = false;
+        now.addAndGet(100);
+        pump.advance(0f);
+        assertFalse(pump.wreckReplicationStreamingForTest());
+        service.sent.clear();
+        world.disappeared.add(wreck.id());
+        world.tagged.remove(wreck.id());
+        now.addAndGet(100);
+        pump.advance(0f);
+        assertEquals(java.util.Set.of(wreck.id()), world.consumed);
+        assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.WRECK_CONSUME));
+    }
+
+    private static final class RecordingWreckWorld implements CoopWreckAuthority.WreckWorld {
+        final java.util.Set<String> tagged = new java.util.LinkedHashSet<>();
+        final java.util.Set<String> consumed = new java.util.LinkedHashSet<>();
+        final java.util.Set<String> disappeared = new java.util.LinkedHashSet<>();
+        final List<String> removed = new ArrayList<>();
+        List<CoopWreckRecord> hostRecords = List.of();
+        int upserts, reconciliations;
+        @Override public List<CoopWreckRecord> captureHost() { return hostRecords; }
+        @Override public java.util.Set<String> taggedIds() { return java.util.Set.copyOf(tagged); }
+        @Override public void upsert(CoopWreckRecord record) { upserts++; tagged.add(record.id()); }
+        @Override public void remove(String id) { removed.add(id); tagged.remove(id); }
+        @Override public java.util.Set<String> locallyConsumed(java.util.Set<String> tracked) {
+            java.util.Set<String> result = new java.util.HashSet<>(disappeared); result.retainAll(tracked); return result;
+        }
+        @Override public void reconcileLegacy(List<CoopWreckRecord> manifest) { reconciliations++; }
+        @Override public java.util.Set<String> consumedIds() { return java.util.Set.copyOf(consumed); }
+        @Override public void markConsumed(String id) { consumed.add(id); }
+    }
+
+    private static RecordingStreamWorld installStreamWorld(CoopNetPump pump,
+                                                            RecordingNetService service,
+                                                            CoopSessionState session, AtomicLong now) {
+        RecordingStreamWorld world = new RecordingStreamWorld();
+        pump.setSlipstreamAuthorityForTest(new CoopSlipstreamAuthority(service, session, now::get, world));
+        return world;
+    }
+
+    private static CoopSlipstreamRecord oneStream(String id) {
+        CoopSlipstreamRecord.Fader fader = new CoopSlipstreamRecord.Fader(1f, 1f, 1f,
+                CoopSlipstreamRecord.FaderState.IDLE, false, false);
+        return new CoopSlipstreamRecord(id, CoopSlipstreamRecord.Kind.SEASONAL,
+                CoopSlipstreamRecord.Params.defaults(), List.of(), List.of(
+                new CoopSlipstreamRecord.Segment(0f, 0f, 600f, 1f, fader),
+                new CoopSlipstreamRecord.Segment(1000f, 0f, 600f, 1f, fader),
+                new CoopSlipstreamRecord.Segment(2000f, 0f, 600f, 1f, fader)),
+                new CoopSlipstreamRecord.Fade(null, 0f, 0f, null, 0f, 0f, 0f), false);
+    }
+
+    private static final class RecordingStreamWorld implements CoopSlipstreamAuthority.StreamWorld {
+        private final java.util.Set<String> tagged = new java.util.LinkedHashSet<>();
+        private final List<String> removed = new ArrayList<>();
+        private boolean failSweep;
+        private int sweepAttempts;
+        private int successfulSweeps;
+        private int upserts;
+
+        @Override public List<CoopSlipstreamRecord> captureHost() {
+            return List.of();
+        }
+
+        @Override public java.util.Set<String> taggedIds() {
+            return java.util.Set.copyOf(tagged);
+        }
+
+        @Override public void upsert(CoopSlipstreamRecord record) {
+            upserts++;
+            tagged.add(record.hostId());
+        }
+
+        @Override public void despawn(CoopSlipstreamRecord.Despawn record) {
+        }
+
+        @Override public void remove(String id) {
+            removed.add(id);
+            tagged.remove(id);
+        }
+
+        @Override public void sweepSeasonal() {
+            sweepAttempts++;
+            if (failSweep) throw new IllegalStateException("seasonal membership is not readable yet");
+            successfulSweeps++;
+        }
     }
 
     // ---- 0.1.2 follow-up: the partner's player mirror gets the same held-drop treatment ----------

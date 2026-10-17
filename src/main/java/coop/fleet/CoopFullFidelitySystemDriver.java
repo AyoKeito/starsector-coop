@@ -202,7 +202,7 @@ public final class CoopFullFidelitySystemDriver {
         boolean canDrive = enabled && !permanentlyDisabled && !saveInProgress && !fastAdvance;
         LocationAPI guestSystem = canDrive ? guestLocation() : null;
         boolean hyperspace = guestSystem != null && guestSystem.isHyperspace();
-        String guestId = guestSystem == null || hyperspace ? "" : String.valueOf(guestSystem.getId());
+        String guestId = guestSystem == null || hyperspace ? "" : String.valueOf(CoopLocations.keyOf(guestSystem));
         boolean engineAdvanced = !guestId.isEmpty() && activeThisFrame(guestSystem);
 
         CoopSystemDriveState.Decision decision = CoopSystemDriveState.decide(new CoopSystemDriveState.Input(
@@ -400,7 +400,7 @@ public final class CoopFullFidelitySystemDriver {
     private static String currentLocationId(SectorAPI sector) {
         try {
             LocationAPI current = sector.getCurrentLocation();
-            return current == null ? "" : String.valueOf(current.getId());
+            return current == null ? "" : String.valueOf(CoopLocations.keyOf(current));
         } catch (RuntimeException | LinkageError ex) {
             return "";
         }

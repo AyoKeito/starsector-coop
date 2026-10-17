@@ -1,8 +1,8 @@
-// Instance registry, verb tables and the five MCP tool implementations.
+// Instance registry, verb tables and the MCP tool implementations.
 // Kept free of the MCP SDK so the test suite can drive it against a mock bridge.
 
 import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffJson } from './diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson } from './diff.js';
 
 /** Read-only verbs. ss_dump and ss_diff accept these. */
 export const QUERY_VERBS = [
@@ -20,7 +20,10 @@ export const QUERY_VERBS = [
   'entities',
   'intel',
   'feed',
-  'screen'
+  'screen',
+  'streams',
+  'wrecks',
+  'encounters'
 ];
 
 /**
@@ -45,7 +48,13 @@ export const ACTION_VERBS = [
   'netfault',
   'save',
   'mark',
-  'memory'
+  'memory',
+  'streamadd',
+  'streamdespawn',
+  'wreckspawn',
+  'wreckconsume',
+  'encounterspawn',
+  'clockalign'
 ];
 
 /**
@@ -146,7 +155,69 @@ export async function ssDiff(bridges, what, args, options = {}) {
     bridges.get('host').send(what, args),
     bridges.get('guest').send(what, args)
   ]);
-  return { what, args: args ?? {}, ...diffJson(host, guest, options) };
+  if (what === 'streams' || what === 'encounters') {
+    const hostStamp = host.campaignTimestamp;
+    const guestStamp = guest.campaignTimestamp;
+    if (!Number.isSafeInteger(hostStamp) || !Number.isSafeInteger(guestStamp) || hostStamp !== guestStamp) {
+      throw new Error(`${what} samples have unmatched campaign timestamps (host=${hostStamp}, guest=${guestStamp}); ` +
+        'hold the shared pause and read both tables again before comparing');
+    }
+  }
+  return { what, args: args ?? {}, ...(what === 'encounters' ? diffEncounters(host, guest, options) : diffJson(host, guest, options)) };
+}
+
+/** Pair paused QA samples explicitly by moving only the lower clock forward. */
+export async function ssAlignClocks(bridges) {
+  const readBoth = async () => {
+    const [host, guest] = await Promise.all(INSTANCES.map((instance) => bridges.get(instance).send('status')));
+    return { host, guest };
+  };
+  const beforeStatus = await readBoth();
+  const sessionId = requirePausedSession(beforeStatus);
+  const before = alignmentTimestamps(beforeStatus);
+  const targetTimestamp = Math.max(before.host, before.guest);
+  if (Math.abs(before.host - before.guest) > MS_PER_GAME_DAY) {
+    throw new Error('clock alignment exceeds one game day; no clock was changed');
+  }
+  const alignedInstance = before.host === before.guest ? null : before.host < before.guest ? 'host' : 'guest';
+  if (alignedInstance !== null) {
+    await bridges.get(alignedInstance).send('clockalign', { targetTimestamp });
+  }
+  const afterStatus = await readBoth();
+  requirePausedSession(afterStatus, sessionId);
+  const after = alignmentTimestamps(afterStatus);
+  if (after.host !== targetTimestamp || after.guest !== targetTimestamp) {
+    throw new Error(`clock alignment readback differs from target ${targetTimestamp} ` +
+      `(host=${after.host}, guest=${after.guest}); read both statuses before another action`);
+  }
+  return { sessionId, targetTimestamp, alignedInstance, advanced: alignedInstance !== null, before, after };
+}
+
+function requirePausedSession({ host, guest }, expectedSessionId) {
+  if (host?.role !== 'HOST' || guest?.role !== 'GUEST') {
+    throw new Error('clock alignment requires host role HOST and guest role GUEST');
+  }
+  if (host.sessionActive !== true || guest.sessionActive !== true) {
+    throw new Error('clock alignment requires an active session on both instances');
+  }
+  if (typeof host.sessionId !== 'string' || host.sessionId.trim().length === 0 ||
+      host.sessionId !== guest.sessionId || (expectedSessionId !== undefined && host.sessionId !== expectedSessionId)) {
+    throw new Error('clock alignment requires the same nonempty sessionId on both instances');
+  }
+  if (host.paused !== true || guest.paused !== true || host.pause?.effective !== true) {
+    throw new Error('clock alignment requires both campaigns paused and the host shared pause effective');
+  }
+  return host.sessionId;
+}
+
+function alignmentTimestamps(status) {
+  const timestamps = Object.fromEntries(INSTANCES.map((instance) => [instance, status[instance]?.clock?.timestamp]));
+  for (const instance of INSTANCES) {
+    if (!Number.isSafeInteger(timestamps[instance])) {
+      throw new Error(`clock alignment requires an exact safe integer clock.timestamp on ${instance}`);
+    }
+  }
+  return timestamps;
 }
 
 /**

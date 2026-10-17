@@ -15,9 +15,81 @@
  * guest, and the engine's fleet ids are assigned locally on each client. `lines` is the visibility
  * probe's text dump, where the two sides describe the same fact in different sentences; its
  * structured `view` counterpart is what actually compares. Diffing any of the three reports a
- * difference on every run and buries the ones that mean something.
+ * difference on every run and buries the ones that mean something. Native orbit-focus and dialog
+ * target ids are metadata too; their canonical reference fields remain part of the comparison.
  */
-export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'lines'];
+export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'orbitFocusEngineId', 'interactionTargetEngineId', 'lines'];
+
+/** Native labels/catalog numbers do not determine temporary encounter gameplay or identity. */
+export const ENCOUNTER_COSMETIC_KEYS = [
+  'name', 'shipName', 'firstName', 'lastName', 'displayName', 'variantDisplayName', 'catalogId'
+];
+
+/** Local ids and the engine's LocationToken cache defect are diagnostic metadata. */
+export const ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS = ['engineId', 'nativeSectorResolves', 'nativeSectorLookupError'];
+
+/** Compare complete canonical membership, including role and identity-resolution checks. */
+export function diffEncounters(host, guest, options = {}) {
+  for (const [instance, table] of [['host', host], ['guest', guest]]) {
+    if (table?.truncated !== false || !isPlainObject(table.encounters)) {
+      throw new Error(`encounters requires a complete untruncated manifest on ${instance}`);
+    }
+  }
+  const maxDifferences = options.maxDifferences ?? 100;
+  if (!Number.isInteger(maxDifferences) || maxDifferences < 1 || maxDifferences > 1000) {
+    throw new Error('maxDifferences must be an integer from 1 to 1000');
+  }
+  const result = diffJson({ encounters: host.encounters }, { encounters: guest.encounters }, {
+    ...options, ignore: [...new Set([...(options.ignore ?? ENCOUNTER_COSMETIC_KEYS), ...ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS])]
+  });
+  const failedPaths = new Map();
+  for (const [instance, table] of [['host', host], ['guest', guest]]) {
+    for (const [instanceId, encounter] of Object.entries(table.encounters)) {
+      for (const collection of ['entities', 'untrackedEntities']) {
+        for (const [entityId, entity] of Object.entries(encounter[collection] ?? {})) {
+          if (entity.present !== true) continue;
+          for (const field of ['canonicalResolves', 'locationResolves']) {
+            if (entity[field] === true) continue;
+            const path = `$.encounters.${instanceId}.${collection}.${entityId}.${field}`;
+            if (!failedPaths.has(path)) failedPaths.set(path, { path, failedInstances: [],
+              host: host.encounters[instanceId]?.[collection]?.[entityId]?.[field],
+              guest: guest.encounters[instanceId]?.[collection]?.[entityId]?.[field],
+              note: 'present entity must resolve to the same object' });
+            failedPaths.get(path).failedInstances.push(instance);
+          }
+        }
+      }
+    }
+  }
+  let resolutionFailureCount = 0;
+  for (const failure of failedPaths.values()) {
+    resolutionFailureCount += failure.failedInstances.length;
+    const existing = result.differences.find((difference) => difference.path === failure.path);
+    if (existing) Object.assign(existing, { failedInstances: failure.failedInstances, note: failure.note });
+    else result.differences.push(failure);
+  }
+  return {
+    ...result,
+    equal: result.differences.length === 0,
+    counts: { ...result.counts, differing: result.differences.length },
+    differences: result.differences.slice(0, maxDifferences).map(compactDifference),
+    truncated: result.differences.length > maxDifferences,
+    resolutionFailureCount,
+    maxDifferences
+  };
+}
+
+// Missing whole systems still report their exact path, without copying a megabyte recipe twice.
+function compactDifference(difference) {
+  const result = { ...difference };
+  for (const side of ['host', 'guest']) {
+    const value = result[side];
+    if (Array.isArray(value)) result[side] = { kind: 'array', length: value.length };
+    else if (isPlainObject(value)) result[side] = { kind: 'object', keys: Object.keys(value).slice(0, 20), keyCount: Object.keys(value).length };
+    else if (typeof value === 'string' && value.length > 512) result[side] = { kind: 'string', length: value.length, preview: value.slice(0, 512) };
+  }
+  return result;
+}
 
 /** Field names tried, in order, when deciding whether an array is a keyed collection. */
 export const KEY_FIELDS = [
