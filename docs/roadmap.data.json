@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0, M1 and shared wrecks are accepted. M2 fresh manifests, native recovery/survey, hint revisits, actor-only reward, separated Threat movement and connected lifetime pass. Original control jump point/anchor removal is verified separately. Strict evolved-time, completed-hint reload and Guest-ended-inside/Host-solo lifetime acceptance remain open. Phase 26 stays PARTIAL"
+      "note": "P26 M1/shared wrecks are accepted. M2 native hints/reward reload, Threat movement and connected lifetime/original-link removal pass. The native type correction is built/tested: 4,192 Java pass, one skip, zero failures. Native deployment/reload retest, connected well cleanup and strict evolved-time remain open. Co-op-only pause stays. Phase 26 is PARTIAL"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: verify the saved Guest-ended-inside hold through distant Host solo play beyond ten days and Guest loading inside in a new session; setup is underway. Completed-hint reload and strict evolved-time comparison also remain open. M1 and shared wrecks remain accepted"
+      "note": "the V1 build queue is complete. Next: deploy the tested native type correction and repeat picker reload, then verify connected Guest departure/expiry with well cleanup and strict evolved-time comparison. Co-op-only pause stays; Host solo play is outside requirements"
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "26 Task 0, M1 and shared wrecks are accepted. M2 fresh manifests, native recovery/survey, hint revisits, separated Threat movement and connected lifetime/original-link removal pass. Guest-ended-inside/Host-solo lifetime, completed-hint reload and strict evolved-time gates remain open; Phase 26 stays PARTIAL. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and solo-Guest abyssal encounter triggering are follow-ups"
+      "note": "P26 M1/shared wrecks are accepted; M2 native type correction is built/tested, deployment/reload retest pending. Hints/reward reload, Threat movement and connected lifetime/original-link removal pass. Connected well cleanup and strict evolved-time remain open. Co-op-only pause stays. P26 is PARTIAL; M3-M5 and solo-Guest abyssal triggering remain follow-ups. P33 is built; 22, 25 and 27 remain queued"
     }
   ],
-  "hereHead": "You are here: 43e300f + native acceptance evidence. V1, P19/P23 and P26 M1/shared wrecks are accepted. M2 native hints, actor-only reward, separated Threat movement and connected lifetime/original-link removal pass. Guest-ended-inside/Host-solo, completed-hint reload and strict evolved-time gates remain open; Phase 26 remains PARTIAL.",
-  "here": "<b>V1 is complete at 0.1.5;</b> Phases 19 and 23 are signed off. <b>Phase 26:</b> Task 0, M1 and shared wrecks are accepted. Deployed <code>43e300f</code> passes native mining/black-hole revisits, the one Guest-owned 25-point scan reward, shared recovery/survey and separated seven-ship Threat movement. Connected lifetime checks preserve occupied systems and remove control C after both players meet native age/distance criteria; separate uncapped lookups verify its original jump point and anchor are gone. The clean build passes 4,190 Java tests, one skipped, and 155 bridge/offline tests. <b>Next:</b> the saved Guest-ended-inside hold through distant Host solo play beyond ten days and Guest loading inside in a new session; setup is underway. Completed-hint reload and strict evolved-time comparison remain open. The capped-query lifetime artifact retains its overall INCONCLUSIVE verdict; separate cleanup evidence passes. Phase 26 remains PARTIAL. M3-M5 and solo-Guest abyssal triggering remain follow-ups.",
+  "hereHead": "You are here: native type correction BUILT/tested, deployment/retest pending. Clean build: 4,192 Java pass, one existing skip, zero failures/errors. P26 remains PARTIAL; co-op-only pause stays. Native reload retest, connected well cleanup and strict evolved-time gates remain open.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 and P26 M1/shared wrecks are accepted. M2 native hints/reward picker reload, recovery/survey, separated Threat movement and connected lifetime/original-link removal pass. The old build's overall reload still FAILS on four Guest <code>SINGLE</code> versus Host <code>DEEP_SPACE</code> types; its Jan 12 failure checkpoint and full backups are verified. <b>The narrow runtime type correction is built and tested:</b> 4,192 Java tests pass, one existing router skip, zero failures/errors. Earlier 155 bridge/offline tests were unchanged and not rerun for this Java-only fix. Recipes, schema and legacy systems stay unchanged. <b>Next:</b> deploy and repeat native reload, then connected Guest departure/expiry with well cleanup and strict evolved-time comparison. Co-op-only pause stays; Host solo play is outside requirements and the saved inside hold remains. Historical verdicts remain unchanged. Phase 26 remains PARTIAL.",
   "attention": [
     {
       "sev": "gate",
       "sevLabel": "native live acceptance",
-      "head": "Finish P26 M2 solo persistence, hint reload and timing gates",
-      "state": "43e300f native hints, actor-only reward, separated Threat movement and connected lifetime/original-link cleanup pass; Guest-ended-inside/Host-solo setup underway; completed-hint reload and strict evolved-time acceptance open",
-      "body": "End Guest's session while inside and verify its saved hold survives Host solo play beyond ten days and 5 LY, then load Guest inside the same system in a new session. Reload the completed mining/black-hole outcomes and confirm terminal flags, actor reward and canonical membership without live duplication. Connected checks already preserve both occupied systems and remove control C with its original jump point/anchor. Lifetime artifact 230 remains overall INCONCLUSIVE with cleanup DEFERRED by capped queries; separate exact-id cleanup evidence 231 passes. Require paired paused timestamps for strict manifest gates; unequal-clock diagnostics remain INCONCLUSIVE even when values match. Preserve earlier verdicts. Phase 26 remains PARTIAL until M2 acceptance."
+      "head": "Deploy P26 M2 type correction, then finish native reload, cleanup and timing gates",
+      "state": "native type correction BUILT/tested: 4,192 Java pass, one existing skip, zero failures/errors; native deployment/retest pending. Prior overall reload FAIL remains; connected well cleanup and strict evolved-time acceptance open",
+      "body": "Deploy the runtime type repair for both supported creators, then repeat picker reload without upgrading original FAIL artifacts 242/249. The correction preserves recipes/schema and legacy systems; Host capture and new/existing Guest upsert restore DEEP_SPACE. Completed hints and one Guest-only 25-point factor already survive reload. Move Guest out of mining fixture 26ed5 during connected play, then verify expiry and well/anchor removal after both players exceed ten days and remain at least 5 LY away. Require equal paused timestamps for strict evolved-time comparison; diagnostic 246 remains INCONCLUSIVE. Co-op-only pause stays and Host-solo acceptance is removed, not passed. Preserve earlier verdicts. Phase 26 remains PARTIAL."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0, M1 and shared wrecks are accepted. M2 fresh manifests, native recovery/survey, hint revisits, actor-only reward, separated Threat movement and connected lifetime pass. Separate exact-id checks verify original control jump-point/anchor removal. Guest-ended-inside/Host-solo persistence, completed-hint reload and strict evolved-time gates remain open. Phase 26 stays PARTIAL; solo-Guest abyssal triggering remains deferred.",
+      "summary": "Task 0, M1 and shared wrecks are accepted. M2 hints/reward reload, Threat movement and connected lifetime/original-link removal pass. Native type correction is built/tested: 4,192 Java pass, one skip; deployment/reload retest, connected well cleanup and strict evolved-time remain open. Co-op-only pause stays. Phase 26 is PARTIAL; solo-Guest abyssal triggering remains deferred.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -926,16 +926,16 @@
       ],
       "residue": [
         "M2 strict evolved-time comparison after separated play; initial fresh parent/dire manifests pass with exact ghost pose/facing and different local history",
-        "M2 completed-hint native reload: terminal mining/black-hole flags, exactly one Guest-only reward and original membership; native hint propagation and separated NPC/Threat movement pass",
+        "M2 deploy the tested runtime native type correction and repeat picker reload; old four-system SINGLE versus DEEP_SPACE failure remains preserved, while completed hints/reward and original membership pass narrowly",
         "M2 fresh native checkpoint reload retains consumed ghosts, FULL surveys and actor-owned hulls; genuine reconnect already retains these outcomes",
-        "M2 saved Guest-ended-inside hold through distant Host solo play beyond ten days, followed by Guest loading inside in a new session; setup underway. Connected occupancy holds and control/original-link removal pass",
+        "M2 connected Guest exit from mining fixture 26ed5, then native expiry and original well/anchor removal after both players meet ten-day/five-LY criteria; connected occupancy holds and control jump-point/anchor removal pass. Host-solo requirement removed by user choice; saved Guest-inside hold retained",
         "M2 repeated native live evidence and user acceptance; preserve the original 6937022 renaming FAIL artifacts 03-08",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
         "M4 hyperspace storm replication: follow-up; existing design retained",
         "M5 guest sensor ghosts and Leviathan trails: follow-up"
       ],
-      "note": "M1 and shared wrecks remain accepted. M2 uses Host seed/resolved specials, canonical identities, primitive overlays and a two-player despawner. Native hints, actor-only reward, separated Threat movement and connected lifetime pass on 43e300f. Separate exact-id evidence verifies original control jump-point/anchor removal without changing the capped-query artifact's INCONCLUSIVE verdict. Shared recovery/survey survives genuine reconnect and the first native reload. Remaining gates cover strict evolved-time comparison, completed-hint reload and saved Guest-ended-inside persistence through Host solo play/new-session load. Historical verdicts remain unchanged. Phase 26 remains PARTIAL; M3-M5 and solo-Guest abyssal triggering are follow-ups."
+      "note": "M1/shared wrecks are accepted. M2 native type correction is built and clean-tested: 4,192 Java pass, one skip, zero failures/errors; prior 155 bridge/offline tests unchanged, not rerun. Runtime Host capture and Guest upsert restore managed DEEP_SPACE without recipe/schema or legacy changes. Native deployment/reload retest remains pending; old overall FAIL is preserved despite narrow hint/reward reload PASS. Connected well cleanup and strict evolved-time acceptance remain open. Co-op-only pause stays; Host-solo requirement removed, saved inside hold retained. P26 remains PARTIAL; M3-M5 and solo-Guest abyssal triggering are follow-ups."
     },
     {
       "id": "27",
@@ -1126,7 +1126,7 @@
     "Guest cannot independently desync clock or fast-forward (shared pause allowed)",
     "Host fast-forward mirrors to guest; dates stay aligned",
     "Guest campaign date converges to host, never steps backward",
-    "Coop save loaded solo runs orphan sweep; host save solo-playable",
+    "Co-op save loaded before pairing runs orphan sweep; configured roles stay paused until the session is playable",
     "Remote fleet mirror updates at campaign rate",
     "Other player's fleet visible outside sensor range, faction-colored, username-labeled",
     "NPC fleet population host-authoritative; guest runs no native spawning/AI",

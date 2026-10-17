@@ -238,7 +238,8 @@ Owns: every wire type, since the enum lives here.
   Shared-wreck live verification and M1 manual checks were accepted on 2026-10-17.
 - `CoopEncounterAuthority` / `CoopEncounterRecord` / `CoopEncounterCodec` / `CoopEncounterWorld` -
   Host rogue-object and dire-hint temporary systems. A 250 ms scan captures new generation recipes
-  even while the configured Host plays alone. `ENC_SET` sends the complete recipe/overlay set on
+  even while the configured Host is paused without a playable session. `ENC_SET` sends the complete
+  recipe/overlay set on
   connect, resume and hash changes, with bounded current orbit batches for offscreen fresh replicas.
   `CoopEncounterOrbitSetCodec` validates instance/member ownership and the escaped batch bounds.
   Those transient batches stay outside the recipe hash and are retained through creation retries;
@@ -266,13 +267,18 @@ Owns: every wire type, since the enum lives here.
   `$abyssalBlackHoleReadingsRevisit` state survive stale overlays/deltas; completed black-hole
   readings cannot be rearmed. Optional bridge `encounters {"lifetime":true}` reads Host native visit
   ages, distances, runtime holds and saved Guest inputs without advancing or refreshing anything;
-  default queries stay unchanged. Deployed `43e300f` passes native hint revisits, actor-reward checks,
-  a primitive saved-state audit and separated Threat movement. Connected lifetime checks preserve
-  occupied systems and remove a control with its original jump point/anchor after both players meet
-  native criteria. Automated results remain 4,190 Java tests (one existing router skip) and 155
-  bridge/offline tests. M2 remains PARTIAL pending completed-hint native reload, strict evolved-time
-  comparison and Guest-ended-inside persistence through distant Host solo play beyond ten days,
-  followed by Guest loading inside in a new session.
+  default queries stay unchanged. Deployed `43e300f` passes native hint revisits, completed-hint picker
+  reload, actor-reward checks, a primitive saved-state audit and separated Threat movement. Connected
+  lifetime checks preserve occupied systems and remove a control with its original jump point/anchor.
+  Overall reload fails because four Guest systems restore as native `SINGLE` instead of Host's
+  `DEEP_SPACE`. The narrow runtime repair is built: Host capture and new/existing Guest upsert restore
+  the supported creators' native type without recipe/schema changes or legacy mutation. The clean
+  build passes 4,192 Java tests (one existing router skip), zero failures/errors; earlier 155
+  bridge/offline tests were not rerun for this Java-only fix. Native deployment/retest is pending.
+  M2 remains PARTIAL pending corrected reload, strict evolved-time comparison and connected expiry/well
+  cleanup. Co-op-only pause remains:
+  configured roles hold the campaign paused without a playable session. The primitive saved
+  Guest-inside hold stays implemented; Host solo progression is outside acceptance by user decision.
   Dated native evidence, including the retained old-build mining FAIL, belongs
   in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md) and `tmp_ff_analysis/p26/2026-10-17/m2-live`.
   NPC mirror checks cover identity/roster, location and motion; world orbital body/focus keys are

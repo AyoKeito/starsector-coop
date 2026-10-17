@@ -95,6 +95,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
                 recipe = captureNew(system);
             }
             if (!ids.add(recipe.instanceId())) throw new IllegalStateException("Duplicate abyssal encounter instance " + recipe.instanceId());
+            restoreNativeSystemType(system);
             ensureHostDespawner(system);
             CoopEncounterRecord current = recipe.withOverlay(captureOverlay(sector, system, recipe));
             system.getMemoryWithoutUpdate().set(RECIPE_KEY, current.encode());
@@ -102,6 +103,13 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         }
         records.sort(Comparator.comparing(CoopEncounterRecord::instanceId));
         return List.copyOf(records);
+    }
+
+    private static void restoreNativeSystemType(StarSystemAPI system) {
+        // Native loading reclassifies real-star deep-space systems as SINGLE after onGameLoad.
+        // Both supported encounter creators generate DEEP_SPACE, so repair that invariant at runtime.
+        if (system.getType() != StarSystemGenerator.StarSystemType.DEEP_SPACE)
+            system.setType(StarSystemGenerator.StarSystemType.DEEP_SPACE);
     }
 
     private CoopEncounterRecord captureNew(StarSystemAPI system) {
@@ -172,6 +180,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
             CoopEncounterRecord previous = Objects.requireNonNull(savedRecipe(existing), "Owned encounter has no saved recipe");
             if (!previous.withOverlay(CoopEncounterRecord.Overlay.empty()).equals(recipe.withOverlay(CoopEncounterRecord.Overlay.empty())))
                 throw new IllegalStateException("Immutable encounter recipe changed: " + recipe.instanceId());
+            restoreNativeSystemType(existing);
             seedGuestBaseline(previous);
             existing.removeScriptsOfClass(AbyssalLocationDespawner.class);
             existing.removeScriptsOfClass(CoopAbyssalDespawner.class);
@@ -185,6 +194,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
             if (before.contains(created)) throw new IllegalStateException("Replay returned an existing system");
             created.setOptionalUniqueId(recipe.instanceId());
             materializeSpecialsAndIdentity(created, recipe);
+            restoreNativeSystemType(created);
             created.getMemoryWithoutUpdate().set(ENCOUNTER_ID_KEY, recipe.instanceId());
             created.removeScriptsOfClass(AbyssalLocationDespawner.class);
             created.removeScriptsOfClass(CoopAbyssalDespawner.class);

@@ -10,6 +10,7 @@ import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.enc.AbyssalLocationDespawner;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.procgen.StarSystemGenerator.StarSystemType;
 import coop.ambient.CoopEncounterReplayBridge;
 import coop.fleet.CoopEntityIds;
 import coop.fleet.CoopLocations;
@@ -100,6 +101,57 @@ class CoopEncounterWorldTest {
         assertEquals(later, restored);
     }
 
+    @Test void hostRestoresManagedDeepSpaceTypeAfterNativeLoadReclassifiesIt() {
+        for (Creator creator : Creator.values()) {
+            scene = new Scene(); Global.setSector(scene.api);
+            CoopEncounterWorld world = scene.world();
+            FakeLocation system = scene.generated("alpha");
+            system.memory.set(CoopEncounterReplayBridge.CREATOR_KEY, creator.className());
+            FakeEntity original = system.token("original");
+            CoopEncounterRecord saved = only(world.captureHost());
+            CoopEncounterWorld restored = scene.world();
+            // CampaignGameManager applies this rewrite after mod onGameLoad has already returned.
+            system.type = StarSystemType.SINGLE;
+
+            assertEquals(saved, only(restored.captureHost()));
+
+            assertEquals(StarSystemType.DEEP_SPACE, system.system().getType());
+            assertEquals(1, scene.systems.size());
+            assertSame(original.api, only(system.entities));
+            assertEquals(saved.encode(), system.memory.values.get(CoopEncounterWorld.RECIPE_KEY));
+        }
+    }
+
+    @Test void guestRestoresLoadedDeepSpaceTypeWithoutReplayingOrReplacingItsMembers() {
+        for (Creator creator : Creator.values()) {
+            scene = new Scene(); Global.setSector(scene.api);
+            AtomicInteger replays = new AtomicInteger();
+            CoopEncounterWorld world = scene.world((sector, record) -> {
+                replays.incrementAndGet(); FakeLocation system = scene.generated("native");
+                system.token("original"); return system.system();
+            });
+            CoopEncounterRecord base = simple("alpha", 1);
+            CoopEncounterRecord record = new CoopEncounterRecord(base.instanceId(), base.effectiveSeed(),
+                    base.encounterPointId(), base.x(), base.y(), base.depth(), base.threatRollRan(),
+                    creator, base.threatTag(), base.entities(), base.specials(), base.overlay());
+            world.upsert(record);
+            FakeLocation system = only(scene.systems);
+            SectorEntityToken original = only(system.entities);
+            scene.entity(original).discovered = true;
+            CoopEncounterWorld restored = scene.world((sector, recipe) -> {
+                fail("Loaded encounter must be reused"); return null;
+            });
+            system.type = StarSystemType.SINGLE;
+
+            restored.upsert(record);
+
+            assertEquals(StarSystemType.DEEP_SPACE, system.system().getType());
+            assertEquals(1, replays.get()); assertEquals(1, scene.systems.size());
+            assertSame(original, only(system.entities)); assertTrue(scene.entity(original).discovered);
+            assertEquals(record.encode(), system.memory.values.get(CoopEncounterWorld.RECIPE_KEY));
+        }
+    }
+
     @Test void metadataOnlySystemsAlreadyPresentAtInitializationRemainLegacy() {
         FakeLocation legacy = scene.generated("old"); FakeEntity old = legacy.token("keep-original");
         FakeLocation unsupported = scene.generated("custom"); unsupported.token("custom-original");
@@ -109,6 +161,8 @@ class CoopEncounterWorldTest {
         assertEquals("keep-original", old.id);
         assertFalse(legacy.memory.values.containsKey(CoopEncounterWorld.RECIPE_KEY));
         assertTrue(world.taggedIds().isEmpty());
+        assertEquals(StarSystemType.SINGLE, legacy.system().getType());
+        assertEquals(StarSystemType.SINGLE, unsupported.system().getType());
     }
 
     @Test void compositeKeysDisambiguateRepeatedNativeCenterAndAnchorIdsWithoutGlobalLookup() {
@@ -610,6 +664,7 @@ class CoopEncounterWorldTest {
         final List<NascentGravityWellAPI> wells = new ArrayList<>();
         final Vector2f position = new Vector2f(1200, -400);
         final Set<String> tags = new HashSet<>();
+        StarSystemType type = StarSystemType.SINGLE;
         String uniqueId;
         FakeEntity anchor;
         FakeLocation(Scene scene, String uniqueId) {
@@ -620,6 +675,8 @@ class CoopEncounterWorldTest {
                 case "getId" -> "deep space";
                 case "getOptionalUniqueId" -> this.uniqueId;
                 case "setOptionalUniqueId" -> { this.uniqueId = (String) a[0]; yield null; }
+                case "getType" -> this.type;
+                case "setType" -> { this.type = (StarSystemType) a[0]; yield null; }
                 case "getMemoryWithoutUpdate" -> memory.api;
                 case "getLocation" -> position;
                 case "hasTag" -> tags.contains(a[0]);
