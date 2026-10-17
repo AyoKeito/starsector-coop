@@ -10,19 +10,19 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "completed phases, with recorded testing and user sign-offs in the plan's Phase Status Ledger. Phases 19 and 23 were closed by user sign-off on 2026-10-12 after the 0.1.5 two-player check"
+      "note": "Completed phases with recorded verification in the plan's Phase Status Ledger. P19/P23 are signed off. P26's approved first build (Task 0, M1, shared wrecks and M2) is built and native-verified; M3-M5 and Guest-proximity abyssal triggering remain unbuilt follow-ups"
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 M1/shared wrecks are accepted. M2 native type/hint/reward reload, Threat movement and original-link cleanup pass. Managed offscreen orbit repair is BUILT/tested: 4,208 Java pass, one existing skip, zero failures. Native deployment/exact-time retest pending; strict FAIL 273 and paired checkpoint 276 remain preserved. Co-op-only pause stays. P26 is PARTIAL"
+      "note": "No phase is currently partial. P26's approved first build is complete; its M3-M5 and Guest-proximity abyssal triggering follow-ups remain outside that completed scope"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: deploy the tested managed offscreen orbit repair and repeat native strict comparison at an actual equal paused timestamp without QA calendar writes. Native reload and original-link cleanup pass; historical FAIL stays. Co-op-only pause stays"
+      "note": "The V1 queue and P26's approved first build are complete. Further work needs separate scope: P26 M3-M5 and Guest-proximity abyssal triggering remain follow-ups; P22, P25 and P27 remain queued"
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P26 M1/shared wrecks are accepted. M2 native reload and connected original-link cleanup pass; managed offscreen orbit repair is built/tested, native exact-time retest pending. Co-op-only pause stays. P26 is PARTIAL; M3-M5 and solo-Guest abyssal triggering remain follow-ups. P33 is built; 22, 25 and 27 remain queued"
+      "note": "P26's approved first build (Task 0, M1, shared wrecks and M2) and P33 are built. P26 M3 lights, M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt follow-ups. P22, P25 and P27 remain queued"
     }
   ],
-  "hereHead": "You are here: managed offscreen orbit repair BUILT/tested; native deployment and exact-time retest pending. Clean build: 4,208 Java pass, one existing router skip, zero failures/errors. Strict FAIL 273 remains preserved in paired checkpoint 276. P26 stays PARTIAL; co-op-only pause stays.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 and P26 M1/shared wrecks are accepted. M2 native type/hint/reward reload, recovery/survey, separated Threat movement and connected original-link cleanup pass. <b>Managed offscreen orbit repair is built and tested:</b> at most one additional managed system per existing one-second orbit tick, transient sorted cursor, canonical ghost pose and payload/frame checks. Wire/saved layout is unchanged. Clean build: 4,208 Java tests pass, one existing router skip, zero failures/errors; earlier 155 bridge/offline tests unchanged and not rerun for this Java-only fix. <b>Next:</b> native deployment and strict exact-time retest. Original strict FAIL 273 and paired native checkpoint 276 retain the three phase differences at identical raw timestamps. Helper 271 stays INCONCLUSIVE. Co-op-only pause stays; Host solo play is outside requirements. P26 remains PARTIAL.",
+  "hereHead": "You are here: e7c28df + final native proof. P26's approved first build is BUILT: Task 0, M1, shared wrecks and M2. Three strict native matches: 5,024 values, zero differences/lookup failures over 47.232 seconds. Clean build: 4,208 Java pass, one existing skip. Co-op-only pause stays; M3-M5 and Guest-proximity abyssal triggering remain unbuilt follow-ups.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26's approved first build is BUILT:</b> Task 0, M1 slipstreams, shared wrecks and M2 abyssal encounters. Deployed <code>e7c28df</code> passes native type/hint/reward reload, recovery/survey, separated Threat movement, original-link cleanup and the strict evolved-world gate. Three complete 5,024-value comparisons at one frozen raw timestamp remain equal over 47.232 seconds, with zero lookup failures and empty queues. Final native checkpoint/backups 295 pass within stated limits; earlier FAIL/INCONCLUSIVE artifacts remain unchanged. Clean build: 4,208 Java pass, one existing router skip, zero failures/errors; earlier 155 bridge/offline tests unchanged and not rerun for the final Java-only fix. Co-op-only pause stays. <b>Unbuilt follow-ups:</b> M3 lights, M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering.",
   "attention": [
     {
-      "sev": "gate",
-      "sevLabel": "native live acceptance",
-      "head": "Deploy P26 M2 managed orbit repair and repeat strict native comparison",
-      "state": "bounded managed orbit repair BUILT/tested: 4,208 Java pass, one existing skip, zero failures/errors; native deployment/exact-time retest pending. Original strict FAIL 273 and paired checkpoint 276 stay unchanged",
-      "body": "Deploy the tested one-managed-instance-per-tick orbit repair and repeat the strict native comparison at an actual equal paused raw timestamp, without QA calendar writes. The transient sorted cursor advances even on occupied/empty slots; only the selected recipe/member set receives full capture, with canonical ghost pose and payload/frame checks. Wire/saved layout is unchanged. Native type/hint/reward reload 259 and connected well/anchor cleanup 265 already pass. Paired native checkpoint 276 verifies full backups at the exact failing timestamp; it preserves, rather than upgrades, the three phase differences in 273. Helper 271 remains INCONCLUSIVE. Co-op-only pause stays; Host-solo acceptance was removed, not passed. P26 remains PARTIAL."
+      "sev": "scope",
+      "sevLabel": "P26 follow-ups",
+      "head": "P26 first build is complete; later milestones remain unbuilt",
+      "state": "Task 0, M1, shared wrecks and M2 BUILT and native-verified on e7c28df; no first-build M2 gate remains open",
+      "body": "M3 lights, M4 storms, M5 cosmetic sensor ghosts/Leviathan trails and Guest-proximity abyssal EPEC triggering are separate unbuilt follow-ups. The completed first build passes three strict 5,024-value native comparisons with zero differences/lookup failures over 47.232 seconds at a shared frozen epoch. Final checkpoint audit 295 is PASS_WITH_LIMITS; historical FAIL/INCONCLUSIVE artifacts remain unchanged. This verifies bounded repair convergence. Co-op-only pause stays; Host-solo acceptance was removed by user choice, not passed by a test."
     },
     {
       "sev": "scope",
@@ -904,8 +904,8 @@
       "title": "Hyperspace Ambient-World Replication",
       "theme": "terrain",
       "track": "post-v1",
-      "status": "partial",
-      "summary": "Task 0, M1 and shared wrecks are accepted. Native reload and connected original-link cleanup pass. Managed offscreen orbit repair is built/tested: 4,208 Java pass, one skip; native deployment/exact-time retest pending. Original strict FAIL stays preserved. Co-op-only pause stays. P26 is PARTIAL; solo-Guest abyssal triggering remains deferred.",
+      "status": "built",
+      "summary": "Approved first build complete: Task 0, M1 slipstreams, shared wrecks and M2 abyssal encounters. Deployed e7c28df passes native reload, actor-owned outcomes, Threat movement, original-link cleanup and three strict 5,024-value matches over 47.232 seconds. Final native backups pass within audit limits. M3-M5 and Guest-proximity abyssal triggering remain unbuilt follow-ups; co-op-only pause stays.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -914,7 +914,7 @@
         "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
         "CoopEncounterAuthority / Record / Codec / World + transient CoopEncounterReplayBridge",
         "CoopEncounterOrbitSetCodec for bounded current offscreen orbit batches retained through replay retries",
-        "CoopEncounterOrbitSweep for one additional managed-system orbit repair per existing one-second tick, with transient cursor and payload/frame limits",
+        "CoopEncounterOrbitSweep for at most one additional managed-system orbit repair per existing one-second tick, with transient cursor and payload/frame limits",
         "CoopAbyssalDespawner with saved Guest visit/inside history",
         "STREAM_SET/ADD/DESPAWN/REMOVE",
         "ENC_SET + reliable ENCOUNTER_STATE outcomes through WORLD_DELTA",
@@ -926,14 +926,12 @@
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "M2 deploy the built/tested managed offscreen orbit repair and pass native exact-time retest; strict FAIL 273 and paired native checkpoint 276 remain preserved, helper 271 stays INCONCLUSIVE",
-        "M2 final acceptance after the strict evolved-time gate; native type/hint/reward reload 259, connected well/anchor cleanup 265 and checkpoint audit 270 pass within their stated scopes. Preserve original FAIL 03-08/242/249 and INCONCLUSIVE diagnostics",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
         "M4 hyperspace storm replication: follow-up; existing design retained",
         "M5 guest sensor ghosts and Leviathan trails: follow-up"
       ],
-      "note": "M1/shared wrecks are accepted. M2 native reload, Threat movement and connected original-link cleanup pass. Managed offscreen orbit repair is built/tested: 4,208 Java pass, one existing skip, zero failures/errors; prior 155 bridge/offline tests unchanged, not rerun. One additional selected managed instance per one-second tick, transient cursor and payload/frame checks preserve wire/saved layout. Native deployment and exact-time retest remain pending; original strict FAIL 273 and paired native checkpoint 276 remain unchanged. Co-op-only pause stays; Host-solo acceptance removed, saved inside hold retained. P26 remains PARTIAL; M3-M5 and solo-Guest abyssal triggering remain follow-ups."
+      "note": "P26 first-build scope is BUILT: Task 0, M1, shared wrecks and M2. Deployed e7c28df converges through the bounded managed orbit sweep and passes three native exact-time comparisons of all 5,024 values over 47.232 seconds, with zero lookup failures and empty queues. Native type/hint/reward reload, recovery/survey, Threat movement and original-link cleanup also pass. Audit 295 verifies final full native backups within stated limits. Clean build: 4,208 Java pass, one existing skip, zero failures/errors; prior 155 bridge/offline tests unchanged, not rerun. Historical verdicts remain unchanged. Co-op-only pause stays; Host-solo acceptance removed, saved inside hold retained. M3-M5 and Guest-proximity abyssal triggering remain unbuilt follow-ups."
     },
     {
       "id": "27",

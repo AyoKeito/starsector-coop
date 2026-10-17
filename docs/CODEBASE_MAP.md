@@ -277,9 +277,12 @@ Owns: every wire type, since the enum lives here.
   tick. The sorted transient cursor advances one slot even when occupied/empty; full recipe/member
   capture is limited to the selected system. Canonical ghost pose, 384 KiB payload and exact 1 MiB
   frame checks apply before queueing. Install/dispose resets the cursor; wire/saved layout is unchanged.
-  The correction is built and tested: 4,208 Java pass, one existing router skip, zero failures/errors;
-  earlier 155 bridge/offline tests were unchanged and not rerun. Native deployment and exact-time
-  retest remain pending; the original strict paired-time orbit FAIL stays preserved and M2 stays PARTIAL.
+  Deployed `e7c28df` passes native bounded-convergence verification: three complete 5,024-value
+  comparisons at a common frozen epoch remain equal over 47.232 seconds, with zero lookup failures
+  and empty queues. Final native saves/backups pass audit within stated limits. The approved first
+  build (Task 0, M1, shared wrecks and M2) is BUILT. Clean build: 4,208 Java pass, one existing router
+  skip, zero failures/errors; earlier 155 bridge/offline tests unchanged, not rerun. M3 lights, M4
+  storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt follow-ups.
   Co-op-only pause remains:
   configured roles hold the campaign paused without a playable session. The primitive saved
   Guest-inside hold stays implemented; Host solo progression is outside acceptance by user decision.
