@@ -266,9 +266,14 @@ Owns: every wire type, since the enum lives here.
   `$abyssalBlackHoleReadingsRevisit` state survive stale overlays/deltas; completed black-hole
   readings cannot be rearmed. Optional bridge `encounters {"lifetime":true}` reads Host native visit
   ages, distances, runtime holds and saved Guest inputs without advancing or refreshing anything;
-  default queries stay unchanged. The hint correction passed 4,190 Java tests (one existing router
-  skip) and 155 bridge/offline tests; deployment and native mining/black-hole retests remain pending.
-  M2 remains PARTIAL. Dated native evidence, including the retained old-build mining FAIL, belongs
+  default queries stay unchanged. Deployed `43e300f` passes native hint revisits, actor-reward checks,
+  a primitive saved-state audit and separated Threat movement. Connected lifetime checks preserve
+  occupied systems and remove a control with its original jump point/anchor after both players meet
+  native criteria. Automated results remain 4,190 Java tests (one existing router skip) and 155
+  bridge/offline tests. M2 remains PARTIAL pending completed-hint native reload, strict evolved-time
+  comparison and Guest-ended-inside persistence through distant Host solo play beyond ten days,
+  followed by Guest loading inside in a new session.
+  Dated native evidence, including the retained old-build mining FAIL, belongs
   in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md) and `tmp_ff_analysis/p26/2026-10-17/m2-live`.
   NPC mirror checks cover identity/roster, location and motion; world orbital body/focus keys are
   checked separately because native NPC assignments and target ids are not replayed.
