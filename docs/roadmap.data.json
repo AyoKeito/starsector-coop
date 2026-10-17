@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 passed live. M1 geometry, mature brightness and the running spawn control passed; a clean reconnect/despawn exposed fade timing divergence. Its correction and remaining live gates precede M2. Phase 23 is complete; publication reminders remain under ATTENTION"
+      "note": "Phase 26 Task 0 and all M1 numeric live gates passed, including both seasonal fade cycles, surges and genuine reconnects. Manual map/discovery, visible fade/carry, guest-local surge, mirror and normal-picker reload checks keep M1 open before M2. Phase 23 is complete; publication reminders remain under ATTENTION"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: correct and retest Phase 26 M1 fade timing, then finish its live gate before M2 abyssal temporary systems"
+      "note": "the V1 build queue is complete. Next: finish Phase 26 M1's manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and Nov 29 normal-picker reload checks before M2 abyssal temporary systems"
     },
     {
       "key": "queued",
@@ -34,25 +34,25 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world; Nameless Rock placement and static stream geometry passed live, with further checks pending before M2. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
+      "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world; Task 0 and all M1 numeric live gates passed. Manual visual, motion and normal-picker reload checks remain, so M1 is incomplete and M2 waits. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 passed live. A complete native spawn with players in different locations matched exactly at seven partial checkpoints, including the late fade. The same stream's despawn and remaining M1 checks are still open before M2. Terminal native faders now stop generating redundant checkpoints. Full test/build: 3,929 passed, one skipped. Publication reminders and optional QA probes remain under ATTENTION.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. <b>Passed on 2026-10-15:</b> both Task 0 checks, static geometry, mature brightness, and a complete native spawn with the host in a system and guest in hyperspace. All seven partial phase comparisons, including the late fade, matched exactly. <b>Next:</b> finish the native despawn and remaining M1 live checks. M2 waits for M1. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 and all M1 numeric live gates passed, including full seasonal fades, host/guest surge checks and genuine reconnects. Manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and Nov 29 normal-picker reload checks remain. M1 is partial; M2 waits. Java: 3,929 passed, one skipped; bridge and harness checks: 147 passed. Publication reminders and optional QA probes remain under ATTENTION.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. <b>Numeric gates passed:</b> Task 0, both full seasonal fade cycles, normal clock coupling, host surge startup/expiry, guest-local surge isolation and genuine reconnect preservation. <b>Manual checks remaining:</b> maps/discovery, visible fade and fleet carry with the guest parked before activation, guest-local surge screen behavior, partner/NPC mirrors and normal-picker reload of the Nov 29, c206 pair. M1 remains partial; M2 waits. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
   "attention": [
     {
       "sev": "gate",
       "sevLabel": "live verification",
-      "head": "M1 shared-clock fade verification",
-      "state": "separated-player spawn passed; full despawn and lifecycle checks remain open",
-      "body": "The frame-time drift and future paused-checkpoint defects are corrected. A complete native spawn on <code>5502d3b</code>, with the host in Nameless Rock and guest in hyperspace, matched all seven partial phase comparisons exactly, including a late sample. Completion preserves the native background endpoint: brightness 1 can retain IN until another in-location advance. The authority now stops redundant checkpoints for that quiescent state while retaining partial fades and directed bounces. The same stream's despawn matched its first three partial checkpoints before a native story dialog interrupted it; continuation remains open. Earlier raw-calendar gate verdicts stay unchanged. Full test/build: 3,929 passed, one skipped. Task 0 temporary-system save/reload seed lock passed with 281 canonical entries and no temporary-system record."
+      "head": "M1 numeric live gates passed",
+      "state": "seasonal fades, surges and genuine reconnect preservation passed; manual checks remain",
+      "body": "Both-hyperspace seasonal fades matched seven partial spawn pairs (one late) and 21 partial despawn pairs (three late), with zero differences and a genuine reconnect preserving the current phase and origin. The separated-player cycle already passed at seven spawn and 20 despawn partial pairs, alongside the separate 937-sample clock control and its natural episode recovery. Host surges matched four partial pairs; startup with the guest in Nameless Rock matched six unfinished partial pairs. All surge differences were zero and native expiry completed on both clients. A guest-local untagged surge never appeared on the host, survived an accepted reconnect with a grace dialog, then expired. Surge runs made no post-trigger calendar writes. Historical failures and raw-calendar verdicts remain unchanged. Java: 3,929 passed, one skipped; bridge and harness checks: 147 passed."
     },
     {
       "sev": "gate",
       "sevLabel": "before M2",
-      "head": "P26 M1 terrain parity still needs the two-instance live gate",
-      "state": "geometry, mature brightness and running spawn control passed; paused fade and lifecycle gate open",
-      "body": "Static geometry/params matched across 12,769 values; the mature baseline matched all 724 brightness samples, including 187 zero gaps. A clean native spawn matched exactly at 94 naturally equal timestamps, including 92 partial-fade pairs; no naturally equal paused pair was captured, so the strict paused gate remains open. The clean despawn found the separate production regression above. Pass: full-fade effective brightness differs by at most 0.05, guest-local surges survive, mirrors stay smooth, and reconnect/save/reload creates no duplicates. Repeat with players in different locations. Start M2 only after this gate passes."
+      "head": "P26 M1 manual checks before M2",
+      "state": "maps/discovery, visible fade/carry, guest-local screen, mirrors and Nov 29 picker reload remain",
+      "body": "Verify both maps and per-player discovery; visible fade and fleet carry with the guest parked before activation; guest-local surge screen behavior; partner/NPC mirror motion; and normal-picker reload of the Nov 29, c206 coordinated pair. The Nov 25 map pair (09:25 Moscow) and Nov 29 mid-fade pair (09:28) remain in the native save folders and backups. Both games are held paused at Dec 15, c206, with faults clear. Numeric checks are complete, but M1 remains partial and M2 waits for these manual results."
     },
     {
       "sev": "scope",
@@ -912,7 +912,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0 passed live, including temporary-system save/reload seed lock and optional-unique location keys. M1 static geometry, mature brightness and a running spawn control passed. A clean reconnect/despawn exposed native fade timing divergence; its correction and remaining M1 live gates precede M2. M3-M5 and guest-proximity triggering remain follow-ups.",
+      "summary": "Task 0 and all M1 numeric live gates passed: both full seasonal fade cycles, normal clock coupling, host surge startup/expiry, guest-local surge isolation and genuine reconnect preservation. Maps/discovery, visible fade/carry, guest-local surge screen, mirror motion and normal-picker reload remain manual checks. M1 stays partial and M2 waits. M3-M5 and guest-proximity triggering remain follow-ups.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -923,12 +923,15 @@
         "$coopStreamId / $coopEncId",
         "segment polyline + live per-segment fader state replication",
         "generation recipe carrying the host's effective EPEC seed",
-        "bridge stream table (timestamp-paired) + temp-system manifest",
+        "bridge stream table (committed-phase checks; raw calendars retained) + temp-system manifest",
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "Retest the fixed-clock fade correction against the retained clean reconnect/despawn failure (clean build passes)",
-        "M1 live gate: map/discovery parity, timestamp-paired fades, seasonal turnover, host-surge travel, guest-local surges, mirror motion, reconnect/save/reload (static bridge geometry passed)",
+        "Manual: both hyperspace maps and per-player route discovery",
+        "Manual: visible fade and fleet carry with the guest parked before surge activation",
+        "Manual: guest-local surge screen behavior",
+        "Manual: partner and NPC mirror motion through streams and host surges",
+        "Manual: normal save-picker reload of the Nov 29, c206 coordinated pair",
         "M2 (after M1 live gate): fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity triggering: follow-up, outside the M1 + M2 draft scope",
@@ -937,7 +940,7 @@
         "document residual divergences + retire v1 accept-divergence entries",
         "commit"
       ],
-      "note": "User confirmed M1 + M2 scope on 2026-10-12 and, after a review the same day, put two shipped-bug fixes first (fingerprint; `deep space` location key, found by decompiling the engine), added host slipsurges to M1 and moved Leviathan trails to M5. Builds on Phases 8/9/13/30. Capture live per-segment FaderUtil state with the fade noise/counters; getFaderBrightness already includes bMult. M2 records the seed the host's EPEC used, because the fork's keyed seed depends on -Dcoop.newGameSeed. Fade-gate samples are paired by campaign timestamp under the shared pause. M2 starts only after M1 passes the bridge and two-instance gate."
+      "note": "User confirmed M1 + M2 scope on 2026-10-12 and, after a review the same day, put two shipped-bug fixes first (fingerprint; `deep space` location key, found by decompiling the engine), added host slipsurges to M1 and moved Leviathan trails to M5. Builds on Phases 8/9/13/30. Version 2 comparisons require the current host's committed origin/tick, native phase and mode, guest reachability, and convergence within five seconds at a frozen host; the 0.05 intensity limit includes zero gaps. Numeric seasonal, surge and reconnect gates now pass. Historical raw-calendar verdicts and the separate clock-control result stay distinct; surge runs used no post-trigger calendar writes. Only the listed manual M1 checks remain before M2. Its recipe carries the seed the host's EPEC used, because the fork's keyed seed depends on -Dcoop.newGameSeed."
     },
     {
       "id": "27",
