@@ -298,6 +298,12 @@ public final class CoopMessages {
          */
         ALLY_BATTLE_JOIN,
         /**
+         * Dual-engine shared combat (Suite frame-sync route). Payload carries {@code action}
+         * ({@link SharedCombatAction}) and a delimited {@code body}. Frames are latest-wins;
+         * OFFER/READY/CLAIM/LEAVE are moment-scoped like {@code BATTLE_*}.
+         */
+        SHARED_COMBAT,
+        /**
          * Phase 33: piloting engine &rarr; owner, what the battle did to the owner's ships. The
          * second message on the wire that changes another player's property without asking
          * ({@code CREDITS_GRANT} is the first), and it is built the same way: a sender-minted
@@ -393,6 +399,7 @@ public final class CoopMessages {
                  INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
                  ABILITY_ACTIVATE, DIALOG_BEGIN,
                  BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
+                 SHARED_COMBAT,
                  SAVE_CHECKPOINT, SAVE_CHECKPOINT_RESULT, RESPAWN_PLAYER, STALL_NOTICE,
                  SESSION_LEAVE,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED, SESSION_STATS, LINK_STATUS,
@@ -401,6 +408,24 @@ public final class CoopMessages {
                  ALLY_BATTLE_JOIN,
                  PING, PONG, UDP_PROBE, PATH_PROBE -> false;
         };
+    }
+
+    /** Actions carried inside {@link Type#SHARED_COMBAT}. */
+    public enum SharedCombatAction {
+        OFFER,
+        READY,
+        FRAME,
+        CLAIM,
+        CLAIM_ACK,
+        LEAVE
+    }
+
+    public static Message sharedCombat(String sessionId, long seq, long sentAtMillis,
+                                       SharedCombatAction action, String body) {
+        Objects.requireNonNull(action, "action");
+        return new Message(Type.SHARED_COMBAT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"action\":\"" + action.name() + "\","
+                        + "\"body\":\"" + escapeJson(body == null ? "" : body) + "\"}");
     }
 
     /**

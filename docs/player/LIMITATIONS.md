@@ -57,16 +57,17 @@ the next step in this line of work and it is not in this release.
 fleet was in it. There is no in-game view of the fight; people watch over a Discord screen share,
 where a full-screen panel on the watching client would be in the way anyway.
 
-**Both players piloting in one battle is experimental join-mode work.** When your partner engages,
+**Both players piloting in one battle is experimental shared-combat work.** When your partner engages,
 the mod measures distance to their fleet mirror (vanilla ally pull-in is 700 units). Within range you
-get a proximity notice (side-by-side fleets). Farther away you get a hyperspace support call — Accept /
-Decline on the ability bar — instead of teleporting your fleet into the fight. Mark non-flagships with
-the Hyperspace Comm Seat hullmod so a remote claim has a target.
+get a proximity notice and the dual-engine path opens a real combat on your client (shadow opposing
+fleet + frame sync). Farther away you get a hyperspace support call — Accept / Decline on the ability
+bar — instead of teleporting your whole fleet. Accept enters combat and claims a marked ship; Decline
+keeps the pause-only spectator. Mark non-flagships with the Hyperspace Comm Seat hullmod so a remote
+claim has a target. Losses and spoils still follow the engaging fleet; disconnect finishes the fight
+on the engager and reconciles on the host.
 
-If **BattleOnline Suite** is also enabled, Accept/Proximity sync Suite's combat join mode
-(REMOTE_SUPPORT / proximity) so claim piloting can run inside a shared BattleOnline fight. Campaign
-Accept alone does **not** drop you into your partner's vanilla campaign battle — that still needs the
-combat package path. Without Suite, Accept still pauses you correctly and records the decision.
+If **BattleOnline Suite** is also enabled, Accept/Proximity also arm Suite's claim variant-tree path
+so modular ships copy intact. See `docs/SHARED_COMBAT_SPIKE.md` for the live two-instance checklist.
 
 ## Saves
 

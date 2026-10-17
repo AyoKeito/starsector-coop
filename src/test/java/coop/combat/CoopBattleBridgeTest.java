@@ -57,6 +57,20 @@ class CoopBattleBridgeTest {
     }
 
     @Test
+    void hostBattleOffersSharedCombatAlongsideBegin() {
+        Fixture fixture = Fixture.host();
+
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);
+
+        boolean sharedOffer = fixture.service.sent.stream()
+                .anyMatch(m -> m.type() == CoopMessages.Type.SHARED_COMBAT
+                        && "OFFER".equals(CoopMessages.payload(m).requiredString("action")));
+        assertTrue(sharedOffer, "engager must advertise SHARED_COMBAT OFFER after local begin");
+        assertTrue(fixture.bridge.sharedCombat().isActive()
+                || fixture.bridge.sharedCombat().phase() == coop.combat.shared.CoopSharedCombatSession.Phase.OFFERED);
+    }
+
+    @Test
     void hostReturningFromCombatClearsTheCombatPauseAndSendsBattleEnd() {
         Fixture fixture = Fixture.host();
         fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);

@@ -13,7 +13,13 @@ import com.fs.starfarer.api.combat.CombatEngineAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.fleet.FleetGoal;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import coop.combat.join.CoopCombatJoinClassifier;
 import coop.combat.join.CoopCombatJoinCoordinator;
+import coop.combat.join.CoopCombatJoinMode;
+import coop.combat.join.CoopPartnerSeparationProbe;
+import coop.combat.join.CoopSharedBattleHooks;
+import coop.combat.join.CoopSuiteCombatBridge;
+import coop.combat.shared.CoopSharedCombatSession;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopMirrorTags;
@@ -173,6 +179,10 @@ public final class CoopBattleBridge {
     private final CoopPreBattleAutosave autosave = new CoopPreBattleAutosave();
     /** Phase-2 join package: proximity vs hyperspace-remote support. */
     private final CoopCombatJoinCoordinator joinCoordinator = new CoopCombatJoinCoordinator();
+    /** Suite-style dual-engine shared combat (frame sync route). */
+    private final CoopSharedCombatSession sharedCombat;
+    /** Drain SHARED_COMBAT / keepalive inbound mid-battle (installed by the pump). */
+    private Runnable combatInboundDrain;
 
     // ---- engaging side ----
     private boolean localBattleActive;
@@ -279,8 +289,64 @@ public final class CoopBattleBridge {
         this.session = Objects.requireNonNull(session, "session");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.pauseCoordinator = Objects.requireNonNull(pauseCoordinator, "pauseCoordinator");
+        this.sharedCombat = new CoopSharedCombatSession(service, session, clock);
         activeBridge = this;
         joinCoordinator.attachAsActive();
+        // Suite reflective bridge first (if present), then layer shared-combat session hooks.
+        installSharedCombatHooks();
+    }
+
+    private void installSharedCombatHooks() {
+        CoopSharedBattleHooks suite = joinCoordinator.hooks();
+        joinCoordinator.setSharedBattleHooks(new CoopSharedBattleHooks() {
+            @Override
+            public void onProximityJoinAvailable(String battleId, String partnerName) {
+                suite.onProximityJoinAvailable(battleId, partnerName);
+                sharedCombat.onProximityJoinAvailable(battleId, partnerName);
+            }
+
+            @Override
+            public void onRemoteSupportAccepted(String battleId, String partnerName) {
+                suite.onRemoteSupportAccepted(battleId, partnerName);
+                sharedCombat.onRemoteSupportAccepted(battleId, partnerName);
+            }
+
+            @Override
+            public void onRemoteSupportUnavailable(String battleId,
+                                                   coop.combat.join.CoopRemoteSupportPrompt.State reason) {
+                suite.onRemoteSupportUnavailable(battleId, reason);
+                sharedCombat.onRemoteSupportUnavailable(battleId, reason);
+            }
+
+            @Override
+            public void onRemoteBattleEnded(String battleId) {
+                suite.onRemoteBattleEnded(battleId);
+                sharedCombat.onRemoteBattleEnded(battleId);
+            }
+
+            @Override
+            public java.util.List<String> extraBannersAfterAccept(String battleId, String partnerName) {
+                java.util.List<String> out = new java.util.ArrayList<>(suite.extraBannersAfterAccept(battleId, partnerName));
+                out.add("Coop: shared combat entry armed — dual-engine frame sync when both are in battle.");
+                return out;
+            }
+
+            @Override
+            public java.util.List<String> extraBannersAfterProximity(String battleId, String partnerName) {
+                java.util.List<String> out = new java.util.ArrayList<>(
+                        suite.extraBannersAfterProximity(battleId, partnerName));
+                out.add("Coop: proximity shared combat — entering dual-engine battle when ready.");
+                return out;
+            }
+        });
+    }
+
+    public CoopSharedCombatSession sharedCombat() {
+        return sharedCombat;
+    }
+
+    public void setCombatInboundDrain(Runnable drain) {
+        this.combatInboundDrain = drain;
     }
 
     /** The bridge the in-combat plugin reports to, or null when no coop pump exists. */
@@ -363,7 +429,31 @@ public final class CoopBattleBridge {
             return;
         }
         try {
+            // Phase B: reset inbound budget and drain SHARED_COMBAT / keepalive while campaign pump sleeps.
+            try {
+                service.beginFrame();
+            } catch (Throwable ignored) {
+            }
+            if (combatInboundDrain != null) {
+                try {
+                    combatInboundDrain.run();
+                } catch (Throwable t) {
+                    CoopLog.warn(CoopBattleBridge.class, "Coop combat inbound drain failed", t);
+                }
+            }
+
+            // Partner dual-engine path: never claim engager authority via beginLocalBattle.
+            if (sharedCombat.isActive() && !localBattleActive && remoteBattleActive) {
+                sharedCombat.onCombatFrame(engine, nowMillis);
+                service.flushOutbound();
+                return;
+            }
+
             if (!isCampaignBattle(engine)) {
+                if (sharedCombat.isActive()) {
+                    sharedCombat.onCombatFrame(engine, nowMillis);
+                    service.flushOutbound();
+                }
                 return;
             }
             if (!localBattleActive) {
@@ -385,9 +475,14 @@ public final class CoopBattleBridge {
                         enemy.isEmpty() ? engageDialogFleetName : enemy,
                         opponents);
                 engageDialogBecameBattle |= fromHandoff;
+                offerSharedCombatFromEngine(engine);
             }
             sawCombatFrame = true;
+            if (sharedCombat.isActive()) {
+                sharedCombat.onCombatFrame(engine, nowMillis);
+            }
             if (nowMillis < nextStatusAtMillis) {
+                service.flushOutbound();
                 return;
             }
             nextStatusAtMillis = nowMillis + STATUS_INTERVAL_MILLIS;
@@ -401,9 +496,40 @@ public final class CoopBattleBridge {
             if (!localBattleNpcFleetIds.isEmpty()) {
                 notifyBattleBegun(localBattleNpcFleetIds);
             }
+            service.flushOutbound();
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopBattleBridge.class, "Coop battle status capture failed", ex);
         }
+    }
+
+    private void offerSharedCombatFromEngine(CombatEngineAPI engine) {
+        List<String> hulls = new ArrayList<>();
+        try {
+            for (ShipAPI ship : engine.getShips()) {
+                if (ship == null || ship.isFighter() || ship.isShuttlePod() || ship.getOwner() == 0) {
+                    continue;
+                }
+                if (ship.getHullSpec() != null) {
+                    hulls.add(ship.getHullSpec().getHullId());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        CoopCombatJoinMode mode = CoopCombatJoinMode.PROXIMITY;
+        try {
+            SectorAPI sector = Global.getSector();
+            mode = CoopCombatJoinClassifier.classify(
+                    CoopPartnerSeparationProbe.measure(sector));
+        } catch (Throwable ignored) {
+            try {
+                mode = joinCoordinator.lastMode();
+            } catch (Throwable ignored2) {
+            }
+        }
+        if (mode == CoopCombatJoinMode.UNKNOWN_FALLBACK_REMOTE) {
+            mode = CoopCombatJoinMode.REMOTE_SUPPORT;
+        }
+        sharedCombat.onLocalEngagerBattleBegin(localBattleId, mode, hulls);
     }
 
     /** Real campaign engagement only: never the refit simulator, mission sim, or title screen. */
@@ -475,6 +601,12 @@ public final class CoopBattleBridge {
         remoteBattleId = "";
         List<String> concluded = List.copyOf(remoteBattleNpcFleetIds);
         remoteBattleNpcFleetIds.clear();
+        try {
+            joinCoordinator.onPartnerBattleEnd(battleId);
+            sharedCombat.onBattleEnded("SILENCE_TIMEOUT");
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBattleBridge.class, "shared combat silence-timeout cleanup failed", t);
+        }
         notifyBattleConcluded(concluded, false);
         CoopLog.warn(CoopBattleBridge.class, "Coop no BATTLE_STATUS for " + silence
                 + " ms on battleId=" + battleId + "; treating the partner's battle as over."
@@ -521,6 +653,7 @@ public final class CoopBattleBridge {
             case BATTLE_END -> handleBattleEnd(message);
             case ENGAGE_GUEST -> handleEngageGuest(message);
             case DIALOG_BEGIN -> handleDialogBegin(message);
+            case SHARED_COMBAT -> sharedCombat.handleMessage(message);
             default -> {
                 // not ours
             }
@@ -550,6 +683,15 @@ public final class CoopBattleBridge {
             for (String extra : joinCoordinator.onPartnerBattleBegin(sector, battleId, partnerName(), enemy)) {
                 queueBanner(extra);
             }
+            List<String> hulls = new ArrayList<>();
+            if (remoteStatus != null) {
+                for (CoopBattleStatus.ShipRecord s : remoteStatus.enemyShips()) {
+                    if (s.hullId() != null && !s.hullId().isEmpty()) {
+                        hulls.add(s.hullId());
+                    }
+                }
+            }
+            sharedCombat.onPartnerBattleOffered(battleId, joinCoordinator.lastMode(), hulls);
         } catch (Throwable t) {
             CoopLog.warn(CoopBattleBridge.class, "Coop join coordinator failed on BATTLE_BEGIN", t);
         }
@@ -618,6 +760,7 @@ public final class CoopBattleBridge {
         queueBanner(battleEndBanner(partnerName(), outcome, survivorSummary(remoteStatus)));
         try {
             joinCoordinator.onPartnerBattleEnd(battleId);
+            sharedCombat.onBattleEnded(outcome);
         } catch (Throwable t) {
             CoopLog.warn(CoopBattleBridge.class, "Coop join coordinator failed on BATTLE_END", t);
         }
@@ -740,8 +883,14 @@ public final class CoopBattleBridge {
         if (service.role() == CoopConnectionRole.HOST) {
             pauseCoordinator.setEitherInCombat(combatPauseIntent(false, remoteBattleActive));
         }
+        try {
+            sharedCombat.onBattleEnded(outcome);
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBattleBridge.class, "shared combat end failed", t);
+        }
         if (!isSessionActive() || !service.isConnected()) {
             CoopLog.warn(CoopBattleBridge.class, discardedResultMessage(battleId, localEnemySummary));
+            notifyBattleConcluded(npcFleetIds, true);
             return;
         }
         CoopMessages.Message message = CoopMessages.battleEnd(
@@ -1323,9 +1472,14 @@ public final class CoopBattleBridge {
         if (localBattleActive && !localBattleEndSent) {
             CoopLog.warn(CoopBattleBridge.class, discardedResultMessage(localBattleId, localEnemySummary));
         }
-        if (localBattleActive || remoteBattleActive) {
+        if (localBattleActive || remoteBattleActive || sharedCombat.isActive()) {
             // The session edge closes the combat window too, so the RTT filter stops holding it open.
             lastCombatEndedAtMillis = clock.getAsLong();
+        }
+        try {
+            sharedCombat.onBattleEnded("DISCONNECT");
+        } catch (Throwable t) {
+            CoopLog.warn(CoopBattleBridge.class, "shared combat disconnect cleanup failed", t);
         }
         localBattleActive = false;
         sawCombatFrame = false;
@@ -1354,7 +1508,8 @@ public final class CoopBattleBridge {
             remoteStatus = null;
             remoteStatusDigest = "";
             queueBanner("Coop: connection lost. Your partner's battle finishes on their machine;"
-                    + " the host's authoritative state reconciles it next session.");
+                    + " the host's authoritative state reconciles it next session."
+                    + " Claimed ships roll back with host-authoritative reconciliation.");
             CoopLog.warn(CoopBattleBridge.class, "Coop session lost while the partner was fighting"
                     + " battleId=" + remoteBattleId + "; spectator released");
         }
