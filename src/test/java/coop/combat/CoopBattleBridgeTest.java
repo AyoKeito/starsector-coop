@@ -71,6 +71,97 @@ class CoopBattleBridgeTest {
     }
 
     @Test
+    void hostBattleEndClearsSharedCombatSession() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.OFFERED,
+                fixture.bridge.sharedCombat().phase());
+
+        fixture.bridge.tickCampaign(null, true, 2000L);
+
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.IDLE,
+                fixture.bridge.sharedCombat().phase());
+        assertEquals("UNKNOWN", fixture.bridge.sharedCombat().endOutcome());
+    }
+
+    @Test
+    void partnerBattleEndClearsSharedCombatOffer() {
+        Fixture fixture = Fixture.guest();
+        fixture.bridge.joinCoordinator().setSeparationProbe(
+                s -> coop.combat.join.CoopPartnerSeparation.sameLocation(2_000f));
+        fixture.bridge.joinCoordinator().setMarkedShipProbe(s -> true);
+        fixture.bridge.sharedCombat().setEntryHookForTest(hulls -> {
+            throw new AssertionError("remote without Accept must not enter");
+        });
+
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L,
+                "battle-g", "host-player", "Corvus", "Pirate Raiders", "", CoopMessages.BattleKind.PLAYER));
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.OFFERED,
+                fixture.bridge.sharedCombat().phase());
+
+        fixture.bridge.handle(CoopMessages.battleEnd("session-a", 2L, 0L,
+                "battle-g", "host-player", "WIN"));
+
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.IDLE,
+                fixture.bridge.sharedCombat().phase());
+    }
+
+    @Test
+    void partnerDeclineRemoteSupportAbortsSharedCombatEntry() {
+        Fixture fixture = Fixture.guest();
+        fixture.bridge.joinCoordinator().setSeparationProbe(
+                s -> coop.combat.join.CoopPartnerSeparation.differentLocation());
+        fixture.bridge.joinCoordinator().setMarkedShipProbe(s -> true);
+        fixture.bridge.sharedCombat().setEntryHookForTest(hulls -> {
+            throw new AssertionError("decline must not enter dual engine");
+        });
+
+        fixture.bridge.handle(CoopMessages.battleBegin("session-a", 1L, 0L,
+                "battle-r", "host-player", "Corvus", "Remnants", "", CoopMessages.BattleKind.PLAYER));
+        assertEquals(coop.combat.join.CoopCombatJoinMode.REMOTE_SUPPORT,
+                fixture.bridge.joinCoordinator().lastMode());
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.OFFERED,
+                fixture.bridge.sharedCombat().phase());
+
+        fixture.bridge.joinCoordinator().declineRemoteSupport();
+
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.IDLE,
+                fixture.bridge.sharedCombat().phase());
+    }
+
+    @Test
+    void sharedCombatLeaveMessageIsRoutedThroughBridgeHandle() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.OFFERED,
+                fixture.bridge.sharedCombat().phase());
+
+        fixture.bridge.handle(CoopMessages.sharedCombat(
+                "session-a", 9L, 0L, CoopMessages.SharedCombatAction.LEAVE, "PEER_END"));
+
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.IDLE,
+                fixture.bridge.sharedCombat().phase());
+        assertEquals("PEER_END", fixture.bridge.sharedCombat().endOutcome());
+    }
+
+    @Test
+    void sessionDropClearsSharedCombatWithoutLeaveWire() {
+        Fixture fixture = Fixture.host();
+        fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);
+        fixture.service.sent.clear();
+
+        fixture.bridge.tickCampaign(null, false, 3000L);
+
+        assertEquals(coop.combat.shared.CoopSharedCombatSession.Phase.IDLE,
+                fixture.bridge.sharedCombat().phase());
+        assertEquals("DISCONNECT", fixture.bridge.sharedCombat().endOutcome());
+        assertTrue(fixture.service.sent.stream()
+                        .noneMatch(m -> m.type() == CoopMessages.Type.SHARED_COMBAT
+                                && "LEAVE".equals(CoopMessages.payload(m).requiredString("action"))),
+                "disconnect cleanup must not emit SHARED_COMBAT LEAVE");
+    }
+
+    @Test
     void hostReturningFromCombatClearsTheCombatPauseAndSendsBattleEnd() {
         Fixture fixture = Fixture.host();
         fixture.bridge.onCombatFrame(fixture.engine(List.of()), 1000L);

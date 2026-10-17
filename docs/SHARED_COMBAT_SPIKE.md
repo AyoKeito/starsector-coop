@@ -38,3 +38,10 @@ Prove the campaign can run **dual real CombatEngines** with Suite/BO-style frame
 2. Guest far + marked ship → Accept → claim ACK → guest pilots claimed hull
 3. Guest Decline → pause only, no entry
 4. Kill host TCP mid-fight → guest released; host battle completes locally
+
+## Headless regressions caught (unit)
+
+- Remote Accept entry used to promote `CLAIM_PENDING` → `ACTIVE` immediately, so claim probes never fired; fixed to stay pending until `CLAIM_ACK`, with 500 ms probe throttle.
+- Combat frames no longer overwrite `CLAIM_PENDING`.
+- `OFFER` body now carries `battleId\nmode\nhulls` (legacy `mode\nhulls` still parsed).
+- Multiline `FRAME` / piped claim trees round-trip through `CoopMessages` JSON escape.

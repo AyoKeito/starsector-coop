@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 
 /**
@@ -52,15 +53,29 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
     private String lastClaimTargetId = "";
     private boolean claimGranted;
     private String endOutcome = "";
+    private long nextClaimProbeAtMillis;
+
+    /**
+     * Test seam: replace {@link CoopSharedCombatEntry#enterAgainstShadowEnemy} without a live engine.
+     * Null = production path.
+     */
+    private Function<List<String>, Boolean> entryHook;
 
     /** Frame send cadence (~10 Hz) — denser than BATTLE_STATUS, lighter than BO UDP. */
     public static final long FRAME_INTERVAL_MILLIS = 100L;
+    /** Claim probe retry cadence while ACK is outstanding. */
+    public static final long CLAIM_PROBE_INTERVAL_MILLIS = 500L;
 
     public CoopSharedCombatSession(CoopNetService service, CoopSessionState session,
                                    LongSupplier clock) {
         this.service = Objects.requireNonNull(service);
         this.session = Objects.requireNonNull(session);
         this.clock = Objects.requireNonNull(clock);
+    }
+
+    /** Package/test: inject partner entry success/failure without calling {@code startBattle}. */
+    public void setEntryHookForTest(Function<List<String>, Boolean> hook) {
+        this.entryHook = hook;
     }
 
     public Phase phase() {
@@ -135,11 +150,14 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
             return;
         }
         this.joinMode = CoopCombatJoinMode.REMOTE_SUPPORT;
-        this.phase = Phase.CLAIM_PENDING;
         if (!entryIssued) {
             tryEnterAsPartner();
         }
-        // Claim first marked target once in combat — combat plugin drives sendClaimIfNeeded.
+        // Stay CLAIM_PENDING until CLAIM_ACK — do not let entry success promote to ACTIVE early.
+        if (entryIssued && !claimGranted) {
+            phase = Phase.CLAIM_PENDING;
+            nextClaimProbeAtMillis = 0L;
+        }
         CoopLog.info(CoopSharedCombatSession.class,
                 "shared combat remote ACCEPTED battleId=" + battleId + " partner=" + partnerName);
     }
@@ -165,15 +183,30 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
         if (entryIssued || localIsEngager) {
             return;
         }
+        Phase prior = phase;
         phase = Phase.ENTERING;
-        boolean ok = CoopSharedCombatEntry.enterAgainstShadowEnemy(List.copyOf(enemyHullIds));
+        List<String> hulls = List.copyOf(enemyHullIds);
+        boolean ok;
+        if (entryHook != null) {
+            Boolean result = entryHook.apply(hulls);
+            ok = Boolean.TRUE.equals(result);
+        } else {
+            ok = CoopSharedCombatEntry.enterAgainstShadowEnemy(hulls);
+        }
         entryIssued = ok;
         if (ok) {
             sendAction(CoopMessages.SharedCombatAction.READY, battleId);
-            phase = Phase.ACTIVE;
-            CoopLog.info(CoopSharedCombatSession.class, "shared combat partner ENTERED battleId=" + battleId);
+            // Remote Accept path needs CLAIM_PENDING until ACK; proximity goes ACTIVE immediately.
+            if (joinMode.isRemote() && !claimGranted) {
+                phase = Phase.CLAIM_PENDING;
+            } else {
+                phase = Phase.ACTIVE;
+            }
+            CoopLog.info(CoopSharedCombatSession.class, "shared combat partner ENTERED battleId=" + battleId
+                    + " phase=" + phase);
         } else {
-            phase = Phase.OFFERED;
+            // Preserve Accept intent so a later retry / combat frame can still claim after re-entry.
+            phase = prior == Phase.CLAIM_PENDING ? Phase.CLAIM_PENDING : Phase.OFFERED;
             CoopLog.warn(CoopSharedCombatSession.class, "shared combat partner ENTRY failed");
         }
     }
@@ -183,7 +216,9 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
         if (engine == null || !isActive()) {
             return;
         }
-        if (!localIsEngager && joinMode.isRemote() && phase == Phase.CLAIM_PENDING && !claimGranted) {
+        if (!localIsEngager && joinMode.isRemote() && phase == Phase.CLAIM_PENDING && !claimGranted
+                && nowMillis >= nextClaimProbeAtMillis) {
+            nextClaimProbeAtMillis = nowMillis + CLAIM_PROBE_INTERVAL_MILLIS;
             sendClaimProbe(engine);
         }
         if (nowMillis < nextFrameAtMillis) {
@@ -194,7 +229,10 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
         frameSeq++;
         sendAction(CoopMessages.SharedCombatAction.FRAME,
                 battleId + "\n" + frameSeq + "\n" + CoopSharedCombatFrameCodec.encode(frames));
-        phase = Phase.ACTIVE;
+        // Never demote CLAIM_PENDING → ACTIVE before ACK; that dropped claim probes.
+        if (phase != Phase.CLAIM_PENDING) {
+            phase = Phase.ACTIVE;
+        }
     }
 
     public void handleMessage(CoopMessages.Message message) {
@@ -240,6 +278,9 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
         entryIssued = false;
         claimGranted = false;
         localIsEngager = false;
+        nextFrameAtMillis = 0L;
+        nextClaimProbeAtMillis = 0L;
+        frameSeq = 0L;
         remoteShips.clear();
         enemyHullIds.clear();
         CoopLog.info(CoopSharedCombatSession.class,
@@ -251,16 +292,28 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
     // ---- internals ------------------------------------------------------------------
 
     private void handleOffer(String body) {
-        // body: mode\nhull1,hull2,...
+        // body: battleId\nmode\nhull1,hull2,...  (legacy: mode\nhulls without battleId)
+        String offeredBattleId = battleId;
         String mode = "REMOTE_SUPPORT";
         List<String> hulls = new ArrayList<>();
         if (body != null && !body.isEmpty()) {
             String[] lines = body.split("\n", -1);
-            if (lines.length > 0 && !lines[0].isBlank()) {
-                mode = lines[0].trim();
+            int modeIdx = 0;
+            if (lines.length >= 2 && looksLikeJoinMode(lines[1].trim())) {
+                // New format: battleId \n mode \n hulls
+                if (!lines[0].isBlank()) {
+                    offeredBattleId = lines[0].trim();
+                }
+                modeIdx = 1;
+            } else if (lines.length >= 1 && looksLikeJoinMode(lines[0].trim())) {
+                modeIdx = 0;
             }
-            if (lines.length > 1 && !lines[1].isBlank()) {
-                for (String h : lines[1].split(",")) {
+            if (lines.length > modeIdx && !lines[modeIdx].isBlank()) {
+                mode = lines[modeIdx].trim();
+            }
+            int hullIdx = modeIdx + 1;
+            if (lines.length > hullIdx && !lines[hullIdx].isBlank()) {
+                for (String h : lines[hullIdx].split(",")) {
                     if (!h.isBlank()) {
                         hulls.add(h.trim());
                     }
@@ -273,7 +326,22 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
         } catch (RuntimeException ex) {
             parsed = CoopCombatJoinMode.REMOTE_SUPPORT;
         }
-        onPartnerBattleOffered(battleId.isEmpty() ? "offer" : battleId, parsed, hulls);
+        if (offeredBattleId == null || offeredBattleId.isEmpty()) {
+            offeredBattleId = "offer";
+        }
+        onPartnerBattleOffered(offeredBattleId, parsed, hulls);
+    }
+
+    private static boolean looksLikeJoinMode(String token) {
+        if (token == null || token.isEmpty()) {
+            return false;
+        }
+        try {
+            CoopCombatJoinMode.valueOf(token);
+            return true;
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     private String encodeOfferBody() {
@@ -284,7 +352,7 @@ public final class CoopSharedCombatSession implements CoopSharedBattleHooks {
             }
             hulls.append(h);
         }
-        return joinMode.name() + "\n" + hulls;
+        return battleId + "\n" + joinMode.name() + "\n" + hulls;
     }
 
     private void handleFrame(String body) {
