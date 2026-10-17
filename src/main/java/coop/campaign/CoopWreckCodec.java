@@ -101,10 +101,15 @@ public final class CoopWreckCodec {
     }
 
     public static CustomCampaignEntityAPI create(LocationAPI location, CoopWreckRecord record) {
+        return create(location, record, record.id());
+    }
+
+    /** Encounter membership uses a separate wire key; null lets the engine mint its native ID. */
+    public static CustomCampaignEntityAPI create(LocationAPI location, CoopWreckRecord record, String nativeEntityId) {
         Objects.requireNonNull(location, "location"); Objects.requireNonNull(record, "record");
         DerelictShipData data = new DerelictShipData(buildShip(record.ship()), record.canHaveExtraCargo());
         data.durationDays = record.durationDays();
-        CustomCampaignEntityAPI entity = location.addCustomEntity(record.id(), record.name(),
+        CustomCampaignEntityAPI entity = location.addCustomEntity(nativeEntityId, record.name(),
                 Entities.WRECK, record.factionId(), data);
         if (entity == null) throw new IllegalStateException("Native wreck creation returned null");
         try {

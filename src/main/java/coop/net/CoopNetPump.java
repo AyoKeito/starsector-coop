@@ -8435,7 +8435,7 @@ public class CoopNetPump implements EveryFrameScript {
             SectorEntityToken target = dialog.getInteractionTarget();
             if (target != null) {
                 String sharedWreckId = coop.campaign.CoopWreckWorld.ownedId(target);
-                currentEntityId = sharedWreckId == null ? target.getId() : sharedWreckId;
+                currentEntityId = sharedWreckId == null ? coop.fleet.CoopEntityIds.keyOf(target) : sharedWreckId;
                 currentEntityName = target.getName();
             }
         }

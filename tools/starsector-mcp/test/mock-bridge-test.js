@@ -296,7 +296,7 @@ test('encounter diff compares canonical gameplay leaves and bounds precise misma
   const table = { truncated: false, encounters: { same: {
     optionalUniqueId: 'same', name: 'host name', catalogId: 'host catalog', threatTag: true,
     recipe: { effectiveSeed: '-9223372036854775808', entities: [{ role: 'SYSTEM', ordinal: 0, specId: 'frozen' }] },
-    entities: { coopenc_same_system0: { present: true, sectorResolves: true, locationResolves: true,
+    entities: { coopenc_same_system0: { present: true, canonicalResolves: true, locationResolves: true,
       x: 1, radius: 25, surveyLevel: 'FULL', orbit: { focusId: 'coopenc_same_system1', radius: 300 },
       conditions: ['cold'], hintFlags: { $visited: false } } }
   } } };
@@ -304,7 +304,7 @@ test('encounter diff compares canonical gameplay leaves and bounds precise misma
   guest.encounters.same.name = 'guest name'; guest.encounters.same.catalogId = 'guest catalog';
   assert.equal(diffEncounters(table, guest).equal, true);
   guest.encounters.same.recipe.entities[0].role = 'ANCHOR';
-  guest.encounters.same.entities.coopenc_same_system0.sectorResolves = false;
+  guest.encounters.same.entities.coopenc_same_system0.canonicalResolves = false;
   guest.encounters.same.entities.coopenc_same_system0.radius = 30;
   const result = diffEncounters(table, guest, { maxDifferences: 2 });
   assert.equal(result.equal, false); assert.equal(result.counts.differing, 3);
@@ -312,6 +312,44 @@ test('encounter diff compares canonical gameplay leaves and bounds precise misma
   assert.ok(result.differences.some((difference) => difference.path.endsWith('.radius')));
   assert.ok(result.differences.every((difference) => difference.path.startsWith('$.encounters.same.')));
   assert.equal(diffEncounters(table, guest).differences.some((difference) => difference.path.endsWith('.role')), true);
+});
+
+test('composite encounter identities compare equal across local native ids and pseudo-token lookup failures', () => {
+  const host = { truncated: false, encounters: { same: { optionalUniqueId: 'same', entities: {
+    coopenc_same_system0: { entityId: 'coopenc_same_system0', engineId: 'host-planet', present: true,
+      canonicalResolves: true, locationResolves: true, nativeSectorResolves: true,
+      nativeSectorLookupError: null, nativeSectorLookupExempt: false, nativeSectorLookupClass: 'CAMPAIGN_ENTITY',
+      orbit: { focusId: 'coopenc_same_system1', radius: 300 }, destinations: ['coopenc_same_jump_point0'] },
+    coopenc_same_system1: { entityId: 'coopenc_same_system1', engineId: 'host-center', present: true,
+      canonicalResolves: true, locationResolves: true, nativeSectorResolves: false,
+      nativeSectorLookupError: 'ClassCastException: native Host token cannot cast',
+      nativeSectorLookupExempt: true, nativeSectorLookupClass: 'LOCATION_TOKEN', targetId: 'coopenc_same_system0' }
+  } } } };
+  const guest = structuredClone(host);
+  guest.encounters.same.entities.coopenc_same_system0.engineId = 'guest-planet';
+  guest.encounters.same.entities.coopenc_same_system1.engineId = 'guest-center';
+  guest.encounters.same.entities.coopenc_same_system1.nativeSectorResolves = true;
+  guest.encounters.same.entities.coopenc_same_system1.nativeSectorLookupError = null;
+  const result = diffEncounters(host, guest);
+  assert.equal(result.equal, true); assert.equal(result.resolutionFailureCount, 0);
+  assert.ok(result.ignored.includes('engineId'));
+  assert.equal(diffEncounters(host, guest, { ignore: [] }).equal, true, 'local identity metadata is excluded independently of cosmetic options');
+  guest.encounters.same.entities.coopenc_same_system0.orbit.focusId = 'coopenc_same_system2';
+  assert.equal(diffEncounters(host, guest).equal, false, 'canonical orbit references remain gameplay fields');
+});
+
+test('identically broken canonical or location resolution cannot pass an encounter diff', () => {
+  const broken = { truncated: false, encounters: { same: { entities: {
+    coopenc_same_system0: { present: true, canonicalResolves: false, locationResolves: true },
+    coopenc_same_system1: { present: false, canonicalResolves: false, locationResolves: false }
+  } } } };
+  const result = diffEncounters(broken, structuredClone(broken), { ignore: ['canonicalResolves'] });
+  assert.equal(result.equal, false); assert.equal(result.counts.differing, 1); assert.equal(result.resolutionFailureCount, 2);
+  assert.deepEqual(result.differences[0].failedInstances, ['host', 'guest']);
+  assert.equal(result.differences[0].path, '$.encounters.same.entities.coopenc_same_system0.canonicalResolves');
+  broken.encounters.same.entities.coopenc_same_system0.canonicalResolves = true;
+  broken.encounters.same.entities.coopenc_same_system0.locationResolves = false;
+  assert.equal(diffEncounters(broken, structuredClone(broken)).equal, false);
 });
 
 test('encounter diff refuses partial manifests and summarizes a missing whole instance', () => {

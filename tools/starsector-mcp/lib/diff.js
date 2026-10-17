@@ -24,6 +24,9 @@ export const ENCOUNTER_COSMETIC_KEYS = [
   'name', 'shipName', 'firstName', 'lastName', 'displayName', 'variantDisplayName', 'catalogId'
 ];
 
+/** Local ids and the engine's LocationToken cache defect are diagnostic metadata. */
+export const ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS = ['engineId', 'nativeSectorResolves', 'nativeSectorLookupError'];
+
 /** Compare complete canonical membership, including role and identity-resolution checks. */
 export function diffEncounters(host, guest, options = {}) {
   for (const [instance, table] of [['host', host], ['guest', guest]]) {
@@ -36,12 +39,41 @@ export function diffEncounters(host, guest, options = {}) {
     throw new Error('maxDifferences must be an integer from 1 to 1000');
   }
   const result = diffJson({ encounters: host.encounters }, { encounters: guest.encounters }, {
-    ...options, ignore: options.ignore ?? ENCOUNTER_COSMETIC_KEYS
+    ...options, ignore: [...new Set([...(options.ignore ?? ENCOUNTER_COSMETIC_KEYS), ...ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS])]
   });
+  const failedPaths = new Map();
+  for (const [instance, table] of [['host', host], ['guest', guest]]) {
+    for (const [instanceId, encounter] of Object.entries(table.encounters)) {
+      for (const collection of ['entities', 'untrackedEntities']) {
+        for (const [entityId, entity] of Object.entries(encounter[collection] ?? {})) {
+          if (entity.present !== true) continue;
+          for (const field of ['canonicalResolves', 'locationResolves']) {
+            if (entity[field] === true) continue;
+            const path = `$.encounters.${instanceId}.${collection}.${entityId}.${field}`;
+            if (!failedPaths.has(path)) failedPaths.set(path, { path, failedInstances: [],
+              host: host.encounters[instanceId]?.[collection]?.[entityId]?.[field],
+              guest: guest.encounters[instanceId]?.[collection]?.[entityId]?.[field],
+              note: 'present entity must resolve to the same object' });
+            failedPaths.get(path).failedInstances.push(instance);
+          }
+        }
+      }
+    }
+  }
+  let resolutionFailureCount = 0;
+  for (const failure of failedPaths.values()) {
+    resolutionFailureCount += failure.failedInstances.length;
+    const existing = result.differences.find((difference) => difference.path === failure.path);
+    if (existing) Object.assign(existing, { failedInstances: failure.failedInstances, note: failure.note });
+    else result.differences.push(failure);
+  }
   return {
     ...result,
+    equal: result.differences.length === 0,
+    counts: { ...result.counts, differing: result.differences.length },
     differences: result.differences.slice(0, maxDifferences).map(compactDifference),
     truncated: result.differences.length > maxDifferences,
+    resolutionFailureCount,
     maxDifferences
   };
 }

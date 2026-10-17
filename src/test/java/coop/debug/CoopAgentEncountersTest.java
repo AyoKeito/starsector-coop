@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.OrbitAPI;
 import com.fs.starfarer.api.campaign.PlanetAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
@@ -17,6 +18,7 @@ import coop.campaign.CoopEncounterRecord;
 import coop.campaign.CoopEncounterWorld;
 import coop.campaign.CoopWreckFixtures;
 import coop.campaign.CoopWreckRecord;
+import coop.fleet.CoopEntityIds;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopNetPump;
 import coop.testing.ApiProxies;
@@ -47,6 +49,7 @@ class CoopAgentEncountersTest {
     }
     @AfterEach void cleanup() {
         CoopEncounterReplayBridge.clear(); Global.setSector(oldSector); Global.setSettings(oldSettings);
+        coop.fleet.CoopLocations.invalidate();
         coop.ui.CoopSessionIntelFeed.uninstall();
     }
 
@@ -80,13 +83,50 @@ class CoopAgentEncountersTest {
         assertEquals(12.5, live.getDouble("x")); assertEquals(40, live.getDouble("radius"));
         assertEquals("FULL", live.getString("surveyLevel")); assertEquals("cold", live.getJSONArray("conditions").getString(0));
         assertTrue(live.getBoolean("ruinsExplored")); assertTrue(live.getJSONObject("hintFlags").getBoolean("$visited"));
-        assertTrue(live.getBoolean("sectorResolves")); assertTrue(live.getBoolean("locationResolves"));
+        assertTrue(live.getBoolean("canonicalResolves")); assertTrue(live.getBoolean("locationResolves"));
+        assertTrue(live.getBoolean("nativeSectorResolves"));
         JSONObject link = row.getJSONObject("entities").getJSONObject(anchor.getId());
-        assertFalse(link.getBoolean("sectorResolves")); assertTrue(link.getBoolean("locationResolves"));
+        assertTrue(link.getBoolean("canonicalResolves"));
+        assertFalse(link.getBoolean("nativeSectorResolves")); assertTrue(link.getBoolean("locationResolves"));
         JSONObject consumed = row.getJSONObject("entities").getJSONObject("coopenc_instance_system1");
         assertTrue(consumed.getBoolean("consumed")); assertFalse(consumed.getBoolean("present"));
         assertEquals(recipe.encode(), system.memory.get(CoopEncounterWorld.RECIPE_KEY), "query must not update the recipe");
         assertEquals(0, row.getJSONObject("untrackedEntities").length());
+    }
+
+    @Test void compositeManifestSurvivesTheNativeSectorCastContractWithoutChangingLocalIds() throws Exception {
+        Scene scene = new Scene(); NativeSystem system = scene.addSystem(); system.optionalId = "instance";
+        Global.setSector(scene.sector);
+        CoopEncounterRecord base = recipe();
+        CoopEncounterRecord shared = new CoopEncounterRecord(base.instanceId(), base.effectiveSeed(), base.encounterPointId(),
+                base.x(), base.y(), base.depth(), base.threatRollRan(), base.creator(), base.threatTag(),
+                List.of(new CoopEncounterRecord.Entity(CoopEncounterRecord.Role.SYSTEM, 0, "planet:frozen"),
+                        new CoopEncounterRecord.Entity(CoopEncounterRecord.Role.SYSTEM, 1, "token"),
+                        new CoopEncounterRecord.Entity(CoopEncounterRecord.Role.ANCHOR, 0, "token")), List.of(), CoopEncounterRecord.Overlay.empty());
+        system.memory.put(CoopEncounterWorld.RECIPE_KEY, shared.encode());
+        Map<String, Object> planetMemory = new HashMap<>();
+        planetMemory.put(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, "coopenc_instance_system0");
+        planetMemory.put(CoopEncounterWorld.ENCOUNTER_ID_KEY, "instance");
+        SectorEntityToken planet = scene.entity("native-planet", system.api, planetMemory, true);
+        SectorEntityToken center = scene.entity("native-center", system.api,
+                Map.of(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, "coopenc_instance_system1", CoopEncounterWorld.ENCOUNTER_ID_KEY, "instance"), false);
+        SectorEntityToken anchor = scene.entity("native-anchor", scene.hyper,
+                Map.of(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, "coopenc_instance_anchor0", CoopEncounterWorld.ENCOUNTER_ID_KEY, "instance"), false);
+        system.entities.add(planet); system.entities.add(center); scene.hyperEntities.add(anchor);
+        scene.orbitFocus.put("native-planet", center);
+        scene.sectorLookup.put("native-planet", planet);
+        scene.sectorFaultIds.add("native-center"); scene.sectorFaultIds.add("native-anchor");
+        JSONObject members = CoopAgentCommands.encounters(new JSONObject(), context(scene.sector, null))
+                .getJSONObject("encounters").getJSONObject("instance").getJSONObject("entities");
+        JSONObject currentCenter = members.getJSONObject("coopenc_instance_system1");
+        assertEquals("native-center", currentCenter.getString("engineId"));
+        assertTrue(currentCenter.getBoolean("canonicalResolves")); assertTrue(currentCenter.getBoolean("locationResolves"));
+        assertFalse(currentCenter.getBoolean("nativeSectorResolves"));
+        assertFalse(currentCenter.getBoolean("nativeSectorLookupExempt"), "an API proxy is not classified as the engine's concrete LocationToken");
+        assertTrue(currentCenter.getString("nativeSectorLookupError").contains("ClassCastException"));
+        assertEquals("coopenc_instance_system1", members.getJSONObject("coopenc_instance_system0").getJSONObject("orbit").getString("focusId"));
+        assertTrue(members.getJSONObject("coopenc_instance_anchor0").getBoolean("canonicalResolves"));
+        assertEquals("native-center", center.getId()); assertEquals("native-anchor", anchor.getId());
     }
 
     @Test void queryCountsLegacySystemsAndExposesUntrackedGeneratedMembers() throws Exception {
@@ -189,6 +229,7 @@ class CoopAgentEncountersTest {
         return new JSONObject("{\"x\":-12345.375,\"y\":23456.625,\"depth\":3}");
     }
     private static CoopNetPump pump(CoopConnectionRole role) { return new CoopNetPump(new RecordingNetService(role), () -> 1000L); }
+
     private static CoopAgentCommands.Context context(SectorAPI sector, CoopNetPump pump) {
         return new CoopAgentCommands.Context() { public SectorAPI sector() { return sector; } public CoopNetPump pump() { return pump; } };
     }
@@ -205,9 +246,11 @@ class CoopAgentEncountersTest {
         final List<StarSystemAPI> systems = new ArrayList<>();
         final List<SectorEntityToken> hyperEntities = new ArrayList<>();
         final Map<String, SectorEntityToken> sectorLookup = new HashMap<>();
+        final Map<String, SectorEntityToken> orbitFocus = new HashMap<>();
+        final Set<String> sectorFaultIds = new HashSet<>();
         final Map<String, Object> memory = new HashMap<>();
         final LocationAPI hyper = (LocationAPI) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{LocationAPI.class}, (p, m, a) -> switch (m.getName()) {
-            case "isHyperspace" -> true; case "getAllEntities" -> hyperEntities;
+            case "isHyperspace" -> true; case "getId" -> "hyperspace"; case "getAllEntities" -> hyperEntities;
             case "getEntityById" -> hyperEntities.stream().filter(entity -> a[0].equals(entity.getId())).findFirst().orElse(null);
             default -> defaultValue(m.getReturnType());
         });
@@ -218,23 +261,36 @@ class CoopAgentEncountersTest {
         });
         final SectorAPI sector = (SectorAPI) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{SectorAPI.class}, (p, m, a) -> switch (m.getName()) {
             case "getStarSystems" -> systems; case "getHyperspace" -> hyper; case "getClock" -> clock;
-            case "getMemoryWithoutUpdate" -> ApiProxies.memory(memory); case "getEntityById" -> sectorLookup.get(a[0]);
+            case "getAllLocations" -> { List<LocationAPI> locations = new ArrayList<>(systems); locations.add(hyper); yield locations; }
+            case "getMemoryWithoutUpdate" -> ApiProxies.memory(memory);
+            case "getEntityById" -> {
+                if (sectorFaultIds.contains(a[0])) throw new ClassCastException("BaseLocation$LocationToken cannot be cast to BaseCampaignEntity");
+                yield sectorLookup.get(a[0]);
+            }
             case "createStarSystem" -> addSystem().api;
             default -> defaultValue(m.getReturnType());
         });
         NativeSystem addSystem() { NativeSystem system = new NativeSystem(); systems.add(system.api); return system; }
         SectorEntityToken entity(String id, LocationAPI location, Map<String, Object> flags, boolean planet) {
+            Map<String, Object> entityMemory = new HashMap<>(flags);
+            if (id.startsWith("coopenc_instance_")) {
+                entityMemory.put(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, id);
+                entityMemory.put(CoopEncounterWorld.ENCOUNTER_ID_KEY, "instance");
+            }
             MarketConditionAPI condition = (MarketConditionAPI) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{MarketConditionAPI.class},
                     (p, m, a) -> m.getName().equals("getId") ? "cold" : defaultValue(m.getReturnType()));
             MarketAPI market = (MarketAPI) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{MarketAPI.class}, (p, m, a) -> switch (m.getName()) {
                 case "getConditions" -> List.of(condition); case "getSurveyLevel" -> MarketAPI.SurveyLevel.FULL;
-                case "getMemoryWithoutUpdate" -> ApiProxies.memory(flags);
+                case "getMemoryWithoutUpdate" -> ApiProxies.memory(entityMemory);
                 default -> defaultValue(m.getReturnType());
             });
             return (SectorEntityToken) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{planet ? PlanetAPI.class : SectorEntityToken.class}, (p, m, a) -> switch (m.getName()) {
                 case "getId" -> id; case "getLocation" -> new Vector2f(12.5f, -3); case "getRadius" -> 40f;
                 case "getContainingLocation" -> location; case "getMarket" -> planet ? market : null; case "getTypeId" -> "frozen";
-                case "getMemoryWithoutUpdate" -> ApiProxies.memory(flags);
+                case "getMemoryWithoutUpdate" -> ApiProxies.memory(entityMemory);
+                case "getOrbitFocus" -> orbitFocus.get(id);
+                case "getOrbit" -> orbitFocus.containsKey(id) ? Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{OrbitAPI.class},
+                        (orbit, method, arguments) -> method.getName().equals("getFocus") ? orbitFocus.get(id) : defaultValue(method.getReturnType())) : null;
                 default -> defaultValue(m.getReturnType());
             });
         }
@@ -243,7 +299,7 @@ class CoopAgentEncountersTest {
     private static final class NativeSystem {
         final Map<String, Object> memory = new HashMap<>(); final Set<String> tags = new HashSet<>();
         final List<SectorEntityToken> entities = new ArrayList<>(); final Vector2f location = new Vector2f();
-        String optionalId = "native-unique";
+        String optionalId = "instance";
         final SectorEntityToken center = (SectorEntityToken) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{SectorEntityToken.class},
                 (p, m, a) -> defaultValue(m.getReturnType()));
         final StarSystemAPI api = (StarSystemAPI) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{StarSystemAPI.class}, (p, m, a) -> switch (m.getName()) {

@@ -22,6 +22,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.procgen.StarSystemGenerator;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData;
 import coop.ambient.CoopEncounterReplayBridge;
+import coop.fleet.CoopEntityIds;
 import coop.fleet.CoopLocations;
 import coop.presence.CoopPresenceRegistry;
 import coop.util.CoopLog;
@@ -103,7 +104,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
 
     private CoopEncounterRecord captureNew(StarSystemAPI system) {
         String instance = Objects.requireNonNull(system.getOptionalUniqueId(), "Abyssal system has no unique id");
-        CoopEncounterRecord.entityId(instance, Role.SYSTEM, 0); // validate before renaming anything
+        CoopEncounterRecord.entityId(instance, Role.SYSTEM, 0); // validate before assigning shared keys
         MemoryAPI memory = system.getMemoryWithoutUpdate();
         long seed = Long.parseLong(requiredString(memory, CoopEncounterReplayBridge.SEED_KEY));
         String pointId = requiredString(memory, CoopEncounterReplayBridge.POINT_ID_KEY);
@@ -137,9 +138,9 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
             if (type == SpecialType.GHOST_WRECK) {
                 if (!(entity instanceof CustomCampaignEntityAPI custom) || !CoopWreckCodec.isNativeWreck(entity))
                     throw new IllegalStateException("Ghost ship hint is not a native derelict");
-                wreck = CoopWreckCodec.capture(custom, CoopEncounterRecord.wreckId(entity.getId()));
+                wreck = CoopWreckCodec.capture(custom, CoopEncounterRecord.wreckId(CoopEntityIds.keyOf(entity)));
             }
-            specials.add(new CoopEncounterRecord.Special(type, entity.getId(),
+            specials.add(new CoopEncounterRecord.Special(type, CoopEntityIds.keyOf(entity),
                     type == SpecialType.PLANET_FLAGS ? null : orbit(entity), wreck, memoryValues(entityMemory)));
         }
         CoopEncounterRecord recipe = new CoopEncounterRecord(instance, seed, pointId, x, y, depth,
@@ -224,7 +225,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
                 CoopEncounterRecord.Entity member = expected.get(index); SectorEntityToken token = actual.get(index);
                 if (member.ordinal() != index || !member.specId().equals(specId(token)))
                     throw new IllegalStateException("Encounter base membership/spec differs at " + role + index);
-                own(token, recipe.instanceId(), recipe.entityId(member)); assigned.put(token.getId(), token);
+                own(token, recipe.instanceId(), recipe.entityId(member)); assigned.put(CoopEntityIds.keyOf(token), token);
             }
         }
         List<CoopEncounterRecord.Special> additions = recipe.specials().stream().filter(s -> s.type() != SpecialType.PLANET_FLAGS)
@@ -234,10 +235,10 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
             if (member.role() != Role.SYSTEM || member.ordinal() != assignedSystemCount(recipe, assigned))
                 throw new IllegalStateException("Encounter specials are not the final native system members");
             SectorEntityToken entity;
-            if (special.type() == SpecialType.GHOST_WRECK) entity = CoopWreckCodec.create(system, special.wreck());
-            else entity = system.addCustomEntity(special.entityId(), "Derelict Structure", VAMBRACE_TYPE, "neutral");
+            if (special.type() == SpecialType.GHOST_WRECK) entity = CoopWreckCodec.create(system, special.wreck(), null);
+            else entity = system.addCustomEntity(null, "Derelict Structure", VAMBRACE_TYPE, "neutral");
             if (!member.specId().equals(specId(entity))) throw new IllegalStateException("Encounter special spec differs");
-            own(entity, recipe.instanceId(), special.entityId()); assigned.put(entity.getId(), entity);
+            own(entity, recipe.instanceId(), special.entityId()); assigned.put(CoopEntityIds.keyOf(entity), entity);
             setOrbit(entity, special.orbit(), assigned); applyMemory(entity.getMemoryWithoutUpdate(), special.memory());
         }
         for (CoopEncounterRecord.Special special : recipe.specials()) if (special.type() == SpecialType.PLANET_FLAGS) {
@@ -394,7 +395,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         MarketAPI market = entity instanceof PlanetAPI ? entity.getMarket() : null;
         String survey = market == null || market.getSurveyLevel() == null ? null : market.getSurveyLevel().name();
         Boolean ruins = market == null || !hasRuins(market) ? null : market.getMemoryWithoutUpdate().getBoolean(RUINS_EXPLORED);
-        return new CoopEncounterRecord.EntityState(entity.getId(), survey, ruins, memoryValues(entity.getMemoryWithoutUpdate()));
+        return new CoopEncounterRecord.EntityState(CoopEntityIds.keyOf(entity), survey, ruins, memoryValues(entity.getMemoryWithoutUpdate()));
     }
 
     private static List<CoopWreckRecord.MemoryValue> memoryValues(MemoryAPI memory) {
@@ -488,9 +489,11 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         List<SectorEntityToken> candidates = new ArrayList<>(system.getAllEntities());
         if (sector.getHyperspace() != null) candidates.addAll(sector.getHyperspace().getAllEntities());
         for (SectorEntityToken entity : candidates) {
-            if (entity instanceof CampaignFleetAPI || !entity.isAlive() || entity.isExpired() || !wanted.contains(entity.getId())) continue;
+            if (entity instanceof CampaignFleetAPI || !entity.isAlive() || entity.isExpired()) continue;
+            String key = CoopEntityIds.keyOf(entity);
+            if (!wanted.contains(key)) continue;
             if (!recipe.instanceId().equals(entity.getMemoryWithoutUpdate().get(ENCOUNTER_ID_KEY))) continue;
-            if (result.putIfAbsent(entity.getId(), entity) != null) throw new IllegalStateException("Duplicate owned encounter entity " + entity.getId());
+            if (result.putIfAbsent(key, entity) != null) throw new IllegalStateException("Duplicate owned encounter entity " + key);
         }
         return result;
     }
@@ -501,7 +504,7 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
     }
     private static CoopEncounterRecord.Orbit orbit(SectorEntityToken entity) {
         SectorEntityToken focus = entity.getOrbitFocus();
-        return focus == null ? null : new CoopEncounterRecord.Orbit(focus.getId(), entity.getCircularOrbitAngle(),
+        return focus == null ? null : new CoopEncounterRecord.Orbit(CoopEntityIds.keyOf(focus), entity.getCircularOrbitAngle(),
                 entity.getCircularOrbitRadius(), entity.getCircularOrbitPeriod());
     }
     private static void setOrbit(SectorEntityToken entity, CoopEncounterRecord.Orbit orbit, Map<String, SectorEntityToken> assigned) {
@@ -510,7 +513,10 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         entity.setCircularOrbit(focus, orbit.angle(), orbit.radius(), orbit.period());
     }
     private static void own(SectorEntityToken entity, String instance, String id) {
-        entity.setId(id); entity.getMemoryWithoutUpdate().set(ENCOUNTER_ID_KEY, instance);
+        // LocationToken centers/anchors cannot pass the engine's global entity lookup cast.
+        // Keep every native engine ID and resolve our separately stored membership key locally.
+        entity.getMemoryWithoutUpdate().set(ENCOUNTER_ID_KEY, instance);
+        entity.getMemoryWithoutUpdate().set(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, id);
     }
     private static String specId(SectorEntityToken entity) {
         if (entity instanceof PlanetAPI planet) return "planet:" + planet.getSpec().getPlanetType();

@@ -189,7 +189,7 @@ Owns: every wire type, since the enum lives here.
 - `CoopFullFidelitySystemDriver` / `CoopSystemDriveFrameHook` / `CoopSystemDriveState` /
   `CoopSystemPhaseSlots` - run the guest's system at host fidelity.
 - `CoopGuestPresence`, `CoopSensorSync`, `CoopRespawnNotifier`, `CoopMirrorOrphanSweeper`,
-  `CoopLocations`, `CoopInflationLatch`, `CoopShipMods`, `CoopNpcActionTextCapture`,
+  `CoopLocations`, `CoopEntityIds`, `CoopInflationLatch`, `CoopShipMods`, `CoopNpcActionTextCapture`,
   `CoopFleetCodec`, `CoopRosterSummary`, `CoopOfficerSkills` (officer skill codec),
   `CoopAllyBattleTracker` (Phase 33: freezes the partner mirror while it is in a battle and reads
   the roster once when it leaves); diagnostics `CoopFleetVisibilityProbe`,
@@ -241,7 +241,10 @@ Owns: every wire type, since the enum lives here.
   even while the configured Host plays alone. `ENC_SET` sends the complete recipe/overlay set on
   connect, resume and hash changes. The Guest replays base geometry through the parent EPEC using
   the effective Host seed and branch inputs, then applies resolved specials without local hint or
-  pity rolls. Original members use `coopenc_<instance>_<role><ordinal>` entity ids; the system keeps
+  pity rolls. Original members store `coopenc_<instance>_<role><ordinal>` in `$coopEncEntityId`;
+  `CoopEntityIds.keyOf/byId` resolves these shared keys while preserving native engine ids. Native
+  `LocationToken` centers/anchors cannot safely pass through the sector's global entity lookup.
+  Consumption, survey, orbit bodies/foci and interaction claims use the shared keys. The system keeps
   the Host's optional unique id. Saved String recipes retain consumed membership and exploration
   state. Reliable `WORLD_DELTA(ENCOUNTER_STATE)` reports Guest hint/survey/ruins changes; saved
   native flags and missing members recover outcomes not acknowledged before reload. Existing

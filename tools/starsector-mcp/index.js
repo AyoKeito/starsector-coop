@@ -105,6 +105,8 @@ const TOOLS = [
       'streams refuses unmatched campaign timestamps: hold the shared pause and use ss_align_clocks before sampling fades. ' +
       'encounters also requires matching timestamps and complete manifests, compares gameplay and identity checks, ' +
       'omits cosmetic names/catalogId by default, and returns at most maxDifferences precise mismatches (default 100). ' +
+      'Local engine ids and native global-lookup diagnostics are metadata; canonical and location resolution ' +
+      'must succeed for every present member even if both clients report the same failure. ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',

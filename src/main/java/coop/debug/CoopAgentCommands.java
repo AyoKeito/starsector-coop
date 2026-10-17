@@ -72,6 +72,7 @@ import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopFleetVisibilityProbe;
 import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopEntityIds;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopNpcActionTextCapture;
 import coop.fleet.CoopNpcFleetReplicator;
@@ -329,11 +330,11 @@ public final class CoopAgentCommands {
             // Extra generated members must be visible even when the saved membership omitted them.
             JSONObject untracked = new JSONObject();
             for (SectorEntityToken entity : system.getAllEntities()) {
-                if (entity instanceof CampaignFleetAPI || expected.contains(entity.getId())) continue;
+                if (entity instanceof CampaignFleetAPI || expected.contains(CoopEntityIds.keyOf(entity))) continue;
                 putEncounterExtra(untracked, entity, sector, system);
             }
             if (sector.getHyperspace() != null) for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
-                if (expected.contains(entity.getId()) || !linksToEncounter(entity, system)) continue;
+                if (expected.contains(CoopEntityIds.keyOf(entity)) || !linksToEncounter(entity, system)) continue;
                 putEncounterExtra(untracked, entity, sector, sector.getHyperspace());
             }
             row.put("untrackedEntities", untracked);
@@ -349,14 +350,14 @@ public final class CoopAgentCommands {
 
     private static void putEncounterExtra(JSONObject out, SectorEntityToken entity, SectorAPI sector,
                                           LocationAPI location) throws JSONException {
-        String id = entity.getId();
+        String id = CoopEntityIds.keyOf(entity);
         if (id == null || id.isEmpty() || out.has(id)) throw new IllegalStateException("Ambiguous untracked encounter entity id");
         out.put(id, encounterEntity(entity, sector, location, id));
     }
 
     private static SectorEntityToken findEncounterMember(LocationAPI location, String id) {
         SectorEntityToken result = null;
-        if (location != null) for (SectorEntityToken entity : location.getAllEntities()) if (id.equals(entity.getId())) {
+        if (location != null) for (SectorEntityToken entity : location.getAllEntities()) if (id.equals(CoopEntityIds.keyOf(entity))) {
             if (result != null) throw new IllegalStateException("Duplicate encounter entity: " + id);
             result = entity;
         }
@@ -377,10 +378,22 @@ public final class CoopAgentCommands {
                                                LocationAPI location, String id) throws JSONException {
         JSONObject out = new JSONObject();
         out.put("entityId", id); out.put("present", entity != null);
-        out.put("sectorResolves", entity != null && sector.getEntityById(id) == entity);
-        out.put("locationResolves", entity != null && location != null && location.getEntityById(id) == entity);
+        out.put("canonicalResolves", entity != null && CoopEntityIds.byId(sector, id) == entity);
+        out.put("locationResolves", entity != null && location != null && location.getEntityById(entity.getId()) == entity);
         if (entity == null) return out;
         out.put("engineId", entity.getId());
+        // Native global lookup has an invalid BaseCampaignEntity cast on a LocationToken cache
+        // miss. Composite identity resolves those tokens without changing the engine's ids.
+        boolean locationToken = entity.getClass().getName().equals("com.fs.starfarer.campaign.BaseLocation$LocationToken");
+        out.put("nativeSectorLookupExempt", locationToken);
+        out.put("nativeSectorLookupClass", locationToken ? "LOCATION_TOKEN" : "CAMPAIGN_ENTITY");
+        try {
+            out.put("nativeSectorResolves", sector.getEntityById(entity.getId()) == entity);
+            out.put("nativeSectorLookupError", JSONObject.NULL);
+        } catch (ClassCastException error) {
+            out.put("nativeSectorResolves", false);
+            out.put("nativeSectorLookupError", error.getClass().getSimpleName() + ": " + error.getMessage());
+        }
         out.put("locationMatches", entity.getContainingLocation() == location);
         out.put("type", entity instanceof PlanetAPI ? "planet" : entity instanceof JumpPointAPI ? "jumpPoint"
                 : entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI ? "well"
@@ -399,7 +412,7 @@ public final class CoopAgentCommands {
         out.put("facing", entity.getFacing());
         JSONObject orbit = new JSONObject();
         orbit.put("present", entity.getOrbit() != null);
-        orbit.put("focusId", entity.getOrbitFocus() == null ? JSONObject.NULL : entity.getOrbitFocus().getId());
+        orbit.put("focusId", entity.getOrbitFocus() == null ? JSONObject.NULL : CoopEntityIds.keyOf(entity.getOrbitFocus()));
         orbit.put("angle", entity.getCircularOrbitAngle()); orbit.put("radius", entity.getCircularOrbitRadius());
         orbit.put("period", entity.getCircularOrbitPeriod()); out.put("orbit", orbit);
         MarketAPI market = entity.getMarket();
@@ -434,11 +447,11 @@ public final class CoopAgentCommands {
         if (entity instanceof JumpPointAPI jump) {
             Set<String> destinations = new TreeSet<>();
             if (jump.getDestinations() != null) for (JumpPointAPI.JumpDestination destination : jump.getDestinations())
-                if (destination.getDestination() != null) destinations.add(destination.getDestination().getId());
+                if (destination.getDestination() != null) destinations.add(CoopEntityIds.keyOf(destination.getDestination()));
             out.put("destinations", new JSONArray(destinations));
         }
         if (entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI well)
-            out.put("targetId", well.getTarget() == null ? JSONObject.NULL : well.getTarget().getId());
+            out.put("targetId", well.getTarget() == null ? JSONObject.NULL : CoopEntityIds.keyOf(well.getTarget()));
         return out;
     }
 

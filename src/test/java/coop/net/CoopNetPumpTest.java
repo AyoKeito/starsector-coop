@@ -699,6 +699,53 @@ class CoopNetPumpTest {
     }
 
     @Test
+    void encounterDialogsClaimTheCompositeIdentityInsteadOfTheirDifferentNativeIds() {
+        AtomicLong now = new AtomicLong(1_000);
+        String key = "coopenc_instance-a_system3";
+        RecordingNetService hostNet = new RecordingNetService(CoopConnectionRole.HOST);
+        RecordingCampaignUi hostUi = new RecordingCampaignUi(new RecordingEntity("host-native", "Derelict",
+                encounterTarget("host-native", key)));
+        SectorAPI hostSector = new RecordingSector(false, hostUi).proxy();
+        Global.setSector(hostSector);
+        CoopNetPump host = livePump(hostNet, activeHostSession(), now::get);
+        host.advance(0);
+        assertEquals(key, CoopMessages.requiredPayloadString(
+                lastOfType(hostNet, CoopMessages.Type.INTERACTION_ACCEPT), "entityId"));
+
+        RecordingNetService guestNet = new RecordingNetService(CoopConnectionRole.GUEST);
+        RecordingCampaignUi guestUi = new RecordingCampaignUi(new RecordingEntity("guest-native", "Derelict",
+                encounterTarget("guest-native", key)));
+        SectorAPI guestSector = new RecordingSector(false, guestUi).proxy();
+        Global.setSector(guestSector);
+        CoopNetPump guest = livePump(guestNet, activeGuestSession(), now::get);
+        guest.advance(0);
+        CoopMessages.Message claim = lastOfType(guestNet, CoopMessages.Type.INTERACTION_CLAIM);
+        assertEquals(key, CoopMessages.requiredPayloadString(claim, "entityId"));
+        Global.setSector(hostSector);
+        hostNet.inbound.add(claim);
+        host.advance(0);
+        Global.setSector(guestSector);
+        guestNet.inbound.add(lastOfType(hostNet, CoopMessages.Type.INTERACTION_REJECT));
+        guest.advance(0);
+        assertEquals(1, guestUi.dismissCount);
+        assertEquals(0, hostUi.dismissCount);
+    }
+
+    private static SectorEntityToken encounterTarget(String nativeId, String sharedId) {
+        MemoryAPI memory = (MemoryAPI) Proxy.newProxyInstance(MemoryAPI.class.getClassLoader(),
+                new Class<?>[]{MemoryAPI.class}, (p,m,a) -> m.getName().equals("get")
+                        ? (coop.fleet.CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY.equals(a[0]) ? sharedId : null)
+                        : defaultValue(m.getReturnType()));
+        return (SectorEntityToken) Proxy.newProxyInstance(SectorEntityToken.class.getClassLoader(),
+                new Class<?>[]{SectorEntityToken.class}, (p,m,a) -> switch (m.getName()) {
+                    case "getId" -> nativeId;
+                    case "getName" -> "Derelict";
+                    case "getMemoryWithoutUpdate" -> memory;
+                    default -> defaultValue(m.getReturnType());
+                });
+    }
+
+    @Test
     void guestBlocksWorldInteractionWhileHostClaimIsActive() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         CoopSessionState session = activeGuestSession();
@@ -5718,6 +5765,7 @@ class CoopNetPumpTest {
                         return switch (method.getName()) {
                             case "getId" -> id;
                             case "getName" -> name;
+                            case "getMemoryWithoutUpdate" -> null;
                             default -> throw new UnsupportedOperationException(method.getName());
                         };
                     });
