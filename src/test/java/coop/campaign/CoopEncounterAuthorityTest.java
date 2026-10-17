@@ -176,6 +176,27 @@ class CoopEncounterAuthorityTest {
     }
 
     @Test
+    void nativeBlackHoleClearAndRevisitAreRecoveredAndReportedBeforeSavedBaselineReplay() {
+        Fixture f = new Fixture(); CoopEncounterRecord record = record("blackhole");
+        String id = record.entityId(record.entities().get(0));
+        var original = new CoopEncounterRecord.EntityState(id, "SEEN", null, List.of(
+                new CoopWreckRecord.MemoryValue("$abyssalBlackHoleReadings", "BOOLEAN", "true", -1)));
+        var completed = new CoopEncounterRecord.EntityState(id, "SEEN", null, List.of(
+                new CoopWreckRecord.MemoryValue("$abyssalBlackHoleReadingsRevisit", "BOOLEAN", "true", -1)));
+        f.world.baselineStates = List.of(original); f.world.states = List.of(completed);
+        f.world.beforeUpsert = () -> {
+            assertEquals(1, f.net.sent.size());
+            CoopMessages.Message delta = f.net.sent.get(0);
+            assertEquals("ENCOUNTER_STATE", CoopMessages.requiredPayloadString(delta, "kind"));
+            assertEquals(completed, CoopEncounterCodec.decodeEntityState(CoopMessages.requiredPayloadString(delta, "newStateJson")));
+        };
+        f.authority.applySet(CoopEncounterCodec.encodeSet(List.of(record.withOverlay(
+                new CoopEncounterRecord.Overlay(List.of(), List.of(original))))));
+        f.now.set(250); f.authority.tickGuest();
+        assertEquals(1, f.net.sent.size(), "the native completion is sent once, with no baseline echo");
+    }
+
+    @Test
     void resetDropsReceiverStateAcrossCampaigns() {
         Fixture f = new Fixture();
         f.world.fail = "a";

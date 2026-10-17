@@ -99,6 +99,7 @@ class CoopEncounterRecordTest {
 
     @Test void overlayAllowsOnlyKnownTypedHintsWithoutSectorState() {
         String id = entityId("uuid", Role.SYSTEM, 0);
+        assertTrue(MEMORY_KEYS.contains("$abyssalBlackHoleReadingsRevisit"));
         for (String key : MEMORY_KEYS) {
             CoopWreckRecord.MemoryValue value = new CoopWreckRecord.MemoryValue(key,
                     key.equals("$gsType") ? "STRING" : "BOOLEAN", key.equals("$gsType") ? "GS_OPIS" : "true", -1);
@@ -108,6 +109,8 @@ class CoopEncounterRecordTest {
                 List.of(new CoopWreckRecord.MemoryValue("$threatSpawnsFailedToRoll", "LONG", "2", -1))));
         assertThrows(IllegalArgumentException.class, () -> new EntityState(id, null, null,
                 List.of(new CoopWreckRecord.MemoryValue("$visited", "STRING", "true", -1))));
+        assertThrows(IllegalArgumentException.class, () -> new EntityState(id, null, null,
+                List.of(new CoopWreckRecord.MemoryValue("$abyssalBlackHoleReadingsRevisit", "STRING", "true", -1))));
         assertThrows(IllegalArgumentException.class, () -> new EntityState(id, null, null,
                 List.of(new CoopWreckRecord.MemoryValue("$gsType", "BOOLEAN", "true", -1))));
         assertThrows(IllegalArgumentException.class, () -> new EntityState(id, "UNKNOWN", null, List.of()));

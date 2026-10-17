@@ -59,6 +59,7 @@ import coop.campaign.CoopCampaignReplicator;
 import coop.campaign.CoopCreditTransfer;
 import coop.campaign.CoopEncounterRecord;
 import coop.campaign.CoopEncounterWorld;
+import coop.campaign.CoopAbyssalDespawner;
 import coop.campaign.CoopWreckRecord;
 import coop.campaign.CoopShipDetail;
 import coop.campaign.CoopPersonDetail;
@@ -286,6 +287,7 @@ public final class CoopAgentCommands {
 
     /** Saved membership and a fresh gameplay snapshot; this reader never captures or renames. */
     static JSONObject encounters(JSONObject args, Context context) throws JSONException {
+        boolean includeLifetime = optionalBoolean(args, "lifetime", false);
         SectorAPI sector = requireSector(context);
         Map<String, StarSystemAPI> systems = new TreeMap<>();
         int legacyCount = 0;
@@ -314,6 +316,7 @@ public final class CoopAgentCommands {
             row.put("abyssal", system.hasTag(Tags.SYSTEM_ABYSSAL));
             row.put("threatTag", system.hasTag(Tags.SYSTEM_CAN_SPAWN_THREAT));
             row.put("recipe", diagnosticJson(recipe));
+            if (includeLifetime) row.put("lifetime", encounterLifetime(sector, system, roleOf(context.pump())));
             JSONObject members = new JSONObject();
             Set<String> expected = new TreeSet<>();
             for (CoopEncounterRecord.Entity member : recipe.entities()) {
@@ -345,6 +348,51 @@ public final class CoopAgentCommands {
         out.put("count", table.length()); out.put("candidateCount", systems.size());
         out.put("legacyCount", legacyCount); out.put("truncated", systems.size() > table.length());
         out.put("encounters", table);
+        return out;
+    }
+
+    private static JSONObject encounterLifetime(SectorAPI sector, StarSystemAPI system,
+                                                CoopConnectionRole role) throws JSONException {
+        JSONObject out = new JSONObject();
+        int matching = 0, custom = 0, vanilla = 0; CoopAbyssalDespawner selected = null;
+        var scripts = system.getScripts();
+        if (scripts != null) for (var script : scripts) {
+            if (script instanceof com.fs.starfarer.api.impl.campaign.enc.AbyssalLocationDespawner) vanilla++;
+            if (script instanceof CoopAbyssalDespawner despawner) {
+                custom++;
+                if (despawner.getSystem() == system) { matching++; selected = despawner; }
+            }
+        }
+        out.put("role", role.name()); out.put("customScriptCount", custom);
+        out.put("matchingScriptCount", matching); out.put("vanillaScriptCount", vanilla);
+        out.put("minimumVisitDays", CoopAbyssalDespawner.MIN_DAYS_SINCE_VISIT);
+        out.put("minimumDistanceLY", CoopAbyssalDespawner.MIN_DISTANCE_LY);
+        out.put("pollIntervalSeconds", CoopAbyssalDespawner.CHECK_INTERVAL_SECONDS);
+        if (role != CoopConnectionRole.HOST || matching != 1) {
+            out.put("available", false);
+            out.put("reason", role == CoopConnectionRole.GUEST ? "host_owned_lifetime_unavailable_on_guest"
+                    : role != CoopConnectionRole.HOST ? "host_role_required"
+                    : matching == 0 ? "host_despawner_missing" : "multiple_host_despawners");
+            return out;
+        }
+        CoopAbyssalDespawner.LifetimeDiagnostics state = selected.lifetimeDiagnostics(sector);
+        out.put("available", true); out.put("runtimeReady", state.runtimeReady());
+        out.put("reconnectHold", state.reconnectHold()); out.put("guestObserved", state.guestObserved());
+        out.put("lastGuestInside", state.lastGuestInside());
+        out.put("guestLastVisitTimestamp", state.guestLastVisitTimestamp() == null ? JSONObject.NULL
+                : Long.toString(state.guestLastVisitTimestamp()));
+        out.put("elapsedGuestDays", jsonValue(state.elapsedGuestDays()));
+        out.put("hostDaysSinceVisit", jsonValue(state.hostDaysSinceVisit()));
+        out.put("hostLastVisitTimestamp", state.hostLastVisitTimestamp() == null ? JSONObject.NULL
+                : Long.toString(state.hostLastVisitTimestamp()));
+        out.put("hostInside", jsonValue(state.hostInside()));
+        out.put("systemX", jsonValue(state.systemX())); out.put("systemY", jsonValue(state.systemY()));
+        out.put("hostHyperX", jsonValue(state.hostHyperX())); out.put("hostHyperY", jsonValue(state.hostHyperY()));
+        out.put("hostDistanceLY", jsonValue(state.hostDistanceLY()));
+        out.put("guestHyperX", jsonValue(state.guestHyperX())); out.put("guestHyperY", jsonValue(state.guestHyperY()));
+        out.put("guestDistanceLY", jsonValue(state.guestDistanceLY()));
+        out.put("guestPositionSource", "last_observed_authoritative_presence");
+        out.put("unitsPerLightYear", state.unitsPerLightYear()); out.put("canDespawn", state.canDespawn());
         return out;
     }
 
@@ -426,7 +474,7 @@ public final class CoopAgentCommands {
                 && market.getMemoryWithoutUpdate().getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG));
         JSONObject flags = new JSONObject();
         for (String key : new TreeSet<>(CoopEncounterRecord.MEMORY_KEYS))
-            flags.put(key, memory == null || !memory.contains(key) ? JSONObject.NULL : jsonValue(memory.get(key)));
+            flags.put(key, memory == null || !memory.contains(key) ? JSONObject.NULL : encounterHintValue(key, memory.get(key)));
         out.put("hintFlags", flags);
         if (entity instanceof com.fs.starfarer.api.campaign.CustomCampaignEntityAPI custom
                 && coop.campaign.CoopWreckCodec.isNativeWreck(entity)) {
@@ -453,6 +501,14 @@ public final class CoopAgentCommands {
         if (entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI well)
             out.put("targetId", well.getTarget() == null ? JSONObject.NULL : CoopEntityIds.keyOf(well.getTarget()));
         return out;
+    }
+
+    private static Object encounterHintValue(String key, Object value) {
+        if (key.equals("$visited") && value instanceof String text) {
+            String flag = text.trim();
+            if (flag.equalsIgnoreCase("true") || flag.equalsIgnoreCase("false")) return Boolean.valueOf(flag);
+        }
+        return jsonValue(value);
     }
 
     /** Records stay structured so a diff reports the changed gameplay leaf instead of an opaque blob. */

@@ -23,7 +23,8 @@ public record CoopEncounterRecord(int version, String instanceId, long effective
     public static final int MAX_ID_LENGTH = 256;
     public static final int MAX_STRING_LENGTH = 4096;
     public static final Set<String> MEMORY_KEYS = Set.of("$abyssalBlackHoleReadings",
-            "$abyssalGasGiantTurbulence", "$abyssalPlanetoidMiningOp", "$gsType", "$visited");
+            "$abyssalBlackHoleReadingsRevisit", "$abyssalGasGiantTurbulence",
+            "$abyssalPlanetoidMiningOp", "$gsType", "$visited");
     private static final Set<String> SURVEY_LEVELS = Set.of("NONE", "SEEN", "PRELIMINARY", "FULL");
     private static final Pattern ENTITY_ID = Pattern.compile(
             "coopenc_([A-Za-z0-9_-]{1,128})_(system|anchor|jump_point|well)([0-9]{1,4})");

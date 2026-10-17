@@ -93,6 +93,20 @@ class CoopEncounterCodecTest {
         assertThrows(IllegalArgumentException.class, () -> CoopEncounterCodec.decodeEntityState(encoded + "|extra"));
     }
 
+    @Test void nativeBlackHoleClearAndRevisitRoundTripThroughStateAndSavedOverlayWithoutVersionChange() {
+        CoopEncounterRecord original = CoopEncounterFixtures.sample("uuid");
+        String key = entityId("uuid", Role.SYSTEM, 1);
+        EntityState completed = new EntityState(key, "SEEN", null, List.of(
+                new CoopWreckRecord.MemoryValue("$abyssalBlackHoleReadingsRevisit", "BOOLEAN", "true", -1)));
+        String wire = CoopEncounterCodec.encodeEntityState(completed);
+        assertTrue(wire.startsWith("ENC_STATE|1|"));
+        assertFalse(wire.contains("$abyssalBlackHoleReadings|"));
+        assertEquals(completed, CoopEncounterCodec.decodeEntityState(wire));
+        CoopEncounterRecord saved = original.withOverlay(new Overlay(List.of(), List.of(completed)));
+        assertEquals(saved, CoopEncounterRecord.decode(saved.encode()));
+        assertEquals(List.of(saved), CoopEncounterCodec.decodeSet(CoopEncounterCodec.encodeSet(List.of(saved))));
+    }
+
     @Test void inputAndOutputSizeCapsApplyBeforeNativeReplay() {
         String tooLarge = "x".repeat(CoopEncounterCodec.MAX_ENCODED_CHARACTERS + 1);
         assertThrows(IllegalArgumentException.class, () -> CoopEncounterCodec.decode(tooLarge));

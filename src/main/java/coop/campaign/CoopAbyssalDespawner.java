@@ -95,6 +95,41 @@ public final class CoopAbyssalDespawner implements EveryFrameScript {
                 && farEnough(origin, new Vector2f(lastGuestHyperX, lastGuestHyperY));
     }
 
+    /** Immutable read of the actual predicate inputs; this never observes or refreshes a visit. */
+    public record LifetimeDiagnostics(boolean runtimeReady, boolean reconnectHold, boolean guestObserved,
+                                      boolean lastGuestInside, Long guestLastVisitTimestamp, Float elapsedGuestDays,
+                                      Float hostDaysSinceVisit, Long hostLastVisitTimestamp, Boolean hostInside,
+                                      Float systemX, Float systemY, Float hostHyperX, Float hostHyperY,
+                                      Double hostDistanceLY, Float guestHyperX, Float guestHyperY,
+                                      Double guestDistanceLY, float unitsPerLightYear, boolean canDespawn) { }
+
+    public LifetimeDiagnostics lifetimeDiagnostics(SectorAPI sector) {
+        Vector2f origin = system == null ? null : system.getLocation();
+        CampaignFleetAPI host = sector == null ? null : sector.getPlayerFleet();
+        Vector2f hostPosition = host == null ? null : host.getLocationInHyperspace();
+        CampaignClockAPI clock = sector == null ? null : sector.getClock();
+        float units = Misc.getUnitsPerLightYear();
+        if (!Float.isFinite(units) || units <= 0f) throw new IllegalStateException("Invalid units per light year");
+        Vector2f guestPosition = guestObserved ? new Vector2f(lastGuestHyperX, lastGuestHyperY) : null;
+        return new LifetimeDiagnostics(runtimeReady, reconnectGrace, guestObserved, lastGuestInside,
+                guestObserved ? guestLastVisitTimestamp : null,
+                guestObserved && clock != null ? finite(clock.getElapsedDaysSince(guestLastVisitTimestamp)) : null,
+                system == null ? null : finite(system.getDaysSinceLastPlayerVisit()),
+                system == null ? null : system.getLastPlayerVisitTimestamp(),
+                host == null || system == null ? null : host.getContainingLocation() == system,
+                x(origin), y(origin), x(hostPosition), y(hostPosition), distanceLY(origin, hostPosition, units),
+                x(guestPosition), y(guestPosition), distanceLY(origin, guestPosition, units), units, canDespawnNow(sector));
+    }
+
+    private static Float finite(float value) { return Float.isFinite(value) ? value : null; }
+    private static Float x(Vector2f value) { return value == null ? null : finite(value.x); }
+    private static Float y(Vector2f value) { return value == null ? null : finite(value.y); }
+    private static Double distanceLY(Vector2f origin, Vector2f position, float units) {
+        if (origin == null || position == null || !Float.isFinite(origin.x) || !Float.isFinite(origin.y)
+                || !Float.isFinite(position.x) || !Float.isFinite(position.y)) return null;
+        return Math.hypot((double) position.x - origin.x, (double) position.y - origin.y) / units;
+    }
+
     @Override
     public void advance(float amount) {
         if (system == null || !runtimeReady || reconnectGrace) return;

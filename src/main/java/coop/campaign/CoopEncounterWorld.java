@@ -52,7 +52,9 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
     public static final String ENCOUNTER_ID_KEY = "$coopEncId";
     private static final String RUINS_EXPLORED = "$ruinsExplored";
     private static final String VAMBRACE_TYPE = "derelict_vambrace";
-    private static final Set<String> PLANET_HINTS = Set.of("$abyssalBlackHoleReadings",
+    private static final String BLACK_HOLE_READINGS = "$abyssalBlackHoleReadings";
+    private static final String BLACK_HOLE_REVISIT = "$abyssalBlackHoleReadingsRevisit";
+    private static final Set<String> PLANET_HINTS = Set.of(BLACK_HOLE_READINGS, BLACK_HOLE_REVISIT,
             "$abyssalGasGiantTurbulence", "$abyssalPlanetoidMiningOp");
 
     @FunctionalInterface
@@ -443,6 +445,11 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         List<CoopWreckRecord.MemoryValue> result = new ArrayList<>();
         for (String key : CoopEncounterRecord.MEMORY_KEYS) {
             if (!memory.contains(key)) continue; Object value = memory.get(key);
+            // Rule assignments store $visited as text; native Memory.getBoolean reads
+            // both representations. Keep the shared wire boolean typed and canonical.
+            if (key.equals("$visited") && value instanceof String text
+                    && (text.trim().equalsIgnoreCase("true") || text.trim().equalsIgnoreCase("false")))
+                value = Boolean.valueOf(text.trim());
             String type = key.equals("$gsType") ? "STRING" : "BOOLEAN";
             if (type.equals("STRING") ? !(value instanceof String) : !(value instanceof Boolean))
                 throw new IllegalStateException("Encounter hint has unsupported type: " + key);
@@ -454,7 +461,13 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
     private static void applyMemory(MemoryAPI memory, List<CoopWreckRecord.MemoryValue> values) {
         Map<String, CoopWreckRecord.MemoryValue> wanted = new HashMap<>();
         for (CoopWreckRecord.MemoryValue value : values) wanted.put(value.key(), value);
+        boolean blackHoleRevisited = memory.getBoolean(BLACK_HOLE_REVISIT)
+                || trueValue(wanted.get(BLACK_HOLE_REVISIT));
         for (String key : CoopEncounterRecord.MEMORY_KEYS) {
+            // Native INIT clears Readings and permanently sets Revisit. An older full state
+            // must not arm that one-shot branch again, including an unrelated survey edit.
+            if (blackHoleRevisited && key.equals(BLACK_HOLE_READINGS)) { memory.unset(key); continue; }
+            if (blackHoleRevisited && key.equals(BLACK_HOLE_REVISIT)) { memory.set(key, true); continue; }
             if (key.equals("$visited") && memory.getBoolean(key)) continue;
             CoopWreckRecord.MemoryValue value = wanted.get(key);
             if (value == null) memory.unset(key);
@@ -474,7 +487,12 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         Map<String, CoopWreckRecord.MemoryValue> incoming = new HashMap<>(), wanted = new HashMap<>();
         for (CoopWreckRecord.MemoryValue value : host.memory()) incoming.put(value.key(), value);
         for (CoopWreckRecord.MemoryValue value : pending.memory()) wanted.put(value.key(), value);
+        boolean hostRevisited = trueValue(incoming.get(BLACK_HOLE_REVISIT));
+        if (trueValue(wanted.get(BLACK_HOLE_REVISIT)) && !hostRevisited) return false;
         for (String key : CoopEncounterRecord.MEMORY_KEYS) {
+            // A completed Host visit acknowledges an earlier Guest state that still had
+            // initial readings, while a stale Host state cannot erase a local completion.
+            if (hostRevisited && (key.equals(BLACK_HOLE_READINGS) || key.equals(BLACK_HOLE_REVISIT))) continue;
             CoopWreckRecord.MemoryValue a = incoming.get(key), b = wanted.get(key);
             if (key.equals("$visited") && b != null && b.value().equals("true")) {
                 if (a == null || !a.value().equals("true")) return false;
@@ -485,6 +503,9 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
             } else if (!sameValue(a, b)) return false;
         }
         return true;
+    }
+    private static boolean trueValue(CoopWreckRecord.MemoryValue value) {
+        return value != null && value.type().equals("BOOLEAN") && value.value().equals("true");
     }
     private static boolean sameValue(CoopWreckRecord.MemoryValue a, CoopWreckRecord.MemoryValue b) {
         return a == null ? b == null : b != null && a.type().equals(b.type()) && a.value().equals(b.value());

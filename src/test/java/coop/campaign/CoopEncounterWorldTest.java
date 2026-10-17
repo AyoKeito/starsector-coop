@@ -17,6 +17,7 @@ import coop.testing.ProxyDefaults;
 import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
 import coop.net.CoopConnectionRole;
+import coop.net.CoopMessages;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,11 +29,14 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static coop.campaign.CoopEncounterRecord.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CoopEncounterWorldTest {
+    private static final String BLACK_HOLE_READINGS = "$abyssalBlackHoleReadings";
+    private static final String BLACK_HOLE_REVISIT = "$abyssalBlackHoleReadingsRevisit";
     private SectorAPI previousSector;
     private SettingsAPI previousSettings;
     private Scene scene;
@@ -249,6 +253,161 @@ class CoopEncounterWorldTest {
         EntityState unknown = new EntityState(id("alpha", Role.SYSTEM, 55), null, null, List.of());
         assertThrows(IllegalArgumentException.class, () -> CoopEncounterWorld.applyEntityState(scene.api, unknown.entityId(), unknown));
         assertTrue(scene.sectorMemory.values.isEmpty(), "shared state must not leak into sector memory");
+    }
+
+    @Test void nativeRuleStringVisitsReachHostAndFreshReplayForBothPlanetHintFamilies() {
+        for (String hint : List.of("$abyssalPlanetoidMiningOp", "$abyssalGasGiantTurbulence")) {
+            Scene hostScene = new Scene(); Global.setSector(hostScene.api);
+            CoopEncounterWorld host = hostScene.world();
+            FakeEntity hostPlanet = hostScene.generated("alpha").planet("native-host");
+            hostPlanet.memory.set(hint, true);
+            CoopEncounterRecord initial = only(host.captureHost());
+
+            Scene guestScene = new Scene(); Global.setSector(guestScene.api);
+            CoopEncounterWorld guest = guestScene.world((sector, recipe) -> {
+                FakeLocation base = guestScene.generated("native-guest"); base.planet("native-guest"); return base.system();
+            });
+            AtomicLong now = new AtomicLong();
+            RecordingNetService net = new RecordingNetService(CoopConnectionRole.GUEST);
+            CoopEncounterAuthority authority = new CoopEncounterAuthority(net, TestSessions.activeGuestSession(), now::get, guest);
+            authority.applySet(CoopEncounterCodec.encodeSet(List.of(initial)));
+            FakeEntity guestPlanet = guestScene.entity(guestScene.systems.get(0).entities.get(0));
+            guestPlanet.memory.set("$visited", "true"); // Actual rules.csv first-open assignment type.
+            now.set(250); authority.tickGuest();
+            CoopMessages.Message delta = only(net.sent);
+            assertEquals("ENCOUNTER_STATE", CoopMessages.requiredPayloadString(delta, "kind"));
+            EntityState visited = CoopEncounterCodec.decodeEntityState(CoopMessages.requiredPayloadString(delta, "newStateJson"));
+            assertTrue(visited.memory().contains(flag("$visited", true)));
+            assertEquals("true", guestPlanet.memory.values.get("$visited"), "capture must not rewrite native local memory");
+
+            Global.setSector(hostScene.api);
+            CoopEncounterWorld.applyEntityState(hostScene.api, visited.entityId(), visited);
+            CoopEncounterRecord acknowledged = only(host.captureHost());
+            assertTrue(hostPlanet.memory.api.getBoolean("$visited"));
+            assertTrue(only(acknowledged.overlay().entities()).memory().contains(flag("$visited", true)));
+            CoopEncounterWorld.applyEntityState(hostScene.api, visited.entityId(), only(initial.overlay().entities()));
+            assertTrue(hostPlanet.memory.api.getBoolean("$visited"), "older unvisited state must not repeat the native story");
+
+            Global.setSector(guestScene.api);
+            authority.applySet(CoopEncounterCodec.encodeSet(List.of(acknowledged)));
+            assertEquals("true", guestPlanet.memory.values.get("$visited"));
+            assertEquals(acknowledged.overlay().entities(), guestScene.world().guestStates());
+
+            Scene fresh = new Scene(); Global.setSector(fresh.api);
+            CoopEncounterWorld replay = fresh.world((sector, recipe) -> {
+                FakeLocation base = fresh.generated("fresh-native"); base.planet("fresh-native"); return base.system();
+            });
+            replay.upsert(CoopEncounterRecord.decode(acknowledged.encode()));
+            FakeEntity replayed = fresh.entity(fresh.systems.get(0).entities.get(0));
+            assertTrue(replayed.memory.api.getBoolean("$visited"));
+            assertTrue(replayed.memory.api.getBoolean(hint));
+        }
+    }
+
+    @Test void nativeStringVisitCaptureIsCanonicalButUnrelatedStringFlagsStillFailLoudly() {
+        CoopEncounterWorld world = scene.world(); FakeEntity planet = scene.generated("alpha").planet("native");
+        for (String value : List.of("true", " TRUE ", "false", " False ")) {
+            planet.memory.set("$visited", value);
+            EntityState state = only(only(world.captureHost()).overlay().entities());
+            assertEquals(List.of(flag("$visited", Boolean.parseBoolean(value.trim()))), state.memory());
+        }
+        planet.memory.set("$visited", "yes");
+        assertThrows(IllegalStateException.class, world::captureHost);
+        planet.memory.set("$visited", "true"); planet.memory.set("$abyssalPlanetoidMiningOp", "true");
+        assertThrows(IllegalStateException.class, world::captureHost);
+    }
+
+    @Test void blackHoleNativeCompletionIsCapturedSavedAndReplayedOverImmutableInitialFlag() {
+        CoopEncounterWorld host = scene.world(); FakeEntity planet = scene.generated("alpha").planet("native");
+        planet.memory.set(BLACK_HOLE_READINGS, true);
+        CoopEncounterRecord initial = only(host.captureHost());
+        planet.memory.api.unset(BLACK_HOLE_READINGS);
+        planet.memory.set(BLACK_HOLE_REVISIT, true); // Native PlanetInteractionDialogPluginImpl INIT.
+        CoopEncounterRecord completed = only(host.captureHost());
+        assertEquals(initial.specials(), completed.specials(), "creation flags remain immutable recipe data");
+        assertEquals(List.of(flag(BLACK_HOLE_REVISIT, true)), only(completed.overlay().entities()).memory());
+
+        scene = new Scene(); Global.setSector(scene.api);
+        CoopEncounterWorld guest = scene.world((sector, record) -> {
+            FakeLocation base = scene.generated("native-guest"); base.planet("native-guest"); return base.system();
+        });
+        guest.upsert(CoopEncounterRecord.decode(completed.encode()));
+        FakeEntity replayed = scene.entity(scene.systems.get(0).entities.get(0));
+        assertFalse(replayed.memory.api.contains(BLACK_HOLE_READINGS));
+        assertTrue(replayed.memory.api.getBoolean(BLACK_HOLE_REVISIT));
+        assertEquals(completed.overlay().entities(), scene.world().guestStates());
+        scene.world().upsert(initial);
+        assertFalse(replayed.memory.api.contains(BLACK_HOLE_READINGS), "stale saved overlay cannot re-arm the 25-point branch");
+        assertTrue(replayed.memory.api.getBoolean(BLACK_HOLE_REVISIT));
+    }
+
+    @Test void blackHoleGuestCompletionSurvivesReloadAndStaleDeltaWithoutRegressingOtherProgress() {
+        CoopEncounterRecord initial = planetRecipe("alpha"); String key = id("alpha", Role.SYSTEM, 0);
+        initial = initial.withOverlay(new Overlay(List.of(), List.of(new EntityState(key, "NONE", false,
+                List.of(flag(BLACK_HOLE_READINGS, true))))));
+        CoopEncounterWorld guest = scene.world((sector, record) -> {
+            FakeLocation base = scene.generated("native"); base.planet("native"); return base.system();
+        });
+        guest.upsert(initial); FakeEntity planet = scene.entity(scene.systems.get(0).entities.get(0));
+        planet.memory.api.unset(BLACK_HOLE_READINGS); planet.memory.set(BLACK_HOLE_REVISIT, true);
+        planet.memory.set("$visited", "true");
+        guest = scene.world(); guest.upsert(initial); // Pending completion is reconstructed from native save state.
+        assertFalse(planet.memory.api.contains(BLACK_HOLE_READINGS));
+        assertTrue(planet.memory.api.getBoolean(BLACK_HOLE_REVISIT));
+        EntityState complete = new EntityState(key, "FULL", true,
+                List.of(flag(BLACK_HOLE_REVISIT, true), flag("$visited", true)));
+        guest.upsert(initial.withOverlay(new Overlay(List.of(), List.of(complete))));
+        EntityState stale = new EntityState(key, "NONE", false,
+                List.of(flag(BLACK_HOLE_READINGS, true), flag(BLACK_HOLE_REVISIT, false), flag("$visited", false)));
+        CoopEncounterWorld.applyEntityState(scene.api, key, stale);
+        assertFalse(planet.memory.api.contains(BLACK_HOLE_READINGS));
+        assertTrue(planet.memory.api.getBoolean(BLACK_HOLE_REVISIT));
+        assertTrue(planet.memory.api.getBoolean("$visited"));
+        assertEquals(MarketAPI.SurveyLevel.FULL, planet.market.survey);
+        assertTrue(planet.market.memory.api.getBoolean("$ruinsExplored"));
+        assertEquals(complete, only(guest.guestStates()));
+    }
+
+    @Test void completedHostBlackHoleVisitAcknowledgesPendingGuestSurveyWithoutKeepingInitialReadings() {
+        CoopEncounterRecord initial = planetRecipe("alpha"); String key = id("alpha", Role.SYSTEM, 0);
+        initial = initial.withOverlay(new Overlay(List.of(), List.of(new EntityState(key, "NONE", false,
+                List.of(flag(BLACK_HOLE_READINGS, true))))));
+        CoopEncounterWorld guest = scene.world((sector, record) -> {
+            FakeLocation base = scene.generated("native"); base.planet("native"); return base.system();
+        });
+        guest.upsert(initial); FakeEntity planet = scene.entity(scene.systems.get(0).entities.get(0));
+        planet.market.survey = MarketAPI.SurveyLevel.PRELIMINARY;
+        EntityState hostVisit = new EntityState(key, "FULL", true, List.of(flag(BLACK_HOLE_REVISIT, true)));
+        guest.upsert(initial.withOverlay(new Overlay(List.of(), List.of(hostVisit))));
+        assertEquals(hostVisit, only(guest.guestStates()));
+        assertFalse(planet.memory.api.contains(BLACK_HOLE_READINGS));
+        assertTrue(planet.memory.api.getBoolean(BLACK_HOLE_REVISIT));
+    }
+
+    @Test void guestBlackHoleCompletionClearsHostReadingsAndLaterStaleReportCannotRearmIt() {
+        CoopEncounterWorld host = scene.world(); FakeEntity planet = scene.generated("alpha").planet("native");
+        planet.memory.set(BLACK_HOLE_READINGS, true);
+        CoopEncounterRecord initial = only(host.captureHost()); String key = CoopEntityIds.keyOf(planet.api);
+        EntityState reported = new EntityState(key, "SEEN", false, List.of(flag(BLACK_HOLE_REVISIT, true)));
+        reported = CoopEncounterCodec.decodeEntityState(CoopEncounterCodec.encodeEntityState(reported));
+        CoopEncounterWorld.applyEntityState(scene.api, key, reported);
+        assertFalse(planet.memory.api.contains(BLACK_HOLE_READINGS));
+        assertTrue(planet.memory.api.getBoolean(BLACK_HOLE_REVISIT));
+        CoopEncounterWorld.applyEntityState(scene.api, key, only(initial.overlay().entities()));
+        CoopEncounterRecord authoritative = only(host.captureHost());
+        assertEquals(reported, only(authoritative.overlay().entities()));
+        assertFalse(planet.memory.api.contains(BLACK_HOLE_READINGS));
+        assertEquals(authoritative, CoopEncounterRecord.decode((String) scene.systems.get(0).memory.values.get(CoopEncounterWorld.RECIPE_KEY)));
+    }
+
+    @Test void firstCaptureAfterNativeBlackHoleVisitStillRecognizesItsResolvedPlanetHint() {
+        CoopEncounterWorld host = scene.world(); FakeEntity planet = scene.generated("alpha").planet("native");
+        planet.memory.set(BLACK_HOLE_REVISIT, true);
+        CoopEncounterRecord completed = only(host.captureHost());
+        Special hint = only(completed.specials());
+        assertEquals(SpecialType.PLANET_FLAGS, hint.type());
+        assertEquals(List.of(flag(BLACK_HOLE_REVISIT, true)), hint.memory());
+        assertEquals(hint.memory(), only(completed.overlay().entities()).memory());
     }
 
     @Test void oldSavedNamespacedEngineIdsStillResolveWithoutAnotherRename() {
@@ -591,10 +750,10 @@ class CoopEncounterWorldTest {
         final Map<String, Float> expiry = new HashMap<>();
         final MemoryAPI api = proxy(MemoryAPI.class, (p, m, a) -> switch (m.getName()) {
             case "get" -> values.get(a[0]);
-            case "set" -> { values.put((String) a[0], a[1]); if (a.length > 2) expiry.put((String) a[0], (Float) a[2]); yield null; }
+            case "set" -> { values.put((String) a[0], a[1]); if (a.length > 2) expiry.put((String) a[0], (Float) a[2]); else expiry.remove(a[0]); yield null; }
             case "unset" -> { values.remove(a[0]); expiry.remove(a[0]); yield null; }
             case "contains" -> values.containsKey(a[0]);
-            case "getBoolean" -> Boolean.TRUE.equals(values.get(a[0]));
+            case "getBoolean" -> values.get(a[0]) != null && Boolean.parseBoolean(values.get(a[0]).toString().trim());
             case "getExpire" -> expiry.getOrDefault(a[0], -1f);
             default -> fallback(p, m, a);
         });

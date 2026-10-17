@@ -262,7 +262,16 @@ Owns: every wire type, since the enum lives here.
   `coop.ambient.CoopEncounterReplayBridge` is the primitive system-loader slot used by the pinned
   parent EPEC fork. The slot is cleared in `finally` and at campaign changes. Pre-capture systems,
   other EPEC creators, free-standing lights and solo-Guest triggering are outside this path.
-  M2's two-client manifest, native interaction and save/reload gates remain mandatory.
+  Native String `$visited` values normalize to Boolean wire values. True visits and terminal
+  `$abyssalBlackHoleReadingsRevisit` state survive stale overlays/deltas; completed black-hole
+  readings cannot be rearmed. Optional bridge `encounters {"lifetime":true}` reads Host native visit
+  ages, distances, runtime holds and saved Guest inputs without advancing or refreshing anything;
+  default queries stay unchanged. The hint correction passed 4,190 Java tests (one existing router
+  skip) and 155 bridge/offline tests; deployment and native mining/black-hole retests remain pending.
+  M2 remains PARTIAL. Dated native evidence, including the retained old-build mining FAIL, belongs
+  in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md) and `tmp_ff_analysis/p26/2026-10-17/m2-live`.
+  NPC mirror checks cover identity/roster, location and motion; world orbital body/focus keys are
+  checked separately because native NPC assignments and target ids are not replayed.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
