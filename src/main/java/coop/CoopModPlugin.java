@@ -4,6 +4,7 @@ import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
 import coop.campaign.CoopAllyToggleAbility;
+import coop.campaign.CoopRemoteSupportAbility;
 import coop.campaign.CoopStoryChainGate;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
@@ -337,6 +338,7 @@ public class CoopModPlugin extends BaseModPlugin {
         // predates 0.1.4 or not. Idempotent, and the toggle's own state persists with the fleet, so
         // this only ever adds the ability and never resets the player's answer.
         ensureAllyAbility(Global.getSector());
+        ensureRemoteSupportAbilities(Global.getSector());
         netService = new CoopNetService();
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
@@ -400,7 +402,20 @@ public class CoopModPlugin extends BaseModPlugin {
      *         (test seam)
      */
     static boolean ensureAllyAbility(com.fs.starfarer.api.campaign.SectorAPI sector) {
-        String id = CoopAllyToggleAbility.ABILITY_ID;
+        return ensureAbilityOnPlayer(sector, CoopAllyToggleAbility.ABILITY_ID,
+                "ally toggle", "this fleet will never be pulled into the partner's battles");
+    }
+
+    static boolean ensureRemoteSupportAbilities(com.fs.starfarer.api.campaign.SectorAPI sector) {
+        boolean a = ensureAbilityOnPlayer(sector, CoopRemoteSupportAbility.ACCEPT_ID,
+                "hyperspace-accept", "remote support accept will be unavailable");
+        boolean b = ensureAbilityOnPlayer(sector, CoopRemoteSupportAbility.DECLINE_ID,
+                "hyperspace-decline", "remote support decline will be unavailable");
+        return a || b;
+    }
+
+    static boolean ensureAbilityOnPlayer(com.fs.starfarer.api.campaign.SectorAPI sector, String id,
+                                         String label, String failTail) {
         try {
             if (sector == null) {
                 return false;
@@ -425,14 +440,12 @@ public class CoopModPlugin extends BaseModPlugin {
                 changed = true;
             }
             if (changed) {
-                CoopLog.info(CoopModPlugin.class, "Coop gave the player the " + id + " toggle"
-                        + (slot == null ? "" : " on ability bar slot " + slot)
-                        + "; it is off until the player turns it on");
+                CoopLog.info(CoopModPlugin.class, "Coop gave the player the " + id + " (" + label + ")"
+                        + (slot == null ? "" : " on ability bar slot " + slot));
             }
             return changed;
         } catch (RuntimeException | LinkageError ex) {
-            CoopLog.warn(CoopModPlugin.class, "Coop could not add the ally toggle to the player fleet;"
-                    + " this fleet will never be pulled into the partner's battles", ex);
+            CoopLog.warn(CoopModPlugin.class, "Coop could not add " + id + "; " + failTail, ex);
             return false;
         }
     }

@@ -919,6 +919,8 @@ public class CoopNetPump implements EveryFrameScript {
         this.npcFleetRegistry = new CoopFleetMirrorRegistry(CoopFleetMirror::new, clockMillis);
         this.campaignReplicator = new CoopCampaignReplicator(service, sessionState, clockMillis);
         this.battleBridge = new CoopBattleBridge(service, sessionState, clockMillis, pauseCoordinator);
+        // Shared-combat / keepalive inbound while the campaign pump is stopped (dual-engine path).
+        this.battleBridge.setCombatInboundDrain(this::drainCombatInboundWhitelist);
         // S5-A: a PING answered across a battle times a stopped pump, not the link. The bridge is the
         // only thing that knows a battle is open on either side, so it supplies that state here rather
         // than the measurement reaching into it.
@@ -4516,6 +4518,7 @@ public class CoopNetPump implements EveryFrameScript {
                  REP_DELTA, GUEST_REP_DELTA, PLAYER_REP_SNAPSHOT, FACTION_REL_DELTA,
                  ABILITY_ACTIVATE,
                  BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, BATTLE_RESULT, ENGAGE_GUEST,
+                 SHARED_COMBAT,
                  SAVE_CHECKPOINT, SAVE_CHECKPOINT_RESULT, RESPAWN_PLAYER, STALL_NOTICE,
                  // 0.1.1, and the second member of isConnectionScopedControl that survives. The two
                  // questions are opposites: "may a leftover copy be written to the NEXT socket" is
@@ -4868,6 +4871,47 @@ public class CoopNetPump implements EveryFrameScript {
         if (!graceBufferedInbound.isEmpty() && !reconnect.active()) {
             discardGraceBufferedInbound("the reconnect window closed without a resume");
         }
+    }
+
+    /**
+     * Mid-combat inbound drain for dual-engine shared combat. Dispatches a tight whitelist and
+     * re-queues everything else onto {@link #deferredInbound} with generation stamps intact so the
+     * post-battle campaign drain still sees world events in order.
+     *
+     * <p>Bounded per combat frame so a long fight cannot spend the whole frame on backlog.
+     */
+    private void drainCombatInboundWhitelist() {
+        final int budget = 64;
+        java.util.ArrayList<DeferredInbound> hold = new java.util.ArrayList<>();
+        int dispatched = 0;
+        DeferredInbound next;
+        while (dispatched < budget && (next = nextInbound()) != null) {
+            if (allowedDuringCombatInbound(next.message().type())) {
+                dispatchOneInbound(next.message(), next.connectionGeneration());
+                dispatched++;
+            } else {
+                hold.add(next);
+            }
+        }
+        for (int i = hold.size() - 1; i >= 0; i--) {
+            deferredInbound.addFirst(hold.get(i));
+        }
+        if (dispatched > 0) {
+            flushReliableAcks();
+        }
+    }
+
+    /**
+     * Types safe to apply while either CombatEngine is running and the campaign pump is stopped.
+     * New types must be argued onto this list — campaign mutators stay deferred.
+     */
+    static boolean allowedDuringCombatInbound(CoopMessages.Type type) {
+        return switch (type) {
+            case SHARED_COMBAT,
+                 PING, PONG, LINK_STATUS, RELIABLE_ACK,
+                 BATTLE_STATUS, BATTLE_END, SESSION_LEAVE -> true;
+            default -> false;
+        };
     }
 
     // ---- 0.1.1 reliable delivery, receiver half ---------------------------------------------------
@@ -5251,7 +5295,7 @@ public class CoopNetPump implements EveryFrameScript {
             case INTERACTION_RELEASE -> handleInteractionRelease(message);
             case NPC_FLEET_SET -> handleNpcFleetSet(message);
             case BASE_SET -> handleBaseSet(message);
-            case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
+            case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN, SHARED_COMBAT ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
             case ALLY_BATTLE_JOIN -> handleAllyBattleJoin(message);
@@ -9838,6 +9882,7 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.TIME_SNAPSHOT
                 || type == CoopMessages.Type.FLEET_SNAPSHOT
                 || type == CoopMessages.Type.NPC_FLEET_MOTION
-                || type == CoopMessages.Type.BATTLE_STATUS;
+                || type == CoopMessages.Type.BATTLE_STATUS
+                || type == CoopMessages.Type.SHARED_COMBAT;
     }
 }

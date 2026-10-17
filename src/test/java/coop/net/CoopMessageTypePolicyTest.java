@@ -53,7 +53,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET,
             CoopMessages.Type.BATTLE_BEGIN, CoopMessages.Type.BATTLE_STATUS,
             CoopMessages.Type.BATTLE_END, CoopMessages.Type.BATTLE_RESULT,
-            CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.DIALOG_BEGIN,
+            CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.SHARED_COMBAT,
+            CoopMessages.Type.DIALOG_BEGIN,
             CoopMessages.Type.GUEST_SNAPSHOT, CoopMessages.Type.SAVE_CHECKPOINT,
             CoopMessages.Type.RESPAWN_PLAYER, CoopMessages.Type.PING, CoopMessages.Type.PONG,
             CoopMessages.Type.LINK_STATUS, CoopMessages.Type.STATE_DATAGRAM,
@@ -166,7 +167,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.FACTION_REL_DELTA, CoopMessages.Type.ABILITY_ACTIVATE,
             CoopMessages.Type.BATTLE_BEGIN, CoopMessages.Type.BATTLE_STATUS,
             CoopMessages.Type.BATTLE_END, CoopMessages.Type.BATTLE_RESULT,
-            CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.SAVE_CHECKPOINT,
+            CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.SHARED_COMBAT,
+            CoopMessages.Type.SAVE_CHECKPOINT,
             CoopMessages.Type.RESPAWN_PLAYER, CoopMessages.Type.STALL_NOTICE,
             CoopMessages.Type.ORBIT_SNAPSHOT, CoopMessages.Type.NPC_FLEET_SET,
             CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET,
@@ -218,7 +220,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.PING, CoopMessages.Type.PONG, CoopMessages.Type.LINK_STATUS,
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,
             CoopMessages.Type.FLEET_SNAPSHOT, CoopMessages.Type.NPC_FLEET_MOTION,
-            CoopMessages.Type.BATTLE_STATUS);
+            CoopMessages.Type.BATTLE_STATUS, CoopMessages.Type.SHARED_COMBAT);
 
     private static CoopMessages.Message message(CoopMessages.Type type) {
         return new CoopMessages.Message(type, "session-a", 1L, 0L, "{}");

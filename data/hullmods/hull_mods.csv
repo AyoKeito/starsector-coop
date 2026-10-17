@@ -1,0 +1,2 @@
+name,id,tier,rarity,tech/manufacturer,tags,uiTags,base value,unlocked,hidden,hiddenEverywhere,cost_frigate,cost_dest,cost_cruiser,cost_capital,script,desc,short,sModDesc,sprite
+Hyperspace Comm Seat,coop_remote_comm,,,,,,1000,TRUE,,,,0,0,0,0,coop.combat.join.CoopRemoteCommHullMod,"Marks this ship for remote hyperspace-comm takeover by a far co-op partner. Do not put on the flagship.","Remote seat",,graphics/hullmods/nav_relay.png
