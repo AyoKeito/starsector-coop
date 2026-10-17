@@ -13,6 +13,8 @@ import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopSlipstreamAuthority;
 import coop.campaign.CoopSlipstreamWorld;
+import coop.campaign.CoopWreckAuthority;
+import coop.ambient.CoopWreckBridge;
 import coop.campaign.CoopCampaignReplicator;
 import coop.combat.CoopBattleBridge;
 import coop.combat.CoopBattleResult;
@@ -698,6 +700,7 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopNpcFleetReplicator npcFleetReplicator;
     private final CoopBaseAuthority baseAuthority;
     private CoopSlipstreamAuthority slipstreamAuthority;
+    private CoopWreckAuthority wreckAuthority;
     /**
      * Session-scoped, not link-scoped: true from the first connect of a co-op session until that
      * session is really over, <em>through</em> a reconnect grace window. See
@@ -708,6 +711,7 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean npcLinkStreaming;
     private boolean baseReplicationStreaming;
     private boolean slipstreamReplicationStreaming;
+    private boolean wreckReplicationStreaming;
     private boolean barSuppressionArmed;
     private String lastNpcDebug;
     /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
@@ -963,6 +967,7 @@ public class CoopNetPump implements EveryFrameScript {
         this.baseAuthority = new CoopBaseAuthority(service, sessionState, clockMillis,
                 campaignReplicator.marketIds());
         this.slipstreamAuthority = new CoopSlipstreamAuthority(service, sessionState, clockMillis);
+        this.wreckAuthority = new CoopWreckAuthority(service, sessionState, clockMillis);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
         this.battleResultReconciler = new CoopBattleResultReconciler(
@@ -3481,6 +3486,7 @@ public class CoopNetPump implements EveryFrameScript {
         tickNetFault();
         // Seasonal membership must be read before NPC suppression removes SlipstreamManager.
         if (syncSlipstreamReplication()) syncNpcReplication();
+        syncWreckReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();
         t = profiler.split(SECTION_NPC_THREAT_WATCHER, t);
@@ -4541,6 +4547,7 @@ public class CoopNetPump implements EveryFrameScript {
                  // best available picture of the world when it does not.
                  ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET,
                  STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE, FLEET_SNAPSHOT,
+                 WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED,
@@ -4651,6 +4658,7 @@ public class CoopNetPump implements EveryFrameScript {
         npcFleetReplicator.rearmFullBroadcast();
         baseAuthority.reset();
         slipstreamAuthority.rearmFullBroadcast();
+        wreckAuthority.rearmFullBroadcast();
         datagramWatermark.reset();
         datagramRedundancy.reset();
         // Phase 20 M4: the returning peer holds no roster, so this side owes it one before its next
@@ -5264,6 +5272,7 @@ public class CoopNetPump implements EveryFrameScript {
             case NPC_FLEET_SET -> handleNpcFleetSet(message);
             case BASE_SET -> handleBaseSet(message);
             case STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE -> handleStream(message);
+            case WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK -> handleWreck(message);
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
@@ -7929,6 +7938,57 @@ public class CoopNetPump implements EveryFrameScript {
         return true;
     }
 
+    private void syncWreckReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !wreckReplicationStreaming) {
+            wreckAuthority.reset();
+            wreckReplicationStreaming = true;
+        } else if (!active && wreckReplicationStreaming && !reconnect.active()) {
+            wreckReplicationStreaming = false;
+        }
+        if (!active) {
+            if (service.role() == CoopConnectionRole.GUEST) {
+                try { wreckAuthority.observeGuest(); }
+                catch (RuntimeException | LinkageError ex) {
+                    CoopLog.warn(CoopNetPump.class, "Failed to retain pending wreck salvage", ex);
+                }
+            }
+            return;
+        }
+        CoopWreckBridge.setGuestMode(service.role() == CoopConnectionRole.GUEST);
+        try {
+            if (service.role() == CoopConnectionRole.HOST) wreckAuthority.tickHost();
+            else if (service.role() == CoopConnectionRole.GUEST) wreckAuthority.tickGuest();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync host hyperspace wrecks", ex);
+        }
+    }
+
+    private void handleWreck(CoopMessages.Message message) {
+        if (!isGameplaySessionActive() || !java.util.Objects.equals(sessionState.sessionId(), message.sessionId())) return;
+        boolean guestReport = message.type() == CoopMessages.Type.WRECK_CONSUME
+                || message.type() == CoopMessages.Type.WRECK_MUTATION;
+        if (guestReport ? service.role() != CoopConnectionRole.HOST : service.role() != CoopConnectionRole.GUEST) return;
+        try {
+            if (shouldStreamFleet() && !wreckReplicationStreaming) {
+                wreckAuthority.reset();
+                wreckReplicationStreaming = true;
+            }
+            switch (message.type()) {
+                case WRECK_SET -> wreckAuthority.applySet(CoopMessages.requiredPayloadString(message, "wrecks"));
+                case WRECK_ADD -> wreckAuthority.applyAdd(CoopMessages.requiredPayloadString(message, "wreck"),
+                        CoopMessages.optionalPayloadLong(message, "revision", 0));
+                case WRECK_REMOVE -> wreckAuthority.applyRemove(CoopMessages.requiredPayloadString(message, "wreckId"));
+                case WRECK_CONSUME -> wreckAuthority.applyConsume(CoopMessages.requiredPayloadString(message, "wrecks"));
+                case WRECK_MUTATION -> wreckAuthority.applyMutation(CoopMessages.requiredPayloadString(message, "mutation"));
+                case WRECK_MUTATION_ACK -> wreckAuthority.applyMutationAck(CoopMessages.requiredPayloadString(message, "ack"));
+                default -> throw new IllegalArgumentException("Not a wreck message: " + message.type());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply " + message.type(), ex);
+        }
+    }
+
     private void tickSlipstreamFadeControl() {
         CoopConnectionRole role = service.role();
         if (!isGameplaySessionActive() && !reconnect.active()) {
@@ -8330,7 +8390,8 @@ public class CoopNetPump implements EveryFrameScript {
         if (dialog != null) {
             SectorEntityToken target = dialog.getInteractionTarget();
             if (target != null) {
-                currentEntityId = target.getId();
+                String sharedWreckId = coop.campaign.CoopWreckWorld.ownedId(target);
+                currentEntityId = sharedWreckId == null ? target.getId() : sharedWreckId;
                 currentEntityName = target.getName();
             }
         }
@@ -9355,6 +9416,14 @@ public class CoopNetPump implements EveryFrameScript {
 
     void setSlipstreamAuthorityForTest(CoopSlipstreamAuthority authority) {
         slipstreamAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    void setWreckAuthorityForTest(CoopWreckAuthority authority) {
+        wreckAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    boolean wreckReplicationStreamingForTest() {
+        return wreckReplicationStreaming;
     }
 
     boolean slipstreamReplicationStreamingForTest() {

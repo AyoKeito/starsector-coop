@@ -228,7 +228,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
     [...READ_ONLY_COMMANDS].sort(),
     [
       'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'hirable', 'intel',
-      'landmarks', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility'
+      'landmarks', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility', 'wrecks'
     ]
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and
@@ -237,7 +237,8 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   // alone, so it is classed by its worst case.
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
-    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn'
+    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
+    'wreckspawn', 'wreckconsume'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -248,7 +249,7 @@ test('the read-only allowlist and the ss_dump verb table are the same set', () =
     'a verb ss_dump accepts but the client will not retry, or vice versa, is a wiring slip');
 });
 
-test('a dropped streams query retries once, while stream triggers and clock alignment are not replayed', async (t) => {
+test('dropped ambient queries retry once, while triggers and clock alignment are not replayed', async (t) => {
   const calls = new Map();
   const bridge = new MockBridge((request) => {
     const count = (calls.get(request.cmd) ?? 0) + 1;
@@ -264,7 +265,9 @@ test('a dropped streams query retries once, while stream triggers and clock alig
 
   assert.equal((await client.send('streams')).campaignTimestamp, 123);
   assert.equal(calls.get('streams'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign']) {
+  assert.equal((await client.send('wrecks')).campaignTimestamp, 123);
+  assert.equal(calls.get('wrecks'), 2);
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
@@ -299,6 +302,36 @@ test('streams dump and host triggers relay their results; guest trigger refusals
     await assert.rejects(() => ssDump(bridges, 'host', verb), /unknown query verb/);
   }
   await assert.rejects(() => ssAct(bridges, 'host', 'streams'), /unknown action verb/);
+});
+
+test('wreck query and native test actions preserve arguments and refuse the wrong tool class', async (t) => {
+  const table = { campaignTimestamp: 123, count: 1, candidateCount: 1, truncated: false,
+    wrecks: { 'wreck:a': { managed: true, engineId: 'native-7', salvageSeed: '-9223372036854775808' } } };
+  const hostBridge = new MockBridge((request) => {
+    if (request.cmd === 'wrecks') return { ok: true, data: table };
+    return { ok: true, data: { command: request.cmd, args: request.args } };
+  });
+  const guestBridge = new MockBridge((request) => request.cmd === 'wreckspawn'
+    ? { ok: false, error: 'IllegalStateException: wreckspawn is host-only' }
+    : { ok: true, data: { command: request.cmd, args: request.args } });
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+  assert.deepEqual(await ssDump(bridges, 'host', 'wrecks'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'wreckspawn', { anchor: 'guest' }),
+    { command: 'wreckspawn', args: { anchor: 'guest' } });
+  assert.deepEqual(await ssAct(bridges, 'guest', 'wreckconsume', { wreckId: 'wreck:a' }),
+    { command: 'wreckconsume', args: { wreckId: 'wreck:a' } });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'wreckspawn'), /host-only/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'wrecks'), /unknown action verb/);
+  for (const action of ['wreckspawn', 'wreckconsume']) {
+    await assert.rejects(() => ssDump(bridges, 'guest', action), /unknown query verb/);
+  }
 });
 
 test('stream diffs require timestamp pairing even if a tolerance or ignore list would hide it', async (t) => {

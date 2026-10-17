@@ -6,6 +6,7 @@ import com.thoughtworks.xstream.XStream;
 import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
 import coop.campaign.CoopSlipstreamWorld;
+import coop.ambient.CoopWreckBridge;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopGuestPresence;
@@ -521,6 +522,8 @@ public class CoopModPlugin extends BaseModPlugin {
     static void beginGameSession() {
         clearPreviousGameStatics();
         CoopStoryChainGate.publish(Global.getSector());
+        CoopWreckBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
+                .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
     }
 
     /**
@@ -537,6 +540,7 @@ public class CoopModPlugin extends BaseModPlugin {
      */
     static void clearPreviousGameStatics() {
         CoopSlipstreamWorld.releaseControlled();
+        CoopWreckBridge.clear();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();
     }

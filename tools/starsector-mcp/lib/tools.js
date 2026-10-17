@@ -21,7 +21,8 @@ export const QUERY_VERBS = [
   'intel',
   'feed',
   'screen',
-  'streams'
+  'streams',
+  'wrecks'
 ];
 
 /**
@@ -49,6 +50,8 @@ export const ACTION_VERBS = [
   'memory',
   'streamadd',
   'streamdespawn',
+  'wreckspawn',
+  'wreckconsume',
   'clockalign'
 ];
 

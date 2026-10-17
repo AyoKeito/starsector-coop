@@ -251,6 +251,9 @@ public final class CoopAgentCommands {
         map.put("feed", CoopAgentCommands::feed);
         map.put("screen", CoopAgentCommands::screen);
         map.put("streams", CoopAgentCommands::streams);
+        map.put("wrecks", CoopAgentCommands::wrecks);
+        map.put("wreckspawn", CoopAgentCommands::wreckspawn);
+        map.put("wreckconsume", CoopAgentCommands::wreckconsume);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("clockalign", CoopAgentCommands::clockalign);
@@ -272,6 +275,104 @@ public final class CoopAgentCommands {
     }
 
     // ---- Queries --------------------------------------------------------------------------------
+
+    /** Pure snapshot: unlike authority capture, this never assigns a shared id or mutates a wreck. */
+    static JSONObject wrecks(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        JSONObject table = new JSONObject();
+        int candidateCount = 0;
+        if (sector.getHyperspace() != null) {
+            for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+                if (!coop.campaign.CoopWreckCodec.isNativeWreck(entity)) continue;
+                candidateCount++;
+                if (table.length() >= 100) continue;
+                String owned = coop.campaign.CoopWreckWorld.ownedId(entity);
+                String id = owned == null ? "wreck:query" : owned;
+                coop.campaign.CoopWreckRecord record = coop.campaign.CoopWreckCodec.capture(
+                        (com.fs.starfarer.api.campaign.CustomCampaignEntityAPI) entity, id);
+                JSONObject row = new JSONObject();
+                row.put("id", owned == null ? JSONObject.NULL : owned);
+                row.put("hostEntityId", record.hostEntityId());
+                row.put("name", record.name());
+                row.put("x", record.x());
+                row.put("y", record.y());
+                row.put("vx", record.vx());
+                row.put("vy", record.vy());
+                row.put("facing", record.facing());
+                row.put("angularVelocity", record.angularVelocity());
+                row.put("elapsedDays", record.elapsedDays());
+                row.put("durationDays", record.durationDays());
+                row.put("variantId", record.ship().variantId());
+                row.put("condition", record.ship().condition());
+                row.put("shipName", record.ship().shipName());
+                row.put("recipe", record.encode());
+                // JSON consumers cannot represent every native long exactly. Keep the seed lossless.
+                row.put("salvageSeed", Long.toString(record.salvageSeed()));
+                row.put("engineId", entity.getId());
+                row.put("managed", owned != null);
+                row.put("fading", entity.hasTag(com.fs.starfarer.api.impl.campaign.ids.Tags.FADING_OUT_AND_EXPIRING));
+                table.put(owned == null ? entity.getId() : owned, row);
+            }
+        }
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        out.put("count", table.length());
+        out.put("candidateCount", candidateCount);
+        out.put("truncated", candidateCount > table.length());
+        out.put("wrecks", table);
+        return out;
+    }
+
+    /** QA invokes the native roll; probability, recipe and salvage assignment remain native. */
+    static JSONObject wreckspawn(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        if (roleOf(context.pump()) != CoopConnectionRole.HOST) {
+            throw new IllegalStateException("wreckspawn is host-only");
+        }
+        String anchor = optionalString(args, "anchor");
+        CampaignFleetAPI fleet;
+        if (anchor.isEmpty() || anchor.equals("host")) fleet = requirePlayerFleet(sector);
+        else if (anchor.equals("guest")) {
+            SectorEntityToken presence = coop.presence.CoopPresenceRegistry.getForFork("CoopAgentCommands");
+            if (!(presence instanceof CampaignFleetAPI)) throw new IllegalStateException("No live guest presence");
+            fleet = (CampaignFleetAPI) presence;
+        } else throw new IllegalArgumentException("anchor must be host or guest");
+        if (!fleet.isInHyperspace()) throw new IllegalStateException("Wreck anchor must be in hyperspace");
+        var event = sector.getEventManager().getOngoingEvent(null,
+                com.fs.starfarer.api.impl.campaign.ids.Events.NEARBY_EVENTS);
+        if (!(event instanceof com.fs.starfarer.api.impl.campaign.events.nearby.NearbyEventsEvent nearby)) {
+            throw new IllegalStateException("Native nearby-events generator is unavailable");
+        }
+        SectorEntityToken created = null;
+        int attempts = 0;
+        while (created == null && attempts < 20) {
+            attempts++;
+            created = nearby.coopTrySpawnDerelictNear(fleet);
+        }
+        JSONObject out = new JSONObject();
+        out.put("anchor", anchor.isEmpty() ? "host" : anchor);
+        out.put("attempts", attempts);
+        out.put("created", created != null);
+        out.put("engineId", created == null ? "" : created.getId());
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    /** Simulates native completed-salvage fade, exercising the same disappearance detector as UI. */
+    static JSONObject wreckconsume(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String id = requiredString(args, "wreckId");
+        if (roleOf(context.pump()) == CoopConnectionRole.NONE) throw new IllegalStateException("Needs an active co-op role");
+        SectorEntityToken found = null;
+        for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+            if (id.equals(coop.campaign.CoopWreckWorld.ownedId(entity))) { found = entity; break; }
+        }
+        if (found == null) throw new IllegalArgumentException("No managed hyperspace wreck " + id);
+        com.fs.starfarer.api.util.Misc.fadeAndExpire(found, 1f);
+        JSONObject out = new JSONObject();
+        out.put("wreckId", id); out.put("fading", true);
+        return out;
+    }
 
     static JSONObject streams(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);

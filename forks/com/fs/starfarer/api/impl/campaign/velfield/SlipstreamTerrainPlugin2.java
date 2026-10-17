@@ -2569,6 +2569,8 @@ public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 	
 	
 	public void applyEffectToWreck(SectorEntityToken other, float days) {
+		// COOP FORK: guest replicas already receive the host's native stream motion.
+		if (coop.ambient.CoopWreckBridge.isGuestReplica(other)) return;
 		if (other.hasTag(Tags.UNAFFECTED_BY_SLIPSTREAM)) return;
 		
 		if (!containsPoint(other.getLocation(), 0f)) {

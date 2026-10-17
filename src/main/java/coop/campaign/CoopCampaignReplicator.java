@@ -6261,6 +6261,33 @@ public final class CoopCampaignReplicator
         }
     }
 
+    /** Captures a derelict's variant before recovery has created a fleet member. */
+    static CoopShipDetail captureWreckVariant(ShipVariantAPI variant) {
+        return captureVariantDetail(Objects.requireNonNull(variant, "variant"),
+                "", "", 0f, 1f, 0, null);
+    }
+
+    /** Rebuilds a derelict's private variant without creating or registering a fleet member. */
+    static ShipVariantAPI rebuildWreckVariant(CoopShipDetail detail) {
+        Objects.requireNonNull(detail, "detail");
+        ShipVariantAPI stock = stockVariantOrNull(detail.baseVariantId());
+        ShipVariantAPI variant;
+        if (stock != null) {
+            variant = stock.clone();
+        } else {
+            ShipHullSpecAPI hull = hullSpecOrNull(detail.hullSpecId());
+            if (hull == null) {
+                throw new IllegalArgumentException("Unknown wreck hull " + detail.hullSpecId()
+                        + " and variant " + detail.baseVariantId());
+            }
+            variant = Global.getSettings().createEmptyVariant(detail.baseVariantId(), hull);
+        }
+        variant.setSource(VariantSource.REFIT);
+        variant.setOriginalVariant(null);
+        applyVariantDetail(variant, detail);
+        return variant;
+    }
+
     /**
      * The variant half of the capture, which a module re-enters with {@code depth + 1}.
      *

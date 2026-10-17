@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 and all M1 numeric live gates passed, including both seasonal fade cycles, surges and genuine reconnects. Manual map/discovery, visible fade/carry, guest-local surge, mirror and normal-picker reload checks keep M1 open before M2. Phase 23 is complete; publication reminders remain under ATTENTION"
+      "note": "Phase 26 Task 0 and M1 stream numeric live gates passed. Manual map testing exposed independent floating hyperspace wrecks; the authorized shared-wreck correction needs its own deployment and live regression. Earlier map/discovery, visible carry, surge screen, mirror and normal-picker checks remain open before M2. Phase 23 is complete"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: finish Phase 26 M1's manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and Nov 29 normal-picker reload checks before M2 abyssal temporary systems"
+      "note": "the V1 build queue is complete. Next: verify the shared floating-wreck correction and finish Phase 26 M1's manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and normal-picker reload checks before M2 abyssal temporary systems"
     },
     {
       "key": "queued",
@@ -34,25 +34,32 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "26 Task 0 and M1 are implemented on codex/p26-ambient-world; Task 0 and all M1 numeric live gates passed. Manual visual, motion and normal-picker reload checks remain, so M1 is incomplete and M2 waits. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity triggering are follow-ups"
+      "note": "26 Task 0 and the M1 stream numeric gates passed on codex/p26-ambient-world. Shared floating hyperspace wrecks were added after a manual desync report; their verification and the earlier visual/motion/load checks remain open. M1 is incomplete and M2 waits. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity abyss triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 and all M1 numeric live gates passed, including full seasonal fades, host/guest surge checks and genuine reconnects. Manual map/discovery, visible fade/carry, guest-local surge screen, mirror motion and Nov 29 normal-picker reload checks remain. M1 is partial; M2 waits. Java: 3,929 passed, one skipped; bridge and harness checks: 147 passed. Publication reminders and optional QA probes remain under ATTENTION.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. <b>Numeric gates passed:</b> Task 0, both full seasonal fade cycles, normal clock coupling, host surge startup/expiry, guest-local surge isolation and genuine reconnect preservation. <b>Manual checks remaining:</b> maps/discovery, visible fade and fleet carry with the guest parked before activation, guest-local surge screen behavior, partner/NPC mirrors and normal-picker reload of the Nov 29, c206 pair. M1 remains partial; M2 waits. M3-M5 and guest-proximity triggering remain follow-ups. Publication reminders and optional QA probes remain under ATTENTION.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 Task 0 and the M1 stream numeric gates passed. Manual map testing found a Guest-only Hound LP wreck. The authorized shared floating-wreck correction now needs deployment and live regression, alongside the earlier visual/map, carry, mirror and normal-picker checks. M1 stays partial; M2 waits. Guest-proximity abyssal encounters remain a follow-up.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Current focus:</b> <span class=\"rp\" data-jump=\"26\">Phase 26</span> on <code>codex/p26-ambient-world</code>. Task 0 and the stream numeric gates passed. A Guest-only Hound LP found during manual map testing added <b>shared floating hyperspace wrecks</b> to this branch: Host generation also covers a separated Guest, with shared pose, age, salvage and durable consumption. <b>Verification remains:</b> deployment/live wreck regression and the earlier maps/discovery, visible fade/carry, surge screen, mirror motion and normal-picker reload checks. M1 stays partial; M2 waits. M3-M5 and guest-proximity abyss triggering remain follow-ups.",
   "attention": [
     {
       "sev": "gate",
+      "sevLabel": "shared-wreck regression",
+      "head": "Verify floating hyperspace wreck authority",
+      "state": "authorized correction; deployment and live verification remain open",
+      "body": "The preserved Dec 1, c206 checkpoint has Guest-only Hound LP 2aa26, absent from Host and from the Nov 25 fixture. The correction covers exact native hyperspace wrecks: Host pose, age, expiry and resolved salvage; Guest-local discovery; canonical consumption tombstones; completed-manifest cleanup of unmatched legacy Guest wrecks. Host native generation also checks a separated Guest, including when Host is in a system, with one check for overlapping 5,000-su neighborhoods. Partial salvage updates compare the expected Host revision; Guest trap alarms create or redirect fleets only on Host, targeting Guest. Verify migration, generation, motion/expiry, consumption, partial-state conflicts, native trap outcomes and reconnect/save/reload. M1 remains open; guest-proximity abyssal EPEC triggering is deferred."
+    },
+    {
+      "sev": "gate",
       "sevLabel": "live verification",
-      "head": "M1 numeric live gates passed",
-      "state": "seasonal fades, surges and genuine reconnect preservation passed; manual checks remain",
-      "body": "Both-hyperspace seasonal fades matched seven partial spawn pairs (one late) and 21 partial despawn pairs (three late), with zero differences and a genuine reconnect preserving the current phase and origin. The separated-player cycle already passed at seven spawn and 20 despawn partial pairs, alongside the separate 937-sample clock control and its natural episode recovery. Host surges matched four partial pairs; startup with the guest in Nameless Rock matched six unfinished partial pairs. All surge differences were zero and native expiry completed on both clients. A guest-local untagged surge never appeared on the host, survived an accepted reconnect with a grace dialog, then expired. Surge runs made no post-trigger calendar writes. Historical failures and raw-calendar verdicts remain unchanged. Java: 3,929 passed, one skipped; bridge and harness checks: 147 passed."
+      "head": "M1 stream numeric live gates passed",
+      "state": "prior seasonal fades, surges and reconnect preservation passed; new wreck verification remains",
+      "body": "Both-hyperspace seasonal fades matched seven partial spawn pairs (one late) and 21 partial despawn pairs (three late), with zero differences and a genuine reconnect preserving the current phase and origin. The separated-player cycle passed at seven spawn and 20 despawn partial pairs, alongside the separate 937-sample clock control and its natural episode recovery. Host surges matched four partial pairs; startup with the guest in Nameless Rock matched six unfinished partial pairs. All surge differences were zero and native expiry completed on both clients. A guest-local untagged surge survived an accepted reconnect and expired without appearing on Host. Surge runs made no post-trigger calendar writes. Historical failures and raw-calendar verdicts stay unchanged. Before the shared-wreck correction: Java 3,929 passed, one skipped; bridge/harness 147 passed."
     },
     {
       "sev": "gate",
       "sevLabel": "before M2",
       "head": "P26 M1 manual checks before M2",
-      "state": "maps/discovery, visible fade/carry, guest-local screen, mirrors and Nov 29 picker reload remain",
-      "body": "Verify both maps and per-player discovery; visible fade and fleet carry with the guest parked before activation; guest-local surge screen behavior; partner/NPC mirror motion; and normal-picker reload of the Nov 29, c206 coordinated pair. The Nov 25 map pair (09:25 Moscow) and Nov 29 mid-fade pair (09:28) remain in the native save folders and backups. Both games are held paused at Dec 15, c206, with faults clear. Numeric checks are complete, but M1 remains partial and M2 waits for these manual results."
+      "state": "maps/discovery, visible fade/carry, guest-local screen, mirrors and picker reload remain",
+      "body": "Verify both maps and per-player discovery; visible fade and fleet carry with Guest parked before activation; guest-local surge screen behavior; partner/NPC mirror motion; and normal-picker reload of the Nov 29, c206 coordinated pair. The Nov 25 map pair (09:25 Moscow) and Nov 29 mid-fade pair (09:28) have full-folder backups. The Dec 1 desync checkpoint is preserved separately for the shared-wreck regression. Earlier stream numeric results do not close that new regression. M1 remains partial and M2 waits."
     },
     {
       "sev": "scope",
@@ -912,10 +919,13 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0 and all M1 numeric live gates passed: both full seasonal fade cycles, normal clock coupling, host surge startup/expiry, guest-local surge isolation and genuine reconnect preservation. Maps/discovery, visible fade/carry, guest-local surge screen, mirror motion and normal-picker reload remain manual checks. M1 stays partial and M2 waits. M3-M5 and guest-proximity triggering remain follow-ups.",
+      "summary": "Task 0 and M1 stream numeric gates passed. A Guest-only Hound LP found during manual map testing added shared floating hyperspace wrecks, including Host generation near a separated Guest. Wreck deployment/live regression and the earlier visual/map, carry, surge screen, mirror and picker checks remain open. M1 stays partial; M2 waits. Guest-proximity abyssal EPEC triggering remains deferred.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
+        "CoopWreckAuthority / Record / Codec / World + transient CoopWreckBridge",
+        "WRECK_SET/ADD/REMOVE/CONSUME + canonical wreck identities and durable tombstones",
+        "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
         "CoopEncounterAuthority",
         "CoopAbyssalDespawner",
         "STREAM_SET/ADD/DESPAWN/REMOVE",
@@ -927,6 +937,7 @@
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
+        "Shared-wreck correction: review/build/deploy and live migration, separated-Guest generation, motion/expiry, consumption, partial salvage revision conflicts, Host trap targeting and reconnect/save/reload regression",
         "Manual: both hyperspace maps and per-player route discovery",
         "Manual: visible fade and fleet carry with the guest parked before surge activation",
         "Manual: guest-local surge screen behavior",
@@ -934,13 +945,13 @@
         "Manual: normal save-picker reload of the Nov 29, c206 coordinated pair",
         "M2 (after M1 live gate): fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
-        "guest-proximity triggering: follow-up, outside the M1 + M2 draft scope",
+        "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck checks near a separated Guest are in scope",
         "M4 hyperspace storm replication: follow-up; existing design retained",
         "M5 guest sensor ghosts and Leviathan trails: follow-up",
         "document residual divergences + retire v1 accept-divergence entries",
         "commit"
       ],
-      "note": "User confirmed M1 + M2 scope on 2026-10-12 and, after a review the same day, put two shipped-bug fixes first (fingerprint; `deep space` location key, found by decompiling the engine), added host slipsurges to M1 and moved Leviathan trails to M5. Builds on Phases 8/9/13/30. Version 2 comparisons require the current host's committed origin/tick, native phase and mode, guest reachability, and convergence within five seconds at a frozen host; the 0.05 intensity limit includes zero gaps. Numeric seasonal, surge and reconnect gates now pass. Historical raw-calendar verdicts and the separate clock-control result stay distinct; surge runs used no post-trigger calendar writes. Only the listed manual M1 checks remain before M2. Its recipe carries the seed the host's EPEC used, because the fork's keyed seed depends on -Dcoop.newGameSeed."
+      "note": "User confirmed M1 + M2 on 2026-10-12, with the fingerprint/location fixes first, host slipsurges included and Leviathan trails moved to M5. On 2026-10-17 the user authorized fixing independent floating hyperspace wrecks found during M1 map testing, including native Host generation near a separated Guest. This exact-native-plugin hyperspace path preserves local discovery and stores durable consumption tombstones; its live regression remains open. Earlier seasonal, surge and reconnect numeric gates passed under the documented version 2 phase criterion; historical raw-calendar verdicts stay distinct. The listed visual/load checks and shared-wreck regression precede M2. Guest-proximity abyssal EPEC triggering stays deferred. M2 carries the host's effective EPEC seed."
     },
     {
       "id": "27",

@@ -113,7 +113,7 @@ service.beginFrame() -> CoopDebug.pollFrame / CoopWiretap.pollFrame -> streamClo
   -> syncFleetMirror -> drainFleetDatagrams -> advanceMirrorMotion -> maybeSendFleetSnapshot
   -> tickRespawnNotifier -> maybeSendGuestSnapshot -> tickSaveCheckpoint
   -> tickSessionLeaveWatchdog -> tickNetFault
-  -> syncSlipstreamReplication -> syncNpcReplication -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
+  -> syncSlipstreamReplication -> syncWreckReplication -> syncNpcReplication -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
   -> syncInteractionGate -> syncCampaignReplicator -> campaignReplicator.tick*(...)
   -> maybeSendPing -> tickLinkSupervision -> service.flushOutbound -> tickTerminalStop
 ```
@@ -195,7 +195,7 @@ Owns: every wire type, since the enum lives here.
   `CoopMotionSpeedProbe`. Owns `FLEET_SNAPSHOT`, `FLEET_ROSTER`,
   `FLEET_ROSTER_REQUEST`, `NPC_FLEET_SET`, `NPC_FLEET_MOTION`, `RESPAWN_PLAYER`.
 
-### `coop.campaign` (35 classes) - shared world state
+### `coop.campaign` (40 classes) - shared world state
 
 - `CoopCampaignReplicator` - the hub; the pump calls its `tickWorldDeltas`, `tickOrbitSync`,
   `tickPlayerRepSync`, `tickBarAcceptance`, `tickBarPool`, `tickColony*`, `tickExpeditionWarnings`,
@@ -219,6 +219,22 @@ Owns: every wire type, since the enum lives here.
   The guest sweeps seasonal terrain before manager suppression;
   an unreadable sweep delays suppression. Saved terrain tags rebuild lookup and same-geometry
   upserts retain local discovery. The live M1 gate remains open before M2.
+- `CoopWreckAuthority` / `CoopWreckRecord` / `CoopWreckCodec` / `CoopWreckWorld` - shared floating
+  hyperspace wrecks with the exact native `DerelictShipEntityPlugin`. A 250 ms host scan captures
+  pose, age and resolved salvage data; `WRECK_SET` plus `WRECK_ADD` sends a complete manifest on
+  connect/resume and every five seconds, with changed records and `WRECK_REMOVE` between sets.
+  Guest salvage reports `WRECK_CONSUME`; primitive `$coopWreckConsumedIds` tombstones prevent
+  resurrection after reconnect or reload. Native entities retain `$coopWreckId` (`wreck:<UUID>`).
+  In-place updates preserve local discovery and defer to an open native salvage dialog. A complete
+  successfully applied manifest removes unmatched legacy guest wrecks; pods and other plugins stay
+  outside this migration. `coop.ambient.CoopWreckBridge` sets Guest mode before native frames and
+  guards the pinned `NearbyEventsEvent` and `DerelictShipEntityPlugin` hooks. Host wreck generation
+  also checks a Guest in hyperspace when Host is in a system or at least 10,000 su away. Host expiry
+  waits while either player can see the wreck; Guest replicas skip local expiry and stream impulses.
+  Partial Guest salvage updates compare the expected Host revision before changing recovery state.
+  The `TransmitterTrapSpecial` fork records Guest alarm activation as a primitive flag and lets the
+  Host create or redirect native trap fleets toward the Guest, using ordinary NPC replication.
+  Shared-wreck live verification and the earlier M1 manual checks remain open before M2.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
@@ -464,12 +480,15 @@ src/launcher/java/coop/launcher/   22 classes
 
 - **Agent bridge.** `coop.debug.CoopAgentBridge`, gated on `-Dcoop.debug.bridge=<port>`; absent,
   unparsable or `0` means no socket and no log line. Binds 127.0.0.1 only, four clients, a few
-  commands per frame on the campaign thread. 34 verbs in `CoopAgentCommands`: `status`, `fleets`,
+  commands per frame on the campaign thread. 37 verbs in `CoopAgentCommands`: `status`, `fleets`,
   `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `ownfleet`, `colonizable`,
-  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen`, `streams` read; `teleport`, `pause`,
+  `hirable`, `landmarks`, `entities`, `intel`, `feed`, `screen`, `streams`, `wrecks` read; `teleport`, `pause`,
   `clockalign`, `ability`,
   `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`,
-  `mark`, `memory`, `streamadd`, `streamdespawn` act. Stream creation/despawn is host-only.
+  `mark`, `memory`, `streamadd`, `streamdespawn`, `wreckspawn`, `wreckconsume` act. Stream
+  creation/despawn and native wreck spawning are host-only. `wreckspawn` tries the native roll at
+  most 20 times near a host or guest anchor; `wreckconsume` starts native fading on a managed wreck
+  to test disappearance propagation. It does not exercise the loot UI.
   `streamadd` reports actual creation and native route exhaustion; explicit `rearmUsedRoute`
   permits a native QA spawn after all seasonal terrain is gone, with the route flag restored.
   `clockalign` requires a paused active session, refuses backward movement or a jump over one day,
