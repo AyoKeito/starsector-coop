@@ -14,6 +14,9 @@ import coop.ambient.CoopEncounterReplayBridge;
 import coop.fleet.CoopEntityIds;
 import coop.fleet.CoopLocations;
 import coop.testing.ProxyDefaults;
+import coop.testing.RecordingNetService;
+import coop.testing.TestSessions;
+import coop.net.CoopConnectionRole;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -181,6 +184,31 @@ class CoopEncounterWorldTest {
         assertTrue(replay.entities.get(0).getMemoryWithoutUpdate().getBoolean("$abyssalPlanetoidMiningOp"));
     }
 
+    @Test void ghostReplayRetainsNativeFinalPoseAtFocusAfterInstallingItsDifferentOrbitPoint() {
+        FakeLocation system = scene.generated("alpha"); FakeEntity planet = system.planet("planet");
+        FakeEntity ghost = system.entity(CustomCampaignEntityAPI.class, "ghost", "wreck");
+        String focusKey = id("alpha", Role.SYSTEM, 0), ghostKey = id("alpha", Role.SYSTEM, 1);
+        CoopWreckRecord captured = CoopWreckFixtures.sample(CoopEncounterRecord.wreckId(ghostKey));
+        planet.position.set(captured.x(), captured.y()); planet.velocity.set(captured.vx(), captured.vy());
+        CoopEncounterRecord.Orbit orbit = new CoopEncounterRecord.Orbit(focusKey, 90, 352, 29.6f);
+        Special special = new Special(SpecialType.GHOST_WRECK, ghostKey, orbit, captured, List.of());
+
+        CoopEncounterWorld.applySpecialOrbitAndPose(ghost.api, special, Map.of(focusKey, planet.api));
+
+        assertSame(planet.api, ghost.focus);
+        assertEquals(352, ghost.radius); assertEquals(90, ghost.angle); assertEquals(29.6f, ghost.period);
+        assertEquals(captured.x(), ghost.position.x); assertEquals(captured.y(), ghost.position.y);
+        assertEquals(captured.vx(), ghost.velocity.x); assertEquals(captured.vy(), ghost.velocity.y);
+        assertEquals(planet.position.x, ghost.position.x); assertEquals(planet.position.y, ghost.position.y);
+        assertNotEquals(planet.position.y + orbit.radius(), ghost.position.y,
+                "native creation overrides the orbit-computed point until the first orbit update");
+
+        FakeEntity vambrace = system.entity(CustomCampaignEntityAPI.class, "vambrace", "derelict_vambrace");
+        CoopEncounterWorld.applySpecialOrbitAndPose(vambrace.api,
+                new Special(SpecialType.VAMBRACE, ghostKey, orbit, null, List.of()), Map.of(focusKey, planet.api));
+        assertEquals(planet.position.y + orbit.radius(), vambrace.position.y);
+    }
+
     @Test void savedPendingGuestVisitSurvivesStaleSetAndMonotoneHostAckCanAdvanceSurvey() {
         CoopEncounterRecord original = planetRecipe("alpha");
         CoopEncounterWorld world = scene.world((sector, record) -> {
@@ -293,6 +321,42 @@ class CoopEncounterWorldTest {
         scene.dialogTarget = null; world.upsert(consumed); assertTrue(system.entities.isEmpty());
     }
 
+    @Test void bundledCurrentOrbitsCorrectProgressedOffscreenReplayWhilePausedAndExcludeNewDynamicEntities() {
+        CoopEncounterWorld host = scene.world(); FakeLocation original = scene.generated("alpha");
+        FakeEntity center = original.token("native-center"), planet = original.planet("native-planet");
+        planet.api.setCircularOrbit(center.api, 42, 1500, 50);
+        FakeEntity moon = original.planet("native-moon"); moon.api.setCircularOrbit(planet.api, 65, 100, 10);
+        List<CoopEncounterRecord> recipes = host.captureHost();
+        planet.api.setCircularOrbitAngle(145);
+        moon.api.setCircularOrbitAngle(230);
+        original.token("later-dynamic").api.setCircularOrbit(center.api, 20, 100, 10);
+        Map<String, String> current = host.captureCurrentOrbits(recipes);
+        List<CoopOrbitSync.OrbitEntry> phases = CoopOrbitSync.decode(current.get("alpha"));
+        assertEquals(2, phases.size()); assertEquals(145, phases.get(0).angle());
+        float expectedX = planet.position.x, expectedY = planet.position.y;
+        float moonX = moon.position.x, moonY = moon.position.y;
+        List<CoopOrbitSync.OrbitEntry> reversed = new ArrayList<>(phases); Collections.reverse(reversed);
+        current = Map.of("alpha", CoopOrbitSync.encode(reversed));
+
+        scene = new Scene(); Global.setSector(scene.api);
+        CoopEncounterWorld guest = scene.world((sector, recipe) -> {
+            FakeLocation replay = scene.generated("native"); FakeEntity focus = replay.token("different-center");
+            FakeEntity parent = replay.planet("different-planet"); parent.api.setCircularOrbit(focus.api, 42, 1500, 50);
+            replay.planet("different-moon").api.setCircularOrbit(parent.api, 65, 100, 10); return replay.system();
+        });
+        CoopEncounterAuthority authority = new CoopEncounterAuthority(new RecordingNetService(CoopConnectionRole.GUEST),
+                TestSessions.activeGuestSession(), () -> 0, guest);
+        authority.applySet(CoopEncounterCodec.encodeSet(recipes), CoopEncounterOrbitSetCodec.encode(current, recipes));
+        FakeEntity replayedPlanet = scene.entity(scene.systems.get(0).entities.get(1));
+        assertNull(scene.player, "no occupied-system orbit stream is available in this fixture");
+        assertEquals(145, replayedPlanet.angle); assertEquals(expectedX, replayedPlanet.position.x);
+        assertEquals(expectedY, replayedPlanet.position.y);
+        FakeEntity replayedMoon = scene.entity(scene.systems.get(0).entities.get(2));
+        assertEquals(230, replayedMoon.angle); assertEquals(moonX, replayedMoon.position.x); assertEquals(moonY, replayedMoon.position.y);
+        assertEquals("different-planet", replayedPlanet.id);
+        assertTrue(scene.api.isPaused());
+    }
+
     private static CoopEncounterRecord simple(String instance, int count) {
         List<Entity> members = new ArrayList<>(); List<EntityState> states = new ArrayList<>();
         for (int i = 0; i < count; i++) {
@@ -351,6 +415,7 @@ class CoopEncounterWorldTest {
                 case "getPlayerFleet" -> player == null ? null : player.api;
                 case "getMemoryWithoutUpdate" -> sectorMemory.api;
                 case "getCurrentLocation" -> current;
+                case "isPaused" -> true;
                 case "setCurrentLocation" -> { current = (LocationAPI) a[0]; yield null; }
                 case "removeStarSystemNextFrame" -> { systems.removeIf(s -> s.api == a[0]); yield null; }
                 case "getEntityById" -> {
@@ -441,6 +506,7 @@ class CoopEncounterWorldTest {
         final SectorEntityToken api;
         final Mem memory = new Mem();
         final Vector2f position = new Vector2f();
+        final Vector2f velocity = new Vector2f();
         final List<JumpPointAPI.JumpDestination> destinations = new ArrayList<>();
         final FakeMarket market;
         final String customType;
@@ -454,6 +520,7 @@ class CoopEncounterWorldTest {
         FakeEntity(Scene scene, Class<? extends SectorEntityToken> type, String id, String customType) {
             this.id = id; this.customType = customType; market = type == PlanetAPI.class ? new FakeMarket() : null;
             PlanetSpecAPI planetSpec = proxy(PlanetSpecAPI.class, (p, m, a) -> m.getName().equals("getPlanetType") ? "barren" : fallback(p, m, a));
+            OrbitAPI nativeOrbit = proxy(OrbitAPI.class, (p, m, a) -> fallback(p, m, a));
             api = proxy(type, (p, m, a) -> switch (m.getName()) {
                 case "getId" -> this.id;
                 case "setId" -> { setIdCalls++; this.id = (String) a[0]; yield null; }
@@ -461,6 +528,7 @@ class CoopEncounterWorldTest {
                 case "getContainingLocation" -> location == null ? null : location.api;
                 case "getStarSystem" -> location != null && location.api instanceof StarSystemAPI ? location.api : null;
                 case "getLocation" -> position;
+                case "getVelocity" -> velocity;
                 case "getLocationInHyperspace" -> location != null && location.api instanceof StarSystemAPI ? location.position : position;
                 case "setLocation" -> { position.set((Float) a[0], (Float) a[1]); yield null; }
                 case "getCustomEntityType" -> customType;
@@ -473,11 +541,23 @@ class CoopEncounterWorldTest {
                 case "getDestinations" -> destinations;
                 case "getTarget" -> target;
                 case "getOrbitFocus" -> focus;
+                case "getOrbit" -> focus == null ? null : nativeOrbit;
                 case "getCircularOrbitAngle" -> angle;
                 case "getCircularOrbitRadius" -> radius;
                 case "getCircularOrbitPeriod" -> period;
                 case "setOrbit" -> { focus = null; yield null; }
-                case "setCircularOrbit" -> { focus = (SectorEntityToken) a[0]; angle = (Float) a[1]; radius = (Float) a[2]; period = (Float) a[3]; yield null; }
+                case "setCircularOrbit" -> {
+                    focus = (SectorEntityToken) a[0]; angle = (Float) a[1]; radius = (Float) a[2]; period = (Float) a[3];
+                    position.set(focus.getLocation().x + (float) Math.cos(Math.toRadians(angle)) * radius,
+                            focus.getLocation().y + (float) Math.sin(Math.toRadians(angle)) * radius);
+                    yield null;
+                }
+                case "setCircularOrbitAngle" -> {
+                    angle = (Float) a[0];
+                    position.set(focus.getLocation().x + (float) Math.cos(Math.toRadians(angle)) * radius,
+                            focus.getLocation().y + (float) Math.sin(Math.toRadians(angle)) * radius);
+                    yield null;
+                }
                 default -> fallback(p, m, a);
             });
             scene.entities.put(api, this);

@@ -1206,6 +1206,13 @@ public final class CoopMessages {
                 "{\"encounters\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
     }
 
+    public static Message encounterSet(String sessionId, long seq, long sentAtMillis,
+                                       String encodedSet, String encodedOrbits) {
+        return new Message(Type.ENC_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"encounters\":\"" + escapeJson(encodedSet == null ? "" : encodedSet)
+                        + "\",\"orbits\":\"" + escapeJson(requireText(encodedOrbits, "orbits")) + "\"}");
+    }
+
     /** Phase 26 id manifest; an empty manifest removes every tagged guest replica. */
     public static Message streamSet(String sessionId, long seq, long sentAtMillis, String encodedIds) {
         return new Message(Type.STREAM_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,

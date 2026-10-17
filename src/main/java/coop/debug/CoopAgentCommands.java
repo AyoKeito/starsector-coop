@@ -2825,26 +2825,11 @@ public final class CoopAgentCommands {
     /**
      * An entity anywhere in the sector, or null.
      *
-     * <p>{@code SectorAPI.getEntityById} first — the engine answers it out of an id map and only falls
-     * back to a walk on a miss. The explicit walk behind it is not redundant: the engine's map is
-     * rebuilt lazily and its own fallback is the same walk, so doing it here costs nothing on the hit
-     * path and keeps the verb answering on any {@code SectorAPI} whose id map is not populated.
+     * <p>Encounter metadata keys resolve locally without the engine's LocationToken cache cast.
+     * Other ids retain the native fast path and a direct-list fallback across all locations.
      */
     static SectorEntityToken findEntity(SectorAPI sector, String entityId) {
-        SectorEntityToken direct = sector.getEntityById(entityId);
-        if (direct != null) {
-            return direct;
-        }
-        for (LocationAPI location : CoopLocations.all(sector)) {
-            if (location == null) {
-                continue;
-            }
-            SectorEntityToken entity = location.getEntityById(entityId);
-            if (entity != null) {
-                return entity;
-            }
-        }
-        return null;
+        return CoopEntityIds.byId(sector, entityId);
     }
 
     /**
@@ -3213,9 +3198,10 @@ public final class CoopAgentCommands {
 
         replicator.applyObjectiveOwnershipForBridge(entityId, factionId);
 
-        SectorEntityToken entity = sector.getEntityById(entityId);
+        SectorEntityToken entity = findEntity(sector, entityId);
         JSONObject out = new JSONObject();
         out.put("entityId", entityId);
+        out.put("engineId", entity == null ? "" : nullSafe(entity.getId()));
         out.put("requestedFactionId", factionId);
         out.put("factionId", entity == null || entity.getFaction() == null
                 ? "" : nullSafe(entity.getFaction().getId()));
@@ -3240,7 +3226,8 @@ public final class CoopAgentCommands {
         JSONObject out = new JSONObject();
         out.put("planetId", planetId);
         out.put("requestedLevel", level);
-        SectorEntityToken entity = sector.getEntityById(planetId);
+        SectorEntityToken entity = findEntity(sector, planetId);
+        out.put("engineId", entity == null ? "" : nullSafe(entity.getId()));
         MarketAPI market = entity instanceof com.fs.starfarer.api.campaign.PlanetAPI planet
                 ? planet.getMarket() : null;
         out.put("level", market == null || market.getSurveyLevel() == null
@@ -3613,7 +3600,8 @@ public final class CoopAgentCommands {
         // is what the mod's own dialogs are identified by everywhere else.
         out.put("interactionDialog", dialog == null ? JSONObject.NULL : interactionDialogName(dialog));
         SectorEntityToken target = interactionTarget(dialog);
-        out.put("interactionTargetId", target == null ? "" : nullSafe(target.getId()));
+        out.put("interactionTargetId", nullSafe(CoopEntityIds.keyOf(target)));
+        out.put("interactionTargetEngineId", target == null ? "" : nullSafe(target.getId()));
         out.put("interactionTargetName", target == null ? "" : nullSafe(target.getName()));
 
         String coreTab = coreTabName(ui);
@@ -3795,7 +3783,7 @@ public final class CoopAgentCommands {
             if (entity == null) {
                 continue;
             }
-            String id = nullSafe(entity.getId());
+            String id = nullSafe(CoopEntityIds.keyOf(entity));
             if (!id.isEmpty() && !seen.add(id)) {
                 continue;
             }
@@ -3986,7 +3974,8 @@ public final class CoopAgentCommands {
     private static JSONObject entityRow(SectorEntityToken entity, String kind, String type)
             throws JSONException {
         JSONObject row = new JSONObject();
-        row.put("id", nullSafe(entity.getId()));
+        row.put("id", nullSafe(CoopEntityIds.keyOf(entity)));
+        row.put("engineId", nullSafe(entity.getId()));
         row.put("name", nullSafe(entity.getName()));
         row.put("kind", kind);
         row.put("type", type);
@@ -3997,7 +3986,8 @@ public final class CoopAgentCommands {
         row.put("y", round(at == null ? 0f : at.y));
         row.put("tags", new JSONArray(entityTags(entity)));
         SectorEntityToken focus = safeRead(entity::getOrbitFocus);
-        row.put("orbitFocus", focus == null ? "" : nullSafe(focus.getId()));
+        row.put("orbitFocus", nullSafe(CoopEntityIds.keyOf(focus)));
+        row.put("orbitFocusEngineId", focus == null ? "" : nullSafe(focus.getId()));
         row.put("hidden", isHiddenBaseEntity(entity));
         // isDiscoverable() is vanilla's "not found yet" flag, not "cannot be found": it goes false the
         // moment the player discovers the entity, so true here means undiscovered.

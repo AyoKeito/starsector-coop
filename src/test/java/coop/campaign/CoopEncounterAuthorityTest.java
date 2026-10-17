@@ -208,6 +208,88 @@ class CoopEncounterAuthorityTest {
         assertTrue(f.net.sent.isEmpty(), "a saved Host tombstone acknowledges the local absence");
     }
 
+    @Test void currentOrbitsAreCapturedOnlyForAnActualSetAndRefreshOnResumeWithoutPhaseHashTraffic() {
+        Fixture f = new Fixture(); CoopEncounterRecord record = record("a"); f.world.host = List.of(record);
+        f.world.hostOrbits = Map.of("a", orbit(record, 45));
+        f.authority.tickHost();
+        CoopMessages.Message delivered = CoopMessages.decode(CoopMessages.encode(f.net.sent.get(0)));
+        assertEquals(f.world.hostOrbits, CoopEncounterOrbitSetCodec.decode(
+                CoopMessages.requiredPayloadString(delivered, "orbits"), List.of(record)));
+        assertEquals(1, f.world.orbitCaptures);
+        f.net.sent.clear(); f.world.hostOrbits = Map.of("a", orbit(record, 90)); f.now.set(250);
+        f.authority.tickHost();
+        assertTrue(f.net.sent.isEmpty()); assertEquals(1, f.world.orbitCaptures);
+        f.authority.rearmFullBroadcast(); f.authority.tickHost();
+        assertEquals(2, f.world.orbitCaptures);
+        assertEquals(f.world.hostOrbits, CoopEncounterOrbitSetCodec.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(0), "orbits"), List.of(record)));
+    }
+
+    @Test void currentOrbitBundleSurvivesFailedNativeReplayAndRetriesBeforeRemovingOldSystems() {
+        Fixture f = new Fixture(); CoopEncounterRecord record = record("a");
+        f.world.local.put("old", record("old")); f.world.fail = "a";
+        Map<String, String> orbits = Map.of("a", orbit(record, 145));
+        assertThrows(IllegalStateException.class, () -> f.authority.applySet(
+                CoopEncounterCodec.encodeSet(List.of(record)), CoopEncounterOrbitSetCodec.encode(orbits, List.of(record))));
+        assertTrue(f.world.appliedOrbits.isEmpty()); assertTrue(f.world.local.containsKey("old"));
+        f.world.fail = null; f.world.failOrbit = "a";
+        assertThrows(IllegalStateException.class, f.authority::tickGuest);
+        assertTrue(f.world.local.containsKey("old")); assertTrue(f.world.removed.isEmpty());
+        f.now.set(250); f.world.failOrbit = null; f.authority.tickGuest();
+        assertEquals(orbits, f.world.appliedOrbits); assertEquals(Set.of("a"), f.world.local.keySet());
+        assertEquals(List.of("old"), f.world.removed);
+    }
+
+    @Test void malformedOrCombinedOversizeBundleFailsBeforeAnyGuestOrHostMutation() {
+        Fixture f = new Fixture(); CoopEncounterRecord small = record("small");
+        String recipes = CoopEncounterCodec.encodeSet(List.of(small));
+        assertThrows(IllegalArgumentException.class, () -> f.authority.applySet(recipes, "broken"));
+        assertThrows(IllegalArgumentException.class, () -> f.authority.applySet(recipes,
+                "x".repeat(CoopEncounterOrbitSetCodec.MAX_ENCODED_BYTES + 1)));
+        assertTrue(f.world.local.isEmpty()); assertTrue(f.world.appliedOrbits.isEmpty()); assertTrue(f.net.sent.isEmpty());
+
+        List<CoopEncounterRecord.Entity> members = new ArrayList<>(); List<CoopOrbitSync.OrbitEntry> phases = new ArrayList<>();
+        for (int i = 0; i < 950; i++) {
+            members.add(new CoopEncounterRecord.Entity(CoopEncounterRecord.Role.SYSTEM, i, "\"".repeat(256)));
+            phases.add(new CoopOrbitSync.OrbitEntry(CoopEncounterRecord.entityId("large", CoopEncounterRecord.Role.SYSTEM, i),
+                    null, 1, 2, 3));
+        }
+        CoopEncounterRecord large = new CoopEncounterRecord("large", 0, "ep", 0, 0, 0, false,
+                CoopEncounterRecord.Creator.PARENT, false, members, List.of(), CoopEncounterRecord.Overlay.empty());
+        List<CoopEncounterRecord> records = List.of(large);
+        String encodedRecipes = CoopEncounterCodec.encodeSet(records);
+        Map<String, String> orbits = Map.of("large", CoopOrbitSync.encode(phases));
+        String encodedOrbits = CoopEncounterOrbitSetCodec.encode(orbits, records);
+        assertFalse(CoopSlipstreamAuthority.fitsFrame(CoopMessages.encounterSet("session", 0, 0, encodedRecipes, encodedOrbits)),
+                "each field fits separately, but both JSON escape layers exceed one combined frame");
+        assertThrows(IllegalArgumentException.class, () -> f.authority.applySet(encodedRecipes, encodedOrbits));
+        assertTrue(f.world.local.isEmpty()); assertTrue(f.world.removed.isEmpty()); assertTrue(f.net.sent.isEmpty());
+        f.world.host = records; f.world.hostOrbits = orbits;
+        assertThrows(IllegalStateException.class, f.authority::tickHost);
+        assertTrue(f.net.sent.isEmpty(), "never send a partial encounter set after combined-size rejection");
+    }
+
+    @Test void obsoleteRemovalRetryCannotRewindAnAlreadyAppliedOrbitBundleAndNewSetRefreshesIt() {
+        Fixture f = new Fixture(); CoopEncounterRecord record = record("a");
+        f.world.local.put("old", record("old")); f.world.failRemove = "old";
+        String recipes = CoopEncounterCodec.encodeSet(List.of(record));
+        String first = CoopEncounterOrbitSetCodec.encode(Map.of("a", orbit(record, 45)), List.of(record));
+        assertThrows(IllegalStateException.class, () -> f.authority.applySet(recipes, first));
+        assertEquals(1, f.world.orbitApplications);
+        assertThrows(IllegalArgumentException.class, () -> f.authority.applySet(recipes, "malformed"));
+        String newerPeriodicOrbit = orbit(record, 90); f.world.appliedOrbits.put("a", newerPeriodicOrbit);
+        f.world.failRemove = null; f.authority.tickGuest();
+        assertEquals(1, f.world.orbitApplications);
+        assertEquals(newerPeriodicOrbit, f.world.appliedOrbits.get("a"));
+        String refreshed = orbit(record, 145);
+        f.authority.applySet(recipes, CoopEncounterOrbitSetCodec.encode(Map.of("a", refreshed), List.of(record)));
+        assertEquals(2, f.world.orbitApplications); assertEquals(refreshed, f.world.appliedOrbits.get("a"));
+    }
+
+    private static String orbit(CoopEncounterRecord record, float angle) {
+        return CoopOrbitSync.encode(List.of(new CoopOrbitSync.OrbitEntry(record.entityId(record.entities().get(0)), null, 1500, 50, angle)));
+    }
+
     static CoopEncounterRecord record(String id) {
         return new CoopEncounterRecord(id, 43, "abyssal_1_2", 1000, 2000, 3, true,
                 CoopEncounterRecord.Creator.PARENT, false,
@@ -231,9 +313,15 @@ class CoopEncounterAuthorityTest {
         final Map<String, CoopEncounterRecord> local = new LinkedHashMap<>();
         final List<String> removed = new ArrayList<>();
         String fail;
+        String failOrbit;
+        String failRemove;
+        Map<String, String> hostOrbits;
+        final Map<String, String> appliedOrbits = new LinkedHashMap<>();
         Set<String> consumed = Set.of();
         boolean grace;
         int hostCaptures;
+        int orbitCaptures;
+        int orbitApplications;
         @Override public List<CoopEncounterRecord> captureHost() { hostCaptures++; return host; }
         @Override public Set<String> taggedIds() { return Set.copyOf(local.keySet()); }
         @Override public void upsert(CoopEncounterRecord record) {
@@ -241,10 +329,22 @@ class CoopEncounterAuthorityTest {
             if (record.instanceId().equals(fail)) throw new IllegalStateException("native creation failed");
             local.put(record.instanceId(), record);
         }
-        @Override public void remove(String id) { removed.add(id); local.remove(id); }
+        @Override public void remove(String id) {
+            if (id.equals(failRemove)) throw new IllegalStateException("native dialog holds obsolete system");
+            removed.add(id); local.remove(id);
+        }
         @Override public void updateGuestPresence(boolean value) { grace = value; }
         @Override public List<CoopEncounterRecord.EntityState> guestStates() { return states; }
         @Override public Set<String> guestConsumedIds() { return consumed; }
         @Override public List<CoopEncounterRecord.EntityState> guestBaselineStates() { return baselineStates; }
+        @Override public Map<String, String> captureCurrentOrbits(List<CoopEncounterRecord> records) {
+            orbitCaptures++;
+            return hostOrbits == null ? CoopEncounterAuthority.EncounterWorld.super.captureCurrentOrbits(records) : hostOrbits;
+        }
+        @Override public void applyCurrentOrbits(CoopEncounterRecord record, String encodedOrbits) {
+            if (record.instanceId().equals(failOrbit)) throw new IllegalStateException("native orbit apply failed");
+            orbitApplications++;
+            appliedOrbits.put(record.instanceId(), encodedOrbits);
+        }
     }
 }

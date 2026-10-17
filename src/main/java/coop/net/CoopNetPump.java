@@ -7953,7 +7953,9 @@ public class CoopNetPump implements EveryFrameScript {
                 encounterAuthority.reset();
                 encounterReplicationStreaming = true;
             }
-            encounterAuthority.applySet(CoopMessages.requiredPayloadString(message, "encounters"));
+            CoopMessages.Payload payload = CoopMessages.payload(message);
+            encounterAuthority.applySet(payload.requiredString("encounters"),
+                    payload.raw().containsKey("orbits") ? payload.requiredString("orbits") : null);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to apply ENC_SET", ex);
         }

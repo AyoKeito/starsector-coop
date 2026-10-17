@@ -50,6 +50,8 @@ Phase 26 M2 keeps each encounter's original creation recipe and current explorat
 
 `coop.campaign.CoopAbyssalDespawner` is a saved Host script, aliased as `coopAbyssalDespawner`. It stores the engine system reference and primitive Guest visit/position history, including a hold when the Guest ended a session inside. Its runtime readiness and reconnect hold are transient. The encounter authority, codecs, receiver lookups and `CoopEncounterReplayBridge` slot are transient; no encounter DTO or transport object belongs in a save. Pre-P26 systems without capture metadata keep their native despawner and are not replicated.
 
+Each `ENC_SET` also carries a bounded current orbit batch per instance. It corrects fresh offscreen replicas to the Host phase after replay, remains available through creation retries, and does not change the saved creation recipe or steady manifest hash. Each instance's batch applies once per desired set, so a deferred old-system removal cannot rewind a newer periodic update. Ghost orbit entries carry exact position, velocity and facing after angle/geometry updates; ordinary entries retain their five-field encoding.
+
 `coop.sessionStats` holds a `CoopSessionStats` bean, XStream-aliased `coopStats`/`coopStatsPlayer`/`coopStatsLoss` in `CoopModPlugin.configureXStream`. The options keys and the two flags are plain strings, so they cost nothing to rename beyond the migration every existing save would need.
 
 One class reaches a save without a key of its own: `coop.colony.CoopExpeditionWarningIntel` is an intel entry that also registers itself with `sector.addScript(this)`, so it serializes under its own class name with **no alias**. Renaming or moving it breaks every save that carries one. Guest saves are also missing the vanilla spawner and `BarEventManager` scripts the Phase 13 suppressors remove, which is why a guest save is co-op-only (see the plan's guest-save policy).
@@ -284,6 +286,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scr
 The switch goes through the existing `-ExtraJvmProps` path, so the catch-all `-Dcoop.*` strip in `Set-CoopVmParams` clears a stale port from the previous run. A launch without `-Bridge` leaves no bridge property behind. The **Agent bridge** checkbox in the launcher's Settings window does the same job for a launch driven from the launcher: it writes the same two ports, 7801 hosting and 7802 joining, unless the port field beside it says otherwise.
 
 Read verbs include `status`, `fleets`, `cargo`, `market`, `markets`, `barpool`, `survey`, `visibility`, `ownfleet`, `hirable`, `colonizable`, `landmarks`, `entities`, `intel`, `feed`, `screen`, `streams`, `wrecks` and `encounters`. Actions include `teleport`, `pause`, `ability`, `setcr`, `give`, `addship`, `objective`, `surveyset`, `expedition`, `rep`, `netfault`, `save`, `mark`, `memory`, `clockalign`, `streamadd`, `streamdespawn`, `wreckspawn`, `wreckconsume` and `encounterspawn`. Selected payloads:
+
+Encounter-aware `teleport`, entity `memory`, `objective` and `surveyset` accept shared `coopenc_*` metadata keys. `entities` reports canonical `id`/`orbitFocus` with native `engineId`/`orbitFocusEngineId`; `screen` reports canonical `interactionTargetId` with `interactionTargetEngineId`. Objective and survey action readbacks retain their requested canonical id and report the local native `engineId`. Default diffs ignore those native diagnostic ids while comparing canonical references.
 
 | verb | shape |
 | --- | --- |

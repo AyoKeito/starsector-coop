@@ -239,7 +239,8 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
             else entity = system.addCustomEntity(null, "Derelict Structure", VAMBRACE_TYPE, "neutral");
             if (!member.specId().equals(specId(entity))) throw new IllegalStateException("Encounter special spec differs");
             own(entity, recipe.instanceId(), special.entityId()); assigned.put(CoopEntityIds.keyOf(entity), entity);
-            setOrbit(entity, special.orbit(), assigned); applyMemory(entity.getMemoryWithoutUpdate(), special.memory());
+            applySpecialOrbitAndPose(entity, special, assigned);
+            applyMemory(entity.getMemoryWithoutUpdate(), special.memory());
         }
         for (CoopEncounterRecord.Special special : recipe.specials()) if (special.type() == SpecialType.PLANET_FLAGS) {
             SectorEntityToken entity = assigned.get(special.entityId());
@@ -313,6 +314,46 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
 
     private void seedGuestBaseline(CoopEncounterRecord recipe) {
         for (CoopEncounterRecord.EntityState state : recipe.overlay().entities()) guestBaseline.putIfAbsent(state.entityId(), state);
+    }
+
+    @Override public Map<String, String> captureCurrentOrbits(List<CoopEncounterRecord> records) {
+        SectorAPI sector = Objects.requireNonNull(sectorSupplier.get(), "No sector for encounter orbits");
+        Map<String, String> result = new LinkedHashMap<>();
+        for (CoopEncounterRecord record : records) {
+            StarSystemAPI system = Objects.requireNonNull(findSystem(sector, record.instanceId()), "Missing Host encounter for current orbits");
+            Set<String> systemMembers = new HashSet<>();
+            for (CoopEncounterRecord.Entity member : record.entities())
+                if (member.role() == Role.SYSTEM) systemMembers.add(record.entityId(member));
+            List<SectorEntityToken> circular = new ArrayList<>();
+            for (SectorEntityToken entity : ownedEntities(sector, system, record).values()) {
+                if (!systemMembers.contains(CoopEntityIds.keyOf(entity))) continue;
+                if (entity.getOrbit() != null && entity.getCircularOrbitRadius() > 0 && entity.getCircularOrbitPeriod() > 0) {
+                    if (entity.getOrbitFocus() != null && !systemMembers.contains(CoopEntityIds.keyOf(entity.getOrbitFocus())))
+                        throw new IllegalStateException("Encounter circular orbit focus is outside original system membership");
+                    circular.add(entity);
+                }
+            }
+            result.put(record.instanceId(), CoopOrbitSync.encode(CoopCampaignReplicator.orbitEntries(circular)));
+        }
+        return Map.copyOf(result);
+    }
+
+    @Override public void applyCurrentOrbits(CoopEncounterRecord record, String encodedOrbits) {
+        SectorAPI sector = Objects.requireNonNull(sectorSupplier.get(), "No sector for encounter orbits");
+        StarSystemAPI system = Objects.requireNonNull(findSystem(sector, record.instanceId()), "Missing Guest encounter for current orbits");
+        Map<String, SectorEntityToken> current = ownedEntities(sector, system, record);
+        Map<String, Integer> creationOrder = new HashMap<>();
+        for (int index = 0; index < record.entities().size(); index++)
+            creationOrder.put(record.entityId(record.entities().get(index)), index);
+        List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(CoopOrbitSync.decode(encodedOrbits));
+        // Native creation installs each focus before its children; specials are the final members.
+        entries.sort(Comparator.comparingInt(entry -> creationOrder.get(entry.entityId())));
+        for (CoopOrbitSync.OrbitEntry entry : entries) {
+            SectorEntityToken entity = current.get(entry.entityId());
+            if (entity == null || entry.focusId() != null && !current.containsKey(entry.focusId())) continue;
+            // Locally consumed originals remain absent until their reliable Host acknowledgement.
+            CoopCampaignReplicator.applyOrbitTo(entity, entry, current, sector);
+        }
     }
 
     /** Reliable guest state deltas may touch only a recorded member of an owned encounter. */
@@ -511,6 +552,16 @@ public final class CoopEncounterWorld implements CoopEncounterAuthority.Encounte
         if (orbit == null) { entity.setOrbit(null); return; }
         SectorEntityToken focus = Objects.requireNonNull(assigned.get(orbit.focusId()), "Unknown encounter special orbit focus");
         entity.setCircularOrbit(focus, orbit.angle(), orbit.radius(), orbit.period());
+    }
+    static void applySpecialOrbitAndPose(SectorEntityToken entity, CoopEncounterRecord.Special special,
+                                         Map<String, SectorEntityToken> assigned) {
+        setOrbit(entity, special.orbit(), assigned);
+        if (special.type() == SpecialType.GHOST_WRECK) {
+            // Native Dire hints install the orbit first, then put the ship at its planet's pose.
+            // setCircularOrbit recomputes a different initial point, so restore the captured result.
+            CoopWreckRecord wreck = special.wreck();
+            entity.setLocation(wreck.x(), wreck.y()); entity.getVelocity().set(wreck.vx(), wreck.vy());
+        }
     }
     private static void own(SectorEntityToken entity, String instance, String id) {
         // LocationToken centers/anchors cannot pass the engine's global entity lookup cast.

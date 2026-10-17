@@ -654,6 +654,32 @@ test('counts report leaf values per side', () => {
 // Ignored keys
 // --------------------------------------------------------------------------
 
+test('entity and screen diffs ignore native references while rejecting changed canonical references', async (t) => {
+  const hostEntities = { entities: [{ id: 'coopenc_same_system1', engineId: 'host-body',
+    orbitFocus: 'coopenc_same_system0', orbitFocusEngineId: 'host-center' }] };
+  const guestEntities = { entities: [{ id: 'coopenc_same_system1', engineId: 'guest-body',
+    orbitFocus: 'coopenc_same_system0', orbitFocusEngineId: 'guest-center' }] };
+  const hostScreen = { interactionTargetId: 'coopenc_same_system1', interactionTargetEngineId: 'host-body' };
+  const guestScreen = { interactionTargetId: 'coopenc_same_system1', interactionTargetEngineId: 'guest-body' };
+  const hostBridge = new MockBridge((request) => ({ ok: true, data: request.cmd === 'entities' ? hostEntities : hostScreen }));
+  const guestBridge = new MockBridge((request) => ({ ok: true, data: request.cmd === 'entities' ? guestEntities : guestScreen }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.equal((await ssDiff(bridges, 'entities')).equal, true);
+  assert.equal((await ssDiff(bridges, 'screen')).equal, true);
+  guestEntities.entities[0].orbitFocus = 'coopenc_same_system2';
+  const focusDiff = await ssDiff(bridges, 'entities');
+  assert.equal(focusDiff.equal, false);
+  assert.deepEqual(focusDiff.differences, [{ path: '$.entities[id=coopenc_same_system1].orbitFocus',
+    host: 'coopenc_same_system0', guest: 'coopenc_same_system2' }]);
+  guestScreen.interactionTargetId = 'coopenc_same_system2';
+  const targetDiff = await ssDiff(bridges, 'screen');
+  assert.equal(targetDiff.equal, false);
+  assert.deepEqual(targetDiff.differences, [{ path: '$.interactionTargetId',
+    host: 'coopenc_same_system1', guest: 'coopenc_same_system2' }]);
+});
+
 // The three payload shapes the live run tripped over. Everything here is per-instance except the
 // coopFleetId keys and the visibility view, which is the point: with the default ignore list these
 // two sides are equal, and without it every run reports the same three meaningless differences.

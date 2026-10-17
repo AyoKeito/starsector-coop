@@ -2035,6 +2035,9 @@ class CoopAgentQueryVerbsTest {
             answers.put("getId", args -> id);
             answers.put("getName", args -> id);
             answers.put("getEntityById", args -> entityIn(id, String.valueOf(args[0])));
+            answers.put("getAllEntities", args -> entitiesById.entrySet().stream()
+                    .filter(entry -> id.equals(locationOfEntity.get(entry.getKey())))
+                    .map(Map.Entry::getValue).toList());
             answers.put("createToken",
                     args -> token(id, ((Number) args[0]).floatValue(), ((Number) args[1]).floatValue()));
             locations.put(id, proxy(LocationAPI.class, answers));

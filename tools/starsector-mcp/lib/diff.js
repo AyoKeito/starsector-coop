@@ -15,9 +15,10 @@
  * guest, and the engine's fleet ids are assigned locally on each client. `lines` is the visibility
  * probe's text dump, where the two sides describe the same fact in different sentences; its
  * structured `view` counterpart is what actually compares. Diffing any of the three reports a
- * difference on every run and buries the ones that mean something.
+ * difference on every run and buries the ones that mean something. Native orbit-focus and dialog
+ * target ids are metadata too; their canonical reference fields remain part of the comparison.
  */
-export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'lines'];
+export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'orbitFocusEngineId', 'interactionTargetEngineId', 'lines'];
 
 /** Native labels/catalog numbers do not determine temporary encounter gameplay or identity. */
 export const ENCOUNTER_COSMETIC_KEYS = [

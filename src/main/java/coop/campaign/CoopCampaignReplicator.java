@@ -79,6 +79,7 @@ import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
+import org.lwjgl.util.vector.Vector2f;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -5317,12 +5318,27 @@ public final class CoopCampaignReplicator
     static List<CoopOrbitSync.OrbitEntry> orbitEntries(List<SectorEntityToken> bodies) {
         List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
         for (SectorEntityToken e : bodies) {
+            String entityId = CoopEntityIds.keyOf(e);
             String focusId = CoopEntityIds.keyOf(e.getOrbitFocus());
-            entries.add(new CoopOrbitSync.OrbitEntry(CoopEntityIds.keyOf(e), focusId,
+            CoopOrbitSync.Pose pose = null;
+            if (isOwnedEncounterGhost(e, entityId)) {
+                Vector2f position = e.getLocation(), velocity = e.getVelocity();
+                pose = new CoopOrbitSync.Pose(position.x, position.y, velocity.x, velocity.y, e.getFacing());
+            }
+            entries.add(new CoopOrbitSync.OrbitEntry(entityId, focusId,
                     e.getCircularOrbitRadius(), e.getCircularOrbitPeriod(),
-                    e.getCircularOrbitAngle()));
+                    e.getCircularOrbitAngle(), pose));
         }
         return entries;
+    }
+
+    private static boolean isOwnedEncounterGhost(SectorEntityToken entity, String entityId) {
+        if (entityId == null || !entityId.startsWith("coopenc_") || !CoopWreckCodec.isNativeWreck(entity)) return false;
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        Object instance = memory == null ? null : memory.get(CoopEncounterWorld.ENCOUNTER_ID_KEY);
+        Object ghostType = memory == null ? null : memory.get("$gsType");
+        return instance instanceof String text && entityId.startsWith("coopenc_" + text + "_")
+                && ghostType instanceof String type && !type.isEmpty();
     }
 
     /**
@@ -5485,10 +5501,14 @@ public final class CoopCampaignReplicator
      * — a non-deterministically generated orbit like the fringe jump-point — reset the whole circular
      * orbit so distance and angle both match the host.
      */
-    private void applyOrbitTo(SectorEntityToken local, CoopOrbitSync.OrbitEntry entry,
+    static void applyOrbitTo(SectorEntityToken local, CoopOrbitSync.OrbitEntry entry,
                               Map<String, SectorEntityToken> localById, SectorAPI sector) {
+        if (entry.pose() != null && (!entry.entityId().equals(CoopEntityIds.keyOf(local))
+                || !isOwnedEncounterGhost(local, entry.entityId())))
+            throw new IllegalArgumentException("Exact orbit pose target is not the shared native ghost");
         boolean orbitGeometryDiffers = Math.abs(local.getCircularOrbitRadius() - entry.radius()) > 1f
                 || Math.abs(local.getCircularOrbitPeriod() - entry.period()) > 0.5f;
+        boolean installedOrbit = false;
         if (orbitGeometryDiffers) {
             // Rare branch (non-deterministic orbit like the fringe jump-point), so the sector-wide
             // lookup fallback is affordable here; the location map still catches the common case.
@@ -5498,10 +5518,17 @@ public final class CoopCampaignReplicator
             }
             if (focus != null) {
                 local.setCircularOrbit(focus, entry.angle(), entry.radius(), entry.period());
-                return;
+                installedOrbit = true;
             }
         }
-        local.setCircularOrbitAngle(entry.angle());
+        if (!installedOrbit) local.setCircularOrbitAngle(entry.angle());
+        // Native Dire hints may place a new ghost at its focus after installing its orbit.
+        // Keep the current Host result even while paused; future snapshots still advance its phase.
+        if (entry.pose() != null) {
+            CoopOrbitSync.Pose pose = entry.pose();
+            local.setLocation(pose.x(), pose.y()); local.getVelocity().set(pose.vx(), pose.vy());
+            local.setFacing(pose.facing());
+        }
     }
 
     /**

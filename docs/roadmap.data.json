@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 passed. The user accepted all remaining M1 and shared-wreck manual gates on 2026-10-17. M2 native build 6937022 failed the entity-renaming gate on LocationToken casts. The composite metadata-key fallback now passes the clean build: 4,147 Java tests passed, one skipped; 154 bridge/offline harness tests passed. Repeat native acceptance next; Phase 26 remains PARTIAL. Phase 23 is complete"
+      "note": "Phase 26 Task 0, M1 and shared wrecks are accepted. M2 is implemented; the composite-key parent manifest passes live. A dire ghost's initial position differed; its correction passes automated tests and needs native retesting. Entry, interactions, reconnect, reload and despawn remain open. Phase 26 stays PARTIAL"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: repeat Phase 26 M2 native parent/dire-hint canonical-manifest, entry, salvage/survey, reconnect, native reload and despawn checks using the composite metadata-key fallback. The original native renaming FAIL is preserved. M1 and shared-wreck acceptance remain closed by user sign-off on 2026-10-17"
+      "note": "the V1 build queue is complete. Next: release the Guest pause-key hold, finish M2 travel checks and retest the dire ghost pose correction. Then verify interactions, reconnect, native reload and Guest-aware despawn. M1 and shared wrecks remain accepted"
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "26 Task 0 passed, and the user accepted M1 plus the shared floating-wreck correction on 2026-10-17. M2's native rename proof failed; its selected composite metadata-key fallback is implemented and awaits repeated native acceptance. Phase 26 remains PARTIAL. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and solo-Guest abyssal encounter triggering are follow-ups"
+      "note": "26 Task 0, M1 and shared wrecks are accepted. M2 native acceptance remains open after a parent manifest pass and an initial dire ghost pose failure. Phase 26 stays PARTIAL. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and solo-Guest abyssal encounter triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 M1 and shared-wreck gates were accepted by the user on 2026-10-17. M2 build 6937022 failed native renaming on LocationToken casts. The $coopEncEntityId metadata fallback passes the clean build: 4,147 Java tests passed, one skipped; 154 bridge/offline harness tests passed. Repeat native parent/dire-hint acceptance next; Phase 26 remains PARTIAL.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Accepted on 2026-10-17:</b> the user closed all remaining <span class=\"rp\" data-jump=\"26\">M1</span> stream and shared-wreck manual gates. <b>M2 native gate remains open:</b> build <code>6937022</code> mirrored a real parent encounter and planet centre, but the manifest failed with native <code>LocationToken</code> casts on both clients. The selected fallback now uses <code>$coopEncEntityId</code> metadata for canonical wire keys and keeps native engine ids. Its clean build passed 4,147 Java tests with one skipped; 154 bridge/offline harness tests passed. <b>Next:</b> repeat parent/dire-hint manifest, entry, salvage/survey, reconnect, native reload and despawn checks. Phase 26 remains PARTIAL; the original FAIL and earlier evidence remain unchanged. M3-M5 and solo-Guest abyssal encounter triggering remain follow-ups.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; P19/P23 and P26 M1/shared wrecks are accepted. M2's parent manifest matches on both clients. The dire encounter exposed an initial ghost position mismatch; the correction passes automated tests and awaits native retesting. Travel is waiting on the Guest pause-key hold. Phase 26 remains PARTIAL.",
+  "here": "<b>V1 is complete at 0.1.5;</b> Phases 19 and 23 are signed off. <b>Phase 26:</b> Task 0, M1 and shared wrecks are accepted. M2 is implemented with composite entity keys. Its parent encounter matched all 173 compared values with no identity-resolution failures. The dire encounter's initial ghost pose differed in two coordinates; the correction passes automated tests and awaits deployment and native retesting. <b>Next:</b> release the Guest pause-key hold, finish entry and orbit checks, then verify interactions, reconnect, native reload and Guest-aware despawn. Phase 26 remains PARTIAL. M3-M5 and solo-Guest abyssal triggering remain follow-ups.",
   "attention": [
     {
       "sev": "gate",
       "sevLabel": "native live acceptance",
-      "head": "Repeat and accept P26 M2 native gates with composite entity keys",
-      "state": "6937022 native renaming FAIL preserved; fallback clean build passed 4,147 Java/one skipped and 154 bridge/offline tests; native acceptance open",
-      "body": "Repeat both native parent and dire-hint encounters with different per-install encounter history using <code>$coopEncEntityId</code> metadata keys. Pass = matching canonical manifests, resolved specials and local entity lookups without native LocationToken casts; both players can enter and leave, fleet snapshots and NPC orbit targets resolve, and salvage/survey outcomes survive reconnect and native save/reload. Verify native despawn with the Guest inside, outside and after ending a session inside, including safe Guest relocation if the Host removed that system between sessions. Keep the original 6937022 FAIL artifacts 03-08 and record the new native results separately. Phase 26 stays PARTIAL until M2 acceptance. M1 and shared-wreck acceptance remain closed; M3-M5 and solo-Guest abyssal encounter triggering remain follow-ups."
+      "head": "Retest the dire ghost pose and finish P26 M2 native acceptance",
+      "state": "parent manifest PASS; pose/current-phase corrections passed clean checks: 4,175 Java plus one skipped, 155 bridge/offline tests; travel held by Guest pause-key intent; M2 acceptance open",
+      "body": "Release the Guest pause-key hold and finish native entry/exit and orbit checks. Deploy the ghost pose correction and repeat dire generation with different local campaign encounter history, timeout keys and pity counters. Pass = matching canonical manifests and resolved specials, working local lookups, player mirrors and NPC orbit targets, salvage/survey outcomes retained through genuine reconnect and native save/reload, and no duplicated system. Verify despawn with the Guest inside, outside and after ending a session inside, including safe relocation if the Host removed that system between sessions. Record new results without changing earlier FAIL/INCONCLUSIVE artifacts. Phase 26 remains PARTIAL until M2 acceptance."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0 passed, and the user accepted all remaining M1 and shared-wreck manual gates on 2026-10-17. M2 is implemented, but build 6937022 failed native entity renaming on LocationToken casts. The selected fallback now carries canonical keys in $coopEncEntityId metadata while preserving engine ids. Repeated native parent/dire-hint acceptance is open, so Phase 26 remains PARTIAL; solo-Guest abyssal encounter triggering remains deferred.",
+      "summary": "Task 0, M1 and shared wrecks are accepted. M2 is implemented with composite entity keys: the native parent manifest passes, and a dire ghost initial-pose correction awaits native retesting. Entry, interactions, reconnect, reload and despawn gates remain open. Phase 26 stays PARTIAL; solo-Guest abyssal triggering remains deferred.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -913,6 +913,7 @@
         "WRECK_SET/ADD/REMOVE/CONSUME/MUTATION/MUTATION_ACK + canonical wreck identities, revisions and durable tombstones",
         "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
         "CoopEncounterAuthority / Record / Codec / World + transient CoopEncounterReplayBridge",
+        "CoopEncounterOrbitSetCodec for bounded current offscreen orbit batches retained through replay retries",
         "CoopAbyssalDespawner with saved Guest visit/inside history",
         "STREAM_SET/ADD/DESPAWN/REMOVE",
         "ENC_SET + reliable ENCOUNTER_STATE outcomes through WORLD_DELTA",
@@ -924,9 +925,9 @@
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "Repeat M2 native parent and dire-hint proof with different per-install history: composite-key lookups without native LocationToken casts, full canonical manifest and resolved-special parity",
+        "Retest the corrected dire ghost initial pose with different local campaign history, timeout keys and pity counters; retain parent manifest parity and working composite-key lookups",
         "M2 native entry/exit and two-way location mapping: player fleet snapshots, salvage/survey and NPC orbit targets",
-        "M2 reconnect and native save/reload: original membership, consumption, survey/ruins/hint outcomes and primitive saved state",
+        "M2 reconnect and native save/reload: fresh offscreen current-phase replay, original membership, consumption, survey/ruins/hint outcomes and primitive saved state",
         "M2 native despawn: Guest inside/outside, saved inside hold after session end and safe relocation when the Host removed the Guest's system",
         "M2 repeated native live evidence and user acceptance; preserve the original 6937022 renaming FAIL artifacts 03-08",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
@@ -934,7 +935,7 @@
         "M4 hyperspace storm replication: follow-up; existing design retained",
         "M5 guest sensor ghosts and Leviathan trails: follow-up"
       ],
-      "note": "User confirmed M1 + M2 on 2026-10-12, with fingerprint/location fixes first, host slipsurges included and Leviathan trails moved to M5. On 2026-10-17 the user said Let's mark all pass, accepting all remaining M1 visual/map/discovery, fade/carry, guest-local surge, mirror-motion and picker-reload checks, plus shared-wreck manual acceptance including partial specials/traps and stream travel. These gates close by user sign-off; no additional instrumented tests are claimed. Earlier stream evidence remains: both-hyperspace seven partial spawn pairs (one late) and 21 partial despawn pairs (three late), separated-player seven spawn and 20 despawn partial pairs, a separate 937-sample clock control, four Host-surge partial pairs and six unfinished startup pairs with Guest in Nameless Rock. Stream differences were zero; accepted reconnects preserved phase/origin and the guest-local surge, and native expiry completed. Surge runs made no post-trigger calendar writes. Historical failures and raw-calendar verdicts stay unchanged. Before the shared-wreck correction: Java 3,929 passed, one skipped; bridge/harness 147 passed. Build 2d7a3e7 shared-wreck instrumentation passed migration, record parity, native QA spawning near separated players including Host in a system, Guest-only lifetime hold past 25 days, motion/expiry, consumption, pending-state reconnect replay and native Dec 5 reload. Java 4,051 passed, one skipped; bridge/harness 148 passed. Dec 6 independently retained two matching wrecks, four tombstones and empty pending queues; unchanged final fleet member-id sets do not independently establish hull recovery. M1 and the shared-wreck correction remain accepted. Initial M2 implementation passed a clean build on 2026-10-17: 4,128 Java tests passed, one skipped; 152 bridge/offline harness tests passed. It records the Host's effective seed and resolved specials, replays the native parent creator, sends ENC_SET and saves primitive consumption/survey/ruins/hint overlays. The custom despawner retains Guest visit/inside history, including session end. Pre-P26 systems and metadata-only systems already present at Host load are logged and skipped because their original consumed members and specials cannot be recovered safely. Native build 6937022 mirrored a real parent encounter and planet centre, but failed the full manifest on LocationToken casts on both clients. The original FAIL artifacts 03-08 and archived logs remain unchanged. The selected fallback is now implemented: $coopEncEntityId metadata carries canonical wire keys, native engine ids stay intact, and CoopEntityIds resolves encounter members through local system/hyperspace scans. Its full test/build passed 4,147 Java tests with one skipped; 154 bridge/offline harness tests passed. Repeated native parent/dire-hint parity with different history, entry and orbit targets, salvage/survey, reconnect, native reload and Guest-aware despawn still require live evidence and M2 acceptance. Phase 26 stays PARTIAL until that gate closes. M3-M5 and solo-Guest abyssal EPEC triggering remain follow-ups."
+      "note": "M1 and shared wrecks remain accepted. M2 uses the Host's effective seed and resolved specials, composite entity keys, primitive exploration overlays and a despawner that accounts for both players. The native parent manifest matches; a dire ghost initial-pose correction passes automated tests and needs native retesting. Remaining gates cover different local history, entry and orbit targets, salvage/survey, genuine reconnect, native save/reload and Guest-aware despawn. Earlier evidence and failed verdicts are retained in the implementation plan. Phase 26 remains PARTIAL; M3-M5 and solo-Guest abyssal triggering are follow-ups."
     },
     {
       "id": "27",

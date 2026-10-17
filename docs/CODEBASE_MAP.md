@@ -239,7 +239,12 @@ Owns: every wire type, since the enum lives here.
 - `CoopEncounterAuthority` / `CoopEncounterRecord` / `CoopEncounterCodec` / `CoopEncounterWorld` -
   Host rogue-object and dire-hint temporary systems. A 250 ms scan captures new generation recipes
   even while the configured Host plays alone. `ENC_SET` sends the complete recipe/overlay set on
-  connect, resume and hash changes. The Guest replays base geometry through the parent EPEC using
+  connect, resume and hash changes, with bounded current orbit batches for offscreen fresh replicas.
+  `CoopEncounterOrbitSetCodec` validates instance/member ownership and the escaped batch bounds.
+  Those transient batches stay outside the recipe hash and are retained through creation retries;
+  they apply once after each upsert/overlay before reconciliation accepts the set or removes old
+  systems, so deferred removal cannot rewind a later periodic update.
+  The Guest replays base geometry through the parent EPEC using
   the effective Host seed and branch inputs, then applies resolved specials without local hint or
   pity rolls. Original members store `coopenc_<instance>_<role><ordinal>` in `$coopEncEntityId`;
   `CoopEntityIds.keyOf/byId` resolves these shared keys while preserving native engine ids. Native
@@ -248,7 +253,10 @@ Owns: every wire type, since the enum lives here.
   the Host's optional unique id. Saved String recipes retain consumed membership and exploration
   state. Reliable `WORLD_DELTA(ENCOUNTER_STATE)` reports Guest hint/survey/ruins changes; saved
   native flags and missing members recover outcomes not acknowledged before reload. Existing
-  consume and orbit paths use the canonical entity ids. `CoopLocations` invalidates on create/remove.
+  consume and orbit paths use the canonical entity ids. Native ghost wrecks restore their captured
+  pose after orbit installation; their one-second orbit entries also carry current Host position,
+  velocity and facing to restore the Host's actual result after each orbit update. Ordinary orbit
+  entries keep their existing five-field wire shape. `CoopLocations` invalidates on create/remove.
   `CoopAbyssalDespawner` is a saved Host script with primitive Guest visit/position history; removal
   waits for both players' native distance/time criteria and a Guest who ended a session inside.
   `coop.ambient.CoopEncounterReplayBridge` is the primitive system-loader slot used by the pinned
