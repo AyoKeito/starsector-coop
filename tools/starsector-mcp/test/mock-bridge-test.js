@@ -15,7 +15,7 @@ import {
   BridgeUnreachableError,
   READ_ONLY_COMMANDS
 } from '../lib/bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
 import {
   ACTION_VERBS,
   Bridges,
@@ -227,7 +227,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   assert.deepEqual(
     [...READ_ONLY_COMMANDS].sort(),
     [
-      'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'hirable', 'intel',
+      'barpool', 'cargo', 'colonizable', 'encounters', 'entities', 'feed', 'fleets', 'hirable', 'intel',
       'landmarks', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility', 'wrecks'
     ]
   );
@@ -238,7 +238,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
     'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
-    'wreckspawn', 'wreckconsume'
+    'wreckspawn', 'wreckconsume', 'encounterspawn'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -267,10 +267,71 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('streams'), 2);
   assert.equal((await client.send('wrecks')).campaignTimestamp, 123);
   assert.equal(calls.get('wrecks'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume']) {
+  assert.equal((await client.send('encounters')).campaignTimestamp, 123);
+  assert.equal(calls.get('encounters'), 2);
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
+});
+
+test('encounter query and native QA creation preserve arguments and guest refusal', async (t) => {
+  const table = { campaignTimestamp: 123, truncated: false, encounters: {} };
+  const hostBridge = new MockBridge((request) => request.cmd === 'encounters'
+    ? { ok: true, data: table } : { ok: true, data: { created: true, createdCount: 1, args: request.args } });
+  const guestBridge = new MockBridge((request) => request.cmd === 'encounters'
+    ? { ok: true, data: table } : { ok: false, error: 'IllegalStateException: encounterspawn is host-only' });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  const args = { creator: 'dire', x: -61234.5, y: 25000, depth: 3, threatRollRan: false, seed: '-9223372036854775808' };
+  assert.deepEqual(await ssDump(bridges, 'guest', 'encounters'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'encounterspawn', args), { created: true, createdCount: 1, args });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'encounterspawn', args), /host-only/);
+  await assert.rejects(() => ssDump(bridges, 'host', 'encounterspawn'), /unknown query verb/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'encounters'), /unknown action verb/);
+});
+
+test('encounter diff compares canonical gameplay leaves and bounds precise mismatches', () => {
+  const table = { truncated: false, encounters: { same: {
+    optionalUniqueId: 'same', name: 'host name', catalogId: 'host catalog', threatTag: true,
+    recipe: { effectiveSeed: '-9223372036854775808', entities: [{ role: 'SYSTEM', ordinal: 0, specId: 'frozen' }] },
+    entities: { coopenc_same_system0: { present: true, sectorResolves: true, locationResolves: true,
+      x: 1, radius: 25, surveyLevel: 'FULL', orbit: { focusId: 'coopenc_same_system1', radius: 300 },
+      conditions: ['cold'], hintFlags: { $visited: false } } }
+  } } };
+  const guest = structuredClone(table);
+  guest.encounters.same.name = 'guest name'; guest.encounters.same.catalogId = 'guest catalog';
+  assert.equal(diffEncounters(table, guest).equal, true);
+  guest.encounters.same.recipe.entities[0].role = 'ANCHOR';
+  guest.encounters.same.entities.coopenc_same_system0.sectorResolves = false;
+  guest.encounters.same.entities.coopenc_same_system0.radius = 30;
+  const result = diffEncounters(table, guest, { maxDifferences: 2 });
+  assert.equal(result.equal, false); assert.equal(result.counts.differing, 3);
+  assert.equal(result.differences.length, 2); assert.equal(result.truncated, true);
+  assert.ok(result.differences.some((difference) => difference.path.endsWith('.radius')));
+  assert.ok(result.differences.every((difference) => difference.path.startsWith('$.encounters.same.')));
+  assert.equal(diffEncounters(table, guest).differences.some((difference) => difference.path.endsWith('.role')), true);
+});
+
+test('encounter diff refuses partial manifests and summarizes a missing whole instance', () => {
+  const table = { truncated: false, encounters: { same: { recipe: { seed: '1' }, entities: {} } } };
+  assert.throws(() => diffEncounters({ ...table, truncated: true }, table), /complete untruncated/);
+  assert.throws(() => diffEncounters(table, {}), /complete untruncated/);
+  assert.throws(() => diffEncounters(table, table, { maxDifferences: 0 }), /maxDifferences/);
+  const missing = diffEncounters(table, { truncated: false, encounters: {} });
+  assert.equal(missing.equal, false);
+  assert.deepEqual(missing.differences[0], { path: '$.encounters.same', missing: 'guest',
+    host: { kind: 'object', keys: ['recipe', 'entities'], keyCount: 2 } });
+});
+
+test('encounter ss_diff requires identical sample timestamps even with ignored timestamps', async (t) => {
+  const hostBridge = new MockBridge(() => ({ ok: true, data: { campaignTimestamp: 123, truncated: false, encounters: {} } }));
+  const guestBridge = new MockBridge(() => ({ ok: true, data: { campaignTimestamp: 124, truncated: false, encounters: {} } }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  await assert.rejects(() => ssDiff(bridges, 'encounters', {}, { ignore: ['campaignTimestamp'], tolerance: 1000 }), /unmatched campaign timestamps/);
 });
 
 test('streams dump and host triggers relay their results; guest trigger refusals reach the caller', async (t) => {

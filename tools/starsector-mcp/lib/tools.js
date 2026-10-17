@@ -2,7 +2,7 @@
 // Kept free of the MCP SDK so the test suite can drive it against a mock bridge.
 
 import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffJson } from './diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson } from './diff.js';
 
 /** Read-only verbs. ss_dump and ss_diff accept these. */
 export const QUERY_VERBS = [
@@ -22,7 +22,8 @@ export const QUERY_VERBS = [
   'feed',
   'screen',
   'streams',
-  'wrecks'
+  'wrecks',
+  'encounters'
 ];
 
 /**
@@ -52,6 +53,7 @@ export const ACTION_VERBS = [
   'streamdespawn',
   'wreckspawn',
   'wreckconsume',
+  'encounterspawn',
   'clockalign'
 ];
 
@@ -153,15 +155,15 @@ export async function ssDiff(bridges, what, args, options = {}) {
     bridges.get('host').send(what, args),
     bridges.get('guest').send(what, args)
   ]);
-  if (what === 'streams') {
+  if (what === 'streams' || what === 'encounters') {
     const hostStamp = host.campaignTimestamp;
     const guestStamp = guest.campaignTimestamp;
     if (!Number.isSafeInteger(hostStamp) || !Number.isSafeInteger(guestStamp) || hostStamp !== guestStamp) {
-      throw new Error(`stream samples have unmatched campaign timestamps (host=${hostStamp}, guest=${guestStamp}); ` +
-        'hold the shared pause and read both tables again before comparing brightness');
+      throw new Error(`${what} samples have unmatched campaign timestamps (host=${hostStamp}, guest=${guestStamp}); ` +
+        'hold the shared pause and read both tables again before comparing');
     }
   }
-  return { what, args: args ?? {}, ...diffJson(host, guest, options) };
+  return { what, args: args ?? {}, ...(what === 'encounters' ? diffEncounters(host, guest, options) : diffJson(host, guest, options)) };
 }
 
 /** Pair paused QA samples explicitly by moving only the lower clock forward. */

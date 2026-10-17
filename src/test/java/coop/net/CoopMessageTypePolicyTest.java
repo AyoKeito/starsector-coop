@@ -50,7 +50,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.COLONY_MGMT, CoopMessages.Type.COLONY_INCOME,
             CoopMessages.Type.EXPEDITION_WARNING, CoopMessages.Type.ABILITY_ACTIVATE,
             CoopMessages.Type.ORBIT_SNAPSHOT, CoopMessages.Type.NPC_FLEET_SET,
-            CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET,
+            CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET, CoopMessages.Type.ENC_SET,
             CoopMessages.Type.STREAM_SET, CoopMessages.Type.STREAM_ADD,
             CoopMessages.Type.STREAM_DESPAWN, CoopMessages.Type.STREAM_REMOVE,
             CoopMessages.Type.WRECK_SET, CoopMessages.Type.WRECK_ADD,
@@ -174,7 +174,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.SAVE_CHECKPOINT,
             CoopMessages.Type.RESPAWN_PLAYER, CoopMessages.Type.STALL_NOTICE,
             CoopMessages.Type.ORBIT_SNAPSHOT, CoopMessages.Type.NPC_FLEET_SET,
-            CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET,
+            CoopMessages.Type.NPC_FLEET_MOTION, CoopMessages.Type.BASE_SET, CoopMessages.Type.ENC_SET,
             CoopMessages.Type.STREAM_SET, CoopMessages.Type.STREAM_ADD,
             CoopMessages.Type.STREAM_DESPAWN, CoopMessages.Type.STREAM_REMOVE,
             CoopMessages.Type.WRECK_SET, CoopMessages.Type.WRECK_ADD,
@@ -431,7 +431,7 @@ class CoopMessageTypePolicyTest {
      */
     @Test
     void slipstreamTrafficHasTheBaseSetPolicies() {
-        for (CoopMessages.Type type : List.of(CoopMessages.Type.STREAM_SET,
+        for (CoopMessages.Type type : List.of(CoopMessages.Type.ENC_SET, CoopMessages.Type.STREAM_SET,
                 CoopMessages.Type.STREAM_ADD, CoopMessages.Type.STREAM_DESPAWN,
                 CoopMessages.Type.STREAM_REMOVE, CoopMessages.Type.WRECK_SET,
                 CoopMessages.Type.WRECK_ADD, CoopMessages.Type.WRECK_REMOVE,

@@ -80,6 +80,10 @@ const TOOLS = [
       'streams (no args: hyperspace streams keyed by canonical host id, with kind, full params, ' +
       'segment geometry and faders, fade state, and effective brightness sampled every 1000 units ' +
       'plus the endpoint; each row and the table carry their campaignTimestamp); ' +
+      'encounters (no args: recipe-bearing temporary abyssal systems keyed by shared instance id, ' +
+      'structured saved recipes and current gameplay manifests including canonical entity ids, ' +
+      'identity lookup checks, in-system and linked hyperspace entities, orbits, conditions, survey, ' +
+      'ruins and hint flags; legacy systems without a saved recipe are counted separately); ' +
       'status, markets and barpool take none. ' +
       'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
       'teleport takes alongside systemId.',
@@ -99,6 +103,8 @@ const TOOLS = [
       'Run the same read-only verb against both instances and diff the two JSON trees field by field. ' +
       'Keyed collections (fleets by coopFleetId, stock by id) compare order-insensitively. ' +
       'streams refuses unmatched campaign timestamps: hold the shared pause and use ss_align_clocks before sampling fades. ' +
+      'encounters also requires matching timestamps and complete manifests, compares gameplay and identity checks, ' +
+      'omits cosmetic names/catalogId by default, and returns at most maxDifferences precise mismatches (default 100). ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',
@@ -109,6 +115,8 @@ const TOOLS = [
           type: 'number',
           description: 'Absolute tolerance for numeric leaves. Default 0 (exact match).'
         },
+        maxDifferences: { type: 'integer', minimum: 1, maximum: 1000,
+          description: 'encounters only: maximum returned mismatches, default 100; counts.differing retains the total.' },
         ignore: {
           type: 'array',
           items: { type: 'string' },
@@ -139,6 +147,10 @@ const TOOLS = [
       'the current month; invoked confirms the call, while streams confirms any resulting terrain), ' +
       'streamdespawn (host only, no args: starts a 10 game-day fade with zero delay on each live ' +
       'seasonal stream that is not already despawning; started is the count), ' +
+      'encounterspawn{creator?:parent|dire, x, y, depth, threatRollRan?:boolean, seed?:decimal-string} ' +
+      '(host-only QA: invokes the exact native encounter creator once at these coordinates, optionally ' +
+      'sets its exact effective 64-bit seed, verifies one new temporary abyssal system, and returns ' +
+      'createdCount; never advances a calendar), ' +
       'clockalign{targetTimestamp} (active coop session and paused campaign required; advances this ' +
       'clock forward by at most one game day and verifies exact readback; prefer ss_align_clocks to ' +
       'check both instances and choose the target), ' +
@@ -219,7 +231,7 @@ async function dispatch(name, args) {
     case 'ss_dump':
       return ssDump(bridges, args.instance, args.what, args.args);
     case 'ss_diff':
-      return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance, ignore: args.ignore });
+      return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance, ignore: args.ignore, maxDifferences: args.maxDifferences });
     case 'ss_act':
       return ssAct(bridges, args.instance, args.verb, args.args);
     case 'ss_align_clocks':

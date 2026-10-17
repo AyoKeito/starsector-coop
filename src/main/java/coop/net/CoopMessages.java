@@ -68,6 +68,8 @@ public final class CoopMessages {
         NPC_FLEET_SET,
         NPC_FLEET_MOTION,
         BASE_SET,
+        /** Complete host abyssal encounter recipes and their saved exploration overlays. */
+        ENC_SET,
         /** Phase 26: host live-id manifest, immediately followed by one upsert per stream. */
         STREAM_SET,
         /** Phase 26: one resolved host stream, including geometry and current live fade state. */
@@ -404,7 +406,7 @@ public final class CoopMessages {
                  SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
                  READY_STATE, FLEET_ROSTER_REQUEST, RELIABLE_ACK,
                  TIME_SNAPSHOT, PAUSE_INTENT, FLEET_SNAPSHOT, FLEET_ROSTER, GUEST_SNAPSHOT,
-                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, STATE_DATAGRAM,
+                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, ENC_SET, STATE_DATAGRAM,
                  // Phase 26: resume sends a fresh manifest and every live stream. Replaying an old
                  // upsert after that set could recreate terrain the host has already removed.
                  STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE,
@@ -1197,6 +1199,11 @@ public final class CoopMessages {
     public static Message baseSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
         return new Message(Type.BASE_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    public static Message encounterSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
+        return new Message(Type.ENC_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"encounters\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
     }
 
     /** Phase 26 id manifest; an empty manifest removes every tagged guest replica. */

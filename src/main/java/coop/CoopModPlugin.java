@@ -7,6 +7,8 @@ import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
 import coop.campaign.CoopSlipstreamWorld;
 import coop.ambient.CoopWreckBridge;
+import coop.ambient.CoopEncounterReplayBridge;
+import coop.campaign.CoopAbyssalDespawner;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopGuestPresence;
@@ -541,6 +543,7 @@ public class CoopModPlugin extends BaseModPlugin {
     static void clearPreviousGameStatics() {
         CoopSlipstreamWorld.releaseControlled();
         CoopWreckBridge.clear();
+        CoopEncounterReplayBridge.clear();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();
     }
@@ -613,6 +616,7 @@ public class CoopModPlugin extends BaseModPlugin {
         x.alias("coopStats", CoopSessionStats.class);
         x.alias("coopStatsPlayer", CoopSessionStats.PlayerStats.class);
         x.alias("coopStatsLoss", CoopSessionStats.ShipLoss.class);
+        x.alias("coopAbyssalDespawner", CoopAbyssalDespawner.class);
     }
 
     /**

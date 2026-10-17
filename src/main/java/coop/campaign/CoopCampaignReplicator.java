@@ -4233,6 +4233,11 @@ public final class CoopCampaignReplicator
 
     private void applyWorldDeltaToEngine(CoopWorldDelta delta) {
         switch (delta.kind()) {
+            case ENCOUNTER_STATE -> {
+                CoopEncounterWorld.applyEntityState(Global.getSector(), delta.entityId(),
+                        CoopEncounterCodec.decodeEntityState(delta.newStateJson()));
+                return;
+            }
             case SPAWN -> {
                 applySpawnToEngine(delta);
                 return;

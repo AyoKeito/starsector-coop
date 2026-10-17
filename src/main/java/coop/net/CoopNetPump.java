@@ -12,6 +12,7 @@ import com.fs.starfarer.api.characters.PersonAPI;
 import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopSlipstreamAuthority;
+import coop.campaign.CoopEncounterAuthority;
 import coop.campaign.CoopSlipstreamWorld;
 import coop.campaign.CoopWreckAuthority;
 import coop.ambient.CoopWreckBridge;
@@ -701,6 +702,7 @@ public class CoopNetPump implements EveryFrameScript {
     private final CoopBaseAuthority baseAuthority;
     private CoopSlipstreamAuthority slipstreamAuthority;
     private CoopWreckAuthority wreckAuthority;
+    private CoopEncounterAuthority encounterAuthority;
     /**
      * Session-scoped, not link-scoped: true from the first connect of a co-op session until that
      * session is really over, <em>through</em> a reconnect grace window. See
@@ -712,6 +714,7 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean baseReplicationStreaming;
     private boolean slipstreamReplicationStreaming;
     private boolean wreckReplicationStreaming;
+    private boolean encounterReplicationStreaming;
     private boolean barSuppressionArmed;
     private String lastNpcDebug;
     /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
@@ -968,6 +971,7 @@ public class CoopNetPump implements EveryFrameScript {
                 campaignReplicator.marketIds());
         this.slipstreamAuthority = new CoopSlipstreamAuthority(service, sessionState, clockMillis);
         this.wreckAuthority = new CoopWreckAuthority(service, sessionState, clockMillis);
+        this.encounterAuthority = new CoopEncounterAuthority(service, sessionState, clockMillis);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
         this.battleResultReconciler = new CoopBattleResultReconciler(
@@ -3485,6 +3489,7 @@ public class CoopNetPump implements EveryFrameScript {
         // the frames that are not an edge, so it gets no profiler section of its own either.
         tickNetFault();
         // Seasonal membership must be read before NPC suppression removes SlipstreamManager.
+        syncEncounterReplication();
         if (syncSlipstreamReplication()) syncNpcReplication();
         syncWreckReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
@@ -4546,7 +4551,7 @@ public class CoopNetPump implements EveryFrameScript {
                  // Snapshots. Superseded by the resume's forced rebroadcast when one comes, and the
                  // best available picture of the world when it does not.
                  ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET,
-                 STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE, FLEET_SNAPSHOT,
+                 STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE, ENC_SET, FLEET_SNAPSHOT,
                  WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
@@ -4659,6 +4664,7 @@ public class CoopNetPump implements EveryFrameScript {
         baseAuthority.reset();
         slipstreamAuthority.rearmFullBroadcast();
         wreckAuthority.rearmFullBroadcast();
+        encounterAuthority.rearmFullBroadcast();
         datagramWatermark.reset();
         datagramRedundancy.reset();
         // Phase 20 M4: the returning peer holds no roster, so this side owes it one before its next
@@ -5273,6 +5279,7 @@ public class CoopNetPump implements EveryFrameScript {
             case BASE_SET -> handleBaseSet(message);
             case STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE -> handleStream(message);
             case WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK -> handleWreck(message);
+            case ENC_SET -> handleEncounterSet(message);
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
@@ -7915,6 +7922,43 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    private void syncEncounterReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !encounterReplicationStreaming) {
+            encounterAuthority.reset();
+            encounterReplicationStreaming = true;
+        } else if (!active && encounterReplicationStreaming && !reconnect.active()) {
+            encounterReplicationStreaming = false;
+        }
+        try {
+            // Saved despawners must retain the last Guest visit even after a session ends.
+            if (service.role() == CoopConnectionRole.HOST) {
+                encounterAuthority.updateGuestPresence(reconnect.active());
+                if (active) encounterAuthority.tickHost();
+                else encounterAuthority.observeHost();
+            } else if (active && service.role() == CoopConnectionRole.GUEST) {
+                encounterAuthority.tickGuest();
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync abyssal encounters", ex);
+        }
+    }
+
+    private void handleEncounterSet(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.GUEST || !isGameplaySessionActive()
+                || !java.util.Objects.equals(sessionState.sessionId(), message.sessionId())) return;
+        try {
+            // Inbound dispatch precedes lifecycle sync; consume the session edge before apply.
+            if (shouldStreamFleet() && !encounterReplicationStreaming) {
+                encounterAuthority.reset();
+                encounterReplicationStreaming = true;
+            }
+            encounterAuthority.applySet(CoopMessages.requiredPayloadString(message, "encounters"));
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply ENC_SET", ex);
+        }
+    }
+
     private boolean syncSlipstreamReplication() {
         boolean active = shouldStreamFleet();
         if (active && !slipstreamReplicationStreaming) {
@@ -9420,6 +9464,10 @@ public class CoopNetPump implements EveryFrameScript {
 
     void setWreckAuthorityForTest(CoopWreckAuthority authority) {
         wreckAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    void setEncounterAuthorityForTest(CoopEncounterAuthority authority) {
+        encounterAuthority = java.util.Objects.requireNonNull(authority, "authority");
     }
 
     boolean wreckReplicationStreamingForTest() {

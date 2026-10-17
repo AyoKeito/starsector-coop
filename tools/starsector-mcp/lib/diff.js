@@ -19,6 +19,45 @@
  */
 export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'lines'];
 
+/** Native labels/catalog numbers do not determine temporary encounter gameplay or identity. */
+export const ENCOUNTER_COSMETIC_KEYS = [
+  'name', 'shipName', 'firstName', 'lastName', 'displayName', 'variantDisplayName', 'catalogId'
+];
+
+/** Compare complete canonical membership, including role and identity-resolution checks. */
+export function diffEncounters(host, guest, options = {}) {
+  for (const [instance, table] of [['host', host], ['guest', guest]]) {
+    if (table?.truncated !== false || !isPlainObject(table.encounters)) {
+      throw new Error(`encounters requires a complete untruncated manifest on ${instance}`);
+    }
+  }
+  const maxDifferences = options.maxDifferences ?? 100;
+  if (!Number.isInteger(maxDifferences) || maxDifferences < 1 || maxDifferences > 1000) {
+    throw new Error('maxDifferences must be an integer from 1 to 1000');
+  }
+  const result = diffJson({ encounters: host.encounters }, { encounters: guest.encounters }, {
+    ...options, ignore: options.ignore ?? ENCOUNTER_COSMETIC_KEYS
+  });
+  return {
+    ...result,
+    differences: result.differences.slice(0, maxDifferences).map(compactDifference),
+    truncated: result.differences.length > maxDifferences,
+    maxDifferences
+  };
+}
+
+// Missing whole systems still report their exact path, without copying a megabyte recipe twice.
+function compactDifference(difference) {
+  const result = { ...difference };
+  for (const side of ['host', 'guest']) {
+    const value = result[side];
+    if (Array.isArray(value)) result[side] = { kind: 'array', length: value.length };
+    else if (isPlainObject(value)) result[side] = { kind: 'object', keys: Object.keys(value).slice(0, 20), keyCount: Object.keys(value).length };
+    else if (typeof value === 'string' && value.length > 512) result[side] = { kind: 'string', length: value.length, preview: value.slice(0, 512) };
+  }
+  return result;
+}
+
 /** Field names tried, in order, when deciding whether an array is a keyed collection. */
 export const KEY_FIELDS = [
   'coopFleetId',

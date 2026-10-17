@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-12 (0.1.5).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-17 (0.1.5, P26 M2 branch).
 
 ## Stack
 
@@ -113,7 +113,8 @@ service.beginFrame() -> CoopDebug.pollFrame / CoopWiretap.pollFrame -> streamClo
   -> syncFleetMirror -> drainFleetDatagrams -> advanceMirrorMotion -> maybeSendFleetSnapshot
   -> tickRespawnNotifier -> maybeSendGuestSnapshot -> tickSaveCheckpoint
   -> tickSessionLeaveWatchdog -> tickNetFault
-  -> syncSlipstreamReplication -> syncWreckReplication -> syncNpcReplication -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
+  -> syncEncounterReplication -> syncSlipstreamReplication -> syncNpcReplication -> syncWreckReplication
+  -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
   -> syncInteractionGate -> syncCampaignReplicator -> campaignReplicator.tick*(...)
   -> maybeSendPing -> tickLinkSupervision -> service.flushOutbound -> tickTerminalStop
 ```
@@ -148,7 +149,7 @@ toggle too).
   and the Phase 20.4 abuse limits.
 - `CoopNetPump` - the `EveryFrameScript` that drives everything: ~9.5k lines, the frame order above.
 - `CoopNetPumpInstaller` - installs it as a transient script.
-- `CoopMessages` - the `Type` enum (77 constants), the envelope codec, datagram header parse,
+- `CoopMessages` - the `Type` enum (84 constants), the envelope codec, datagram header parse,
   `isReliableOneShot`, `wireToken`, `MAX_DATAGRAM_CHUNKS`.
 - `CoopPeerLink` - everything known about one peer: TCP channel, half-written frame, inbound
   assembly, validated send address, watermarks.
@@ -218,7 +219,7 @@ Owns: every wire type, since the enum lives here.
   owns the transient system-loader registry. Guest expiry waits for the host's remove event.
   The guest sweeps seasonal terrain before manager suppression;
   an unreadable sweep delays suppression. Saved terrain tags rebuild lookup and same-geometry
-  upserts retain local discovery. The live M1 gate remains open before M2.
+  upserts retain local discovery. M1 was accepted by user sign-off on 2026-10-17.
 - `CoopWreckAuthority` / `CoopWreckRecord` / `CoopWreckCodec` / `CoopWreckWorld` - shared floating
   hyperspace wrecks with the exact native `DerelictShipEntityPlugin`. A 250 ms host scan captures
   pose, age and resolved salvage data; `WRECK_SET` plus `WRECK_ADD` sends a complete manifest on
@@ -234,14 +235,30 @@ Owns: every wire type, since the enum lives here.
   Partial Guest salvage updates compare the expected Host revision before changing recovery state.
   The `TransmitterTrapSpecial` fork records Guest alarm activation as a primitive flag and lets the
   Host create or redirect native trap fleets toward the Guest, using ordinary NPC replication.
-  Shared-wreck live verification and the earlier M1 manual checks remain open before M2.
+  Shared-wreck live verification and M1 manual checks were accepted on 2026-10-17.
+- `CoopEncounterAuthority` / `CoopEncounterRecord` / `CoopEncounterCodec` / `CoopEncounterWorld` -
+  Host rogue-object and dire-hint temporary systems. A 250 ms scan captures new generation recipes
+  even while the configured Host plays alone. `ENC_SET` sends the complete recipe/overlay set on
+  connect, resume and hash changes. The Guest replays base geometry through the parent EPEC using
+  the effective Host seed and branch inputs, then applies resolved specials without local hint or
+  pity rolls. Original members use `coopenc_<instance>_<role><ordinal>` entity ids; the system keeps
+  the Host's optional unique id. Saved String recipes retain consumed membership and exploration
+  state. Reliable `WORLD_DELTA(ENCOUNTER_STATE)` reports Guest hint/survey/ruins changes; saved
+  native flags and missing members recover outcomes not acknowledged before reload. Existing
+  consume and orbit paths use the canonical entity ids. `CoopLocations` invalidates on create/remove.
+  `CoopAbyssalDespawner` is a saved Host script with primitive Guest visit/position history; removal
+  waits for both players' native distance/time criteria and a Guest who ended a session inside.
+  `coop.ambient.CoopEncounterReplayBridge` is the primitive system-loader slot used by the pinned
+  parent EPEC fork. The slot is cleared in `finally` and at campaign changes. Pre-capture systems,
+  other EPEC creators, free-standing lights and solo-Guest triggering are outside this path.
+  M2's two-client manifest, native interaction and save/reload gates remain mandatory.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
   `data/campaign/abilities.csv`, a toggle whose effect is nothing and whose state is everything). Owns `MARKET_OPEN`, `MARKET_SNAPSHOT`, `MARKET_TXN`,
   `WORLD_DELTA`, `MISSION_POOL_SNAPSHOT`, `MISSION_CLAIM_*`, `REP_DELTA`, `GUEST_REP_DELTA`,
   `PLAYER_REP_SNAPSHOT`, `FACTION_REL_DELTA`, `ABILITY_ACTIVATE`, `ORBIT_SNAPSHOT`, `BASE_SET`,
-  `STREAM_SET`, `STREAM_ADD`, `STREAM_DESPAWN`, `STREAM_REMOVE`,
+  `STREAM_SET`, `STREAM_ADD`, `STREAM_DESPAWN`, `STREAM_REMOVE`, `ENC_SET`,
   `CREDITS_GRANT`.
 
   Credit transfers bind their wallet to the originating sector, register outgoing gifts before
@@ -332,7 +349,7 @@ Owns: every wire type, since the enum lives here.
 
 ## Wire Protocol
 
-Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **77 constants**. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
+Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **84 constants**. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
 payloads use the `CoopDelimited` unit-separator encoding instead):
 
 ```text

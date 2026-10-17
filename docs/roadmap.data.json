@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Phase 26 Task 0 passed. The user accepted all remaining M1 and shared-wreck manual gates on 2026-10-17. M2 abyssal temporary systems are next and not started; Phase 26 remains PARTIAL until M2 is implemented and accepted. Phase 23 is complete"
+      "note": "Phase 26 Task 0 passed. The user accepted all remaining M1 and shared-wreck manual gates on 2026-10-17. M2 abyssal temporary systems are implemented; 4,128 Java tests passed, one skipped, and 152 bridge/offline harness tests passed. Native M2 live acceptance is next; Phase 26 remains PARTIAL. Phase 23 is complete"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "the V1 build queue is complete. Next: Phase 26 M2 abyssal temporary systems, starting with capture/replay from the host's recorded seed, ENC_SET, location mapping and native despawn. M1 and shared-wreck acceptance closed by user sign-off on 2026-10-17; M2 is not started"
+      "note": "the V1 build queue is complete. Next: Phase 26 M2 native live checks for parent and dire-hint encounters, entity renaming, location entry, salvage/survey, reconnect, native reload and despawn. M2 implementation and automated gates passed; M1 and shared-wreck acceptance remain closed by user sign-off on 2026-10-17"
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "26 Task 0 passed, and the user accepted M1 plus the shared floating-wreck correction on 2026-10-17. M2 is next and not started, so Phase 26 remains PARTIAL. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and guest-proximity abyss triggering are follow-ups"
+      "note": "26 Task 0 passed, and the user accepted M1 plus the shared floating-wreck correction on 2026-10-17. M2 is implemented with automated gates passed; native live acceptance is open, so Phase 26 remains PARTIAL. Phase 33 is built; 22, 25 and 27 remain queued. P26 M3-M5 and solo-Guest abyssal encounter triggering are follow-ups"
     }
   ],
-  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. On 2026-10-17 the user accepted all remaining Phase 26 M1 and shared-wreck manual gates. Earlier instrumented results remain unchanged. M2 abyssal temporary systems are next and not started; Phase 26 remains PARTIAL until M2 is implemented and accepted.",
-  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Accepted on 2026-10-17:</b> the user closed all remaining <span class=\"rp\" data-jump=\"26\">M1</span> stream and shared-wreck manual gates on <code>codex/p26-ambient-world</code>. This sign-off adds no new instrumented results. <b>Next:</b> M2 abyssal temporary systems, not started. Phase 26 remains PARTIAL until M2 is implemented and accepted. M3-M5 and guest-proximity abyss triggering remain follow-ups.",
+  "hereHead": "You are here: V1 is complete at 0.1.5; Phases 19 and 23 are signed off. Phase 26 M1 and shared-wreck gates were accepted by the user on 2026-10-17. M2 abyssal temporary systems are implemented: 4,128 Java tests passed, one skipped; 152 bridge/offline harness tests passed. Native live acceptance is next, so Phase 26 remains PARTIAL.",
+  "here": "<b>V1 is complete at 0.1.5:</b> <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"23\">Phase 23</span> are signed off. <b>Accepted on 2026-10-17:</b> the user closed all remaining <span class=\"rp\" data-jump=\"26\">M1</span> stream and shared-wreck manual gates. <b>M2 implemented:</b> recorded-seed replay, resolved specials, <code>ENC_SET</code>, canonical identities, primitive exploration overlays and the Guest-aware despawner. The clean build passed 4,128 Java tests with one skipped; 152 bridge/offline harness tests passed. <b>Next:</b> M2 native live checks and acceptance. Phase 26 remains PARTIAL; earlier live evidence is unchanged. M3-M5 and solo-Guest abyssal encounter triggering remain follow-ups.",
   "attention": [
     {
       "sev": "gate",
-      "sevLabel": "next milestone",
-      "head": "Implement and accept P26 M2 abyssal temporary systems",
-      "state": "not started; M1 and shared-wreck gates accepted by the user on 2026-10-17",
-      "body": "Implement native encounter capture/replay using the host's effective EPEC seed, validate temporary-system renaming, send ENC_SET with overlays, map locations in both directions and preserve native despawn with Guest presence. Pass = matching temporary-system contents and location identity through encounter, reconnect, save/load and despawn checks, followed by M2 acceptance. Phase 26 stays PARTIAL until that work is complete. M3-M5 and guest-proximity abyssal EPEC triggering remain follow-ups."
+      "sevLabel": "native live acceptance",
+      "head": "Verify and accept P26 M2 abyssal temporary systems",
+      "state": "implemented; automated gates passed on 2026-10-17; native live acceptance open",
+      "body": "Exercise both native parent and dire-hint encounters with different per-install encounter history. Pass = matching full manifests, resolved specials and renamed entity lookups; both players can enter and leave, fleet snapshots and NPC orbit targets resolve, and salvage/survey outcomes survive reconnect and native save/reload. Verify native despawn with the Guest inside, outside and after ending a session inside, including safe Guest relocation if the Host removed that system between sessions. Record the native results and obtain M2 acceptance. Phase 26 stays PARTIAL until that gate closes. M1 and shared-wreck acceptance remain closed; M3-M5 and solo-Guest abyssal encounter triggering remain follow-ups."
     },
     {
       "sev": "scope",
@@ -905,33 +905,35 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Task 0 passed. On 2026-10-17 the user accepted all remaining M1 and shared-wreck manual gates, including the correction for floating hyperspace wrecks found during map testing. M2 abyssal temporary systems are next and not started. Phase 26 remains PARTIAL until M2 is implemented and accepted; guest-proximity abyssal EPEC triggering remains deferred.",
+      "summary": "Task 0 passed, and the user accepted all remaining M1 and shared-wreck manual gates on 2026-10-17. M2 abyssal temporary systems are implemented with automated gates passed: recorded-seed replay, resolved specials, ENC_SET, canonical identity, primitive overlays and a Guest-aware despawner. Native M2 live acceptance remains open, so Phase 26 remains PARTIAL; solo-Guest abyssal encounter triggering remains deferred.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
         "CoopWreckAuthority / Record / Codec / World + transient CoopWreckBridge",
         "WRECK_SET/ADD/REMOVE/CONSUME/MUTATION/MUTATION_ACK + canonical wreck identities, revisions and durable tombstones",
         "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
-        "CoopEncounterAuthority",
-        "CoopAbyssalDespawner",
+        "CoopEncounterAuthority / Record / Codec / World + transient CoopEncounterReplayBridge",
+        "CoopAbyssalDespawner with saved Guest visit/inside history",
         "STREAM_SET/ADD/DESPAWN/REMOVE",
-        "ENC_SET",
+        "ENC_SET + reliable ENCOUNTER_STATE outcomes through WORLD_DELTA",
         "$coopStreamId / $coopEncId",
         "segment polyline + live per-segment fader state replication",
-        "generation recipe carrying the host's effective EPEC seed",
+        "primitive saved generation recipe carrying the Host's effective EPEC seed, resolved specials, original member identities and exploration overlays",
         "bridge stream table (committed-phase checks; raw calendars retained) + temp-system manifest",
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "M2 next, not started: fork capture/replay from the recorded seed, rename spike, ENC_SET with overlays, two-way location mapping, guest-aware despawner, live gate and acceptance",
+        "M2 native parent and dire-hint proof with different per-install history: renamed entity lookups, full manifest and resolved-special parity",
+        "M2 native entry/exit and two-way location mapping: player fleet snapshots, salvage/survey and NPC orbit targets",
+        "M2 reconnect and native save/reload: original membership, consumption, survey/ruins/hint outcomes and primitive saved state",
+        "M2 native despawn: Guest inside/outside, saved inside hold after session end and safe relocation when the Host removed the Guest's system",
+        "M2 live evidence and user acceptance; implementation and automated gates are complete",
         "M3 free-standing abyssal lights: follow-up, outside the M1 + M2 draft scope",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
         "M4 hyperspace storm replication: follow-up; existing design retained",
-        "M5 guest sensor ghosts and Leviathan trails: follow-up",
-        "document residual divergences + retire v1 accept-divergence entries",
-        "commit"
+        "M5 guest sensor ghosts and Leviathan trails: follow-up"
       ],
-      "note": "User confirmed M1 + M2 on 2026-10-12, with fingerprint/location fixes first, host slipsurges included and Leviathan trails moved to M5. On 2026-10-17 the user said Let's mark all pass, accepting all remaining M1 visual/map/discovery, fade/carry, guest-local surge, mirror-motion and picker-reload checks, plus shared-wreck manual acceptance including partial specials/traps and stream travel. These gates close by user sign-off; no additional instrumented tests are claimed. Earlier stream evidence remains: both-hyperspace seven partial spawn pairs (one late) and 21 partial despawn pairs (three late), separated-player seven spawn and 20 despawn partial pairs, a separate 937-sample clock control, four Host-surge partial pairs and six unfinished startup pairs with Guest in Nameless Rock. Stream differences were zero; accepted reconnects preserved phase/origin and the guest-local surge, and native expiry completed. Surge runs made no post-trigger calendar writes. Historical failures and raw-calendar verdicts stay unchanged. Before the shared-wreck correction: Java 3,929 passed, one skipped; bridge/harness 147 passed. Build 2d7a3e7 shared-wreck instrumentation passed migration, record parity, native QA spawning near separated players including Host in a system, Guest-only lifetime hold past 25 days, motion/expiry, consumption, pending-state reconnect replay and native Dec 5 reload. Java 4,051 passed, one skipped; bridge/harness 148 passed. Dec 6 independently retained two matching wrecks, four tombstones and empty pending queues; unchanged final fleet member-id sets do not independently establish hull recovery. M1 and the shared-wreck correction are accepted; M2 remains next and not started. Phase 26 stays PARTIAL until M2 is implemented and accepted. M2 carries the host's effective EPEC seed; M3-M5 and guest-proximity abyssal EPEC triggering remain follow-ups."
+      "note": "User confirmed M1 + M2 on 2026-10-12, with fingerprint/location fixes first, host slipsurges included and Leviathan trails moved to M5. On 2026-10-17 the user said Let's mark all pass, accepting all remaining M1 visual/map/discovery, fade/carry, guest-local surge, mirror-motion and picker-reload checks, plus shared-wreck manual acceptance including partial specials/traps and stream travel. These gates close by user sign-off; no additional instrumented tests are claimed. Earlier stream evidence remains: both-hyperspace seven partial spawn pairs (one late) and 21 partial despawn pairs (three late), separated-player seven spawn and 20 despawn partial pairs, a separate 937-sample clock control, four Host-surge partial pairs and six unfinished startup pairs with Guest in Nameless Rock. Stream differences were zero; accepted reconnects preserved phase/origin and the guest-local surge, and native expiry completed. Surge runs made no post-trigger calendar writes. Historical failures and raw-calendar verdicts stay unchanged. Before the shared-wreck correction: Java 3,929 passed, one skipped; bridge/harness 147 passed. Build 2d7a3e7 shared-wreck instrumentation passed migration, record parity, native QA spawning near separated players including Host in a system, Guest-only lifetime hold past 25 days, motion/expiry, consumption, pending-state reconnect replay and native Dec 5 reload. Java 4,051 passed, one skipped; bridge/harness 148 passed. Dec 6 independently retained two matching wrecks, four tombstones and empty pending queues; unchanged final fleet member-id sets do not independently establish hull recovery. M1 and the shared-wreck correction remain accepted. M2 implementation passed a clean build on 2026-10-17: 4,128 Java tests passed, one skipped; 152 bridge/offline harness tests passed. It records the Host's effective seed and resolved specials, replays the native parent creator, sends ENC_SET, assigns canonical member/location identities and saves primitive consumption/survey/ruins/hint overlays. The custom despawner retains Guest visit/inside history, including session end. Pre-P26 systems and metadata-only systems already present at Host load are logged and skipped because their original consumed members and specials cannot be recovered safely. Native parent/dire-hint parity with different history, entry and orbit targets, salvage/survey, reconnect, native reload and Guest-aware despawn still require live evidence and M2 acceptance. Phase 26 stays PARTIAL until that gate closes. M3-M5 and solo-Guest abyssal EPEC triggering remain follow-ups."
     },
     {
       "id": "27",

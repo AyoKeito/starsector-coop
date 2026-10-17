@@ -57,6 +57,11 @@ import com.fs.starfarer.api.util.Misc;
 import coop.campaign.CoopBarPoolCapture;
 import coop.campaign.CoopCampaignReplicator;
 import coop.campaign.CoopCreditTransfer;
+import coop.campaign.CoopEncounterRecord;
+import coop.campaign.CoopEncounterWorld;
+import coop.campaign.CoopWreckRecord;
+import coop.campaign.CoopShipDetail;
+import coop.campaign.CoopPersonDetail;
 import coop.campaign.CoopMarketSync;
 import coop.campaign.CoopMissionBoardSync;
 import coop.campaign.CoopSkeletonMutationWatcher;
@@ -254,6 +259,8 @@ public final class CoopAgentCommands {
         map.put("wrecks", CoopAgentCommands::wrecks);
         map.put("wreckspawn", CoopAgentCommands::wreckspawn);
         map.put("wreckconsume", CoopAgentCommands::wreckconsume);
+        map.put("encounters", CoopAgentCommands::encounters);
+        map.put("encounterspawn", CoopAgentCommands::encounterspawn);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("clockalign", CoopAgentCommands::clockalign);
@@ -275,6 +282,318 @@ public final class CoopAgentCommands {
     }
 
     // ---- Queries --------------------------------------------------------------------------------
+
+    /** Saved membership and a fresh gameplay snapshot; this reader never captures or renames. */
+    static JSONObject encounters(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        Map<String, StarSystemAPI> systems = new TreeMap<>();
+        int legacyCount = 0;
+        for (StarSystemAPI system : sector.getStarSystems()) {
+            if (!system.hasTag(Tags.TEMPORARY_LOCATION) || !system.hasTag(Tags.SYSTEM_ABYSSAL)) continue;
+            Object saved = system.getMemoryWithoutUpdate().get(CoopEncounterWorld.RECIPE_KEY);
+            if (saved == null) { legacyCount++; continue; }
+            if (!(saved instanceof String encoded)) throw new IllegalStateException("Encounter recipe is not a saved string");
+            CoopEncounterRecord recipe = CoopEncounterRecord.decode(encoded);
+            if (systems.put(recipe.instanceId(), system) != null)
+                throw new IllegalStateException("Duplicate encounter instance: " + recipe.instanceId());
+        }
+        JSONObject table = new JSONObject();
+        for (Map.Entry<String, StarSystemAPI> entry : systems.entrySet()) {
+            if (table.length() >= CoopEncounterRecord.MAX_ENCOUNTERS) break;
+            StarSystemAPI system = entry.getValue();
+            CoopEncounterRecord recipe = CoopEncounterRecord.decode(
+                    (String) system.getMemoryWithoutUpdate().get(CoopEncounterWorld.RECIPE_KEY));
+            JSONObject row = new JSONObject();
+            row.put("instanceId", recipe.instanceId());
+            row.put("optionalUniqueId", jsonValue(system.getOptionalUniqueId()));
+            row.put("locationKey", CoopLocations.keyOf(system));
+            row.put("type", system.getType() == null ? JSONObject.NULL : system.getType().name());
+            row.put("x", system.getLocation().x); row.put("y", system.getLocation().y);
+            row.put("temporary", system.hasTag(Tags.TEMPORARY_LOCATION));
+            row.put("abyssal", system.hasTag(Tags.SYSTEM_ABYSSAL));
+            row.put("threatTag", system.hasTag(Tags.SYSTEM_CAN_SPAWN_THREAT));
+            row.put("recipe", diagnosticJson(recipe));
+            JSONObject members = new JSONObject();
+            Set<String> expected = new TreeSet<>();
+            for (CoopEncounterRecord.Entity member : recipe.entities()) {
+                String id = recipe.entityId(member); expected.add(id);
+                LocationAPI location = member.role() == CoopEncounterRecord.Role.SYSTEM ? system : sector.getHyperspace();
+                SectorEntityToken found = findEncounterMember(location, id);
+                JSONObject entity = encounterEntity(found, sector, location, id);
+                entity.put("role", member.role().name()); entity.put("ordinal", member.ordinal());
+                entity.put("expectedSpecId", member.specId());
+                entity.put("consumed", recipe.overlay().consumedIds().contains(id));
+                members.put(id, entity);
+            }
+            row.put("entities", members);
+            // Extra generated members must be visible even when the saved membership omitted them.
+            JSONObject untracked = new JSONObject();
+            for (SectorEntityToken entity : system.getAllEntities()) {
+                if (entity instanceof CampaignFleetAPI || expected.contains(entity.getId())) continue;
+                putEncounterExtra(untracked, entity, sector, system);
+            }
+            if (sector.getHyperspace() != null) for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+                if (expected.contains(entity.getId()) || !linksToEncounter(entity, system)) continue;
+                putEncounterExtra(untracked, entity, sector, sector.getHyperspace());
+            }
+            row.put("untrackedEntities", untracked);
+            table.put(recipe.instanceId(), row);
+        }
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        out.put("count", table.length()); out.put("candidateCount", systems.size());
+        out.put("legacyCount", legacyCount); out.put("truncated", systems.size() > table.length());
+        out.put("encounters", table);
+        return out;
+    }
+
+    private static void putEncounterExtra(JSONObject out, SectorEntityToken entity, SectorAPI sector,
+                                          LocationAPI location) throws JSONException {
+        String id = entity.getId();
+        if (id == null || id.isEmpty() || out.has(id)) throw new IllegalStateException("Ambiguous untracked encounter entity id");
+        out.put(id, encounterEntity(entity, sector, location, id));
+    }
+
+    private static SectorEntityToken findEncounterMember(LocationAPI location, String id) {
+        SectorEntityToken result = null;
+        if (location != null) for (SectorEntityToken entity : location.getAllEntities()) if (id.equals(entity.getId())) {
+            if (result != null) throw new IllegalStateException("Duplicate encounter entity: " + id);
+            result = entity;
+        }
+        return result;
+    }
+
+    private static boolean linksToEncounter(SectorEntityToken entity, StarSystemAPI system) {
+        if (entity == system.getHyperspaceAnchor()) return true;
+        if (entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI well)
+            return well.getTarget() != null && well.getTarget().getContainingLocation() == system;
+        if (entity instanceof JumpPointAPI jump && jump.getDestinations() != null)
+            for (JumpPointAPI.JumpDestination destination : jump.getDestinations())
+                if (destination.getDestination() != null && destination.getDestination().getContainingLocation() == system) return true;
+        return false;
+    }
+
+    private static JSONObject encounterEntity(SectorEntityToken entity, SectorAPI sector,
+                                               LocationAPI location, String id) throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("entityId", id); out.put("present", entity != null);
+        out.put("sectorResolves", entity != null && sector.getEntityById(id) == entity);
+        out.put("locationResolves", entity != null && location != null && location.getEntityById(id) == entity);
+        if (entity == null) return out;
+        out.put("engineId", entity.getId());
+        out.put("locationMatches", entity.getContainingLocation() == location);
+        out.put("type", entity instanceof PlanetAPI ? "planet" : entity instanceof JumpPointAPI ? "jumpPoint"
+                : entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI ? "well"
+                : entity instanceof CampaignTerrainAPI ? "terrain" : "entity");
+        String specId = entity instanceof PlanetAPI planet ? "planet:" + planet.getTypeId()
+                : entity instanceof CampaignTerrainAPI terrain ? "terrain:" + terrain.getType()
+                : entity.getCustomEntityType() != null ? "custom:" + entity.getCustomEntityType()
+                : entity instanceof JumpPointAPI ? "jump_point"
+                : entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI ? "well" : "token";
+        out.put("specId", specId);
+        out.put("expectedLocationKey", CoopLocations.keyOf(location));
+        out.put("instanceId", entity.getMemoryWithoutUpdate() == null ? JSONObject.NULL
+                : jsonValue(entity.getMemoryWithoutUpdate().get(CoopEncounterWorld.ENCOUNTER_ID_KEY)));
+        out.put("x", entity.getLocation().x); out.put("y", entity.getLocation().y);
+        out.put("radius", entity.getRadius());
+        out.put("facing", entity.getFacing());
+        JSONObject orbit = new JSONObject();
+        orbit.put("present", entity.getOrbit() != null);
+        orbit.put("focusId", entity.getOrbitFocus() == null ? JSONObject.NULL : entity.getOrbitFocus().getId());
+        orbit.put("angle", entity.getCircularOrbitAngle()); orbit.put("radius", entity.getCircularOrbitRadius());
+        orbit.put("period", entity.getCircularOrbitPeriod()); out.put("orbit", orbit);
+        MarketAPI market = entity.getMarket();
+        Set<String> conditions = new TreeSet<>();
+        if (market != null && market.getConditions() != null)
+            for (MarketConditionAPI condition : market.getConditions()) conditions.add(condition.getId());
+        out.put("conditions", new JSONArray(conditions));
+        out.put("surveyLevel", market == null || market.getSurveyLevel() == null ? JSONObject.NULL : market.getSurveyLevel().name());
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        out.put("ruinsExplored", market != null && market.getMemoryWithoutUpdate() != null
+                && market.getMemoryWithoutUpdate().getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG));
+        JSONObject flags = new JSONObject();
+        for (String key : new TreeSet<>(CoopEncounterRecord.MEMORY_KEYS))
+            flags.put(key, memory == null || !memory.contains(key) ? JSONObject.NULL : jsonValue(memory.get(key)));
+        out.put("hintFlags", flags);
+        if (entity instanceof com.fs.starfarer.api.campaign.CustomCampaignEntityAPI custom
+                && coop.campaign.CoopWreckCodec.isNativeWreck(entity)) {
+            var wreck = coop.campaign.CoopWreckCodec.capture(custom, "wreck:query");
+            JSONObject salvage = new JSONObject();
+            salvage.put("ship", diagnosticJson(wreck.ship()));
+            salvage.put("salvageSeed", Long.toString(wreck.salvageSeed()));
+            salvage.put("canHaveExtraCargo", wreck.canHaveExtraCargo());
+            salvage.put("recovery", diagnosticJson(wreck.recovery()));
+            salvage.put("previousRecovery", diagnosticJson(wreck.previousRecovery()));
+            salvage.put("dropValue", diagnosticJson(wreck.dropValue()));
+            salvage.put("dropRandom", diagnosticJson(wreck.dropRandom()));
+            salvage.put("extraSalvage", diagnosticJson(wreck.extraSalvage()));
+            salvage.put("temporaryExtraSalvage", diagnosticJson(wreck.temporaryExtraSalvage()));
+            salvage.put("salvageXP", jsonValue(wreck.salvageXP()));
+            out.put("salvage", salvage);
+        }
+        if (entity instanceof JumpPointAPI jump) {
+            Set<String> destinations = new TreeSet<>();
+            if (jump.getDestinations() != null) for (JumpPointAPI.JumpDestination destination : jump.getDestinations())
+                if (destination.getDestination() != null) destinations.add(destination.getDestination().getId());
+            out.put("destinations", new JSONArray(destinations));
+        }
+        if (entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI well)
+            out.put("targetId", well.getTarget() == null ? JSONObject.NULL : well.getTarget().getId());
+        return out;
+    }
+
+    /** Records stay structured so a diff reports the changed gameplay leaf instead of an opaque blob. */
+    static Object diagnosticJson(Object value) throws JSONException {
+        if (value == null) return JSONObject.NULL;
+        if (value instanceof Long) return value.toString(); // Exact native seeds and saved timestamps.
+        if (value instanceof String || value instanceof Number || value instanceof Boolean) return value;
+        if (value instanceof Enum<?> enumeration) return enumeration.name();
+        if (value instanceof java.util.Collection<?> collection) {
+            JSONArray array = new JSONArray(); for (Object member : collection) array.put(diagnosticJson(member)); return array;
+        }
+        if (value instanceof Map<?, ?> map) {
+            JSONObject object = new JSONObject();
+            for (Map.Entry<?, ?> entry : map.entrySet()) object.put(entry.getKey().toString(), diagnosticJson(entry.getValue()));
+            return object;
+        }
+        if (value instanceof CoopEncounterRecord record) return diagnosticObject(
+                "version,instanceId,effectiveSeed,encounterPointId,x,y,depth,threatRollRan,creator,threatTag,entities,specials,overlay",
+                record.version(), record.instanceId(), record.effectiveSeed(), record.encounterPointId(), record.x(), record.y(),
+                record.depth(), record.threatRollRan(), record.creator(), record.threatTag(), record.entities(), record.specials(), record.overlay());
+        if (value instanceof CoopEncounterRecord.Entity entity)
+            return diagnosticObject("role,ordinal,specId", entity.role(), entity.ordinal(), entity.specId());
+        if (value instanceof CoopEncounterRecord.Orbit orbit)
+            return diagnosticObject("focusId,angle,radius,period", orbit.focusId(), orbit.angle(), orbit.radius(), orbit.period());
+        if (value instanceof CoopEncounterRecord.Special special)
+            return diagnosticObject("type,entityId,orbit,wreck,memory", special.type(), special.entityId(), special.orbit(), special.wreck(), special.memory());
+        if (value instanceof CoopEncounterRecord.EntityState state)
+            return diagnosticObject("entityId,surveyLevel,ruinsExplored,memory", state.entityId(), state.surveyLevel(), state.ruinsExplored(), state.memory());
+        if (value instanceof CoopEncounterRecord.Overlay overlay)
+            return diagnosticObject("consumedIds,entities", overlay.consumedIds(), overlay.entities());
+        if (value instanceof CoopWreckRecord wreck) return diagnosticObject(
+                "version,id,hostEntityId,name,factionId,x,y,vx,vy,facing,angularVelocity,elapsedDays,durationDays,expiring,canHaveExtraCargo,ship,salvageSeed,recovery,previousRecovery,dropValue,dropRandom,extraSalvage,temporaryExtraSalvage,discoveryXP,salvageXP,sensorProfile,discoverable,radius,detectionModifiers,tags,memory",
+                wreck.version(), wreck.id(), wreck.hostEntityId(), wreck.name(), wreck.factionId(), wreck.x(), wreck.y(), wreck.vx(), wreck.vy(),
+                wreck.facing(), wreck.angularVelocity(), wreck.elapsedDays(), wreck.durationDays(), wreck.expiring(), wreck.canHaveExtraCargo(),
+                wreck.ship(), wreck.salvageSeed(), wreck.recovery(), wreck.previousRecovery(), wreck.dropValue(), wreck.dropRandom(),
+                wreck.extraSalvage(), wreck.temporaryExtraSalvage(), wreck.discoveryXP(), wreck.salvageXP(), wreck.sensorProfile(),
+                wreck.discoverable(), wreck.radius(), wreck.detectionModifiers(), wreck.tags(), wreck.memory());
+        if (value instanceof CoopWreckRecord.Ship ship) return diagnosticObject(
+                "condition,variantId,variant,variantState,captain,captainState,shipName,fleetMemberId,addDmods,pruneWeapons,nameAlwaysKnown,sModProb",
+                ship.condition(), ship.variantId(), ship.variant(), ship.variantState(), ship.captain(), ship.captainState(), ship.shipName(),
+                ship.fleetMemberId(), ship.addDmods(), ship.pruneWeapons(), ship.nameAlwaysKnown(), ship.sModProb());
+        if (value instanceof CoopWreckRecord.VariantState state) return diagnosticObject(
+                "modulePath,tags,source,originalVariant,goalVariant,mayAutoAssignWeapons", state.modulePath(), state.tags(), state.source(),
+                state.originalVariant(), state.goalVariant(), state.mayAutoAssignWeapons());
+        if (value instanceof CoopWreckRecord.CaptainState state) return diagnosticObject(
+                "aiCoreId,tags,importance,voice,memory", state.aiCoreId(), state.tags(), state.importance(), state.voice(), state.memory());
+        if (value instanceof CoopWreckRecord.Recovery recovery) return diagnosticObject(
+                "description,storyPointRecovery,notNowOptionExits,noDescriptionText,ships,special", recovery.description(),
+                recovery.storyPointRecovery(), recovery.notNowOptionExits(), recovery.noDescriptionText(), recovery.ships(), recovery.special());
+        if (value instanceof CoopWreckRecord.Special special)
+            return diagnosticObject("type,values,person,personState", special.type(), special.values(), special.person(), special.personState());
+        if (value instanceof CoopWreckRecord.Drop drop) return diagnosticObject(
+                "group,chances,maxChances,value,valueMult,custom", drop.group(), drop.chances(), drop.maxChances(), drop.value(), drop.valueMult(), drop.custom());
+        if (value instanceof CoopWreckRecord.DropRow row)
+            return diagnosticObject("commodity,group,frequency,weight", row.commodity(), row.group(), row.frequency(), row.weight());
+        if (value instanceof CoopWreckRecord.Cargo cargo)
+            return diagnosticObject("type,id,data,quantity", cargo.type(), cargo.id(), cargo.data(), cargo.quantity());
+        if (value instanceof CoopWreckRecord.ExtraCargo cargo)
+            return diagnosticObject("present,expiresDays,cargo", cargo.present(), cargo.expiresDays(), cargo.cargo());
+        if (value instanceof CoopWreckRecord.Modifier modifier)
+            return diagnosticObject("kind,source,description,value", modifier.kind(), modifier.source(), modifier.description(), modifier.value());
+        if (value instanceof CoopWreckRecord.MemoryValue memory)
+            return diagnosticObject("key,type,value,expiresDays", memory.key(), memory.type(), memory.value(), memory.expiresDays());
+        if (value instanceof CoopShipDetail ship) return diagnosticObject(
+                "memberId,shipName,baseVariantId,hullSpecId,baseCR,vents,caps,permaMods,sMods,sModdedBuiltIns,refitMods,suppressedMods,weapons,wings,weaponGroups,hullFraction,displayName,modules",
+                ship.memberId(), ship.shipName(), ship.baseVariantId(), ship.hullSpecId(), ship.baseCR(), ship.vents(), ship.caps(), ship.permaMods(),
+                ship.sMods(), ship.sModdedBuiltIns(), ship.refitMods(), ship.suppressedMods(), ship.weapons(), ship.wings(), ship.weaponGroups(),
+                ship.hullFraction(), ship.displayName(), ship.modules());
+        if (value instanceof CoopShipDetail.WeaponGroup group)
+            return diagnosticObject("slots,alternating,autofire", group.slots(), group.alternating(), group.autofire());
+        if (value instanceof CoopPersonDetail person) return diagnosticObject(
+                "personId,firstName,lastName,gender,portraitSprite,personalityId,rankId,postId,factionId,level,xp,role,hiringBonus,salary,adminTier,timeRemainingDays,skills",
+                person.personId(), person.first(), person.last(), person.gender(), person.portraitSprite(), person.personalityId(), person.rankId(),
+                person.postId(), person.factionId(), person.level(), person.xp(), person.role(), person.hiringBonus(), person.salary(), person.adminTier(),
+                person.timeRemainingDays(), person.skills());
+        throw new IllegalArgumentException("Unsupported diagnostic value: " + value.getClass().getName());
+    }
+
+    private static JSONObject diagnosticObject(String fields, Object... values) throws JSONException {
+        String[] keys = fields.split(",");
+        if (keys.length != values.length) throw new IllegalStateException("Diagnostic field/value count differs");
+        JSONObject object = new JSONObject();
+        for (int index = 0; index < keys.length; index++) object.put(keys[index], diagnosticJson(values[index]));
+        return object;
+    }
+
+    /** QA creates one native encounter at exact coordinates without advancing either calendar. */
+    static JSONObject encounterspawn(JSONObject args, Context context) throws JSONException {
+        return encounterspawn(args, context, (creator, point) -> creator.createEncounter(
+                com.fs.starfarer.api.impl.campaign.enc.EncounterManager.getInstance(), point));
+    }
+
+    @FunctionalInterface
+    interface EncounterCreation {
+        void create(com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectEPEC creator,
+                    com.fs.starfarer.api.impl.campaign.enc.EncounterPoint point);
+    }
+
+    static JSONObject encounterspawn(JSONObject args, Context context, EncounterCreation creation) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        if (roleOf(context.pump()) != CoopConnectionRole.HOST) throw new IllegalStateException("encounterspawn is host-only");
+        float x = encounterCoordinate(args, "x"), y = encounterCoordinate(args, "y");
+        float depth = encounterCoordinate(args, "depth");
+        if (depth < 0) throw new IllegalArgumentException("depth must be nonnegative");
+        String kind = optionalString(args, "creator");
+        com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectEPEC creator;
+        if (kind.isEmpty() || kind.equals("parent")) creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectEPEC();
+        else if (kind.equals("dire")) creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectDireHintsEPEC();
+        else throw new IllegalArgumentException("creator must be parent or dire");
+        Long seed = null;
+        if (args.has("seed")) {
+            if (!(args.opt("seed") instanceof String text)) throw new IllegalArgumentException("seed must be a decimal string");
+            try { seed = Long.parseLong(text); }
+            catch (NumberFormatException error) { throw new IllegalArgumentException("seed must be a signed 64-bit decimal string"); }
+        }
+        boolean threatRollRan = optionalBoolean(args, "threatRollRan", true);
+        var data = new com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData();
+        data.depth = depth; data.random = new java.util.Random();
+        if (!threatRollRan) {
+            if (sector.getStarSystems().isEmpty()) throw new IllegalStateException("threatRollRan:false needs an existing nearest system");
+            data.nearest = sector.getStarSystems().get(0);
+        }
+        if (sector.getHyperspace() == null) throw new IllegalStateException("Hyperspace is unavailable");
+        var point = new com.fs.starfarer.api.impl.campaign.enc.EncounterPoint(
+                "abyssal_" + (int) (x / 1000f) + "_" + (int) (y / 1000f), sector.getHyperspace(),
+                new Vector2f(x, y), com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.EP_TYPE_ABYSSAL);
+        point.custom = data;
+        Set<StarSystemAPI> before = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        before.addAll(sector.getStarSystems());
+        boolean seeded = seed != null;
+        if (seeded) coop.ambient.CoopEncounterReplayBridge.beginQaSeed(seed);
+        try { creation.create(creator, point); }
+        finally { if (seeded) coop.ambient.CoopEncounterReplayBridge.endQaSeed(); }
+        List<StarSystemAPI> created = sector.getStarSystems().stream().filter(system -> !before.contains(system)).toList();
+        if (created.size() != 1 || !created.get(0).hasTag(Tags.TEMPORARY_LOCATION) || !created.get(0).hasTag(Tags.SYSTEM_ABYSSAL))
+            throw new IllegalStateException("Native encounter creation produced " + created.size() + " systems; expected one temporary abyssal system");
+        StarSystemAPI system = created.get(0);
+        JSONObject out = new JSONObject();
+        out.put("qa", true); out.put("created", true); out.put("createdCount", created.size());
+        out.put("creator", kind.isEmpty() ? "parent" : kind); out.put("encounterPointId", point.id);
+        out.put("optionalUniqueId", jsonValue(system.getOptionalUniqueId()));
+        out.put("x", x); out.put("y", y); out.put("depth", depth); out.put("threatRollRan", threatRollRan);
+        out.put("effectiveSeed", jsonValue(system.getMemoryWithoutUpdate().get(coop.ambient.CoopEncounterReplayBridge.SEED_KEY)));
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    private static float encounterCoordinate(JSONObject args, String key) {
+        double value = requiredDouble(args, key);
+        if (!Double.isFinite(value) || Math.abs(value) > 1_000_000) throw new IllegalArgumentException(key + " is out of bounds");
+        return (float) value;
+    }
+
+    private static Object jsonValue(Object value) { return value == null ? JSONObject.NULL : value; }
 
     /** Pure snapshot: unlike authority capture, this never assigns a shared id or mutates a wreck. */
     static JSONObject wrecks(JSONObject args, Context context) throws JSONException {

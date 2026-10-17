@@ -5549,6 +5549,9 @@ class CoopNetPumpTest {
                             case "getScripts", "getTransientScripts" -> {
                                 return new ArrayList<>();
                             }
+                            case "getStarSystems" -> {
+                                return List.of();
+                            }
                             case "getPersistentData" -> {
                                 return persistentData;
                             }
@@ -8734,6 +8737,53 @@ class CoopNetPumpTest {
         assertFalse(pump.npcReplicationStreamingForTest(),
                 "the next connect is a fresh session start, not a resume");
         assertFalse(pump.baseReplicationStreamingForTest());
+    }
+
+    @Test
+    void initialEncounterSetSurvivesTheLifecycleEdgeAndReportsLaterHintEdits() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        var record = new coop.campaign.CoopEncounterRecord("enc-1", 12, "abyssal_0_0", 0, 0, 3,
+                true, coop.campaign.CoopEncounterRecord.Creator.PARENT, false,
+                List.of(new coop.campaign.CoopEncounterRecord.Entity(
+                        coop.campaign.CoopEncounterRecord.Role.SYSTEM, 0, "planet")),
+                List.of(), coop.campaign.CoopEncounterRecord.Overlay.empty());
+        var world = new RecordingEncounterWorld(record);
+        pump.setEncounterAuthorityForTest(new coop.campaign.CoopEncounterAuthority(
+                service, session, now::get, world));
+        service.inbound.add(CoopMessages.encounterSet("session-a", 1, now.get(),
+                coop.campaign.CoopEncounterCodec.encodeSet(List.of(record))));
+
+        pump.advance(0f);
+
+        assertEquals(1, world.upserts);
+        world.visited = true;
+        now.addAndGet(250);
+        pump.advance(0f);
+        assertTrue(service.sent.stream().anyMatch(message -> message.type() == CoopMessages.Type.WORLD_DELTA
+                && "ENCOUNTER_STATE".equals(CoopMessages.requiredPayloadString(message, "kind"))),
+                "the lifecycle pass must retain the receiver baseline created during dispatch");
+    }
+
+    private static final class RecordingEncounterWorld implements coop.campaign.CoopEncounterAuthority.EncounterWorld {
+        final coop.campaign.CoopEncounterRecord record;
+        int upserts;
+        boolean visited;
+        RecordingEncounterWorld(coop.campaign.CoopEncounterRecord record) { this.record = record; }
+        @Override public List<coop.campaign.CoopEncounterRecord> captureHost() { return List.of(record); }
+        @Override public java.util.Set<String> taggedIds() { return java.util.Set.of(record.instanceId()); }
+        @Override public void upsert(coop.campaign.CoopEncounterRecord value) { upserts++; }
+        @Override public void remove(String id) { throw new AssertionError("unexpected encounter removal"); }
+        @Override public void updateGuestPresence(boolean grace) { }
+        @Override public List<coop.campaign.CoopEncounterRecord.EntityState> guestStates() {
+            return List.of(new coop.campaign.CoopEncounterRecord.EntityState(
+                    record.entityId(record.entities().get(0)), null, null, visited
+                    ? List.of(new coop.campaign.CoopWreckRecord.MemoryValue("$visited", "BOOLEAN", "true", 0))
+                    : List.of()));
+        }
     }
 
     @Test

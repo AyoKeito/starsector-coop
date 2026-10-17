@@ -199,7 +199,7 @@ class CoopAgentCommandsTest {
                         "mark", "market", "markets", "memory", "netfault", "objective", "ownfleet",
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
                         "teleport", "visibility", "streams", "streamadd", "streamdespawn", "clockalign",
-                        "wrecks", "wreckspawn", "wreckconsume"),
+                        "wrecks", "wreckspawn", "wreckconsume", "encounters", "encounterspawn"),
                 new CoopAgentCommands().verbs());
     }
 
