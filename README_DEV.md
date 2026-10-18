@@ -281,6 +281,23 @@ Host log: inbound PING and outbound PONG
 Guest log: outbound PING and inbound PONG
 ```
 
+## Diagnosing desktop lag at the native launcher
+
+The [launcher monitor](tools/lag-monitor/README.md) records CPU, GPU, paging, disk, foreground PID
+and a timer heartbeat, then compares the idle, Host-only, both-launcher and recovery periods.
+Its controlled mode requires both test clients closed and their bridges disabled; it leaves game
+configuration unchanged and closes only the processes it creates. Leave the native windows at the
+launcher without pressing Play. Use `-ElevatedTrace` when software frame timing is needed: Windows
+requests UAC consent for the recorder alone, while the monitor and games retain normal permissions.
+The raw ETL and reports stay under ignored `tmp_ff_analysis/lag-monitor/`.
+
+```powershell
+pwsh -NoProfile -File scripts/monitor-client-lag.ps1 -Mode Launchers -ElevatedTrace -BaselineSeconds 6 -SingleSeconds 6 -BothSeconds 30 -RecoverySeconds 6
+```
+
+Counter or frame captures at the native launcher do not verify campaign replication. M3's native
+acceptance checklist remains open until both campaigns can run the specified checks.
+
 ## Agent Bridge And Starsector MCP (Phase 30)
 
 `coop.debug.CoopAgentBridge` is a dormant localhost TCP listener for driving smoke checks from an agent instead of from two pairs of eyes. It is gated on `-Dcoop.debug.bridge=<port>`: with the property absent, unparsable, or `0`, no socket is opened and nothing is logged. It binds 127.0.0.1 only, accepts up to four clients at once, and services a few commands per frame on the campaign thread.

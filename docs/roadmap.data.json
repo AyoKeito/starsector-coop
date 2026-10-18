@@ -16,7 +16,7 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. Task 0, M1, shared wrecks and M2 are complete. M3 lights are implemented with native acceptance pending; M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt"
+      "note": "P26 is partial. Task 0, M1, shared wrecks and M2 are complete. M3 lights await native acceptance; current testing is held by desktop lag at the native launchers. M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt"
     },
     {
       "key": "next",
@@ -37,9 +37,16 @@
       "note": "P33 is built. P26 is partial: M1/M2 are complete, M3 lights await native acceptance, and M4 storms/M5 ghosts and trails remain unbuilt. Guest-proximity abyssal triggering also remains unbuilt. P22, P25 and P27 remain queued"
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. Task 0, M1, shared wrecks and M2 are complete. M3 native lights are implemented as of 2026-10-18, with NATIVE ACCEPTANCE PENDING. M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt. Co-op-only pause stays.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> Task 0, M1 and M2 are complete, including shared wrecks. <b>M3 lights are implemented; native acceptance is pending.</b> Final clean M3 build: 4,324 Java pass, one existing router skip, zero failures/errors, 272 suites; focused Java 686 pass, Node bridge/offline 77 pass. The open native gate covers all spawn shapes, both actors' pulse/burst rewards, races, expiry, legacy cleanup, reconnect/reload and native Dweller leave/battle behavior. M4/M5 and Guest-proximity abyssal triggering remain unbuilt. Earlier M1/M2 native passes on <code>e7c28df</code> and checkpoint 295 remain scoped to that build; they do not verify M3. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 PARTIAL. M1/M2 and shared wrecks are complete; M3 lights are implemented with NATIVE ACCEPTANCE PENDING. Native launcher desktop lag is being diagnosed before campaign checks resume. M4/M5 and Guest-proximity abyssal triggering remain unbuilt. Co-op-only pause stays.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> Task 0, M1 and M2 are complete, including shared wrecks. <b>M3 lights are implemented; native acceptance is pending.</b> Final clean M3 build: 4,324 Java pass, one existing router skip, zero failures/errors, 272 suites; focused Java 686 pass, Node bridge/offline 77 pass. Testing is currently held by desktop lag at the native launchers, reproduced with bridges disabled and RivaTuner absent; a complete local frame trace was captured on 2026-10-18. Launcher diagnostics do not verify M3. The open native gate covers all spawn shapes, both actors' pulse/burst rewards, races, expiry, legacy cleanup, reconnect/reload and native Dweller leave/battle behavior. M4/M5 and Guest-proximity abyssal triggering remain unbuilt. Earlier M1/M2 native passes on <code>e7c28df</code> and checkpoint 295 remain scoped to that build; they do not verify M3. Co-op-only pause stays.",
   "attention": [
+    {
+      "sev": "risk",
+      "sevLabel": "native test hold",
+      "head": "Two native launchers cause desktop lag",
+      "state": "reproduced before Play with campaign bridges disabled and RivaTuner absent",
+      "body": "Analyze the complete local frame trace and test a reversible mitigation. Pass = interacting with both launchers leaves the desktop responsive, then resume M3 campaign acceptance. Elevated compositor CPU is a correlation; no driver or overlay has been established as the cause. Counter and frame diagnostics are not M3 campaign passes."
+    },
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
