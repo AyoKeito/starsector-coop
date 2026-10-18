@@ -84,6 +84,9 @@ const TOOLS = [
       'structured saved recipes and current gameplay manifests including canonical entity ids, ' +
       'identity lookup checks, in-system and linked hyperspace entities, orbits, conditions, survey, ' +
       'ruins and hint flags; legacy systems without a saved recipe are counted separately); ' +
+      'lights{limit?:1..512} (read-only native hyperspace light manifest: canonical ids, position, ' +
+      'complete native params, remaining lifetime, dweller flag, lossless salvage seed, despawn state ' +
+      'and truncation counts; this query never adopts or creates lights); ' +
       'status, markets and barpool take none. ' +
       'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
       'teleport takes alongside systemId.',
@@ -107,6 +110,9 @@ const TOOLS = [
       'omits cosmetic names/catalogId by default, and returns at most maxDifferences precise mismatches (default 100). ' +
       'Local engine ids and native global-lookup diagnostics are metadata; canonical and location resolution ' +
       'must succeed for every present member even if both clients report the same failure. ' +
+      'lights requires complete managed canonical manifests and exact native recipe comparison, ' +
+      'omits only local engineId and actor-local state counts, and reports INCONCLUSIVE for unmatched ' +
+      'raw campaign timestamps; nonzero tolerance or gameplay ignore keys are refused. ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',
@@ -118,7 +124,7 @@ const TOOLS = [
           description: 'Absolute tolerance for numeric leaves. Default 0 (exact match).'
         },
         maxDifferences: { type: 'integer', minimum: 1, maximum: 1000,
-          description: 'encounters only: maximum returned mismatches, default 100; counts.differing retains the total.' },
+          description: 'encounters/lights: maximum returned mismatches, default 100; counts.differing retains the total.' },
         ignore: {
           type: 'array',
           items: { type: 'string' },
@@ -153,6 +159,9 @@ const TOOLS = [
       '(host-only QA: invokes the exact native encounter creator once at these coordinates, optionally ' +
       'sets its exact effective 64-bit seed, verifies one new temporary abyssal system, and returns ' +
       'createdCount; never advances a calendar), ' +
+      'lightspawn{kind?:normal|pair|cluster|large|dweller, x, y, seed?:decimal-string} ' +
+      '(host-only QA: invokes the actual native light creation branch at these coordinates; ' +
+      'never advances a calendar and is never retried after an uncertain socket drop), ' +
       'clockalign{targetTimestamp} (active coop session and paused campaign required; advances this ' +
       'clock forward by at most one game day and verifies exact readback; prefer ss_align_clocks to ' +
       'check both instances and choose the target), ' +

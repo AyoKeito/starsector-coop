@@ -28,6 +28,87 @@ export const ENCOUNTER_COSMETIC_KEYS = [
 /** Local ids and the engine's LocationToken cache defect are diagnostic metadata. */
 export const ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS = ['engineId', 'nativeSectorResolves', 'nativeSectorLookupError'];
 
+const LIGHT_ID = /^light:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const LIGHT_NUMERIC_FIELDS = ['x', 'y', 'colorArgb', 'frequencyMultMin', 'frequencyMultMax',
+  'frequencyChangeMult', 'size', 'detectedRange', 'bonusMult', 'remainingDays', 'pointsOverride', 'radius'];
+
+/** Exact native light recipes and membership; local engine ids and actor state do not compare. */
+export function diffLights(host, guest, options = {}) {
+  validateLightManifest(host, 'host');
+  validateLightManifest(guest, 'guest');
+  if (options.tolerance !== undefined && Number(options.tolerance) !== 0) {
+    throw new Error('lights requires exact comparison; tolerance must be 0');
+  }
+  if (options.ignore !== undefined && (!Array.isArray(options.ignore)
+      || options.ignore.some((key) => key !== 'engineId'))) {
+    throw new Error('lights only excludes engineId; gameplay fields cannot be ignored');
+  }
+  const maxDifferences = options.maxDifferences ?? 100;
+  if (!Number.isInteger(maxDifferences) || maxDifferences < 1 || maxDifferences > 1000) {
+    throw new Error('maxDifferences must be an integer from 1 to 1000');
+  }
+  const result = diffJson({ lights: host.lights }, { lights: guest.lights }, {
+    tolerance: 0, ignore: ['engineId']
+  });
+  const calendarMatched = Number.isSafeInteger(host.campaignTimestamp)
+    && Number.isSafeInteger(guest.campaignTimestamp)
+    && host.campaignTimestamp === guest.campaignTimestamp;
+  const status = !calendarMatched ? 'INCONCLUSIVE' : result.equal ? 'PASS' : 'FAIL';
+  return {
+    ...result,
+    equal: status === 'PASS',
+    status,
+    calendarMatched,
+    campaignTimestamps: { host: host.campaignTimestamp, guest: guest.campaignTimestamp },
+    ...(calendarMatched ? {} : { reason: 'lights require matching safe-integer campaign timestamps; hold the shared pause and sample again' }),
+    differences: result.differences.slice(0, maxDifferences).map(compactDifference),
+    truncated: result.differences.length > maxDifferences,
+    resolutionFailureCount: 0,
+    maxDifferences
+  };
+}
+
+function validateLightManifest(table, instance) {
+  if (table?.truncated !== false || !isPlainObject(table.lights)) {
+    throw new Error(`lights requires a complete untruncated manifest on ${instance}`);
+  }
+  const entries = Object.entries(table.lights);
+  if (!Number.isInteger(table.count) || table.count !== entries.length
+      || !Number.isInteger(table.candidateCount) || table.candidateCount !== table.count) {
+    throw new Error(`lights manifest count or candidateCount is incomplete on ${instance}`);
+  }
+  const engineIds = new Set();
+  const hostEntityIds = new Set();
+  for (const [id, row] of entries) {
+    if (!LIGHT_ID.test(id) || !isPlainObject(row) || row.id !== id || row.managed !== true
+        || typeof row.engineId !== 'string' || !row.engineId || engineIds.has(row.engineId)) {
+      throw new Error(`lights manifest requires unique managed canonical identities on ${instance}: ${id}`);
+    }
+    engineIds.add(row.engineId);
+    if (typeof row.hostEntityId !== 'string' || !row.hostEntityId.trim()
+        || hostEntityIds.has(row.hostEntityId)) {
+      throw new Error(`lights manifest requires unique nonempty host entity identities on ${instance}: ${id}`);
+    }
+    hostEntityIds.add(row.hostEntityId);
+    for (const field of LIGHT_NUMERIC_FIELDS) {
+      if (typeof row[field] !== 'number' || !Number.isFinite(row[field])) {
+        throw new Error(`lights manifest requires finite ${field} on ${instance}: ${id}`);
+      }
+    }
+    if (!Number.isInteger(row.colorArgb) || row.colorArgb < -2147483648 || row.colorArgb > 2147483647
+        || !Number.isSafeInteger(row.pointsOverride) || typeof row.dweller !== 'boolean'
+        || typeof row.despawning !== 'boolean'
+        || !row.despawning && row.remainingDays < 0
+        || row.dweller && typeof row.salvageSeed !== 'string'
+        || !(row.salvageSeed === null || typeof row.salvageSeed === 'string'
+          && /^-?\d+$/.test(row.salvageSeed)
+          && BigInt(row.salvageSeed) >= -9223372036854775808n
+          && BigInt(row.salvageSeed) <= 9223372036854775807n)) {
+      throw new Error(`lights manifest has an invalid native recipe on ${instance}: ${id}`);
+    }
+  }
+}
+
 /** Compare complete canonical membership, including role and identity-resolution checks. */
 export function diffEncounters(host, guest, options = {}) {
   for (const [instance, table] of [['host', host], ['guest', guest]]) {

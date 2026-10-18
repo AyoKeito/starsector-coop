@@ -991,7 +991,8 @@ public final class CoopNpcFleetReplicator {
                 if (fleet == null || fleet == player) {
                     continue;
                 }
-                if (isCoopMirror(fleet) || fleet.isStationMode()) {
+                if (isCoopMirror(fleet) || fleet.isStationMode()
+                        || coop.ambient.CoopLightBridge.isEncounterFleet(fleet)) {
                     continue;
                 }
                 consumer.accept(fleet);

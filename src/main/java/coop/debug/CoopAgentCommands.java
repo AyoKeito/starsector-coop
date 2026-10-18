@@ -263,6 +263,8 @@ public final class CoopAgentCommands {
         map.put("wreckconsume", CoopAgentCommands::wreckconsume);
         map.put("encounters", CoopAgentCommands::encounters);
         map.put("encounterspawn", CoopAgentCommands::encounterspawn);
+        map.put("lights", CoopAgentCommands::lights);
+        map.put("lightspawn", CoopAgentCommands::lightspawn);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("clockalign", CoopAgentCommands::clockalign);
@@ -663,6 +665,131 @@ public final class CoopAgentCommands {
     }
 
     private static Object jsonValue(Object value) { return value == null ? JSONObject.NULL : value; }
+
+    /** Native gameplay fields only; querying never adopts, grants, fades or rewrites a light. */
+    static JSONObject lights(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        double requestedLimit = args.has("limit") ? requiredDouble(args, "limit") : 256;
+        if (!Double.isFinite(requestedLimit) || requestedLimit != Math.rint(requestedLimit)
+                || requestedLimit < 1 || requestedLimit > coop.campaign.CoopLightRecord.MAX_LIGHTS)
+            throw new IllegalArgumentException("limit must be between 1 and " + coop.campaign.CoopLightRecord.MAX_LIGHTS);
+        int limit = (int) requestedLimit;
+        JSONObject table = new JSONObject();
+        int candidates = 0;
+        if (sector.getHyperspace() != null) {
+            for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+                if (!coop.ambient.CoopLightBridge.isNativeLight(entity)) continue;
+                candidates++;
+                if (table.length() >= limit) continue;
+                var plugin = (com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin) entity.getCustomPlugin();
+                var p = plugin.getParams();
+                String id = coop.campaign.CoopLightWorld.ownedId(entity);
+                JSONObject row = new JSONObject();
+                row.put("id", jsonValue(id)); row.put("engineId", entity.getId()); row.put("managed", id != null);
+                Object hostId = entity.getMemoryWithoutUpdate().get(coop.campaign.CoopLightWorld.HOST_ENTITY_ID_KEY);
+                if (hostId != null && !(hostId instanceof String)) {
+                    throw new IllegalStateException("light Host identity is not a string: " + entity.getId());
+                }
+                row.put("hostEntityId", hostId instanceof String text ? text : entity.getId());
+                row.put("x", entity.getLocation().x); row.put("y", entity.getLocation().y);
+                row.put("colorArgb", p.color.getRGB());
+                row.put("frequencyMultMin", p.frequencyMultMin); row.put("frequencyMultMax", p.frequencyMultMax);
+                row.put("frequencyChangeMult", p.frequencyChangeMult); row.put("size", p.size);
+                row.put("detectedRange", p.detectedRange); row.put("bonusMult", p.bonusMult);
+                row.put("remainingDays", p.durationDays); row.put("pointsOverride", p.pointsOverride);
+                row.put("radius", entity.getRadius()); row.put("dweller", plugin.isDweller());
+                Object seed = entity.getMemoryWithoutUpdate().get(com.fs.starfarer.api.impl.campaign.ids.MemFlags.SALVAGE_SEED);
+                row.put("salvageSeed", seed instanceof Number value ? Long.toString(value.longValue()) : JSONObject.NULL);
+                row.put("despawning", plugin.isDespawning());
+                table.put(id == null ? "native:" + entity.getId() : id, row);
+            }
+        }
+        JSONObject stateCounts = new JSONObject(new coop.campaign.CoopLightWorld(() -> sector).readOnlyStateCounts());
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", sector.getClock().getTimestamp()); out.put("count", table.length());
+        out.put("candidateCount", candidates); out.put("truncated", candidates > table.length());
+        out.put("lights", table); out.put("state", stateCounts);
+        out.put("actorBonus", readOnlyLightBonus(sector.getPlayerFleet()));
+        return out;
+    }
+
+    private static JSONObject readOnlyLightBonus(CampaignFleetAPI player) throws JSONException {
+        com.fs.starfarer.api.impl.campaign.AbyssalLightBonus found = null;
+        if (player != null && player.getScripts() != null) {
+            for (var script : player.getScripts()) {
+                if (script instanceof com.fs.starfarer.api.impl.campaign.AbyssalLightBonus bonus) {
+                    if (found != null) throw new IllegalStateException("duplicate native light bonus scripts");
+                    found = bonus;
+                }
+            }
+        }
+        JSONObject result = new JSONObject();
+        result.put("present", found != null);
+        result.put("burnReserve", found == null ? 0f : found.getBurnBonus());
+        result.put("sensorReserve", found == null ? 0f : found.getSensorBonus());
+        return result;
+    }
+
+    @FunctionalInterface
+    interface LightCreation {
+        void create(com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC creator,
+                    com.fs.starfarer.api.impl.campaign.enc.EncounterPoint point);
+    }
+
+    /** QA chooses the native spawn branch; global random draws and resolved positions stay native. */
+    static JSONObject lightspawn(JSONObject args, Context context) throws JSONException {
+        return lightspawn(args, context, (creator, point) -> creator.createEncounter(
+                com.fs.starfarer.api.impl.campaign.enc.EncounterManager.getInstance(), point));
+    }
+
+    static JSONObject lightspawn(JSONObject args, Context context, LightCreation creation) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        if (roleOf(context.pump()) != CoopConnectionRole.HOST) throw new IllegalStateException("lightspawn is host-only");
+        if (sector.getHyperspace() == null) throw new IllegalStateException("Hyperspace is unavailable");
+        float x = encounterCoordinate(args, "x"), y = encounterCoordinate(args, "y");
+        String kind = optionalString(args, "kind");
+        if (kind.isEmpty()) kind = "normal";
+        com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC creator;
+        if (kind.equals("dweller")) creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalLightDwellerEPEC();
+        else {
+            var type = switch (kind) {
+                case "normal" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.NORMAL;
+                case "pair" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.PAIR;
+                case "cluster" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.CLUSTER;
+                case "large" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.LARGE;
+                default -> throw new IllegalArgumentException("kind must be normal, pair, cluster, large or dweller");
+            };
+            creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC() {
+                @Override protected LightSpawnType pickSpawnType(
+                        com.fs.starfarer.api.impl.campaign.enc.EncounterManager manager,
+                        com.fs.starfarer.api.impl.campaign.enc.EncounterPoint point) { return type; }
+            };
+        }
+        Long seed = null;
+        if (args.has("seed")) {
+            if (!(args.opt("seed") instanceof String text)) throw new IllegalArgumentException("seed must be a decimal string");
+            try { seed = Long.parseLong(text); }
+            catch (NumberFormatException error) { throw new IllegalArgumentException("seed must be a signed 64-bit decimal string"); }
+        }
+        var data = new com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData();
+        data.depth = 1f; data.random = seed == null ? new java.util.Random() : new java.util.Random(seed);
+        var point = new com.fs.starfarer.api.impl.campaign.enc.EncounterPoint("coop_qa_light", sector.getHyperspace(),
+                new Vector2f(x, y), com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.EP_TYPE_ABYSSAL);
+        point.custom = data;
+        Set<SectorEntityToken> before = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        before.addAll(sector.getHyperspace().getAllEntities());
+        creation.create(creator, point);
+        List<SectorEntityToken> created = sector.getHyperspace().getAllEntities().stream()
+                .filter(entity -> !before.contains(entity) && coop.ambient.CoopLightBridge.isNativeLight(entity)).toList();
+        boolean validCount = kind.equals("pair") ? created.size() == 2 : kind.equals("cluster")
+                ? created.size() >= 3 && created.size() <= 9 : created.size() == 1;
+        if (!validCount) throw new IllegalStateException("Native light creation produced " + created.size() + " entities for " + kind);
+        JSONObject out = new JSONObject(); JSONArray ids = new JSONArray();
+        for (SectorEntityToken entity : created) ids.put(entity.getId());
+        out.put("qa", true); out.put("kind", kind); out.put("createdCount", created.size()); out.put("engineIds", ids);
+        out.put("x", x); out.put("y", y); out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
 
     /** Pure snapshot: unlike authority capture, this never assigns a shared id or mutates a wreck. */
     static JSONObject wrecks(JSONObject args, Context context) throws JSONException {

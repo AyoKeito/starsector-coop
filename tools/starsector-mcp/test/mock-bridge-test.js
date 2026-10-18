@@ -15,7 +15,7 @@ import {
   BridgeUnreachableError,
   READ_ONLY_COMMANDS
 } from '../lib/bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights, leafCount, pickKeyField } from '../lib/diff.js';
 import {
   ACTION_VERBS,
   Bridges,
@@ -228,7 +228,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
     [...READ_ONLY_COMMANDS].sort(),
     [
       'barpool', 'cargo', 'colonizable', 'encounters', 'entities', 'feed', 'fleets', 'hirable', 'intel',
-      'landmarks', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility', 'wrecks'
+      'landmarks', 'lights', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility', 'wrecks'
     ]
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and
@@ -238,7 +238,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
     'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
-    'wreckspawn', 'wreckconsume', 'encounterspawn'
+    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -269,7 +269,9 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('wrecks'), 2);
   assert.equal((await client.send('encounters')).campaignTimestamp, 123);
   assert.equal(calls.get('encounters'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn']) {
+  assert.equal((await client.send('lights')).campaignTimestamp, 123);
+  assert.equal(calls.get('lights'), 2);
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
@@ -290,6 +292,161 @@ test('encounter query and native QA creation preserve arguments and guest refusa
   await assert.rejects(() => ssAct(bridges, 'guest', 'encounterspawn', args), /host-only/);
   await assert.rejects(() => ssDump(bridges, 'host', 'encounterspawn'), /unknown query verb/);
   await assert.rejects(() => ssAct(bridges, 'host', 'encounters'), /unknown action verb/);
+});
+
+const LIGHT_ID = 'light:01234567-89ab-4def-8123-0123456789ab';
+function lightManifest() {
+  return { campaignTimestamp: -55633163748062, count: 1, candidateCount: 1, truncated: false,
+    lights: { [LIGHT_ID]: { id: LIGHT_ID, engineId: 'host-native-light', hostEntityId: 'native-host-light', managed: true,
+      x: -62000.25, y: -45000, colorArgb: -1, frequencyMultMin: 0.7, frequencyMultMax: 1.3,
+      frequencyChangeMult: 1, size: 120, detectedRange: 600, bonusMult: 1.5,
+      remainingDays: 19.25, pointsOverride: -1, radius: 60, dweller: false,
+      salvageSeed: '-9223372036854775808', despawning: false } }, state: { consumedCount: 2 } };
+}
+
+test('light query and native QA creation preserve arguments and refuse the wrong verb class', async (t) => {
+  const table = lightManifest();
+  const hostBridge = new MockBridge((request) => request.cmd === 'lights'
+    ? { ok: true, data: { ...table, args: request.args } }
+    : { ok: true, data: { createdCount: 3, args: request.args } });
+  const guestBridge = new MockBridge((request) => request.cmd === 'lights'
+    ? { ok: true, data: table } : { ok: false, error: 'IllegalStateException: lightspawn is host-only' });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.deepEqual((await ssDump(bridges, 'host', 'lights', { limit: 512 })).args, { limit: 512 });
+  const args = { kind: 'cluster', x: -60000.5, y: -45000, seed: '-9223372036854775808' };
+  assert.deepEqual(await ssAct(bridges, 'host', 'lightspawn', args), { createdCount: 3, args });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'lightspawn', args), /host-only/);
+  await assert.rejects(() => ssDump(bridges, 'host', 'lightspawn'), /unknown query verb/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'lights'), /unknown action verb/);
+});
+
+test('strict light diff excludes local identity metadata and actor-local counts only', () => {
+  const host = lightManifest(); const guest = structuredClone(host);
+  guest.lights[LIGHT_ID].engineId = 'guest-native-light';
+  guest.state = { consumedCount: 100, pendingRequests: 4 };
+  const result = diffLights(host, guest);
+  assert.equal(result.status, 'PASS'); assert.equal(result.equal, true);
+  assert.equal(result.calendarMatched, true); assert.equal(result.resolutionFailureCount, 0);
+  assert.equal(result.counts.differing, 0); assert.ok(result.counts.host > 10);
+  assert.deepEqual(result.ignored, ['engineId']);
+  assert.equal(diffLights(host, guest, { ignore: [] }).equal, true);
+});
+
+test('strict light diff retains exact mismatch totals while bounding displayed recipe differences', () => {
+  const host = lightManifest(); host.lights[LIGHT_ID].recipe = { nativeSeed: '9223372036854775806' };
+  const guest = structuredClone(host); const row = guest.lights[LIGHT_ID];
+  row.x += 1; row.colorArgb = -2; row.dweller = true; row.salvageSeed = '9223372036854775807';
+  row.remainingDays -= 0.5; row.recipe.nativeSeed = '9223372036854775807';
+  const result = diffLights(host, guest, { maxDifferences: 2 });
+  assert.equal(result.status, 'FAIL'); assert.equal(result.equal, false);
+  assert.equal(result.counts.differing, 6); assert.equal(result.differences.length, 2);
+  assert.equal(result.truncated, true);
+  assert.ok(result.differences.every((difference) => difference.path.startsWith(`$.lights.${LIGHT_ID}.`)));
+  assert.equal(diffLights(host, guest).differences.some((d) => d.path.endsWith('.recipe.nativeSeed')), true);
+});
+
+test('strict light diff refuses incomplete or noncanonical manifests and malformed native recipes', () => {
+  const host = lightManifest();
+  for (const change of [
+    (table) => { table.truncated = true; },
+    (table) => { table.count = 0; },
+    (table) => { table.candidateCount = 2; },
+    (table) => { table.lights[LIGHT_ID].managed = false; },
+    (table) => { table.lights[LIGHT_ID].id = 'light:invalid'; },
+    (table) => { table.lights[LIGHT_ID].engineId = ''; },
+    (table) => { delete table.lights[LIGHT_ID].hostEntityId; },
+    (table) => { table.lights[LIGHT_ID].hostEntityId = ' '; },
+    (table) => { table.lights[LIGHT_ID].hostEntityId = 123; },
+    (table) => { delete table.lights[LIGHT_ID].remainingDays; },
+    (table) => { table.lights[LIGHT_ID].x = NaN; },
+    (table) => { table.lights[LIGHT_ID].remainingDays = -0.001; },
+    (table) => { table.lights[LIGHT_ID].dweller = 'true'; },
+    (table) => { table.lights[LIGHT_ID].salvageSeed = 123; },
+    (table) => { table.lights[LIGHT_ID].salvageSeed = '9223372036854775808'; },
+    (table) => { table.lights[LIGHT_ID].dweller = true; table.lights[LIGHT_ID].salvageSeed = null; }
+  ]) {
+    const malformed = structuredClone(host); change(malformed);
+    assert.throws(() => diffLights(host, malformed), /lights.*(manifest|requires)/);
+    assert.throws(() => diffLights(malformed, malformed), /lights.*(manifest|requires)/,
+      'identically malformed manifests cannot produce PASS');
+  }
+  const duplicate = structuredClone(host);
+  const otherId = 'light:11234567-89ab-4def-8123-0123456789ab';
+  duplicate.lights[otherId] = { ...duplicate.lights[LIGHT_ID], id: otherId };
+  duplicate.count = duplicate.candidateCount = 2;
+  assert.throws(() => diffLights(duplicate, duplicate), /unique managed canonical identities/);
+  duplicate.lights[otherId].engineId = 'another-local-engine-id';
+  assert.throws(() => diffLights(duplicate, duplicate), /unique nonempty host entity identities/);
+  assert.throws(() => diffLights(host, host, { tolerance: 1 }), /exact comparison/);
+  assert.throws(() => diffLights(host, host, { ignore: ['x'] }), /cannot be ignored/);
+  assert.throws(() => diffLights(host, host, { maxDifferences: 0 }), /maxDifferences/);
+});
+
+test('light diagnostics preserve negative fading lifetime while rejecting negative live lifetime', () => {
+  const fading = lightManifest();
+  fading.lights[LIGHT_ID].remainingDays = -0.0001;
+  fading.lights[LIGHT_ID].despawning = true;
+  assert.equal(diffLights(fading, structuredClone(fading)).status, 'PASS');
+  const guest = structuredClone(fading); guest.lights[LIGHT_ID].remainingDays = -0.0002;
+  const result = diffLights(fading, guest);
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.differences[0].path, `$.lights.${LIGHT_ID}.remainingDays`);
+  fading.lights[LIGHT_ID].despawning = false;
+  assert.throws(() => diffLights(fading, fading), /invalid native recipe/);
+});
+
+test('dweller salvage seeds stay exact signed-64 strings and ordinary lights may omit the native seed', () => {
+  const ordinary = lightManifest(); ordinary.lights[LIGHT_ID].salvageSeed = null;
+  assert.equal(diffLights(ordinary, structuredClone(ordinary)).status, 'PASS');
+  for (const seed of ['-9223372036854775808', '9223372036854775807']) {
+    const dweller = lightManifest(); dweller.lights[LIGHT_ID].dweller = true;
+    dweller.lights[LIGHT_ID].salvageSeed = seed;
+    assert.equal(diffLights(dweller, structuredClone(dweller)).status, 'PASS');
+  }
+  const host = lightManifest(); host.lights[LIGHT_ID].dweller = true;
+  host.lights[LIGHT_ID].salvageSeed = '9223372036854775806';
+  const guest = structuredClone(host); guest.lights[LIGHT_ID].salvageSeed = '9223372036854775807';
+  assert.equal(diffLights(host, guest).status, 'FAIL');
+});
+
+test('light membership differences are explicit and empty complete manifests are valid', () => {
+  const host = lightManifest();
+  const empty = { ...host, lights: {}, count: 0, candidateCount: 0 };
+  const result = diffLights(host, empty);
+  assert.equal(result.status, 'FAIL'); assert.equal(result.counts.differing, 1);
+  assert.equal(result.differences[0].path, `$.lights.${LIGHT_ID}`);
+  assert.equal(result.differences[0].missing, 'guest');
+  assert.equal(diffLights(empty, structuredClone(empty)).status, 'PASS');
+});
+
+test('light clock mismatch is INCONCLUSIVE even when fields match or tolerance could hide the clock', () => {
+  const host = lightManifest(); const guest = structuredClone(host); guest.campaignTimestamp++;
+  const result = diffLights(host, guest);
+  assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.equal, false);
+  assert.equal(result.calendarMatched, false); assert.equal(result.counts.differing, 0);
+  guest.lights[LIGHT_ID].remainingDays -= 1;
+  assert.equal(diffLights(host, guest).counts.differing, 1);
+  assert.equal(diffLights(host, guest).status, 'INCONCLUSIVE');
+  host.campaignTimestamp = guest.campaignTimestamp = Number.MAX_SAFE_INTEGER + 1;
+  assert.equal(diffLights(host, guest).status, 'INCONCLUSIVE');
+});
+
+test('ss_diff lights uses the strict manifest and raw-calendar comparator', async (t) => {
+  const host = lightManifest(); const guest = structuredClone(host); guest.lights[LIGHT_ID].engineId = 'guest-light';
+  const hostBridge = new MockBridge(() => ({ ok: true, data: host }));
+  const guestBridge = new MockBridge(() => ({ ok: true, data: guest }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.equal((await ssDiff(bridges, 'lights', { limit: 512 })).status, 'PASS');
+  guest.campaignTimestamp++;
+  assert.equal((await ssDiff(bridges, 'lights')).status, 'INCONCLUSIVE');
+  guest.campaignTimestamp = host.campaignTimestamp; guest.lights[LIGHT_ID].bonusMult++;
+  assert.equal((await ssDiff(bridges, 'lights')).status, 'FAIL');
+  guest.truncated = true;
+  await assert.rejects(() => ssDiff(bridges, 'lights'), /complete untruncated manifest/);
 });
 
 test('encounter diff compares canonical gameplay leaves and bounds precise mismatches', () => {

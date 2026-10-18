@@ -13,6 +13,8 @@ import coop.campaign.CoopBarGenerationSuppressor;
 import coop.campaign.CoopBaseAuthority;
 import coop.campaign.CoopSlipstreamAuthority;
 import coop.campaign.CoopEncounterAuthority;
+import coop.campaign.CoopLightAuthority;
+import coop.campaign.CoopLightWorld;
 import coop.campaign.CoopSlipstreamWorld;
 import coop.campaign.CoopWreckAuthority;
 import coop.ambient.CoopWreckBridge;
@@ -703,6 +705,10 @@ public class CoopNetPump implements EveryFrameScript {
     private CoopSlipstreamAuthority slipstreamAuthority;
     private CoopWreckAuthority wreckAuthority;
     private CoopEncounterAuthority encounterAuthority;
+    private final CoopLightWorld lightWorld;
+    private java.util.function.Predicate<String> lightClaimAvailable;
+    private String lightBridgeSessionId;
+    private CoopLightAuthority lightAuthority;
     /**
      * Session-scoped, not link-scoped: true from the first connect of a co-op session until that
      * session is really over, <em>through</em> a reconnect grace window. See
@@ -715,6 +721,7 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean slipstreamReplicationStreaming;
     private boolean wreckReplicationStreaming;
     private boolean encounterReplicationStreaming;
+    private boolean lightReplicationStreaming;
     private boolean barSuppressionArmed;
     private String lastNpcDebug;
     /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
@@ -749,6 +756,12 @@ public class CoopNetPump implements EveryFrameScript {
     /** Phase 17: watches the local player fleet for the vanilla wipe respawn's object swap. */
     private final CoopRespawnNotifier respawnNotifier = new CoopRespawnNotifier();
     private String localInteractionEntityId;
+    /** Native light dialogs wait for a claim before opening; ordinary dialogs remain optimistic. */
+    private String lightPreclaimEntityId;
+    private String lightPreclaimToken;
+    private String localLightInteractionToken;
+    private long lightPreclaimTouchedAt;
+    private long lightPreclaimNextSendAt;
     private String lastBlockedEntityName;
     /** Phase 30 bridge lever: a guest-side screen-level pause intent asserted by the agent bridge. */
     private boolean bridgePauseIntent;
@@ -972,6 +985,13 @@ public class CoopNetPump implements EveryFrameScript {
         this.slipstreamAuthority = new CoopSlipstreamAuthority(service, sessionState, clockMillis);
         this.wreckAuthority = new CoopWreckAuthority(service, sessionState, clockMillis);
         this.encounterAuthority = new CoopEncounterAuthority(service, sessionState, clockMillis);
+        this.lightWorld = new CoopLightWorld();
+        this.lightWorld.setDwellerClaimPolicy((lightId, actorId) -> {
+            String holder = interactionGate.holderOf(lightId);
+            return holder == null || holder.equals(actorId);
+        });
+        this.lightClaimAvailable = lightWorld::isAvailable;
+        this.lightAuthority = new CoopLightAuthority(service, sessionState, clockMillis, lightWorld);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
         this.battleResultReconciler = new CoopBattleResultReconciler(
@@ -3492,6 +3512,7 @@ public class CoopNetPump implements EveryFrameScript {
         syncEncounterReplication();
         if (syncSlipstreamReplication()) syncNpcReplication();
         syncWreckReplication();
+        syncLightReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();
         t = profiler.split(SECTION_NPC_THREAT_WATCHER, t);
@@ -4553,6 +4574,7 @@ public class CoopNetPump implements EveryFrameScript {
                  ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET,
                  STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE, ENC_SET, FLEET_SNAPSHOT,
                  WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
+                 LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT,
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED,
@@ -4665,6 +4687,7 @@ public class CoopNetPump implements EveryFrameScript {
         slipstreamAuthority.rearmFullBroadcast();
         wreckAuthority.rearmFullBroadcast();
         encounterAuthority.rearmFullBroadcast();
+        lightAuthority.rearmFullBroadcast();
         datagramWatermark.reset();
         datagramRedundancy.reset();
         // Phase 20 M4: the returning peer holds no roster, so this side owes it one before its next
@@ -5280,6 +5303,7 @@ public class CoopNetPump implements EveryFrameScript {
             case STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE -> handleStream(message);
             case WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK -> handleWreck(message);
             case ENC_SET -> handleEncounterSet(message);
+            case LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT -> handleLight(message);
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
@@ -8035,6 +8059,72 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    private void syncLightReplication() {
+        boolean active = shouldStreamFleet();
+        if (active && !lightReplicationStreaming) {
+            lightAuthority.reset();
+            lightReplicationStreaming = true;
+        } else if (!active && lightReplicationStreaming && !reconnect.active()) {
+            lightReplicationStreaming = false;
+        }
+        CoopConnectionRole role = service.role();
+        try {
+            installLightBridge();
+            if (active && role == CoopConnectionRole.HOST) lightAuthority.tickHost();
+            else if (active && role == CoopConnectionRole.GUEST) lightAuthority.tickGuest();
+            else if (role == CoopConnectionRole.GUEST) lightAuthority.observeGuest();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync abyssal lights", ex);
+        }
+    }
+
+    private void handleLight(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()
+                || !Objects.equals(sessionState.sessionId(), message.sessionId())) return;
+        boolean request = message.type() == CoopMessages.Type.LIGHT_REQUEST;
+        if (request ? service.role() != CoopConnectionRole.HOST
+                : service.role() != CoopConnectionRole.GUEST) return;
+        try {
+            installLightBridge();
+            // Inbound dispatch runs before lifecycle sync, including the first manifest's frame.
+            if (shouldStreamFleet() && !lightReplicationStreaming) {
+                lightAuthority.reset();
+                lightReplicationStreaming = true;
+            }
+            switch (message.type()) {
+                case LIGHT_SET -> lightAuthority.applySet(CoopMessages.requiredPayloadString(message, "lights"));
+                case LIGHT_REQUEST -> lightAuthority.applyRequest(
+                        CoopMessages.requiredPayloadString(message, "request"), sessionState.remotePlayerId());
+                case LIGHT_RESULT -> lightAuthority.applyResult(CoopMessages.requiredPayloadString(message, "result"));
+                default -> throw new IllegalArgumentException("Not a light message: " + message.type());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply " + message.type(), ex);
+        }
+    }
+
+    private void installLightBridge() {
+        CoopConnectionRole role = service.role();
+        String actor = sessionState.localPlayerId();
+        String sessionId = sessionState.sessionId();
+        if ((shouldStreamFleet() || reconnect.active()) && role != CoopConnectionRole.NONE
+                && actor != null && !actor.isBlank() && sessionId != null) {
+            if (!Objects.equals(lightBridgeSessionId, sessionId)) {
+                lightWorld.resetBridge();
+                lightBridgeSessionId = sessionId;
+            }
+            lightWorld.installBridge(role == CoopConnectionRole.GUEST, actor, this::allowDwellerLightDialog);
+        } else {
+            // A configured but unjoined Guest has no actor yet. Retain the native safety guard
+            // without installing a callback that could grant on behalf of a previous session.
+            lightWorld.resetBridge();
+            lightBridgeSessionId = null;
+            if (role != CoopConnectionRole.NONE) {
+                coop.ambient.CoopLightBridge.setGuestMode(role == CoopConnectionRole.GUEST);
+            }
+        }
+    }
+
     private void tickSlipstreamFadeControl() {
         CoopConnectionRole role = service.role();
         if (!isGameplaySessionActive() && !reconnect.active()) {
@@ -8274,11 +8364,29 @@ public class CoopNetPump implements EveryFrameScript {
         String entityId = payload.requiredString("entityId");
         String entityName = payload.requiredString("entityName");
         String playerId = payload.requiredString("playerId");
+        String lightClaimToken = CoopMessages.interactionLightClaimToken(message);
+        if (coop.ambient.CoopLightBridge.isCanonicalId(entityId) && lightClaimToken == null) {
+            CoopMessages.Message reject = CoopMessages.interactionReject(sessionState.sessionId(),
+                    service.nextSeq(), clockMillis.getAsLong(), entityId, "light_claim_token_required");
+            service.sendTo(message.senderId(), reject);
+            log("outbound", reject);
+            return;
+        }
+        if (coop.ambient.CoopLightBridge.isCanonicalId(entityId)
+                && interactionGate.holderOf(entityId) == null && !lightClaimAvailable.test(entityId)) {
+            // A Guest may still see the old native light until the next manifest. Existing owners
+            // retain their encounter through native consumption; a fresh dialog cannot claim it.
+            CoopMessages.Message reject = CoopMessages.interactionReject(sessionState.sessionId(),
+                    service.nextSeq(), clockMillis.getAsLong(), entityId, "light_unavailable", lightClaimToken);
+            service.sendTo(message.senderId(), reject);
+            log("outbound", reject);
+            return;
+        }
         CoopInteractionGate.ClaimResult result = interactionGate.arbitrate(entityId, playerId, entityName);
         if (result.accepted()) {
             CoopMessages.Message accept = CoopMessages.interactionAccept(
                     sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
-                    entityId, playerId, entityName, result.hostSeq());
+                    entityId, playerId, entityName, result.hostSeq(), lightClaimToken);
             service.sendTo(message.senderId(), accept);
             log("outbound", accept);
             CoopLog.info(CoopNetPump.class, "Coop interaction claim accepted entityId=" + entityId
@@ -8286,7 +8394,7 @@ public class CoopNetPump implements EveryFrameScript {
         } else {
             CoopMessages.Message reject = CoopMessages.interactionReject(
                     sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
-                    entityId, result.rejectReason());
+                    entityId, result.rejectReason(), lightClaimToken);
             service.sendTo(message.senderId(), reject);
             log("outbound", reject);
             CoopLog.info(CoopNetPump.class, "Coop interaction claim rejected entityId=" + entityId
@@ -8306,6 +8414,13 @@ public class CoopNetPump implements EveryFrameScript {
                 payload.requiredString("playerId"),
                 payload.requiredString("entityName"),
                 payload.requiredLong("hostSeq"));
+        if (coop.ambient.CoopLightBridge.isCanonicalId(claim.entityId())
+                && Objects.equals(claim.playerId(), sessionState.localPlayerId())
+                && !matchesLightClaimToken(claim.entityId(), CoopMessages.interactionLightClaimToken(message))) {
+            // A cancelled generation may answer after its RELEASE, or after a new claim for the
+            // same light. Releasing here would also release the newer claim on Host.
+            return;
+        }
         interactionGate.applyAccepted(claim);
         // The host has ruled on this entity, so the wait is over whichever way it went. Nothing is
         // posted for an answer that arrives late: the accept simply leaves the dialog where it is.
@@ -8334,6 +8449,10 @@ public class CoopNetPump implements EveryFrameScript {
         CoopMessages.Payload payload = CoopMessages.payload(message);
         String entityId = payload.requiredString("entityId");
         String reason = payload.requiredString("reason");
+        if (coop.ambient.CoopLightBridge.isCanonicalId(entityId)
+                && !matchesLightClaimToken(entityId, CoopMessages.interactionLightClaimToken(message))) {
+            return;
+        }
         claimWaitTracker.onAnswered(entityId);
         if (rejectTracker.onRejected(entityId)) {
             CoopLog.warn(CoopNetPump.class, "Coop interaction rejected entityId=" + entityId + " "
@@ -8423,6 +8542,66 @@ public class CoopNetPump implements EveryFrameScript {
         return p95 == null ? 0 : p95;
     }
 
+    /** A native Dweller ambush must own its shared light before a dialog can start combat. */
+    boolean allowDwellerLightDialog(SectorEntityToken entity) {
+        if (!shouldStreamFleet() || entity == null || !entity.isAlive()
+                || entity.hasTag(com.fs.starfarer.api.impl.campaign.ids.Tags.FADING_OUT_AND_EXPIRING)) return false;
+        String id = CoopLightWorld.ownedId(entity);
+        String actor = sessionState.localPlayerId();
+        if (id == null || actor == null || interactionGate.isBlockedFor(actor)) return false;
+        if (id.equals(localInteractionEntityId)) {
+            // Manually opened native dialogs already sent their own token. Do not replace that
+            // generation with an automatic preclaim while its answer is still in flight.
+            return actor.equals(interactionGate.holderOf(id))
+                    && (service.role() == CoopConnectionRole.HOST || localLightInteractionToken != null);
+        }
+        long now = clockMillis.getAsLong();
+        if (lightPreclaimEntityId != null && !id.equals(lightPreclaimEntityId)) releaseLightPreclaim();
+        if (lightPreclaimEntityId == null) {
+            lightPreclaimEntityId = id;
+            lightPreclaimToken = UUID.randomUUID().toString();
+            lightPreclaimNextSendAt = 0L;
+        }
+        lightPreclaimTouchedAt = now;
+        if (actor.equals(interactionGate.holderOf(id))) return true;
+        String name = entity.getName();
+        if (name == null || name.isBlank()) name = "Abyssal Light";
+        if (service.role() == CoopConnectionRole.HOST) {
+            CoopInteractionGate.ClaimResult result = interactionGate.arbitrate(id, actor, name);
+            if (!result.accepted()) return false;
+            CoopMessages.Message accept = CoopMessages.interactionAccept(sessionState.sessionId(),
+                    service.nextSeq(), now, id, actor, name, result.hostSeq());
+            service.send(accept);
+            log("outbound", accept);
+            return true;
+        }
+        if (service.role() == CoopConnectionRole.GUEST && now >= lightPreclaimNextSendAt) {
+            CoopMessages.Message claim = CoopMessages.interactionClaim(sessionState.sessionId(),
+                    service.nextSeq(), now, id, name, actor, lightPreclaimToken);
+            service.send(claim);
+            log("outbound", claim);
+            claimWaitTracker.onClaimSent(id, name, now);
+            lightPreclaimNextSendAt = now + 1_000L;
+        }
+        return false;
+    }
+
+    private void releaseLightPreclaim() {
+        if (lightPreclaimEntityId == null) return;
+        sendInteractionRelease(lightPreclaimEntityId);
+        interactionGate.release(lightPreclaimEntityId, sessionState.localPlayerId());
+        lightPreclaimEntityId = null;
+        lightPreclaimToken = null;
+        lightPreclaimNextSendAt = 0L;
+    }
+
+    private boolean matchesLightClaimToken(String entityId, String token) {
+        return token != null && (Objects.equals(entityId, lightPreclaimEntityId)
+                && token.equals(lightPreclaimToken)
+                || Objects.equals(entityId, localInteractionEntityId)
+                && token.equals(localLightInteractionToken));
+    }
+
     private void detectLocalInteraction(SectorAPI sector) {
         String currentEntityId = null;
         String currentEntityName = null;
@@ -8437,7 +8616,9 @@ public class CoopNetPump implements EveryFrameScript {
             SectorEntityToken target = dialog.getInteractionTarget();
             if (target != null) {
                 String sharedWreckId = coop.campaign.CoopWreckWorld.ownedId(target);
-                currentEntityId = sharedWreckId == null ? coop.fleet.CoopEntityIds.keyOf(target) : sharedWreckId;
+                String sharedLightId = CoopLightWorld.ownedId(target);
+                currentEntityId = sharedLightId != null ? sharedLightId
+                        : sharedWreckId == null ? coop.fleet.CoopEntityIds.keyOf(target) : sharedWreckId;
                 currentEntityName = target.getName();
             }
         }
@@ -8460,6 +8641,26 @@ public class CoopNetPump implements EveryFrameScript {
             return;
         }
 
+        if (lightPreclaimEntityId != null) {
+            if (lightPreclaimEntityId.equals(currentEntityId)) {
+                // The native callback already obtained this claim before opening the dialog.
+                if (localInteractionEntityId != null && !localInteractionEntityId.equals(currentEntityId)) {
+                    sendInteractionRelease(localInteractionEntityId);
+                    interactionGate.release(localInteractionEntityId, sessionState.localPlayerId());
+                }
+                localInteractionEntityId = currentEntityId;
+                localLightInteractionToken = lightPreclaimToken;
+                lightPreclaimEntityId = null;
+                lightPreclaimToken = null;
+                lightPreclaimNextSendAt = 0L;
+            } else if (currentEntityId == null && clockMillis.getAsLong() >= lightPreclaimTouchedAt
+                    && clockMillis.getAsLong() - lightPreclaimTouchedAt <= 2_000L) {
+                return;
+            } else {
+                releaseLightPreclaim();
+            }
+        }
+
         if (Objects.equals(currentEntityId, localInteractionEntityId)) {
             return;
         }
@@ -8472,6 +8673,7 @@ public class CoopNetPump implements EveryFrameScript {
                 interactionGate.release(localInteractionEntityId, sessionState.localPlayerId());
             }
             localInteractionEntityId = null;
+            localLightInteractionToken = null;
         }
 
         // A new local interaction just opened: host arbitrates locally and broadcasts the accept;
@@ -8599,9 +8801,11 @@ public class CoopNetPump implements EveryFrameScript {
                         + "; closing the local dialog");
             }
         } else {
+            localLightInteractionToken = coop.ambient.CoopLightBridge.isCanonicalId(entityId)
+                    ? UUID.randomUUID().toString() : null;
             CoopMessages.Message claim = CoopMessages.interactionClaim(
                     sessionState.sessionId(), service.nextSeq(), clockMillis.getAsLong(),
-                    entityId, entityName, localPlayerId);
+                    entityId, entityName, localPlayerId, localLightInteractionToken);
             service.send(claim);
             log("outbound", claim);
             // Phase 20 M6: start the round-trip clock. The dialog is already open (optimistic model);
@@ -8653,12 +8857,17 @@ public class CoopNetPump implements EveryFrameScript {
         claimWaitTracker.clear();
         boolean hadDelayedClaims = !delayedInteractionClaims.isEmpty();
         delayedInteractionClaims.clear();
+        boolean hadLightPreclaim = lightPreclaimEntityId != null;
+        lightPreclaimEntityId = null;
+        lightPreclaimToken = null;
+        localLightInteractionToken = null;
+        lightPreclaimNextSendAt = 0L;
         // The gate itself is asked, not just the four side flags. A remote claim accepted inside
         // this frame's inbound drain is recorded in the gate and in none of them (applyLocalBlocking
         // has not run for it yet), so a link that dies on that same frame used to skip the clear and
         // carry the claim into the next session, where it blocked every local interaction.
         if (localInteractionEntityId == null && lastBlockedEntityName == null
-                && !hadRejection && !hadDelayedClaims && interactionGate.isEmpty()) {
+                && !hadRejection && !hadDelayedClaims && !hadLightPreclaim && interactionGate.isEmpty()) {
             return;
         }
         localInteractionEntityId = null;
@@ -9470,6 +9679,18 @@ public class CoopNetPump implements EveryFrameScript {
 
     void setEncounterAuthorityForTest(CoopEncounterAuthority authority) {
         encounterAuthority = java.util.Objects.requireNonNull(authority, "authority");
+    }
+
+    void setLightAuthorityForTest(CoopLightAuthority authority) {
+        lightAuthority = Objects.requireNonNull(authority, "authority");
+    }
+
+    void setLightClaimAvailabilityForTest(java.util.function.Predicate<String> available) {
+        lightClaimAvailable = Objects.requireNonNull(available, "available");
+    }
+
+    boolean lightReplicationStreamingForTest() {
+        return lightReplicationStreaming;
     }
 
     boolean wreckReplicationStreamingForTest() {

@@ -2,9 +2,12 @@ package coop.fleet;
 
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import coop.ambient.CoopLightBridge;
 import coop.fleet.CoopNpcFleetSuppressor.BaseIntelCleanup;
 import coop.fleet.CoopNpcFleetSuppressor.ManagerHandle;
 import coop.net.CoopConnectionRole;
@@ -490,6 +493,37 @@ class CoopNpcFleetSuppressorTest {
     }
 
     @Test
+    void nativeLightEncounterFleetSurvivesTheActualGuestSweepWithoutBecomingAnNpcMirror() {
+        SweepSector sector = new SweepSector();
+        FakeSweptFleet dweller = new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "light:01234567-89ab-4def-8123-0123456789ab"), Factions.DWELLER);
+        sector.corvus.fleets.add(dweller);
+
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 1_000L);
+
+        assertEquals(1, sector.corvus.removed.size(), "the ordinary local NPC is still removed");
+        assertEquals(List.of(dweller), sector.corvus.fleets);
+        assertFalse(dweller.memory.containsKey(CoopNpcFleetSuppressor.NPC_MIRROR_TAG));
+    }
+
+    @Test
+    void malformedOrUnrelatedLightFleetMarkersDoNotBypassTheGuestSweep() {
+        SweepSector sector = new SweepSector();
+        sector.corvus.fleets.clear();
+        sector.corvus.fleets.add(new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "light:01234567-89ab-4def-8123-0123456789ab"), Factions.PIRATES));
+        sector.corvus.fleets.add(new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "not-a-light-id"), Factions.DWELLER));
+        sector.corvus.fleets.add(new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                Boolean.TRUE), Factions.DWELLER));
+
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 1_000L);
+
+        assertEquals(3, sector.corvus.removed.size());
+        assertTrue(sector.corvus.fleets.isEmpty());
+    }
+
+    @Test
     void coverageLineReportsBothStatuses() {
         assertTrue(CoopNpcFleetSuppressor.coverageLine("persistent", "PirateBaseManager", true)
                 .contains("SUPPRESSED"));
@@ -595,9 +629,15 @@ class CoopNpcFleetSuppressorTest {
     /** A fleet the sweep either culls or preserves, depending on its coop memory tag. */
     private static final class FakeSweptFleet {
         private final Map<String, Object> memory;
+        private final String factionId;
 
         private FakeSweptFleet(Map<String, Object> memory) {
+            this(memory, Factions.PIRATES);
+        }
+
+        private FakeSweptFleet(Map<String, Object> memory, String factionId) {
             this.memory = new HashMap<>(memory);
+            this.factionId = factionId;
         }
 
         private static FakeSweptFleet plain() {
@@ -617,6 +657,9 @@ class CoopNpcFleetSuppressorTest {
                         case "hashCode" -> System.identityHashCode(this);
                         case "equals" -> proxy == args[0];
                         case "isStationMode" -> Boolean.FALSE;
+                        case "getFaction" -> Proxy.newProxyInstance(
+                                FactionAPI.class.getClassLoader(), new Class<?>[]{FactionAPI.class},
+                                (f, fm, fargs) -> "getId".equals(fm.getName()) ? factionId : null);
                         case "getMemoryWithoutUpdate" -> Proxy.newProxyInstance(
                                 MemoryAPI.class.getClassLoader(),
                                 new Class<?>[]{MemoryAPI.class},
@@ -627,6 +670,7 @@ class CoopNpcFleetSuppressorTest {
                                     case "getBoolean" ->
                                             Boolean.TRUE.equals(memory.get(String.valueOf(margs[0])));
                                     case "contains" -> memory.containsKey(String.valueOf(margs[0]));
+                                    case "get" -> memory.get(String.valueOf(margs[0]));
                                     default -> null;
                                 });
                         default -> null;

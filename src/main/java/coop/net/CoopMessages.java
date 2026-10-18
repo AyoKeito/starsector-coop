@@ -88,6 +88,12 @@ public final class CoopMessages {
         WRECK_CONSUME,
         WRECK_MUTATION,
         WRECK_MUTATION_ACK,
+        /** Complete Host-owned free-standing abyssal light state. */
+        LIGHT_SET,
+        /** Durable Guest light interaction, authenticated by the receiving session. */
+        LIGHT_REQUEST,
+        /** Host first-wins outcome, including the consuming player's reward recipe. */
+        LIGHT_RESULT,
         BATTLE_BEGIN,
         BATTLE_STATUS,
         BATTLE_END,
@@ -411,6 +417,7 @@ public final class CoopMessages {
                  // upsert after that set could recreate terrain the host has already removed.
                  STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE,
                  WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
+                 LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT,
                  PLAYER_REP_SNAPSHOT, MISSION_POOL_SNAPSHOT,
                  MISSION_CLAIM_REQUEST, MISSION_CLAIM_ACCEPT, MISSION_CLAIM_REJECT,
                  MARKET_OPEN, MARKET_SNAPSHOT, COLONY_INCOME, EXPEDITION_WARNING,
@@ -849,26 +856,64 @@ public final class CoopMessages {
 
     public static Message interactionClaim(String sessionId, long seq, long sentAtMillis,
                                            String entityId, String entityName, String playerId) {
+        return interactionClaim(sessionId, seq, sentAtMillis, entityId, entityName, playerId, null);
+    }
+
+    public static Message interactionClaim(String sessionId, long seq, long sentAtMillis,
+                                           String entityId, String entityName, String playerId,
+                                           String lightClaimToken) {
         return new Message(Type.INTERACTION_CLAIM, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
                         + "\"entityName\":\"" + escapeJson(entityName == null ? "" : entityName) + "\","
-                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\""
+                        + lightClaimTokenField(lightClaimToken) + "}");
     }
 
     public static Message interactionAccept(String sessionId, long seq, long sentAtMillis,
                                             String entityId, String playerId, String entityName, long hostSeq) {
+        return interactionAccept(sessionId, seq, sentAtMillis, entityId, playerId, entityName, hostSeq, null);
+    }
+
+    public static Message interactionAccept(String sessionId, long seq, long sentAtMillis,
+                                            String entityId, String playerId, String entityName, long hostSeq,
+                                            String lightClaimToken) {
         return new Message(Type.INTERACTION_ACCEPT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
                         + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
                         + "\"entityName\":\"" + escapeJson(entityName == null ? "" : entityName) + "\","
-                        + "\"hostSeq\":" + hostSeq + "}");
+                        + "\"hostSeq\":" + hostSeq + lightClaimTokenField(lightClaimToken) + "}");
     }
 
     public static Message interactionReject(String sessionId, long seq, long sentAtMillis,
                                             String entityId, String reason) {
+        return interactionReject(sessionId, seq, sentAtMillis, entityId, reason, null);
+    }
+
+    public static Message interactionReject(String sessionId, long seq, long sentAtMillis,
+                                            String entityId, String reason, String lightClaimToken) {
         return new Message(Type.INTERACTION_REJECT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
-                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\""
+                        + lightClaimTokenField(lightClaimToken) + "}");
+    }
+
+    /** Optional correlation for light preclaims; ordinary interaction messages omit it. */
+    public static String interactionLightClaimToken(Message message) {
+        Payload value = payload(message);
+        return value.raw().containsKey("lightClaimToken")
+                ? checkedLightClaimToken(value.requiredString("lightClaimToken")) : null;
+    }
+
+    private static String lightClaimTokenField(String token) {
+        String checked = checkedLightClaimToken(token);
+        return checked == null ? "" : ",\"lightClaimToken\":\"" + escapeJson(checked) + "\"";
+    }
+
+    private static String checkedLightClaimToken(String token) {
+        if (token == null) return null;
+        String checked = requireText(token, "lightClaimToken");
+        if (checked.length() > 128) throw new IllegalArgumentException("lightClaimToken is too long");
+        return checked;
     }
 
     public static Message interactionRelease(String sessionId, long seq, long sentAtMillis,
@@ -1272,6 +1317,22 @@ public final class CoopMessages {
     public static Message wreckMutationAck(String sessionId, long seq, long sentAtMillis, String encoded) {
         return new Message(Type.WRECK_MUTATION_ACK, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"ack\":\"" + escapeJson(requireText(encoded, "ack")) + "\"}");
+    }
+
+    // ---- Phase 26 M3: Host-owned abyssal lights --------------------------------------------------
+    public static Message lightSet(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.LIGHT_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"lights\":\"" + escapeJson(requireText(encoded, "lights")) + "\"}");
+    }
+
+    public static Message lightRequest(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.LIGHT_REQUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"request\":\"" + escapeJson(requireText(encoded, "request")) + "\"}");
+    }
+
+    public static Message lightResult(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.LIGHT_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"result\":\"" + escapeJson(requireText(encoded, "result")) + "\"}");
     }
 
     // ---- Phase 21: lobby / ready-up ---------------------------------------------------------------

@@ -2,7 +2,7 @@
 // Kept free of the MCP SDK so the test suite can drive it against a mock bridge.
 
 import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson } from './diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights } from './diff.js';
 
 /** Read-only verbs. ss_dump and ss_diff accept these. */
 export const QUERY_VERBS = [
@@ -23,7 +23,8 @@ export const QUERY_VERBS = [
   'screen',
   'streams',
   'wrecks',
-  'encounters'
+  'encounters',
+  'lights'
 ];
 
 /**
@@ -54,6 +55,7 @@ export const ACTION_VERBS = [
   'wreckspawn',
   'wreckconsume',
   'encounterspawn',
+  'lightspawn',
   'clockalign'
 ];
 
@@ -155,6 +157,7 @@ export async function ssDiff(bridges, what, args, options = {}) {
     bridges.get('host').send(what, args),
     bridges.get('guest').send(what, args)
   ]);
+  if (what === 'lights') return { what, args: args ?? {}, ...diffLights(host, guest, options) };
   if (what === 'streams' || what === 'encounters') {
     const hostStamp = host.campaignTimestamp;
     const guestStamp = guest.campaignTimestamp;

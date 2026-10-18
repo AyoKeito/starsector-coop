@@ -27,7 +27,7 @@ K:\Starsector\mods\coop
 |-- src/main/java/coop/   the mod: 22 packages + CoopModPlugin
 |-- src/launcher/java/    coop.launcher, the FlatLaf desktop launcher (no Starsector API on its classpath)
 |-- src/test/java/coop/   JUnit 5 suite, mirrors the main packages + coop/launcher + coop/testing
-|-- forks/                classpath-shadow copies of 12 vanilla classes -> coop-forks.jar
+|-- forks/                classpath-shadow copies of 17 vanilla classes -> coop-forks.jar
 |-- data/                 rules.csv, campaign/abilities.csv, config/coop_options.json,
 |                         config/settings.json, version/
 |-- docs/                 design, plan ledger, generated roadmap, player guides
@@ -114,6 +114,7 @@ service.beginFrame() -> CoopDebug.pollFrame / CoopWiretap.pollFrame -> streamClo
   -> tickRespawnNotifier -> maybeSendGuestSnapshot -> tickSaveCheckpoint
   -> tickSessionLeaveWatchdog -> tickNetFault
   -> syncEncounterReplication -> syncSlipstreamReplication -> syncNpcReplication -> syncWreckReplication
+  -> syncLightReplication
   -> tickNpcThreatWatcher -> syncBaseReplication -> syncBarGeneration
   -> syncInteractionGate -> syncCampaignReplicator -> campaignReplicator.tick*(...)
   -> maybeSendPing -> tickLinkSupervision -> service.flushOutbound -> tickTerminalStop
@@ -149,7 +150,7 @@ toggle too).
   and the Phase 20.4 abuse limits.
 - `CoopNetPump` - the `EveryFrameScript` that drives everything: ~9.5k lines, the frame order above.
 - `CoopNetPumpInstaller` - installs it as a transient script.
-- `CoopMessages` - the `Type` enum (84 constants), the envelope codec, datagram header parse,
+- `CoopMessages` - the `Type` enum (87 constants), the envelope codec, datagram header parse,
   `isReliableOneShot`, `wireToken`, `MAX_DATAGRAM_CHUNKS`.
 - `CoopPeerLink` - everything known about one peer: TCP channel, half-written frame, inbound
   assembly, validated send address, watermarks.
@@ -280,8 +281,9 @@ Owns: every wire type, since the enum lives here.
   Deployed `e7c28df` passes native bounded-convergence verification: three complete 5,024-value
   comparisons at a common frozen epoch remain equal over 47.232 seconds, with zero lookup failures
   and empty queues. Final native saves/backups pass audit within stated limits. Phase 26 remains
-  PARTIAL: Task 0, M1, shared wrecks and M2 are complete; M3 lights, M4 storms and M5 ghosts/Leviathan
-  trails are unbuilt milestones. Clean build: 4,208 Java pass, one existing router skip, zero
+  PARTIAL: Task 0, M1, shared wrecks and M2 are complete; M3 lights are implemented with native
+  acceptance pending. M4 storms and M5 ghosts/Leviathan trails remain unbuilt. The M1/M2 clean build
+  passed 4,208 Java tests with one existing router skip and zero
   failures/errors; earlier 155 bridge/offline tests unchanged, not rerun. Guest-proximity abyssal
   triggering also remains unbuilt.
   Co-op-only pause remains:
@@ -291,6 +293,37 @@ Owns: every wire type, since the enum lives here.
   in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md) and `tmp_ff_analysis/p26/2026-10-17/m2-live`.
   NPC mirror checks cover identity/roster, location and motion; world orbital body/focus keys are
   checked separately because native NPC assignments and target ids are not replayed.
+- `CoopLightAuthority` / `CoopLightRecord` / `CoopLightCodec` / `CoopLightWorld` - M3 free-standing
+  native hyperspace lights, implemented with native acceptance pending. The Host captures resolved
+  params and positions directly, retaining all native spawn shapes and their existing global RNG
+  draws. `LIGHT_SET` carries the complete set on static changes and a five-second lifetime refresh;
+  null scans never become an empty manifest. All records validate before upserts; removals and
+  legacy cleanup wait for complete application, with native failures retried. Manifests are bounded
+  to 384 KiB UTF-8 and the escaped 1 MiB transport frame.
+  `LIGHT_REQUEST` binds to the authenticated remote actor. Host commits the first valid pulse,
+  sensor burst or Dweller consumption and returns resolved actor-specific bonus/points through
+  `LIGHT_RESULT`. Guest pending requests retry every two seconds. Sector-memory `$coopLightState`
+  is primitive String data containing pending requests, Host results, consumed identities, applied
+  rewards and explicit uncertain-grant markers; callbacks and parsed records remain transient.
+  `coop.ambient.CoopLightBridge`, the pinned `AbyssalLightEntityPlugin` fork and the narrow
+  `DwellerCMD` fork hold Guest expiry, suppress mirror/NPC side effects and use the native local
+  reward helper. Automatic Dweller dialogs wait for a nonce-correlated interaction claim before
+  opening. Manual light dialogs use the same token protocol; `CoopLightDeferredEngagement` defers
+  native Dweller fleet creation until acceptance, cancelling on dialog close, light expiry or
+  session-adapter change. Its scripts and callback map are transient. Native local
+  Dweller combat stays on the existing battle bridge; marked temporary encounter fleets are
+  excluded from NPC publishing and exempted from Guest spawner cleanup, then removed on leave.
+  Leaving the initial small dialog preserves the light; entering combat consumes it.
+  Bridge `lights` is read-only, `lightspawn` is a Host-only native fixture, and `diffLights` checks
+  complete matching-clock tables. Native acceptance remains open. Local visual phase/flicker/sounds
+  are cosmetic; a non-consuming Guest sees generic fade when Host's pulse removes a light.
+  A new canonical-light claim is rejected when the light has expired or been consumed; an existing
+  encounter owner retains its claim through native light consumption. A deferred action without a
+  live adapter leaves an escape option instead of creating a fleet.
+  Host rejects a new DWELLER consumption if another actor holds the shared interaction; already
+  committed results replay their original decision without running that arbitration again.
+  The final 2026-10-18 M3 clean build passes 4,324 Java tests with one existing router skip, zero
+  failures/errors and 272 suites; focused Java passes 686, and Node bridge/offline passes 77.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
@@ -388,8 +421,9 @@ Owns: every wire type, since the enum lives here.
 
 ## Wire Protocol
 
-Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **84 constants**. The envelope is flat JSON, six fields, no arrays (the parser has no array support - multi-element
-payloads use the `CoopDelimited` unit-separator encoding instead):
+Types are declared in `coop/net/CoopMessages.java` as `CoopMessages.Type`: **87 constants**. The
+envelope is flat JSON with six fields. Structured payloads travel as primitive text using their
+record codec, including delimiter or length-prefixed formats:
 
 ```text
 {"type","sessionId","seq","sentAtMillis","payloadJson","senderId"}

@@ -7,6 +7,7 @@ import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
 import coop.campaign.CoopSlipstreamWorld;
 import coop.ambient.CoopWreckBridge;
+import coop.ambient.CoopLightBridge;
 import coop.ambient.CoopEncounterReplayBridge;
 import coop.campaign.CoopAbyssalDespawner;
 import coop.fleet.CoopFullFidelitySystemDriver;
@@ -526,6 +527,8 @@ public class CoopModPlugin extends BaseModPlugin {
         CoopStoryChainGate.publish(Global.getSector());
         CoopWreckBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
                 .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
+        CoopLightBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
+                .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
     }
 
     /**
@@ -543,6 +546,7 @@ public class CoopModPlugin extends BaseModPlugin {
     static void clearPreviousGameStatics() {
         CoopSlipstreamWorld.releaseControlled();
         CoopWreckBridge.clear();
+        CoopLightBridge.clear();
         CoopEncounterReplayBridge.clear();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();

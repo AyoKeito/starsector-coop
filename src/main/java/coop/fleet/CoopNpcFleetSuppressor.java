@@ -369,6 +369,10 @@ public final class CoopNpcFleetSuppressor {
         if (fleet == null) {
             return false;
         }
+        // Native lights stage a local battle fleet without creating a shared campaign NPC.
+        if (coop.ambient.CoopLightBridge.isEncounterFleet(fleet)) {
+            return false;
+        }
         MemoryAPI memory = fleet.getMemoryWithoutUpdate();
         boolean playerMirror = memory != null && memory.getBoolean(PLAYER_MIRROR_TAG);
         boolean npcMirror = memory != null && memory.contains(NPC_MIRROR_TAG);

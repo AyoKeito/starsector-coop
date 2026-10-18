@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. Task 0, M1, shared wrecks and M2 are complete; M3 lights, M4 storms and M5 sensor ghosts/Leviathan trails remain unbuilt milestones. Guest-proximity abyssal triggering also remains unbuilt"
+      "note": "P26 is partial. Task 0, M1, shared wrecks and M2 are complete. M3 lights are implemented with native acceptance pending; M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "The V1 queue is complete. P26 remains in progress with M3-M5 unbuilt; Guest-proximity abyssal triggering also remains unbuilt. P22, P25 and P27 remain queued"
+      "note": "The V1 queue is complete. Next P26 gate: native M3 light acceptance. M4/M5 and Guest-proximity abyssal triggering remain unbuilt; P22, P25 and P27 remain queued"
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P33 is built. P26 is partial: M1/M2 are complete, while M3 lights, M4 storms and M5 ghosts/Leviathan trails remain unbuilt milestones. Guest-proximity abyssal triggering also remains unbuilt. P22, P25 and P27 remain queued"
+      "note": "P33 is built. P26 is partial: M1/M2 are complete, M3 lights await native acceptance, and M4 storms/M5 ghosts and trails remain unbuilt. Guest-proximity abyssal triggering also remains unbuilt. P22, P25 and P27 remain queued"
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. Task 0, M1, shared wrecks and M2 are complete and native-verified on e7c28df. M3 lights, M4 storms and M5 ghosts/Leviathan trails remain unbuilt milestones. Three strict M2 native matches: 5,024 values, zero differences/lookup failures over 47.232 seconds. Co-op-only pause stays; Guest-proximity abyssal triggering also remains unbuilt.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 remains PARTIAL:</b> Task 0, M1 slipstreams, shared wrecks and M2 abyssal encounters are complete. <b>Remaining milestones:</b> M3 lights, M4 storms and M5 ghosts/Leviathan trails are unbuilt; Guest-proximity abyssal triggering also remains unbuilt. Deployed <code>e7c28df</code> passes M2 native type/hint/reward reload, recovery/survey, separated Threat movement, original-link cleanup and the strict evolved-world gate. Three complete 5,024-value comparisons at one frozen raw timestamp remain equal over 47.232 seconds, with zero lookup failures and empty queues. Final native checkpoint/backups 295 pass within stated limits; earlier FAIL/INCONCLUSIVE artifacts remain unchanged. Clean build: 4,208 Java pass, one existing router skip, zero failures/errors; earlier 155 bridge/offline tests unchanged and not rerun for the final Java-only fix. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 PARTIAL. Task 0, M1, shared wrecks and M2 are complete. M3 native lights are implemented as of 2026-10-18, with NATIVE ACCEPTANCE PENDING. M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt. Co-op-only pause stays.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> Task 0, M1 and M2 are complete, including shared wrecks. <b>M3 lights are implemented; native acceptance is pending.</b> Final clean M3 build: 4,324 Java pass, one existing router skip, zero failures/errors, 272 suites; focused Java 686 pass, Node bridge/offline 77 pass. The open native gate covers all spawn shapes, both actors' pulse/burst rewards, races, expiry, legacy cleanup, reconnect/reload and native Dweller leave/battle behavior. M4/M5 and Guest-proximity abyssal triggering remain unbuilt. Earlier M1/M2 native passes on <code>e7c28df</code> and checkpoint 295 remain scoped to that build; they do not verify M3. Co-op-only pause stays.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
-      "head": "P26 is PARTIAL: M3, M4 and M5 remain unbuilt",
-      "state": "Task 0, M1, shared wrecks and M2 complete and native-verified on e7c28df; the whole phase is not complete",
-      "body": "M3 lights, M4 storms and M5 cosmetic sensor ghosts/Leviathan trails remain planned, unbuilt P26 milestones. Guest-proximity abyssal EPEC triggering also remains unbuilt. The completed M1/M2 build passes three strict 5,024-value native comparisons with zero differences/lookup failures over 47.232 seconds at a shared frozen epoch. Final checkpoint audit 295 is PASS_WITH_LIMITS; historical FAIL/INCONCLUSIVE artifacts remain unchanged. This verifies bounded repair convergence. Co-op-only pause stays; Host-solo acceptance was removed by user choice, not passed by a test."
+      "head": "M3 lights: native acceptance pending; P26 stays PARTIAL",
+      "state": "Task 0, M1, shared wrecks and M2 complete; M3 implemented on 2026-10-18; M4/M5 and Guest-proximity abyssal triggering unbuilt",
+      "body": "M3 captures resolved native light params and positions without changing EPEC RNG or spawn shapes. Host owns first-wins pulse/burst/Dweller consumption; rewards stay with the actor and native Dweller dialogs obtain nonce-correlated shared claims. Native acceptance remains open for branch fidelity, both actors' rewards/races, lifetime, legacy cleanup, reconnect/reload and small-dialog/battle behavior. Visual phase/flicker/sounds stay local; a non-consuming Guest uses a generic fade for Host pulse removal. Earlier M1/M2 native passes do not verify M3. Co-op-only pause stays; Host-solo acceptance was removed, not passed."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "P26 is PARTIAL. Task 0, M1 slipstreams, shared wrecks and M2 abyssal encounters are complete; M3 lights, M4 storms and M5 ghosts/Leviathan trails remain unbuilt milestones. Deployed e7c28df passes M2 native reload, actor-owned outcomes, Threat movement, original-link cleanup and three strict 5,024-value matches over 47.232 seconds. Final native backups pass within audit limits. Guest-proximity abyssal triggering also remains unbuilt; co-op-only pause stays.",
+      "summary": "P26 remains PARTIAL. Task 0, M1 slipstreams, shared wrecks and M2 abyssal encounters are complete. M3 free-standing lights are implemented with native acceptance pending. M4 storms, M5 ghosts/Leviathan trails and Guest-proximity abyssal triggering remain unbuilt. Co-op-only pause stays.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -913,6 +913,10 @@
         "WRECK_SET/ADD/REMOVE/CONSUME/MUTATION/MUTATION_ACK + canonical wreck identities, revisions and durable tombstones",
         "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
         "CoopEncounterAuthority / Record / Codec / World + transient CoopEncounterReplayBridge",
+        "CoopLightAuthority / Record / Codec / World + transient CoopLightBridge and narrow native light/DwellerCMD forks",
+        "LIGHT_SET/REQUEST/RESULT: resolved native shapes/params, Host first-wins actor rewards, durable pending/results/tombstones and uncertain-grant markers",
+        "nonce-correlated automatic/manual light claims, transient deferred Dweller fleet creation and validated local temporary encounter fleets on the existing battle bridge",
+        "read-only lights, Host-only native lightspawn fixture and strict same-clock diffLights",
         "CoopEncounterOrbitSetCodec for bounded current offscreen orbit batches retained through replay retries",
         "CoopEncounterOrbitSweep for at most one additional managed-system orbit repair per existing one-second tick, with transient cursor and payload/frame limits",
         "CoopAbyssalDespawner with saved Guest visit/inside history",
@@ -926,12 +930,12 @@
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "M3 free-standing abyssal lights: remaining unbuilt P26 milestone",
+        "M3 free-standing abyssal lights: implemented, native acceptance pending for branch fidelity, actor rewards/races, expiry, legacy cleanup, reconnect/reload and Dweller leave/battle/claim behavior",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
         "M4 hyperspace storm replication: remaining unbuilt P26 milestone; existing design retained",
         "M5 guest sensor ghosts and Leviathan trails: remaining unbuilt P26 milestone"
       ],
-      "note": "P26 remains PARTIAL. Task 0, M1, shared wrecks and M2 are complete; M3 lights, M4 storms and M5 ghosts/Leviathan trails remain unbuilt milestones. Deployed e7c28df converges through the bounded managed orbit sweep and passes three native exact-time comparisons of all 5,024 values over 47.232 seconds, with zero lookup failures and empty queues. Native type/hint/reward reload, recovery/survey, Threat movement and original-link cleanup also pass. Audit 295 verifies final full native backups within stated limits. Clean build: 4,208 Java pass, one existing skip, zero failures/errors; prior 155 bridge/offline tests unchanged, not rerun. Historical verdicts remain unchanged. Co-op-only pause stays; Host-solo acceptance removed, saved inside hold retained. Guest-proximity abyssal triggering also remains unbuilt."
+      "note": "P26 remains PARTIAL as of 2026-10-18. M1/M2 and shared wrecks are complete; M3 lights are implemented but native acceptance has not run. Final clean M3 build: 4,324 Java pass, one existing router skip, zero failures/errors, 272 suites; focused Java 686 pass and Node bridge/offline 77 pass. Native light EPECs retain NORMAL/PAIR/CLUSTER/LARGE shapes and existing RNG draws. Complete manifests, actor-resolved first-wins rewards, durable String state and nonce-correlated automatic/manual Dweller actions are implemented. Local phase/flicker/sounds and non-consumer Host-pulse fade remain cosmetic differences. M4/M5 and Guest-proximity abyssal triggering remain unbuilt. Prior M1/M2 evidence on e7c28df and audit 295 retain their limits; historical verdicts stay unchanged. Co-op-only pause and the saved Guest-inside hold remain; Host-solo acceptance was removed, not passed."
     },
     {
       "id": "27",

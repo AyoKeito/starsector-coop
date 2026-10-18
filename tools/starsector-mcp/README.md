@@ -117,6 +117,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `hirable` | `{limit?, maxLy?}` | markets holding officers or administrators for hire, nearest the local player fleet first; the game only rolls officers when a player opens a market screen, so `candidateCount: 0` on a fresh campaign means dock at a big hub first |
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 | `streams` | none | campaign timestamp, stream ids/kinds, params, segment geometry/faders, native fade state and effective brightness sampled every 1,000 units |
+| `lights` | `{limit?:1..512}` | read-only native hyperspace lights: canonical ids, position, complete native params, lifetime, dweller flag, lossless salvage seed, despawn state, truncation counts and local `actorBonus`; never adopts lights or creates reward scripts |
 
 ```
 ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
@@ -208,6 +209,10 @@ Two things about `market` that are behaviour, not bugs. On the host it runs the 
 
 ### `ss_diff(what, args?, tolerance?, ignore?)`
 
+`lights` uses a strict comparison: both manifests must be complete, every row must have a valid managed canonical identity, and every native gameplay/recipe field compares exactly. Local `engineId`, actor-local state counts and `actorBonus` are excluded. Matching raw campaign timestamps produce `PASS` or `FAIL`; unequal or unsafe timestamps produce `INCONCLUSIVE`, even when the fields match. `maxDifferences` limits displayed mismatches while `counts.differing` retains the full count. Nonzero tolerance and gameplay ignore keys are refused.
+
+`actorBonus` reports `{present,burnReserve,sensorReserve}` from an existing native `AbyssalLightBonus` script on the local player's fleet. The query scans `fleet.getScripts()` and reads its getters; it never calls the native create-if-missing `get(fleet)` method. Duplicate native bonus scripts are an error. These floats are travel reserves: one unit lasts three light-years, rather than representing a flat burn or sensor increase. Player rewards first enter native pending fields and settle after more than one unpaused native frame. Keep the fleet stationary in actual abyssal depth of at least 1 while comparing before/after reserves; travel drains them and leaving the abyss clears them. Compare actor-local deltas separately from the shared-light world diff.
+
 Runs one query verb against both instances and compares the two JSON trees field by field.
 
 ```
@@ -257,6 +262,7 @@ One state-changing verb against one instance.
 | `expedition` | `{}` or `{factionId}` — host only |
 | `streamadd` | `{rearmUsedRoute?}` — host only; invokes native seasonal stream creation, reports actual new ids/configuration state |
 | `streamdespawn` | `{}` — host only; starts native seasonal despawn with no delay and a ten-day fade |
+| `lightspawn` | `{kind?:normal\|pair\|cluster\|large\|dweller, x, y, seed?:decimalString}` — Host-only native light creation; never changes the calendar or retries an uncertain request |
 
 `ability` normally refuses an ability the player does not own. For test setup,
 `{abilityId:"generate_slipsurge", grantMissing:true, on:false}` validates the native ability spec,

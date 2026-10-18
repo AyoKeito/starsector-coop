@@ -56,6 +56,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.WRECK_SET, CoopMessages.Type.WRECK_ADD,
             CoopMessages.Type.WRECK_REMOVE, CoopMessages.Type.WRECK_CONSUME,
             CoopMessages.Type.WRECK_MUTATION, CoopMessages.Type.WRECK_MUTATION_ACK,
+            CoopMessages.Type.LIGHT_SET, CoopMessages.Type.LIGHT_REQUEST, CoopMessages.Type.LIGHT_RESULT,
             CoopMessages.Type.BATTLE_BEGIN, CoopMessages.Type.BATTLE_STATUS,
             CoopMessages.Type.BATTLE_END, CoopMessages.Type.BATTLE_RESULT,
             CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.DIALOG_BEGIN,
@@ -180,6 +181,9 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.WRECK_SET, CoopMessages.Type.WRECK_ADD,
             CoopMessages.Type.WRECK_REMOVE, CoopMessages.Type.WRECK_CONSUME,
             CoopMessages.Type.WRECK_MUTATION, CoopMessages.Type.WRECK_MUTATION_ACK,
+            // A complete manifest is refreshed; pending claims and their committed results are
+            // replayed by their durable producer rather than the reliable one-shot transport.
+            CoopMessages.Type.LIGHT_SET, CoopMessages.Type.LIGHT_REQUEST, CoopMessages.Type.LIGHT_RESULT,
             CoopMessages.Type.FLEET_SNAPSHOT, CoopMessages.Type.FLEET_ROSTER,
             CoopMessages.Type.GUEST_SNAPSHOT, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,

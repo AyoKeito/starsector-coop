@@ -1,10 +1,13 @@
 package coop.fleet;
 
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import coop.ambient.CoopLightBridge;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.FleetInflater;
@@ -340,6 +343,20 @@ class CoopNpcFleetReplicatorTest {
         replicator.sendSetIfChanged(sector, 0L);
 
         assertEquals("nameless_rock_location", decodeSet(service.sent.get(0)).fleets().get(0).locationId());
+    }
+
+    @Test
+    void aNativeLightManifestationNeverEntersTheHostNpcSet() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        SectorAPI sector = sectorWithOneDamagedFleet(new MutableHealth(1f, 1f),
+                new String[]{""}, "hyperspace", null,
+                "light:01234567-89ab-4def-8123-0123456789ab");
+        CoopNpcFleetReplicator replicator = new CoopNpcFleetReplicator(service,
+                TestSessions.activeHostSession(), () -> 0L, new CoopStreamClock(), sent::add);
+
+        replicator.sendSetIfChanged(sector, 0L);
+
+        assertTrue(decodeSet(service.sent.get(0)).fleets().isEmpty());
     }
 
     @Test
@@ -890,6 +907,11 @@ class CoopNpcFleetReplicatorTest {
 
     private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health, String[] actionText,
                                                        String locationId, String uniqueId) {
+        return sectorWithOneDamagedFleet(health, actionText, locationId, uniqueId, null);
+    }
+
+    private static SectorAPI sectorWithOneDamagedFleet(MutableHealth health, String[] actionText,
+                                                       String locationId, String uniqueId, String lightId) {
         Object repairTracker = stub(RepairTrackerAPI.class, (name, args) ->
                 "getCR".equals(name) ? health.cr : null);
         Object status = stub(FleetMemberStatusAPI.class, (name, args) ->
@@ -904,6 +926,10 @@ class CoopNpcFleetReplicatorTest {
         });
         Object fleetData = stub(FleetDataAPI.class, (name, args) ->
                 "getMembersListCopy".equals(name) ? new ArrayList<>(List.of(member)) : null);
+        Object lightMemory = lightId == null ? null : stub(MemoryAPI.class, (name, args) ->
+                "get".equals(name) && CoopLightBridge.ENCOUNTER_FLEET_KEY.equals(args[0]) ? lightId : null);
+        Object lightFaction = lightId == null ? null : stub(FactionAPI.class, (name, args) ->
+                "getId".equals(name) ? Factions.DWELLER : null);
 
         Object[] location = new Object[1];
         CampaignFleetAPI fleet = (CampaignFleetAPI) stub(CampaignFleetAPI.class, (name, args) -> switch (name) {
@@ -913,6 +939,8 @@ class CoopNpcFleetReplicatorTest {
             case "getLocation" -> new Vector2f(100f, 200f);
             case "getVelocity" -> new Vector2f(0f, 0f);
             case "getFleetData" -> fleetData;
+            case "getMemoryWithoutUpdate" -> lightMemory;
+            case "getFaction" -> lightFaction;
             case "getNullAIActionText" -> actionText[0];
             default -> null;
         });
