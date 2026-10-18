@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-17 (0.1.5, P26 M2 branch).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-18 (0.1.5, P26 M3 native acceptance pending; launcher diagnostics updated).
 
 ## Stack
 
@@ -611,6 +611,8 @@ scripts/deploy-to-test-clients.ps1  builds + copies the whole mod (data/ include
 scripts/launch-host.ps1           -Port, -Diagnostics, -Bridge (7801), -ExtraJvmProps
 scripts/launch-guest.ps1          -HostAddress, -Port, -Bridge (7802), -ProxiedJvm, -AdoptCampaign
 scripts/tail-two-client-logs.ps1  coop lines from both profiles
+scripts/monitor-client-lag.ps1   controlled native-launcher counters and optional named WPR frame trace
+scripts/set-test-launcher-mode.ps1 Legacy/Modern native UI; closed-client check, byte-preserving backups/rollback
 scripts/package-release.ps1       dist\coop-<version>.zip; refuses a dirty tree, a version mismatch,
                                   jars whose baked-in commit is not HEAD, or a broken classloader split
 ```

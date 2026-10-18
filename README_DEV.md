@@ -298,6 +298,22 @@ pwsh -NoProfile -File scripts/monitor-client-lag.ps1 -Mode Launchers -ElevatedTr
 Counter or frame captures at the native launcher do not verify campaign replication. M3's native
 acceptance checklist remains open until both campaigns can run the specified checks.
 
+On the test machine, interacting with both modern launchers caused DWM flip gaps up to 6.93 seconds.
+The built-in legacy launcher removed the observed stall: the repeated active-interaction capture
+had a maximum 4K gap of 38.02 ms, with the user reporting a responsive desktop. Enable it in both
+test copies while they are closed:
+
+```powershell
+pwsh -NoProfile -File scripts/set-test-launcher-mode.ps1 -Mode Legacy
+```
+
+This changes only `legacyLauncher` in each copy's native `data/config/settings.json`. The helper
+backs up both files with SHA-256 receipts, preserves comments/encoding, and rolls back its changes
+if either write fails. `-Mode Modern` restores the modern launcher. Run it again after rebuilding
+test copies with `setup-two-client-test.ps1`, which recopies the base installation's settings.
+The legacy UI has Play, Mods, resolution, fullscreen and sound controls; it omits the modern
+memory, AA and UI-scaling controls. Native game initialization still uses the saved preferences.
+
 ## Agent Bridge And Starsector MCP (Phase 30)
 
 `coop.debug.CoopAgentBridge` is a dormant localhost TCP listener for driving smoke checks from an agent instead of from two pairs of eyes. It is gated on `-Dcoop.debug.bridge=<port>`: with the property absent, unparsable, or `0`, no socket is opened and nothing is logged. It binds 127.0.0.1 only, accepts up to four clients at once, and services a few commands per frame on the campaign thread.

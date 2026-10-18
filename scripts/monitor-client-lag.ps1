@@ -184,7 +184,16 @@ try {
             }
             $vm = Get-Content -LiteralPath (Join-Path $profile 'vmparams') -Raw
             if ($vm -match '-Dcoop\.debug\.bridge=') { throw "$role bridge is enabled; this comparison requires it disabled" }
-            $profileInfo += [ordered]@{ role = $role; root = $profile; vmparamsSha256 = (Get-FileHash -LiteralPath (Join-Path $profile 'vmparams') -Algorithm SHA256).Hash; bridgeEnabled = $false }
+            $settingsPath = Join-Path $profile 'starsector-core\data\config\settings.json'
+            $settings = Get-Content -LiteralPath $settingsPath -Raw
+            $launcherMode = [regex]::Matches($settings, '(?m)^\s*"legacyLauncher"\s*:\s*(true|false)(?=\s*[,#\r\n])')
+            if ($launcherMode.Count -ne 1) { throw "$role native launcher mode is missing or ambiguous" }
+            $profileInfo += [ordered]@{
+                role = $role; root = $profile
+                vmparamsSha256 = (Get-FileHash -LiteralPath (Join-Path $profile 'vmparams') -Algorithm SHA256).Hash
+                bridgeEnabled = $false; legacyLauncher = $launcherMode[0].Groups[1].Value -eq 'true'
+                settingsSha256 = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
+            }
         }
     }
     Add-Type -Path (Join-Path $repo 'tools\lag-monitor\NativeCounters.cs'), (Join-Path $repo 'tools\lag-monitor\LauncherGuard.cs')

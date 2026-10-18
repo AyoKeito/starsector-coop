@@ -24,6 +24,7 @@ window. `-BaselineSeconds`, `-SingleSeconds` and `-RecoverySeconds` control the 
 
 Each run creates a fresh folder under `tmp_ff_analysis/lag-monitor/`, containing `samples.ndjson`,
 `report.json` and `report.md`. `-OutputDirectory` chooses a new folder; existing folders are refused.
+Metadata records each profile's native launcher mode, settings SHA-256 and `vmparams` SHA-256.
 
 The native collector samples once per second:
 
@@ -65,11 +66,36 @@ work. It contains system profiling data, including process names and paths. Ordi
 alone cannot identify the exact driver or overlay responsible for a presentation stall. Neither
 capture measures physical display latency.
 
+## Legacy launcher workaround
+
+The 2026-10-18 active-interaction comparison reproduced desktop stalls with the modern launcher
+and a responsive desktop with the built-in legacy launcher. The maximum strictly contained 4K DWM
+flip gap fell from 6,933.46 ms to 38.02 ms. The legacy run had completed-frame coverage across all
+capture phases, with no gaps over 100 ms on either tracked render target during the both-launcher
+phase. This validates a workaround for the test setup; it does not identify a defective driver.
+
+With both test clients closed:
+
+```powershell
+pwsh -NoProfile -File scripts/set-test-launcher-mode.ps1 -Mode Legacy
+```
+
+Use `-Mode Modern` to switch back. `-TestRoot` selects the two-profile root; `-BackupDirectory`
+selects a fresh backup folder. The default backup folder is under ignored `tmp_ff_analysis/lag-monitor/`.
+Both files are backed up before mutation; receipts contain original/updated hashes. The helper
+replaces only the anchored `legacyLauncher` boolean, preserves the other bytes, refuses running
+test games or reparse paths, and rolls back its own writes on failure.
+
+The legacy launcher retains the main native controls but omits modern memory/AA/scaling controls.
+It removes the continuous OpenGL launcher render loop; a brief AA capability query can still use
+OpenGL at startup. [Official Starsector support recommendation](https://fractalsoftworks.com/forum/index.php?topic=31967.0).
+
 Tests:
 
 ```powershell
 node --test tools/lag-monitor/test.mjs tools/lag-monitor/test-focus.mjs
 pwsh -NoProfile -File tools/lag-monitor/test-native.ps1
+pwsh -NoProfile -File tools/lag-monitor/test-launcher-mode.ps1
 ```
 
 The native tests use fresh hidden PowerShell sleep processes and clean them up. They do not operate games.
