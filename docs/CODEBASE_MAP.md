@@ -2,6 +2,8 @@
 
 Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; both-actor battle/claim/cleanup gate passes within bounds, with generation races and unfinished reload still open).
 
+The subsequent MCP-only checks retain exact native pending-request backups, pass bounded same-request retry recovery and Sensor Burst automatic preclaim cancellation, and observe native TCP death/same-session resume with one accepted Guest consumption. The reconnect helper's FAIL stays preserved for a history-factor metric error; its separate total progress shows no Host reward. Final automatic conflict 03 qualifies Host ownership but stays INCONCLUSIVE for rejection correlation, with Host's native story held for later UI input. Pending reload, manual/generation races and uncertain-grant recovery remain open. Latest clear checkpoint 99h is Feb 25, c207; the final open story is unsaved. See the dated [native acceptance report](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) for the preserved failures and evidence limits.
+
 ## Stack
 
 - Java 17 toolchain (`build.gradle`: `JavaLanguageVersion.of(17)`), Gradle wrapper (`gradlew`)
