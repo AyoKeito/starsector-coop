@@ -100,6 +100,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * The Phase 30 agent-bridge command registry: verb -&gt; handler, plus the newline-delimited JSON
@@ -3792,11 +3794,88 @@ public final class CoopAgentCommands {
 
         JSONObject coopDialog = coopDialogBlock(pump);
         out.put("coopDialog", coopDialog == null ? JSONObject.NULL : coopDialog);
+        out.put("lightInteraction", lightInteractionBlock(args, sector, target,
+                pump == null ? null : pump::interactionHolderForBridge));
 
         out.put("pause", pauseBlock(roleOf(pump),
                 pump == null ? null : pump.pauseCoordinatorForBridge(),
                 CoopNetPump.blockingScreenOpenForBridge(sector)));
         return out;
+    }
+
+    /** Observe native target identity and the production claim ledger without acquiring a claim. */
+    static JSONObject lightInteractionBlock(JSONObject args, SectorAPI sector, SectorEntityToken target,
+                                             Function<String, String> claimHolder) throws JSONException {
+        List<String> errors = new ArrayList<>();
+        String requested = null;
+        if (args.has("lightId")) {
+            Object value = args.opt("lightId");
+            if (!coop.ambient.CoopLightBridge.isCanonicalId(value)) {
+                throw new IllegalArgumentException("screen lightId must be a canonical light UUID");
+            }
+            requested = (String) value;
+        }
+        String targetId = lightDiagnosticRead("targetCanonicalId", () -> coop.campaign.CoopLightWorld.ownedId(target), errors);
+        CampaignFleetAPI player = sector == null ? null : lightDiagnosticRead("playerFleet", sector::getPlayerFleet, errors);
+        SectorEntityToken queued = player == null ? null : lightDiagnosticRead("queuedTarget", player::getInteractionTarget, errors);
+        String queuedId = lightDiagnosticRead("queuedCanonicalId", () -> coop.campaign.CoopLightWorld.ownedId(queued), errors);
+        String claimId = requested == null ? targetId : requested;
+        String holder = claimId == null || claimHolder == null ? null
+                : lightDiagnosticRead("claimHolder", () -> claimHolder.apply(claimId), errors);
+        JSONObject out = new JSONObject();
+        out.put("targetCanonicalLightId", lightDiagnosticJson(targetId));
+        out.put("targetEngineId", target == null ? JSONObject.NULL
+                : lightDiagnosticJson(lightDiagnosticRead("targetEngineId", target::getId, errors)));
+        out.put("targetManagedEncounterFleet", target instanceof CampaignFleetAPI fleet
+                ? lightDiagnosticJson(lightDiagnosticRead("targetEncounterFleet", () -> coop.ambient.CoopLightBridge.isEncounterFleet(fleet), errors)) : false);
+        out.put("queuedTargetCanonicalLightId", lightDiagnosticJson(queuedId));
+        out.put("queuedTargetEngineId", queued == null ? JSONObject.NULL
+                : lightDiagnosticJson(lightDiagnosticRead("queuedTargetEngineId", queued::getId, errors)));
+        out.put("claimLightId", lightDiagnosticJson(claimId));
+        out.put("claimHolderPlayerId", lightDiagnosticJson(holder));
+        JSONArray encounters = new JSONArray();
+        for (coop.ambient.CoopLightBridge.EncounterDiagnostic row : coop.ambient.CoopLightBridge.encounterDiagnostics()) {
+            JSONObject item = new JSONObject();
+            item.put("observationId", row.observationId());
+            item.put("lightId", row.lightId());
+            item.put("engineId", lightDiagnosticJson(row.engineId()));
+            item.put("observedAtCreation", row.observedAtCreation());
+            item.put("referenceAlive", row.referenceAlive());
+            item.put("markerLightId", lightDiagnosticJson(row.currentMarkerLightId()));
+            item.put("managedEncounterFleet", lightDiagnosticJson(row.managedEncounterFleet()));
+            item.put("claimHolderPlayerId", claimHolder == null ? JSONObject.NULL
+                    : lightDiagnosticJson(lightDiagnosticRead("encounterClaimHolder", () -> claimHolder.apply(row.lightId()), errors)));
+            item.put("cleanupHookCalls", row.cleanupHookCalls());
+            item.put("cleanupHookReturns", row.cleanupHookReturns());
+            item.put("removeEntityCalls", row.removeEntityCalls());
+            item.put("removeEntityReturns", row.removeEntityReturns());
+            item.put("cleanupError", lightDiagnosticJson(row.cleanupError()));
+            item.put("alive", lightDiagnosticJson(row.alive()));
+            item.put("expired", lightDiagnosticJson(row.expired()));
+            item.put("containingLocationId", lightDiagnosticJson(row.containingLocationId()));
+            item.put("containingLocationHasFleet", lightDiagnosticJson(row.containingLocationHasFleet()));
+            item.put("containingLocationHasEntity", lightDiagnosticJson(row.containingLocationHasEntity()));
+            item.put("originReferenceAlive", row.originReferenceAlive());
+            item.put("originLocationId", lightDiagnosticJson(row.originLocationId()));
+            item.put("originHasFleet", lightDiagnosticJson(row.originHasFleet()));
+            item.put("originHasEntity", lightDiagnosticJson(row.originHasEntity()));
+            item.put("readErrors", new JSONArray(row.readErrors()));
+            encounters.put(item);
+        }
+        out.put("encounters", encounters);
+        out.put("encounterLimit", 16);
+        out.put("readErrors", new JSONArray(errors));
+        return out;
+    }
+
+    private static Object lightDiagnosticJson(Object value) { return value == null ? JSONObject.NULL : value; }
+
+    private static <T> T lightDiagnosticRead(String field, Supplier<T> read, List<String> errors) {
+        try { return read.get(); }
+        catch (Throwable failure) {
+            errors.add(field + ":" + failure.getClass().getName());
+            return null;
+        }
     }
 
     /**

@@ -2,6 +2,7 @@ package coop.ambient;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin;
@@ -9,7 +10,11 @@ import com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin.DespawnType;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import coop.presence.CoopPresenceRegistry;
 
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /** Transient system-loader seam for the pinned native light plugin. Never saved on an entity. */
 public final class CoopLightBridge {
@@ -21,6 +26,42 @@ public final class CoopLightBridge {
     private static Handler handler;
     private static Boolean versionOk;
     private static int authoritativeDespawnDepth;
+    private static final int MAX_ENCOUNTER_DIAGNOSTICS = 16;
+    private static final List<EncounterTrace> encounterDiagnostics = new ArrayList<>();
+
+    /** Primitive observation only; neither this record nor its weak references enter a save. */
+    public record EncounterDiagnostic(String observationId, String lightId, String engineId,
+                                      boolean observedAtCreation, boolean referenceAlive,
+                                      int cleanupHookCalls, int cleanupHookReturns,
+                                      int removeEntityCalls, int removeEntityReturns,
+                                      String cleanupError, String currentMarkerLightId,
+                                      Boolean managedEncounterFleet, Boolean alive, Boolean expired,
+                                      String containingLocationId, Boolean containingLocationHasFleet,
+                                      Boolean containingLocationHasEntity, boolean originReferenceAlive,
+                                      String originLocationId, Boolean originHasFleet, Boolean originHasEntity,
+                                      List<String> readErrors) { }
+
+    private static final class EncounterTrace {
+        final String observationId = UUID.randomUUID().toString();
+        final String lightId;
+        final String engineId;
+        final WeakReference<CampaignFleetAPI> fleet;
+        final WeakReference<LocationAPI> origin;
+        final boolean observedAtCreation;
+        int cleanupHookCalls;
+        int cleanupHookReturns;
+        int removeEntityCalls;
+        int removeEntityReturns;
+        String cleanupError;
+
+        EncounterTrace(CampaignFleetAPI fleet, String lightId, LocationAPI origin, boolean created) {
+            this.lightId = lightId;
+            this.engineId = fleet.getId();
+            this.fleet = new WeakReference<>(fleet);
+            this.origin = new WeakReference<>(origin);
+            this.observedAtCreation = created;
+        }
+    }
 
     public interface Handler {
         void requestPulse(SectorEntityToken light, boolean sensorBurst);
@@ -33,7 +74,10 @@ public final class CoopLightBridge {
     public static void setGuestMode(boolean value) { guestMode = value; }
 
     public static void install(boolean guest, Handler value) {
-        if (handler != value) CoopLightDeferredEngagement.clear();
+        if (handler != value) {
+            CoopLightDeferredEngagement.clear();
+            encounterDiagnostics.clear();
+        }
         guestMode = guest;
         handler = value;
     }
@@ -46,6 +90,7 @@ public final class CoopLightBridge {
         if (handler == owner) {
             handler = null;
             CoopLightDeferredEngagement.clear();
+            encounterDiagnostics.clear();
         }
     }
 
@@ -55,6 +100,7 @@ public final class CoopLightBridge {
         handler = null;
         versionOk = null;
         authoritativeDespawnDepth = 0;
+        encounterDiagnostics.clear();
     }
 
     public static boolean isCanonicalId(Object value) {
@@ -146,6 +192,11 @@ public final class CoopLightBridge {
         String id = lightId(light);
         if (fleet != null && id != null && versionMatches()) {
             fleet.getMemoryWithoutUpdate().set(ENCOUNTER_FLEET_KEY, id);
+            // Observation must never prevent the native fleet from being created.
+            try {
+                if (isEncounterFleet(fleet)) rememberEncounter(fleet, id, light.getContainingLocation(), true);
+            }
+            catch (Throwable ignored) { }
         }
     }
 
@@ -157,8 +208,77 @@ public final class CoopLightBridge {
     }
 
     public static void discardEncounterFleet(CampaignFleetAPI fleet) {
-        if (isEncounterFleet(fleet) && fleet.getContainingLocation() != null) {
-            fleet.getContainingLocation().removeEntity(fleet);
+        if (!isEncounterFleet(fleet)) return;
+        EncounterTrace trace = null;
+        try {
+            trace = rememberEncounter(fleet,
+                    (String) fleet.getMemoryWithoutUpdate().get(ENCOUNTER_FLEET_KEY),
+                    fleet.getContainingLocation(), false);
+            trace.cleanupHookCalls++;
+        } catch (Throwable ignored) { }
+        try {
+            if (fleet.getContainingLocation() != null) {
+                if (trace != null) trace.removeEntityCalls++;
+                fleet.getContainingLocation().removeEntity(fleet);
+                if (trace != null) trace.removeEntityReturns++;
+            }
+            if (trace != null) trace.cleanupHookReturns++;
+        } catch (RuntimeException | Error failure) {
+            if (trace != null) trace.cleanupError = failure.getClass().getName();
+            throw failure;
+        }
+    }
+
+    private static EncounterTrace rememberEncounter(CampaignFleetAPI fleet, String lightId,
+                                                      LocationAPI origin, boolean created) {
+        for (EncounterTrace trace : encounterDiagnostics) if (trace.fleet.get() == fleet) return trace;
+        if (encounterDiagnostics.size() == MAX_ENCOUNTER_DIAGNOSTICS) encounterDiagnostics.remove(0);
+        EncounterTrace trace = new EncounterTrace(fleet, lightId, origin, created);
+        encounterDiagnostics.add(trace);
+        return trace;
+    }
+
+    /** Read the same native object even when the engine never registered it in a fleet census. */
+    public static List<EncounterDiagnostic> encounterDiagnostics() {
+        List<EncounterDiagnostic> result = new ArrayList<>();
+        for (EncounterTrace trace : encounterDiagnostics) {
+            List<String> errors = new ArrayList<>();
+            CampaignFleetAPI fleet = trace.fleet.get();
+            LocationAPI location = fleet == null ? null : diagnosticRead("containingLocation", fleet::getContainingLocation, errors);
+            LocationAPI origin = trace.origin.get();
+            result.add(new EncounterDiagnostic(trace.observationId, trace.lightId, trace.engineId,
+                    trace.observedAtCreation, fleet != null, trace.cleanupHookCalls, trace.cleanupHookReturns,
+                    trace.removeEntityCalls, trace.removeEntityReturns, trace.cleanupError,
+                    fleet == null ? null : diagnosticRead("marker", () -> {
+                        Object marker = fleet.getMemoryWithoutUpdate().get(ENCOUNTER_FLEET_KEY);
+                        if (marker != null && !(marker instanceof String)) throw new IllegalStateException("Encounter marker is not text");
+                        return (String) marker;
+                    }, errors),
+                    fleet == null ? null : diagnosticRead("managedEncounterFleet", () -> isEncounterFleet(fleet), errors),
+                    fleet == null ? null : diagnosticRead("alive", fleet::isAlive, errors),
+                    fleet == null ? null : diagnosticRead("expired", fleet::isExpired, errors),
+                    location == null ? null : diagnosticRead("locationId", location::getId, errors),
+                    location == null || fleet == null ? null : diagnosticRead("locationFleets", () -> containsIdentity(location.getFleets(), fleet), errors),
+                    location == null || fleet == null ? null : diagnosticRead("locationEntities", () -> containsIdentity(location.getAllEntities(), fleet), errors),
+                    origin != null, origin == null ? null : diagnosticRead("originId", origin::getId, errors),
+                    origin == null || fleet == null ? null : diagnosticRead("originFleets", () -> containsIdentity(origin.getFleets(), fleet), errors),
+                    origin == null || fleet == null ? null : diagnosticRead("originEntities", () -> containsIdentity(origin.getAllEntities(), fleet), errors),
+                    List.copyOf(errors)));
+        }
+        return List.copyOf(result);
+    }
+
+    private static boolean containsIdentity(List<?> values, Object expected) {
+        if (values == null) throw new IllegalStateException("Native collection unavailable");
+        for (Object value : values) if (value == expected) return true;
+        return false;
+    }
+
+    private static <T> T diagnosticRead(String name, Supplier<T> read, List<String> errors) {
+        try { return read.get(); }
+        catch (Throwable failure) {
+            errors.add(name + ":" + failure.getClass().getName());
+            return null;
         }
     }
 

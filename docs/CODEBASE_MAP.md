@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-18 (0.1.5, P26 M3 native acceptance pending; launcher diagnostics updated).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; read-only claim/cleanup diagnostics await live checks).
 
 ## Stack
 
@@ -294,7 +294,7 @@ Owns: every wire type, since the enum lives here.
   NPC mirror checks cover identity/roster, location and motion; world orbital body/focus keys are
   checked separately because native NPC assignments and target ids are not replayed.
 - `CoopLightAuthority` / `CoopLightRecord` / `CoopLightCodec` / `CoopLightWorld` - M3 free-standing
-  native hyperspace lights, implemented with native acceptance pending. The Host captures resolved
+  native hyperspace lights, implemented with native acceptance partial. The Host captures resolved
   params and positions directly, retaining all native spawn shapes and their existing global RNG
   draws. `LIGHT_SET` carries the complete set on static changes and a five-second lifetime refresh;
   null scans never become an empty manifest. All records validate before upserts; removals and
@@ -322,8 +322,17 @@ Owns: every wire type, since the enum lives here.
   live adapter leaves an escape option instead of creating a fleet.
   Host rejects a new DWELLER consumption if another actor holds the shared interaction; already
   committed results replay their original decision without running that arbitration again.
-  The final 2026-10-18 M3 clean build passes 4,324 Java tests with one existing router skip, zero
-  failures/errors and 272 suites; focused Java passes 686, and Node bridge/offline passes 77.
+  `screen` now adds read-only `lightInteraction`: current/queued canonical and native targets,
+  production claim holder and up to 16 exact-fleet observations. Optional `lightId` selects the
+  canonical claim even after its dialog closes. `CoopLightBridge` retains weak fleet/origin
+  references with transient cleanup/removeEntity call-return counters; adapter changes clear them.
+  Native getter failures are explicit per-field errors. A returned native removeEntity call is
+  separate from membership, alive/expired and containing-location observations; false census
+  membership before and after Leave cannot establish cleanup for an unregistered native fleet.
+  The diagnostic patch passes a 2026-10-20 clean build with 4,330 Java passes, one existing router
+  skip, zero failures/errors and 273 suites. Six focused diagnostic tests also pass after test-only
+  adapter-reset coverage was strengthened. Live validation is pending; older native passes remain
+  scoped to `5a395f4`, whose Node bridge/offline count remains 77.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
@@ -583,6 +592,9 @@ src/launcher/java/coop/launcher/   22 classes
   permits a native QA spawn after all seasonal terrain is gone, with the route flag restored.
   `clockalign` requires a paused active session, refuses backward movement or a jump over one day,
   and verifies both the calendar and cached timestamp after the write.
+  `screen {"lightId":"light:<UUID>"}` optionally selects a shared light's actual claim holder;
+  its `lightInteraction` block reports native targets and bounded weak-reference cleanup traces
+  without acquiring claims, changing the world or adding an action/verb.
   Four things are deliberately **not** verbs (market buy/sell, officer hire, bar-offer accept, market
   open/close) because a UI listener drives each and a verb would bypass the listener under test.
 - **MCP server.** `tools/starsector-mcp` (Node, stdio) wraps host port 7801 and guest 7802 into

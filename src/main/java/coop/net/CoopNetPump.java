@@ -1136,6 +1136,11 @@ public class CoopNetPump implements EveryFrameScript {
         return sessionState;
     }
 
+    /** Bridge-only observation of the production claim ledger; no claim is requested or renewed. */
+    public String interactionHolderForBridge(String entityId) {
+        return interactionGate.holderOf(entityId);
+    }
+
     /** Bridge-only: the transport, for its connection role. */
     public CoopNetService netServiceForBridge() {
         return service;
