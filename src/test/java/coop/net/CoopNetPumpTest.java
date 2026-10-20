@@ -9214,6 +9214,59 @@ class CoopNetPumpTest {
     }
 
     @Test
+    void guestLeavingAnAcceptedLightDialogMustAwaitANewAcknowledgementForItsNextAttempt() {
+        for (boolean automatic : List.of(false, true)) {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+            AtomicLong now = new AtomicLong(1_000L);
+            SectorEntityToken light = nativeLightToken(LIGHT_ID, true);
+            RecordingEntity target = new RecordingEntity("native-light", "Light", light);
+            RecordingCampaignUi ui = new RecordingCampaignUi(automatic ? null : target);
+            Global.setSector(new RecordingSector(false, ui).proxy());
+            CoopNetPump pump = livePump(service, activeGuestSession(), now::get);
+            pump.advance(0f);
+            if (automatic) assertFalse(pump.allowDwellerLightDialog(light));
+            String oldToken = CoopMessages.interactionLightClaimToken(
+                    onlyOf(service, CoopMessages.Type.INTERACTION_CLAIM));
+            assertNotNull(oldToken);
+            service.inbound.add(CoopMessages.interactionAccept("session-a", 10, now.get(), LIGHT_ID,
+                    "guest-player", "Abyssal Light", 1, oldToken));
+            now.incrementAndGet(); pump.advance(0f);
+            assertTrue(pump.allowDwellerLightDialog(light));
+            if (automatic) {
+                ui.target = target;
+                now.incrementAndGet(); pump.advance(0f);
+            }
+            assertEquals("guest-player", pump.interactionHolderForBridge(LIGHT_ID));
+
+            service.sent.clear();
+            ui.target = null;
+            now.incrementAndGet(); pump.advance(0f);
+            assertEquals(LIGHT_ID, CoopMessages.requiredPayloadString(
+                    onlyOf(service, CoopMessages.Type.INTERACTION_RELEASE), "entityId"));
+            assertNull(pump.interactionHolderForBridge(LIGHT_ID),
+                    "Leave must remove Guest's local native-dialog permission without a release echo");
+
+            service.sent.clear();
+            assertFalse(pump.allowDwellerLightDialog(light), "a fresh native encounter cannot use the previous lease");
+            String newToken = CoopMessages.interactionLightClaimToken(
+                    onlyOf(service, CoopMessages.Type.INTERACTION_CLAIM));
+            assertNotEquals(oldToken, newToken);
+            service.inbound.add(CoopMessages.interactionAccept("session-a", 11, now.get(), LIGHT_ID,
+                    "guest-player", "Abyssal Light", 1, oldToken));
+            now.incrementAndGet(); pump.advance(0f);
+            assertNull(pump.interactionHolderForBridge(LIGHT_ID));
+            assertFalse(pump.allowDwellerLightDialog(light), "the old generation's delayed ACK cannot permit the new attempt");
+            assertEquals(1, countOfType(service, CoopMessages.Type.INTERACTION_CLAIM));
+
+            service.inbound.add(CoopMessages.interactionAccept("session-a", 12, now.get(), LIGHT_ID,
+                    "guest-player", "Abyssal Light", 2, newToken));
+            now.incrementAndGet(); pump.advance(0f);
+            assertEquals("guest-player", pump.interactionHolderForBridge(LIGHT_ID));
+            assertTrue(pump.allowDwellerLightDialog(light), "only a fresh matching ACK permits the next native encounter");
+        }
+    }
+
+    @Test
     void realSessionEndUninstallsTheOwnerOfPendingNativeLightActions() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         AtomicLong now = new AtomicLong(1_000L);

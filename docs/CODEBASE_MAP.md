@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; read-only claim/cleanup diagnostics await live checks).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; diagnostic live checks expose a Guest claim-release defect, with a tested narrow fix awaiting native retest).
 
 ## Stack
 
@@ -331,8 +331,14 @@ Owns: every wire type, since the enum lives here.
   membership before and after Leave cannot establish cleanup for an unregistered native fleet.
   The diagnostic patch passes a 2026-10-20 clean build with 4,330 Java passes, one existing router
   skip, zero failures/errors and 273 suites. Six focused diagnostic tests also pass after test-only
-  adapter-reset coverage was strengthened. Live validation is pending; older native passes remain
-  scoped to `5a395f4`, whose Node bridge/offline count remains 77.
+  adapter-reset coverage was strengthened. Native diagnostic build `282081e` verifies Host LOW
+  dialog claim continuity and cleanup-path invocation, but Guest retains its own local claim for
+  40 seconds after Leave despite Host releasing it. The fix releases Guest's local gate when a
+  canonical light dialog closes, preserving ordinary Guest interaction behavior. Its clean build
+  passes 4,331 Java tests plus one existing router skip, 273 suites and zero failures/errors;
+  focused `CoopNetPumpTest` passes 335. Native retest remains pending. Older native passes remain
+  scoped to `5a395f4`; Node count 77 retains that build's scope. Saved failure checkpoint 82 is not
+  a reload acceptance pass.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in

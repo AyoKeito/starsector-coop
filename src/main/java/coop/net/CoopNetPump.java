@@ -8674,7 +8674,10 @@ public class CoopNetPump implements EveryFrameScript {
         // release the claim and tell the remote client.
         if (localInteractionEntityId != null) {
             sendInteractionRelease(localInteractionEntityId);
-            if (service.role() == CoopConnectionRole.HOST) {
+            // A Guest light lease is also native-dialog permission. Keeping its own accepted
+            // holder after Leave would let the next automatic attempt skip its fresh Host ACK.
+            if (service.role() == CoopConnectionRole.HOST
+                    || coop.ambient.CoopLightBridge.isCanonicalId(localInteractionEntityId)) {
                 interactionGate.release(localInteractionEntityId, sessionState.localPlayerId());
             }
             localInteractionEntityId = null;
