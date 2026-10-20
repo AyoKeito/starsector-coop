@@ -2,7 +2,7 @@
 
 Build `5a395f410011`, branch `codex/p26-ambient-world`. Host is Conrad Triton; Guest is Frost Pillai. Both loaded the Jan 21, c207 checkpoint with the legacy launcher setting. This run uses the existing local agent bridges and MCP implementation library. No computer-use actions were performed.
 
-M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. They do not complete the Dweller, migration, visual or reload gates. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat, both actors' victory/loot and a backed-up Feb 15 test checkpoint; their remaining gates and limitations are recorded separately.
+M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. Their original scope leaves the Dweller, migration, visual and reload gates open. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat, both actors' victory/loot, native Sensor Burst timeout clearing, local near/far rendering and the known native fade difference. Separate battle, timeout and render checkpoints, remaining gates and limitations are recorded there.
 
 ## Recorded results
 
@@ -20,7 +20,7 @@ M3 remains partial. The checks below cover native light creation, ability reward
 | Coordinated save and backup | PASS for checkpoint creation: both Feb 14, c207 autosaves have the same timestamp. Each complete backup matches its own source file hashes. Four XML files parse; primitive reward ledgers and all 14 saved lights per client match the captured native state. Reload is a separate open gate. | `30-coordinated-checkpoint.json`, independent `31-save-and-expiry-audit.json` |
 | Final campaign state | PASS: both clients are paused on clear campaign screens; 14 lights each, 252 compared values, zero differences, no truncation or lookup failures. Both have zero pending and uncertain grants. No clock write is needed for this final comparison. | `32-final-paused.json`, `33-final-strict-diff.json` |
 
-The four exact ability checks compare full Host/Guest tables at equal raw campaign timestamps: 270 values each, zero differences, zero lookup failures and no truncation. Each has one acting-player outcome, no outcome on the other actor, and zero pending or uncertain grants. The bonus assertion uses the other positive reserve channel to subtract native travel drain, with an explicit absolute tolerance of `0.0001`. Sensor Burst's encounter-timeout reset has no independent native readback in this run.
+The four exact ability checks compare full Host/Guest tables at equal raw campaign timestamps: 270 values each, zero differences, zero lookup failures and no truncation. Each has one acting-player outcome, no outcome on the other actor, and zero pending or uncertain grants. The bonus assertion uses the other positive reserve channel to subtract native travel drain, with an explicit absolute tolerance of `0.0001`. Sensor Burst's encounter-timeout reset has no independent native readback in this run; the separate October 20 positive-marker saved-XML chain closes that gate.
 
 All raw captures, ignored test helpers and backups are under `tmp_ff_analysis/p26/2026-10-18/m3-mcp-live/run-001/`. Original failed captures remain unchanged. The historical audit records input hashes.
 
@@ -38,10 +38,8 @@ Test helpers explicitly use QA calendar alignment for same-epoch comparisons. Th
 
 ## Remaining checks
 
-This is the historical October 18 list. See the [October 20 follow-up](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md#remaining-gates) for current status.
+This retains the historical October 18 list, except for timeout readback and scoped rendering/fade checks completed on October 20. See the [October 20 follow-up](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md#remaining-gates) for current status.
 
-- Observe Sensor Burst's native encounter-timeout reset with a direct readback.
-- Check local visual discovery and the non-consuming client's fade behavior.
 - Exercise genuine legacy Guest lights, including an open legacy interaction and unrelated custom plugins. The Jan 21 baseline has no light candidates, so it cannot prove migration.
 - Reload the saved pair and verify live identities, lifetimes, consumption tombstones, cached results and actor reward guards. Pending-consumption reload remains separate from the completed-consumption checkpoint.
 - On each actor, open the small native Dweller dialog and Leave; verify the light survives and its claim releases.
