@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; diagnostic live checks expose a Guest claim-release defect, with a tested narrow fix awaiting native retest).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; Guest canonical-release correction passes bounded native LOW Leave, with post-battle cleanup/races/reload still open).
 
 ## Stack
 
@@ -336,9 +336,13 @@ Owns: every wire type, since the enum lives here.
   40 seconds after Leave despite Host releasing it. The fix releases Guest's local gate when a
   canonical light dialog closes, preserving ordinary Guest interaction behavior. Its clean build
   passes 4,331 Java tests plus one existing router skip, 273 suites and zero failures/errors;
-  focused `CoopNetPumpTest` passes 335. Native retest remains pending. Older native passes remain
-  scoped to `5a395f4`; Node count 77 retains that build's scope. Saved failure checkpoint 82 is not
-  a reload acceptance pass.
+  focused `CoopNetPumpTest` passes 335. Native correction `2e2dc63` clears Guest's local holder on
+  LOW Leave before Guest's delayed RELEASE reaches/applies on Host; exact cleanup counters reach one. A new native
+  interaction uses fresh acceptance. One pending manual LOW cancellation also survives late Host
+  arbitration without a new Guest fleet; no new generation is opened in that case. Consumed
+  post-battle cleanup, owner/expiry/session changes and reconnect/reload remain separate gates.
+  Older native passes remain scoped to `5a395f4`; Node count 77 retains that
+  build's scope. Saved failure checkpoint 82 is not a reload acceptance pass.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
   `CoopAbilityArbiter` / `CoopAbilityEffectApplier` / `CoopOrbitSync` / `CoopCampaignEventListener` /
   `CoopStoryChainGate` / `CoopDelimited` / `CoopAllyToggleAbility` (Phase 33: the `coop_ally` row in
