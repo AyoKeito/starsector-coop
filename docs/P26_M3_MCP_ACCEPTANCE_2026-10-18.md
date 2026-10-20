@@ -2,7 +2,7 @@
 
 Build `5a395f410011`, branch `codex/p26-ambient-world`. Host is Conrad Triton; Guest is Frost Pillai. Both loaded the Jan 21, c207 checkpoint with the legacy launcher setting. This run uses the existing local agent bridges and MCP implementation library. No computer-use actions were performed.
 
-M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. Their original scope leaves the Dweller, migration, visual and reload gates open. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat, both actors' victory/loot, native Sensor Burst timeout clearing, local near/far rendering and the known native fade difference. Separate battle, timeout and render checkpoints, remaining gates and limitations are recorded there.
+M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. Their original scope leaves the Dweller, migration, visual and reload gates open. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat, both actors' victory/loot, native Sensor Burst timeout clearing, local near/far rendering, the known native fade difference and bounded legacy migration/open-dialog deferral. Separate checkpoint lineages, remaining gates and limitations are recorded there.
 
 ## Recorded results
 
@@ -38,9 +38,8 @@ Test helpers explicitly use QA calendar alignment for same-epoch comparisons. Th
 
 ## Remaining checks
 
-This retains the historical October 18 list, except for timeout readback and scoped rendering/fade checks completed on October 20. See the [October 20 follow-up](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md#remaining-gates) for current status.
+This retains the historical October 18 list, except for timeout readback, scoped rendering/fade and bounded legacy checks completed on October 20. See the [October 20 follow-up](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md#remaining-gates) for current status.
 
-- Exercise genuine legacy Guest lights, including an open legacy interaction and unrelated custom plugins. The Jan 21 baseline has no light candidates, so it cannot prove migration.
 - Reload the saved pair and verify live identities, lifetimes, consumption tombstones, cached results and actor reward guards. Pending-consumption reload remains separate from the completed-consumption checkpoint.
 - On each actor, open the small native Dweller dialog and Leave; verify the light survives and its claim releases.
 - Fight a native Dweller on each actor; verify claim continuity, native loot and temporary-fleet cleanup.
