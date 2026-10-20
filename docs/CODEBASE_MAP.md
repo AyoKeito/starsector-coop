@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; Host consumed post-battle release/cleanup has bounded evidence, with Guest post-battle, generation races and pending reload still open).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; both-actor battle/claim/cleanup gate passes within bounds, with generation races and unfinished reload still open).
 
 ## Stack
 
@@ -346,8 +346,11 @@ Owns: every wire type, since the enum lives here.
   engine reads. A committed consumption saved while fading survives native reload, then finishes
   removal; final Feb 19 checkpoint 90 is verified. Startup advances position/clock and native
   repair/travel resources, so final inventory is not asserted identical at zero time. Guest consumed
-  post-battle cleanup, generation/owner/expiry/session changes and unfinished-request/uncertain-grant
-  reload remain separate gates.
+  post-battle path now has its own bounded victory/recovery/loot/claim-release/cleanup proof, including
+  continuous sampled Host authority through a retained Guest-local query gap. The both-actor native
+  battle gate is complete within those limits; generation/owner/expiry/session/reconnect paths and
+  unfinished-request/uncertain-grant reload remain open. Latest checkpoint 96 preserves the settled
+  Feb 19 pair with 15 Host/12 Guest ships; it has not been reloaded by that proof.
   Older native passes remain scoped to `5a395f4`; Node count 77 retains that
   build's scope. Saved failure checkpoint 82 is not a reload acceptance pass.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
