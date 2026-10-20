@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; Guest canonical-release correction passes bounded native LOW Leave, with post-battle cleanup/races/reload still open).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-20 (0.1.5, P26 M3 native acceptance partial; Host consumed post-battle release/cleanup has bounded evidence, with Guest post-battle, generation races and pending reload still open).
 
 ## Stack
 
@@ -339,8 +339,15 @@ Owns: every wire type, since the enum lives here.
   focused `CoopNetPumpTest` passes 335. Native correction `2e2dc63` clears Guest's local holder on
   LOW Leave before Guest's delayed RELEASE reaches/applies on Host; exact cleanup counters reach one. A new native
   interaction uses fresh acceptance. One pending manual LOW cancellation also survives late Host
-  arbitration without a new Guest fleet; no new generation is opened in that case. Consumed
-  post-battle cleanup, owner/expiry/session changes and reconnect/reload remain separate gates.
+  arbitration without a new Guest fleet; no new generation is opened in that case. A later Host
+  victory/recovery/salvage exit retains the same observed claim/fleet through the readable phases,
+  then releases both holders and increments exact cleanup/removeEntity counters once. The combat
+  journal has no COMBAT samples; native protocol corroboration does not turn that gap into direct
+  engine reads. A committed consumption saved while fading survives native reload, then finishes
+  removal; final Feb 19 checkpoint 90 is verified. Startup advances position/clock and native
+  repair/travel resources, so final inventory is not asserted identical at zero time. Guest consumed
+  post-battle cleanup, generation/owner/expiry/session changes and unfinished-request/uncertain-grant
+  reload remain separate gates.
   Older native passes remain scoped to `5a395f4`; Node count 77 retains that
   build's scope. Saved failure checkpoint 82 is not a reload acceptance pass.
 - `CoopRepDelta` / `CoopFactionRelations` / `CoopCommissionSync` / `CoopCreditTransfer` /
