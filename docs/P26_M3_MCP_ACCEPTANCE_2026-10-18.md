@@ -2,7 +2,7 @@
 
 Build `5a395f410011`, branch `codex/p26-ambient-world`. Host is Conrad Triton; Guest is Frost Pillai. Both loaded the Jan 21, c207 checkpoint with the legacy launcher setting. This run uses the existing local agent bridges and MCP implementation library. No computer-use actions were performed.
 
-M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. They do not complete the Dweller, migration, visual or reload gates. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat and Guest victory/loot; their remaining gates and limitations are recorded separately.
+M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. They do not complete the Dweller, migration, visual or reload gates. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat, both actors' victory/loot and a backed-up Feb 15 test checkpoint; their remaining gates and limitations are recorded separately.
 
 ## Recorded results
 

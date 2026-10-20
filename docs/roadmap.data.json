@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. Task 0, M1, shared wrecks and M2 are complete. M3 adds completed-consumption reload, both Dweller Leave paths and Guest victory/loot to its native MCP passes. Host victory/loot is deferred; fleet cleanup/claims, visuals, migration, timeout readback and pending-consumption reload remain. M4/M5 and Guest-proximity triggering remain unbuilt"
+      "note": "P26 is partial. Task 0, M1, shared wrecks and M2 are complete. M3 adds completed-consumption reload, both Dweller Leave paths and both actors' victory/loot to its native MCP passes. Fleet cleanup/claims, visuals, migration, timeout readback and pending-consumption reload remain. M4/M5 and Guest-proximity triggering remain unbuilt"
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "The V1 queue is complete. Remaining M3 gates: deferred Host victory/loot, fleet cleanup/claims, local visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload. M4/M5 and Guest-proximity abyssal triggering remain unbuilt; P22, P25 and P27 remain queued"
+      "note": "The V1 queue is complete. Remaining M3 gates: fleet cleanup/claims, local visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload. Both actors' victory/loot paths pass. M4/M5 and Guest-proximity abyssal triggering remain unbuilt; P22, P25 and P27 remain queued"
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P33 is built. P26 is partial: M1/M2 are complete; M3 native checks include completed-consumption reload, both Dweller Leave paths and Guest victory/loot. Host victory/loot and the remaining cleanup/claim, visual, migration, timeout and pending-reload gates stay open. M4/M5 and Guest-proximity triggering are unbuilt. P22, P25 and P27 remain queued"
+      "note": "P33 is built. P26 is partial: M1/M2 are complete; M3 native checks include completed-consumption reload, both Dweller Leave paths and both actors' victory/loot. Cleanup/claim, visual, migration, timeout and pending-reload gates stay open. M4/M5 and Guest-proximity triggering are unbuilt. P22, P25 and P27 remain queued"
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. M1/M2 and shared wrecks are complete. M3 native passes include completed-consumption reload, both Dweller Leave paths, Host defeat and Guest victory/loot. Final light comparison matches 252 values. Host victory/loot is deferred; cleanup/claims, visuals, migration, timeout readback and pending-consumption reload remain. M4/M5 and Guest-proximity triggering are unbuilt. Co-op-only pause stays.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> Task 0, M1 and M2 are complete, including shared wrecks. M3 native MCP checks cover all five shapes, both actors' exact Pulse/Burst rewards, ordinary-light race/retry, cleanup, expiry and pending-consumption reconnect. <b>October 20 native UI checks add:</b> completed-consumption reload, both small Dweller Leave paths, Host defeat and Guest victory/loot. Guest pickup adds 83 supplies and 72 fuel; Host cargo stays unchanged. Native fade settlement leaves 252 equal values and both campaigns paused. The original Feb 14 saves are backed up; the current disposable battle state is not a replacement clean checkpoint. <b>Host victory/loot is deferred.</b> Fleet cleanup/claim continuity and races, local visibility/fades, legacy migration, timeout readback and pending-consumption reload remain open. Installed timeout/legacy fixtures are preparation only. QA calendar alignment does not verify production clock reconciliation. Runtime tests remain 4,324 Java pass, one existing skip; focused Java 686 pass, Node 77 pass. M4/M5 and Guest-proximity triggering remain unbuilt. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 PARTIAL. M1/M2 and shared wrecks are complete. M3 native passes include completed-consumption reload, both Dweller Leave paths, Host defeat and both actors' victory/loot. Final light comparisons match 252 values; the Feb 15 test checkpoint is saved and backed up. Cleanup/claims, visuals, migration, timeout readback and pending-consumption reload remain. M4/M5 and Guest-proximity triggering are unbuilt. Co-op-only pause stays.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> Task 0, M1 and M2 are complete, including shared wrecks. M3 native MCP checks cover all five shapes, both actors' exact Pulse/Burst rewards, ordinary-light race/retry, cleanup, expiry and pending-consumption reconnect. <b>October 20 native UI checks add:</b> completed-consumption reload, both small Dweller Leave paths, Host defeat and both actors' victory/loot. Guest pickup adds 83 supplies/72 fuel; Host cargo stays unchanged. In a separate restarted session, Host's captured net pickup is 5 supplies/9 fuel, with unchanged Guest cargo and filtered topography 34/73. Each native fade settlement matches 252 values. Original clean Feb 14 backups remain separate from the current Host test fleet. Fleet cleanup/claim continuity and races, local visibility/fades, legacy migration, timeout readback and pending-consumption reload remain open. Installed timeout/legacy fixtures are preparation only. QA calendar alignment does not verify production clock reconciliation. Runtime tests remain 4,324 Java pass, one existing skip; focused Java 686 pass, Node 77 pass. M4/M5 and Guest-proximity triggering remain unbuilt. Co-op-only pause stays.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
-      "head": "Guest Dweller victory/loot passes; Host battle deferred",
-      "state": "M1/M2 complete; M3 native checks include completed-consumption reload and both Dweller Leave paths; P26 PARTIAL; remaining M3 gates and M4/M5 stay open",
-      "body": "October 20 native checks add both small Dweller Leave paths, Host defeat and Guest victory/loot. Guest alone gains 83 supplies and 72 fuel during native pickup; Host cargo and filtered topography stay unchanged. The consumed light disappears on both after native settlement; 252 values match. Host victory/loot is deferred. Fleet cleanup/claim continuity and races, visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload remain open. Prepared save fixtures are not native passes. Original failures stay recorded, and QA clock alignment is comparison setup. See docs/P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md. Co-op-only pause stays; Host-solo acceptance was removed, not passed."
+      "head": "Both Dweller victory/loot paths pass; M3 remains partial",
+      "state": "M1/M2 complete; M3 native checks include completed-consumption reload, both Dweller Leave paths and both actors' victory/loot; remaining M3 gates and M4/M5 stay open",
+      "body": "Separate October 20 native runs verify actor-local Dweller loot: Guest gains 83 supplies/72 fuel; Host's captured net gain is 5 supplies/9 fuel. The nonacting player's full cargo stays unchanged, as does filtered topography during pickup. Both consumed lights disappear after native settlement; each final comparison matches 252 values. Host's own battle leaves its light ledger unchanged; Guest adds the removal tombstone. The Feb 15 test checkpoint and full backups are verified. Fleet cleanup/claim continuity and races, visuals, legacy migration, timeout readback and pending-consumption reload remain open. Prepared save fixtures are not native passes. Historical failures and QA clock alignment remain explicit. See docs/P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md. Co-op-only pause stays; Host-solo acceptance was removed, not passed."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "P26 remains PARTIAL. M1/M2 and shared wrecks are complete. M3 native checks include completed-consumption reload, both Dweller Leave paths, Host defeat and Guest victory/loot. Host victory/loot is deferred; fleet cleanup/claims, visuals, migration, timeout readback and pending-consumption reload remain. M4/M5 and Guest-proximity triggering remain unbuilt. Co-op-only pause stays.",
+      "summary": "P26 remains PARTIAL. M1/M2 and shared wrecks are complete. M3 native checks include completed-consumption reload, both Dweller Leave paths, Host defeat and both actors' victory/loot. Fleet cleanup/claims, visuals, migration, timeout readback and pending-consumption reload remain. M4/M5 and Guest-proximity triggering remain unbuilt. Co-op-only pause stays.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -930,12 +930,12 @@
         "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "M3 free-standing abyssal lights: native MCP and bounded UI checks pass; Host victory/loot is deferred, while fleet cleanup/claim continuity and races, local visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload remain open",
+        "M3 free-standing abyssal lights: native MCP and both actors' bounded victory/loot checks pass; fleet cleanup/claim continuity and races, local visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload remain open",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
         "M4 hyperspace storm replication: remaining unbuilt P26 milestone; existing design retained",
         "M5 guest sensor ghosts and Leviathan trails: remaining unbuilt P26 milestone"
       ],
-      "note": "P26 remains PARTIAL as of 2026-10-20. M1/M2 and shared wrecks are complete. M3 native MCP checks pass on 5a395f4; native UI checks add completed-consumption reload, both Dweller Leave paths, Host defeat and Guest victory/loot. Exact pickup adds 83 supplies/72 fuel to Guest with unchanged Host cargo; native fade settlement matches 252 values. Host victory/loot is deferred. Fleet cleanup/claims, visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload remain open. Timeout/legacy fixture copies are installed but untested natively. Original Feb 14 checkpoints are backed up; current disposable battle changes have no new clean checkpoint. Runtime tests remain 4,324 Java pass, one existing skip; focused Java 686 pass, Node 77 pass. Historical failures and inconclusive captures stay unchanged. QA calendar alignment is not production clock acceptance. M4/M5 and Guest-proximity triggering remain unbuilt. Co-op-only pause stays; Host-solo acceptance was removed, not passed."
+      "note": "P26 remains PARTIAL as of 2026-10-20. M1/M2 and shared wrecks are complete. M3 native MCP checks pass on 5a395f4; native UI checks add completed-consumption reload, both Dweller Leave paths, Host defeat and both actors' victory/loot. Guest pickup is 83 supplies/72 fuel; Host's captured net pickup is 5 supplies/9 fuel. Nonacting cargo stays unchanged, and each native fade settlement matches 252 values. The Feb 15 Host test checkpoint has verified native XML and full backups in 42b; the initial backup failure in 42 is preserved. Fleet cleanup/claims, visuals, legacy migration, Sensor Burst timeout readback and pending-consumption reload remain open. Timeout/legacy fixture copies are installed but untested natively. Original clean Feb 14 backups remain separate; Guest's unsaved winning session was discarded on the requested restart. Runtime tests remain 4,324 Java pass, one existing skip; focused Java 686 pass, Node 77 pass. Historical failures and inconclusive captures stay unchanged. QA calendar alignment is not production clock acceptance. M4/M5 and Guest-proximity triggering remain unbuilt. Co-op-only pause stays; Host-solo acceptance was removed, not passed."
     },
     {
       "id": "27",
