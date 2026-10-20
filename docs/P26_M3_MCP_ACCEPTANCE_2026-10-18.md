@@ -2,7 +2,7 @@
 
 Build `5a395f410011`, branch `codex/p26-ambient-world`. Host is Conrad Triton; Guest is Frost Pillai. Both loaded the Jan 21, c207 checkpoint with the legacy launcher setting. This run uses the existing local agent bridges and MCP implementation library. No computer-use actions were performed.
 
-M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. They do not complete the Dweller, migration, visual or reload gates.
+M3 remains partial. The checks below cover native light creation, ability rewards, shared consumption, cleanup and network recovery. They do not complete the Dweller, migration, visual or reload gates. [October 20 native checks](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) subsequently verify completed-consumption reload, both small Dweller Leave paths, Host defeat and Guest victory/loot; their remaining gates and limitations are recorded separately.
 
 ## Recorded results
 
@@ -37,6 +37,8 @@ All raw captures, ignored test helpers and backups are under `tmp_ff_analysis/p2
 Test helpers explicitly use QA calendar alignment for same-epoch comparisons. These results do not establish production clock reconciliation. Lifetime refreshes require the full-set cadence, and fade completion requires native unpaused frames.
 
 ## Remaining checks
+
+This is the historical October 18 list. See the [October 20 follow-up](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md#remaining-gates) for current status.
 
 - Observe Sensor Burst's native encounter-timeout reset with a direct readback.
 - Check local visual discovery and the non-consuming client's fade behavior.
