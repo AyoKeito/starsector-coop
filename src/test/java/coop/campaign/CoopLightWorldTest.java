@@ -157,6 +157,73 @@ class CoopLightWorldTest {
         assertFalse(again.isAvailable(id));
     }
 
+    @Test void reloadedGuestPendingRequestWaitsForItsMirrorAndKeepsItsOriginalIdentity() {
+        Fixture host = new Fixture(); host.world.installBridge(false, "host");
+        String id = host.world.captureHost().get(0).id();
+        Fixture guest = new Fixture(); guest.world.installBridge(true, "guest");
+        guest.lights.get(0).tag(id);
+        assertTrue(CoopLightBridge.handlePulse(guest.lights.get(0).entity, guest.local.entity, false));
+        CoopLightCodec.Request request = guest.world.pendingRequests().get(0);
+        CoopLightWorld reloadedGuest = guest.newWorld(); reloadedGuest.installBridge(true, "guest");
+        assertEquals(List.of(request), reloadedGuest.pendingRequests());
+        Object savedPending = guest.saved.get(CoopLightWorld.STATE_KEY);
+        Object savedHost = host.saved.get(CoopLightWorld.STATE_KEY);
+        host.remoteAvailable = false;
+
+        IllegalStateException waiting = assertThrows(IllegalStateException.class,
+                () -> host.world.applyRequest(request, "guest"));
+
+        assertTrue(waiting.getMessage().contains("actor is not ready"));
+        assertEquals(savedHost, host.saved.get(CoopLightWorld.STATE_KEY), "no permanent denial is recorded before placement");
+        assertEquals(savedPending, guest.saved.get(CoopLightWorld.STATE_KEY));
+        assertEquals(List.of(request), reloadedGuest.pendingRequests());
+        assertEquals(Map.of("pending", 0, "results", 0, "tombstones", 0, "applied", 0, "uncertain", 0),
+                host.world.readOnlyStateCounts());
+        assertFalse(host.lights.get(0).fading);
+        assertTrue(host.codec.grants.isEmpty()); assertTrue(guest.codec.grants.isEmpty());
+
+        host.remoteAvailable = true;
+        CoopLightCodec.Outcome accepted = host.world.applyRequest(request, "guest");
+        assertTrue(accepted.accepted()); assertEquals(request.requestId(), accepted.requestId());
+        reloadedGuest.acceptOutcome(accepted);
+        assertTrue(reloadedGuest.pendingRequests().isEmpty());
+        assertEquals(List.of("burn:0.5:7"), guest.codec.grants);
+        assertEquals(Map.of("pending", 0, "results", 1, "tombstones", 1, "applied", 0, "uncertain", 0),
+                host.world.readOnlyStateCounts());
+        assertEquals(Map.of("pending", 0, "results", 0, "tombstones", 1, "applied", 1, "uncertain", 0),
+                reloadedGuest.readOnlyStateCounts());
+
+        Object committedHost = host.saved.get(CoopLightWorld.STATE_KEY);
+        host.remoteAvailable = false;
+        CoopLightWorld reloadedHost = host.newWorld(); reloadedHost.installBridge(false, "host");
+        assertEquals(accepted, reloadedHost.applyRequest(request, "guest"),
+                "cached decisions replay even when the mirror is unavailable again");
+        assertEquals(committedHost, host.saved.get(CoopLightWorld.STATE_KEY));
+        reloadedGuest.acceptOutcome(accepted);
+        assertEquals(1, guest.codec.grants.size()); assertTrue(host.codec.grants.isEmpty());
+    }
+
+    @Test void newConsumptionCannotRecordAnOutcomeUntilItsActorIsAliveAndPlaced() {
+        for (String state : List.of("absent", "dead", "unlocated")) {
+            Fixture f = new Fixture(); f.world.installBridge(false, "host");
+            String id = f.world.captureHost().get(0).id();
+            CoopLightCodec.Request request = request(id, CoopLightCodec.Action.PULSE);
+            f.remoteAvailable = !state.equals("absent");
+            f.remote.alive = !state.equals("dead");
+            f.remote.located = !state.equals("unlocated");
+            Object saved = f.saved.get(CoopLightWorld.STATE_KEY);
+
+            assertThrows(IllegalStateException.class, () -> f.world.applyRequest(request, "guest"), state);
+
+            assertEquals(saved, f.saved.get(CoopLightWorld.STATE_KEY), state);
+            assertEquals(0, f.world.readOnlyStateCounts().get("results"), state);
+            assertEquals(0, f.world.readOnlyStateCounts().get("tombstones"), state);
+            assertFalse(f.lights.get(0).fading, state);
+            f.remoteAvailable = true; f.remote.alive = true; f.remote.located = true;
+            assertTrue(f.world.applyRequest(request, "guest").accepted(), state);
+        }
+    }
+
     @Test void unrelatedResultCannotAwardLocalPlayerAndDoesNotErasePending() {
         Fixture f = new Fixture(); f.world.installBridge(true, "guest");
         String id = id(); f.lights.get(0).tag(id);
@@ -381,6 +448,7 @@ class CoopLightWorldTest {
         final CoopLightWorld world;
         SectorEntityToken dialogTarget;
         boolean failFinalRewardCommit;
+        boolean remoteAvailable = true;
         Fixture() { this(true); }
         Fixture(boolean initialLight) {
             hyper = proxy(LocationAPI.class, (self, method, args) -> switch (method.getName()) {
@@ -418,7 +486,7 @@ class CoopLightWorldTest {
             });
             world = newWorld(); if (initialLight) add("native");
         }
-        CoopLightWorld newWorld() { return new CoopLightWorld(() -> sector, () -> remote.entity, codec); }
+        CoopLightWorld newWorld() { return new CoopLightWorld(() -> sector, () -> remoteAvailable ? remote.entity : null, codec); }
         Light add(String nativeId) {
             Light light = new Light(this, nativeId); lights.add(light); entities.add(light.entity);
             byEntity.put(light.entity, light); return light;
@@ -483,12 +551,14 @@ class CoopLightWorldTest {
         final Map<String, Object> saved = new HashMap<>();
         final CampaignFleetAPI entity;
         boolean inHyper = true;
+        boolean alive = true;
+        boolean located = true;
         Actor(Fixture f, boolean player) {
             MemoryAPI memory = ApiProxies.memory(saved);
             entity = proxy(CampaignFleetAPI.class, (self, method, args) -> switch (method.getName()) {
                 case "isPlayerFleet" -> player;
-                case "isAlive" -> true;
-                case "getContainingLocation" -> inHyper ? f.hyper : f.system;
+                case "isAlive" -> alive;
+                case "getContainingLocation" -> located ? inHyper ? f.hyper : f.system : null;
                 case "getMemoryWithoutUpdate" -> memory;
                 case "getLocation" -> position;
                 case "getRadius" -> 50f;

@@ -153,12 +153,58 @@ class CoopLightAuthorityTest {
         assertEquals(1, f.world.effects); assertEquals(2, f.net.sent.size());
     }
 
+    @Test void unavailableHostActorRetainsGuestRequestAndRetriesTheSameIdentityUntilOneCommittedResult() {
+        Fixture host = new Fixture(true), guest = new Fixture(false);
+        CoopLightCodec.Request pending = request(ID);
+        guest.world.pending.add(pending);
+        host.world.actorUnavailable = true;
+
+        guest.authority.tickGuest();
+        String first = guest.payload("request");
+        assertEquals(pending, CoopLightCodec.decodeRequest(first));
+        assertThrows(IllegalStateException.class, () -> host.authority.applyRequest(first, "guest-player"));
+        assertTrue(host.net.sent.isEmpty(), "temporary actor absence must not become a definitive denial");
+        assertTrue(host.world.results.isEmpty()); assertTrue(host.world.tombstones.isEmpty());
+        assertEquals(0, host.world.effects); assertEquals(List.of(pending), guest.world.pending);
+        assertEquals(0, guest.world.effects);
+
+        guest.now.set(1_999); guest.authority.tickGuest(); assertEquals(1, guest.net.sent.size());
+        guest.now.set(2_000); guest.authority.tickGuest(); assertEquals(2, guest.net.sent.size());
+        assertEquals(first, guest.payload("request"), "retry must retain the saved request UUID and action");
+        host.world.actorUnavailable = false;
+        host.authority.applyRequest(guest.payload("request"), "guest-player");
+        String committed = host.payload("result");
+        assertTrue(CoopLightCodec.decodeOutcome(committed).accepted());
+        assertEquals(1, host.world.effects); assertEquals(1, host.world.results.size());
+        assertEquals(Set.of(ID), host.world.tombstones);
+
+        // Lose that result, then retry after transport rearm with the actor temporarily absent again.
+        host.world.actorUnavailable = true;
+        host.authority.rearmFullBroadcast(); guest.authority.rearmFullBroadcast();
+        guest.authority.tickGuest(); assertEquals(3, guest.net.sent.size());
+        assertEquals(first, guest.payload("request"));
+        host.authority.applyRequest(guest.payload("request"), "guest-player");
+        assertEquals(committed, host.payload("result"));
+        assertEquals(1, host.world.effects); assertEquals(1, host.world.results.size());
+        assertEquals(List.of(pending), guest.world.pending);
+
+        guest.authority.applyResult(host.payload("result"));
+        guest.authority.applyResult(committed);
+        assertTrue(guest.world.pending.isEmpty()); assertEquals(1, guest.world.effects);
+        assertEquals(0.75f, guest.world.awardedBonus); assertEquals(25, guest.world.awardedPoints);
+        guest.now.set(4_000); guest.authority.tickGuest(); assertEquals(3, guest.net.sent.size());
+        assertEquals(3, host.world.requestCalls);
+    }
+
     @Test void wrongActorOrMalformedRequestCannotReachNativeClaim() {
         Fixture f = new Fixture(true);
+        f.world.actorUnavailable = true;
         assertThrows(IllegalArgumentException.class, () -> f.authority.applyRequest(request(ID).encode(), "host-player"));
         assertThrows(IllegalArgumentException.class, () -> f.authority.applyRequest(request(ID).encode(), "forged-player"));
+        assertThrows(IllegalArgumentException.class, () -> f.authority.applyRequest(request(ID).encode(), null));
         assertThrows(IllegalArgumentException.class, () -> f.authority.applyRequest("broken", "guest-player"));
         assertTrue(f.world.results.isEmpty()); assertTrue(f.world.tombstones.isEmpty()); assertTrue(f.net.sent.isEmpty());
+        assertEquals(0, f.world.requestCalls, "seat binding and decoding must happen before native authorization");
     }
 
     @Test void nativeOutcomeMustMatchEveryAuthenticatedRequestFieldBeforeSending() {
@@ -244,8 +290,8 @@ class CoopLightAuthorityTest {
         final Map<String, CoopLightCodec.Outcome> results = new LinkedHashMap<>();
         String failUpsert;
         CoopLightCodec.Outcome overrideOutcome;
-        boolean failOutcome;
-        int captures, effects, awardedPoints;
+        boolean failOutcome, actorUnavailable;
+        int captures, effects, awardedPoints, requestCalls;
         float awardedBonus;
         public List<CoopLightRecord> captureHost() { captures++; return host; }
         public Set<String> taggedIds() { return Set.copyOf(guest.keySet()); }
@@ -258,7 +304,11 @@ class CoopLightAuthorityTest {
         public void reconcileLegacy(List<CoopLightRecord> complete) { calls.add("legacy"); legacy.clear(); }
         public List<CoopLightCodec.Request> pendingRequests() { return List.copyOf(pending); }
         public CoopLightCodec.Outcome applyRequest(CoopLightCodec.Request request, String actor) {
+            requestCalls++;
             if (overrideOutcome != null) return overrideOutcome;
+            CoopLightCodec.Outcome committed = results.get(actor + ":" + request.requestId());
+            if (committed != null) return committed;
+            if (actorUnavailable) throw new IllegalStateException("native light actor is not ready");
             return results.computeIfAbsent(actor + ":" + request.requestId(), ignored -> {
                 effects++; tombstones.add(request.lightId());
                 return outcome(actor, request.lightId(), request.requestId(), request.action());

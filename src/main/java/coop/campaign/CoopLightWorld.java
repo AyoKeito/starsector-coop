@@ -289,9 +289,15 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
             requireSameRequest(previous, request, actorId);
             return previous;
         }
+        CampaignFleetAPI actor = actor(actorId);
+        if (actor == null || !actor.isAlive() || actor.getContainingLocation() == null) {
+            // A saved Guest request can arrive over TCP before its first fleet datagram creates
+            // and places the authenticated mirror. Retain that request for its ordinary retry;
+            // recording a denial now would permanently answer it from incomplete startup state.
+            throw new IllegalStateException("Light actor is not ready; retry after native fleet placement");
+        }
         CustomCampaignEntityAPI entity = find(request.lightId());
         CoopLightRecord record = entity == null ? null : codec.capture(entity, request.lightId());
-        CampaignFleetAPI actor = actor(actorId);
         String rejection = rejection(request, actor, entity, state);
         if (rejection == null && request.action() == CoopLightCodec.Action.DWELLER
                 && !dwellerClaimAllowed.test(request.lightId(), actorId)) {
