@@ -1,8 +1,14 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-21 (0.1.5, runtime `47cdbc98dbcb`; P26 M3 native acceptance partial, with bounded battle/cleanup and pending-request reload passes; claim/generation and uncertain-grant reload remain open).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-22 (0.1.5, runtime `47cdbc98dbcb`; P26 M3 native acceptance partial, with bounded battle/cleanup, reload, manual generation, conflict, constructed expiry and session/campaign replacement passes; both broad native gate groups remain open).
 
 October 20 MCP-only checks add bounded pending-save/retry, automatic preclaim cancellation and native TCP reconnect recovery; full conflicting-request rejection remains inconclusive. October 21 native loading then exposes and fixes premature rejection before Guest's fleet mirror exists. `CoopLightWorld` checks actor readiness after cached-result lookup and before any new result/tombstone, leaving unknown/dead/unplaced actors retryable. Native reload on `47cdbc98dbcb` recovers the original pending request once, with a 248-check independent audit. Current clean build passes 4,334 tests plus one existing skip across 273 suites; focused World/Authority tests pass 26/21. Latest clear checkpoint 99j preserves Feb 25, c207 and 234 equal fields after explicit QA alignment. Claim/generation and uncertain-grant reload remain open. See the dated [native acceptance report](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) for preserved failures and limits.
+
+Follow-up native load 19 verifies 99j's durable consumption in 26 checks. Initial cancellation 22a stays generation-inconclusive, while separate repeat 29 passes bounded fresh-generation isolation in 11,097 checks: the old lease never authorizes G2, fresh acceptance creates one native fleet, and Leave invokes exact cleanup once. Correlation stays temporal/behavioral because logs omit wire nonces. Constructed native expiry audit 17 adds 7,085 checks: a QA-only positive lifetime reduction leads to actual native despawn/removal, a delayed `light_unavailable` rejection and no fleet/reward. It does not establish natural generation, direct tag readback or late accepted-reply cancellation.
+
+Native session/campaign replacement audit 66 adds 153 checks: Host leaves during Guest's pending action, Guest later closes its retained story with native Leave, and native Load/join establishes a distinct session within the same JVMs. Two held captures 90.138 seconds apart preserve actor/ship identities and progress 34/88 without an old manifestation/reward. Clock/cargo and the QA expiry tombstone roll back with the unmodified 99j copies. This is lifecycle disposal, not an isolated in-place owner swap or an old accepted reply delivered across the new session. Native uncertain-grant failure/reload, pending-DWELLER re-engagement, claim-pending reconnect and remaining automatic-race limits keep M3 partial. Test clients are closed and the temporary delay is removed.
+
+Native opposing-claim audit 44 adds a 7,166-check protocol/cleanup pass through capture 51. Its original final watcher failure remains: native Host Leave restores unpaused state, bridge pause shares the normal coordinator intent, and delayed Guest screen state eventually unmasks the unpause. The later uncontrolled tail is excluded; this does not establish persistent bridge holding or final world equality.
 
 ## Stack
 
@@ -350,8 +356,9 @@ Owns: every wire type, since the enum lives here.
   repair/travel resources, so final inventory is not asserted identical at zero time. Guest consumed
   post-battle path now has its own bounded victory/recovery/loot/claim-release/cleanup proof, including
   continuous sampled Host authority through a retained Guest-local query gap. The both-actor native
-  battle gate is complete within those limits; generation/owner/expiry/session/reconnect paths and
-  unfinished-request/uncertain-grant reload remain open. Latest checkpoint 96 preserves the settled
+  battle gate is complete within those limits. Later generation, expiry, session and reload checks
+  have their own bounded proofs above; uncertain-grant and remaining claim subcases stay open.
+  Checkpoint 96 preserves the settled
   Feb 19 pair with 15 Host/12 Guest ships; it has not been reloaded by that proof.
   Older native passes remain scoped to `5a395f4`; Node count 77 retains that
   build's scope. Saved failure checkpoint 82 is not a reload acceptance pass.
