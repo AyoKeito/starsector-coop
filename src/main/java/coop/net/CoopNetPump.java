@@ -1136,6 +1136,11 @@ public class CoopNetPump implements EveryFrameScript {
         return sessionState;
     }
 
+    /** Bridge-only: the installed light adapter, including its opt-in grant fault instrument. */
+    public CoopLightWorld lightWorldForBridge() {
+        return lightWorld;
+    }
+
     /** Bridge-only observation of the production claim ledger; no claim is requested or renewed. */
     public String interactionHolderForBridge(String entityId) {
         return interactionGate.holderOf(entityId);

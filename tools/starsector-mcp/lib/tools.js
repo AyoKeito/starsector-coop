@@ -56,6 +56,7 @@ export const ACTION_VERBS = [
   'wreckconsume',
   'encounterspawn',
   'lightspawn',
+  'lightgrantfault',
   'clockalign'
 ];
 

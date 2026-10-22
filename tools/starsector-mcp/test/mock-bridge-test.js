@@ -238,7 +238,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
     'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
-    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn'
+    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -271,7 +271,7 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('encounters'), 2);
   assert.equal((await client.send('lights')).campaignTimestamp, 123);
   assert.equal(calls.get('lights'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn']) {
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
@@ -320,6 +320,66 @@ test('light query and native QA creation preserve arguments and refuse the wrong
   await assert.rejects(() => ssAct(bridges, 'guest', 'lightspawn', args), /host-only/);
   await assert.rejects(() => ssDump(bridges, 'host', 'lightspawn'), /unknown query verb/);
   await assert.rejects(() => ssAct(bridges, 'host', 'lights'), /unknown action verb/);
+});
+
+test('lightgrantfault arm, status and disarm stay action-only and preserve opaque arguments and replies', async (t) => {
+  const requestId = 'a6288349-e51d-4e20-867c-315c0da61599';
+  const cases = [
+    { args: { mode: 'arm', requestId }, reply: { qa: true, armed: true, tripped: false, requestId } },
+    { args: { mode: 'status', requestId }, reply: { qa: true, armed: false, tripped: true, requestId,
+      trip: { requestId, stage: 'after-native-grant' } } },
+    { args: { mode: 'disarm', requestId }, reply: { qa: true, armed: false, tripped: true, requestId,
+      disarmed: true } }
+  ];
+  const bridge = new MockBridge((request) => {
+    assert.equal(request.cmd, 'lightgrantfault');
+    const example = cases.find((item) => item.args.mode === request.args.mode);
+    assert.ok(example, 'only the three explicit transport cases should reach this mock');
+    return { ok: true, data: example.reply };
+  });
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => { bridges.closeAll(); await bridge.stop(); });
+
+  assert.equal(ACTION_VERBS.filter((verb) => verb === 'lightgrantfault').length, 1);
+  assert.ok(!QUERY_VERBS.includes('lightgrantfault'));
+  assert.ok(!READ_ONLY_COMMANDS.has('lightgrantfault'), 'even status shares an arm/disarm verb, so cannot retry');
+  for (const { args, reply } of cases) {
+    assert.deepEqual(await ssAct(bridges, 'guest', 'lightgrantfault', args), reply);
+    assert.deepEqual(bridge.requests.at(-1).args, args, 'MCP must not normalize or discard mode/request identity');
+  }
+  await assert.rejects(() => ssDump(bridges, 'guest', 'lightgrantfault', { mode: 'status' }),
+    /unknown query verb "lightgrantfault"/);
+  assert.equal(bridge.requests.length, cases.length, 'the query refusal must not reach the bridge');
+});
+
+test('lightgrantfault relays Host, invalid mode and invalid request refusals from the bridge', async (t) => {
+  const hostError = 'IllegalStateException: lightgrantfault is guest-only';
+  const modeError = 'IllegalArgumentException: lightgrantfault mode must be arm|status|disarm';
+  const requestError = 'IllegalArgumentException: lightgrantfault requestId must be a UUID';
+  const hostBridge = new MockBridge(() => ({ ok: false, error: hostError }));
+  const guestBridge = new MockBridge((request) => ({ ok: false,
+    error: request.args.mode === 'invalid-mode' ? modeError : requestError }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  const cases = [
+    { instance: 'host', bridge: hostBridge,
+      args: { mode: 'arm', requestId: 'a6288349-e51d-4e20-867c-315c0da61599' }, error: hostError },
+    { instance: 'guest', bridge: guestBridge, args: { mode: 'invalid-mode', requestId: 'opaque-request' }, error: modeError },
+    { instance: 'guest', bridge: guestBridge, args: { mode: 'arm', requestId: 'not-a-UUID' }, error: requestError }
+  ];
+  for (const { instance, bridge, args, error } of cases) {
+    await assert.rejects(() => ssAct(bridges, instance, 'lightgrantfault', args), (caught) => {
+      assert.ok(caught instanceof BridgeError);
+      assert.equal(caught.instance, instance);
+      assert.equal(caught.cmd, 'lightgrantfault');
+      assert.equal(caught.bridgeError, error);
+      return true;
+    });
+    assert.deepEqual(bridge.requests.at(-1).args, args, 'validation belongs to the Java bridge');
+  }
+  assert.equal(hostBridge.requests.length + guestBridge.requests.length, cases.length);
 });
 
 test('strict light diff excludes local identity metadata and actor-local counts only', () => {

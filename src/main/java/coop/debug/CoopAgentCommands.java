@@ -267,6 +267,7 @@ public final class CoopAgentCommands {
         map.put("encounterspawn", CoopAgentCommands::encounterspawn);
         map.put("lights", CoopAgentCommands::lights);
         map.put("lightspawn", CoopAgentCommands::lightspawn);
+        map.put("lightgrantfault", CoopAgentCommands::lightgrantfault);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("clockalign", CoopAgentCommands::clockalign);
@@ -712,7 +713,43 @@ public final class CoopAgentCommands {
         out.put("candidateCount", candidates); out.put("truncated", candidates > table.length());
         out.put("lights", table); out.put("state", stateCounts);
         out.put("actorBonus", readOnlyLightBonus(sector.getPlayerFleet()));
+        out.put("lightGrantFault", new JSONObject(CoopLightGrantFault.status()));
         return out;
+    }
+
+    /** One-shot QA interruption after a real Guest reward grant and before its applied marker. */
+    static JSONObject lightgrantfault(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String mode = requiredString(args, "mode");
+        Map<String, Object> receipt;
+        switch (mode) {
+            case "status" -> receipt = CoopLightGrantFault.status();
+            case "disarm" -> receipt = CoopLightGrantFault.disarm("bridge_command");
+            case "arm" -> {
+                if (CoopAgentBridge.configuredPort() == 0) {
+                    throw new IllegalStateException("lightgrantfault requires the opt-in agent bridge");
+                }
+                if (!coop.util.CoopDebug.diagnosticsEnabled()) {
+                    throw new IllegalStateException("lightgrantfault requires debug diagnostics");
+                }
+                CoopNetPump pump = context.pump();
+                if (roleOf(pump) != CoopConnectionRole.GUEST) {
+                    throw new IllegalStateException("lightgrantfault is guest-only");
+                }
+                if (!pump.gameplaySessionActiveForBridge()) {
+                    throw new IllegalStateException("lightgrantfault requires an active gameplay session");
+                }
+                if (!sector.isPaused()) {
+                    throw new IllegalStateException("lightgrantfault must be armed while paused");
+                }
+                receipt = pump.lightWorldForBridge().armGrantFault(requiredString(args, "requestId"));
+            }
+            default -> throw new IllegalArgumentException("mode must be arm, status or disarm");
+        }
+        JSONObject result = new JSONObject(receipt);
+        result.put("qa", true);
+        result.put("mode", mode);
+        return result;
     }
 
     private static JSONObject readOnlyLightBonus(CampaignFleetAPI player) throws JSONException {
@@ -1118,6 +1155,7 @@ public final class CoopAgentCommands {
         out.put("credits", creditsBlock(optionalString(args, "ledgerId")));
         // 0.1.1: always present, so a netfault someone forgot to clear can never be read as a bug.
         out.put("netfault", netFaultBlock(netFaultStatusOf(pump)));
+        out.put("lightGrantFault", new JSONObject(CoopLightGrantFault.status()));
         // 0.1.1: the reliable-delivery layer's three counters, which are the only evidence outside a
         // log that a replay after a link drop landed exactly once.
         out.put("reliable", reliableBlock(pump));

@@ -14,10 +14,12 @@ import com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.CargoPodsEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import coop.ambient.CoopLightBridge;
+import coop.debug.CoopLightGrantFault;
 import coop.interaction.CoopInteractionGate;
 import coop.presence.CoopPresenceRegistry;
 import coop.testing.ApiProxies;
 import coop.testing.ProxyDefaults;
+import coop.util.CoopDebug;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,21 +34,32 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class CoopLightWorldTest {
     private SettingsAPI oldSettings;
+    private String oldDiagnosticsProperty;
 
     @BeforeEach void setup() {
         oldSettings = Global.getSettings();
+        oldDiagnosticsProperty = System.getProperty(CoopDebug.PROPERTY);
+        CoopLightGrantFault.disarm("test_setup");
         Global.setSettings(proxy(SettingsAPI.class, (self, method, args) -> switch (method.getName()) {
             case "getVersionString" -> CoopPresenceRegistry.PINNED_VERSION;
             default -> ProxyDefaults.defaultValue(method.getReturnType());
         }));
         CoopLightBridge.clear();
     }
-    @AfterEach void cleanup() { CoopLightBridge.clear(); Global.setSettings(oldSettings); }
+    @AfterEach void cleanup() {
+        CoopLightGrantFault.disarm("test_cleanup");
+        CoopLightBridge.clear();
+        if (oldDiagnosticsProperty == null) System.clearProperty(CoopDebug.PROPERTY);
+        else System.setProperty(CoopDebug.PROPERTY, oldDiagnosticsProperty);
+        for (int i = 0; i < 300; i++) CoopDebug.pollFrame();
+        Global.setSettings(oldSettings);
+    }
 
     @Test void captureAdoptsOnlyExactLiveNativeHyperspaceLightsAndKeepsIds() {
         Fixture f = new Fixture(false);
@@ -418,6 +431,229 @@ class CoopLightWorldTest {
         assertThrows(IllegalStateException.class, () -> reloaded.acceptOutcome(accepted));
         assertEquals(1, f.codec.grants.size()); assertEquals(1, f.codec.grantAttempts);
         assertEquals(1, reloaded.readOnlyStateCounts().get("uncertain"));
+    }
+
+    @Test void armedPostGrantFaultRetainsRealUncertaintyAndCannotGrantAgainAfterReload() {
+        diagnostics(true);
+        for (CoopLightCodec.Action action : List.of(CoopLightCodec.Action.PULSE, CoopLightCodec.Action.SENSOR_BURST)) {
+            Fixture f = new Fixture();
+            CoopLightCodec.Request request = pendingReward(f, action);
+            CoopLightCodec.Outcome accepted = outcome(request, "guest", true, 1, 7);
+            Map<String, Object> savedBeforeArm = Map.copyOf(f.saved);
+            Map<String, Object> armed = f.world.armGrantFault(request.requestId());
+            assertEquals(true, armed.get("armed"));
+            Map<?, ?> arm = (Map<?, ?>) armed.get("arm");
+            assertEquals(request.requestId(), arm.get("requestId"));
+            assertEquals(request.lightId(), arm.get("lightId"));
+            assertEquals(action.name(), arm.get("action"));
+            assertEquals("guest", arm.get("actorId"));
+            assertEquals(savedBeforeArm, f.saved, "arming must not edit the saved ledger");
+            assertThrows(IllegalStateException.class, () -> f.world.armGrantFault(request.requestId()));
+
+            // Diagnostic callers create a separate, unused adapter; neither that nor reinstalling
+            // the same callback may cancel an explicitly armed request.
+            assertEquals(f.world.readOnlyStateCounts(), f.newWorld().readOnlyStateCounts());
+            f.world.installBridge(true, "guest");
+            assertEquals(true, CoopLightGrantFault.status().get("armed"));
+            IllegalStateException interruption = assertThrows(IllegalStateException.class, () -> f.world.acceptOutcome(accepted));
+            assertTrue(interruption.getMessage().startsWith("Injected one-shot"));
+            assertEquals(1, f.codec.grantAttempts);
+            assertEquals(List.of((action == CoopLightCodec.Action.SENSOR_BURST ? "sensor:" : "burn:") + "1.0:7"), f.codec.grants);
+            assertEquals(List.of(request), f.world.pendingRequests());
+            assertEquals(Map.of("pending", 1, "results", 0, "tombstones", 1, "applied", 0, "uncertain", 1), f.world.readOnlyStateCounts());
+            assertEquals(false, CoopLightGrantFault.status().get("armed"));
+            Map<?, ?> trip = (Map<?, ?>) CoopLightGrantFault.status().get("lastTrip");
+            assertEquals(arm.get("armId"), trip.get("armId"));
+            assertEquals("post_native_grant_before_applied", trip.get("phase"));
+            assertEquals(true, trip.get("nativeGrantReturned"));
+            assertEquals(7, trip.get("expectedPoints"));
+            assertFalse(((String) f.saved.get(CoopLightWorld.STATE_KEY)).contains((String) arm.get("armId")));
+            assertThrows(IllegalStateException.class, () -> f.world.armGrantFault(request.requestId()));
+
+            CoopLightWorld reloaded = f.newWorld(); reloaded.installBridge(true, "guest");
+            assertThrows(IllegalStateException.class, () -> reloaded.acceptOutcome(accepted));
+            assertThrows(IllegalStateException.class, () -> reloaded.acceptOutcome(accepted));
+            assertEquals(1, f.codec.grantAttempts);
+            assertEquals(1, reloaded.readOnlyStateCounts().get("uncertain"));
+            assertEquals(trip, CoopLightGrantFault.status().get("lastTrip"));
+            Map<String, Object> savedBeforeDisarm = Map.copyOf(f.saved);
+            CoopLightGrantFault.disarm("bridge_command");
+            assertEquals(savedBeforeDisarm, f.saved, "disarm must not clear durable uncertainty");
+        }
+    }
+
+    @Test void faultIsInertWithoutArmingAndCannotArmWithoutDiagnostics() {
+        diagnostics(false);
+        Fixture f = new Fixture();
+        CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+        assertThrows(IllegalStateException.class, () -> f.world.armGrantFault(request.requestId()));
+        f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        assertEquals(1, f.codec.grantAttempts);
+        assertEquals(0, f.world.readOnlyStateCounts().get("uncertain"));
+        assertEquals(1, f.world.readOnlyStateCounts().get("applied"));
+    }
+
+    @Test void armRequiresInstalledGuestAndExistingEligiblePendingRequest() {
+        diagnostics(true);
+        Fixture f = new Fixture();
+        CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+        assertThrows(IllegalArgumentException.class, () -> f.world.armGrantFault("not-a-uuid"));
+        assertThrows(IllegalArgumentException.class, () -> f.world.armGrantFault(UUID.randomUUID().toString()));
+        assertThrows(IllegalStateException.class, () -> CoopLightGrantFault.arm(f.world, f.sector, "guest",
+                request(request.lightId(), request.action())));
+        assertThrows(IllegalStateException.class, () -> CoopLightGrantFault.arm(f.world, f.sector, "guest",
+                new CoopLightCodec.Request(id(), request.requestId(), request.action())));
+        assertThrows(IllegalStateException.class, () -> f.newWorld().armGrantFault(request.requestId()));
+        f.world.installBridge(false, "guest");
+        assertThrows(IllegalStateException.class, () -> f.world.armGrantFault(request.requestId()));
+        f.world.installBridge(true, "guest");
+        f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        assertThrows(IllegalArgumentException.class, () -> f.world.armGrantFault(request.requestId()));
+        assertEquals(false, CoopLightGrantFault.status().get("armed"));
+
+        Fixture dweller = new Fixture(); dweller.world.installBridge(true, "guest");
+        Light light = dweller.lights.get(0); light.tag(id()); light.tags.add(Tags.DWELLER_LIGHT);
+        assertFalse(CoopLightBridge.allowNativeDespawn(light.entity));
+        CoopLightCodec.Request consumption = dweller.world.pendingRequests().get(0);
+        assertEquals(CoopLightCodec.Action.DWELLER, consumption.action());
+        assertThrows(IllegalArgumentException.class, () -> dweller.world.armGrantFault(consumption.requestId()));
+        assertEquals(0, dweller.codec.grantAttempts);
+    }
+
+    @Test void mismatchedOrRejectedOutcomeCancelsArmWithoutADeferredSurprise() {
+        diagnostics(true);
+        for (String mismatch : List.of("request", "light", "actor", "action", "rejection")) {
+            Fixture f = new Fixture();
+            CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+            f.world.armGrantFault(request.requestId());
+            CoopLightCodec.Outcome different = new CoopLightCodec.Outcome(
+                    mismatch.equals("request") ? UUID.randomUUID().toString() : request.requestId(),
+                    mismatch.equals("light") ? id() : request.lightId(),
+                    mismatch.equals("actor") ? "other" : "guest",
+                    mismatch.equals("action") ? CoopLightCodec.Action.SENSOR_BURST : request.action(),
+                    !mismatch.equals("rejection"), null, 0, 0, "test_mismatch");
+            if (List.of("light", "actor", "action").contains(mismatch))
+                assertThrows(IllegalStateException.class, () -> f.world.acceptOutcome(different));
+            else f.world.acceptOutcome(different);
+            assertEquals(false, CoopLightGrantFault.status().get("armed"), mismatch);
+            assertEquals("outcome_mismatch_or_rejection", ((Map<?, ?>) CoopLightGrantFault.status().get("lastDisarm")).get("reason"));
+            f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+            assertEquals(mismatch.equals("rejection") ? 0 : 1, f.codec.grantAttempts, mismatch);
+            assertEquals(0, f.world.readOnlyStateCounts().get("uncertain"), mismatch);
+        }
+    }
+
+    @Test void disablingDiagnosticsCancelsArmBeforeNativeRewardReturnsNormally() {
+        diagnostics(true);
+        Fixture f = new Fixture();
+        CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+        f.world.armGrantFault(request.requestId());
+        diagnostics(false);
+        f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        assertEquals(false, CoopLightGrantFault.status().get("armed"));
+        assertEquals("diagnostics_disabled", ((Map<?, ?>) CoopLightGrantFault.status().get("lastDisarm")).get("reason"));
+        assertEquals(1, f.codec.grantAttempts);
+        assertEquals(0, f.world.readOnlyStateCounts().get("uncertain"));
+    }
+
+    @Test void matchingOutcomeWithoutPendingRewardCancelsArmEvenIfOldPendingStateReturnsLater() {
+        diagnostics(true);
+        Fixture f = new Fixture();
+        CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+        CoopLightCodec.Outcome accepted = outcome(request, "guest", true, 1, 7);
+        String pendingState = (String) f.saved.get(CoopLightWorld.STATE_KEY);
+        f.world.armGrantFault(request.requestId());
+        // Simulate replacement of campaign memory independently of result handling. This exact
+        // outcome has nothing local to reward and must not leave the one-shot waiting for later.
+        f.saved.remove(CoopLightWorld.STATE_KEY);
+        f.world.acceptOutcome(accepted);
+        assertEquals(0, f.codec.grantAttempts);
+        assertEquals(false, CoopLightGrantFault.status().get("armed"));
+        assertEquals("outcome_has_no_native_reward", ((Map<?, ?>) CoopLightGrantFault.status().get("lastDisarm")).get("reason"));
+        f.saved.put(CoopLightWorld.STATE_KEY, pendingState);
+        f.world.acceptOutcome(accepted);
+        assertEquals(1, f.codec.grantAttempts);
+        assertEquals(0, f.world.readOnlyStateCounts().get("uncertain"));
+        assertEquals(1, f.world.readOnlyStateCounts().get("applied"));
+    }
+
+    @Test void bridgeResetReplacementRoleAndActorChangesCancelArm() {
+        diagnostics(true);
+        for (String change : List.of("reset", "replacement", "clear", "role", "actor")) {
+            Fixture f = new Fixture();
+            CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+            f.world.armGrantFault(request.requestId());
+            switch (change) {
+                case "reset" -> f.world.resetBridge();
+                case "replacement" -> f.newWorld().installBridge(true, "guest");
+                case "clear" -> CoopLightBridge.clear();
+                case "role" -> f.world.installBridge(false, "guest");
+                case "actor" -> f.world.installBridge(true, "other");
+                default -> fail(change);
+            }
+            assertEquals(false, CoopLightGrantFault.status().get("armed"), change);
+            f.world.installBridge(true, "guest");
+            f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+            assertEquals(1, f.codec.grantAttempts, change);
+            assertEquals(0, f.world.readOnlyStateCounts().get("uncertain"), change);
+        }
+    }
+
+    @Test void changingSectorCancelsArmEvenIfSameWorldAndActorAreReused() {
+        diagnostics(true);
+        Fixture f = new Fixture();
+        AtomicReference<SectorAPI> current = new AtomicReference<>(f.sector);
+        CoopLightWorld world = new CoopLightWorld(current::get, () -> f.remote.entity, f.codec);
+        world.installBridge(true, "guest"); f.lights.get(0).tag(id());
+        CoopLightBridge.handlePulse(f.lights.get(0).entity, f.local.entity, false);
+        CoopLightCodec.Request request = world.pendingRequests().get(0);
+        world.armGrantFault(request.requestId());
+        current.set(new Fixture(false).sector);
+        assertEquals(false, CoopLightGrantFault.status().get("armed"));
+        current.set(f.sector); world.installBridge(true, "guest");
+        world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        assertEquals(1, f.codec.grantAttempts);
+        assertEquals(0, world.readOnlyStateCounts().get("uncertain"));
+    }
+
+    @Test void aNativeGrantFailureCancelsArmAndPreservesTheExistingUncertaintyGuard() {
+        diagnostics(true);
+        Fixture f = new Fixture();
+        CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+        f.world.armGrantFault(request.requestId());
+        f.codec.failGrant = true;
+        assertThrows(IllegalStateException.class, () -> f.world.acceptOutcome(outcome(request, "guest", true, 1, 7)));
+        assertEquals(false, CoopLightGrantFault.status().get("armed"));
+        assertEquals("native_grant_failed", ((Map<?, ?>) CoopLightGrantFault.status().get("lastDisarm")).get("reason"));
+        assertEquals(1, f.world.readOnlyStateCounts().get("uncertain"));
+        assertThrows(IllegalStateException.class, () -> f.world.armGrantFault(request.requestId()));
+        assertEquals(1, f.codec.grantAttempts);
+        assertTrue(f.codec.grants.isEmpty());
+    }
+
+    @Test void explicitDisarmDoesNotChangePendingLedgerAndDoesNotLeaveALaterFault() {
+        diagnostics(true);
+        Fixture f = new Fixture();
+        CoopLightCodec.Request request = pendingReward(f, CoopLightCodec.Action.PULSE);
+        f.world.armGrantFault(request.requestId());
+        Map<String, Object> saved = Map.copyOf(f.saved);
+        assertEquals(false, CoopLightGrantFault.disarm("bridge_command").get("armed"));
+        assertEquals(saved, f.saved);
+        f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        assertEquals(1, f.codec.grantAttempts);
+        assertEquals(0, f.world.readOnlyStateCounts().get("uncertain"));
+    }
+
+    private static CoopLightCodec.Request pendingReward(Fixture f, CoopLightCodec.Action action) {
+        f.world.installBridge(true, "guest"); f.lights.get(0).tag(id());
+        assertTrue(CoopLightBridge.handlePulse(f.lights.get(0).entity, f.local.entity, action == CoopLightCodec.Action.SENSOR_BURST));
+        return f.world.pendingRequests().get(0);
+    }
+
+    private static void diagnostics(boolean enabled) {
+        System.setProperty(CoopDebug.PROPERTY, Boolean.toString(enabled));
+        for (int i = 0; i < 300; i++) CoopDebug.pollFrame();
+        assertEquals(enabled, CoopDebug.diagnosticsEnabled());
     }
 
     private static String id() { return "light:" + UUID.randomUUID(); }

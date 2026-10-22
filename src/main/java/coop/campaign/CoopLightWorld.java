@@ -15,8 +15,10 @@ import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import coop.ambient.CoopLightBridge;
+import coop.debug.CoopLightGrantFault;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.net.CoopJson;
+import coop.util.CoopDebug;
 
 import java.awt.Color;
 import java.util.ArrayList;
@@ -135,6 +137,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
     }
 
     public void installBridge(boolean guest, String localActorId, Predicate<SectorEntityToken> gate) {
+        CoopLightGrantFault.checkContext();
         this.guest = guest;
         this.localActorId = CoopLightRecord.identity(localActorId, "local light actor");
         this.dwellerDialogGate = Objects.requireNonNull(gate, "dweller dialog gate");
@@ -151,12 +154,46 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
             }
         };
         CoopLightBridge.install(guest, bridgeHandler);
+        CoopLightGrantFault.checkContext();
     }
 
     public void resetBridge() {
+        CoopLightGrantFault.disarmOwner(this, "bridge_reset");
         if (bridgeHandler != null) CoopLightBridge.uninstall(bridgeHandler);
         bridgeHandler = null;
         localActorId = null;
+    }
+
+    /** Arms only a pending local reward; this never creates requests or changes the saved ledger. */
+    public Map<String, Object> armGrantFault(String requestId) {
+        CoopLightGrantFault.checkContext();
+        if (!CoopDebug.diagnosticsEnabled()) throw new IllegalStateException("Light grant fault requires diagnostics");
+        SectorAPI sector = sectorSupplier.get();
+        if (!isCurrentGrantFaultContext(sector, localActorId))
+            throw new IllegalStateException("Light grant fault requires the currently installed Guest adapter");
+        requestId = CoopLightRecord.uuid(requestId, "light grant fault request id");
+        State state = state();
+        CoopLightCodec.Request pending = state.pending.get(requestId);
+        if (pending == null) throw new IllegalArgumentException("Light grant fault requires an existing pending local request");
+        if (pending.action() == CoopLightCodec.Action.DWELLER)
+            throw new IllegalArgumentException("Dweller consumption has no native light reward to interrupt");
+        if (state.uncertain.contains(requestId) || state.applied.contains(requestId))
+            throw new IllegalStateException("Light grant fault cannot arm an uncertain or already applied request");
+        return CoopLightGrantFault.arm(this, sector, localActorId, pending);
+    }
+
+    /** Identity check for the transient debug hook, including replacement of the global native callback. */
+    public boolean isCurrentGrantFaultContext(SectorAPI sector, String actorId) {
+        return guest && bridgeHandler != null && CoopLightBridge.interactionOwner() == bridgeHandler
+                && localActorId != null && localActorId.equals(actorId) && sector != null && sectorSupplier.get() == sector;
+    }
+
+    /** The hook also checks this if invoked directly, so it cannot arm a fabricated future request. */
+    public boolean isEligibleGrantFaultRequest(CoopLightCodec.Request request) {
+        State state = state();
+        return request != null && request.action() != CoopLightCodec.Action.DWELLER
+                && request.equals(state.pending.get(request.requestId())) && !state.uncertain.contains(request.requestId())
+                && !state.applied.contains(request.requestId());
     }
 
     /** Transient session arbitration only; durable results remain authoritative across retries. */
@@ -347,11 +384,13 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
 
     @Override public void acceptOutcome(CoopLightCodec.Outcome outcome) {
         Objects.requireNonNull(outcome, "outcome");
+        CoopLightGrantFault.beforeOutcome(this, outcome);
         State state = state();
         CoopLightCodec.Request pending = state.pending.get(outcome.requestId());
         if (pending != null) requireSameRequest(outcome, pending, localActorId);
         boolean ownPending = pending != null && Objects.equals(localActorId, outcome.actorId());
         if (state.uncertain.contains(outcome.requestId())) {
+            CoopLightGrantFault.disarmOwner(this, "uncertain_reward");
             throw new IllegalStateException("Light reward application is uncertain for " + outcome.requestId()
                     + "; refusing to repeat a possibly applied native reward");
         }
@@ -361,6 +400,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         if (outcome.accepted()) state.consumed.add(outcome.lightId());
         boolean grant = ownPending && !state.applied.contains(outcome.requestId()) && outcome.accepted()
                 && outcome.action() != CoopLightCodec.Action.DWELLER;
+        if (!grant) CoopLightGrantFault.disarmOwner(this, "outcome_has_no_native_reward");
         if (grant) {
             SectorAPI sector = Objects.requireNonNull(sectorSupplier.get(), "No sector for light reward");
             CampaignFleetAPI player = Objects.requireNonNull(sector.getPlayerFleet(), "No local fleet for light reward");
@@ -368,7 +408,13 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
             // remain visibly uncertain across adapter recreation and can never auto-grant again.
             state.uncertain.add(outcome.requestId());
             save(state);
-            codec.grant(player, outcome.action() == CoopLightCodec.Action.SENSOR_BURST, outcome.bonus(), outcome.points());
+            try {
+                codec.grant(player, outcome.action() == CoopLightCodec.Action.SENSOR_BURST, outcome.bonus(), outcome.points());
+            } catch (RuntimeException | LinkageError failure) {
+                CoopLightGrantFault.disarmOwner(this, "native_grant_failed");
+                throw failure;
+            }
+            CoopLightGrantFault.afterNativeGrant(this, sector, outcome);
             state.uncertain.remove(outcome.requestId());
         }
         if (ownPending) {

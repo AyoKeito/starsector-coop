@@ -99,6 +99,8 @@ ss_status(instance: "guest")
 
 The guest has no such breakdown, because a guest's coordinator holds its own outgoing intents rather than the authority's view. `ss_advance_days` reads this block when the clock does not move.
 
+`status.lightGrantFault` reports the transient QA reward-interruption hook: `armed`, the current `arm`, `lastTrip` and `lastDisarm`. `ss_dump(what:"lights")` carries the same block. These snapshots do not arm the hook or grant rewards; the explicit `lightgrantfault` command below always uses `ss_act`.
+
 ### `ss_dump(instance, what, args?)`
 
 One read-only verb against one instance, returned as-is. Verbs and their arguments:
@@ -117,7 +119,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `hirable` | `{limit?, maxLy?}` | markets holding officers or administrators for hire, nearest the local player fleet first; the game only rolls officers when a player opens a market screen, so `candidateCount: 0` on a fresh campaign means dock at a big hub first |
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 | `streams` | none | campaign timestamp, stream ids/kinds, params, segment geometry/faders, native fade state and effective brightness sampled every 1,000 units |
-| `lights` | `{limit?:1..512}` | read-only native hyperspace lights: canonical ids, position, complete native params, lifetime, dweller flag, lossless salvage seed, despawn state, truncation counts and local `actorBonus`; never adopts lights or creates reward scripts |
+| `lights` | `{limit?:1..512}` | read-only native hyperspace lights: canonical ids, position, complete native params, lifetime, dweller flag, lossless salvage seed, despawn state, truncation counts, local `actorBonus` and transient `lightGrantFault` receipt; never adopts lights or creates reward scripts |
 
 ```
 ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
@@ -263,6 +265,15 @@ One state-changing verb against one instance.
 | `streamadd` | `{rearmUsedRoute?}` — host only; invokes native seasonal stream creation, reports actual new ids/configuration state |
 | `streamdespawn` | `{}` — host only; starts native seasonal despawn with no delay and a ten-day fade |
 | `lightspawn` | `{kind?:normal\|pair\|cluster\|large\|dweller, x, y, seed?:decimalString}` — Host-only native light creation; never changes the calendar or retries an uncertain request |
+| `lightgrantfault` | `{mode:"arm", requestId:"<existing pending UUID>"}`, `{mode:"status"}` or `{mode:"disarm"}`; one-shot post-native-grant QA interruption, always action-only and never retried after a dropped socket |
+
+`lightgrantfault` arms only an exact existing local Guest PULSE or SENSOR_BURST request with no uncertain/applied guard. It requires the configured agent bridge, diagnostics, an active gameplay session and the campaign paused. Use the existing launch-script `-Bridge` and `-Diagnostics` options; there is no new configuration flag. DWELLER requests, missing/future request ids, a second arm and mismatched contexts fail explicitly. While delivery is held, read the real pending UUID with `ss_act(instance:"guest", verb:"memory", args:{scope:"global", key:"coopLightState"})` without a `value`, then arm it; never fabricate or replace the ledger.
+
+The arm binds the current World, Sector, actor, request, light and action. It is transient, disarms on reset, adapter/campaign replacement, outcome mismatch/rejection or diagnostics disable, and consumes itself before throwing once after the real native reward returns. The Guest network catch preserves the campaign with pending plus uncertain state and no applied guard. A normal native Save can then capture that state for Load testing; on retry, the saved uncertain guard refuses a second grant. Explicit disarm never clears the guard or edits the ledger.
+
+All three modes use `ss_act`, including `mode:"status"`; `ss_dump` refuses `what:"lightgrantfault"`. Read `ss_status` or `ss_dump(what:"lights")` for retryable snapshots instead. The receipt has `armed`, `arm`, `lastTrip` and `lastDisarm`; arm details identify the binding, and a trip records `phase:"post_native_grant_before_applied"`. Status/disarm still work with diagnostics disabled for cleanup, through a loaded campaign's bridge. A dropped arm response is uncertain: inspect the receipt before issuing another action.
+
+For native acceptance, capture the actual saved P+U/no-A state and native reward reserves/queued points, then use standard native Load and prove no second grant. `lights.actorBonus` exposes burn/sensor reserves, but `AbyssalLightBonus.pendingTopographyPoints` has no API getter and must be inspected in the normal native save XML. Paused settled intel alone can miss a reward already queued. This hook is implemented; its native injected-interruption Save/Load acceptance remains pending.
 
 `ability` normally refuses an ability the player does not own. For test setup,
 `{abilityId:"generate_slipsurge", grantMissing:true, on:false}` validates the native ability spec,

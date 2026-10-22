@@ -1,8 +1,12 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-22 (0.1.5, runtime `47cdbc98dbcb`; P26 M3 native acceptance partial, with bounded battle/cleanup, reload, manual generation, conflict, constructed expiry and session/campaign replacement passes; both broad native gate groups remain open).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-22 (0.1.5; post-native-grant QA hook implemented, native exercise pending; latest native evidence on `47cdbc98dbcb` has bounded battle/cleanup, reload, manual generation, conflict, constructed expiry and session/campaign replacement passes; P26 M3 and both broad native gate groups remain partial).
 
-October 20 MCP-only checks add bounded pending-save/retry, automatic preclaim cancellation and native TCP reconnect recovery; full conflicting-request rejection remains inconclusive. October 21 native loading then exposes and fixes premature rejection before Guest's fleet mirror exists. `CoopLightWorld` checks actor readiness after cached-result lookup and before any new result/tombstone, leaving unknown/dead/unplaced actors retryable. Native reload on `47cdbc98dbcb` recovers the original pending request once, with a 248-check independent audit. Current clean build passes 4,334 tests plus one existing skip across 273 suites; focused World/Authority tests pass 26/21. Latest clear checkpoint 99j preserves Feb 25, c207 and 234 equal fields after explicit QA alignment. Claim/generation and uncertain-grant reload remain open. See the dated [native acceptance report](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) for preserved failures and limits.
+October 20 MCP-only checks add bounded pending-save/retry, automatic preclaim cancellation and native TCP reconnect recovery; full conflicting-request rejection remains inconclusive. October 21 native loading then exposes and fixes premature rejection before Guest's fleet mirror exists. `CoopLightWorld` checks actor readiness after cached-result lookup and before any new result/tombstone, leaving unknown/dead/unplaced actors retryable. Native reload on `47cdbc98dbcb` recovers the original pending request once, with a 248-check independent audit. That runtime's clean build passes 4,334 tests plus one existing skip across 273 suites; focused World/Authority tests pass 26/21. These counts precede the new post-native-grant QA hook. Latest clear checkpoint 99j preserves Feb 25, c207 and 234 equal fields after explicit QA alignment. Claim/generation and uncertain-grant reload remain open. See the dated [native acceptance report](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) for preserved failures and limits.
+
+`coop.debug.CoopLightGrantFault` now provides a transient opt-in interruption after one exact Guest native reward, before uncertain-state removal and the applied guard. `CoopLightWorld` validates the existing non-DWELLER pending request and current adapter; bridge `lightgrantfault` arms only with diagnostics, a configured bridge and a paused active Guest session. The arm binds World/Sector/actor/request/light/action, consumes itself before one exception and disarms on reset, replacement, mismatch or diagnostics disable. Bridge `status`/`lights` expose the receipt; `ss_act` handles every mode without socket retries. A native Save/Load exercise of the resulting pending-plus-uncertain state has not run, so this implementation closes no native gate.
+
+The hook candidate's clean `test build` passes 4,349 Java tests with one existing router skip, zero failures/errors and 274 suites. The MCP bridge suite passes 79/79. These automated results do not extend the historical native evidence to the new hook.
 
 Follow-up native load 19 verifies 99j's durable consumption in 26 checks. Initial cancellation 22a stays generation-inconclusive, while separate repeat 29 passes bounded fresh-generation isolation in 11,097 checks: the old lease never authorizes G2, fresh acceptance creates one native fleet, and Leave invokes exact cleanup once. Correlation stays temporal/behavioral because logs omit wire nonces. Constructed native expiry audit 17 adds 7,085 checks: a QA-only positive lifetime reduction leads to actual native despawn/removal, a delayed `light_unavailable` rejection and no fleet/reward. It does not establish natural generation, direct tag readback or late accepted-reply cancellation.
 
@@ -313,6 +317,10 @@ Owns: every wire type, since the enum lives here.
   `LIGHT_RESULT`. Guest pending requests retry every two seconds. Sector-memory `$coopLightState`
   is primitive String data containing pending requests, Host results, consumed identities, applied
   rewards and explicit uncertain-grant markers; callbacks and parsed records remain transient.
+  `coop.debug.CoopLightGrantFault` is a one-shot QA hook after the native reward returns and before
+  uncertain removal/applied bookkeeping. It requires an exact existing pending request and never
+  writes a synthetic ledger row. Arms are transient; reset/replacement/mismatch or diagnostics
+  disable disarms them. Native Save/Load acceptance of an injected interruption remains pending.
   `coop.ambient.CoopLightBridge`, the pinned `AbyssalLightEntityPlugin` fork and the narrow
   `DwellerCMD` fork hold Guest expiry, suppress mirror/NPC side effects and use the native local
   reward helper. Automatic Dweller dialogs wait for a nonce-correlated interaction claim before
@@ -322,7 +330,8 @@ Owns: every wire type, since the enum lives here.
   Dweller combat stays on the existing battle bridge; marked temporary encounter fleets are
   excluded from NPC publishing and exempted from Guest spawner cleanup, then removed on leave.
   Leaving the initial small dialog preserves the light; entering combat consumes it.
-  Bridge `lights` is read-only, `lightspawn` is a Host-only native fixture, and `diffLights` checks
+  Bridge `lights` is read-only, `lightspawn` is a Host-only native fixture, `lightgrantfault` is an
+  action-only Guest QA arm/status/disarm command, and `diffLights` checks
   complete matching-clock tables. Native acceptance remains open. Local visual phase/flicker/sounds
   are cosmetic; a non-consuming Guest sees generic fade when Host's pulse removes a light.
   A new canonical-light claim is rejected when the light has expired or been consumed; an existing
