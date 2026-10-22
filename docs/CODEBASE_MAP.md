@@ -1,14 +1,18 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-22 (0.1.5; post-native-grant QA hook implemented, native exercise pending; latest native evidence on `47cdbc98dbcb` has bounded battle/cleanup, reload, manual generation, conflict, constructed expiry and session/campaign replacement passes; P26 M3 and both broad native gate groups remain partial).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-22 (0.1.5; passive claim/deferred probes, real-message holds and the post-native-grant hook implemented, native exercises pending; latest native evidence on `47cdbc98dbcb` has bounded battle/cleanup, reload, manual generation, conflict, constructed expiry and session/campaign replacement passes; P26 M3 and both broad native gate groups remain partial).
 
 October 20 MCP-only checks add bounded pending-save/retry, automatic preclaim cancellation and native TCP reconnect recovery; full conflicting-request rejection remains inconclusive. October 21 native loading then exposes and fixes premature rejection before Guest's fleet mirror exists. `CoopLightWorld` checks actor readiness after cached-result lookup and before any new result/tombstone, leaving unknown/dead/unplaced actors retryable. Native reload on `47cdbc98dbcb` recovers the original pending request once, with a 248-check independent audit. That runtime's clean build passes 4,334 tests plus one existing skip across 273 suites; focused World/Authority tests pass 26/21. These counts precede the new post-native-grant QA hook. Latest clear checkpoint 99j preserves Feb 25, c207 and 234 equal fields after explicit QA alignment. Claim/generation and uncertain-grant reload remain open. See the dated [native acceptance report](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) for preserved failures and limits.
 
 `coop.debug.CoopLightGrantFault` now provides a transient opt-in interruption after one exact Guest native reward, before uncertain-state removal and the applied guard. `CoopLightWorld` validates the existing non-DWELLER pending request and current adapter; bridge `lightgrantfault` arms only with diagnostics, a configured bridge and a paused active Guest session. The arm binds World/Sector/actor/request/light/action, consumes itself before one exception and disarms on reset, replacement, mismatch or diagnostics disable. Bridge `status`/`lights` expose the receipt; `ss_act` handles every mode without socket retries. A native Save/Load exercise of the resulting pending-plus-uncertain state has not run, so this implementation closes no native gate.
 
-The hook candidate's clean `test build` passes 4,349 Java tests with one existing router skip, zero failures/errors and 274 suites. The MCP bridge suite passes 79/79. These automated results do not extend the historical native evidence to the new hook.
+Post-grant hook build `d44fbe3` passes a clean `test build` with 4,349 Java tests, one existing router skip, zero failures/errors and 274 suites. The MCP bridge suite passes 79/79. These results precede the claim/deferred probes and message hold; they do not extend the historical native evidence.
 
-Follow-up native load 19 verifies 99j's durable consumption in 26 checks. Initial cancellation 22a stays generation-inconclusive, while separate repeat 29 passes bounded fresh-generation isolation in 11,097 checks: the old lease never authorizes G2, fresh acceptance creates one native fleet, and Leave invokes exact cleanup once. Correlation stays temporal/behavioral because logs omit wire nonces. Constructed native expiry audit 17 adds 7,085 checks: a QA-only positive lifetime reduction leads to actual native despawn/removal, a delayed `light_unavailable` rejection and no fleet/reward. It does not establish natural generation, direct tag readback or late accepted-reply cancellation.
+`coop.debug.CoopLightMessageHold` holds one real logical message and matching retries at either accepted-claim reply or pre-application consumption request. `CoopNetPump` releases the original envelope through ordinary send/dispatch, reports its disposition and drops on timeout/context invalidation. Host `lightmessagehold` is action-only, bounded to 1–600 seconds from arm (default 30) and gated by diagnostics, the configured bridge and a paused active session for arm/release. `status.lightMessageHold` provides the receipt. Passive `lights.lightClaims`/`screen.lightInteraction.claimState` report current tokens and 128 bounded actual reply observations; `CoopLightDeferredEngagement` adds a 256-event cached primitive journal with original queued tokens, identities, cancellation and action counters. Exact selected-light `screen` readback includes the fading tag independently of the general census. Reads do not call the permission gate. Native exercises remain pending; older missing-nonce/tag evidence keeps its original limits.
+
+The probe/message-hold candidate passes a clean `test build` with 4,377 Java passes, one existing router skip, zero failures/errors and 276 suites. MCP passes 81/81, including local-probe exclusion from strict world comparison and action-only no-retry handling. Native exercises are still pending.
+
+Follow-up native load 19 verifies 99j's durable consumption in 26 checks. Initial cancellation 22a stays generation-inconclusive, while separate repeat 29 passes bounded fresh-generation isolation in 11,097 checks: the old lease never authorizes G2, fresh acceptance creates one native fleet, and Leave invokes exact cleanup once. Correlation stays temporal/behavioral because those logs omit wire nonces. Constructed native expiry audit 17 adds 7,085 checks: a QA-only positive lifetime reduction leads to actual native despawn/removal, a delayed `light_unavailable` rejection and no fleet/reward. It does not establish natural generation, direct tag readback or late accepted-reply cancellation.
 
 Native session/campaign replacement audit 66 adds 153 checks: Host leaves during Guest's pending action, Guest later closes its retained story with native Leave, and native Load/join establishes a distinct session within the same JVMs. Two held captures 90.138 seconds apart preserve actor/ship identities and progress 34/88 without an old manifestation/reward. Clock/cargo and the QA expiry tombstone roll back with the unmodified 99j copies. This is lifecycle disposal, not an isolated in-place owner swap or an old accepted reply delivered across the new session. Native uncertain-grant failure/reload, pending-DWELLER re-engagement, claim-pending reconnect and remaining automatic-race limits keep M3 partial. Test clients are closed and the temporary delay is removed.
 
@@ -321,6 +325,11 @@ Owns: every wire type, since the enum lives here.
   uncertain removal/applied bookkeeping. It requires an exact existing pending request and never
   writes a synthetic ledger row. Arms are transient; reset/replacement/mismatch or diagnostics
   disable disarms them. Native Save/Load acceptance of an injected interruption remains pending.
+  `coop.debug.CoopLightMessageHold` holds a real accepted claim reply after arbitration or a real
+  LIGHT_REQUEST before Host application, then releases its original envelope through ordinary
+  send/dispatch. Only matching retries of the latched token/request are suppressed. Timeout drops
+  the copy, and session/connection/sector/handler change invalidates it; no old-session delivery is
+  forced. Release receipts are transport dispositions, not proof of native application.
   `coop.ambient.CoopLightBridge`, the pinned `AbyssalLightEntityPlugin` fork and the narrow
   `DwellerCMD` fork hold Guest expiry, suppress mirror/NPC side effects and use the native local
   reward helper. Automatic Dweller dialogs wait for a nonce-correlated interaction claim before
@@ -331,7 +340,8 @@ Owns: every wire type, since the enum lives here.
   excluded from NPC publishing and exempted from Guest spawner cleanup, then removed on leave.
   Leaving the initial small dialog preserves the light; entering combat consumes it.
   Bridge `lights` is read-only, `lightspawn` is a Host-only native fixture, `lightgrantfault` is an
-  action-only Guest QA arm/status/disarm command, and `diffLights` checks
+  action-only Guest QA arm/status/disarm command, `lightmessagehold` is the bounded Host real-message
+  arm/status/release/drop command, and `diffLights` checks
   complete matching-clock tables. Native acceptance remains open. Local visual phase/flicker/sounds
   are cosmetic; a non-consuming Guest sees generic fade when Host's pulse removes a light.
   A new canonical-light claim is rejected when the light has expired or been consumed; an existing
@@ -346,6 +356,11 @@ Owns: every wire type, since the enum lives here.
   Native getter failures are explicit per-field errors. A returned native removeEntity call is
   separate from membership, alive/expired and containing-location observations; false census
   membership before and after Leave cannot establish cleanup for an unregistered native fleet.
+  Additive `claimState`/`lightClaims` snapshots expose current manual/preclaim tokens and bounded
+  actual reply observations. `deferredActions` has pending attempts and a 256-event primitive
+  lifecycle journal, stable observation ids, original queued tokens and explicit eviction/errors.
+  Querying it never calls native permission checks or renews a claim. Exact selected `nativeLight`
+  scans bypass the bounded general census and report alive/despawning/fading flags and completeness.
   The diagnostic patch passes a 2026-10-20 clean build with 4,330 Java passes, one existing router
   skip, zero failures/errors and 273 suites. Six focused diagnostic tests also pass after test-only
   adapter-reset coverage was strengthened. Native diagnostic build `282081e` verifies Host LOW

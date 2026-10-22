@@ -9143,6 +9143,166 @@ class CoopNetPumpTest {
     }
 
     @Test
+    void lightClaimReplyHoldOccursAfterRealArbitrationSuppressesRetriesAndReleasesOriginalEnvelope() {
+        withLightMessageProbe(() -> {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            AtomicLong now = new AtomicLong(1_000L);
+            RecordingSector sector = new RecordingSector(false); Global.setSector(sector.proxy());
+            CoopNetPump pump = livePump(service, activeHostSession(), now::get); pump.advance(0f);
+            pump.setLightClaimAvailabilityForTest(id -> true); sector.paused = true;
+            pump.armLightMessageHoldForBridge("claim_reply", LIGHT_ID, null, 30);
+            service.sent.clear();
+            service.inbound.add(CoopMessages.interactionClaim("session-a", 10, now.get(), LIGHT_ID,
+                    "Light", "guest-player", "actual-generation").withSenderId("guest-player"));
+            pump.advance(0f);
+            assertEquals("guest-player", pump.interactionHolderForBridge(LIGHT_ID), "the real arbiter must already have committed");
+            assertEquals(0L, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT));
+            java.util.Map<?, ?> original = (java.util.Map<?, ?>) pump.lightMessageHoldStatusForBridge().get("arm");
+            service.inbound.add(CoopMessages.interactionClaim("session-a", 11, now.get(), LIGHT_ID,
+                    "Light", "guest-player", "actual-generation").withSenderId("guest-player"));
+            service.inbound.add(CoopMessages.interactionClaim("session-a", 12, now.get(), SECOND_LIGHT_ID,
+                    "Other Light", "guest-player", "unrelated-generation").withSenderId("guest-player"));
+            service.inbound.add(CoopMessages.ping("session-a", 13, now.get()));
+            pump.advance(0f);
+            assertEquals(1L, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT));
+            assertEquals(SECOND_LIGHT_ID, CoopMessages.requiredPayloadString(onlyOf(service, CoopMessages.Type.INTERACTION_ACCEPT), "entityId"));
+            assertEquals(1L, countOfType(service, CoopMessages.Type.PONG), "heartbeats must keep flowing");
+            assertEquals(2L, ((java.util.Map<?, ?>) pump.lightMessageHoldStatusForBridge().get("arm")).get("matchingMessages"));
+            sector.paused = true;
+            pump.releaseLightMessageHoldForBridge();
+            CoopMessages.Message released = lastOfType(service, CoopMessages.Type.INTERACTION_ACCEPT);
+            assertEquals(original.get("messageSeq"), released.seq());
+            assertEquals(LIGHT_ID, CoopMessages.requiredPayloadString(released, "entityId"));
+            assertEquals("actual-generation", CoopMessages.interactionLightClaimToken(released));
+            assertEquals("original_reply_enqueued", ((java.util.Map<?, ?>) pump.lightMessageHoldStatusForBridge().get("lastReceipt")).get("releaseDisposition"));
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, pump::releaseLightMessageHoldForBridge);
+        });
+    }
+
+    @Test
+    void lightConsumptionHoldDoesNotApplyUntilOriginalRequestReturnsThroughNormalDispatch() {
+        withLightMessageProbe(() -> {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+            AtomicLong now = new AtomicLong(1_000L); CoopSessionState session = activeHostSession();
+            RecordingSector sector = new RecordingSector(false); Global.setSector(sector.proxy());
+            CoopNetPump pump = livePump(service, session, now::get);
+            RecordingLightWorld world = installLightWorld(pump, service, session, now);
+            pump.advance(0f); sector.paused = true;
+            pump.armLightMessageHoldForBridge("consumption_request", LIGHT_ID, "PULSE", 30);
+            service.sent.clear();
+            CoopMessages.Message original = CoopMessages.lightRequest("session-a", 10, now.get(),
+                    CoopLightCodec.encodeRequest(lightRequest())).withSenderId("guest-player");
+            service.inbound.add(original);
+            service.inbound.add(CoopMessages.lightRequest("session-a", 11, now.get(),
+                    CoopLightCodec.encodeRequest(lightRequest())).withSenderId("guest-player"));
+            service.inbound.add(CoopMessages.ping("session-a", 12, now.get()));
+            pump.advance(0f);
+            assertEquals(0, world.requests);
+            assertEquals(0L, countOfType(service, CoopMessages.Type.LIGHT_RESULT));
+            assertEquals(1L, countOfType(service, CoopMessages.Type.PONG));
+            java.util.Map<?, ?> arm = (java.util.Map<?, ?>) pump.lightMessageHoldStatusForBridge().get("arm");
+            assertEquals(LIGHT_REQUEST_ID, arm.get("latchedIdentity")); assertEquals(2L, arm.get("matchingMessages"));
+            assertEquals(10L, arm.get("messageSeq"));
+            sector.paused = true;
+            pump.releaseLightMessageHoldForBridge();
+            assertEquals(1, world.requests, "release must reach the actual authority rather than a dedup no-op");
+            assertEquals("guest-player", world.requestActor);
+            assertEquals(1L, countOfType(service, CoopMessages.Type.LIGHT_RESULT));
+            assertEquals("original_request_dispatched", ((java.util.Map<?, ?>) pump.lightMessageHoldStatusForBridge().get("lastReceipt")).get("releaseDisposition"));
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, pump::releaseLightMessageHoldForBridge);
+        });
+    }
+
+    @Test
+    void lightMessageHoldRefusesDeliveryAfterConnectionOrAdapterReplacement() {
+        withLightMessageProbe(() -> {
+            for (String replacement : List.of("connection", "adapter", "sector")) {
+                RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+                AtomicLong now = new AtomicLong(1_000L);
+                RecordingSector sector = new RecordingSector(false); Global.setSector(sector.proxy());
+                CoopNetPump pump = livePump(service, activeHostSession(), now::get); pump.advance(0f);
+                pump.setLightClaimAvailabilityForTest(id -> true); sector.paused = true;
+                pump.armLightMessageHoldForBridge("claim_reply", LIGHT_ID, null, 30);
+                service.sent.clear();
+                service.inbound.add(CoopMessages.interactionClaim("session-a", 10, now.get(), LIGHT_ID,
+                        "Light", "guest-player", "old-generation").withSenderId("guest-player"));
+                pump.advance(0f);
+                assertEquals(true, pump.lightMessageHoldStatusForBridge().get("held"));
+                switch (replacement) {
+                    case "connection" -> service.connectionGeneration++;
+                    case "adapter" -> coop.ambient.CoopLightBridge.clear();
+                    case "sector" -> Global.setSector(new RecordingSector(true).proxy());
+                    default -> throw new AssertionError(replacement);
+                }
+                org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, pump::releaseLightMessageHoldForBridge);
+                assertEquals(0L, countOfType(service, CoopMessages.Type.INTERACTION_ACCEPT));
+                assertEquals("context_changed", ((java.util.Map<?, ?>) pump.lightMessageHoldStatusForBridge().get("lastReceipt")).get("reason"));
+            }
+        });
+    }
+
+    @Test
+    void lightClaimDiagnosticsExposeActualNonceMatchesWithoutRequestingClaimsAndStayBounded() {
+        withLightMessageProbe(() -> {
+            RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+            AtomicLong now = new AtomicLong(1_000L);
+            Global.setSector(new RecordingSector(false).proxy());
+            CoopNetPump pump = livePump(service, activeGuestSession(), now::get); pump.advance(0f);
+            assertFalse(pump.allowDwellerLightDialog(nativeLightToken(LIGHT_ID)));
+            String token = CoopMessages.interactionLightClaimToken(onlyOf(service, CoopMessages.Type.INTERACTION_CLAIM));
+            assertEquals(token, coop.ambient.CoopLightBridge.passiveClaimToken(LIGHT_ID), "first session installation must wire the passive token probe after reset");
+            Object originalOwner = coop.ambient.CoopLightBridge.interactionOwner();
+            pump.lightWorldForBridge().resetBridge();
+            assertNull(coop.ambient.CoopLightBridge.passiveClaimToken(LIGHT_ID));
+            pump.advance(0f);
+            assertNotSame(originalOwner, coop.ambient.CoopLightBridge.interactionOwner());
+            assertEquals(token, coop.ambient.CoopLightBridge.passiveClaimToken(LIGHT_ID), "reinstallation must restore the passive probe");
+            int sentBeforeQuery = service.sent.size();
+            assertEquals(token, pump.lightClaimDiagnosticsForBridge(LIGHT_ID).get("selectedToken"));
+            assertEquals(token, pump.lightClaimTokenForProbe(LIGHT_ID));
+            assertNull(pump.lightClaimTokenForProbe(SECOND_LIGHT_ID));
+            assertEquals(sentBeforeQuery, service.sent.size());
+            service.inbound.add(CoopMessages.interactionAccept("session-a", 10, now.get(), LIGHT_ID,
+                    "guest-player", "Light", 1, "old-generation"));
+            service.inbound.add(CoopMessages.interactionReject("session-a", 11, now.get(), LIGHT_ID,
+                    "already_claimed_by:host-player", "old-generation"));
+            service.inbound.add(CoopMessages.interactionAccept("session-a", 12, now.get(), LIGHT_ID,
+                    "guest-player", "Light", 1, token));
+            pump.advance(0f);
+            java.util.List<?> rows = (java.util.List<?>) pump.lightClaimDiagnosticsForBridge(LIGHT_ID).get("observations");
+            assertEquals(3, rows.size());
+            assertEquals(false, ((java.util.Map<?, ?>) rows.get(0)).get("matched"));
+            assertEquals(false, ((java.util.Map<?, ?>) rows.get(1)).get("matched"));
+            assertEquals(true, ((java.util.Map<?, ?>) rows.get(2)).get("matched"));
+            assertEquals(token, ((java.util.Map<?, ?>) rows.get(2)).get("token"));
+            for (int i = 0; i < 130; i++) {
+                service.inbound.add(CoopMessages.interactionAccept("session-a", 20 + i, now.get(), LIGHT_ID,
+                        "guest-player", "Light", 1, token));
+                pump.advance(0f);
+            }
+            java.util.Map<String, Object> snapshot = pump.lightClaimDiagnosticsForBridge(LIGHT_ID);
+            assertEquals(128, ((java.util.List<?>) snapshot.get("observations")).size());
+            assertEquals(5L, snapshot.get("evictedObservations"));
+        });
+    }
+
+    private static void withLightMessageProbe(Runnable action) {
+        String[] properties = {coop.util.CoopDebug.PROPERTY, coop.debug.CoopAgentBridge.PORT_PROPERTY,
+                coop.util.CoopDebug.INTERACTION_DELAY_PROPERTY};
+        String[] saved = java.util.Arrays.stream(properties).map(System::getProperty).toArray(String[]::new);
+        try {
+            System.setProperty(properties[0], "true"); System.setProperty(properties[1], "9189");
+            System.setProperty(properties[2], "0"); forceDebugToggleRefresh();
+            action.run();
+        } finally {
+            for (int i = 0; i < properties.length; i++) {
+                if (saved[i] == null) System.clearProperty(properties[i]); else System.setProperty(properties[i], saved[i]);
+            }
+            forceDebugToggleRefresh();
+        }
+    }
+
+    @Test
     void manuallyOpenedNormalAndDwellerLightDialogsUseTheirOwnAcceptedToken() {
         for (boolean dweller : List.of(false, true)) {
             RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);

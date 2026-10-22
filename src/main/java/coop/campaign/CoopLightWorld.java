@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiPredicate;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -53,6 +54,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
     private CoopLightBridge.Handler bridgeHandler;
     private Predicate<SectorEntityToken> dwellerDialogGate = entity -> true;
     private BiPredicate<String, String> dwellerClaimAllowed = (lightId, actorId) -> true;
+    private Function<String, String> claimTokenProbe = lightId -> null;
     private SectorAPI cachedSector;
     private String cachedText;
     private State cachedState;
@@ -152,6 +154,9 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
                 String id = ownedId(light);
                 return id != null && isAvailable(id) && dwellerDialogGate.test(light);
             }
+            @Override public String claimToken(String canonicalLightId) {
+                return claimTokenProbe.apply(canonicalLightId);
+            }
         };
         CoopLightBridge.install(guest, bridgeHandler);
         CoopLightGrantFault.checkContext();
@@ -162,6 +167,12 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         if (bridgeHandler != null) CoopLightBridge.uninstall(bridgeHandler);
         bridgeHandler = null;
         localActorId = null;
+        claimTokenProbe = lightId -> null;
+    }
+
+    /** Passive token reader only; calling it must never request or renew a claim. */
+    public void setClaimTokenProbe(Function<String, String> probe) {
+        claimTokenProbe = Objects.requireNonNull(probe, "light claim token probe");
     }
 
     /** Arms only a pending local reward; this never creates requests or changes the saved ledger. */

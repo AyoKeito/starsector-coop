@@ -200,7 +200,7 @@ class CoopAgentCommandsTest {
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
                         "teleport", "visibility", "streams", "streamadd", "streamdespawn", "clockalign",
                         "wrecks", "wreckspawn", "wreckconsume", "encounters", "encounterspawn", "lights", "lightspawn",
-                        "lightgrantfault"),
+                        "lightgrantfault", "lightmessagehold"),
                 new CoopAgentCommands().verbs());
     }
 

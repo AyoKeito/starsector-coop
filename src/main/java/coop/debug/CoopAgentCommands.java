@@ -268,6 +268,7 @@ public final class CoopAgentCommands {
         map.put("lights", CoopAgentCommands::lights);
         map.put("lightspawn", CoopAgentCommands::lightspawn);
         map.put("lightgrantfault", CoopAgentCommands::lightgrantfault);
+        map.put("lightmessagehold", CoopAgentCommands::lightmessagehold);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
         map.put("clockalign", CoopAgentCommands::clockalign);
@@ -704,6 +705,7 @@ public final class CoopAgentCommands {
                 Object seed = entity.getMemoryWithoutUpdate().get(com.fs.starfarer.api.impl.campaign.ids.MemFlags.SALVAGE_SEED);
                 row.put("salvageSeed", seed instanceof Number value ? Long.toString(value.longValue()) : JSONObject.NULL);
                 row.put("despawning", plugin.isDespawning());
+                row.put("fadingOutAndExpiring", entity.hasTag(Tags.FADING_OUT_AND_EXPIRING));
                 table.put(id == null ? "native:" + entity.getId() : id, row);
             }
         }
@@ -714,7 +716,63 @@ public final class CoopAgentCommands {
         out.put("lights", table); out.put("state", stateCounts);
         out.put("actorBonus", readOnlyLightBonus(sector.getPlayerFleet()));
         out.put("lightGrantFault", new JSONObject(CoopLightGrantFault.status()));
+        out.put("lightClaims", lightClaimProbe(context.pump(), null));
+        out.put("deferredActions", new JSONObject(coop.ambient.CoopLightBridge.deferredDiagnostics()));
         return out;
+    }
+
+    /** Captures real M3 messages at a bounded QA hold, without blocking other traffic. */
+    static JSONObject lightmessagehold(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String mode = requiredString(args, "mode");
+        CoopNetPump pump = context.pump();
+        if (pump == null) throw new IllegalStateException("no coop pump installed");
+        Map<String, Object> receipt;
+        switch (mode) {
+            case "status" -> receipt = pump.lightMessageHoldStatusForBridge();
+            case "drop" -> receipt = pump.dropLightMessageHoldForBridge("bridge_command");
+            case "arm", "release" -> {
+                if (CoopAgentBridge.configuredPort() == 0)
+                    throw new IllegalStateException("lightmessagehold requires the opt-in agent bridge");
+                if (!coop.util.CoopDebug.diagnosticsEnabled())
+                    throw new IllegalStateException("lightmessagehold requires debug diagnostics");
+                if (roleOf(pump) != CoopConnectionRole.HOST)
+                    throw new IllegalStateException("lightmessagehold is host-only");
+                if (!pump.gameplaySessionActiveForBridge())
+                    throw new IllegalStateException("lightmessagehold requires an active gameplay session");
+                if (!sector.isPaused())
+                    throw new IllegalStateException("lightmessagehold arm/release requires the campaign paused");
+                if (mode.equals("release")) receipt = pump.releaseLightMessageHoldForBridge();
+                else {
+                    String stage = requiredString(args, "stage");
+                    String lightId = coop.campaign.CoopLightRecord.canonicalId(requiredString(args, "lightId"));
+                    int seconds = optionalInt(args, "seconds", 30);
+                    if (seconds < 1 || seconds > CoopLightMessageHold.MAX_SECONDS)
+                        throw new IllegalArgumentException("seconds must be between 1 and " + CoopLightMessageHold.MAX_SECONDS);
+                    String action = null;
+                    if (stage.equals("consumption_request")) {
+                        action = requiredString(args, "action");
+                        try { coop.campaign.CoopLightCodec.Action.valueOf(action); }
+                        catch (IllegalArgumentException ex) {
+                            throw new IllegalArgumentException("action must be PULSE, SENSOR_BURST or DWELLER");
+                        }
+                    } else if (!stage.equals("claim_reply"))
+                        throw new IllegalArgumentException("stage must be claim_reply or consumption_request");
+                    else if (args.has("action"))
+                        throw new IllegalArgumentException("action is only accepted for consumption_request");
+                    receipt = pump.armLightMessageHoldForBridge(stage, lightId, action, seconds);
+                }
+            }
+            default -> throw new IllegalArgumentException("mode must be arm, status, release or drop");
+        }
+        JSONObject result = new JSONObject(receipt);
+        result.put("qa", true);
+        result.put("mode", mode);
+        return result;
+    }
+
+    private static Object lightClaimProbe(CoopNetPump pump, String lightId) {
+        return pump == null ? JSONObject.NULL : new JSONObject(pump.lightClaimDiagnosticsForBridge(lightId));
     }
 
     /** One-shot QA interruption after a real Guest reward grant and before its applied marker. */
@@ -1156,6 +1214,8 @@ public final class CoopAgentCommands {
         // 0.1.1: always present, so a netfault someone forgot to clear can never be read as a bug.
         out.put("netfault", netFaultBlock(netFaultStatusOf(pump)));
         out.put("lightGrantFault", new JSONObject(CoopLightGrantFault.status()));
+        out.put("lightMessageHold", pump == null ? JSONObject.NULL
+                : new JSONObject(pump.lightMessageHoldStatusForBridge()));
         // 0.1.1: the reliable-delivery layer's three counters, which are the only evidence outside a
         // log that a replay after a link drop landed exactly once.
         out.put("reliable", reliableBlock(pump));
@@ -3832,8 +3892,11 @@ public final class CoopAgentCommands {
 
         JSONObject coopDialog = coopDialogBlock(pump);
         out.put("coopDialog", coopDialog == null ? JSONObject.NULL : coopDialog);
-        out.put("lightInteraction", lightInteractionBlock(args, sector, target,
-                pump == null ? null : pump::interactionHolderForBridge));
+        JSONObject lightInteraction = lightInteractionBlock(args, sector, target,
+                pump == null ? null : pump::interactionHolderForBridge);
+        Object claimLightId = lightInteraction.opt("claimLightId");
+        lightInteraction.put("claimState", lightClaimProbe(pump, claimLightId instanceof String id ? id : null));
+        out.put("lightInteraction", lightInteraction);
 
         out.put("pause", pauseBlock(roleOf(pump),
                 pump == null ? null : pump.pauseCoordinatorForBridge(),
@@ -3871,6 +3934,8 @@ public final class CoopAgentCommands {
                 : lightDiagnosticJson(lightDiagnosticRead("queuedTargetEngineId", queued::getId, errors)));
         out.put("claimLightId", lightDiagnosticJson(claimId));
         out.put("claimHolderPlayerId", lightDiagnosticJson(holder));
+        out.put("deferredActions", new JSONObject(coop.ambient.CoopLightBridge.deferredDiagnostics()));
+        out.put("nativeLight", selectedNativeLight(sector, claimId, errors));
         JSONArray encounters = new JSONArray();
         for (coop.ambient.CoopLightBridge.EncounterDiagnostic row : coop.ambient.CoopLightBridge.encounterDiagnostics()) {
             JSONObject item = new JSONObject();
@@ -3903,6 +3968,50 @@ public final class CoopAgentCommands {
         out.put("encounters", encounters);
         out.put("encounterLimit", 16);
         out.put("readErrors", new JSONArray(errors));
+        return out;
+    }
+
+    /** Exact selected-light flags, independent of the bounded general entity census. */
+    private static JSONObject selectedNativeLight(SectorAPI sector, String lightId, List<String> errors)
+            throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("lightId", lightDiagnosticJson(lightId));
+        LocationAPI hyperspace = sector == null ? null
+                : lightDiagnosticRead("lightHyperspace", sector::getHyperspace, errors);
+        boolean available = lightId != null && hyperspace != null;
+        out.put("available", available);
+        JSONArray rows = new JSONArray();
+        int matches = 0;
+        int errorsBefore = errors.size();
+        List<SectorEntityToken> entities = available
+                ? lightDiagnosticRead("nativeLightEntities", hyperspace::getAllEntities, errors) : null;
+        if (entities != null) {
+            for (SectorEntityToken entity : entities) {
+                if (!Boolean.TRUE.equals(lightDiagnosticRead("nativeLightKind",
+                        () -> coop.ambient.CoopLightBridge.isNativeLight(entity), errors))) continue;
+                String id = lightDiagnosticRead("nativeLightCanonicalId",
+                        () -> coop.campaign.CoopLightWorld.ownedId(entity), errors);
+                if (!lightId.equals(id)) continue;
+                matches++;
+                if (rows.length() >= 2) continue;
+                JSONObject row = new JSONObject();
+                row.put("engineId", lightDiagnosticJson(lightDiagnosticRead("nativeLightEngineId", entity::getId, errors)));
+                row.put("alive", lightDiagnosticJson(lightDiagnosticRead("nativeLightAlive", entity::isAlive, errors)));
+                row.put("fadingOutAndExpiring", lightDiagnosticJson(lightDiagnosticRead("nativeLightFadeTag",
+                        () -> entity.hasTag(Tags.FADING_OUT_AND_EXPIRING), errors)));
+                var plugin = lightDiagnosticRead("nativeLightPlugin", entity::getCustomPlugin, errors);
+                if (!(plugin instanceof com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin))
+                    errors.add("nativeLightPlugin: missing native light plugin");
+                row.put("despawning", lightDiagnosticJson(lightDiagnosticRead("nativeLightDespawning",
+                        () -> plugin instanceof com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin light
+                                ? light.isDespawning() : null, errors)));
+                rows.put(row);
+            }
+        }
+        out.put("matches", matches);
+        out.put("entities", rows);
+        out.put("truncated", matches > rows.length());
+        out.put("complete", available && entities != null && errors.size() == errorsBefore && matches <= rows.length());
         return out;
     }
 

@@ -101,6 +101,8 @@ The guest has no such breakdown, because a guest's coordinator holds its own out
 
 `status.lightGrantFault` reports the transient QA reward-interruption hook: `armed`, the current `arm`, `lastTrip` and `lastDisarm`. `ss_dump(what:"lights")` carries the same block. These snapshots do not arm the hook or grant rewards; the explicit `lightgrantfault` command below always uses `ss_act`.
 
+`status.lightMessageHold` reports the transient real-message hold: `armed`, `held`, the current `arm` and `lastReceipt`. Use this snapshot to inspect an uncertain action response; the explicit `lightmessagehold` command, including its status mode, always uses `ss_act`.
+
 ### `ss_dump(instance, what, args?)`
 
 One read-only verb against one instance, returned as-is. Verbs and their arguments:
@@ -119,7 +121,8 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `hirable` | `{limit?, maxLy?}` | markets holding officers or administrators for hire, nearest the local player fleet first; the game only rolls officers when a player opens a market screen, so `candidateCount: 0` on a fresh campaign means dock at a big hub first |
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 | `streams` | none | campaign timestamp, stream ids/kinds, params, segment geometry/faders, native fade state and effective brightness sampled every 1,000 units |
-| `lights` | `{limit?:1..512}` | read-only native hyperspace lights: canonical ids, position, complete native params, lifetime, dweller flag, lossless salvage seed, despawn state, truncation counts, local `actorBonus` and transient `lightGrantFault` receipt; never adopts lights or creates reward scripts |
+| `lights` | `{limit?:1..512}` | read-only native hyperspace lights: canonical ids, position, complete native params, lifetime, dweller flag, lossless salvage seed, despawn/`fadingOutAndExpiring` state, truncation counts, local `actorBonus`, `lightClaims`, `deferredActions` and transient `lightGrantFault` receipt; never adopts lights or creates reward scripts |
+| `screen` | `{lightId?:"light:<UUID>"}` | local native UI state and `lightInteraction`, including `claimState`, cached `deferredActions`, exact selected `nativeLight` flags and weak exact-fleet cleanup observations; never acquires/renews a claim |
 
 ```
 ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
@@ -209,6 +212,12 @@ Story one-offs are not included: the Ziggurat wreck, the Alpha Site, the red pla
 
 Two things about `market` that are behaviour, not bugs. On the host it runs the same `ensureOpenMarketStocked` a real dock visit runs, so calling it stocks the market. On the guest it reports raw current cargo, and a market the guest has never docked at comes back with `"stocked": false` rather than an error.
 
+`lights.lightClaims` and `screen.lightInteraction.claimState` expose the current manual/preclaim light ids and tokens, selected token/holder, adapter identities and at most 128 actual ACCEPT/REJECT observations. Rows include sequence, direction, reply token, current token and `matched`; `evictedObservations` reports lost history. On Guest inbound replies, `matched` is the production comparison with the current generation. Host outbound observation alone is not evidence that Guest received or applied a reply. Observations require diagnostics enabled; empty or evicted history cannot establish that no reply occurred.
+
+`deferredActions` has `pending`, `pendingCount`, `pendingTruncated`, `journal`, `maxEvents:256` and `evictedEvents`. Attempt rows carry stable `observationId`, `originalClaimToken` captured when the action queues, `tokenObserved`/`tokenReadError`, owner/sector/player/dialog/light identities, state/reason, queue times and native action execution/return counts and failure details. These are cached primitive snapshots; reads never invoke native permission checks, call a token provider or renew a claim. Journal eviction and token errors limit what a capture can prove.
+
+For exact native fading state, call `ss_dump(instance:"guest", what:"screen", args:{lightId:"light:<UUID>"})`. `lightInteraction.nativeLight` scans that selected canonical light independently of the bounded general census. It reports match count and up to two matching native entities with `engineId`, `alive`, `despawning` and `fadingOutAndExpiring`, plus `complete`/`truncated` and read errors. Scan completeness alone does not prove a unique canonical entity; check the match count and errors. General `lights` rows also include the fading tag. These diagnostics support new native tests; they do not repair older truncated tag captures or missing-nonce observations.
+
 ### `ss_diff(what, args?, tolerance?, ignore?)`
 
 `lights` uses a strict comparison: both manifests must be complete, every row must have a valid managed canonical identity, and every native gameplay/recipe field compares exactly. Local `engineId`, actor-local state counts and `actorBonus` are excluded. Matching raw campaign timestamps produce `PASS` or `FAIL`; unequal or unsafe timestamps produce `INCONCLUSIVE`, even when the fields match. `maxDifferences` limits displayed mismatches while `counts.differing` retains the full count. Nonzero tolerance and gameplay ignore keys are refused.
@@ -266,6 +275,15 @@ One state-changing verb against one instance.
 | `streamdespawn` | `{}` — host only; starts native seasonal despawn with no delay and a ten-day fade |
 | `lightspawn` | `{kind?:normal\|pair\|cluster\|large\|dweller, x, y, seed?:decimalString}` — Host-only native light creation; never changes the calendar or retries an uncertain request |
 | `lightgrantfault` | `{mode:"arm", requestId:"<existing pending UUID>"}`, `{mode:"status"}` or `{mode:"disarm"}`; one-shot post-native-grant QA interruption, always action-only and never retried after a dropped socket |
+| `lightmessagehold` | `{mode:"arm", stage:"claim_reply", lightId, seconds?:1..600}` or `{mode:"arm", stage:"consumption_request", lightId, action:"PULSE"\|"SENSOR_BURST"\|"DWELLER", seconds?:1..600}`; other modes `status`, `release`, `drop`; all action-only with no socket retry |
+
+`lightmessagehold` holds a real Host/Guest light message without blocking other traffic or fabricating protocol state. Arm/release require the configured agent bridge, diagnostics and a paused active Host gameplay session. Use existing `-Bridge` and `-Diagnostics` launch options. `lightId` must be canonical. `claim_reply` accepts no `action` and latches only a real accepted Host arbitration result before sending it. `consumption_request` requires the exact uppercase action and latches a real Guest `LIGHT_REQUEST` before Host application. Once latched, only retries of that token/request identity remain held; fresh identities and unrelated traffic continue normally.
+
+`seconds` is an integer from 1 to 600, default 30, and the deadline begins at arm rather than capture. Use explicit 600 for planned native battle checks and finish within that deadline. Timeout drops the held copy; session, connection generation, Sector or handler replacement invalidates it, as does diagnostics disable. No old-session delivery is forced into a new context. Status/drop remain available with diagnostics off through the loaded campaign's bridge. Drop clears only instrumentation, never a ledger or the gameplay request, so ordinary retries can resume afterward.
+
+Release consumes the hold before using the original envelope through normal send/dispatch. The receipt reports `armed`, `held`, `arm` and `lastReceipt`, with stage, context identities, deadline, latched identity, matching-message count and original sequence metadata. `lastReceipt.releaseDisposition` records `original_reply_enqueued`, `original_request_dispatched` or a release failure. These are transport dispositions, not proof of Guest receipt or native reward application; correlate subsequent claim/deferred, ledger and native observations. All modes use `ss_act`, including status; `ss_dump` refuses `what:"lightmessagehold"`. Use `ss_status` for a retryable receipt after an uncertain socket response.
+
+For fault-hook setup, first arm a `consumption_request` hold, then create the real Guest request, read its actual P UUID without writing memory and arm `lightgrantfault`. Release the held request through Host normally. For pending DWELLER tests, the request must originate from native `battleContextCreated`; opening and leaving a story cannot create it. Native UI/battles and acceptance remain pending. A battle that outlasts the hold cannot establish held-request coverage, and an enqueue/dispatch receipt alone closes no M3 gate.
 
 `lightgrantfault` arms only an exact existing local Guest PULSE or SENSOR_BURST request with no uncertain/applied guard. It requires the configured agent bridge, diagnostics, an active gameplay session and the campaign paused. Use the existing launch-script `-Bridge` and `-Diagnostics` options; there is no new configuration flag. DWELLER requests, missing/future request ids, a second arm and mismatched contexts fail explicitly. While delivery is held, read the real pending UUID with `ss_act(instance:"guest", verb:"memory", args:{scope:"global", key:"coopLightState"})` without a `value`, then arm it; never fabricate or replace the ledger.
 

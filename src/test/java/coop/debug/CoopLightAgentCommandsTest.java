@@ -58,6 +58,7 @@ class CoopLightAgentCommandsTest {
         assertEquals("native-host", row.getString("hostEntityId"));
         assertEquals(22.5, row.getDouble("remainingDays"));
         assertTrue(row.getBoolean("dweller"));
+        assertFalse(row.getBoolean("fadingOutAndExpiring"));
         assertEquals(123L, result.getLong("campaignTimestamp"));
         assertEquals(before, memory);
         assertTrue(f.sectorMemory.isEmpty(), "a query must not create durable light state");

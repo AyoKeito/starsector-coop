@@ -90,6 +90,20 @@ class CoopLightWorldTest {
         assertNull(new CoopLightWorld(() -> null).captureHost());
     }
 
+    @Test void passiveTokenProbeCannotQueueAClaimOrChangeTheSavedLedger() {
+        Fixture f = new Fixture();
+        f.world.installBridge(true, "guest");
+        String lightId = id();
+        Map<String, Object> before = Map.copyOf(f.saved);
+        f.world.setClaimTokenProbe(selected -> selected.equals(lightId) ? "existing-claim-token" : null);
+        assertEquals("existing-claim-token", CoopLightBridge.passiveClaimToken(lightId));
+        assertNull(CoopLightBridge.passiveClaimToken(id()));
+        assertTrue(f.world.pendingRequests().isEmpty());
+        assertEquals(before, f.saved);
+        f.world.resetBridge();
+        assertNull(CoopLightBridge.passiveClaimToken(lightId));
+    }
+
     @Test void upsertAdoptsStrictNativeRecipeAndPreservesLocalEntity() {
         Fixture f = new Fixture(false);
         Light legacy = f.add("same-native");

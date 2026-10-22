@@ -157,6 +157,212 @@ class CoopLightDeferredEngagementTest {
         assertTrue(scene.scripts.isEmpty());
     }
 
+    @Test void diagnosticsAreImmutablePrimitiveSnapshotsAndCaptureTheOriginalTokenAfterTheGate() {
+        Scene scene = new Scene();
+        scene.queueTokenOnGate = true;
+        int[] calls = {0};
+        assertTrue(CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> calls[0]++));
+        Map<String, Object> first = CoopLightBridge.deferredDiagnostics();
+        Map<String, Object> queued = rows(first, "pending").get(0);
+        assertEquals("original-claim-token", queued.get("originalClaimToken"));
+        assertEquals(true, queued.get("tokenObserved"));
+        assertEquals("", queued.get("tokenReadError"));
+        assertEquals(1, scene.permissionCalls);
+        assertEquals(1, scene.tokenReads);
+        assertEquals(queued.get("queuedSequence"), lastEvent((String) queued.get("observationId")).get("sequence"));
+        for (String key : List.of("ownerIdentity", "sectorIdentity", "playerIdentity", "dialogIdentity", "lightIdentity"))
+            assertFalse(((String) queued.get(key)).isBlank(), key);
+
+        scene.token = "later-claim-token";
+        scene.fading = true;
+        assertTrue(CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> calls[0] += 10));
+        assertEquals(first, CoopLightBridge.deferredDiagnostics(), "reads and repeated selections cannot retire or replace a pending attempt");
+        assertEquals(1, scene.permissionCalls);
+        assertEquals(1, scene.tokenReads);
+        assertEquals(0, calls[0]);
+        assertTrue(scene.scripts.stream().noneMatch(EveryFrameScript::isDone));
+        assertPrimitives(first);
+        assertThrows(UnsupportedOperationException.class, () -> first.put("pendingCount", 42));
+        assertThrows(UnsupportedOperationException.class, () -> rows(first, "journal").clear());
+        assertThrows(UnsupportedOperationException.class, () -> queued.put("actionExecutionCount", 42));
+        assertEquals(1, scene.memory.size(), "diagnostics never add saved state");
+    }
+
+    @Test void executionCountersDistinguishInvocationFromReturnAndNeverRepeat() {
+        Scene scene = new Scene();
+        int[] calls = {0};
+        CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> {
+            calls[0]++;
+            List<Map<String, Object>> journal = rows(CoopLightBridge.deferredDiagnostics(), "journal");
+            Map<String, Object> invoked = journal.get(journal.size() - 1);
+            assertEquals("action_invoked", invoked.get("reason"));
+            assertEquals(1, invoked.get("actionExecutionCount"));
+            assertEquals(0, invoked.get("actionReturnCount"));
+        });
+        String id = (String) rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId");
+        scene.accepted = true;
+        EveryFrameScript script = scene.scripts.get(0);
+        script.advance(0f);
+        Map<String, Object> after = CoopLightBridge.deferredDiagnostics();
+        script.advance(0f);
+        assertEquals(after, CoopLightBridge.deferredDiagnostics());
+        assertEquals(1, calls[0]);
+        assertEquals(0, after.get("pendingCount"));
+        Map<String, Object> returned = lastEvent(id);
+        assertEquals("executed", returned.get("state"));
+        assertEquals("action_returned", returned.get("reason"));
+        assertEquals(1, returned.get("actionExecutionCount"));
+        assertEquals(1, returned.get("actionReturnCount"));
+        assertEquals("", returned.get("actionFailure"));
+    }
+
+    @Test void actionFailureRemainsVisibleWithoutBeingReportedAsSuccessfulOrRetried() {
+        Scene scene = new Scene();
+        IllegalStateException failure = new IllegalStateException("native action failed");
+        CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> { throw failure; });
+        String id = (String) rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId");
+        scene.accepted = true;
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> scene.scripts.get(0).advance(0f)));
+        Map<String, Object> failed = lastEvent(id);
+        assertEquals("action_failed", failed.get("reason"));
+        assertEquals(1, failed.get("actionExecutionCount"));
+        assertEquals(0, failed.get("actionReturnCount"));
+        assertTrue(((String) failed.get("actionFailure")).contains("native action failed"));
+        scene.scripts.get(0).advance(0f);
+        assertSame(failed, lastEvent(id));
+        assertEquals(0, CoopLightBridge.deferredDiagnostics().get("pendingCount"));
+    }
+
+    @Test void eachNativeCancellationPredicateRecordsItsReasonWithoutCallingTheGateAgain() {
+        Map<String, String> reasons = Map.of("closed", "dialog_closed_or_replaced", "retargeted", "dialog_target_changed",
+                "dead", "light_not_alive", "fading", "light_fading", "sector", "sector_changed",
+                "player", "player_changed", "ui", "campaign_ui_unavailable");
+        for (var example : reasons.entrySet()) {
+            Scene scene = new Scene();
+            int[] calls = {0};
+            CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> calls[0]++);
+            String id = (String) rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId");
+            switch (example.getKey()) {
+                case "closed" -> scene.open = false;
+                case "retargeted" -> scene.target = scene.player;
+                case "dead" -> scene.alive = false;
+                case "fading" -> scene.fading = true;
+                case "sector" -> Global.setSector(null);
+                case "player" -> scene.currentPlayer = null;
+                case "ui" -> scene.uiAvailable = false;
+            }
+            scene.accepted = true;
+            scene.scripts.get(0).advance(0f);
+            Map<String, Object> cancelled = lastEvent(id);
+            assertEquals("cancelled", cancelled.get("state"), example.getKey());
+            assertEquals(example.getValue(), cancelled.get("reason"));
+            assertEquals(0, cancelled.get("actionExecutionCount"));
+            assertEquals(0, cancelled.get("actionReturnCount"));
+            assertEquals(1, scene.permissionCalls, "cancellation must precede any permission check");
+            assertEquals(0, calls[0]);
+        }
+    }
+
+    @Test void bridgeReplacementUninstallAndClearKeepExplicitCancellationReceiptsAcrossResets() {
+        for (String change : List.of("replacement", "uninstall", "clear", "explicit")) {
+            Scene scene = new Scene();
+            CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> fail("cancelled action ran"));
+            String id = (String) rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId");
+            switch (change) {
+                case "replacement" -> CoopLightBridge.install(true, scene.newOwner());
+                case "uninstall" -> CoopLightBridge.uninstall(scene.owner);
+                case "clear" -> CoopLightBridge.clear();
+                case "explicit" -> CoopLightDeferredEngagement.clear();
+            }
+            assertTrue(scene.scripts.get(0).isDone());
+            assertEquals("cancelled", lastEvent(id).get("state"));
+            assertEquals(switch (change) {
+                case "replacement" -> "bridge_replaced";
+                case "uninstall" -> "bridge_uninstalled";
+                case "clear" -> "bridge_cleared";
+                default -> "explicit_reset";
+            }, lastEvent(id).get("reason"));
+            CoopLightBridge.clear();
+            assertEquals("cancelled", lastEvent(id).get("state"), "global resets retain primitive evidence");
+        }
+    }
+
+    @Test void aRetiredOwnerCannotCancelOrRetokenizeTheReplacementAttempt() {
+        Scene scene = new Scene();
+        scene.token = "old-token";
+        int[] calls = {0};
+        CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> calls[0] += 100);
+        String oldId = (String) rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId");
+        CoopLightBridge.install(true, scene.newOwner());
+        scene.token = "new-token";
+        CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> calls[0]++);
+        Map<String, Object> current = rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0);
+        String newId = (String) current.get("observationId");
+        assertNotEquals(oldId, newId);
+        assertEquals("old-token", lastEvent(oldId).get("originalClaimToken"));
+        assertEquals("new-token", current.get("originalClaimToken"));
+        CoopLightBridge.uninstall(scene.owner);
+        assertEquals(newId, rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId"));
+        scene.accepted = true;
+        scene.scripts.forEach(script -> script.advance(0f));
+        assertEquals(1, calls[0]);
+        assertEquals("cancelled", lastEvent(oldId).get("state"));
+        assertEquals("action_returned", lastEvent(newId).get("reason"));
+    }
+
+    @Test void journalIsBoundedAndNewAttemptsHaveDistinctIdsWithoutSavedReferences() {
+        Scene scene = new Scene();
+        long beforeEvicted = (long) CoopLightBridge.deferredDiagnostics().get("evictedEvents");
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (int i = 0; i < 300; i++) {
+            CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> fail("cancelled action ran"));
+            ids.add((String) rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0).get("observationId"));
+            CoopLightDeferredEngagement.clear("bounded_test");
+        }
+        Map<String, Object> result = CoopLightBridge.deferredDiagnostics();
+        assertEquals(300, ids.size());
+        assertEquals(256, rows(result, "journal").size());
+        assertTrue((long) result.get("evictedEvents") - beforeEvicted >= 344);
+        assertEquals(0, result.get("pendingCount"));
+        assertPrimitives(result);
+        assertEquals(1, scene.memory.size());
+    }
+
+    @Test void aMissingOrFailedPassiveTokenProviderDoesNotChangeNativeDeferralBehavior() {
+        for (boolean failing : List.of(false, true)) {
+            Scene scene = new Scene();
+            if (failing) scene.tokenFailure = new IllegalStateException("token probe unavailable");
+            int[] calls = {0};
+            CoopLightDeferredEngagement.deferIfNeeded(scene.dialog, scene.light, scene.player, () -> calls[0]++);
+            Map<String, Object> row = rows(CoopLightBridge.deferredDiagnostics(), "pending").get(0);
+            assertEquals(false, row.get("tokenObserved"));
+            assertEquals("", row.get("originalClaimToken"));
+            assertEquals(failing, !((String) row.get("tokenReadError")).isBlank());
+            scene.accepted = true;
+            scene.scripts.get(0).advance(0f);
+            assertEquals(1, calls[0]);
+            assertEquals(1, scene.tokenReads);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> rows(Map<String, Object> snapshot, String key) {
+        return (List<Map<String, Object>>) snapshot.get(key);
+    }
+
+    private static Map<String, Object> lastEvent(String observationId) {
+        return rows(CoopLightBridge.deferredDiagnostics(), "journal").stream()
+                .filter(row -> observationId.equals(row.get("observationId"))).reduce((a, b) -> b).orElseThrow();
+    }
+
+    private static void assertPrimitives(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            map.forEach((key, child) -> { assertInstanceOf(String.class, key); assertPrimitives(child); });
+        } else if (value instanceof List<?> list) list.forEach(CoopLightDeferredEngagementTest::assertPrimitives);
+        else assertTrue(value instanceof String || value instanceof Number || value instanceof Boolean,
+                    "diagnostic value must be an immutable primitive: " + value.getClass());
+    }
+
     private static final class Command extends DwellerCMD {
         int calls;
         DwellerStrength strength;
@@ -179,12 +385,17 @@ class CoopLightDeferredEngagementTest {
         final Map<String, Object> memory = new HashMap<>();
         boolean accepted, fading;
         boolean open = true, alive = true;
+        boolean uiAvailable = true, queueTokenOnGate;
+        int permissionCalls, tokenReads;
+        String token;
+        RuntimeException tokenFailure;
         final LocationAPI hyper = stub(LocationAPI.class, (name, args) -> "isHyperspace".equals(name) ? true : null);
         final CampaignFleetAPI player = stub(CampaignFleetAPI.class, (name, args) -> switch (name) {
             case "getMemoryWithoutUpdate" -> ApiProxies.memory(Map.of());
             case "isPlayerFleet" -> true;
             default -> null;
         });
+        CampaignFleetAPI currentPlayer = player;
         final AbyssalLightEntityPlugin plugin = new AbyssalLightEntityPlugin();
         final SectorEntityToken light = stub(CustomCampaignEntityAPI.class, (name, args) -> switch (name) {
             case "getCustomPlugin" -> plugin;
@@ -208,8 +419,8 @@ class CoopLightDeferredEngagementTest {
         final CampaignUIAPI ui = stub(CampaignUIAPI.class, (name, args) ->
                 "getCurrentInteractionDialog".equals(name) && open ? dialog : null);
         final SectorAPI sector = stub(SectorAPI.class, (name, args) -> switch (name) {
-            case "getPlayerFleet" -> player;
-            case "getCampaignUI" -> ui;
+            case "getPlayerFleet" -> currentPlayer;
+            case "getCampaignUI" -> uiAvailable ? ui : null;
             case "isPaused" -> true;
             case "addTransientScript" -> { scripts.add((EveryFrameScript) args[0]); yield null; }
             default -> null;
@@ -226,7 +437,16 @@ class CoopLightDeferredEngagementTest {
             return new CoopLightBridge.Handler() {
                 @Override public void requestPulse(SectorEntityToken light, boolean sensor) { }
                 @Override public void requestDwellerConsumption(SectorEntityToken light) { }
-                @Override public boolean allowDwellerDialog(SectorEntityToken light) { return accepted; }
+                @Override public boolean allowDwellerDialog(SectorEntityToken light) {
+                    permissionCalls++;
+                    if (queueTokenOnGate && token == null) token = "original-claim-token";
+                    return accepted;
+                }
+                @Override public String claimToken(String canonicalLightId) {
+                    tokenReads++;
+                    if (tokenFailure != null) throw tokenFailure;
+                    return token;
+                }
             };
         }
     }

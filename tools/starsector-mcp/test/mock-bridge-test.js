@@ -238,7 +238,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
     'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
-    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault'
+    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -271,7 +271,7 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('encounters'), 2);
   assert.equal((await client.send('lights')).campaignTimestamp, 123);
   assert.equal(calls.get('lights'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault']) {
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
@@ -382,10 +382,52 @@ test('lightgrantfault relays Host, invalid mode and invalid request refusals fro
   assert.equal(hostBridge.requests.length + guestBridge.requests.length, cases.length);
 });
 
+test('lightmessagehold keeps all modes action-only and preserves captured message receipts', async (t) => {
+  const modes = [
+    { mode: 'arm', stage: 'claim_reply', lightId: LIGHT_ID, seconds: 30 },
+    { mode: 'status' }, { mode: 'release' }, { mode: 'drop' },
+    { mode: 'arm', stage: 'consumption_request', lightId: LIGHT_ID, action: 'DWELLER', seconds: 600 }
+  ];
+  const receipt = { qa: true, armed: true, held: true, requestId: 'original-native-request',
+    claimToken: 'original-native-token', suppressedRetries: 2 };
+  const bridge = new MockBridge((request) => ({ ok: true, data: { ...receipt, args: request.args } }));
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => { bridges.closeAll(); await bridge.stop(); });
+  assert.ok(ACTION_VERBS.includes('lightmessagehold'));
+  assert.ok(!QUERY_VERBS.includes('lightmessagehold'));
+  assert.ok(!READ_ONLY_COMMANDS.has('lightmessagehold'));
+  for (const args of modes) {
+    assert.deepEqual(await ssAct(bridges, 'host', 'lightmessagehold', args), { ...receipt, args });
+    assert.deepEqual(bridge.requests.at(-1).args, args);
+  }
+  await assert.rejects(() => ssDump(bridges, 'host', 'lightmessagehold', { mode: 'status' }), /unknown query verb/);
+  assert.equal(bridge.requests.length, modes.length);
+});
+
+test('screen and light probes preserve nonce, deferred lifecycle and native tag evidence', async (t) => {
+  const deferred = { pending: [], journal: [{ observationId: 'attempt-1', originalClaimToken: 'claim-1',
+    state: 'cancelled', reason: 'light_fading', actionExecutionCount: 0 }], maxEvents: 256, evictedEvents: 0 };
+  const screen = { lightInteraction: { claimState: { manualToken: 'claim-2' }, deferredActions: deferred,
+    nativeLight: { complete: true, matches: 1, entities: [{ fadingOutAndExpiring: true }] } } };
+  const lights = { ...lightManifest(), lightClaims: { preclaimToken: 'claim-2' }, deferredActions: deferred };
+  const bridge = new MockBridge((request) => ({ ok: true, data: request.cmd === 'screen' ? screen : lights }));
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => { bridges.closeAll(); await bridge.stop(); });
+  assert.deepEqual(await ssDump(bridges, 'guest', 'screen', { lightId: LIGHT_ID }), screen);
+  assert.deepEqual(await ssDump(bridges, 'guest', 'lights'), lights);
+  assert.deepEqual(bridge.requests.map((request) => request.cmd), ['screen', 'lights']);
+});
+
 test('strict light diff excludes local identity metadata and actor-local counts only', () => {
   const host = lightManifest(); const guest = structuredClone(host);
   guest.lights[LIGHT_ID].engineId = 'guest-native-light';
   guest.state = { consumedCount: 100, pendingRequests: 4 };
+  host.lightClaims = { manualToken: 'host-local-token' };
+  guest.lightClaims = { preclaimToken: 'guest-local-token' };
+  host.deferredActions = { pending: [], journal: [], evictedEvents: 0 };
+  guest.deferredActions = { pending: [], journal: [{ reason: 'dialog_closed' }], evictedEvents: 4 };
   const result = diffLights(host, guest);
   assert.equal(result.status, 'PASS'); assert.equal(result.equal, true);
   assert.equal(result.calendarMatched, true); assert.equal(result.resolutionFailureCount, 0);

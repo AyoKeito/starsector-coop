@@ -11,6 +11,7 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import coop.ambient.CoopLightBridge;
 import coop.testing.ProxyDefaults;
 import org.json.JSONArray;
@@ -174,6 +175,44 @@ class CoopLightInteractionDiagnosticsTest {
                 id -> { fail("an invalid ID must not reach the production ledger"); return null; }));
     }
 
+    @Test void selectedLightFlagsAreReadDirectlyBeyondTheGeneralEntityCensusLimit() throws Exception {
+        Fixture f = new Fixture();
+        for (int i = 0; i < 600; i++) f.nativeEntities.add(stub(SectorEntityToken.class, (name, args) -> null));
+        f.nativeEntities.add(f.light);
+        f.fading = true;
+        JSONObject result = read(f, null, Map.of(), true);
+        JSONObject selected = result.getJSONObject("nativeLight");
+        assertTrue(selected.getBoolean("available"));
+        assertTrue(selected.getBoolean("complete"), result.toString());
+        assertEquals(1, selected.getInt("matches"));
+        JSONObject row = selected.getJSONArray("entities").getJSONObject(0);
+        assertEquals("native-light", row.getString("engineId"));
+        assertTrue(row.getBoolean("alive"));
+        assertTrue(row.getBoolean("fadingOutAndExpiring"));
+        assertTrue(row.getBoolean("despawning"));
+        assertTrue(f.removals.isEmpty());
+    }
+
+    @Test void selectedLightGetterFailureIsIncompleteRatherThanAnAbsentLightPass() throws Exception {
+        Fixture f = new Fixture();
+        f.failEntityRead = true;
+        JSONObject result = read(f, null, Map.of(), true);
+        JSONObject selected = result.getJSONObject("nativeLight");
+        assertTrue(selected.getBoolean("available"));
+        assertFalse(selected.getBoolean("complete"));
+        assertEquals(0, selected.getInt("matches"));
+        assertTrue(result.toString().contains("nativeLightEntities"));
+    }
+
+    @Test void duplicateSelectedNativeIdentitiesStayExplicit() throws Exception {
+        Fixture f = new Fixture();
+        f.nativeEntities.addAll(List.of(f.light, f.light));
+        JSONObject selected = read(f, null, Map.of(), true).getJSONObject("nativeLight");
+        assertEquals(2, selected.getInt("matches"));
+        assertEquals(2, selected.getJSONArray("entities").length());
+        assertFalse(selected.getBoolean("truncated"));
+    }
+
     private static JSONObject read(Fixture f, SectorEntityToken target, Map<String, String> holders,
                                    boolean requested) throws Exception {
         JSONObject args = requested ? new JSONObject().put("lightId", LIGHT_ID) : new JSONObject();
@@ -184,6 +223,8 @@ class CoopLightInteractionDiagnosticsTest {
         final Map<CampaignFleetAPI, Map<String, Object>> memories = new HashMap<>();
         final List<Object> removals = new ArrayList<>();
         final AtomicReference<SectorEntityToken> queued = new AtomicReference<>();
+        final List<SectorEntityToken> nativeEntities = new ArrayList<>();
+        boolean fading;
         boolean failEntityRead;
         boolean failExpiredRead;
         IllegalStateException removeFailure;
@@ -193,7 +234,7 @@ class CoopLightInteractionDiagnosticsTest {
             case "getFleets" -> List.of();
             case "getAllEntities" -> {
                 if (failEntityRead) throw new NoClassDefFoundError("test native getter unavailable");
-                yield List.of();
+                yield nativeEntities;
             }
             case "removeEntity" -> {
                 if (removeFailure != null) throw removeFailure;
@@ -209,12 +250,27 @@ class CoopLightInteractionDiagnosticsTest {
             case "getContainingLocation" -> location;
             case "getMemoryWithoutUpdate" -> lightMemory;
             case "getId" -> "native-light";
+            case "isAlive" -> true;
+            case "hasTag" -> fading && Tags.FADING_OUT_AND_EXPIRING.equals(args[0]);
             default -> null;
         });
         final CampaignFleetAPI player = stub(CampaignFleetAPI.class, (name, args) ->
                 "getInteractionTarget".equals(name) ? queued.get() : null);
-        final SectorAPI sector = stub(SectorAPI.class, (name, args) ->
-                "getPlayerFleet".equals(name) ? player : null);
+        final SectorAPI sector = stub(SectorAPI.class, (name, args) -> switch (name) {
+            case "getPlayerFleet" -> player;
+            case "getHyperspace" -> location;
+            default -> null;
+        });
+
+        Fixture() {
+            try {
+                var field = com.fs.starfarer.api.impl.campaign.BaseCustomEntityPlugin.class.getDeclaredField("entity");
+                field.setAccessible(true);
+                field.set(plugin, light);
+            } catch (ReflectiveOperationException failure) {
+                throw new AssertionError("Could not initialize the native light fixture", failure);
+            }
+        }
 
         CampaignFleetAPI createFleet(String id) {
             Map<String, Object> values = new HashMap<>();

@@ -67,6 +67,8 @@ public final class CoopLightBridge {
         void requestPulse(SectorEntityToken light, boolean sensorBurst);
         void requestDwellerConsumption(SectorEntityToken light);
         boolean allowDwellerDialog(SectorEntityToken light);
+        /** Passive correlation only; this must never request, accept, renew or release a claim. */
+        default String claimToken(String canonicalLightId) { return null; }
     }
 
     private CoopLightBridge() { }
@@ -75,7 +77,7 @@ public final class CoopLightBridge {
 
     public static void install(boolean guest, Handler value) {
         if (handler != value) {
-            CoopLightDeferredEngagement.clear();
+            CoopLightDeferredEngagement.clear("bridge_replaced");
             encounterDiagnostics.clear();
         }
         guestMode = guest;
@@ -85,17 +87,29 @@ public final class CoopLightBridge {
     /** Identity only: deferred native actions cannot migrate to another session's adapter. */
     public static Object interactionOwner() { return handler; }
 
+    /** Pure token read used once when a real native action becomes deferred. */
+    public static String passiveClaimToken(String canonicalLightId) {
+        if (!isCanonicalId(canonicalLightId)) throw new IllegalArgumentException("Canonical light id required");
+        Handler current = handler;
+        return current == null ? null : current.claimToken(canonicalLightId);
+    }
+
+    /** Cached primitive lifecycle evidence; reading it never calls the installed permission gate. */
+    public static java.util.Map<String, Object> deferredDiagnostics() {
+        return CoopLightDeferredEngagement.diagnostics();
+    }
+
     /** A retiring adapter cannot uninstall a newer campaign's callback. */
     public static void uninstall(Handler owner) {
         if (handler == owner) {
             handler = null;
-            CoopLightDeferredEngagement.clear();
+            CoopLightDeferredEngagement.clear("bridge_uninstalled");
             encounterDiagnostics.clear();
         }
     }
 
     public static void clear() {
-        CoopLightDeferredEngagement.clear();
+        CoopLightDeferredEngagement.clear("bridge_cleared");
         guestMode = false;
         handler = null;
         versionOk = null;
