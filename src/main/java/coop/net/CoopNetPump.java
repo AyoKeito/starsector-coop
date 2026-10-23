@@ -7554,9 +7554,10 @@ public class CoopNetPump implements EveryFrameScript {
                 + ") as " + service.role() + "; ending the session now rather than holding the world"
                 + " for a reconnect that is not coming");
         postFeed(FEED_PARTNER_LEFT, now, "Co-op: " + name + " left the game.", FEED_WARN_COLOR);
-        // Refuse the grace for the drop edge that follows this frame: the socket is about to close
-        // behind the partner's process, and without this the ordinary edge would open a window.
-        partnerLeftDeliberately = true;
+        // Refuse the next drop edge only while this connection is still live. A queued pre-drop
+        // leave reaches an already-open grace after its edge was consumed; retaining that latch
+        // would incorrectly deny a later session's unrelated reconnect.
+        partnerLeftDeliberately = !reconnect.active();
         if (reconnect.active()) {
             // The listener runs releaseReconnectHold, endSessionAfterDrop and the dialog.
             reconnect.end(CoopReconnectCoordinator.REASON_PARTNER_LEFT);

@@ -45,7 +45,7 @@
       "sevLabel": "P26 remaining milestones",
       "head": "Finish remaining M3 claim and pending-DWELLER reconnect gates",
       "state": "Narrow uncertain-grant Save/Load and same-session Leave/old-ACCEPT isolation pass; both broad M3 groups remain unchecked",
-      "body": "Use actual token/attempt probes for the remaining after-expiry/new-session accepted replies, isolated owner swap and automatic Dweller race. Same-session native Leave cancellation and original old ACCEPT isolation now pass in audit 28 (181 checks), with no N2 deferred choice/combat. For real pending DWELLER consumption/re-engagement/reconnect, arm consumption_request with explicit 600 seconds before native battle creation and complete within the deadline; enqueue/dispatch is not native application, and context change invalidates the held copy. Audit 18 separately closes the narrow injected Guest PULSE Save/Load/replay case (352 checks). Both broad groups stay unchecked. Initial cooldown case 04, earlier inconclusive/failed nonce/tag cases and documented restore contamination retain their recorded scope."
+      "body": "Use actual token/attempt probes for remaining after-expiry/new-session accepted replies, isolated owner swap and automatic Dweller race. Audit 28 passes same-session Leave/old-ACCEPT isolation (181 checks); audit 40a passes real pending DWELLER cleanup and one normal retry after hold expiry (312 checks). Re-engagement 35/36 is inconclusive and reconnect 37 never ran. Actual claim-pending interruption 44 exposes a stale intentional-leave flag: Guest enters grace while Host refuses it. The correction passes the 340-test Pump suite; native repeat remains pending. Pending-DWELLER re-engagement/reconnect also stays open. Observe each required transition before the message hold's 600-second deadline. Audit 18 closes narrow injected Guest PULSE Save/Load/replay (352 checks). Both broad groups stay unchecked; original failures and restore limits remain recorded."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "P26 remains PARTIAL. M1/M2 and shared wrecks are complete. M3's bounded earlier native passes retain their runtimes; audits 18/28 on 8fd6b06 add narrow Guest PULSE Save/Load/replay (352 checks) and same-session Leave/old-ACCEPT isolation (181 checks). Pending-DWELLER/reconnect and remaining claim/generation cases keep both broad groups unchecked. M4/M5 and Guest-proximity triggering remain unbuilt.",
+      "summary": "P26 remains PARTIAL. M1/M2 and shared wrecks are complete. M3 audits 18/28 on 8fd6b06 add narrow Guest PULSE Save/Load/replay (352 checks) and same-session Leave/old-ACCEPT isolation (181 checks). Audit 40a adds real pending DWELLER cleanup and one normal retry after hold expiry (312 checks), without closing re-engagement/reconnect. Remaining claim/generation cases keep both broad groups unchecked. Earlier native passes retain their runtimes; M4/M5 and Guest-proximity triggering remain unbuilt.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",

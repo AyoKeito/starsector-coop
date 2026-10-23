@@ -8595,6 +8595,63 @@ class CoopNetPumpTest {
                 "one banner per event: the grace-expiry line would say the same thing twice");
     }
 
+    @Test
+    void aPreDropLeaveDoesNotVetoAnUnrelatedDropInTheNextSession() {
+        for (CoopConnectionRole role : List.of(CoopConnectionRole.HOST, CoopConnectionRole.GUEST)) {
+            RecordingNetService service = new RecordingNetService(role);
+            AtomicLong now = new AtomicLong(1_000L);
+            CoopSessionState session;
+            if (role == CoopConnectionRole.HOST) {
+                session = new CoopSessionState(
+                        new SequencedIds("lobby-a", "host-player", "session-a", "session-b"));
+                session.startHost("Host");
+                session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+                session.hostAcceptHandshake();
+                session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+                session.releaseLobby();
+            } else {
+                session = activeGuestSession();
+            }
+            CoopNetPump pump = livePump(service, session, now::get);
+            pump.advance(0f);
+
+            // The FIN is observed first; the queued leave then closes that already-open grace.
+            service.inbound.add(CoopMessages.sessionLeave("session-a", 9L, now.get(),
+                    CoopMessages.LEAVE_REASON_MENU));
+            service.connected = false;
+            pump.advance(0f);
+            assertFalse(pump.reconnectCoordinatorForTest().active(), role.toString());
+            assertFalse(pump.gameplaySessionActiveForBridge(), role.toString());
+
+            // The same pump accepts a new lobby round, as native Load/rejoin does without a JVM restart.
+            service.connected = true;
+            service.connectionGeneration++;
+            if (role == CoopConnectionRole.HOST) {
+                session.hostAcceptGuest(new CoopPlayerInfo("guest-player", "Guest"));
+                session.hostAcceptHandshake();
+            } else {
+                session.guestAcceptLobby("lobby-b", new CoopPlayerInfo("host-player", "Host"));
+                session.guestAcceptHandshake("session-b");
+            }
+            session.recordSeedLock(123456789L, "coop-seed", "fingerprint-host");
+            session.releaseLobby();
+            pump.advance(0f);
+            assertEquals("session-b", session.sessionId(), role.toString());
+            assertTrue(pump.gameplaySessionActiveForBridge(), role.toString());
+
+            // This departure carries no SESSION_LEAVE and must preserve the fresh session for resume.
+            service.connected = false;
+            now.addAndGet(1_000L);
+            pump.advance(0f);
+            assertTrue(pump.reconnectCoordinatorForTest().active(),
+                    role + ": the previous session's leave must not suppress this reconnect grace");
+            assertEquals("session-b", session.sessionId(), role.toString());
+            assertTrue(role == CoopConnectionRole.HOST
+                    ? pump.reconnectCoordinatorForTest().hostWaiting()
+                    : pump.reconnectCoordinatorForTest().guestReconnecting(), role.toString());
+        }
+    }
+
     /** A stranger who dialled the freed slot mid-grace must not be able to end a held session. */
     @Test
     void aLeaveFromAnUnprovenPeerDuringTheGraceWindowIsIgnored() {
