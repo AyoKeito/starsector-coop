@@ -20,7 +20,7 @@ script will not produce an archive that the handshake would reject at connect ti
     reports to every player as the current release;
   * jar manifests whose Coop-Git-Commit is not HEAD, which is what a build made before the
     release commit looks like;
-  * coop.jar carrying coop/rng/, coop/presence/ or coop/ambient/, or coop-forks.jar missing them -- those
+  * coop.jar carrying coop/rng/, coop/presence/, coop/ambient/ or coop/storm/, or coop-forks.jar missing them -- those
     packages belong to the system classloader only and a duplicate breaks the forks silently.
 
 .EXAMPLE
@@ -334,22 +334,22 @@ else {
 
 # Classloader split (release checklist step 7).
 $coopJarEntries = Get-CoopJarEntryNames -JarPath $coopJar
-$strays = @($coopJarEntries | Where-Object { $_ -like 'coop/rng/*' -or $_ -like 'coop/presence/*' -or $_ -like 'coop/ambient/*' })
+$strays = @($coopJarEntries | Where-Object { $_ -like 'coop/rng/*' -or $_ -like 'coop/presence/*' -or $_ -like 'coop/ambient/*' -or $_ -like 'coop/storm/*' })
 if ($strays.Count -gt 0) {
     throw ("jars\coop.jar contains $($strays.Count) entry/entries under coop/rng/ or" +
-        " coop/presence/ or coop/ambient/. Those packages belong to the system classloader only; a duplicate in" +
+        " coop/presence/, coop/ambient/ or coop/storm/. Those packages belong to the system classloader only; a duplicate in" +
         " coop.jar breaks the forks silently.`n  " + (($strays | Select-Object -First 10) -join "`n  "))
 }
 
 $forksJarEntries = Get-CoopJarEntryNames -JarPath $forksJar
-foreach ($package in @('coop/rng/', 'coop/presence/', 'coop/ambient/')) {
+foreach ($package in @('coop/rng/', 'coop/presence/', 'coop/ambient/', 'coop/storm/')) {
     if (-not ($forksJarEntries | Where-Object { $_ -like ($package + '*') })) {
         throw ("jars\coop-forks.jar has no $package entries. The forks jar is what puts those" +
             " packages on the system classloader; without them the forked engine classes cannot" +
             " resolve them.")
     }
 }
-Write-Host "Classloader split verified: coop/rng/, coop/presence/ and coop/ambient/ live only in coop-forks.jar."
+Write-Host "Classloader split verified: coop/rng/, coop/presence/, coop/ambient/ and coop/storm/ live only in coop-forks.jar."
 
 # ---------------------------------------------------------------------------------------------
 # Stage

@@ -87,6 +87,10 @@ const TOOLS = [
       'lights{limit?:1..512} (read-only native hyperspace light manifest: canonical ids, position, ' +
       'complete native params, remaining lifetime, dweller flag, lossless salvage seed, despawn state ' +
       'and truncation counts; this query never adopts or creates lights); ' +
+      'storms{cells?:"i,j;i,j", limit?:1..128} (pure storm-World diagnostics: raw timestamp, ' +
+      'authoritative revision/generation/frame anchor, whole-grid hash and native tracker timers ' +
+      'at global grid indices; default samples around both viewers, available:false is not an ' +
+      'empty grid, and the query never evolves weather or queues controls); ' +
       'status, markets and barpool take none. ' +
       'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
       'teleport takes alongside systemId.',
@@ -113,6 +117,10 @@ const TOOLS = [
       'lights requires complete managed canonical manifests and exact native recipe comparison, ' +
       'omits only local engineId and actor-local state counts, and reports INCONCLUSIVE for unmatched ' +
       'raw campaign timestamps; nonzero tolerance or gameplay ignore keys are refused. ' +
+      'storms compares whole-grid identity/generation and common global sampled cells exactly; ' +
+      'raw clock or authoritative snapshot/revision mismatch, pending controls, unavailable worlds ' +
+      'or no common global samples report INCONCLUSIVE with explicit lag/coverage. ' +
+      'Older matching frame anchors may project to a matching query clock; their local lag is reported. ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',

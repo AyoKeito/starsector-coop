@@ -266,6 +266,7 @@ public final class CoopAgentCommands {
         map.put("encounters", CoopAgentCommands::encounters);
         map.put("encounterspawn", CoopAgentCommands::encounterspawn);
         map.put("lights", CoopAgentCommands::lights);
+        map.put("storms", CoopAgentCommands::storms);
         map.put("lightspawn", CoopAgentCommands::lightspawn);
         map.put("lightgrantfault", CoopAgentCommands::lightgrantfault);
         map.put("lightmessagehold", CoopAgentCommands::lightmessagehold);
@@ -669,6 +670,52 @@ public final class CoopAgentCommands {
     }
 
     private static Object jsonValue(Object value) { return value == null ? JSONObject.NULL : value; }
+
+    /** Pure World diagnostics: no native advancement, authoritative capture or control request. */
+    static JSONObject storms(JSONObject args, Context context) throws JSONException {
+        requireSector(context);
+        for (var keys = args.keys(); keys.hasNext();) {
+            String key = (String) keys.next();
+            if (!key.equals("cells") && !key.equals("limit"))
+                throw new IllegalArgumentException("unknown storms argument: " + key);
+        }
+        double requestedLimit = args.has("limit") ? requiredDouble(args, "limit") : 128;
+        if (!Double.isFinite(requestedLimit) || requestedLimit != Math.rint(requestedLimit)
+                || requestedLimit < 1 || requestedLimit > 128)
+            throw new IllegalArgumentException("storms limit must be an integer from 1 to 128");
+        int limit = (int) requestedLimit;
+        String cells = "";
+        if (args.has("cells")) {
+            if (!(args.opt("cells") instanceof String text))
+                throw new IllegalArgumentException("storms cells must be a string of global i,j pairs");
+            cells = text.trim();
+        }
+        if (!cells.isEmpty()) {
+            String[] selected = cells.split(";", -1);
+            if (selected.length > limit)
+                throw new IllegalArgumentException("storms cells count exceeds limit");
+            Set<String> unique = new java.util.LinkedHashSet<>();
+            for (String selectedCell : selected) {
+                String[] coordinates = selectedCell.trim().split(",", -1);
+                if (coordinates.length != 2 || !coordinates[0].trim().matches("[0-9]+")
+                        || !coordinates[1].trim().matches("[0-9]+"))
+                    throw new IllegalArgumentException("storms cells must contain global nonnegative i,j pairs");
+                try {
+                    String key = Integer.parseInt(coordinates[0].trim()) + ","
+                            + Integer.parseInt(coordinates[1].trim());
+                    if (!unique.add(key)) throw new IllegalArgumentException("duplicate storms cell: " + key);
+                } catch (NumberFormatException error) {
+                    throw new IllegalArgumentException("storms cell indices must fit nonnegative 32-bit integers");
+                }
+            }
+            cells = String.join(";", unique);
+        }
+        CoopNetPump pump = context.pump();
+        if (pump == null) throw new IllegalStateException("no coop pump installed");
+        var world = pump.stormWorldForBridge();
+        if (world == null) throw new IllegalStateException("storm world is unavailable");
+        return new JSONObject(world.diagnostics(cells, limit));
+    }
 
     /** Native gameplay fields only; querying never adopts, grants, fades or rewrites a light. */
     static JSONObject lights(JSONObject args, Context context) throws JSONException {

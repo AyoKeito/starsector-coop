@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. Audits 93 (358 checks) and 99 (744 checks) close the two final M3 release checks. M4/M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed."
+      "note": "P26 is partial. M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. Audits 93 (358 checks) and 99 (744 checks) close the two final M3 release checks. M4 is implemented with native acceptance pending; M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "The V1 queue is complete. P26 now has M1/M2, shared wrecks and bounded M3 acceptance complete. Remaining P26 work is M4 storms, M5 sensor ghosts/Leviathan trails and Guest-proximity triggering. Deferred M3 edge cases remain unpassed and non-blocking."
+      "note": "The V1 queue is complete. P26 now has M1/M2, shared wrecks and bounded M3 acceptance complete. Remaining P26 work is M4 storms (native acceptance pending), M5 sensor ghosts/Leviathan trails and Guest-proximity triggering. Deferred M3 edge cases remain unpassed and non-blocking."
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and M3 within the agreed bounded release scope are complete; M4/M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
+      "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and M3 within the agreed bounded release scope are complete; M4 is implemented with native acceptance pending; M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. M1/M2, shared wrecks and bounded M3 release acceptance are complete after audits 93 (358 checks) and 99 (744 checks). M4/M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2 and shared wrecks are complete. <b>M3 is complete within the agreed bounded release scope.</b> Independent audit 93 passes 358/358 checks of a native second-fight intent waiting under real DWELLER P through ordinary retry/fading cancellation, complemented by separate case 78/audit 79a-002 reconnect evidence and the source P-or-T guard. The same queued observation through reconnect remains unobserved. Audit 99 passes 744/744 checks with zero failures/errors on unchanged runtime ca1f5b2f6610: an accepted Guest reservation blocks a later automatic Host trigger, followed by native handoff, serial native LOW dialog-fleet creation and cleanup. Those fleets are detached dialog targets; physical world-fleet registration, simultaneous first-claim fairness and delivered conflicting wire REJECT are not established. Both broad M3 release groups are accepted within these bounds. Late expiry/new-session ACCEPT delivery, isolated owner/handler replacement and private-map retirement remain deferred, unpassed and non-blocking. Checkpoint 99b-final-native-checkpoint.json saves and hash-verifies both Mar 22, c207 campaigns and backup copies. Earlier runtime passes, historical failures/inconclusive cases and clock/query/QA limits remain in the native acceptance report. Native autosave retention prunes live slots; immutable backups remain separate. M4 storms, M5 sensor ghosts/Leviathan trails and Guest-proximity triggering remain unbuilt. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 is implemented and passes offline tests; native two-client acceptance remains open. M5 and Guest-proximity triggering are follow-ups.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. <b>M4 storm replication is implemented and passes offline verification.</b> Host owns native grids and actual tracker phases across both players' neighborhoods. Guest sends bounded stream/surge weather intents for Host validation; its surge itself and each owner's strike timing, boost and damage stay local. Narrow pinned native forks preserve existing class names and add primitive saved metadata, replacing the old subclass/no-migration design for M4 only. Complete storm snapshots use bounded fragments when needed. The clean build passes 4,445 Java tests with one existing skip across 282 suites; MCP passes 103/103. Verify native same-cell phases, separated players, shared surge weather, save/load and reconnect using the new read-only storm probes. M4 has no native acceptance pass yet. M5 sensor ghosts/Leviathan trails and Guest-proximity triggering remain unbuilt. M3's dated evidence and deferred unpassed edge cases stay in the implementation plan. Co-op-only pause stays.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
-      "head": "Choose the next unbuilt P26 milestone",
-      "state": "M3 accepted within the agreed bounded release scope; P26 remains partial",
-      "body": "Audits 93 (358 checks) and 99 (744 checks) close the final bounded M3 release checks on unchanged runtime ca1f5b2f6610. Pending re-engagement uses separate waiting/cancellation and reconnect evidence plus the source P-or-T guard; the same queued observation through reconnect remains unobserved. Automatic acceptance covers an existing Guest reservation, later Host contention and native handoff with serial detached dialog-fleet creation/cleanup. Simultaneous first-claim fairness and delivered conflicting wire REJECT remain unobserved. Deferred reply/owner/private-map variants remain unpassed. Remaining P26 work is M4 storms, M5 sensor ghosts/Leviathan trails and Guest-proximity triggering; none is built."
+      "head": "Run M4 native acceptance",
+      "state": "M4 implementation and offline tests pass; native acceptance pending",
+      "body": "Deploy the clean M4 commit to both clients and load the backed-up Mar 22, c207 pair. Pass = equal complete grids and canonical phases at selected global cells after pausing and receiving a current checkpoint, including separated players, shared Guest surge weather, reconnect and save/load. Keep strike timing, boosts and damage owner-local. M4 stays open until these native checks pass. M5 and Guest-proximity triggering remain follow-ups."
     },
     {
       "sev": "scope",
@@ -79,8 +79,8 @@
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Hyperspace storms hit one player and the other never sees why",
-      "state": "documented; Phase 26 M4 would replicate it, not built",
-      "body": "Storm cells are rolled per engine, so a strike on the guest (CR loss, repair-tracker event <code>hyperstorm</code>) is invisible on the host and reads as an unexplained CR drop. Not a bug in V1; stated in <code>docs/player/LIMITATIONS.md</code> and the 0.1.1 changelog. The fix is <span class=\"rp\" data-jump=\"26\">Phase 26</span> M4 (terrain-plugin subclass, one capture per generation), specced in the plan."
+      "state": "M4 implemented and offline-verified; native gate pending",
+      "body": "M4 replaces independent weather evolution with Host-owned grids and tracker phases across both players' neighborhoods. Strike timing, boosts and damage remain local to each owner's fleet. Validate the pinned native forks and shared Guest surge controls with same-clock global-cell probes, reconnect and native save/load before accepting the milestone."
     },
     {
       "sev": "gap",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "P26 remains PARTIAL. M1/M2 and shared wrecks are complete. M3 is complete within the agreed bounded release scope: audit 93 passes 358 checks of native pending re-engagement through ordinary retry/fading cancellation, complemented by separate case 78 reconnect evidence and the source P-or-T guard; audit 99 passes 744 checks of reserved-Guest-lease automatic contention and native handoff on unchanged runtime ca1f5b2f6610. Both broad M3 release groups are accepted. The same queued observation through reconnect, simultaneous first-claim fairness and delivered conflicting wire REJECT remain unobserved. Native LOW fleets are detached dialog targets; only serial native dialog-fleet creation/cleanup is claimed. Deferred reply/owner/private-map variants remain unpassed. Both Mar 22, c207 campaigns are saved and hash-verified with backups in checkpoint 99b. M4/M5 and Guest-proximity triggering remain unbuilt.",
+      "summary": "P26 remains PARTIAL. M1/M2, shared wrecks and bounded M3 release acceptance are complete. M4 is implemented with Host-owned native storm grids and tracker phases, both-player coverage, shared Guest stream/surge weather controls, primitive saved metadata and read-only storm probes. Offline verification passes 4,445 Java tests with one existing skip and 103 MCP tests; native acceptance remains open. M5 and Guest-proximity triggering remain unbuilt; M3's deferred edge cases remain unpassed.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -935,10 +935,10 @@
       "residue": [
         "M3 release acceptance is complete within agreed bounds from audits 93 (358 checks) and 99 (744 checks). Deferred, unpassed follow-ups: late expiry/new-session ACCEPT delivery, isolated owner/handler replacement and private-map retirement. Exact queued-observation continuity across reconnect, simultaneous first-claim fairness and delivered conflicting wire REJECT remain unobserved.",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
-        "M4 hyperspace storm replication: remaining unbuilt P26 milestone; existing design retained",
+        "M4 hyperspace storms: implementation and offline verification pass; native two-client acceptance pending.",
         "M5 guest sensor ghosts and Leviathan trails: remaining unbuilt P26 milestone"
       ],
-      "note": "P26 remains PARTIAL as of 2026-10-24. M3 and its two broad native release groups are accepted within the agreed bounded scope. Audit 99 passes 744/744 checks with zero failures/errors on unchanged runtime ca1f5b2f6610: existing accepted Guest reservation versus a later native Host trigger, then automatic handoff with serial native LOW dialog-fleet creation and cleanup. Native encounter fleets are detached dialog targets, so physical world-fleet registration is not claimed. This does not establish simultaneous first-claim fairness or delivered conflicting wire REJECT. Audit 93 passes 358/358 checks of a real pending-DWELLER second-fight intent waiting/cancelling through ordinary retry/fading; separate case 78/audit 79a-002 proves pending same-session reconnect (1,395 live/309 independent checks). The source P-or-T guard supplies the complementary availability rule; the same queued observation through reconnect remains unobserved and no combined native execution is claimed. Late expiry/new-session ACCEPT delivery, isolated owner/handler replacement and private-map retirement remain deferred, unpassed and non-blocking. Checkpoint 99b-final-native-checkpoint.json saves and hash-verifies both Mar 22, c207 campaigns and backup copies. Earlier runtime passes and historical failures/inconclusive cases remain bounded by the dated native acceptance report; QA alignment does not establish production clock reconciliation. M4/M5 and Guest-proximity triggering remain unbuilt; co-op-only pause stays."
+      "note": "M4 work started 2026-10-24. User approved shared Guest surge weather changes, validated and published by Host, while the surge itself stays Guest-local. User relaxed the no-migration policy for M4 where it reduces complexity: narrow forks keep native class names and add primitive saved storm metadata. Offline verification passes 4,445 Java tests with one existing skip across 282 suites and 103 MCP tests. Native acceptance is pending. M3 remains accepted only within its recorded bounded scope; its deferred variants are unpassed. Paired Mar 22, c207 checkpoint 99b and backups are available for M4 testing. M5 and Guest-proximity triggering remain follow-ups; co-op-only pause stays."
     },
     {
       "id": "27",

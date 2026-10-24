@@ -83,6 +83,8 @@ class CoopNetPumpTest {
         coop.fleet.CoopGuestPresence.frameBoundary();
         coop.ambient.CoopWreckBridge.clear();
         coop.ambient.CoopLightBridge.clear();
+        coop.storm.CoopStormBridge.clear();
+        coop.storm.CoopStormBridge.configureGuest(false);
     }
 
     @Test
@@ -9562,6 +9564,123 @@ class CoopNetPumpTest {
         assertEquals("light_unavailable", CoopMessages.requiredPayloadString(
                 onlyOf(service, CoopMessages.Type.INTERACTION_REJECT), "reason"));
         assertTrue(service.sent.stream().noneMatch(m -> m.type() == CoopMessages.Type.INTERACTION_ACCEPT));
+    }
+
+    @Test
+    void firstStormBaselineSurvivesLifecycleAndForeignOrWrongDirectionFramesAreIgnored() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStormWorld world = installStormWorld(pump, service, session, now);
+        String encoded = coop.campaign.CoopStormCodec.encodeSnapshot(stormSnapshot(1));
+        service.inbound.add(CoopMessages.stormSet("other-session", 1, now.get(), encoded));
+        service.inbound.add(CoopMessages.stormControl("session-a", 2, now.get(), stormControl()));
+        service.inbound.add(CoopMessages.stormSet("session-a", 3, now.get(), encoded));
+        pump.advance(0f);
+        assertTrue(pump.stormReplicationStreamingForTest());
+        assertEquals(1, world.resets);
+        assertEquals(List.of(stormSnapshot(1)), world.applied);
+        assertEquals(0, world.controls);
+        now.addAndGet(250); pump.advance(0f);
+        assertEquals(1, world.resets, "first baseline must not be reset by the next lifecycle tick");
+    }
+
+    @Test
+    void stormSessionReplacementResetsOrderingAndReinstallsNativeCallbacksWithoutInactiveFrame() {
+        var baseSettings = coop.testing.ApiProxies.whiteSettings();
+        Global.setSettings((com.fs.starfarer.api.SettingsAPI) Proxy.newProxyInstance(
+                com.fs.starfarer.api.SettingsAPI.class.getClassLoader(),
+                new Class<?>[]{com.fs.starfarer.api.SettingsAPI.class}, (proxy, method, args) ->
+                        method.getName().equals("getVersionString") ? coop.presence.CoopPresenceRegistry.PINNED_VERSION
+                                : method.invoke(baseSettings, args)));
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStormWorld world = installStormWorld(pump, service, session, now);
+        service.inbound.add(CoopMessages.stormSet("session-a", 1, now.get(),
+                coop.campaign.CoopStormCodec.encodeSnapshot(stormSnapshot(9))));
+        pump.advance(0f);
+        session.guestAcceptHandshake("session-b");
+        service.inbound.add(CoopMessages.stormSet("session-b", 2, now.get(),
+                coop.campaign.CoopStormCodec.encodeSnapshot(stormSnapshot(1))));
+        now.incrementAndGet(); pump.advance(0f);
+        assertEquals(2, world.resets);
+        assertEquals(List.of(stormSnapshot(9), stormSnapshot(1)), world.applied,
+                "a new Host baseline may have a lower revision in a different session");
+        assertTrue(coop.storm.CoopStormBridge.sharing(), "native callbacks must be reinstalled after replacement");
+        session.reset(); service.connected = false; now.incrementAndGet(); pump.advance(0f);
+        assertFalse(coop.storm.CoopStormBridge.sharing());
+    }
+
+    @Test
+    void hostStormControlsUseAuthenticatedActorAndIgnoreHostOnlyOrForeignFrames() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.HOST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeHostSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStormWorld world = installStormWorld(pump, service, session, now);
+        String encoded = coop.campaign.CoopStormCodec.encodeSnapshot(stormSnapshot(1));
+        service.inbound.add(CoopMessages.stormSet("session-a", 1, now.get(), encoded));
+        service.inbound.add(CoopMessages.stormGrid("session-a", 2, now.get(), encoded));
+        service.inbound.add(CoopMessages.stormControl("other-session", 3, now.get(), stormControl()));
+        service.inbound.add(CoopMessages.stormControl("session-a", 4, now.get(), stormControl()));
+        pump.advance(0f);
+        assertEquals(1, world.controls); assertEquals("guest-player", world.actor);
+        assertTrue(world.applied.isEmpty());
+    }
+
+    @Test
+    void stormBaselineRetriesAfterTemporaryNativeApplyFailure() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L); CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStormWorld world = installStormWorld(pump, service, session, now);
+        world.failApply = true;
+        service.inbound.add(CoopMessages.stormSet("session-a", 1, now.get(),
+                coop.campaign.CoopStormCodec.encodeSnapshot(stormSnapshot(1))));
+        pump.advance(0f);
+        world.failApply = false; now.addAndGet(250); pump.advance(0f);
+        assertEquals(List.of(stormSnapshot(1)), world.applied);
+        assertEquals(1, world.resets);
+    }
+
+    private static coop.storm.CoopStormSnapshot stormSnapshot(long revision) {
+        return new coop.storm.CoopStormSnapshot(revision, 1, -1000, -900, 2f, 2, 2,
+                coop.storm.CoopStormGrid.encode(new byte[2][2]), List.of());
+    }
+
+    private static String stormControl() {
+        return coop.campaign.CoopStormCodec.encodeControl(coop.storm.CoopStormControl.surgeWindow(
+                "00000000-0000-0000-0000-000000000001", 0, 0, 0, 16_000f, 5f));
+    }
+
+    private static RecordingStormWorld installStormWorld(CoopNetPump pump, RecordingNetService service,
+            CoopSessionState session, AtomicLong now) {
+        RecordingStormWorld world = new RecordingStormWorld();
+        pump.setStormAuthorityForTest(new coop.campaign.CoopStormAuthority(service, session, now::get, world));
+        return world;
+    }
+
+    private static final class RecordingStormWorld implements coop.campaign.CoopStormAuthority.World {
+        final List<coop.storm.CoopStormSnapshot> applied = new ArrayList<>();
+        int resets, controls; String actor; boolean failApply;
+        public coop.storm.CoopStormSnapshot captureHost() { return null; }
+        public void applySnapshot(coop.storm.CoopStormSnapshot snapshot) {
+            if (failApply) throw new IllegalStateException("native terrain not available yet");
+            applied.add(snapshot);
+        }
+        public void observeGuest() { }
+        public List<coop.storm.CoopStormControl> pendingControls() { return List.of(); }
+        public void applyControl(coop.storm.CoopStormControl control, String authenticatedActor) {
+            controls++; actor = authenticatedActor;
+        }
+        public void resetTransport() { resets++; }
     }
 
     private static final String LIGHT_ID = "light:00000000-0000-0000-0000-000000000001";

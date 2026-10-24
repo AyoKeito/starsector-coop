@@ -44,10 +44,33 @@ class CoopModPluginTest {
         CoopFullFidelitySystemDriver.endSave();
         CoopPresenceRegistry.clear();
         coop.ambient.CoopLightBridge.clear();
+        coop.storm.CoopStormBridge.clear();
+        coop.storm.CoopStormBridge.configureGuest(false);
         Global.setSector(null);
         System.clearProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
         System.clearProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
         System.clearProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+    }
+
+    @Test
+    void stormLaunchRoleExistsBeforeCampaignLoadAndSurvivesHandlerClear() {
+        var baseSettings = ApiProxies.whiteSettings();
+        Global.setSettings((com.fs.starfarer.api.SettingsAPI) Proxy.newProxyInstance(
+                com.fs.starfarer.api.SettingsAPI.class.getClassLoader(),
+                new Class<?>[]{com.fs.starfarer.api.SettingsAPI.class}, (proxy, method, args) ->
+                        method.getName().equals("getVersionString") ? CoopPresenceRegistry.PINNED_VERSION
+                                : method.invoke(baseSettings, args)));
+        System.setProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, "127.0.0.1");
+        System.setProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, "7777");
+        CoopModPlugin.publishStormRole();
+        assertTrue(coop.storm.CoopStormBridge.isGuest());
+        CoopModPlugin.clearPreviousGameStatics();
+        assertTrue(coop.storm.CoopStormBridge.isGuest(), "native readResolve cannot lose its launch role");
+        System.clearProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
+        System.clearProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "7777");
+        CoopModPlugin.publishStormRole();
+        assertFalse(coop.storm.CoopStormBridge.isGuest(), "role comes from this launch, never saved Guest memory");
     }
 
     // ---- config-plugin-1: the save that failed -------------------------------------------------

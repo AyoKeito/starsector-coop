@@ -94,6 +94,12 @@ public final class CoopMessages {
         LIGHT_REQUEST,
         /** Host first-wins outcome, including the consuming player's reward recipe. */
         LIGHT_RESULT,
+        /** Complete Host storm baseline, including native cell and tracker state. */
+        STORM_SET,
+        /** A newer complete Host storm revision within the current baseline. */
+        STORM_GRID,
+        /** Guest weather intent; the Host validates its actor, geometry and bounds. */
+        STORM_CONTROL,
         BATTLE_BEGIN,
         BATTLE_STATUS,
         BATTLE_END,
@@ -418,6 +424,7 @@ public final class CoopMessages {
                  STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE,
                  WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
                  LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT,
+                 STORM_SET, STORM_GRID, STORM_CONTROL,
                  PLAYER_REP_SNAPSHOT, MISSION_POOL_SNAPSHOT,
                  MISSION_CLAIM_REQUEST, MISSION_CLAIM_ACCEPT, MISSION_CLAIM_REJECT,
                  MARKET_OPEN, MARKET_SNAPSHOT, COLONY_INCOME, EXPEDITION_WARNING,
@@ -1333,6 +1340,22 @@ public final class CoopMessages {
     public static Message lightResult(String sessionId, long seq, long sentAtMillis, String encoded) {
         return new Message(Type.LIGHT_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"result\":\"" + escapeJson(requireText(encoded, "result")) + "\"}");
+    }
+
+    // ---- Phase 26 M4: Host-owned hyperspace storms ------------------------------------------------
+    public static Message stormSet(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.STORM_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"storm\":\"" + escapeJson(requireText(encoded, "storm")) + "\"}");
+    }
+
+    public static Message stormGrid(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.STORM_GRID, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"storm\":\"" + escapeJson(requireText(encoded, "storm")) + "\"}");
+    }
+
+    public static Message stormControl(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.STORM_CONTROL, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"control\":\"" + escapeJson(requireText(encoded, "control")) + "\"}");
     }
 
     // ---- Phase 21: lobby / ready-up ---------------------------------------------------------------

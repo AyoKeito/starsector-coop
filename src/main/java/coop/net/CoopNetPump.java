@@ -15,6 +15,8 @@ import coop.campaign.CoopSlipstreamAuthority;
 import coop.campaign.CoopEncounterAuthority;
 import coop.campaign.CoopLightAuthority;
 import coop.campaign.CoopLightWorld;
+import coop.campaign.CoopStormAuthority;
+import coop.campaign.CoopStormWorld;
 import coop.campaign.CoopSlipstreamWorld;
 import coop.campaign.CoopWreckAuthority;
 import coop.ambient.CoopWreckBridge;
@@ -707,6 +709,10 @@ public class CoopNetPump implements EveryFrameScript {
     private CoopWreckAuthority wreckAuthority;
     private CoopEncounterAuthority encounterAuthority;
     private final CoopLightWorld lightWorld;
+    private final CoopStormWorld stormWorld;
+    private CoopStormAuthority stormAuthority;
+    private String stormBridgeSessionId;
+    private String stormReplicationSessionId;
     private java.util.function.Predicate<String> lightClaimAvailable;
     private String lightBridgeSessionId;
     private Object lightBridgeOwner;
@@ -728,6 +734,7 @@ public class CoopNetPump implements EveryFrameScript {
     private boolean wreckReplicationStreaming;
     private boolean encounterReplicationStreaming;
     private boolean lightReplicationStreaming;
+    private boolean stormReplicationStreaming;
     private boolean barSuppressionArmed;
     private String lastNpcDebug;
     /** Guest-side pre-check for the diagnostics dump: -1 means "nothing seen yet, always build". */
@@ -998,6 +1005,8 @@ public class CoopNetPump implements EveryFrameScript {
         });
         this.lightClaimAvailable = lightWorld::isAvailable;
         this.lightAuthority = new CoopLightAuthority(service, sessionState, clockMillis, lightWorld);
+        this.stormWorld = new CoopStormWorld(CoopNetPump::sectorOrNull);
+        this.stormAuthority = new CoopStormAuthority(service, sessionState, clockMillis, stormWorld);
         // Phase 15: the host integrates every battle's campaign deltas through this one reconciler,
         // whether they arrived as a guest BATTLE_RESULT or came from the host's own battle bridge.
         this.battleResultReconciler = new CoopBattleResultReconciler(
@@ -1145,6 +1154,11 @@ public class CoopNetPump implements EveryFrameScript {
     /** Bridge-only: the installed light adapter, including its opt-in grant fault instrument. */
     public CoopLightWorld lightWorldForBridge() {
         return lightWorld;
+    }
+
+    /** Read-only storm diagnostics use the installed adapter without capturing a new revision. */
+    public CoopStormWorld stormWorldForBridge() {
+        return stormWorld;
     }
 
     /** Pure observation: unlike the native permission gate, this cannot send or renew a claim. */
@@ -3636,6 +3650,7 @@ public class CoopNetPump implements EveryFrameScript {
         if (syncSlipstreamReplication()) syncNpcReplication();
         syncWreckReplication();
         syncLightReplication();
+        syncStormReplication();
         t = profiler.split(SECTION_NPC_REPLICATION, t);
         tickNpcThreatWatcher();
         t = profiler.split(SECTION_NPC_THREAT_WATCHER, t);
@@ -4698,6 +4713,7 @@ public class CoopNetPump implements EveryFrameScript {
                  STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE, ENC_SET, FLEET_SNAPSHOT,
                  WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
                  LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT,
+                 STORM_SET, STORM_GRID,
                  FLEET_ROSTER, GUEST_SNAPSHOT, SESSION_STATS, STATE_DATAGRAM,
                  TIME_SNAPSHOT, PAUSE_INTENT,
                  OPTIONS_SNAPSHOT, OPTIONS_APPLIED,
@@ -4715,7 +4731,7 @@ public class CoopNetPump implements EveryFrameScript {
                  // Honouring it is what stops the resume replaying messages that already landed.
                  RELIABLE_ACK -> true;
             // Scoped to the connection the drop edge just tore down, or to state it just reset.
-            case INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
+            case STORM_CONTROL, INTERACTION_CLAIM, INTERACTION_ACCEPT, INTERACTION_REJECT, INTERACTION_RELEASE,
                  DIALOG_BEGIN,
                  LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
@@ -4811,6 +4827,7 @@ public class CoopNetPump implements EveryFrameScript {
         wreckAuthority.rearmFullBroadcast();
         encounterAuthority.rearmFullBroadcast();
         lightAuthority.rearmFullBroadcast();
+        stormAuthority.rearmFullBroadcast();
         datagramWatermark.reset();
         datagramRedundancy.reset();
         // Phase 20 M4: the returning peer holds no roster, so this side owes it one before its next
@@ -4907,6 +4924,7 @@ public class CoopNetPump implements EveryFrameScript {
                 forceFullRebroadcast();
             } else {
                 // Drop the synthesized hold snapshot; the host's next real one is the truth.
+                stormAuthority.rearmFullBroadcast();
                 latestTimeSnapshot = null;
                 lastReconciledTimeSnapshot = null;
             }
@@ -5427,6 +5445,7 @@ public class CoopNetPump implements EveryFrameScript {
             case WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK -> handleWreck(message);
             case ENC_SET -> handleEncounterSet(message);
             case LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT -> handleLight(message);
+            case STORM_SET, STORM_GRID, STORM_CONTROL -> handleStorm(message);
             case BATTLE_BEGIN, BATTLE_STATUS, BATTLE_END, ENGAGE_GUEST, DIALOG_BEGIN ->
                     handleBattleMessage(message);
             case BATTLE_RESULT -> handleBattleResult(message);
@@ -8183,6 +8202,69 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
+    private void syncStormReplication() {
+        boolean active = shouldStreamFleet();
+        try {
+            if (active && (!stormReplicationStreaming
+                    || !Objects.equals(stormReplicationSessionId, sessionState.sessionId()))) {
+                stormAuthority.reset();
+                stormReplicationStreaming = true;
+                stormReplicationSessionId = sessionState.sessionId();
+            } else if (!active && stormReplicationStreaming && !reconnect.active()) {
+                stormAuthority.reset();
+                stormReplicationStreaming = false;
+                stormReplicationSessionId = null;
+            }
+            installStormBridge();
+            if (active && service.role() == CoopConnectionRole.HOST) stormAuthority.tickHost();
+            else if (active && service.role() == CoopConnectionRole.GUEST) stormAuthority.tickGuest();
+            else if (service.role() == CoopConnectionRole.GUEST) stormAuthority.observeGuest();
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to sync hyperspace storms", ex);
+        }
+    }
+
+    private void installStormBridge() {
+        CoopConnectionRole role = service.role();
+        String sessionId = sessionState.sessionId();
+        if ((shouldStreamFleet() || reconnect.active()) && role != CoopConnectionRole.NONE && sessionId != null) {
+            if (!Objects.equals(stormBridgeSessionId, sessionId)) {
+                stormWorld.uninstall();
+                stormBridgeSessionId = sessionId;
+            }
+            stormWorld.install(this, role == CoopConnectionRole.GUEST, fleetMirror::mirrorFleetOrNull);
+        } else {
+            stormWorld.uninstall();
+            stormBridgeSessionId = null;
+        }
+    }
+
+    private void handleStorm(CoopMessages.Message message) {
+        if (!isGameplaySessionActive()
+                || !Objects.equals(sessionState.sessionId(), message.sessionId())) return;
+        boolean control = message.type() == CoopMessages.Type.STORM_CONTROL;
+        if (control ? service.role() != CoopConnectionRole.HOST : service.role() != CoopConnectionRole.GUEST) return;
+        try {
+            // Dispatch precedes the first lifecycle tick. Do not discard that first baseline.
+            if (shouldStreamFleet() && (!stormReplicationStreaming
+                    || !Objects.equals(stormReplicationSessionId, sessionState.sessionId()))) {
+                stormAuthority.reset();
+                stormReplicationStreaming = true;
+                stormReplicationSessionId = sessionState.sessionId();
+            }
+            installStormBridge();
+            switch (message.type()) {
+                case STORM_SET -> stormAuthority.applySet(CoopMessages.requiredPayloadString(message, "storm"));
+                case STORM_GRID -> stormAuthority.applyGrid(CoopMessages.requiredPayloadString(message, "storm"));
+                case STORM_CONTROL -> stormAuthority.applyControl(
+                        CoopMessages.requiredPayloadString(message, "control"), sessionState.remotePlayerId());
+                default -> throw new IllegalArgumentException("Not a storm message: " + message.type());
+            }
+        } catch (RuntimeException | LinkageError ex) {
+            CoopLog.warn(CoopNetPump.class, "Failed to apply " + message.type(), ex);
+        }
+    }
+
     private void syncLightReplication() {
         boolean active = shouldStreamFleet();
         if (active && !lightReplicationStreaming) {
@@ -9834,6 +9916,14 @@ public class CoopNetPump implements EveryFrameScript {
         lightAuthority = Objects.requireNonNull(authority, "authority");
     }
 
+    void setStormAuthorityForTest(CoopStormAuthority authority) {
+        stormAuthority = Objects.requireNonNull(authority, "authority");
+    }
+
+    boolean stormReplicationStreamingForTest() {
+        return stormReplicationStreaming;
+    }
+
     void setLightClaimAvailabilityForTest(java.util.function.Predicate<String> available) {
         lightClaimAvailable = Objects.requireNonNull(available, "available");
     }
@@ -10420,6 +10510,8 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.TIME_SNAPSHOT
                 || type == CoopMessages.Type.FLEET_SNAPSHOT
                 || type == CoopMessages.Type.NPC_FLEET_MOTION
+                || type == CoopMessages.Type.STORM_GRID
+                || type == CoopMessages.Type.STORM_CONTROL
                 || type == CoopMessages.Type.BATTLE_STATUS;
     }
 }

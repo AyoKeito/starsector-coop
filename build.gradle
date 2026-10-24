@@ -84,6 +84,8 @@ def forksCompileClasspath = files(
 dependencies {
     compileOnly starsectorJars
     testImplementation starsectorJars
+    // Native BaseTiledTerrain's legacy save codec uses JAXB; the game's Java 17 runtime supplies it.
+    testRuntimeOnly files("${starsectorCore}/jaxb-api-2.4.0-b180830.0359.jar")
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.3'
@@ -173,6 +175,7 @@ sourceSets {
             // This bridge calls methods supplied only by the native forks. Its one runtime copy
             // belongs to the system loader; main code links against the forks output below.
             exclude 'coop/ambient/**'
+            exclude 'coop/storm/**'
         }
     }
     // Forked engine classes (com.fs.starfarer.api.*) plus coop.rng.CoopRandom and
@@ -183,6 +186,7 @@ sourceSets {
         java {
             srcDirs = ['forks', 'src/main/java/coop/rng', 'src/main/java/coop/presence',
                        'src/main/java/coop/ambient',
+                       'src/main/java/coop/storm',
                        generatedForksBuildInfoDir]
         }
         compileClasspath = forksCompileClasspath
@@ -262,6 +266,7 @@ jar {
     exclude 'coop/rng/**'
     exclude 'coop/presence/**'
     exclude 'coop/ambient/**'
+    exclude 'coop/storm/**'
     // Same rule for the forks build stamp: the one copy on disk has to be the one inside
     // coop-forks.jar, or it would report this jar's identity instead of that one's.
     exclude 'coop/build/CoopForksBuildInfo*'

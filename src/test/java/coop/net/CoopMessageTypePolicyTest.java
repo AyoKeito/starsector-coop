@@ -57,6 +57,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.WRECK_REMOVE, CoopMessages.Type.WRECK_CONSUME,
             CoopMessages.Type.WRECK_MUTATION, CoopMessages.Type.WRECK_MUTATION_ACK,
             CoopMessages.Type.LIGHT_SET, CoopMessages.Type.LIGHT_REQUEST, CoopMessages.Type.LIGHT_RESULT,
+            CoopMessages.Type.STORM_SET, CoopMessages.Type.STORM_GRID, CoopMessages.Type.STORM_CONTROL,
             CoopMessages.Type.BATTLE_BEGIN, CoopMessages.Type.BATTLE_STATUS,
             CoopMessages.Type.BATTLE_END, CoopMessages.Type.BATTLE_RESULT,
             CoopMessages.Type.ENGAGE_GUEST, CoopMessages.Type.DIALOG_BEGIN,
@@ -184,6 +185,7 @@ class CoopMessageTypePolicyTest {
             // A complete manifest is refreshed; pending claims and their committed results are
             // replayed by their durable producer rather than the reliable one-shot transport.
             CoopMessages.Type.LIGHT_SET, CoopMessages.Type.LIGHT_REQUEST, CoopMessages.Type.LIGHT_RESULT,
+            CoopMessages.Type.STORM_SET, CoopMessages.Type.STORM_GRID,
             CoopMessages.Type.FLEET_SNAPSHOT, CoopMessages.Type.FLEET_ROSTER,
             CoopMessages.Type.GUEST_SNAPSHOT, CoopMessages.Type.SESSION_STATS,
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,
@@ -232,6 +234,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.PING, CoopMessages.Type.PONG, CoopMessages.Type.LINK_STATUS,
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,
             CoopMessages.Type.FLEET_SNAPSHOT, CoopMessages.Type.NPC_FLEET_MOTION,
+            CoopMessages.Type.STORM_GRID, CoopMessages.Type.STORM_CONTROL,
             CoopMessages.Type.BATTLE_STATUS);
 
     private static CoopMessages.Message message(CoopMessages.Type type) {

@@ -2,7 +2,8 @@
 // Kept free of the MCP SDK so the test suite can drive it against a mock bridge.
 
 import { BridgeClient, DEFAULT_TIMEOUT_MS } from './bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights } from './diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights, diffStorms } from './diff.js';
+import { validateStormArgs } from './storms.js';
 
 /** Read-only verbs. ss_dump and ss_diff accept these. */
 export const QUERY_VERBS = [
@@ -24,7 +25,8 @@ export const QUERY_VERBS = [
   'streams',
   'wrecks',
   'encounters',
-  'lights'
+  'lights',
+  'storms'
 ];
 
 /**
@@ -143,6 +145,7 @@ export async function ssStatus(bridges, instance) {
 
 export async function ssDump(bridges, instance, what, args) {
   assertVerb(what, QUERY_VERBS, 'query');
+  if (what === 'storms') validateStormArgs(args);
   return bridges.get(instance).send(what, args);
 }
 
@@ -155,11 +158,14 @@ export { DEFAULT_IGNORE_KEYS };
 
 export async function ssDiff(bridges, what, args, options = {}) {
   assertVerb(what, QUERY_VERBS, 'query');
+  const stormSelection = what === 'storms' ? validateStormArgs(args) : null;
   const [host, guest] = await Promise.all([
     bridges.get('host').send(what, args),
     bridges.get('guest').send(what, args)
   ]);
   if (what === 'lights') return { what, args: args ?? {}, ...diffLights(host, guest, options) };
+  if (what === 'storms') return { what, args: args ?? {},
+    ...diffStorms(host, guest, { ...options, requestedCells: stormSelection.cells }) };
   if (what === 'streams' || what === 'encounters') {
     const hostStamp = host.campaignTimestamp;
     const guestStamp = guest.campaignTimestamp;

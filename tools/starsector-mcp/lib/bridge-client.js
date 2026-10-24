@@ -78,7 +78,8 @@ export const READ_ONLY_COMMANDS = Object.freeze(
     'streams',
     'wrecks',
     'encounters',
-    'lights'
+    'lights',
+    'storms'
   ])
 );
 

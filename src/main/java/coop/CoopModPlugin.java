@@ -9,6 +9,7 @@ import coop.campaign.CoopSlipstreamWorld;
 import coop.ambient.CoopWreckBridge;
 import coop.ambient.CoopLightBridge;
 import coop.ambient.CoopEncounterReplayBridge;
+import coop.storm.CoopStormBridge;
 import coop.campaign.CoopAbyssalDespawner;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
@@ -57,6 +58,7 @@ public class CoopModPlugin extends BaseModPlugin {
         super.onApplicationLoad();
         CoopLog.info(CoopModPlugin.class, "CoopModPlugin loaded");
         publishLauncherProperties();
+        publishStormRole();
         checkGameVersion();
         String newGameSeed = CoopNetStartupConfig.newGameSeedFromSystemProperties();
         if (!newGameSeed.isEmpty()) {
@@ -65,6 +67,17 @@ public class CoopModPlugin extends BaseModPlugin {
                             + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
                             + "=" + newGameSeed);
             publishSeedForTheForks(newGameSeed);
+        }
+    }
+
+    /** Native storm readResolve runs before onGameLoad, so its role must come from launch config. */
+    static void publishStormRole() {
+        try {
+            CoopStormBridge.configureGuest(CoopNetStartupConfig.fromSystemProperties().role()
+                    == coop.net.CoopConnectionRole.GUEST);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopStormBridge.configureGuest(false);
+            CoopLog.warn(CoopModPlugin.class, "Coop could not resolve the storm launch role", ex);
         }
     }
 
@@ -524,6 +537,7 @@ public class CoopModPlugin extends BaseModPlugin {
      */
     static void beginGameSession() {
         clearPreviousGameStatics();
+        publishStormRole();
         CoopStoryChainGate.publish(Global.getSector());
         CoopWreckBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
                 .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
@@ -548,6 +562,7 @@ public class CoopModPlugin extends BaseModPlugin {
         CoopWreckBridge.clear();
         CoopLightBridge.clear();
         CoopEncounterReplayBridge.clear();
+        CoopStormBridge.clear();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();
     }

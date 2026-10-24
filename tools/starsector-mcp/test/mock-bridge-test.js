@@ -15,7 +15,8 @@ import {
   BridgeUnreachableError,
   READ_ONLY_COMMANDS
 } from '../lib/bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights, leafCount, pickKeyField } from '../lib/diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights, diffStorms, leafCount, pickKeyField } from '../lib/diff.js';
+import { validateStormArgs } from '../lib/storms.js';
 import {
   ACTION_VERBS,
   Bridges,
@@ -228,7 +229,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
     [...READ_ONLY_COMMANDS].sort(),
     [
       'barpool', 'cargo', 'colonizable', 'encounters', 'entities', 'feed', 'fleets', 'hirable', 'intel',
-      'landmarks', 'lights', 'market', 'markets', 'screen', 'status', 'streams', 'survey', 'visibility', 'wrecks'
+      'landmarks', 'lights', 'market', 'markets', 'screen', 'status', 'storms', 'streams', 'survey', 'visibility', 'wrecks'
     ]
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and
@@ -271,6 +272,8 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('encounters'), 2);
   assert.equal((await client.send('lights')).campaignTimestamp, 123);
   assert.equal(calls.get('lights'), 2);
+  assert.equal((await client.send('storms')).campaignTimestamp, 123);
+  assert.equal(calls.get('storms'), 2);
   for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
@@ -549,6 +552,171 @@ test('ss_diff lights uses the strict manifest and raw-calendar comparator', asyn
   assert.equal((await ssDiff(bridges, 'lights')).status, 'FAIL');
   guest.truncated = true;
   await assert.rejects(() => ssDiff(bridges, 'lights'), /complete untruncated manifest/);
+});
+
+function stormManifest(role = 'HOST') {
+  return { available: true, role, timestamp: -55628015052062, revision: 7, generation: 3,
+    commitTimestamp: -55628115052062, snapshotTimestamp: -55628015052062,
+    width: 8, height: 4, gridHash: 'a'.repeat(64), trackerCount: 2, pendingControlCount: 0,
+    cells: [
+      { i: 2, j: 1, gridValue: 1, state: 'SIGNAL', epoch: 11,
+        wait: 0, signal: 0.25, wane: 0, maxSignal: 1, maxWane: 0, timeScale: 1 },
+      { i: 3, j: 1, gridValue: 0, state: 'ABSENT', epoch: 0,
+        wait: 0, signal: 0, wane: 0, maxSignal: 0, maxWane: 0, timeScale: 0 }
+    ] };
+}
+
+test('storm selectors validate global indices, bounds, uniqueness and explicit coverage', () => {
+  assert.deepEqual(validateStormArgs(), { limit: 128, cells: [] });
+  assert.deepEqual(validateStormArgs({ cells: ' 02, 1 ; 3,1 ', limit: 2 }),
+    { limit: 2, cells: ['2,1', '3,1'] });
+  for (const args of [null, [], { x: 100 }, { limit: '2' }, { limit: 0 }, { limit: 129 },
+    { limit: 1.5 }, { cells: null }, { cells: ['2,1'] }, { cells: '2' }, { cells: '2,1;' },
+    { cells: '-1,2' }, { cells: '2.1,1' }, { cells: '2,1;02,1' }, { cells: '2147483648,0' },
+    { cells: '2,1;3,1', limit: 1 }, { cells: Array.from({ length: 129 }, (_, i) => `${i},0`).join(';') }]) {
+    assert.throws(() => validateStormArgs(args), /storms/);
+  }
+});
+
+test('malformed storm arguments are refused before any bridge request', async () => {
+  const bridges = { get() { throw new Error('bridge must not be consulted'); } };
+  await assert.rejects(() => ssDump(bridges, 'host', 'storms', { cells: '0,0;', limit: 2 }), /storms cells/);
+  await assert.rejects(() => ssDiff(bridges, 'storms', { limit: 0 }), /storms limit/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'storms'), /unknown action verb/);
+});
+
+test('storm comparison is exact and order-independent at the same global indices', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  guest.cells.reverse(); guest.trackerCount = 3;
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'PASS'); assert.equal(result.equal, true);
+  assert.equal(result.comparedCellCount, 2);
+  assert.deepEqual(result.sampleCoverage.commonGlobalCells, ['2,1', '3,1']);
+  assert.equal(result.snapshots.guest.trackerCount, 3, 'local tracker census is diagnostic, not a global equality claim');
+});
+
+test('storm grid/generation and every native sampled timer remain gameplay comparisons', () => {
+  const host = stormManifest();
+  for (const mutate of [
+    (table) => { table.gridHash = 'b'.repeat(64); }, (table) => { table.generation++; },
+    (table) => { table.commitTimestamp--; }, (table) => { table.width++; },
+    (table) => { table.cells[0].gridValue = 2; }, (table) => { table.cells[0].state = 'STORM'; },
+    ...['epoch', 'wait', 'signal', 'wane', 'maxSignal', 'maxWane', 'timeScale'].map((field) =>
+      (table) => { table.cells[0][field]++; })
+  ]) {
+    const guest = stormManifest('GUEST'); mutate(guest);
+    const result = diffStorms(host, guest);
+    assert.equal(result.status, 'FAIL'); assert.equal(result.equal, false);
+    assert.ok(result.differences.length > 0);
+  }
+});
+
+test('storm rows from different global cells never count as equal samples', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  for (const row of guest.cells) row.i += 2;
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.equal, false);
+  assert.equal(result.comparedCellCount, 0);
+  assert.deepEqual(result.sampleCoverage.hostOnlyGlobalCells, ['2,1', '3,1']);
+  assert.deepEqual(result.sampleCoverage.guestOnlyGlobalCells, ['4,1', '5,1']);
+  assert.match(result.reason, /no common global/);
+});
+
+test('storm common-cell comparison reports one-sided sampling and missing explicit selectors', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST'); guest.cells.pop();
+  assert.equal(diffStorms(host, guest).status, 'PASS');
+  assert.deepEqual(diffStorms(host, guest).sampleCoverage.hostOnlyGlobalCells, ['3,1']);
+  const requested = diffStorms(host, guest, { requestedCells: ['2,1', '3,1'] });
+  assert.equal(requested.status, 'INCONCLUSIVE');
+  assert.deepEqual(requested.sampleCoverage.missingRequestedGlobalCells.guest, ['3,1']);
+});
+
+test('storm raw-clock or authoritative-anchor differences are explicitly inconclusive', () => {
+  const host = stormManifest();
+  for (const [mutate, reason] of [
+    [(table) => { table.timestamp++; }, /raw campaign timestamps/],
+    [(table) => { table.snapshotTimestamp--; }, /snapshot\/revision lag/],
+    [(table) => { table.revision++; }, /snapshot\/revision lag/],
+    [(table) => { table.pendingControlCount = 1; }, /controls are still pending/]
+  ]) {
+    const guest = stormManifest('GUEST'); mutate(guest);
+    const result = diffStorms(host, guest);
+    assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.equal, false);
+    assert.match(result.reason, reason);
+  }
+  const guest = stormManifest('GUEST'); guest.timestamp--;
+  assert.match(diffStorms(host, guest).reason, /snapshot is ahead/);
+});
+
+test('matching older storm anchors can project to the query clock and report local lag', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  host.snapshotTimestamp -= 1000; guest.snapshotTimestamp -= 1000;
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'PASS'); assert.equal(result.snapshotMatched, true);
+  assert.equal(result.snapshots.host.localLagMillis, 1000);
+  assert.equal(result.snapshots.guest.localLagMillis, 1000);
+});
+
+test('an unavailable storm World is distinct from an available quiet grid', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  guest.available = false;
+  for (const key of ['timestamp', 'revision', 'generation', 'gridHash', 'cells']) delete guest[key];
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.availability.guest, false);
+  assert.match(result.reason, /not an empty grid/);
+  const quietHost = stormManifest(); quietHost.trackerCount = 0; quietHost.cells.shift();
+  const quietGuest = structuredClone(quietHost); quietGuest.role = 'GUEST';
+  assert.equal(diffStorms(quietHost, quietGuest).status, 'PASS');
+});
+
+test('storm validation rejects malformed diagnostics even when both sides are equally broken', () => {
+  for (const mutate of [
+    (table) => { delete table.available; }, (table) => { table.role = 'NONE'; },
+    (table) => { table.timestamp = '123'; }, (table) => { delete table.snapshotTimestamp; },
+    (table) => { table.revision = -1; }, (table) => { table.gridHash = 'unavailable'; },
+    (table) => { table.width = 0; }, (table) => { table.trackerCount = 100; },
+    (table) => { table.pendingControlCount = -1; }, (table) => { table.cells = {}; },
+    (table) => { table.cells.push({ ...table.cells[0] }); },
+    (table) => { table.cells[0].i = table.width; }, (table) => { table.cells[0].gridValue = 3; },
+    (table) => { table.cells[0].epoch = Number.MAX_SAFE_INTEGER + 1; },
+    (table) => { table.cells[0].epoch = -1; }, (table) => { table.cells[0].timeScale = 101; },
+    (table) => { table.cells[0].signal = 1_000_001; },
+    (table) => { table.cells[0].signal = NaN; }, (table) => { table.cells[0].state = 'unknown'; },
+    (table) => { delete table.cells[0].maxSignal; }, (table) => { table.cells[1].wait = 1; }
+  ]) {
+    const host = stormManifest(); mutate(host);
+    const guest = structuredClone(host); guest.role = 'GUEST';
+    assert.throws(() => diffStorms(host, guest), /storms/);
+  }
+});
+
+test('storm comparison refuses tolerances/ignored gameplay fields and bounds its output', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  for (const options of [{ tolerance: 0.1 }, { tolerance: '0' }, { ignore: ['signal'] },
+    { ignore: null }, { maxDifferences: 0 }, { maxDifferences: 1001 }]) {
+    assert.throws(() => diffStorms(host, guest, options), /storms|maxDifferences/);
+  }
+  guest.cells[0].wait++; guest.cells[0].signal++;
+  const result = diffStorms(host, guest, { tolerance: 0, ignore: [], maxDifferences: 1 });
+  assert.equal(result.status, 'FAIL'); assert.equal(result.differences.length, 1);
+  assert.equal(result.counts.differing, 2); assert.equal(result.truncated, true);
+});
+
+test('storm query/diff route only reads and preserves explicit coverage and bridge failures', async (t) => {
+  const host = stormManifest(); const guest = stormManifest('GUEST'); let fail = false;
+  const hostBridge = new MockBridge(() => ({ ok: true, data: host }));
+  const guestBridge = new MockBridge(() => fail
+    ? { ok: false, error: 'IllegalStateException: storm world unavailable' } : { ok: true, data: guest });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  const args = { cells: '2,1;3,1', limit: 2 };
+  assert.deepEqual(await ssDump(bridges, 'host', 'storms', args), host);
+  assert.deepEqual(hostBridge.requests[0].args, args);
+  assert.equal((await ssDiff(bridges, 'storms', args)).status, 'PASS');
+  guest.cells.pop(); assert.equal((await ssDiff(bridges, 'storms', args)).status, 'INCONCLUSIVE');
+  fail = true; await assert.rejects(() => ssDiff(bridges, 'storms'), BridgeError);
+  assert.ok([...hostBridge.requests, ...guestBridge.requests].every((request) => request.cmd === 'storms'));
 });
 
 test('encounter diff compares canonical gameplay leaves and bounds precise mismatches', () => {

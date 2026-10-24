@@ -122,6 +122,7 @@ One read-only verb against one instance, returned as-is. Verbs and their argumen
 | `landmarks` | `{kinds?, limit?, maxLy?}` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, nearest first |
 | `streams` | none | campaign timestamp, stream ids/kinds, params, segment geometry/faders, native fade state and effective brightness sampled every 1,000 units |
 | `lights` | `{limit?:1..512}` | read-only native hyperspace lights: canonical ids, position, complete native params, lifetime, dweller flag, lossless salvage seed, despawn/`fadingOutAndExpiring` state, truncation counts, local `actorBonus`, `lightClaims`, `deferredActions` and transient `lightGrantFault` receipt; never adopts lights or creates reward scripts |
+| `storms` | `{cells?:"i,j;i,j", limit?:1..128}` | pure storm World diagnostics: availability/role, raw query timestamp, authoritative revision/generation and frame timestamps, whole-grid hash/dimensions, local tracker and pending-control counts, and native state/timers keyed by each row's global `i,j` |
 | `screen` | `{lightId?:"light:<UUID>"}` | local native UI state and `lightInteraction`, including `claimState`, cached `deferredActions`, exact selected `nativeLight` flags and weak exact-fleet cleanup observations; never acquires/renews a claim |
 
 ```
@@ -129,6 +130,10 @@ ss_dump(instance: "host", what: "market", args: { "marketId": "jangala" })
 ```
 
 `markets` is an index, not a dock visit: it enumerates and stocks nothing. Use it to find the `marketId` that `market` wants. `survey` takes the same system id every other verb emits as a `locationId` (`system_16cf` and the like), not the display name.
+
+`storms` samples a deduplicated 3x3 neighborhood around both viewers by default. `cells` selects explicit global grid indices, such as `"420,260;421,260"`; these are grid indices, not position-relative offsets or hyperspace coordinates. The limit defaults to 128. Malformed, duplicate, negative or oversized selectors and unknown arguments are refused; an explicit selector list must fit the limit. An unavailable or legacy storm World reports `available:false`; a bridge failure remains an error, and neither means a zero storm grid. The query does not advance weather, capture/publish a revision, modify saved state or queue controls.
+
+`ss_diff(what:"storms")` compares whole-grid hash/dimensions, generation/commit time and native timers for the exact global cells common to both samples. It reports the common and one-sided index sets, rather than pairing different local coordinates. PASS requires matching raw query clocks and authoritative revision/frame anchors, no pending controls and at least one common cell. Clock/anchor lag, unavailable Worlds and absent overlap are INCONCLUSIVE. Matching older frame anchors may project forward to the matching query clock; `snapshots.localLagMillis` reports that age explicitly. Nonzero tolerance and ignore keys are refused. These read-only diagnostics do not establish M4 live acceptance.
 
 `cargo` reports the local player fleet only, and each instance answers for its own — `ss_diff(what: "cargo")` compares two different fleets, so a difference there is normal, not a desync. The three capacities are independent: `cargoSpace`, `fuelSpace` and `personnel`, each with `capacity`, `used` and `free`, where `free` is the same `capacity - used` subtraction vanilla exposes as `$cargoRoom`, `$fuelRoom` and `$crewRoom` and goes negative when the fleet is over. `overloaded` is true when any of the three is over its limit and `over` names which, so "the fleet is overloaded" and "the fleet is overloaded on fuel" are one call apart. `personnel` counts everyone aboard, so it is larger than `crew` on a fleet carrying marines.
 
