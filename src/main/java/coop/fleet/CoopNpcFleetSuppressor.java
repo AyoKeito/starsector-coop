@@ -80,6 +80,10 @@ public final class CoopNpcFleetSuppressor {
             "PunitiveExpeditionManager",
             "FactionHostilityManager",
 
+            // Phase 26: seasonal slipstreams now arrive as resolved host terrain. The manager has
+            // no cached sector-memory handle; guest-local ability surges do not use it.
+            "SlipstreamManager",
+
             // Phase 13 coverage pass: story/SDF fleet spawners. All extend PersonalFleetScript
             // (unseeded `new Random()`, respawn-on-death timers) and none end in a matched suffix.
             "PersonalFleetHoracioCaden",
@@ -363,6 +367,10 @@ public final class CoopNpcFleetSuppressor {
 
     private boolean shouldRemove(CampaignFleetAPI fleet, CampaignFleetAPI player) {
         if (fleet == null) {
+            return false;
+        }
+        // Native lights stage a local battle fleet without creating a shared campaign NPC.
+        if (coop.ambient.CoopLightBridge.isEncounterFleet(fleet)) {
             return false;
         }
         MemoryAPI memory = fleet.getMemoryWithoutUpdate();

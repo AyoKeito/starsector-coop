@@ -1,0 +1,119 @@
+package coop.debug;
+
+import coop.campaign.CoopSlipstreamRecord;
+import coop.campaign.CoopSlipstreamWorld;
+import coop.net.CoopConnectionRole;
+import org.json.JSONObject;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class CoopAgentStreamsTest {
+    @Test
+    void streamTriggersRequireTheHostRole() {
+        CoopAgentCommands.requireStreamAuthority(CoopConnectionRole.HOST);
+        assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.requireStreamAuthority(CoopConnectionRole.GUEST));
+        assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.requireStreamAuthority(CoopConnectionRole.NONE));
+    }
+
+    @Test
+    void defaultNoOpReportsAnExhaustedConfigurationAndNoCreatedTerrain() throws Exception {
+        CoopSlipstreamWorld.SeasonalAddResult result = new CoopSlipstreamWorld.SeasonalAddResult(
+                true, false, false, true, null, 7, 0, 0, List.of(), "routes_exhausted");
+
+        JSONObject response = CoopAgentCommands.streamAddResult(result, 9, -55_644_499_345_400L);
+
+        assertTrue(response.getBoolean("invoked"));
+        assertFalse(response.getBoolean("created"));
+        assertFalse(response.getBoolean("rearmedUsedRoute"));
+        assertTrue(response.getBoolean("configPresent"));
+        assertTrue(response.isNull("routeId"));
+        assertEquals(7, response.getInt("configuredRoutes"));
+        assertEquals(0, response.getInt("unusedBefore"));
+        assertEquals(0, response.getInt("newCount"));
+        assertEquals(0, response.getJSONArray("newIds").length());
+        assertEquals("routes_exhausted", response.getString("reason"));
+        assertEquals(9, response.getInt("month"));
+        assertEquals(-55_644_499_345_400L, response.getLong("campaignTimestamp"));
+    }
+
+    @Test
+    void rearmedNativeCreationReportsTheChosenRouteAndOnlyTheNewIds() throws Exception {
+        CoopSlipstreamWorld.SeasonalAddResult result = new CoopSlipstreamWorld.SeasonalAddResult(
+                true, true, true, true, "A", 7, 0, 0, List.of("new-native"), "created");
+
+        JSONObject response = CoopAgentCommands.streamAddResult(result, 9, 123L);
+
+        assertTrue(response.getBoolean("created"));
+        assertTrue(response.getBoolean("rearmedUsedRoute"));
+        assertEquals("A", response.getString("routeId"));
+        assertEquals(0, response.getInt("unusedAfter"));
+        assertEquals(1, response.getInt("newCount"));
+        assertEquals("new-native", response.getJSONArray("newIds").getString(0));
+        assertEquals("created", response.getString("reason"));
+    }
+
+    @Test
+    void theTableCarriesCanonicalIdentityGeometryParamsAndUnmodifiedEffectiveBrightness()
+            throws Exception {
+        CoopSlipstreamRecord.Fader fader = new CoopSlipstreamRecord.Fader(0.7f, 1f, 2f,
+                CoopSlipstreamRecord.FaderState.IN, false, false);
+        CoopSlipstreamRecord record = new CoopSlipstreamRecord("host-stream-7",
+                CoopSlipstreamRecord.Kind.SEASONAL, CoopSlipstreamRecord.Params.defaults(),
+                List.of("slipstream_visible_in_abyss"), List.of(
+                new CoopSlipstreamRecord.Segment(0f, 0f, 600f, 0.5f, fader),
+                new CoopSlipstreamRecord.Segment(1000f, 0f, 650f, 0.5f, fader),
+                new CoopSlipstreamRecord.Segment(2000f, 0f, 700f, 0.5f, fader)),
+                new CoopSlipstreamRecord.Fade(new float[]{0.1f, 0.9f}, 2f, 1f,
+                        null, 0f, 0f, 0f),
+                new CoopSlipstreamRecord.Timeline(0L, 1L, 123456L, true, false),
+                new CoopSlipstreamRecord.SurgeWaveState(true, false, 1, 0.08f, 4.2f));
+        CoopSlipstreamWorld.TableRow sample = new CoopSlipstreamWorld.TableRow(123456L, record,
+                List.of(new CoopSlipstreamWorld.BrightnessSample(0f, 0.35f),
+                        new CoopSlipstreamWorld.BrightnessSample(1000f, 0.35f),
+                        new CoopSlipstreamWorld.BrightnessSample(2000f, 0f)));
+
+        JSONObject table = CoopAgentCommands.streamTable(List.of(sample), 123456L);
+        JSONObject row = table.getJSONObject("streams").getJSONObject("host-stream-7");
+
+        assertEquals(123456L, table.getLong("campaignTimestamp"));
+        assertEquals(1, table.getInt("count"));
+        assertEquals("host-stream-7", row.getString("id"));
+        assertEquals("SEASONAL", row.getString("kind"));
+        assertEquals(123456L, row.getLong("campaignTimestamp"));
+        assertEquals(2, row.getInt("version"));
+        JSONObject timeline = row.getJSONObject("timeline");
+        assertEquals(0L, timeline.getLong("originCampaignMillis"));
+        assertEquals(1L, timeline.getLong("committedTick"));
+        assertEquals(72_000L, timeline.getLong("committedCampaignMillis"));
+        assertEquals(123456L, timeline.getLong("captureCampaignMillis"));
+        assertEquals(72_000L, timeline.getLong("quantumCampaignMillis"));
+        assertTrue(timeline.getBoolean("hostPaused"));
+        assertFalse(timeline.getBoolean("hostInHyperspace"));
+        JSONObject wave = row.getJSONObject("surgeWave");
+        assertTrue(wave.getBoolean("present"));
+        assertFalse(wave.getBoolean("done"));
+        assertEquals(1, wave.getInt("index"));
+        assertEquals(.08, wave.getDouble("elapsed"), 1e-6);
+        assertEquals(4.2, wave.getDouble("maxElapsed"), 1e-6);
+        assertTrue(row.getBoolean("unfinishedSurgeFadeIn"));
+        assertEquals(3, row.getInt("segmentCount"));
+        assertEquals(28, row.getJSONObject("params").length());
+        assertTrue(row.getJSONObject("params").isNull("enteringSlipstreamTextOverride"));
+        assertEquals(30, row.getJSONObject("params").getInt("burnLevel"));
+        assertEquals(650d, row.getJSONArray("segments").getJSONObject(1).getDouble("width"));
+        assertEquals(0.5d, row.getJSONArray("segments").getJSONObject(1).getDouble("bMult"));
+        assertEquals(0.35d, row.getJSONArray("brightness").getJSONObject(0).getDouble("brightness"), 1e-6,
+                "the adapter already included bMult; the bridge must not multiply it again");
+        assertEquals(0d, row.getJSONArray("brightness").getJSONObject(2).getDouble("brightness"));
+        assertTrue(row.getJSONObject("fade").isNull("despawnNoise"));
+        assertEquals(2, row.getJSONObject("fade").getJSONArray("spawnNoise").length());
+    }
+}

@@ -16,6 +16,7 @@ import {
   INSTANCES,
   QUERY_VERBS,
   ssAct,
+  ssAlignClocks,
   ssAdvanceDays,
   ssDiff,
   ssDump,
@@ -76,6 +77,20 @@ const TOOLS = [
       'when the link died), ' +
       'screen (state, paused, dialogOpen, interactionDialog + target, coreTab, menuOpen, the coop ' +
       'dialog requested or shown, and the same pause block ss_status carries); ' +
+      'streams (no args: hyperspace streams keyed by canonical host id, with kind, full params, ' +
+      'segment geometry and faders, fade state, and effective brightness sampled every 1000 units ' +
+      'plus the endpoint; each row and the table carry their campaignTimestamp); ' +
+      'encounters (no args: recipe-bearing temporary abyssal systems keyed by shared instance id, ' +
+      'structured saved recipes and current gameplay manifests including canonical entity ids, ' +
+      'identity lookup checks, in-system and linked hyperspace entities, orbits, conditions, survey, ' +
+      'ruins and hint flags; legacy systems without a saved recipe are counted separately); ' +
+      'lights{limit?:1..512} (read-only native hyperspace light manifest: canonical ids, position, ' +
+      'complete native params, remaining lifetime, dweller flag, lossless salvage seed, despawn state ' +
+      'and truncation counts; this query never adopts or creates lights); ' +
+      'storms{cells?:"i,j;i,j", limit?:1..128} (pure storm-World diagnostics: raw timestamp, ' +
+      'authoritative revision/generation/frame anchor, whole-grid hash and native tracker timers ' +
+      'at global grid indices; default samples around both viewers, available:false is not an ' +
+      'empty grid, and the query never evolves weather or queues controls); ' +
       'status, markets and barpool take none. ' +
       'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
       'teleport takes alongside systemId.',
@@ -94,6 +109,18 @@ const TOOLS = [
     description:
       'Run the same read-only verb against both instances and diff the two JSON trees field by field. ' +
       'Keyed collections (fleets by coopFleetId, stock by id) compare order-insensitively. ' +
+      'streams refuses unmatched campaign timestamps: hold the shared pause and use ss_align_clocks before sampling fades. ' +
+      'encounters also requires matching timestamps and complete manifests, compares gameplay and identity checks, ' +
+      'omits cosmetic names/catalogId by default, and returns at most maxDifferences precise mismatches (default 100). ' +
+      'Local engine ids and native global-lookup diagnostics are metadata; canonical and location resolution ' +
+      'must succeed for every present member even if both clients report the same failure. ' +
+      'lights requires complete managed canonical manifests and exact native recipe comparison, ' +
+      'omits only local engineId and actor-local state counts, and reports INCONCLUSIVE for unmatched ' +
+      'raw campaign timestamps; nonzero tolerance or gameplay ignore keys are refused. ' +
+      'storms compares whole-grid identity/generation and common global sampled cells exactly; ' +
+      'raw clock or authoritative snapshot/revision mismatch, pending controls, unavailable worlds ' +
+      'or no common global samples report INCONCLUSIVE with explicit lag/coverage. ' +
+      'Older matching frame anchors may project to a matching query clock; their local lag is reported. ' +
       'Returns equal, differences[{path, host, guest}], ignored[] and counts{host, guest, differing} where host/guest are leaf-value counts.',
     inputSchema: {
       type: 'object',
@@ -104,6 +131,8 @@ const TOOLS = [
           type: 'number',
           description: 'Absolute tolerance for numeric leaves. Default 0 (exact match).'
         },
+        maxDifferences: { type: 'integer', minimum: 1, maximum: 1000,
+          description: 'encounters/lights: maximum returned mismatches, default 100; counts.differing retains the total.' },
         ignore: {
           type: 'array',
           items: { type: 'string' },
@@ -130,6 +159,20 @@ const TOOLS = [
       'local player fleet; an unknown variant is refused by name and count is capped at 20), ' +
       'objective{entityId, factionId}, surveyset{planetId, level}, ' +
       'expedition{factionId?} (host only: forces a punitive expedition against a player colony), ' +
+      'streamadd (host only, no args: asks the live SlipstreamManager to add a seasonal stream for ' +
+      'the current month; invoked confirms the call, while streams confirms any resulting terrain), ' +
+      'streamdespawn (host only, no args: starts a 10 game-day fade with zero delay on each live ' +
+      'seasonal stream that is not already despawning; started is the count), ' +
+      'encounterspawn{creator?:parent|dire, x, y, depth, threatRollRan?:boolean, seed?:decimal-string} ' +
+      '(host-only QA: invokes the exact native encounter creator once at these coordinates, optionally ' +
+      'sets its exact effective 64-bit seed, verifies one new temporary abyssal system, and returns ' +
+      'createdCount; never advances a calendar), ' +
+      'lightspawn{kind?:normal|pair|cluster|large|dweller, x, y, seed?:decimal-string} ' +
+      '(host-only QA: invokes the actual native light creation branch at these coordinates; ' +
+      'never advances a calendar and is never retried after an uncertain socket drop), ' +
+      'clockalign{targetTimestamp} (active coop session and paused campaign required; advances this ' +
+      'clock forward by at most one game day and verifies exact readback; prefer ss_align_clocks to ' +
+      'check both instances and choose the target), ' +
       'rep{factionId, value|points} (host only: sets the player faction\'s standing with factionId; ' +
       'value is -1..1 in API units, points is -100..100 as shown in the UI, exactly one is required), ' +
       'netfault{mode: discard|loss|clear, seconds, lossPercent, delaySeconds} (makes THIS instance ' +
@@ -169,6 +212,15 @@ const TOOLS = [
     }
   },
   {
+    name: 'ss_align_clocks',
+    description:
+      'While both campaigns hold the shared pause in the same active session, advance only the ' +
+      'lower campaign clock to the greater timestamp, by at most one game day. Rechecks both ' +
+      'paused states, session ids and exact timestamps after the action. An already equal pair ' +
+      'is a no-op. Use before comparing slipstream fade brightness with ss_diff streams.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  },
+  {
     name: 'ss_advance_days',
     description:
       'Unpause the host, wait for its campaign clock to advance N game days, then pause it again. ' +
@@ -198,9 +250,11 @@ async function dispatch(name, args) {
     case 'ss_dump':
       return ssDump(bridges, args.instance, args.what, args.args);
     case 'ss_diff':
-      return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance, ignore: args.ignore });
+      return ssDiff(bridges, args.what, args.args, { tolerance: args.tolerance, ignore: args.ignore, maxDifferences: args.maxDifferences });
     case 'ss_act':
       return ssAct(bridges, args.instance, args.verb, args.args);
+    case 'ss_align_clocks':
+      return ssAlignClocks(bridges);
     case 'ss_advance_days':
       return ssAdvanceDays(bridges, args.days, { timeoutSeconds: args.timeoutSeconds });
     default:

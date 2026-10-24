@@ -2,11 +2,13 @@ package coop.debug;
 
 import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainPlugin;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.CharacterDataAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
@@ -55,14 +57,23 @@ import com.fs.starfarer.api.util.Misc;
 import coop.campaign.CoopBarPoolCapture;
 import coop.campaign.CoopCampaignReplicator;
 import coop.campaign.CoopCreditTransfer;
+import coop.campaign.CoopEncounterRecord;
+import coop.campaign.CoopEncounterWorld;
+import coop.campaign.CoopAbyssalDespawner;
+import coop.campaign.CoopWreckRecord;
+import coop.campaign.CoopShipDetail;
+import coop.campaign.CoopPersonDetail;
 import coop.campaign.CoopMarketSync;
 import coop.campaign.CoopMissionBoardSync;
 import coop.campaign.CoopSkeletonMutationWatcher;
+import coop.campaign.CoopSlipstreamRecord;
+import coop.campaign.CoopSlipstreamWorld;
 import coop.combat.CoopPreBattleAutosave;
 import coop.fleet.CoopFleetSnapshot;
 import coop.fleet.CoopFleetSnapshotFactory;
 import coop.fleet.CoopFleetVisibilityProbe;
 import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopEntityIds;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopNpcActionTextCapture;
 import coop.fleet.CoopNpcFleetReplicator;
@@ -89,6 +100,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * The Phase 30 agent-bridge command registry: verb -&gt; handler, plus the newline-delimited JSON
@@ -246,8 +259,20 @@ public final class CoopAgentCommands {
         map.put("intel", CoopAgentCommands::intel);
         map.put("feed", CoopAgentCommands::feed);
         map.put("screen", CoopAgentCommands::screen);
+        map.put("streams", CoopAgentCommands::streams);
+        map.put("wrecks", CoopAgentCommands::wrecks);
+        map.put("wreckspawn", CoopAgentCommands::wreckspawn);
+        map.put("wreckconsume", CoopAgentCommands::wreckconsume);
+        map.put("encounters", CoopAgentCommands::encounters);
+        map.put("encounterspawn", CoopAgentCommands::encounterspawn);
+        map.put("lights", CoopAgentCommands::lights);
+        map.put("storms", CoopAgentCommands::storms);
+        map.put("lightspawn", CoopAgentCommands::lightspawn);
+        map.put("lightgrantfault", CoopAgentCommands::lightgrantfault);
+        map.put("lightmessagehold", CoopAgentCommands::lightmessagehold);
         map.put("teleport", CoopAgentCommands::teleport);
         map.put("pause", CoopAgentCommands::pause);
+        map.put("clockalign", CoopAgentCommands::clockalign);
         map.put("ability", CoopAgentCommands::ability);
         map.put("setcr", CoopAgentCommands::setcr);
         map.put("give", CoopAgentCommands::give);
@@ -260,10 +285,932 @@ public final class CoopAgentCommands {
         map.put("save", CoopAgentCommands::save);
         map.put("mark", CoopAgentCommands::mark);
         map.put("memory", CoopAgentCommands::memory);
+        map.put("streamadd", CoopAgentCommands::streamadd);
+        map.put("streamdespawn", CoopAgentCommands::streamdespawn);
         return map;
     }
 
     // ---- Queries --------------------------------------------------------------------------------
+
+    /** Saved membership and a fresh gameplay snapshot; this reader never captures or renames. */
+    static JSONObject encounters(JSONObject args, Context context) throws JSONException {
+        boolean includeLifetime = optionalBoolean(args, "lifetime", false);
+        SectorAPI sector = requireSector(context);
+        Map<String, StarSystemAPI> systems = new TreeMap<>();
+        int legacyCount = 0;
+        for (StarSystemAPI system : sector.getStarSystems()) {
+            if (!system.hasTag(Tags.TEMPORARY_LOCATION) || !system.hasTag(Tags.SYSTEM_ABYSSAL)) continue;
+            Object saved = system.getMemoryWithoutUpdate().get(CoopEncounterWorld.RECIPE_KEY);
+            if (saved == null) { legacyCount++; continue; }
+            if (!(saved instanceof String encoded)) throw new IllegalStateException("Encounter recipe is not a saved string");
+            CoopEncounterRecord recipe = CoopEncounterRecord.decode(encoded);
+            if (systems.put(recipe.instanceId(), system) != null)
+                throw new IllegalStateException("Duplicate encounter instance: " + recipe.instanceId());
+        }
+        JSONObject table = new JSONObject();
+        for (Map.Entry<String, StarSystemAPI> entry : systems.entrySet()) {
+            if (table.length() >= CoopEncounterRecord.MAX_ENCOUNTERS) break;
+            StarSystemAPI system = entry.getValue();
+            CoopEncounterRecord recipe = CoopEncounterRecord.decode(
+                    (String) system.getMemoryWithoutUpdate().get(CoopEncounterWorld.RECIPE_KEY));
+            JSONObject row = new JSONObject();
+            row.put("instanceId", recipe.instanceId());
+            row.put("optionalUniqueId", jsonValue(system.getOptionalUniqueId()));
+            row.put("locationKey", CoopLocations.keyOf(system));
+            row.put("type", system.getType() == null ? JSONObject.NULL : system.getType().name());
+            row.put("x", system.getLocation().x); row.put("y", system.getLocation().y);
+            row.put("temporary", system.hasTag(Tags.TEMPORARY_LOCATION));
+            row.put("abyssal", system.hasTag(Tags.SYSTEM_ABYSSAL));
+            row.put("threatTag", system.hasTag(Tags.SYSTEM_CAN_SPAWN_THREAT));
+            row.put("recipe", diagnosticJson(recipe));
+            if (includeLifetime) row.put("lifetime", encounterLifetime(sector, system, roleOf(context.pump())));
+            JSONObject members = new JSONObject();
+            Set<String> expected = new TreeSet<>();
+            for (CoopEncounterRecord.Entity member : recipe.entities()) {
+                String id = recipe.entityId(member); expected.add(id);
+                LocationAPI location = member.role() == CoopEncounterRecord.Role.SYSTEM ? system : sector.getHyperspace();
+                SectorEntityToken found = findEncounterMember(location, id);
+                JSONObject entity = encounterEntity(found, sector, location, id);
+                entity.put("role", member.role().name()); entity.put("ordinal", member.ordinal());
+                entity.put("expectedSpecId", member.specId());
+                entity.put("consumed", recipe.overlay().consumedIds().contains(id));
+                members.put(id, entity);
+            }
+            row.put("entities", members);
+            // Extra generated members must be visible even when the saved membership omitted them.
+            JSONObject untracked = new JSONObject();
+            for (SectorEntityToken entity : system.getAllEntities()) {
+                if (entity instanceof CampaignFleetAPI || expected.contains(CoopEntityIds.keyOf(entity))) continue;
+                putEncounterExtra(untracked, entity, sector, system);
+            }
+            if (sector.getHyperspace() != null) for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+                if (expected.contains(CoopEntityIds.keyOf(entity)) || !linksToEncounter(entity, system)) continue;
+                putEncounterExtra(untracked, entity, sector, sector.getHyperspace());
+            }
+            row.put("untrackedEntities", untracked);
+            table.put(recipe.instanceId(), row);
+        }
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        out.put("count", table.length()); out.put("candidateCount", systems.size());
+        out.put("legacyCount", legacyCount); out.put("truncated", systems.size() > table.length());
+        out.put("encounters", table);
+        return out;
+    }
+
+    private static JSONObject encounterLifetime(SectorAPI sector, StarSystemAPI system,
+                                                CoopConnectionRole role) throws JSONException {
+        JSONObject out = new JSONObject();
+        int matching = 0, custom = 0, vanilla = 0; CoopAbyssalDespawner selected = null;
+        var scripts = system.getScripts();
+        if (scripts != null) for (var script : scripts) {
+            if (script instanceof com.fs.starfarer.api.impl.campaign.enc.AbyssalLocationDespawner) vanilla++;
+            if (script instanceof CoopAbyssalDespawner despawner) {
+                custom++;
+                if (despawner.getSystem() == system) { matching++; selected = despawner; }
+            }
+        }
+        out.put("role", role.name()); out.put("customScriptCount", custom);
+        out.put("matchingScriptCount", matching); out.put("vanillaScriptCount", vanilla);
+        out.put("minimumVisitDays", CoopAbyssalDespawner.MIN_DAYS_SINCE_VISIT);
+        out.put("minimumDistanceLY", CoopAbyssalDespawner.MIN_DISTANCE_LY);
+        out.put("pollIntervalSeconds", CoopAbyssalDespawner.CHECK_INTERVAL_SECONDS);
+        if (role != CoopConnectionRole.HOST || matching != 1) {
+            out.put("available", false);
+            out.put("reason", role == CoopConnectionRole.GUEST ? "host_owned_lifetime_unavailable_on_guest"
+                    : role != CoopConnectionRole.HOST ? "host_role_required"
+                    : matching == 0 ? "host_despawner_missing" : "multiple_host_despawners");
+            return out;
+        }
+        CoopAbyssalDespawner.LifetimeDiagnostics state = selected.lifetimeDiagnostics(sector);
+        out.put("available", true); out.put("runtimeReady", state.runtimeReady());
+        out.put("reconnectHold", state.reconnectHold()); out.put("guestObserved", state.guestObserved());
+        out.put("lastGuestInside", state.lastGuestInside());
+        out.put("guestLastVisitTimestamp", state.guestLastVisitTimestamp() == null ? JSONObject.NULL
+                : Long.toString(state.guestLastVisitTimestamp()));
+        out.put("elapsedGuestDays", jsonValue(state.elapsedGuestDays()));
+        out.put("hostDaysSinceVisit", jsonValue(state.hostDaysSinceVisit()));
+        out.put("hostLastVisitTimestamp", state.hostLastVisitTimestamp() == null ? JSONObject.NULL
+                : Long.toString(state.hostLastVisitTimestamp()));
+        out.put("hostInside", jsonValue(state.hostInside()));
+        out.put("systemX", jsonValue(state.systemX())); out.put("systemY", jsonValue(state.systemY()));
+        out.put("hostHyperX", jsonValue(state.hostHyperX())); out.put("hostHyperY", jsonValue(state.hostHyperY()));
+        out.put("hostDistanceLY", jsonValue(state.hostDistanceLY()));
+        out.put("guestHyperX", jsonValue(state.guestHyperX())); out.put("guestHyperY", jsonValue(state.guestHyperY()));
+        out.put("guestDistanceLY", jsonValue(state.guestDistanceLY()));
+        out.put("guestPositionSource", "last_observed_authoritative_presence");
+        out.put("unitsPerLightYear", state.unitsPerLightYear()); out.put("canDespawn", state.canDespawn());
+        return out;
+    }
+
+    private static void putEncounterExtra(JSONObject out, SectorEntityToken entity, SectorAPI sector,
+                                          LocationAPI location) throws JSONException {
+        String id = CoopEntityIds.keyOf(entity);
+        if (id == null || id.isEmpty() || out.has(id)) throw new IllegalStateException("Ambiguous untracked encounter entity id");
+        out.put(id, encounterEntity(entity, sector, location, id));
+    }
+
+    private static SectorEntityToken findEncounterMember(LocationAPI location, String id) {
+        SectorEntityToken result = null;
+        if (location != null) for (SectorEntityToken entity : location.getAllEntities()) if (id.equals(CoopEntityIds.keyOf(entity))) {
+            if (result != null) throw new IllegalStateException("Duplicate encounter entity: " + id);
+            result = entity;
+        }
+        return result;
+    }
+
+    private static boolean linksToEncounter(SectorEntityToken entity, StarSystemAPI system) {
+        if (entity == system.getHyperspaceAnchor()) return true;
+        if (entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI well)
+            return well.getTarget() != null && well.getTarget().getContainingLocation() == system;
+        if (entity instanceof JumpPointAPI jump && jump.getDestinations() != null)
+            for (JumpPointAPI.JumpDestination destination : jump.getDestinations())
+                if (destination.getDestination() != null && destination.getDestination().getContainingLocation() == system) return true;
+        return false;
+    }
+
+    private static JSONObject encounterEntity(SectorEntityToken entity, SectorAPI sector,
+                                               LocationAPI location, String id) throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("entityId", id); out.put("present", entity != null);
+        out.put("canonicalResolves", entity != null && CoopEntityIds.byId(sector, id) == entity);
+        out.put("locationResolves", entity != null && location != null && location.getEntityById(entity.getId()) == entity);
+        if (entity == null) return out;
+        out.put("engineId", entity.getId());
+        // Native global lookup has an invalid BaseCampaignEntity cast on a LocationToken cache
+        // miss. Composite identity resolves those tokens without changing the engine's ids.
+        boolean locationToken = entity.getClass().getName().equals("com.fs.starfarer.campaign.BaseLocation$LocationToken");
+        out.put("nativeSectorLookupExempt", locationToken);
+        out.put("nativeSectorLookupClass", locationToken ? "LOCATION_TOKEN" : "CAMPAIGN_ENTITY");
+        try {
+            out.put("nativeSectorResolves", sector.getEntityById(entity.getId()) == entity);
+            out.put("nativeSectorLookupError", JSONObject.NULL);
+        } catch (ClassCastException error) {
+            out.put("nativeSectorResolves", false);
+            out.put("nativeSectorLookupError", error.getClass().getSimpleName() + ": " + error.getMessage());
+        }
+        out.put("locationMatches", entity.getContainingLocation() == location);
+        out.put("type", entity instanceof PlanetAPI ? "planet" : entity instanceof JumpPointAPI ? "jumpPoint"
+                : entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI ? "well"
+                : entity instanceof CampaignTerrainAPI ? "terrain" : "entity");
+        String specId = entity instanceof PlanetAPI planet ? "planet:" + planet.getTypeId()
+                : entity instanceof CampaignTerrainAPI terrain ? "terrain:" + terrain.getType()
+                : entity.getCustomEntityType() != null ? "custom:" + entity.getCustomEntityType()
+                : entity instanceof JumpPointAPI ? "jump_point"
+                : entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI ? "well" : "token";
+        out.put("specId", specId);
+        out.put("expectedLocationKey", CoopLocations.keyOf(location));
+        out.put("instanceId", entity.getMemoryWithoutUpdate() == null ? JSONObject.NULL
+                : jsonValue(entity.getMemoryWithoutUpdate().get(CoopEncounterWorld.ENCOUNTER_ID_KEY)));
+        out.put("x", entity.getLocation().x); out.put("y", entity.getLocation().y);
+        out.put("radius", entity.getRadius());
+        out.put("facing", entity.getFacing());
+        JSONObject orbit = new JSONObject();
+        orbit.put("present", entity.getOrbit() != null);
+        orbit.put("focusId", entity.getOrbitFocus() == null ? JSONObject.NULL : CoopEntityIds.keyOf(entity.getOrbitFocus()));
+        orbit.put("angle", entity.getCircularOrbitAngle()); orbit.put("radius", entity.getCircularOrbitRadius());
+        orbit.put("period", entity.getCircularOrbitPeriod()); out.put("orbit", orbit);
+        MarketAPI market = entity.getMarket();
+        Set<String> conditions = new TreeSet<>();
+        if (market != null && market.getConditions() != null)
+            for (MarketConditionAPI condition : market.getConditions()) conditions.add(condition.getId());
+        out.put("conditions", new JSONArray(conditions));
+        out.put("surveyLevel", market == null || market.getSurveyLevel() == null ? JSONObject.NULL : market.getSurveyLevel().name());
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        out.put("ruinsExplored", market != null && market.getMemoryWithoutUpdate() != null
+                && market.getMemoryWithoutUpdate().getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG));
+        JSONObject flags = new JSONObject();
+        for (String key : new TreeSet<>(CoopEncounterRecord.MEMORY_KEYS))
+            flags.put(key, memory == null || !memory.contains(key) ? JSONObject.NULL : encounterHintValue(key, memory.get(key)));
+        out.put("hintFlags", flags);
+        if (entity instanceof com.fs.starfarer.api.campaign.CustomCampaignEntityAPI custom
+                && coop.campaign.CoopWreckCodec.isNativeWreck(entity)) {
+            var wreck = coop.campaign.CoopWreckCodec.capture(custom, "wreck:query");
+            JSONObject salvage = new JSONObject();
+            salvage.put("ship", diagnosticJson(wreck.ship()));
+            salvage.put("salvageSeed", Long.toString(wreck.salvageSeed()));
+            salvage.put("canHaveExtraCargo", wreck.canHaveExtraCargo());
+            salvage.put("recovery", diagnosticJson(wreck.recovery()));
+            salvage.put("previousRecovery", diagnosticJson(wreck.previousRecovery()));
+            salvage.put("dropValue", diagnosticJson(wreck.dropValue()));
+            salvage.put("dropRandom", diagnosticJson(wreck.dropRandom()));
+            salvage.put("extraSalvage", diagnosticJson(wreck.extraSalvage()));
+            salvage.put("temporaryExtraSalvage", diagnosticJson(wreck.temporaryExtraSalvage()));
+            salvage.put("salvageXP", jsonValue(wreck.salvageXP()));
+            out.put("salvage", salvage);
+        }
+        if (entity instanceof JumpPointAPI jump) {
+            Set<String> destinations = new TreeSet<>();
+            if (jump.getDestinations() != null) for (JumpPointAPI.JumpDestination destination : jump.getDestinations())
+                if (destination.getDestination() != null) destinations.add(CoopEntityIds.keyOf(destination.getDestination()));
+            out.put("destinations", new JSONArray(destinations));
+        }
+        if (entity instanceof com.fs.starfarer.api.campaign.NascentGravityWellAPI well)
+            out.put("targetId", well.getTarget() == null ? JSONObject.NULL : CoopEntityIds.keyOf(well.getTarget()));
+        return out;
+    }
+
+    private static Object encounterHintValue(String key, Object value) {
+        if (key.equals("$visited") && value instanceof String text) {
+            String flag = text.trim();
+            if (flag.equalsIgnoreCase("true") || flag.equalsIgnoreCase("false")) return Boolean.valueOf(flag);
+        }
+        return jsonValue(value);
+    }
+
+    /** Records stay structured so a diff reports the changed gameplay leaf instead of an opaque blob. */
+    static Object diagnosticJson(Object value) throws JSONException {
+        if (value == null) return JSONObject.NULL;
+        if (value instanceof Long) return value.toString(); // Exact native seeds and saved timestamps.
+        if (value instanceof String || value instanceof Number || value instanceof Boolean) return value;
+        if (value instanceof Enum<?> enumeration) return enumeration.name();
+        if (value instanceof java.util.Collection<?> collection) {
+            JSONArray array = new JSONArray(); for (Object member : collection) array.put(diagnosticJson(member)); return array;
+        }
+        if (value instanceof Map<?, ?> map) {
+            JSONObject object = new JSONObject();
+            for (Map.Entry<?, ?> entry : map.entrySet()) object.put(entry.getKey().toString(), diagnosticJson(entry.getValue()));
+            return object;
+        }
+        if (value instanceof CoopEncounterRecord record) return diagnosticObject(
+                "version,instanceId,effectiveSeed,encounterPointId,x,y,depth,threatRollRan,creator,threatTag,entities,specials,overlay",
+                record.version(), record.instanceId(), record.effectiveSeed(), record.encounterPointId(), record.x(), record.y(),
+                record.depth(), record.threatRollRan(), record.creator(), record.threatTag(), record.entities(), record.specials(), record.overlay());
+        if (value instanceof CoopEncounterRecord.Entity entity)
+            return diagnosticObject("role,ordinal,specId", entity.role(), entity.ordinal(), entity.specId());
+        if (value instanceof CoopEncounterRecord.Orbit orbit)
+            return diagnosticObject("focusId,angle,radius,period", orbit.focusId(), orbit.angle(), orbit.radius(), orbit.period());
+        if (value instanceof CoopEncounterRecord.Special special)
+            return diagnosticObject("type,entityId,orbit,wreck,memory", special.type(), special.entityId(), special.orbit(), special.wreck(), special.memory());
+        if (value instanceof CoopEncounterRecord.EntityState state)
+            return diagnosticObject("entityId,surveyLevel,ruinsExplored,memory", state.entityId(), state.surveyLevel(), state.ruinsExplored(), state.memory());
+        if (value instanceof CoopEncounterRecord.Overlay overlay)
+            return diagnosticObject("consumedIds,entities", overlay.consumedIds(), overlay.entities());
+        if (value instanceof CoopWreckRecord wreck) return diagnosticObject(
+                "version,id,hostEntityId,name,factionId,x,y,vx,vy,facing,angularVelocity,elapsedDays,durationDays,expiring,canHaveExtraCargo,ship,salvageSeed,recovery,previousRecovery,dropValue,dropRandom,extraSalvage,temporaryExtraSalvage,discoveryXP,salvageXP,sensorProfile,discoverable,radius,detectionModifiers,tags,memory",
+                wreck.version(), wreck.id(), wreck.hostEntityId(), wreck.name(), wreck.factionId(), wreck.x(), wreck.y(), wreck.vx(), wreck.vy(),
+                wreck.facing(), wreck.angularVelocity(), wreck.elapsedDays(), wreck.durationDays(), wreck.expiring(), wreck.canHaveExtraCargo(),
+                wreck.ship(), wreck.salvageSeed(), wreck.recovery(), wreck.previousRecovery(), wreck.dropValue(), wreck.dropRandom(),
+                wreck.extraSalvage(), wreck.temporaryExtraSalvage(), wreck.discoveryXP(), wreck.salvageXP(), wreck.sensorProfile(),
+                wreck.discoverable(), wreck.radius(), wreck.detectionModifiers(), wreck.tags(), wreck.memory());
+        if (value instanceof CoopWreckRecord.Ship ship) return diagnosticObject(
+                "condition,variantId,variant,variantState,captain,captainState,shipName,fleetMemberId,addDmods,pruneWeapons,nameAlwaysKnown,sModProb",
+                ship.condition(), ship.variantId(), ship.variant(), ship.variantState(), ship.captain(), ship.captainState(), ship.shipName(),
+                ship.fleetMemberId(), ship.addDmods(), ship.pruneWeapons(), ship.nameAlwaysKnown(), ship.sModProb());
+        if (value instanceof CoopWreckRecord.VariantState state) return diagnosticObject(
+                "modulePath,tags,source,originalVariant,goalVariant,mayAutoAssignWeapons", state.modulePath(), state.tags(), state.source(),
+                state.originalVariant(), state.goalVariant(), state.mayAutoAssignWeapons());
+        if (value instanceof CoopWreckRecord.CaptainState state) return diagnosticObject(
+                "aiCoreId,tags,importance,voice,memory", state.aiCoreId(), state.tags(), state.importance(), state.voice(), state.memory());
+        if (value instanceof CoopWreckRecord.Recovery recovery) return diagnosticObject(
+                "description,storyPointRecovery,notNowOptionExits,noDescriptionText,ships,special", recovery.description(),
+                recovery.storyPointRecovery(), recovery.notNowOptionExits(), recovery.noDescriptionText(), recovery.ships(), recovery.special());
+        if (value instanceof CoopWreckRecord.Special special)
+            return diagnosticObject("type,values,person,personState", special.type(), special.values(), special.person(), special.personState());
+        if (value instanceof CoopWreckRecord.Drop drop) return diagnosticObject(
+                "group,chances,maxChances,value,valueMult,custom", drop.group(), drop.chances(), drop.maxChances(), drop.value(), drop.valueMult(), drop.custom());
+        if (value instanceof CoopWreckRecord.DropRow row)
+            return diagnosticObject("commodity,group,frequency,weight", row.commodity(), row.group(), row.frequency(), row.weight());
+        if (value instanceof CoopWreckRecord.Cargo cargo)
+            return diagnosticObject("type,id,data,quantity", cargo.type(), cargo.id(), cargo.data(), cargo.quantity());
+        if (value instanceof CoopWreckRecord.ExtraCargo cargo)
+            return diagnosticObject("present,expiresDays,cargo", cargo.present(), cargo.expiresDays(), cargo.cargo());
+        if (value instanceof CoopWreckRecord.Modifier modifier)
+            return diagnosticObject("kind,source,description,value", modifier.kind(), modifier.source(), modifier.description(), modifier.value());
+        if (value instanceof CoopWreckRecord.MemoryValue memory)
+            return diagnosticObject("key,type,value,expiresDays", memory.key(), memory.type(), memory.value(), memory.expiresDays());
+        if (value instanceof CoopShipDetail ship) return diagnosticObject(
+                "memberId,shipName,baseVariantId,hullSpecId,baseCR,vents,caps,permaMods,sMods,sModdedBuiltIns,refitMods,suppressedMods,weapons,wings,weaponGroups,hullFraction,displayName,modules",
+                ship.memberId(), ship.shipName(), ship.baseVariantId(), ship.hullSpecId(), ship.baseCR(), ship.vents(), ship.caps(), ship.permaMods(),
+                ship.sMods(), ship.sModdedBuiltIns(), ship.refitMods(), ship.suppressedMods(), ship.weapons(), ship.wings(), ship.weaponGroups(),
+                ship.hullFraction(), ship.displayName(), ship.modules());
+        if (value instanceof CoopShipDetail.WeaponGroup group)
+            return diagnosticObject("slots,alternating,autofire", group.slots(), group.alternating(), group.autofire());
+        if (value instanceof CoopPersonDetail person) return diagnosticObject(
+                "personId,firstName,lastName,gender,portraitSprite,personalityId,rankId,postId,factionId,level,xp,role,hiringBonus,salary,adminTier,timeRemainingDays,skills",
+                person.personId(), person.first(), person.last(), person.gender(), person.portraitSprite(), person.personalityId(), person.rankId(),
+                person.postId(), person.factionId(), person.level(), person.xp(), person.role(), person.hiringBonus(), person.salary(), person.adminTier(),
+                person.timeRemainingDays(), person.skills());
+        throw new IllegalArgumentException("Unsupported diagnostic value: " + value.getClass().getName());
+    }
+
+    private static JSONObject diagnosticObject(String fields, Object... values) throws JSONException {
+        String[] keys = fields.split(",");
+        if (keys.length != values.length) throw new IllegalStateException("Diagnostic field/value count differs");
+        JSONObject object = new JSONObject();
+        for (int index = 0; index < keys.length; index++) object.put(keys[index], diagnosticJson(values[index]));
+        return object;
+    }
+
+    /** QA creates one native encounter at exact coordinates without advancing either calendar. */
+    static JSONObject encounterspawn(JSONObject args, Context context) throws JSONException {
+        return encounterspawn(args, context, (creator, point) -> creator.createEncounter(
+                com.fs.starfarer.api.impl.campaign.enc.EncounterManager.getInstance(), point));
+    }
+
+    @FunctionalInterface
+    interface EncounterCreation {
+        void create(com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectEPEC creator,
+                    com.fs.starfarer.api.impl.campaign.enc.EncounterPoint point);
+    }
+
+    static JSONObject encounterspawn(JSONObject args, Context context, EncounterCreation creation) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        if (roleOf(context.pump()) != CoopConnectionRole.HOST) throw new IllegalStateException("encounterspawn is host-only");
+        float x = encounterCoordinate(args, "x"), y = encounterCoordinate(args, "y");
+        float depth = encounterCoordinate(args, "depth");
+        if (depth < 0) throw new IllegalArgumentException("depth must be nonnegative");
+        String kind = optionalString(args, "creator");
+        com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectEPEC creator;
+        if (kind.isEmpty() || kind.equals("parent")) creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectEPEC();
+        else if (kind.equals("dire")) creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalRogueStellarObjectDireHintsEPEC();
+        else throw new IllegalArgumentException("creator must be parent or dire");
+        Long seed = null;
+        if (args.has("seed")) {
+            if (!(args.opt("seed") instanceof String text)) throw new IllegalArgumentException("seed must be a decimal string");
+            try { seed = Long.parseLong(text); }
+            catch (NumberFormatException error) { throw new IllegalArgumentException("seed must be a signed 64-bit decimal string"); }
+        }
+        boolean threatRollRan = optionalBoolean(args, "threatRollRan", true);
+        var data = new com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData();
+        data.depth = depth; data.random = new java.util.Random();
+        if (!threatRollRan) {
+            if (sector.getStarSystems().isEmpty()) throw new IllegalStateException("threatRollRan:false needs an existing nearest system");
+            data.nearest = sector.getStarSystems().get(0);
+        }
+        if (sector.getHyperspace() == null) throw new IllegalStateException("Hyperspace is unavailable");
+        var point = new com.fs.starfarer.api.impl.campaign.enc.EncounterPoint(
+                "abyssal_" + (int) (x / 1000f) + "_" + (int) (y / 1000f), sector.getHyperspace(),
+                new Vector2f(x, y), com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.EP_TYPE_ABYSSAL);
+        point.custom = data;
+        Set<StarSystemAPI> before = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        before.addAll(sector.getStarSystems());
+        boolean seeded = seed != null;
+        if (seeded) coop.ambient.CoopEncounterReplayBridge.beginQaSeed(seed);
+        try { creation.create(creator, point); }
+        finally { if (seeded) coop.ambient.CoopEncounterReplayBridge.endQaSeed(); }
+        List<StarSystemAPI> created = sector.getStarSystems().stream().filter(system -> !before.contains(system)).toList();
+        if (created.size() != 1 || !created.get(0).hasTag(Tags.TEMPORARY_LOCATION) || !created.get(0).hasTag(Tags.SYSTEM_ABYSSAL))
+            throw new IllegalStateException("Native encounter creation produced " + created.size() + " systems; expected one temporary abyssal system");
+        StarSystemAPI system = created.get(0);
+        JSONObject out = new JSONObject();
+        out.put("qa", true); out.put("created", true); out.put("createdCount", created.size());
+        out.put("creator", kind.isEmpty() ? "parent" : kind); out.put("encounterPointId", point.id);
+        out.put("optionalUniqueId", jsonValue(system.getOptionalUniqueId()));
+        out.put("x", x); out.put("y", y); out.put("depth", depth); out.put("threatRollRan", threatRollRan);
+        out.put("effectiveSeed", jsonValue(system.getMemoryWithoutUpdate().get(coop.ambient.CoopEncounterReplayBridge.SEED_KEY)));
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    private static float encounterCoordinate(JSONObject args, String key) {
+        double value = requiredDouble(args, key);
+        if (!Double.isFinite(value) || Math.abs(value) > 1_000_000) throw new IllegalArgumentException(key + " is out of bounds");
+        return (float) value;
+    }
+
+    private static Object jsonValue(Object value) { return value == null ? JSONObject.NULL : value; }
+
+    /** Pure World diagnostics: no native advancement, authoritative capture or control request. */
+    static JSONObject storms(JSONObject args, Context context) throws JSONException {
+        requireSector(context);
+        for (var keys = args.keys(); keys.hasNext();) {
+            String key = (String) keys.next();
+            if (!key.equals("cells") && !key.equals("limit"))
+                throw new IllegalArgumentException("unknown storms argument: " + key);
+        }
+        double requestedLimit = args.has("limit") ? requiredDouble(args, "limit") : 128;
+        if (!Double.isFinite(requestedLimit) || requestedLimit != Math.rint(requestedLimit)
+                || requestedLimit < 1 || requestedLimit > 128)
+            throw new IllegalArgumentException("storms limit must be an integer from 1 to 128");
+        int limit = (int) requestedLimit;
+        String cells = "";
+        if (args.has("cells")) {
+            if (!(args.opt("cells") instanceof String text))
+                throw new IllegalArgumentException("storms cells must be a string of global i,j pairs");
+            cells = text.trim();
+        }
+        if (!cells.isEmpty()) {
+            String[] selected = cells.split(";", -1);
+            if (selected.length > limit)
+                throw new IllegalArgumentException("storms cells count exceeds limit");
+            Set<String> unique = new java.util.LinkedHashSet<>();
+            for (String selectedCell : selected) {
+                String[] coordinates = selectedCell.trim().split(",", -1);
+                if (coordinates.length != 2 || !coordinates[0].trim().matches("[0-9]+")
+                        || !coordinates[1].trim().matches("[0-9]+"))
+                    throw new IllegalArgumentException("storms cells must contain global nonnegative i,j pairs");
+                try {
+                    String key = Integer.parseInt(coordinates[0].trim()) + ","
+                            + Integer.parseInt(coordinates[1].trim());
+                    if (!unique.add(key)) throw new IllegalArgumentException("duplicate storms cell: " + key);
+                } catch (NumberFormatException error) {
+                    throw new IllegalArgumentException("storms cell indices must fit nonnegative 32-bit integers");
+                }
+            }
+            cells = String.join(";", unique);
+        }
+        CoopNetPump pump = context.pump();
+        if (pump == null) throw new IllegalStateException("no coop pump installed");
+        var world = pump.stormWorldForBridge();
+        if (world == null) throw new IllegalStateException("storm world is unavailable");
+        return new JSONObject(world.diagnostics(cells, limit));
+    }
+
+    /** Native gameplay fields only; querying never adopts, grants, fades or rewrites a light. */
+    static JSONObject lights(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        double requestedLimit = args.has("limit") ? requiredDouble(args, "limit") : 256;
+        if (!Double.isFinite(requestedLimit) || requestedLimit != Math.rint(requestedLimit)
+                || requestedLimit < 1 || requestedLimit > coop.campaign.CoopLightRecord.MAX_LIGHTS)
+            throw new IllegalArgumentException("limit must be between 1 and " + coop.campaign.CoopLightRecord.MAX_LIGHTS);
+        int limit = (int) requestedLimit;
+        JSONObject table = new JSONObject();
+        int candidates = 0;
+        if (sector.getHyperspace() != null) {
+            for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+                if (!coop.ambient.CoopLightBridge.isNativeLight(entity)) continue;
+                candidates++;
+                if (table.length() >= limit) continue;
+                var plugin = (com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin) entity.getCustomPlugin();
+                var p = plugin.getParams();
+                String id = coop.campaign.CoopLightWorld.ownedId(entity);
+                JSONObject row = new JSONObject();
+                row.put("id", jsonValue(id)); row.put("engineId", entity.getId()); row.put("managed", id != null);
+                Object hostId = entity.getMemoryWithoutUpdate().get(coop.campaign.CoopLightWorld.HOST_ENTITY_ID_KEY);
+                if (hostId != null && !(hostId instanceof String)) {
+                    throw new IllegalStateException("light Host identity is not a string: " + entity.getId());
+                }
+                row.put("hostEntityId", hostId instanceof String text ? text : entity.getId());
+                row.put("x", entity.getLocation().x); row.put("y", entity.getLocation().y);
+                row.put("colorArgb", p.color.getRGB());
+                row.put("frequencyMultMin", p.frequencyMultMin); row.put("frequencyMultMax", p.frequencyMultMax);
+                row.put("frequencyChangeMult", p.frequencyChangeMult); row.put("size", p.size);
+                row.put("detectedRange", p.detectedRange); row.put("bonusMult", p.bonusMult);
+                row.put("remainingDays", p.durationDays); row.put("pointsOverride", p.pointsOverride);
+                row.put("radius", entity.getRadius()); row.put("dweller", plugin.isDweller());
+                Object seed = entity.getMemoryWithoutUpdate().get(com.fs.starfarer.api.impl.campaign.ids.MemFlags.SALVAGE_SEED);
+                row.put("salvageSeed", seed instanceof Number value ? Long.toString(value.longValue()) : JSONObject.NULL);
+                row.put("despawning", plugin.isDespawning());
+                row.put("fadingOutAndExpiring", entity.hasTag(Tags.FADING_OUT_AND_EXPIRING));
+                table.put(id == null ? "native:" + entity.getId() : id, row);
+            }
+        }
+        JSONObject stateCounts = new JSONObject(new coop.campaign.CoopLightWorld(() -> sector).readOnlyStateCounts());
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", sector.getClock().getTimestamp()); out.put("count", table.length());
+        out.put("candidateCount", candidates); out.put("truncated", candidates > table.length());
+        out.put("lights", table); out.put("state", stateCounts);
+        out.put("actorBonus", readOnlyLightBonus(sector.getPlayerFleet()));
+        out.put("lightGrantFault", new JSONObject(CoopLightGrantFault.status()));
+        out.put("lightClaims", lightClaimProbe(context.pump(), null));
+        out.put("deferredActions", new JSONObject(coop.ambient.CoopLightBridge.deferredDiagnostics()));
+        return out;
+    }
+
+    /** Captures real M3 messages at a bounded QA hold, without blocking other traffic. */
+    static JSONObject lightmessagehold(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String mode = requiredString(args, "mode");
+        CoopNetPump pump = context.pump();
+        if (pump == null) throw new IllegalStateException("no coop pump installed");
+        Map<String, Object> receipt;
+        switch (mode) {
+            case "status" -> receipt = pump.lightMessageHoldStatusForBridge();
+            case "drop" -> receipt = pump.dropLightMessageHoldForBridge("bridge_command");
+            case "arm", "release" -> {
+                if (CoopAgentBridge.configuredPort() == 0)
+                    throw new IllegalStateException("lightmessagehold requires the opt-in agent bridge");
+                if (!coop.util.CoopDebug.diagnosticsEnabled())
+                    throw new IllegalStateException("lightmessagehold requires debug diagnostics");
+                if (roleOf(pump) != CoopConnectionRole.HOST)
+                    throw new IllegalStateException("lightmessagehold is host-only");
+                if (!pump.gameplaySessionActiveForBridge())
+                    throw new IllegalStateException("lightmessagehold requires an active gameplay session");
+                if (!sector.isPaused())
+                    throw new IllegalStateException("lightmessagehold arm/release requires the campaign paused");
+                if (mode.equals("release")) receipt = pump.releaseLightMessageHoldForBridge();
+                else {
+                    String stage = requiredString(args, "stage");
+                    String lightId = coop.campaign.CoopLightRecord.canonicalId(requiredString(args, "lightId"));
+                    int seconds = optionalInt(args, "seconds", 30);
+                    if (seconds < 1 || seconds > CoopLightMessageHold.MAX_SECONDS)
+                        throw new IllegalArgumentException("seconds must be between 1 and " + CoopLightMessageHold.MAX_SECONDS);
+                    String action = null;
+                    if (stage.equals("consumption_request")) {
+                        action = requiredString(args, "action");
+                        try { coop.campaign.CoopLightCodec.Action.valueOf(action); }
+                        catch (IllegalArgumentException ex) {
+                            throw new IllegalArgumentException("action must be PULSE, SENSOR_BURST or DWELLER");
+                        }
+                    } else if (!stage.equals("claim_reply"))
+                        throw new IllegalArgumentException("stage must be claim_reply or consumption_request");
+                    else if (args.has("action"))
+                        throw new IllegalArgumentException("action is only accepted for consumption_request");
+                    receipt = pump.armLightMessageHoldForBridge(stage, lightId, action, seconds);
+                }
+            }
+            default -> throw new IllegalArgumentException("mode must be arm, status, release or drop");
+        }
+        JSONObject result = new JSONObject(receipt);
+        result.put("qa", true);
+        result.put("mode", mode);
+        return result;
+    }
+
+    private static Object lightClaimProbe(CoopNetPump pump, String lightId) {
+        return pump == null ? JSONObject.NULL : new JSONObject(pump.lightClaimDiagnosticsForBridge(lightId));
+    }
+
+    /** One-shot QA interruption after a real Guest reward grant and before its applied marker. */
+    static JSONObject lightgrantfault(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String mode = requiredString(args, "mode");
+        Map<String, Object> receipt;
+        switch (mode) {
+            case "status" -> receipt = CoopLightGrantFault.status();
+            case "disarm" -> receipt = CoopLightGrantFault.disarm("bridge_command");
+            case "arm" -> {
+                if (CoopAgentBridge.configuredPort() == 0) {
+                    throw new IllegalStateException("lightgrantfault requires the opt-in agent bridge");
+                }
+                if (!coop.util.CoopDebug.diagnosticsEnabled()) {
+                    throw new IllegalStateException("lightgrantfault requires debug diagnostics");
+                }
+                CoopNetPump pump = context.pump();
+                if (roleOf(pump) != CoopConnectionRole.GUEST) {
+                    throw new IllegalStateException("lightgrantfault is guest-only");
+                }
+                if (!pump.gameplaySessionActiveForBridge()) {
+                    throw new IllegalStateException("lightgrantfault requires an active gameplay session");
+                }
+                if (!sector.isPaused()) {
+                    throw new IllegalStateException("lightgrantfault must be armed while paused");
+                }
+                receipt = pump.lightWorldForBridge().armGrantFault(requiredString(args, "requestId"));
+            }
+            default -> throw new IllegalArgumentException("mode must be arm, status or disarm");
+        }
+        JSONObject result = new JSONObject(receipt);
+        result.put("qa", true);
+        result.put("mode", mode);
+        return result;
+    }
+
+    private static JSONObject readOnlyLightBonus(CampaignFleetAPI player) throws JSONException {
+        com.fs.starfarer.api.impl.campaign.AbyssalLightBonus found = null;
+        if (player != null && player.getScripts() != null) {
+            for (var script : player.getScripts()) {
+                if (script instanceof com.fs.starfarer.api.impl.campaign.AbyssalLightBonus bonus) {
+                    if (found != null) throw new IllegalStateException("duplicate native light bonus scripts");
+                    found = bonus;
+                }
+            }
+        }
+        JSONObject result = new JSONObject();
+        result.put("present", found != null);
+        result.put("burnReserve", found == null ? 0f : found.getBurnBonus());
+        result.put("sensorReserve", found == null ? 0f : found.getSensorBonus());
+        return result;
+    }
+
+    @FunctionalInterface
+    interface LightCreation {
+        void create(com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC creator,
+                    com.fs.starfarer.api.impl.campaign.enc.EncounterPoint point);
+    }
+
+    /** QA chooses the native spawn branch; global random draws and resolved positions stay native. */
+    static JSONObject lightspawn(JSONObject args, Context context) throws JSONException {
+        return lightspawn(args, context, (creator, point) -> creator.createEncounter(
+                com.fs.starfarer.api.impl.campaign.enc.EncounterManager.getInstance(), point));
+    }
+
+    static JSONObject lightspawn(JSONObject args, Context context, LightCreation creation) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        if (roleOf(context.pump()) != CoopConnectionRole.HOST) throw new IllegalStateException("lightspawn is host-only");
+        if (sector.getHyperspace() == null) throw new IllegalStateException("Hyperspace is unavailable");
+        float x = encounterCoordinate(args, "x"), y = encounterCoordinate(args, "y");
+        String kind = optionalString(args, "kind");
+        if (kind.isEmpty()) kind = "normal";
+        com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC creator;
+        if (kind.equals("dweller")) creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalLightDwellerEPEC();
+        else {
+            var type = switch (kind) {
+                case "normal" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.NORMAL;
+                case "pair" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.PAIR;
+                case "cluster" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.CLUSTER;
+                case "large" -> com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType.LARGE;
+                default -> throw new IllegalArgumentException("kind must be normal, pair, cluster, large or dweller");
+            };
+            creator = new com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC() {
+                @Override protected LightSpawnType pickSpawnType(
+                        com.fs.starfarer.api.impl.campaign.enc.EncounterManager manager,
+                        com.fs.starfarer.api.impl.campaign.enc.EncounterPoint point) { return type; }
+            };
+        }
+        Long seed = null;
+        if (args.has("seed")) {
+            if (!(args.opt("seed") instanceof String text)) throw new IllegalArgumentException("seed must be a decimal string");
+            try { seed = Long.parseLong(text); }
+            catch (NumberFormatException error) { throw new IllegalArgumentException("seed must be a signed 64-bit decimal string"); }
+        }
+        var data = new com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData();
+        data.depth = 1f; data.random = seed == null ? new java.util.Random() : new java.util.Random(seed);
+        var point = new com.fs.starfarer.api.impl.campaign.enc.EncounterPoint("coop_qa_light", sector.getHyperspace(),
+                new Vector2f(x, y), com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.EP_TYPE_ABYSSAL);
+        point.custom = data;
+        Set<SectorEntityToken> before = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        before.addAll(sector.getHyperspace().getAllEntities());
+        creation.create(creator, point);
+        List<SectorEntityToken> created = sector.getHyperspace().getAllEntities().stream()
+                .filter(entity -> !before.contains(entity) && coop.ambient.CoopLightBridge.isNativeLight(entity)).toList();
+        boolean validCount = kind.equals("pair") ? created.size() == 2 : kind.equals("cluster")
+                ? created.size() >= 3 && created.size() <= 9 : created.size() == 1;
+        if (!validCount) throw new IllegalStateException("Native light creation produced " + created.size() + " entities for " + kind);
+        JSONObject out = new JSONObject(); JSONArray ids = new JSONArray();
+        for (SectorEntityToken entity : created) ids.put(entity.getId());
+        out.put("qa", true); out.put("kind", kind); out.put("createdCount", created.size()); out.put("engineIds", ids);
+        out.put("x", x); out.put("y", y); out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    /** Pure snapshot: unlike authority capture, this never assigns a shared id or mutates a wreck. */
+    static JSONObject wrecks(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        JSONObject table = new JSONObject();
+        int candidateCount = 0;
+        if (sector.getHyperspace() != null) {
+            for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+                if (!coop.campaign.CoopWreckCodec.isNativeWreck(entity)) continue;
+                candidateCount++;
+                if (table.length() >= 100) continue;
+                String owned = coop.campaign.CoopWreckWorld.ownedId(entity);
+                String id = owned == null ? "wreck:query" : owned;
+                coop.campaign.CoopWreckRecord record = coop.campaign.CoopWreckCodec.capture(
+                        (com.fs.starfarer.api.campaign.CustomCampaignEntityAPI) entity, id);
+                JSONObject row = new JSONObject();
+                row.put("id", owned == null ? JSONObject.NULL : owned);
+                row.put("hostEntityId", record.hostEntityId());
+                row.put("name", record.name());
+                row.put("x", record.x());
+                row.put("y", record.y());
+                row.put("vx", record.vx());
+                row.put("vy", record.vy());
+                row.put("facing", record.facing());
+                row.put("angularVelocity", record.angularVelocity());
+                row.put("elapsedDays", record.elapsedDays());
+                row.put("durationDays", record.durationDays());
+                row.put("variantId", record.ship().variantId());
+                row.put("condition", record.ship().condition());
+                row.put("shipName", record.ship().shipName());
+                row.put("recipe", record.encode());
+                // JSON consumers cannot represent every native long exactly. Keep the seed lossless.
+                row.put("salvageSeed", Long.toString(record.salvageSeed()));
+                row.put("engineId", entity.getId());
+                row.put("managed", owned != null);
+                row.put("fading", entity.hasTag(com.fs.starfarer.api.impl.campaign.ids.Tags.FADING_OUT_AND_EXPIRING));
+                table.put(owned == null ? entity.getId() : owned, row);
+            }
+        }
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        out.put("count", table.length());
+        out.put("candidateCount", candidateCount);
+        out.put("truncated", candidateCount > table.length());
+        out.put("wrecks", table);
+        return out;
+    }
+
+    /** QA invokes the native roll; probability, recipe and salvage assignment remain native. */
+    static JSONObject wreckspawn(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        if (roleOf(context.pump()) != CoopConnectionRole.HOST) {
+            throw new IllegalStateException("wreckspawn is host-only");
+        }
+        String anchor = optionalString(args, "anchor");
+        CampaignFleetAPI fleet;
+        if (anchor.isEmpty() || anchor.equals("host")) fleet = requirePlayerFleet(sector);
+        else if (anchor.equals("guest")) {
+            SectorEntityToken presence = coop.presence.CoopPresenceRegistry.getForFork("CoopAgentCommands");
+            if (!(presence instanceof CampaignFleetAPI)) throw new IllegalStateException("No live guest presence");
+            fleet = (CampaignFleetAPI) presence;
+        } else throw new IllegalArgumentException("anchor must be host or guest");
+        if (!fleet.isInHyperspace()) throw new IllegalStateException("Wreck anchor must be in hyperspace");
+        var event = sector.getEventManager().getOngoingEvent(null,
+                com.fs.starfarer.api.impl.campaign.ids.Events.NEARBY_EVENTS);
+        if (!(event instanceof com.fs.starfarer.api.impl.campaign.events.nearby.NearbyEventsEvent nearby)) {
+            throw new IllegalStateException("Native nearby-events generator is unavailable");
+        }
+        SectorEntityToken created = null;
+        int attempts = 0;
+        while (created == null && attempts < 20) {
+            attempts++;
+            created = nearby.coopTrySpawnDerelictNear(fleet);
+        }
+        JSONObject out = new JSONObject();
+        out.put("anchor", anchor.isEmpty() ? "host" : anchor);
+        out.put("attempts", attempts);
+        out.put("created", created != null);
+        out.put("engineId", created == null ? "" : created.getId());
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    /** Simulates native completed-salvage fade, exercising the same disappearance detector as UI. */
+    static JSONObject wreckconsume(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        String id = requiredString(args, "wreckId");
+        if (roleOf(context.pump()) == CoopConnectionRole.NONE) throw new IllegalStateException("Needs an active co-op role");
+        SectorEntityToken found = null;
+        for (SectorEntityToken entity : sector.getHyperspace().getAllEntities()) {
+            if (id.equals(coop.campaign.CoopWreckWorld.ownedId(entity))) { found = entity; break; }
+        }
+        if (found == null) throw new IllegalArgumentException("No managed hyperspace wreck " + id);
+        com.fs.starfarer.api.util.Misc.fadeAndExpire(found, 1f);
+        JSONObject out = new JSONObject();
+        out.put("wreckId", id); out.put("fading", true);
+        return out;
+    }
+
+    static JSONObject streams(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        return streamTable(new CoopSlipstreamWorld(() -> sector).captureTable(),
+                sector.getClock().getTimestamp());
+    }
+
+    /** Rows use the host terrain id on both clients; brightness already includes bMult. */
+    static JSONObject streamTable(List<CoopSlipstreamWorld.TableRow> rows, long timestamp)
+            throws JSONException {
+        JSONObject table = new JSONObject();
+        for (CoopSlipstreamWorld.TableRow captured : rows) {
+            if (captured.campaignTimestamp() != timestamp) {
+                throw new IllegalStateException("stream rows have unmatched campaign timestamps");
+            }
+            CoopSlipstreamRecord stream = captured.stream();
+            if (table.has(stream.hostId())) {
+                throw new IllegalStateException("duplicate canonical stream id: " + stream.hostId());
+            }
+            JSONObject row = new JSONObject();
+            row.put("id", stream.hostId());
+            row.put("version", stream.version());
+            row.put("kind", stream.kind().name());
+            row.put("campaignTimestamp", captured.campaignTimestamp());
+            row.put("segmentCount", stream.segments().size());
+            row.put("params", streamParamsJson(stream.params()));
+            row.put("terrainTags", new JSONArray(stream.terrainTags()));
+            row.put("unfinishedSurgeFadeIn", stream.unfinishedSurgeFadeIn());
+            CoopSlipstreamRecord.Timeline timeline = stream.timeline();
+            JSONObject grid = new JSONObject();
+            grid.put("originCampaignMillis", timeline.originCampaignMillis());
+            grid.put("committedTick", timeline.committedTick());
+            grid.put("committedCampaignMillis", timeline.committedCampaignMillis());
+            grid.put("captureCampaignMillis", timeline.captureCampaignMillis());
+            grid.put("hostPaused", timeline.hostPaused());
+            grid.put("hostInHyperspace", timeline.hostInHyperspace());
+            grid.put("quantumCampaignMillis", CoopSlipstreamRecord.QUANTUM_CAMPAIGN_MILLIS);
+            row.put("timeline", grid);
+            CoopSlipstreamRecord.SurgeWaveState surgeWave = stream.surgeWave();
+            JSONObject wave = new JSONObject();
+            wave.put("present", surgeWave.present());
+            wave.put("done", surgeWave.done());
+            wave.put("index", surgeWave.index());
+            wave.put("elapsed", surgeWave.elapsed());
+            wave.put("maxElapsed", surgeWave.maxElapsed());
+            row.put("surgeWave", wave);
+            JSONArray segments = new JSONArray();
+            for (CoopSlipstreamRecord.Segment segment : stream.segments()) {
+                JSONObject geometry = new JSONObject();
+                geometry.put("x", segment.x());
+                geometry.put("y", segment.y());
+                geometry.put("width", segment.width());
+                geometry.put("bMult", segment.bMult());
+                CoopSlipstreamRecord.Fader fader = segment.fader();
+                JSONObject fade = new JSONObject();
+                fade.put("brightness", fader.brightness());
+                fade.put("durationIn", fader.durationIn());
+                fade.put("durationOut", fader.durationOut());
+                fade.put("state", fader.state().name());
+                fade.put("bounceUp", fader.bounceUp());
+                fade.put("bounceDown", fader.bounceDown());
+                geometry.put("fader", fade);
+                segments.put(geometry);
+            }
+            row.put("segments", segments);
+            CoopSlipstreamRecord.Fade fade = stream.fade();
+            JSONObject fadeState = new JSONObject();
+            fadeState.put("spawnNoise", streamNoiseJson(fade.spawnNoise()));
+            fadeState.put("spawnDays", fade.spawnDays());
+            fadeState.put("spawnElapsed", fade.spawnElapsed());
+            fadeState.put("despawnNoise", streamNoiseJson(fade.despawnNoise()));
+            fadeState.put("despawnDelay", fade.despawnDelay());
+            fadeState.put("despawnDays", fade.despawnDays());
+            fadeState.put("despawnElapsed", fade.despawnElapsed());
+            row.put("fade", fadeState);
+            JSONArray brightness = new JSONArray();
+            for (CoopSlipstreamWorld.BrightnessSample sample : captured.brightness()) {
+                JSONObject value = new JSONObject();
+                value.put("distance", sample.distance());
+                value.put("brightness", sample.brightness());
+                brightness.put(value);
+            }
+            row.put("brightness", brightness);
+            table.put(stream.hostId(), row);
+        }
+        JSONObject out = new JSONObject();
+        out.put("campaignTimestamp", timestamp);
+        out.put("count", rows.size());
+        out.put("streams", table);
+        return out;
+    }
+
+    private static Object streamNoiseJson(float[] noise) throws JSONException {
+        if (noise == null) return JSONObject.NULL;
+        JSONArray values = new JSONArray();
+        for (float value : noise) values.put(value);
+        return values;
+    }
+
+    private static JSONObject streamParamsJson(CoopSlipstreamRecord.Params params)
+            throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("enteringSlipstreamTextOverride", params.enteringSlipstreamTextOverride() == null
+                ? JSONObject.NULL : params.enteringSlipstreamTextOverride());
+        out.put("enteringSlipstreamTextDurationOverride", params.enteringSlipstreamTextDurationOverride() == null
+                ? JSONObject.NULL : params.enteringSlipstreamTextDurationOverride());
+        out.put("forceNoWindVisualEffectOnFleets", params.forceNoWindVisualEffectOnFleets());
+        out.put("spriteKey1", params.spriteKey1());
+        out.put("spriteKey2", params.spriteKey2());
+        out.put("spriteKey3", params.spriteKey3());
+        out.put("edgeKey", params.edgeKey());
+        out.put("baseWidth", params.baseWidth());
+        out.put("widthForMaxSpeed", params.widthForMaxSpeed());
+        out.put("edgeWidth", params.edgeWidth());
+        out.put("areaPerParticle", params.areaPerParticle());
+        out.put("maxParticles", params.maxParticles());
+        out.put("minSpeed", params.minSpeed());
+        out.put("maxSpeed", params.maxSpeed());
+        out.put("minDur", params.minDur());
+        out.put("maxDur", params.maxDur());
+        out.put("particleFadeInTime", params.particleFadeInTime());
+        out.put("lineLengthFractionOfSpeed", params.lineLengthFractionOfSpeed());
+        out.put("burnLevel", params.burnLevel());
+        out.put("maxBurnLevelForTextureScroll", params.maxBurnLevelForTextureScroll());
+        out.put("slowDownInWiderSections", params.slowDownInWiderSections());
+        out.put("widthForMaxSpeedMinMult", params.widthForMaxSpeedMinMult());
+        out.put("widthForMaxSpeedMaxMult", params.widthForMaxSpeedMaxMult());
+        out.put("accelerationMult", params.accelerationMult());
+        out.put("name", params.name() == null ? JSONObject.NULL : params.name());
+        out.put("texScrollMult0", params.texScrollMult0());
+        out.put("texScrollMult1", params.texScrollMult1());
+        out.put("texScrollMult2", params.texScrollMult2());
+        return out;
+    }
+
+    static JSONObject streamadd(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        requireStreamAuthority(roleOf(context.pump()));
+        boolean rearmUsedRoute = optionalBoolean(args, "rearmUsedRoute", false);
+        CoopSlipstreamWorld.SeasonalAddResult result = new CoopSlipstreamWorld(() -> sector)
+                .addSeasonal(rearmUsedRoute);
+        return streamAddResult(result, sector.getClock().getMonth(), sector.getClock().getTimestamp());
+    }
+
+    static JSONObject streamAddResult(CoopSlipstreamWorld.SeasonalAddResult result, int month,
+                                      long campaignTimestamp) throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("invoked", result.invoked());
+        out.put("created", result.created());
+        out.put("rearmedUsedRoute", result.rearmedUsedRoute());
+        out.put("configPresent", result.configPresent());
+        out.put("routeId", result.routeId() == null ? JSONObject.NULL : result.routeId());
+        out.put("configuredRoutes", result.configuredRoutes());
+        out.put("unusedBefore", result.unusedBefore());
+        out.put("unusedAfter", result.unusedAfter());
+        out.put("newCount", result.newIds().size());
+        out.put("newIds", new JSONArray(result.newIds()));
+        out.put("reason", result.reason());
+        out.put("month", month);
+        out.put("campaignTimestamp", campaignTimestamp);
+        return out;
+    }
+
+    static JSONObject streamdespawn(JSONObject args, Context context) throws JSONException {
+        SectorAPI sector = requireSector(context);
+        requireStreamAuthority(roleOf(context.pump()));
+        JSONObject out = new JSONObject();
+        out.put("started", new CoopSlipstreamWorld(() -> sector).despawnSeasonal());
+        out.put("delayDays", 0);
+        out.put("fadeDays", 10);
+        out.put("campaignTimestamp", sector.getClock().getTimestamp());
+        return out;
+    }
+
+    static void requireStreamAuthority(CoopConnectionRole role) {
+        if (role != CoopConnectionRole.HOST) {
+            throw new IllegalStateException("stream triggers are host-only; current role=" + role);
+        }
+    }
 
     static JSONObject status(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
@@ -295,7 +1242,7 @@ public final class CoopAgentCommands {
         JSONObject fleetJson = new JSONObject();
         if (player != null) {
             LocationAPI location = player.getContainingLocation();
-            fleetJson.put("locationId", location == null ? "" : location.getId());
+            fleetJson.put("locationId", nullSafe(CoopLocations.keyOf(location)));
             fleetJson.put("x", round(player.getLocation() == null ? 0f : player.getLocation().x));
             fleetJson.put("y", round(player.getLocation() == null ? 0f : player.getLocation().y));
         }
@@ -313,6 +1260,9 @@ public final class CoopAgentCommands {
         out.put("credits", creditsBlock(optionalString(args, "ledgerId")));
         // 0.1.1: always present, so a netfault someone forgot to clear can never be read as a bug.
         out.put("netfault", netFaultBlock(netFaultStatusOf(pump)));
+        out.put("lightGrantFault", new JSONObject(CoopLightGrantFault.status()));
+        out.put("lightMessageHold", pump == null ? JSONObject.NULL
+                : new JSONObject(pump.lightMessageHoldStatusForBridge()));
         // 0.1.1: the reliable-delivery layer's three counters, which are the only evidence outside a
         // log that a replay after a link drop landed exactly once.
         out.put("reliable", reliableBlock(pump));
@@ -460,7 +1410,7 @@ public final class CoopAgentCommands {
             if (location == null) {
                 return;
             }
-            if (!locationFilter.isEmpty() && !locationFilter.equals(location.getId())) {
+            if (!locationFilter.isEmpty() && !locationFilter.equals(CoopLocations.keyOf(location))) {
                 return;
             }
             List<CampaignFleetAPI> present = location.getFleets();
@@ -500,7 +1450,7 @@ public final class CoopAgentCommands {
                     coopFleetKey(fleet, playerFleet, guestMirror, localPlayerId, remotePlayerId));
             row.put("name", nullSafe(fleet.getName()));
             row.put("factionId", fleet.getFaction() == null ? "" : nullSafe(fleet.getFaction().getId()));
-            row.put("locationId", location.getId() == null ? "" : location.getId());
+            row.put("locationId", nullSafe(CoopLocations.keyOf(location)));
             row.put("x", round(fleet.getLocation() == null ? 0f : fleet.getLocation().x));
             row.put("y", round(fleet.getLocation() == null ? 0f : fleet.getLocation().y));
             row.put("vx", round(fleet.getVelocity() == null ? 0f : fleet.getVelocity().x));
@@ -738,7 +1688,7 @@ public final class CoopAgentCommands {
         if (location == null && market.getPrimaryEntity() != null) {
             location = market.getPrimaryEntity().getContainingLocation();
         }
-        return location == null ? "" : nullSafe(location.getId());
+        return nullSafe(CoopLocations.keyOf(location));
     }
 
     /**
@@ -827,7 +1777,7 @@ public final class CoopAgentCommands {
         List<StarSystemAPI> systems = sector.getStarSystems();
         if (systems != null) {
             for (StarSystemAPI system : systems) {
-                if (system != null && systemId.equals(system.getId())) {
+                if (system != null && systemId.equals(CoopLocations.keyOf(system))) {
                     return system;
                 }
             }
@@ -947,7 +1897,7 @@ public final class CoopAgentCommands {
             return out;
         }
         LocationAPI location = fleet.getContainingLocation();
-        out.put("locationId", location == null || location.getId() == null ? "" : location.getId());
+        out.put("locationId", nullSafe(CoopLocations.keyOf(location)));
         out.put("inHyperspace", fleet.isInHyperspace());
         out.put("paused", sector.isPaused());
         CargoAPI cargo = fleet.getCargo();
@@ -1126,7 +2076,7 @@ public final class CoopAgentCommands {
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
-        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("fromLocationId", nullSafe(CoopLocations.keyOf(here)));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
         out.put("neutralOnly", neutralOnly);
@@ -1202,7 +2152,7 @@ public final class CoopAgentCommands {
             if (planets == null) {
                 return;
             }
-            int markets = marketsByLocation.getOrDefault(nullSafe(location.getId()), 0);
+            int markets = marketsByLocation.getOrDefault(nullSafe(CoopLocations.keyOf(location)), 0);
             for (PlanetAPI planet : planets) {
                 ColonizableCandidate candidate =
                         colonizableCandidate(planet, location, player, here, markets);
@@ -1319,7 +2269,7 @@ public final class CoopAgentCommands {
                     nullSafe(planet.getName()),
                     nullSafe(planet.getTypeId()),
                     planet.isGasGiant(),
-                    nullSafe(location.getId()),
+                    nullSafe(CoopLocations.keyOf(location)),
                     nullSafe(location.getName()),
                     at == null ? 0f : at.x,
                     at == null ? 0f : at.y,
@@ -1466,7 +2416,7 @@ public final class CoopAgentCommands {
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
-        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("fromLocationId", nullSafe(CoopLocations.keyOf(here)));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
         // Everything holding somebody, before maxLy and limit trimmed the list: "none nearby" and
@@ -1761,7 +2711,7 @@ public final class CoopAgentCommands {
 
         LocationAPI here = player.getContainingLocation();
         JSONObject out = new JSONObject();
-        out.put("fromLocationId", here == null ? "" : nullSafe(here.getId()));
+        out.put("fromLocationId", nullSafe(CoopLocations.keyOf(here)));
         out.put("kinds", new JSONArray(landmarkKindKeys(kinds)));
         out.put("limit", limit);
         out.put("maxLy", round((float) maxLy));
@@ -1919,7 +2869,7 @@ public final class CoopAgentCommands {
                     nullSafe(entity.getId()),
                     nullSafe(entity.getName()),
                     nullSafe(entity.getCustomEntityType()),
-                    nullSafe(location.getId()),
+                    nullSafe(CoopLocations.keyOf(location)),
                     nullSafe(location.getName()),
                     location.isHyperspace(),
                     at == null ? 0f : at.x,
@@ -2137,10 +3087,10 @@ public final class CoopAgentCommands {
         }
 
         JSONObject out = new JSONObject();
-        out.put("locationId", nullSafe(target.location().getId()));
+        out.put("locationId", nullSafe(CoopLocations.keyOf(target.location())));
         out.put("x", round(target.x()));
         out.put("y", round(target.y()));
-        out.put("movedFrom", current == null ? "" : nullSafe(current.getId()));
+        out.put("movedFrom", nullSafe(CoopLocations.keyOf(current)));
         out.put("entityId", target.entityId());
         out.put("entityName", target.entityName());
         out.put("transition", jump ? "jump" : "local");
@@ -2205,26 +3155,11 @@ public final class CoopAgentCommands {
     /**
      * An entity anywhere in the sector, or null.
      *
-     * <p>{@code SectorAPI.getEntityById} first — the engine answers it out of an id map and only falls
-     * back to a walk on a miss. The explicit walk behind it is not redundant: the engine's map is
-     * rebuilt lazily and its own fallback is the same walk, so doing it here costs nothing on the hit
-     * path and keeps the verb answering on any {@code SectorAPI} whose id map is not populated.
+     * <p>Encounter metadata keys resolve locally without the engine's LocationToken cache cast.
+     * Other ids retain the native fast path and a direct-list fallback across all locations.
      */
     static SectorEntityToken findEntity(SectorAPI sector, String entityId) {
-        SectorEntityToken direct = sector.getEntityById(entityId);
-        if (direct != null) {
-            return direct;
-        }
-        for (LocationAPI location : CoopLocations.all(sector)) {
-            if (location == null) {
-                continue;
-            }
-            SectorEntityToken entity = location.getEntityById(entityId);
-            if (entity != null) {
-                return entity;
-            }
-        }
-        return null;
+        return CoopEntityIds.byId(sector, entityId);
     }
 
     /**
@@ -2272,6 +3207,29 @@ public final class CoopAgentCommands {
         return out;
     }
 
+    /** Explicit paused QA action; the two-client caller chooses the greater observed timestamp. */
+    static JSONObject clockalign(JSONObject args, Context context) throws JSONException {
+        long targetTimestamp = requiredLong(args, "targetTimestamp");
+        CoopNetPump pump = context == null ? null : context.pump();
+        CoopConnectionRole role = roleOf(pump);
+        if ((role != CoopConnectionRole.HOST && role != CoopConnectionRole.GUEST)
+                || !pump.gameplaySessionActiveForBridge()) {
+            throw new IllegalStateException("clock alignment requires an active coop session"
+                    + " (role=" + role.name() + ")");
+        }
+        if (role == CoopConnectionRole.HOST && !pump.pauseCoordinatorForBridge().effectivePaused()) {
+            throw new IllegalStateException("clock alignment requires the shared pause");
+        }
+        CoopDebugClockAlignment.Result result = CoopDebugClockAlignment.align(
+                requireSector(context), targetTimestamp);
+        JSONObject out = new JSONObject();
+        out.put("role", role.name());
+        out.put("beforeTimestamp", result.beforeTimestamp());
+        out.put("afterTimestamp", result.afterTimestamp());
+        out.put("advanced", result.advanced());
+        return out;
+    }
+
     /**
      * UI-faithful on purpose: this is the same {@code AbilityPlugin#activate()} the toolbar button
      * calls, so the engine's {@code isPlayerFleet} check, its
@@ -2287,18 +3245,63 @@ public final class CoopAgentCommands {
      * a setup step can be re-run without flipping what it just set. The guard reads
      * {@code isActiveOrInProgress} rather than {@code isActive} so an ability mid-turn-on is treated
      * as on, which is what the toolbar shows.
+     *
+     * <p>Explicit {@code grantMissing:true} grants a registered native ability through the saved
+     * character list before applying that same button/state request. The engine removes fleet-only
+     * grants when it reconciles abilities. Existing plugins are retained.
      */
     static JSONObject ability(JSONObject args, Context context) throws JSONException {
         SectorAPI sector = requireSector(context);
         CampaignFleetAPI player = requirePlayerFleet(sector);
         String abilityId = requiredString(args, "abilityId");
+        boolean grantArgumentPresent = args.has("grantMissing");
+        Object grantArgument = args.opt("grantMissing");
+        if (grantArgumentPresent && !(grantArgument instanceof Boolean)) {
+            throw new IllegalArgumentException("grantMissing must be boolean");
+        }
+        boolean grantMissing = Boolean.TRUE.equals(grantArgument);
 
         AbilityPlugin plugin = player.getAbility(abilityId);
-        if (plugin == null) {
+        if (plugin == null && !grantMissing) {
             throw new IllegalArgumentException("player fleet has no ability " + abilityId);
         }
 
         Boolean desired = optionalAbilityState(args);
+        boolean grantedMissing = false;
+        if (grantMissing) {
+            CharacterDataAPI character = sector.getCharacterData();
+            if (character == null || character.getAbilities() == null) {
+                throw new IllegalStateException("ability grant requires the character ability list");
+            }
+            boolean characterMissing = !character.getAbilities().contains(abilityId);
+            if (characterMissing || plugin == null) {
+                SettingsAPI settings = Global.getSettings();
+                if (settings == null) {
+                    throw new IllegalStateException("ability grant requires game settings");
+                }
+                if (settings.getAbilitySpec(abilityId) == null) {
+                    throw new IllegalArgumentException("no ability spec " + abilityId);
+                }
+                AbilityPlugin existing = plugin;
+                if (characterMissing) {
+                    // Native addAbility also installs the fleet plugin, retaining one already there.
+                    character.addAbility(abilityId);
+                    if (character.getAbilities() == null || !character.getAbilities().contains(abilityId)) {
+                        throw new IllegalStateException("character did not acquire ability " + abilityId);
+                    }
+                } else {
+                    player.addAbility(abilityId);
+                }
+                plugin = player.getAbility(abilityId);
+                if (plugin == null) {
+                    throw new IllegalStateException("player fleet did not acquire ability " + abilityId);
+                }
+                if (existing != null && plugin != existing) {
+                    throw new IllegalStateException("ability grant replaced the existing plugin " + abilityId);
+                }
+                grantedMissing = true;
+            }
+        }
         if (desired == null) {
             plugin.activate();
         } else if (desired) {
@@ -2313,6 +3316,9 @@ public final class CoopAgentCommands {
         out.put("abilityId", abilityId);
         out.put("active", plugin.isActive());
         out.put("activeOrInProgress", plugin.isActiveOrInProgress());
+        if (grantArgumentPresent) {
+            out.put("grantedMissing", grantedMissing);
+        }
         return out;
     }
 
@@ -2522,9 +3528,10 @@ public final class CoopAgentCommands {
 
         replicator.applyObjectiveOwnershipForBridge(entityId, factionId);
 
-        SectorEntityToken entity = sector.getEntityById(entityId);
+        SectorEntityToken entity = findEntity(sector, entityId);
         JSONObject out = new JSONObject();
         out.put("entityId", entityId);
+        out.put("engineId", entity == null ? "" : nullSafe(entity.getId()));
         out.put("requestedFactionId", factionId);
         out.put("factionId", entity == null || entity.getFaction() == null
                 ? "" : nullSafe(entity.getFaction().getId()));
@@ -2549,7 +3556,8 @@ public final class CoopAgentCommands {
         JSONObject out = new JSONObject();
         out.put("planetId", planetId);
         out.put("requestedLevel", level);
-        SectorEntityToken entity = sector.getEntityById(planetId);
+        SectorEntityToken entity = findEntity(sector, planetId);
+        out.put("engineId", entity == null ? "" : nullSafe(entity.getId()));
         MarketAPI market = entity instanceof com.fs.starfarer.api.campaign.PlanetAPI planet
                 ? planet.getMarket() : null;
         out.put("level", market == null || market.getSurveyLevel() == null
@@ -2922,7 +3930,8 @@ public final class CoopAgentCommands {
         // is what the mod's own dialogs are identified by everywhere else.
         out.put("interactionDialog", dialog == null ? JSONObject.NULL : interactionDialogName(dialog));
         SectorEntityToken target = interactionTarget(dialog);
-        out.put("interactionTargetId", target == null ? "" : nullSafe(target.getId()));
+        out.put("interactionTargetId", nullSafe(CoopEntityIds.keyOf(target)));
+        out.put("interactionTargetEngineId", target == null ? "" : nullSafe(target.getId()));
         out.put("interactionTargetName", target == null ? "" : nullSafe(target.getName()));
 
         String coreTab = coreTabName(ui);
@@ -2930,11 +3939,137 @@ public final class CoopAgentCommands {
 
         JSONObject coopDialog = coopDialogBlock(pump);
         out.put("coopDialog", coopDialog == null ? JSONObject.NULL : coopDialog);
+        JSONObject lightInteraction = lightInteractionBlock(args, sector, target,
+                pump == null ? null : pump::interactionHolderForBridge);
+        Object claimLightId = lightInteraction.opt("claimLightId");
+        lightInteraction.put("claimState", lightClaimProbe(pump, claimLightId instanceof String id ? id : null));
+        out.put("lightInteraction", lightInteraction);
 
         out.put("pause", pauseBlock(roleOf(pump),
                 pump == null ? null : pump.pauseCoordinatorForBridge(),
                 CoopNetPump.blockingScreenOpenForBridge(sector)));
         return out;
+    }
+
+    /** Observe native target identity and the production claim ledger without acquiring a claim. */
+    static JSONObject lightInteractionBlock(JSONObject args, SectorAPI sector, SectorEntityToken target,
+                                             Function<String, String> claimHolder) throws JSONException {
+        List<String> errors = new ArrayList<>();
+        String requested = null;
+        if (args.has("lightId")) {
+            Object value = args.opt("lightId");
+            if (!coop.ambient.CoopLightBridge.isCanonicalId(value)) {
+                throw new IllegalArgumentException("screen lightId must be a canonical light UUID");
+            }
+            requested = (String) value;
+        }
+        String targetId = lightDiagnosticRead("targetCanonicalId", () -> coop.campaign.CoopLightWorld.ownedId(target), errors);
+        CampaignFleetAPI player = sector == null ? null : lightDiagnosticRead("playerFleet", sector::getPlayerFleet, errors);
+        SectorEntityToken queued = player == null ? null : lightDiagnosticRead("queuedTarget", player::getInteractionTarget, errors);
+        String queuedId = lightDiagnosticRead("queuedCanonicalId", () -> coop.campaign.CoopLightWorld.ownedId(queued), errors);
+        String claimId = requested == null ? targetId : requested;
+        String holder = claimId == null || claimHolder == null ? null
+                : lightDiagnosticRead("claimHolder", () -> claimHolder.apply(claimId), errors);
+        JSONObject out = new JSONObject();
+        out.put("targetCanonicalLightId", lightDiagnosticJson(targetId));
+        out.put("targetEngineId", target == null ? JSONObject.NULL
+                : lightDiagnosticJson(lightDiagnosticRead("targetEngineId", target::getId, errors)));
+        out.put("targetManagedEncounterFleet", target instanceof CampaignFleetAPI fleet
+                ? lightDiagnosticJson(lightDiagnosticRead("targetEncounterFleet", () -> coop.ambient.CoopLightBridge.isEncounterFleet(fleet), errors)) : false);
+        out.put("queuedTargetCanonicalLightId", lightDiagnosticJson(queuedId));
+        out.put("queuedTargetEngineId", queued == null ? JSONObject.NULL
+                : lightDiagnosticJson(lightDiagnosticRead("queuedTargetEngineId", queued::getId, errors)));
+        out.put("claimLightId", lightDiagnosticJson(claimId));
+        out.put("claimHolderPlayerId", lightDiagnosticJson(holder));
+        out.put("deferredActions", new JSONObject(coop.ambient.CoopLightBridge.deferredDiagnostics()));
+        out.put("nativeLight", selectedNativeLight(sector, claimId, errors));
+        JSONArray encounters = new JSONArray();
+        for (coop.ambient.CoopLightBridge.EncounterDiagnostic row : coop.ambient.CoopLightBridge.encounterDiagnostics()) {
+            JSONObject item = new JSONObject();
+            item.put("observationId", row.observationId());
+            item.put("lightId", row.lightId());
+            item.put("engineId", lightDiagnosticJson(row.engineId()));
+            item.put("observedAtCreation", row.observedAtCreation());
+            item.put("referenceAlive", row.referenceAlive());
+            item.put("markerLightId", lightDiagnosticJson(row.currentMarkerLightId()));
+            item.put("managedEncounterFleet", lightDiagnosticJson(row.managedEncounterFleet()));
+            item.put("claimHolderPlayerId", claimHolder == null ? JSONObject.NULL
+                    : lightDiagnosticJson(lightDiagnosticRead("encounterClaimHolder", () -> claimHolder.apply(row.lightId()), errors)));
+            item.put("cleanupHookCalls", row.cleanupHookCalls());
+            item.put("cleanupHookReturns", row.cleanupHookReturns());
+            item.put("removeEntityCalls", row.removeEntityCalls());
+            item.put("removeEntityReturns", row.removeEntityReturns());
+            item.put("cleanupError", lightDiagnosticJson(row.cleanupError()));
+            item.put("alive", lightDiagnosticJson(row.alive()));
+            item.put("expired", lightDiagnosticJson(row.expired()));
+            item.put("containingLocationId", lightDiagnosticJson(row.containingLocationId()));
+            item.put("containingLocationHasFleet", lightDiagnosticJson(row.containingLocationHasFleet()));
+            item.put("containingLocationHasEntity", lightDiagnosticJson(row.containingLocationHasEntity()));
+            item.put("originReferenceAlive", row.originReferenceAlive());
+            item.put("originLocationId", lightDiagnosticJson(row.originLocationId()));
+            item.put("originHasFleet", lightDiagnosticJson(row.originHasFleet()));
+            item.put("originHasEntity", lightDiagnosticJson(row.originHasEntity()));
+            item.put("readErrors", new JSONArray(row.readErrors()));
+            encounters.put(item);
+        }
+        out.put("encounters", encounters);
+        out.put("encounterLimit", 16);
+        out.put("readErrors", new JSONArray(errors));
+        return out;
+    }
+
+    /** Exact selected-light flags, independent of the bounded general entity census. */
+    private static JSONObject selectedNativeLight(SectorAPI sector, String lightId, List<String> errors)
+            throws JSONException {
+        JSONObject out = new JSONObject();
+        out.put("lightId", lightDiagnosticJson(lightId));
+        LocationAPI hyperspace = sector == null ? null
+                : lightDiagnosticRead("lightHyperspace", sector::getHyperspace, errors);
+        boolean available = lightId != null && hyperspace != null;
+        out.put("available", available);
+        JSONArray rows = new JSONArray();
+        int matches = 0;
+        int errorsBefore = errors.size();
+        List<SectorEntityToken> entities = available
+                ? lightDiagnosticRead("nativeLightEntities", hyperspace::getAllEntities, errors) : null;
+        if (entities != null) {
+            for (SectorEntityToken entity : entities) {
+                if (!Boolean.TRUE.equals(lightDiagnosticRead("nativeLightKind",
+                        () -> coop.ambient.CoopLightBridge.isNativeLight(entity), errors))) continue;
+                String id = lightDiagnosticRead("nativeLightCanonicalId",
+                        () -> coop.campaign.CoopLightWorld.ownedId(entity), errors);
+                if (!lightId.equals(id)) continue;
+                matches++;
+                if (rows.length() >= 2) continue;
+                JSONObject row = new JSONObject();
+                row.put("engineId", lightDiagnosticJson(lightDiagnosticRead("nativeLightEngineId", entity::getId, errors)));
+                row.put("alive", lightDiagnosticJson(lightDiagnosticRead("nativeLightAlive", entity::isAlive, errors)));
+                row.put("fadingOutAndExpiring", lightDiagnosticJson(lightDiagnosticRead("nativeLightFadeTag",
+                        () -> entity.hasTag(Tags.FADING_OUT_AND_EXPIRING), errors)));
+                var plugin = lightDiagnosticRead("nativeLightPlugin", entity::getCustomPlugin, errors);
+                if (!(plugin instanceof com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin))
+                    errors.add("nativeLightPlugin: missing native light plugin");
+                row.put("despawning", lightDiagnosticJson(lightDiagnosticRead("nativeLightDespawning",
+                        () -> plugin instanceof com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin light
+                                ? light.isDespawning() : null, errors)));
+                rows.put(row);
+            }
+        }
+        out.put("matches", matches);
+        out.put("entities", rows);
+        out.put("truncated", matches > rows.length());
+        out.put("complete", available && entities != null && errors.size() == errorsBefore && matches <= rows.length());
+        return out;
+    }
+
+    private static Object lightDiagnosticJson(Object value) { return value == null ? JSONObject.NULL : value; }
+
+    private static <T> T lightDiagnosticRead(String field, Supplier<T> read, List<String> errors) {
+        try { return read.get(); }
+        catch (Throwable failure) {
+            errors.add(field + ":" + failure.getClass().getName());
+            return null;
+        }
     }
 
     /**
@@ -3104,7 +4239,7 @@ public final class CoopAgentCommands {
             if (entity == null) {
                 continue;
             }
-            String id = nullSafe(entity.getId());
+            String id = nullSafe(CoopEntityIds.keyOf(entity));
             if (!id.isEmpty() && !seen.add(id)) {
                 continue;
             }
@@ -3123,7 +4258,7 @@ public final class CoopAgentCommands {
                 .thenComparing(row -> row.optString("id", "")));
 
         JSONObject out = new JSONObject();
-        out.put("locationId", nullSafe(location.getId()));
+        out.put("locationId", nullSafe(CoopLocations.keyOf(location)));
         out.put("locationName", nullSafe(location.getName()));
         out.put("kinds", new JSONArray(kinds));
         out.put("clutterExcluded", excludeClutter);
@@ -3295,7 +4430,8 @@ public final class CoopAgentCommands {
     private static JSONObject entityRow(SectorEntityToken entity, String kind, String type)
             throws JSONException {
         JSONObject row = new JSONObject();
-        row.put("id", nullSafe(entity.getId()));
+        row.put("id", nullSafe(CoopEntityIds.keyOf(entity)));
+        row.put("engineId", nullSafe(entity.getId()));
         row.put("name", nullSafe(entity.getName()));
         row.put("kind", kind);
         row.put("type", type);
@@ -3306,7 +4442,8 @@ public final class CoopAgentCommands {
         row.put("y", round(at == null ? 0f : at.y));
         row.put("tags", new JSONArray(entityTags(entity)));
         SectorEntityToken focus = safeRead(entity::getOrbitFocus);
-        row.put("orbitFocus", focus == null ? "" : nullSafe(focus.getId()));
+        row.put("orbitFocus", nullSafe(CoopEntityIds.keyOf(focus)));
+        row.put("orbitFocusEngineId", focus == null ? "" : nullSafe(focus.getId()));
         row.put("hidden", isHiddenBaseEntity(entity));
         // isDiscoverable() is vanilla's "not found yet" flag, not "cannot be found": it goes false the
         // moment the player discovers the entity, so true here means undiscovered.
@@ -4126,6 +5263,18 @@ public final class CoopAgentCommands {
             throw new IllegalArgumentException("missing or non-numeric argument " + key);
         }
         return value;
+    }
+
+    private static long requiredLong(JSONObject args, String key) {
+        Object raw = args.opt(key);
+        if (raw instanceof Number) {
+            try {
+                return new java.math.BigDecimal(raw.toString()).longValueExact();
+            } catch (NumberFormatException | ArithmeticException invalid) {
+                throw new IllegalArgumentException(key + " must be an exact signed 64-bit integer");
+            }
+        }
+        throw new IllegalArgumentException("missing or non-integer argument " + key);
     }
 
     private static boolean requiredPauseState(JSONObject args) {

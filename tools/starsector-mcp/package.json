@@ -13,7 +13,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/mock-bridge-test.js"
+    "test": "node --test test/mock-bridge-test.js test/light-hold-renewal-test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0"

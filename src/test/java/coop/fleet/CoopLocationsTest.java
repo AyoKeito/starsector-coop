@@ -2,6 +2,8 @@ package coop.fleet;
 
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
+import coop.testing.ProxyDefaults;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -13,6 +15,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 /**
@@ -57,6 +60,69 @@ class CoopLocationsTest {
     }
 
     // ---- The id cache -----------------------------------------------------------------------------
+
+    @Test
+    void gateHaulerAndNamelessRockWithTheSameEngineIdResolveSeparately() {
+        StarSystemAPI gateHauler = system("deep space", null);
+        StarSystemAPI namelessRock = system("deep space", "nameless_rock_location");
+        FakeSector sector = new FakeSector();
+        sector.proxies.addAll(List.of(gateHauler, namelessRock));
+
+        assertEquals("deep space", CoopLocations.keyOf(gateHauler));
+        assertEquals("nameless_rock_location", CoopLocations.keyOf(namelessRock));
+        assertNotEquals(CoopLocations.keyOf(gateHauler), CoopLocations.keyOf(namelessRock));
+        assertSame(gateHauler, CoopLocations.byId(sector.proxy(), "deep space"));
+        assertSame(namelessRock, CoopLocations.byId(sector.proxy(), "nameless_rock_location"));
+        assertEquals(1, sector.allLocationsCalls);
+        assertEquals(2, CoopLocations.cachedIdCount());
+    }
+
+    @Test
+    void permanentSystemsWithoutAUniqueIdAndHyperspaceKeepTheirExistingKeys() {
+        assertEquals("corvus", CoopLocations.keyOf(system("corvus", null)));
+        assertEquals("hyperspace", CoopLocations.keyOf(FakeSector.locationProxy("hyperspace")));
+        assertNull(CoopLocations.keyOf(null));
+    }
+
+    @Test
+    void aUniqueSystemIdReplacesTheEngineIdRatherThanAddingAnAmbiguousAlias() {
+        StarSystemAPI namelessRock = system("deep space", "nameless_rock_location");
+        FakeSector sector = new FakeSector();
+        sector.proxies.add(namelessRock);
+
+        assertSame(namelessRock, CoopLocations.byId(sector.proxy(), "nameless_rock_location"));
+        assertNull(CoopLocations.byId(sector.proxy(), "deep space"));
+        assertEquals(1, CoopLocations.cachedIdCount());
+    }
+
+    @Test
+    void anUnseenUniqueIdRebuildsTheCacheToFindALaterCreatedSystem() {
+        FakeSector sector = new FakeSector("corvus");
+        SectorAPI proxy = sector.proxy();
+        CoopLocations.byId(proxy, "corvus");
+        StarSystemAPI temporary = system("deep space", "coop_abyss:host:1");
+        sector.proxies.add(temporary);
+
+        assertSame(temporary, CoopLocations.byId(proxy, "coop_abyss:host:1"));
+        assertEquals(2, sector.allLocationsCalls);
+        assertSame(temporary, CoopLocations.byId(proxy, "coop_abyss:host:1"));
+        assertEquals(2, sector.allLocationsCalls);
+    }
+
+    @Test
+    void lifecycleInvalidationRechecksAMissedKeyAndDropsRemovedSystems() {
+        FakeSector sector = new FakeSector("corvus");
+        SectorAPI proxy = sector.proxy();
+        assertNull(CoopLocations.byId(proxy, "coop_abyss:host:1"));
+        StarSystemAPI temporary = system("deep space", "coop_abyss:host:1");
+        sector.proxies.add(temporary);
+        CoopLocations.invalidate();
+        assertSame(temporary, CoopLocations.byId(proxy, "coop_abyss:host:1"));
+
+        sector.proxies.remove(temporary);
+        CoopLocations.invalidate();
+        assertNull(CoopLocations.byId(proxy, "coop_abyss:host:1"));
+    }
 
     @Test
     void repeatedLookupsCostOneWalkNotOnePerLookup() {
@@ -123,6 +189,17 @@ class CoopLocationsTest {
     }
 
     // ---- Fakes ------------------------------------------------------------------------------------
+
+    private static StarSystemAPI system(String id, String uniqueId) {
+        return (StarSystemAPI) Proxy.newProxyInstance(StarSystemAPI.class.getClassLoader(),
+                new Class<?>[]{StarSystemAPI.class}, (proxy, method, args) -> switch (method.getName()) {
+                    case "getId" -> id;
+                    case "getOptionalUniqueId" -> uniqueId;
+                    case "equals" -> proxy == args[0];
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    default -> ProxyDefaults.defaultValue(method.getReturnType());
+                });
+    }
 
     private static final class FakeSector {
         private final List<String> ids;

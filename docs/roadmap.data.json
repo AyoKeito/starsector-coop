@@ -10,48 +10,55 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "code-complete and smoke-verified per phase. The 0.1.5 two-player check is complete. Dates, commits and results are in the plan's Phase Status Ledger"
+      "note": "Completed phases with recorded verification in the plan's Phase Status Ledger. P19/P23 are signed off. P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance do not complete M4/M5 or Guest-proximity triggering."
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "partially built. Phase 23: guides, launch scripts, changelog, release checklist and license are in; left are the forum-thread URL and the COOP TEST Ziggurat start (see ATTENTION)"
+      "note": "P26 is partial. M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. Audits 93 (358 checks) and 99 (744 checks) close the two final M3 release checks. M4 is implemented with native acceptance pending; M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "immediate focus. Phase 19, the final sign-off, is the only unbuilt V1 phase; it starts once Phase 23's two items land, and its checklist is the ATTENTION list above"
+      "note": "The V1 queue is complete. P26 now has M1/M2, shared wrecks and bounded M3 acceptance complete. Remaining P26 work is M4 storms (native acceptance pending), M5 sensor ghosts/Leviathan trails and Guest-proximity triggering. Deferred M3 edge cases remain unpassed and non-blocking."
     },
     {
       "key": "queued",
       "icon": "◆",
       "label": "Queued for V1",
-      "note": "committed to V1, not yet built. Empty since 2026-09-05: Phase 19 is the only V1 phase left and it sits under Next up"
+      "note": "empty: all V1 phases are complete, including Phase 19 sign-off and Phase 23 packaging"
     },
     {
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "beyond V1: 33 (built) → 22 (next) → 26 (slipstreams M1, then the abyss M2 as a narrow proof) → 25 → 27, as appetite allows"
+      "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and M3 within the agreed bounded release scope are complete; M4 is implemented with native acceptance pending; M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
     }
   ],
-  "hereHead": "You are here: 0.1.5 (v0.1.5, 2026-10-12) fixes credit transfers, reconnects, consecutive ally battles and launcher lifecycle bugs. Automated checks pass and the two-player check is complete. Next: Phase 22 (tactical orders for your own joined ships). Remaining before V1 sign-off: Phase 23 (forum-thread URL, COOP TEST Ziggurat start) and the Phase 19 and Phase 33 checklist items under ATTENTION.",
-  "here": "<b>0.1.5</b> (<code>v0.1.5</code>, 2026-10-12) fixes credit transfers, reconnects, consecutive ally battles and launcher lifecycle bugs. <b>Automated checks pass and the two-player check is complete.</b> <b>Next:</b> <span class=\"rp\" data-jump=\"22\">Phase 22</span>, tactical orders for your own joined ships; its seven live checks run in a Phase 33 ally battle. <b>Remaining for V1:</b> <span class=\"rp\" data-jump=\"23\">Phase 23</span>: the forum-thread URL in <code>docs/player/LISTING.md</code> and <code>modThreadId</code> in <code>coop.version</code>, and remove or dev-gate the COOP TEST Ziggurat start. <span class=\"rp\" data-jump=\"19\">Phase 19</span> and <span class=\"rp\" data-jump=\"33\">Phase 33</span>: the checklist items under ATTENTION, each waiting on a trigger.",
+  "hereHead": "You are here: P26 PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 is implemented and passes offline tests; native two-client acceptance remains open. M5 and Guest-proximity triggering are follow-ups.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. <b>M4 storm replication is implemented and passes offline verification.</b> Host owns native grids and actual tracker phases across both players' neighborhoods. Guest sends bounded stream/surge weather intents for Host validation; its surge itself and each owner's strike timing, boost and damage stay local. Narrow pinned native forks preserve existing class names and add primitive saved metadata, replacing the old subclass/no-migration design for M4 only. Complete storm snapshots use bounded fragments when needed. The clean build passes 4,445 Java tests with one existing skip across 282 suites; MCP passes 103/103. Verify native same-cell phases, separated players, shared surge weather, save/load and reconnect using the new read-only storm probes. M4 has no native acceptance pass yet. M5 sensor ghosts/Leviathan trails and Guest-proximity triggering remain unbuilt. M3's dated evidence and deferred unpassed edge cases stay in the implementation plan. Co-op-only pause stays.",
   "attention": [
     {
       "sev": "scope",
+      "sevLabel": "P26 remaining milestones",
+      "head": "Run M4 native acceptance",
+      "state": "M4 implementation and offline tests pass; native acceptance pending",
+      "body": "Deploy the clean M4 commit to both clients and load the backed-up Mar 22, c207 pair. Pass = equal complete grids and canonical phases at selected global cells after pausing and receiving a current checkpoint, including separated players, shared Guest surge weather, reconnect and save/load. Keep strike timing, boosts and damage owner-local. M4 stays open until these native checks pass. M5 and Guest-proximity triggering remain follow-ups."
+    },
+    {
+      "sev": "scope",
       "sevLabel": "before public listing",
-      "head": "Phase 23: forum-thread URL and the COOP TEST Ziggurat start",
-      "state": "open; two edits, neither is code",
+      "head": "Publication follow-ups: forum-thread metadata and the COOP TEST start",
+      "state": "post-sign-off reminders; Phase 23 is complete",
       "body": "(1) Create the forum thread, then put its URL in <code>docs/player/LISTING.md</code> and its numeric id in <code>modThreadId</code> in <code>coop.version</code> (0 today, so Version Checker offers no link). Verify: Version Checker's mod entry links to the thread. (2) Remove or dev-gate the COOP TEST start: rows <code>coopZigguratStart</code> and <code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code> (option 6, a Ziggurat plus 1,000,000 credits). Verify: a new game shows five occupation choices, or six only with the dev flag. The forced tutorial skip and forced Normal difficulty stay; they are permanent mod behaviour (see the plan, <span class=\"rp\" data-jump=\"23\">Phase 23</span>)."
     },
     {
       "sev": "revisit",
-      "sevLabel": "Phase 19 checklist",
-      "head": "Smoke steps Sessions 1-5 never reached",
-      "state": "open; each has a pass criterion",
+      "sevLabel": "optional QA follow-ups",
+      "head": "Post-sign-off probes awaiting a trigger",
+      "state": "non-blocking; Phase 19 is complete, pass criteria retained",
       "body": "<b>Step 33, guest saturation bombardment decivilising the host's colony:</b> pass = the next reconnect passes the fingerprint check. <b>S4-B, mothballed hull cargo:</b> find a trade fleet carrying hulls; pass = the guest draws them mothballed, not as 0% CR warships. <b>Post-battle mirror freeze expiry</b> needs a lost BATTLE_RESULT and has no cheap trigger; stays unit-verified. <b>UPnP router without <code>GetSpecificPortMappingEntry</code>:</b> cannot be exercised on this network (the MikroTik answers it); expected behaviour is a conflict report and a port change, not an eviction."
     },
     {
@@ -72,8 +79,8 @@
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Hyperspace storms hit one player and the other never sees why",
-      "state": "documented; Phase 26 M4 would replicate it, not built",
-      "body": "Storm cells are rolled per engine, so a strike on the guest (CR loss, repair-tracker event <code>hyperstorm</code>) is invisible on the host and reads as an unexplained CR drop. Not a bug in V1; stated in <code>docs/player/LIMITATIONS.md</code> and the 0.1.1 changelog. The fix is <span class=\"rp\" data-jump=\"26\">Phase 26</span> M4 (terrain-plugin subclass, one capture per generation), specced in the plan."
+      "state": "M4 implemented and offline-verified; native gate pending",
+      "body": "M4 replaces independent weather evolution with Host-owned grids and tracker phases across both players' neighborhoods. Strike timing, boosts and damage remain local to each owner's fleet. Validate the pinned native forks and shared Guest surge controls with same-clock global-cell probes, reconnect and native save/load before accepting the milestone."
     },
     {
       "sev": "gap",
@@ -678,22 +685,16 @@
       "title": "Two-Instance QA Pass",
       "theme": "qa",
       "track": "v1",
-      "status": "not-built",
-      "summary": "Final v1 sign-off: the exhaustive manual two-instance QA checklist plus preflight and log-tail scripts, fixing only checklist failures.",
+      "status": "built",
+      "summary": "V1 final sign-off accepted by the user on 2026-10-12 after the 0.1.5 two-player check. Trigger-dependent edge-case probes remain optional QA follow-ups.",
       "introduces": [
-        "QA_V1.md checklist",
-        "qa-preflight.ps1",
-        "tail-log.ps1",
+        "V1 two-player QA sign-off",
         "seed/campaign-UUID lock tests",
         "full-system regression matrix",
         "WAN matrix re-verify"
       ],
-      "residue": [
-        "run entire manual checklist across all phases",
-        "re-run Phase 20 WAN matrix + real-Internet/VPN session",
-        "record dated pass/fail results"
-      ],
-      "note": "Runs LAST — prerequisite is every other v1 phase through Phase 20 complete (build-order position 14)"
+      "residue": [],
+      "note": "Closed by user sign-off on 2026-10-12. The phase's historical proposed files and checklist are retained in the plan; closure does not claim a new exhaustive test run or creation of the proposed QA scripts. Optional probes retain their triggers and pass criteria under ATTENTION."
     },
     {
       "id": "20",
@@ -830,7 +831,7 @@
       "title": "Public Release Packaging",
       "theme": "config",
       "track": "v1",
-      "status": "partial",
+      "status": "built",
       "summary": "Turns the developer-grade deliverable into a releasable mod with player docs, friendlier launch config, and release hygiene.",
       "introduces": [
         "install guide",
@@ -839,10 +840,11 @@
         "Phase 28 M1 settings-file",
         "launch-script hardening",
         "version-string discipline",
-        "MIT attribution",
+        "license and attribution policy",
         "issue-report flow"
       ],
-      "residue": []
+      "residue": [],
+      "note": "Closed by user sign-off on 2026-10-12. Forum-thread metadata and removing or dev-gating the COOP TEST Ziggurat start remain publication reminders under ATTENTION; CoOpCombat attribution stays conditional on Phase 22 shipping that code."
     },
     {
       "id": "24",
@@ -902,32 +904,41 @@
       "title": "Hyperspace Ambient-World Replication",
       "theme": "terrain",
       "track": "post-v1",
-      "status": "not-built",
-      "summary": "Replicates slipstreams as outcome polylines, abyssal temporary systems via keyed EPEC re-execution, and (M4, open) hyperspace storm grids as per-generation captures so both players share hyperspace ambient content.",
+      "status": "partial",
+      "summary": "P26 remains PARTIAL. M1/M2, shared wrecks and bounded M3 release acceptance are complete. M4 is implemented with Host-owned native storm grids and tracker phases, both-player coverage, shared Guest stream/surge weather controls, primitive saved metadata and read-only storm probes. Offline verification passes 4,445 Java tests with one existing skip and 103 MCP tests; native acceptance remains open. M5 and Guest-proximity triggering remain unbuilt; M3's deferred edge cases remain unpassed.",
       "introduces": [
         "CoopSlipstreamAuthority",
-        "CoopEncounterAuthority",
-        "CoopAbyssalDespawner",
-        "STREAM_ADD/SET/DESPAWN/REMOVE",
-        "ENC_SPAWN/ENC_REMOVE",
-        "AbyssalRogueStellarObjectDireHintsEPEC fork",
-        "$coopStreamId / $coopEncId / $coopEncOrdinal",
-        "segment polyline + fade-state replication",
-        "bridge stream table + temp-system manifest",
-        "M4: CoopHyperspaceTerrainPlugin / CoopHyperspaceAutomaton subclasses via terrain.json (no fork)",
-        "M4: CoopStormAuthority + STORM_GRID/STORM_SET + keyed trackers + bridge storm table"
+        "CoopSlipstreamFadeDriver + transient native fade bridge",
+        "CoopWreckAuthority / Record / Codec / World + transient CoopWreckBridge",
+        "WRECK_SET/ADD/REMOVE/CONSUME/MUTATION/MUTATION_ACK + canonical wreck identities, revisions and durable tombstones",
+        "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
+        "CoopEncounterAuthority / Record / Codec / World + transient CoopEncounterReplayBridge",
+        "CoopLightAuthority / Record / Codec / World + transient CoopLightBridge and narrow native light/DwellerCMD forks",
+        "LIGHT_SET/REQUEST/RESULT: resolved native shapes/params, Host first-wins actor rewards, durable pending/results/tombstones and uncertain-grant markers",
+        "nonce-correlated automatic/manual light claims, transient deferred Dweller fleet creation and validated local temporary encounter fleets on the existing battle bridge",
+        "read-only lights, Host-only native lightspawn fixture and strict same-clock diffLights",
+        "transient CoopLightGrantFault and action-only lightgrantfault for one opt-in post-native-grant interruption; no synthetic ledger state",
+        "transient CoopLightMessageHold and action-only lightmessagehold for real accepted-claim replies or pre-application consumption requests, bounded to 1–600 seconds from arm",
+        "passive actual claim-token observations, cached deferred-attempt lifecycle journals and exact selected native fading-tag readback",
+        "CoopEncounterOrbitSetCodec for bounded current offscreen orbit batches retained through replay retries",
+        "CoopEncounterOrbitSweep for at most one additional managed-system orbit repair per existing one-second tick, with transient cursor and payload/frame limits",
+        "CoopAbyssalDespawner with saved Guest visit/inside history",
+        "STREAM_SET/ADD/DESPAWN/REMOVE",
+        "ENC_SET + reliable ENCOUNTER_STATE outcomes through WORLD_DELTA",
+        "$coopStreamId / $coopEncId / $coopEncEntityId metadata wire keys; native encounter entity ids preserved",
+        "CoopEntityIds canonical lookup through local system/hyperspace scans, avoiding native LocationToken cache casts",
+        "segment polyline + live per-segment fader state replication",
+        "primitive saved generation recipe carrying the Host's effective EPEC seed, resolved specials, original member identities and exploration overlays",
+        "bridge stream table (committed-phase checks; raw calendars retained) + temp-system manifest",
+        "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
       ],
       "residue": [
-        "M1 slipstream capture/apply/reconcile incl. fade state + bridge-gated smoke",
-        "M2 (after M1 smoke) abyssal re-execution + four corrections + dire-hint override + ordinal keys + fingerprint exclusion + bridge-gated smoke",
-        "M3 abyssal lights/dire hints (open, user 2026-09-05)",
-        "stretch guest-proximity triggering (open, user 2026-09-05)",
-        "M4 hyperspace storm replication: grid per generation + keyed trackers, option B recommended (open, user 2026-09-05)",
-        "M5 sensor ghosts on the guest: local cosmetic subset via a coop ghost manager, no wire (open, user 2026-09-05)",
-        "document residual divergences + retire v1 accept-divergence entries",
-        "commit"
+        "M3 release acceptance is complete within agreed bounds from audits 93 (358 checks) and 99 (744 checks). Deferred, unpassed follow-ups: late expiry/new-session ACCEPT delivery, isolated owner/handler replacement and private-map retirement. Exact queued-observation continuity across reconnect, simultaneous first-claim fairness and delivered conflicting wire REJECT remain unobserved.",
+        "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
+        "M4 hyperspace storms: implementation and offline verification pass; native two-client acceptance pending.",
+        "M5 guest sensor ghosts and Leviathan trails: remaining unbuilt P26 milestone"
       ],
-      "note": "Requires Phase 13 (suppressor + coop-forks.jar); builds on Phase 9 NPC mirrors + Phase 8 hyper position. Review pass 2026-09-05 corrected four points against the API source: slipstream fades scale travel intensity (despawn fades run up to 27 days), so fade state is replicated instead of drawn locally; the dire-hints draw is filtered by per-install UniqueEncounterData, so the host ships its resolved choice; entities inside a generated system take Sector.genUID() ids that differ per client, so they are keyed by creation ordinal; and acceptance is gated on bridge diffs, not unit tests. Ordered first post-V1 (after 19, before 33/22) by user decision the same day; scope M1 + M2, M3 and stretch open. M4 (storms) added the same evening after a source read: the automaton's committed grid only changes at the 1.5-2.5 day interval and has a deflate codec already, trackers are local-player-centric (±10000 su) and get keyed durations instead of being shipped, and the plugin is replaceable through terrain.json so no classpath fork is needed. Open like M3; independent of M1-M3."
+      "note": "M4 work started 2026-10-24. User approved shared Guest surge weather changes, validated and published by Host, while the surge itself stays Guest-local. User relaxed the no-migration policy for M4 where it reduces complexity: narrow forks keep native class names and add primitive saved storm metadata. Offline verification passes 4,445 Java tests with one existing skip across 282 suites and 103 MCP tests. Native acceptance is pending. M3 remains accepted only within its recorded bounded scope; its deferred variants are unpassed. Paired Mar 22, c207 checkpoint 99b and backups are available for M4 testing. M5 and Guest-proximity triggering remain follow-ups; co-op-only pause stays."
     },
     {
       "id": "27",
@@ -1118,7 +1129,7 @@
     "Guest cannot independently desync clock or fast-forward (shared pause allowed)",
     "Host fast-forward mirrors to guest; dates stay aligned",
     "Guest campaign date converges to host, never steps backward",
-    "Coop save loaded solo runs orphan sweep; host save solo-playable",
+    "Co-op save loaded before pairing runs orphan sweep; configured roles stay paused until the session is playable",
     "Remote fleet mirror updates at campaign rate",
     "Other player's fleet visible outside sensor range, faction-colored, username-labeled",
     "NPC fleet population host-authoritative; guest runs no native spawning/AI",

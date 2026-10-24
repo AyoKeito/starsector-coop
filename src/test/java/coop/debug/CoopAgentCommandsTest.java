@@ -198,8 +198,26 @@ class CoopAgentCommandsTest {
                         "expedition", "feed", "fleets", "give", "hirable", "intel", "landmarks",
                         "mark", "market", "markets", "memory", "netfault", "objective", "ownfleet",
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
-                        "teleport", "visibility"),
+                        "teleport", "visibility", "streams", "storms", "streamadd", "streamdespawn", "clockalign",
+                        "wrecks", "wreckspawn", "wreckconsume", "encounters", "encounterspawn", "lights", "lightspawn",
+                        "lightgrantfault", "lightmessagehold"),
                 new CoopAgentCommands().verbs());
+    }
+
+    @Test
+    void stormSelectorsFailBeforeAccessingTheLiveAdapter() throws JSONException {
+        var sector = coop.testing.ApiProxies.sectorWithMemory(coop.testing.ApiProxies.memory(new java.util.HashMap<>()));
+        CoopAgentCommands.Context context = new CoopAgentCommands.Context() {
+            public SectorAPI sector() { return sector; }
+            public CoopNetPump pump() { throw new AssertionError("invalid selector accessed the pump"); }
+        };
+        for (String args : java.util.List.of("{\"limit\":0}", "{\"limit\":129}", "{\"limit\":1.5}",
+                "{\"cells\":true}", "{\"cells\":\"-1,2\"}", "{\"cells\":\"1,2;\"}",
+                "{\"cells\":\"1,2;01,2\"}", "{\"cells\":\"2147483648,0\"}",
+                "{\"cells\":\"1,2;2,3\",\"limit\":1}", "{\"unexpected\":1}")) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> CoopAgentCommands.storms(new JSONObject(args), context), args);
+        }
     }
 
     @Test

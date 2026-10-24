@@ -5,6 +5,12 @@ import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
 import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
+import coop.campaign.CoopSlipstreamWorld;
+import coop.ambient.CoopWreckBridge;
+import coop.ambient.CoopLightBridge;
+import coop.ambient.CoopEncounterReplayBridge;
+import coop.storm.CoopStormBridge;
+import coop.campaign.CoopAbyssalDespawner;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopGuestPresence;
@@ -52,6 +58,7 @@ public class CoopModPlugin extends BaseModPlugin {
         super.onApplicationLoad();
         CoopLog.info(CoopModPlugin.class, "CoopModPlugin loaded");
         publishLauncherProperties();
+        publishStormRole();
         checkGameVersion();
         String newGameSeed = CoopNetStartupConfig.newGameSeedFromSystemProperties();
         if (!newGameSeed.isEmpty()) {
@@ -60,6 +67,17 @@ public class CoopModPlugin extends BaseModPlugin {
                             + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
                             + "=" + newGameSeed);
             publishSeedForTheForks(newGameSeed);
+        }
+    }
+
+    /** Native storm readResolve runs before onGameLoad, so its role must come from launch config. */
+    static void publishStormRole() {
+        try {
+            CoopStormBridge.configureGuest(CoopNetStartupConfig.fromSystemProperties().role()
+                    == coop.net.CoopConnectionRole.GUEST);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopStormBridge.configureGuest(false);
+            CoopLog.warn(CoopModPlugin.class, "Coop could not resolve the storm launch role", ex);
         }
     }
 
@@ -341,6 +359,8 @@ public class CoopModPlugin extends BaseModPlugin {
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
         CoopMirrorOrphanSweeper.sweep(Global.getSector());
+        // Recreate transient control before the first terrain frame, including background batches.
+        CoopSlipstreamWorld.prepareLoad(Global.getSector());
         // Before the pump, so it sits earlier in the transient script list and runs first each frame:
         // it captures the engine's per-frame delta for the full-fidelity guest-system drive and is the
         // always-on observer that releases the drive when the pump stops ticking it.
@@ -517,7 +537,12 @@ public class CoopModPlugin extends BaseModPlugin {
      */
     static void beginGameSession() {
         clearPreviousGameStatics();
+        publishStormRole();
         CoopStoryChainGate.publish(Global.getSector());
+        CoopWreckBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
+                .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
+        CoopLightBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
+                .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
     }
 
     /**
@@ -533,6 +558,11 @@ public class CoopModPlugin extends BaseModPlugin {
      * clears, and a failed save must not carry it into the next campaign.
      */
     static void clearPreviousGameStatics() {
+        CoopSlipstreamWorld.releaseControlled();
+        CoopWreckBridge.clear();
+        CoopLightBridge.clear();
+        CoopEncounterReplayBridge.clear();
+        CoopStormBridge.clear();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();
     }
@@ -605,6 +635,7 @@ public class CoopModPlugin extends BaseModPlugin {
         x.alias("coopStats", CoopSessionStats.class);
         x.alias("coopStatsPlayer", CoopSessionStats.PlayerStats.class);
         x.alias("coopStatsLoss", CoopSessionStats.ShipLoss.class);
+        x.alias("coopAbyssalDespawner", CoopAbyssalDespawner.class);
     }
 
     /**
