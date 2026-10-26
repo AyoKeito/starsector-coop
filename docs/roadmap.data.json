@@ -10,42 +10,42 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "Completed phases with recorded verification in the plan's Phase Status Ledger. P19/P23 are signed off. P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance do not complete M4/M5 or Guest-proximity triggering."
+      "note": "Completed phases with recorded verification in the plan's Phase Status Ledger."
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 now passes bounded paired reload, surge-tail/session recovery, shared control acceptance and native strikes on both real owners. Visual, direct boost/mirror execution and isolated shared clearing observations remain open. M5 and Guest-proximity triggering remain unbuilt."
+      "note": "P26: finish M4 acceptance, M5 and Guest-proximity encounter triggering."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "The V1 queue is complete. P26 now has M1/M2, shared wrecks and bounded M3 acceptance complete. Remaining P26 work is M4 storms (bounded native passes; remaining checks open), M5 sensor ghosts/Leviathan trails and Guest-proximity triggering. Deferred M3 edge cases remain unpassed and non-blocking."
+      "note": "Finish P26; deferred M3 edge cases remain non-blocking."
     },
     {
       "key": "queued",
       "icon": "◆",
       "label": "Queued for V1",
-      "note": "empty: all V1 phases are complete, including Phase 19 sign-off and Phase 23 packaging"
+      "note": "All V1 phases are complete."
     },
     {
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 recovery/control/owner-strike checks pass within recorded bounds, with remaining visual and execution observations open. M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
+      "note": "P26 remains partial; P22, P25 and P27 are queued, and P33 is built."
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. M4 native recovery, paired reload, shared controls and real-owner strikes pass within bounds; visual and direct boost/mirror observations remain.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 runtime 114fa97 passes 4,451 Java tests plus one existing skip across 282 suites; MCP retains 103/103. Native paired load accepts 7 source advertisements and 105 private OFF controls. A same-JVM Host reload resets authorization before accepting 2 new advertisements and 27 OFF controls. No surge window or Host private geometry is recreated. Both complete 2,273-coordinate readbacks converge after explicit QA pairing. Ordinary shared OFF rises by 394 across 13 native cloud cells, with 148 equal fields. Both real owners record hyperstorm CR damage. The Mar 29 checkpoint independently matches all 405,000 grid cells and 718 rows, with all 27 ship identities and complete backups preserved. Remaining observations: same-cell visuals, direct boost/mirror execution and isolated before/after shared clearing. Clock pairing does not establish production reconciliation or frame lockstep. M5 and Guest-proximity triggering remain follow-ups. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 ambient-world replication; finish M4 acceptance, then M5 and Guest-proximity triggering.",
+  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. Finish M4 storm acceptance, then build M5 sensor ghosts/Leviathan trails and Guest-proximity encounter triggering. Detailed test results stay in the implementation plan and acceptance reports.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
-      "head": "Finish M4 visual and direct execution observations",
-      "state": "native recovery, reload, control and owner-strike cases pass within bounds",
-      "body": "114fa97 verifies private-tail source recovery after actual session reset, base acceleration and no Host private geometry. Paired reload matches 2,273 requested cells; ordinary shared controls and both real-owner strikes are observed. Mar 29 saves independently match all 405,000 grid cells and 718 rows, with complete backups. Remaining: same-global-cell visual comparison, direct native boost/mirror execution observations and an isolated shared-stream before/after tracker mutation. Refused startup revisions and teleport-range controls remain recorded, not zero-error claims. M4 remains partial."
+      "head": "Finish M4 storm acceptance",
+      "state": "implemented; remaining native observations open",
+      "body": "Finish the visual, boost/mirror and isolated clearing checks. Pass when the M4 acceptance report records the results and explicitly resolves the remaining evidence limits."
     },
     {
       "sev": "scope",
@@ -74,13 +74,6 @@
       "head": "S4-C: fleet churn in far systems still resends the NPC set",
       "state": "partial; 0.14 structural sends/s idle (was 0.3-0.5/s)",
       "body": "Structural NPC_FLEET_SET sends are scoped to the two observers' locations, but route fleets despawning in the host's own system count as near, so a parked pair still sees about one 20 KB set every 7 s. Candidate fix: treat the despawn of a fleet the guest has never mirrored as far. Measure: count <code>Coop sent NPC_FLEET_SET</code> lines in the host log over a 130 s window with both fleets parked; target is near zero."
-    },
-    {
-      "sev": "gap",
-      "sevLabel": "known gap",
-      "head": "Hyperspace storms hit one player and the other never sees why",
-      "state": "M4 implemented and offline-verified; native gate pending",
-      "body": "M4 replaces independent weather evolution with Host-owned grids and tracker phases across both players' neighborhoods. Strike timing, boosts and damage remain local to each owner's fleet. Validate the pinned native forks and shared Guest surge controls with same-clock global-cell probes, reconnect and native save/load before accepting the milestone."
     },
     {
       "sev": "gap",
@@ -905,43 +898,20 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "P26 remains PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 now has bounded native phase/evolution, separated coverage, surge/clear, reconnect, save/reload, private-tail reset recovery, shared controls and real-owner strike passes. Runtime 114fa97 passes 4,451 Java tests plus one skip; MCP passes 103/103. Remaining visual, direct boost/mirror execution and isolated shared clearing observations stay open. M5 and Guest-proximity triggering remain unbuilt.",
+      "summary": "Shares Host-owned slipstreams, floating wrecks, temporary abyssal systems, lights and hyperspace storms. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 is implemented with native acceptance still partial.",
       "introduces": [
-        "CoopSlipstreamAuthority",
-        "CoopSlipstreamFadeDriver + transient native fade bridge",
-        "CoopWreckAuthority / Record / Codec / World + transient CoopWreckBridge",
-        "WRECK_SET/ADD/REMOVE/CONSUME/MUTATION/MUTATION_ACK + canonical wreck identities, revisions and durable tombstones",
-        "native floating-wreck generation near a separated Guest, shared motion/age/salvage",
-        "CoopEncounterAuthority / Record / Codec / World + transient CoopEncounterReplayBridge",
-        "CoopLightAuthority / Record / Codec / World + transient CoopLightBridge and narrow native light/DwellerCMD forks",
-        "LIGHT_SET/REQUEST/RESULT: resolved native shapes/params, Host first-wins actor rewards, durable pending/results/tombstones and uncertain-grant markers",
-        "nonce-correlated automatic/manual light claims, transient deferred Dweller fleet creation and validated local temporary encounter fleets on the existing battle bridge",
-        "read-only lights, Host-only native lightspawn fixture and strict same-clock diffLights",
-        "transient CoopLightGrantFault and action-only lightgrantfault for one opt-in post-native-grant interruption; no synthetic ledger state",
-        "transient CoopLightMessageHold and action-only lightmessagehold for real accepted-claim replies or pre-application consumption requests, bounded to 1–600 seconds from arm",
-        "passive actual claim-token observations, cached deferred-attempt lifecycle journals and exact selected native fading-tag readback",
-        "CoopEncounterOrbitSetCodec for bounded current offscreen orbit batches retained through replay retries",
-        "CoopEncounterOrbitSweep for at most one additional managed-system orbit repair per existing one-second tick, with transient cursor and payload/frame limits",
-        "CoopAbyssalDespawner with saved Guest visit/inside history",
-        "STREAM_SET/ADD/DESPAWN/REMOVE",
-        "ENC_SET + reliable ENCOUNTER_STATE outcomes through WORLD_DELTA",
-        "$coopStreamId / $coopEncId / $coopEncEntityId metadata wire keys; native encounter entity ids preserved",
-        "CoopEntityIds canonical lookup through local system/hyperspace scans, avoiding native LocationToken cache casts",
-        "segment polyline + live per-segment fader state replication",
-        "primitive saved generation recipe carrying the Host's effective EPEC seed, resolved specials, original member identities and exploration overlays",
-        "bridge stream table (committed-phase checks; raw calendars retained) + temp-system manifest",
-        "paused QA clock alignment + successful seed-lock fingerprint diagnostic",
-      "Host-owned native storm grids and actual tracker phases across both viewer windows",
-      "STORM_SET/GRID/CONTROL with bounded atomic snapshots, native surge coverage and recurring private source recovery",
-      "primitive storm save metadata, pure global-cell probes and strict checkpoint comparison"
+        "Slipstream geometry and fades",
+        "Shared wrecks and salvage",
+        "Temporary abyssal systems",
+        "Shared lights and actor rewards",
+        "Host-owned storm grids and phases"
       ],
       "residue": [
-        "M3 release acceptance is complete within agreed bounds from audits 93 (358 checks) and 99 (744 checks). Deferred, unpassed follow-ups: late expiry/new-session ACCEPT delivery, isolated owner/handler replacement and private-map retirement. Exact queued-observation continuity across reconnect, simultaneous first-claim fairness and delivered conflicting wire REJECT remain unobserved.",
-        "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
-    "M4 hyperspace storms: recovery, paired reload, shared controls and real-owner strikes pass within bounds; visual/direct boost-mirror execution and isolated shared clearing observations remain open.",
-        "M5 guest sensor ghosts and Leviathan trails: remaining unbuilt P26 milestone"
+        "M4: finish visual, boost/mirror and isolated clearing observations.",
+        "M5: Guest sensor ghosts and Leviathan trails.",
+        "Guest-proximity encounter triggering; deferred M3 edge cases."
       ],
-      "note": "Native M4 checks on 4072ba0 establish bounded phase/evolution, separated windows, surge expansion/clear, reconnect and saved grids/2,273 rows. Runtime 114fa97 adds read-only accepted-control probes and verifies surviving-tail reset recovery, paired 2,273-coordinate convergence, 394 shared OFF controls across 13 native cloud cells and both real-owner hyperstorm CR events. Mar 29 saves independently match all 405,000 grid cells and 718 rows with verified complete backups. Startup revision and teleport-neighborhood refusals remain qualified; source-authorization failures are zero. Visual/direct boost-mirror execution and isolated shared clearing observations remain unpassed. M4/P26 stay partial, M5 and Guest-proximity triggering remain follow-ups, and co-op-only pause stays."
+      "note": "Milestone details and test evidence are in the implementation plan and dated acceptance reports."
     },
     {
       "id": "27",
