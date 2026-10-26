@@ -34,6 +34,8 @@ The actual reload defect is distinct: Host logs 15 rejected STORM_CONTROL messag
 
 The fix adds a neutral `SURGE_SOURCE` intent from the pinned live native OFF branch. Untagged, non-dynamic native surge geometry re-advertises its source before clearing; shared replicas and other profiles are excluded. Host checks the authenticated actor, revision and current position, then renews only its transient recent-source allowance. The clean full suite passes 4,450 tests with one existing skip across 282 suites; 66 storm tests include 24 native-hook regressions. Native retesting remains open.
 
+Recovery commit `587dec19e4dc` is pushed and deployed. All nine source/Host/Guest jar hashes and manifest commits match; parent storm classes occur only in the forks jar. Both test JVMs are relaunched at the legacy launchers. Native reload retesting stops when window activation fails with `GetCursorPos failed: Access is denied (0x80070005)` and state capture is black. No UI input is issued after that failure. The backed-up Mar 28 pair is ready for the next native pass.
+
 ## Still open
 
 Verify the surge-tail recovery fix on the real paired M4 save, finish Guest native reload and new-session convergence, and record ordinary slipstream clearing and owner-only strike effects within explicit observable bounds. Direct mirror strike/boost execution counters are not exposed by the current bridge. M4 and P26 remain partial until their remaining acceptance requirements are resolved.
