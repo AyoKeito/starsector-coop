@@ -249,22 +249,47 @@ class CoopStormNativeTest {
 
     @Test void nativeTailSourceRestoresClearingAfterTransportResetAndOwnerReplacement() {
         Scene s = new Scene(4, 4);
+        s.remotePoint.set(50, -75);
         CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), false, () -> s.remote);
         long revision = world.captureHost().revision();
-        var source = CoopStormControl.surgeSource(uuid(), revision, 0, 0);
-        var off = CoopStormControl.tileOff(uuid(), revision, 0, 0, 1000, 1);
+        var source = CoopStormControl.surgeSource(uuid(), revision, 50, -75);
+        var off = CoopStormControl.tileOff(uuid(), revision, 200, -100, 1000, 1);
         assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+        assertAcceptedControls(world, 0, 0, 0, 0);
         world.applyControl(source, "Guest");
         s.terrain.put(2, 2, 0, 1); s.terrain.getActiveCells()[2][2].state = HyperspaceTerrainPlugin.CellState.SIGNAL;
         world.applyControl(off, "Guest");
         assertEquals(HyperspaceTerrainPlugin.CellState.STORM_WANE, s.terrain.getActiveCells()[2][2].state);
         assertEquals(0f, CoopStormBridge.remoteExtraRadius()); assertEquals(1f, CoopStormBridge.remoteTimeScale());
+        assertAcceptedControls(world, 1, 0, 0, 1);
+        Map<String, Object> accepted = world.diagnostics("", 1);
+        assertEquals(100L, accepted.get("lastAcceptedSurgeSourceTimestamp"));
+        assertEquals(50f, accepted.get("lastAcceptedSurgeSourceX")); assertEquals(-75f, accepted.get("lastAcceptedSurgeSourceY"));
+        assertEquals(200f, accepted.get("lastAcceptedPrivateSurgeOffX")); assertEquals(-100f, accepted.get("lastAcceptedPrivateSurgeOffY"));
+        assertEquals(1000f, accepted.get("lastAcceptedPrivateSurgeOffRadius"));
+        assertEquals(true, accepted.get("surgeSourceCurrent")); assertEquals(false, accepted.get("surgeWindowCurrent"));
+        assertEquals(0f, accepted.get("effectiveRemoteExtraRadius")); assertEquals(1f, accepted.get("effectiveRemoteTimeScale"));
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(
+                CoopStormControl.surgeSource(uuid(), revision + 1, 50, -75), "Guest"));
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(
+                CoopStormControl.tileOff(uuid(), revision, 40_000, 0, 1000, 1), "Guest"));
+        assertAcceptedControls(world, 1, 0, 0, 1);
         world.resetTransport(); assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+        assertAcceptedControls(world, 0, 0, 0, 0);
+        Map<String, Object> reset = world.diagnostics("", 1);
+        assertEquals(0L, reset.get("lastAcceptedSurgeSourceTimestamp"));
+        assertEquals(0f, reset.get("lastAcceptedSurgeSourceX")); assertEquals(0f, reset.get("lastAcceptedSurgeSourceY"));
+        assertEquals(0f, reset.get("lastAcceptedPrivateSurgeOffX")); assertEquals(0f, reset.get("lastAcceptedPrivateSurgeOffY"));
+        assertEquals(0f, reset.get("lastAcceptedPrivateSurgeOffRadius")); assertEquals(false, reset.get("surgeSourceCurrent"));
         world.applyControl(source, "Guest"); assertDoesNotThrow(() -> world.applyControl(off, "Guest"));
+        assertAcceptedControls(world, 1, 0, 0, 1);
         world.install(new Object(), false, () -> s.remote);
+        assertAcceptedControls(world, 0, 0, 0, 0);
         assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
         world.applyControl(source, "Guest"); assertDoesNotThrow(() -> world.applyControl(off, "Guest"));
         s.elapsedDays = 1.8f; assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+        assertAcceptedControls(world, 1, 0, 0, 1);
+        assertEquals(false, world.diagnostics("", 1).get("surgeSourceCurrent"));
     }
 
     @Test void sourceAdvertisementNeitherChangesExistingWindowNorAdvancesWeatherAndIsActorBounded() {
@@ -275,11 +300,35 @@ class CoopStormNativeTest {
         var cell = s.terrain.getActiveCells()[650][2];
         world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 40_000, 0), "Guest");
         assertEquals(16_000f, CoopStormBridge.remoteExtraRadius()); assertEquals(5f, CoopStormBridge.remoteTimeScale());
+        assertAcceptedControls(world, 1, 1, 0, 0);
+        Map<String, Object> active = world.diagnostics("", 1);
+        assertEquals(true, active.get("surgeWindowCurrent"));
+        assertEquals(16_000f, active.get("effectiveRemoteExtraRadius")); assertEquals(5f, active.get("effectiveRemoteTimeScale"));
         assertEquals(HyperspaceTerrainPlugin.CellState.WAIT, cell.state); assertEquals(20f, cell.wait);
         assertThrows(IllegalArgumentException.class, () -> world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 30_000, 0), "Guest"));
         assertThrows(IllegalArgumentException.class, () -> world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 40_000, 0), ""));
+        assertAcceptedControls(world, 1, 1, 0, 0);
         world.install(new Object(), true, () -> s.remote);
         assertThrows(IllegalArgumentException.class, () -> world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 40_000, 0), "Guest"));
+        assertAcceptedControls(world, 0, 0, 0, 0);
+    }
+
+    @Test void acceptedOffProbeSeparatesSharedGeometryFromPrivateSurgeClearing() {
+        Scene s = new Scene(4, 4);
+        SlipstreamTerrainPlugin2 stream = new SlipstreamTerrainPlugin2();
+        var segment = new SlipstreamTerrainPlugin2.SlipstreamSegment();
+        segment.width = 1288; segment.fader.setBrightness(1); stream.getSegments().add(segment);
+        s.terrains.add(stub(CampaignTerrainAPI.class, (name, args) -> switch (name) {
+            case "getPlugin" -> stream; case "isAlive" -> true; default -> null;
+        }));
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), false, () -> s.remote);
+        long revision = world.captureHost().revision();
+        world.applyControl(CoopStormControl.tileOff(uuid(), revision, 0, 0, 1000, 1), "Guest");
+        assertAcceptedControls(world, 0, 0, 1, 0);
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(
+                CoopStormControl.tileOff(uuid(), revision, 0, 0, 3000, 1), "Guest"));
+        assertAcceptedControls(world, 0, 0, 1, 0);
+        assertEquals(false, world.diagnostics("", 1).get("surgeSourceCurrent"));
     }
 
     @Test void survivingNativeTailReadvertisesBeforeOffWithoutRestartingExpansion() throws Exception {
@@ -469,6 +518,13 @@ class CoopStormNativeTest {
     }
 
     private static String uuid() { return UUID.randomUUID().toString(); }
+    private static void assertAcceptedControls(CoopStormWorld world, long source, long window, long sharedOff, long privateOff) {
+        Map<String, Object> diagnostics = world.diagnostics("", 1);
+        assertEquals(source, diagnostics.get("acceptedSurgeSourceCount"));
+        assertEquals(window, diagnostics.get("acceptedSurgeWindowCount"));
+        assertEquals(sharedOff, diagnostics.get("acceptedSharedOffCount"));
+        assertEquals(privateOff, diagnostics.get("acceptedPrivateSurgeOffCount"));
+    }
     private static CoopStormSnapshot.Tracker row(int i, int j, long epoch, int state, float wait,
             float signal, float wane, float maxSignal, float maxWane, float scale) {
         return new CoopStormSnapshot.Tracker(i, j, epoch, state, wait, signal, wane, maxSignal, maxWane, scale);

@@ -16,7 +16,7 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. Audits 93 (358 checks) and 99 (744 checks) close the two final M3 release checks. M4 has bounded native passes with recovery/remaining checks open; M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed. Recovery build 587dec1 is pushed and offline-verified; native retesting remains open."
+      "note": "P26 is partial. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 paired reload now converges across all 2,273 saved coordinates after explicit QA clock pairing. The old surge footprint is cloudless; accepted-control probes distinguish recovery from a vacuous weather comparison. Native recovery/remaining checks stay open. M5 and Guest-proximity triggering remain unbuilt."
     },
     {
       "key": "next",
@@ -37,15 +37,15 @@
       "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and M3 within the agreed bounded release scope are complete; M4 has bounded native passes with recovery/remaining checks open; M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 has bounded native passes; recovery build 587dec1 is pushed and offline-verified, with native retesting and remaining checks open.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and bounded M3 acceptance are complete. <b>M4 has bounded native passes</b> for phase evolution, separated viewers, Guest surge expansion/clear, same-session reconnect and coordinated saving. Both saves match all 405,000 grid cells and 2,273 tracker rows, including 1,079 Guest-only rows. Host reload preserves every saved cell identity; a surviving private surge tail then exposes lost source authorization. Recovery build 587dec1 is pushed and deployed. Its transient SURGE_SOURCE fix passes the clean offline suite: 4,450 Java tests, one existing skip across 282 suites; MCP passes 103/103. Native recovery retesting, Guest reload, ordinary stream clearing and owner-only strike observations remain. Exact phase checks use explicit paused QA clock pairing and do not establish production clock reconciliation or frame lockstep. M5 and Guest-proximity triggering remain follow-ups. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 PARTIAL. M4 paired reload converges across all 2,273 saved coordinates; accepted-control probes support the continuing native recovery checks.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 has bounded native passes for phase evolution, separated viewers, Guest surge expansion/clear, same-session reconnect and coordinated saving. Both saved grids and 2,273 native tracker rows match. On recovery build 587dec1, both Mar 28 saves load into a new session and all 2,273 requested coordinates converge after explicit QA clock pairing. The old Guest surge tail persists without Host geometry, but all 67 footprint tiles are cloudless, so ABSENT comparisons cannot prove clearing. Read-only accepted-control probes distinguish source recovery and shared/private OFF paths. Native recovery, ordinary stream clearing and owner-only strike observations remain open. Explicit QA pairing does not establish production clock reconciliation or frame lockstep. M5 and Guest-proximity triggering remain follow-ups. Co-op-only pause stays.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
       "head": "Verify M4 surge-tail recovery and finish native checks",
-      "state": "recovery build 587dec1 pushed/deployed; native retest pending",
-      "body": "Both legacy launchers have clean recovery build 587dec1. Load the backed-up Mar 28, c207 pair. Pass = the surviving Guest-private surge tail re-advertises its source after reset/load, its valid OFF messages are accepted, accelerated coverage stays ended and Host receives no private surge geometry. Then finish Guest reload/new-session convergence, ordinary stream clearing and owner-only strike observations. Native phase/surge/reconnect/save results and preserved harness failures are in the dated M4 report; M4 remains partial."
+      "state": "paired native reload passes within bounds; accepted-control retest continues",
+      "body": "Both Mar 28 saves load on 587dec1 and all 2,273 requested coordinates converge after explicit QA clock pairing. The surviving Guest-private tail covers 67 cloudless tiles, so a read-only primitive probe now distinguishes accepted source/private-OFF controls from an empty weather footprint. Verify positive control acceptance after reset, base acceleration and no Host private geometry; finish ordinary shared clearing and owner strike observations. M4 remains partial."
     },
     {
       "sev": "scope",

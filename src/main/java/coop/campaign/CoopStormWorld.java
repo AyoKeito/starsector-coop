@@ -37,6 +37,13 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
     private long remoteWindowTimestamp;
     private long remoteSurgeSourceTimestamp;
     private boolean remoteSurgeSourceKnown;
+    private long acceptedSurgeSourceCount;
+    private long acceptedSurgeWindowCount;
+    private long acceptedSharedOffCount;
+    private long acceptedPrivateSurgeOffCount;
+    private long lastAcceptedSurgeSourceTimestamp;
+    private float lastAcceptedSurgeSourceX, lastAcceptedSurgeSourceY;
+    private float lastAcceptedPrivateSurgeOffX, lastAcceptedPrivateSurgeOffY, lastAcceptedPrivateSurgeOffRadius;
 
     public CoopStormWorld(Supplier<SectorAPI> sectorSupplier) {
         this.sectorSupplier = Objects.requireNonNull(sectorSupplier);
@@ -149,6 +156,9 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
                 throw new IllegalArgumentException("Storm surge source does not match current Guest position");
             remoteSurgeSourceTimestamp = installedSector.getClock().getTimestamp();
             remoteSurgeSourceKnown = true;
+            acceptedSurgeSourceCount++;
+            lastAcceptedSurgeSourceTimestamp = remoteSurgeSourceTimestamp;
+            lastAcceptedSurgeSourceX = control.x(); lastAcceptedSurgeSourceY = control.y();
             return;
         }
         if (control.action() == CoopStormControl.Action.SURGE_WINDOW) {
@@ -162,13 +172,21 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
                 remoteSurgeSourceTimestamp = remoteWindowTimestamp; remoteSurgeSourceKnown = true;
             }
             nativeWeather.coopRemoteWindowChanged();
+            acceptedSurgeWindowCount++;
             return;
         }
         if (control.radius() > MAX_OFF_RADIUS || distance > 26_000f + control.radius())
             throw new IllegalArgumentException("Storm clearing is outside the Guest weather neighborhood");
-        if (!matchesSharedStream(control) && !(surgeSourceCurrent() && control.radius() <= 3_000f))
+        boolean sharedStream = matchesSharedStream(control);
+        if (!sharedStream && !(surgeSourceCurrent() && control.radius() <= 3_000f))
             throw new IllegalArgumentException("Storm clearing has no shared stream or current native surge window");
         nativeWeather.setTileState(point, control.radius(), CellState.OFF, control.waitDays(), -1f, -1f);
+        if (sharedStream) acceptedSharedOffCount++;
+        else {
+            acceptedPrivateSurgeOffCount++;
+            lastAcceptedPrivateSurgeOffX = control.x(); lastAcceptedPrivateSurgeOffY = control.y();
+            lastAcceptedPrivateSurgeOffRadius = control.radius();
+        }
     }
 
     private boolean matchesSharedStream(CoopStormControl control) {
@@ -187,6 +205,10 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
     @Override public void resetTransport() {
         pending.clear(); remoteExtraRadius = 0f; remoteTimeScale = 1f; remoteWindowTimestamp = 0;
         remoteSurgeSourceTimestamp = 0; remoteSurgeSourceKnown = false;
+        acceptedSurgeSourceCount = 0; acceptedSurgeWindowCount = 0;
+        acceptedSharedOffCount = 0; acceptedPrivateSurgeOffCount = 0;
+        lastAcceptedSurgeSourceTimestamp = 0; lastAcceptedSurgeSourceX = 0f; lastAcceptedSurgeSourceY = 0f;
+        lastAcceptedPrivateSurgeOffX = 0f; lastAcceptedPrivateSurgeOffY = 0f; lastAcceptedPrivateSurgeOffRadius = 0f;
     }
 
     public Map<String, Object> diagnostics(String cells, int limit) {
@@ -195,6 +217,21 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         result.putIfAbsent("available", false);
         result.put("role", (owner == null ? CoopStormBridge.isGuest() : guest) ? "GUEST" : "HOST");
         result.put("pendingControlCount", pending.size());
+        result.put("acceptedSurgeSourceCount", acceptedSurgeSourceCount);
+        result.put("acceptedSurgeWindowCount", acceptedSurgeWindowCount);
+        result.put("acceptedSharedOffCount", acceptedSharedOffCount);
+        result.put("acceptedPrivateSurgeOffCount", acceptedPrivateSurgeOffCount);
+        result.put("lastAcceptedSurgeSourceTimestamp", lastAcceptedSurgeSourceTimestamp);
+        result.put("lastAcceptedSurgeSourceX", lastAcceptedSurgeSourceX);
+        result.put("lastAcceptedSurgeSourceY", lastAcceptedSurgeSourceY);
+        result.put("lastAcceptedPrivateSurgeOffX", lastAcceptedPrivateSurgeOffX);
+        result.put("lastAcceptedPrivateSurgeOffY", lastAcceptedPrivateSurgeOffY);
+        result.put("lastAcceptedPrivateSurgeOffRadius", lastAcceptedPrivateSurgeOffRadius);
+        result.put("surgeSourceCurrent", surgeSourceCurrent());
+        boolean window = windowCurrent();
+        result.put("surgeWindowCurrent", window);
+        result.put("effectiveRemoteExtraRadius", window ? remoteExtraRadius : 0f);
+        result.put("effectiveRemoteTimeScale", window ? remoteTimeScale : 1f);
         return result;
     }
 
