@@ -16,7 +16,7 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26: finish M4 acceptance, M5 and Guest-proximity encounter triggering."
+      "note": "P26: finish M4 visual/boost checks, M5 and Guest-proximity encounter triggering."
     },
     {
       "key": "next",
@@ -37,15 +37,15 @@
       "note": "P26 remains partial; P22, P25 and P27 are queued, and P33 is built."
     }
   ],
-  "hereHead": "You are here: P26 ambient-world replication; finish M4 acceptance, then M5 and Guest-proximity triggering.",
-  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. Finish M4 storm acceptance, then build M5 sensor ghosts/Leviathan trails and Guest-proximity encounter triggering. Detailed test results stay in the implementation plan and acceptance reports.",
+  "hereHead": "You are here: P26 ambient-world replication; finish M4 visual/boost checks, then M5 and Guest-proximity triggering.",
+  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. Finish M4 visual and boost/mirror observations, then build M5 sensor ghosts/Leviathan trails and Guest-proximity encounter triggering. Detailed test results stay in the implementation plan and acceptance reports.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
       "head": "Finish M4 storm acceptance",
-      "state": "implemented; remaining native observations open",
-      "body": "Finish the visual, boost/mirror and isolated clearing checks. Pass when the M4 acceptance report records the results and explicitly resolves the remaining evidence limits."
+      "state": "automatic clearing passes; visual/boost observations open",
+      "body": "Finish the visual and boost/mirror checks. Pass when the M4 acceptance report records the results and explicitly resolves the remaining evidence limits."
     },
     {
       "sev": "scope",
@@ -907,7 +907,7 @@
         "Host-owned storm grids and phases"
       ],
       "residue": [
-        "M4: finish visual, boost/mirror and isolated clearing observations.",
+        "M4: finish visual and boost/mirror observations.",
         "M5: Guest sensor ghosts and Leviathan trails.",
         "Guest-proximity encounter triggering; deferred M3 edge cases."
       ],
