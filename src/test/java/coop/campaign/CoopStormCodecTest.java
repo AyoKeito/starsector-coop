@@ -79,7 +79,8 @@ class CoopStormCodecTest {
     @Test void typedNativeControlsRoundTripAndRejectTruncationTrailingAndArbitrarySignals() {
         for (CoopStormControl control : List.of(CoopStormControl.tileOff(ID, 1, -100, 200, 500, 0.25f),
                 CoopStormControl.surgeWindow(ID, 1, -100, 200, 16000, 5),
-                CoopStormControl.surgeWindow(ID, 1, -100, 200, 0, 1))) {
+                CoopStormControl.surgeWindow(ID, 1, -100, 200, 0, 1),
+                CoopStormControl.surgeSource(ID, 1, -100, 200))) {
             String encoded = CoopStormCodec.encodeControl(control);
             assertEquals(control, CoopStormCodec.decodeControl(encoded));
             for (int end = 0; end < encoded.length(); end++) {

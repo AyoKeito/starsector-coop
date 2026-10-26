@@ -39,4 +39,27 @@ class CoopStormControlTest {
         assertThrows(IllegalArgumentException.class, () -> CoopStormControl.surgeWindow(ID, 1, 0, 0, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> CoopStormControl.surgeWindow(ID, 1, 0, 0, -1, 1));
     }
+
+    @Test void sourceAdvertisementCannotModifyWeatherOrAcceleratedCoverage() {
+        var source = CoopStormControl.surgeSource(ID, 7, -200, 100);
+        assertEquals(CoopStormControl.Action.SURGE_SOURCE, source.action());
+        assertEquals(7, source.baseRevision()); assertEquals(-200, source.x()); assertEquals(100, source.y());
+        assertEquals(0, source.radius()); assertEquals(0, source.waitDays());
+        assertEquals(-1, source.minSignalDays()); assertEquals(-1, source.maxSignalDays());
+        assertEquals(0, source.extraRadius()); assertEquals(1, source.timeScale());
+        assertThrows(IllegalArgumentException.class, () -> CoopStormControl.surgeSource(ID, 7, Float.NaN, 0));
+        assertThrows(IllegalArgumentException.class, () -> CoopStormControl.surgeSource(ID, -1, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new CoopStormControl(ID, 7, CoopStormControl.Action.SURGE_SOURCE,
+                0, 0, 1, 0, -1, -1, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new CoopStormControl(ID, 7, CoopStormControl.Action.SURGE_SOURCE,
+                0, 0, 0, 0.1f, -1, -1, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new CoopStormControl(ID, 7, CoopStormControl.Action.SURGE_SOURCE,
+                0, 0, 0, 0, 0, -1, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new CoopStormControl(ID, 7, CoopStormControl.Action.SURGE_SOURCE,
+                0, 0, 0, 0, -1, 0, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new CoopStormControl(ID, 7, CoopStormControl.Action.SURGE_SOURCE,
+                0, 0, 0, 0, -1, -1, 1, 1));
+        assertThrows(IllegalArgumentException.class, () -> new CoopStormControl(ID, 7, CoopStormControl.Action.SURGE_SOURCE,
+                0, 0, 0, 0, -1, -1, 0, 5));
+    }
 }

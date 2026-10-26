@@ -2,6 +2,7 @@
  * COOP FORK - pinned Starsector 0.98a-RC8 canonical slipstream fade hook.
  * Original source: starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/velfield/SlipstreamTerrainPlugin2.java
  * Raw native advancement skips only controlled faders, fade counters, and guest expiry.
+ * A live Guest-local native surge also reports its weather source before clearing cells.
  * No native instance fields or save references are added. Without a registered non-dynamic
  * terrain every original path retains vanilla behavior. All changes are tagged COOP FORK.
  * Compiled into coop-forks.jar before starfarer.api.jar; re-copy the pinned native source and
@@ -11,6 +12,8 @@ package com.fs.starfarer.api.impl.campaign.velfield;
 
 // COOP FORK: system-loader registry; never saved on this native object.
 import coop.ambient.CoopSlipstreamFadeBridge;
+// COOP FORK: recurring private-surge weather source evidence; never stored on this object.
+import coop.storm.CoopStormBridge;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -702,12 +705,19 @@ public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 //			}
 //		}
 			
+		// COOP FORK: advertise once only if this pass actually clears weather.
+		boolean coopSurgeSourceObserved = false;
 		// advance wobble, compute wobbledWidth
 		for (int i = 0; i < near.size(); i++) {
 			SlipstreamSegment curr = near.get(i);
 			
 			if (entity.isInHyperspace() && !curr.fader.isFadedOut() && 
 					curr.fader.getBrightness() * curr.bMult > 0.05f && curr.bMult > 0f) {
+				// COOP FORK: a surviving Guest-local tail re-advertises after session/load reset.
+				if (!coopSurgeSourceObserved) {
+					CoopStormBridge.observeNativeSurgeSource(this);
+					coopSurgeSourceObserved = true;
+				}
 				plugin.setTileState(
 						curr.loc, curr.width * 0.5f + params.edgeWidth + 100f, 
 						CellState.OFF,

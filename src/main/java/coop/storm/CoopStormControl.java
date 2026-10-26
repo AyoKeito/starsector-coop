@@ -3,12 +3,12 @@ package coop.storm;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Only native stream-clearing and surge-window intents; never an arbitrary weather edit. */
+/** Only native stream-clearing and surge coverage/source intents; never an arbitrary weather edit. */
 public record CoopStormControl(String requestId, long baseRevision, Action action, float x, float y,
         float radius, float waitDays, float minSignalDays, float maxSignalDays,
         float extraRadius, float timeScale) {
     public static final float MAX_RADIUS = 100_000f;
-    public enum Action { TILE_OFF, SURGE_WINDOW }
+    public enum Action { TILE_OFF, SURGE_WINDOW, SURGE_SOURCE }
 
     public CoopStormControl {
         Objects.requireNonNull(requestId, "storm control request id");
@@ -30,6 +30,9 @@ public record CoopStormControl(String requestId, long baseRevision, Action actio
             if (radius <= 0f || radius > MAX_RADIUS || waitDays < 0f || waitDays > 1f
                     || extraRadius != 0f || timeScale != 1f)
                 throw new IllegalArgumentException("Invalid native TILE_OFF control");
+        } else if (action == Action.SURGE_SOURCE) {
+            if (radius != 0f || waitDays != 0f || extraRadius != 0f || timeScale != 1f)
+                throw new IllegalArgumentException("Invalid native SURGE_SOURCE control");
         } else {
             boolean ended = extraRadius == 0f && timeScale == 1f;
             boolean expanded = extraRadius > 0f && extraRadius <= 16_000f && timeScale > 0f && timeScale <= 5f;
@@ -48,5 +51,10 @@ public record CoopStormControl(String requestId, long baseRevision, Action actio
             float extraRadius, float timeScale) {
         return new CoopStormControl(requestId, revision, Action.SURGE_WINDOW, x, y, 0f, 0f,
                 -1f, -1f, extraRadius, timeScale);
+    }
+
+    public static CoopStormControl surgeSource(String requestId, long revision, float x, float y) {
+        return new CoopStormControl(requestId, revision, Action.SURGE_SOURCE, x, y, 0f, 0f,
+                -1f, -1f, 0f, 1f);
     }
 }

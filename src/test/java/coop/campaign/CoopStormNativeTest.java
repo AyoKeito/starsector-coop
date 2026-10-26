@@ -10,6 +10,7 @@ import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAutomaton;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceTerrainPlugin;
+import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
 import com.fs.starfarer.api.combat.ViewportAPI;
 import com.fs.starfarer.api.loading.TerrainSpecAPI;
 import com.thoughtworks.xstream.XStream;
@@ -246,6 +247,80 @@ class CoopStormNativeTest {
         s.elapsedDays = 1.8f; assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
     }
 
+    @Test void nativeTailSourceRestoresClearingAfterTransportResetAndOwnerReplacement() {
+        Scene s = new Scene(4, 4);
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), false, () -> s.remote);
+        long revision = world.captureHost().revision();
+        var source = CoopStormControl.surgeSource(uuid(), revision, 0, 0);
+        var off = CoopStormControl.tileOff(uuid(), revision, 0, 0, 1000, 1);
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+        world.applyControl(source, "Guest");
+        s.terrain.put(2, 2, 0, 1); s.terrain.getActiveCells()[2][2].state = HyperspaceTerrainPlugin.CellState.SIGNAL;
+        world.applyControl(off, "Guest");
+        assertEquals(HyperspaceTerrainPlugin.CellState.STORM_WANE, s.terrain.getActiveCells()[2][2].state);
+        assertEquals(0f, CoopStormBridge.remoteExtraRadius()); assertEquals(1f, CoopStormBridge.remoteTimeScale());
+        world.resetTransport(); assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+        world.applyControl(source, "Guest"); assertDoesNotThrow(() -> world.applyControl(off, "Guest"));
+        world.install(new Object(), false, () -> s.remote);
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+        world.applyControl(source, "Guest"); assertDoesNotThrow(() -> world.applyControl(off, "Guest"));
+        s.elapsedDays = 1.8f; assertThrows(IllegalArgumentException.class, () -> world.applyControl(off, "Guest"));
+    }
+
+    @Test void sourceAdvertisementNeitherChangesExistingWindowNorAdvancesWeatherAndIsActorBounded() {
+        Scene s = new Scene(700, 4); s.hostPoint.x = -40_000; s.remotePoint.x = 40_000;
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), false, () -> s.remote);
+        long revision = world.captureHost().revision(); s.terrain.put(650, 2, 20, 1);
+        world.applyControl(CoopStormControl.surgeWindow(uuid(), revision, 40_000, 0, 16_000, 5), "Guest");
+        var cell = s.terrain.getActiveCells()[650][2];
+        world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 40_000, 0), "Guest");
+        assertEquals(16_000f, CoopStormBridge.remoteExtraRadius()); assertEquals(5f, CoopStormBridge.remoteTimeScale());
+        assertEquals(HyperspaceTerrainPlugin.CellState.WAIT, cell.state); assertEquals(20f, cell.wait);
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 30_000, 0), "Guest"));
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 40_000, 0), ""));
+        world.install(new Object(), true, () -> s.remote);
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(CoopStormControl.surgeSource(uuid(), revision, 40_000, 0), "Guest"));
+    }
+
+    @Test void survivingNativeTailReadvertisesBeforeOffWithoutRestartingExpansion() throws Exception {
+        Scene s = new Scene(4, 4);
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), true, () -> s.remote);
+        world.applySnapshot(snapshot(4, 4, List.of(row(2, 2, 2, 2, 0, 1, 0, 1, 0, 1))));
+        var nativeSource = privateNativeSurge(s, new HashMap<>(), true, true);
+        for (int n = 0; n < 2; n++) {
+            CoopStormBridge.observeNativeSurgeSource(nativeSource);
+            s.terrain.setTileState(new Vector2f(), 1000, HyperspaceTerrainPlugin.CellState.OFF, 0.5f, -1);
+        }
+        List<CoopStormControl> controls = world.pendingControls();
+        assertEquals(List.of(CoopStormControl.Action.SURGE_SOURCE, CoopStormControl.Action.TILE_OFF),
+                controls.stream().map(CoopStormControl::action).toList());
+        assertEquals(0f, controls.get(0).extraRadius()); assertEquals(1f, controls.get(0).timeScale());
+        assertEquals(HyperspaceTerrainPlugin.CellState.SIGNAL, s.terrain.getActiveCells()[2][2].state);
+        world.resetTransport(); world.install(new Object(), true, () -> s.remote);
+        CoopStormBridge.observeNativeSurgeSource(nativeSource);
+        s.terrain.setTileState(new Vector2f(), 1000, HyperspaceTerrainPlugin.CellState.OFF, 0.5f, -1);
+        assertEquals(List.of(CoopStormControl.Action.SURGE_SOURCE, CoopStormControl.Action.TILE_OFF),
+                world.pendingControls().stream().map(CoopStormControl::action).toList());
+    }
+
+    @Test void onlyLiveUntaggedNativePrivateSurgesCanAdvertiseTailSources() throws Exception {
+        Scene s = new Scene(4, 4);
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), true, () -> s.remote);
+        var tagged = privateNativeSurge(s, new HashMap<>(Map.of("$coopStreamId", "shared")), true, true);
+        var other = privateNativeSurge(s, new HashMap<>(), true, true); other.getParams().enteringSlipstreamTextOverride = null;
+        var dynamic = privateNativeSurge(s, new HashMap<>(), true, true); dynamic.setDynamic(true);
+        var wrongProfile = privateNativeSurge(s, new HashMap<>(), true, true); wrongProfile.getParams().forceNoWindVisualEffectOnFleets = false;
+        for (var source : List.of(tagged, other, dynamic, wrongProfile,
+                privateNativeSurge(s, new HashMap<>(), false, true), privateNativeSurge(s, new HashMap<>(), true, false))) {
+            CoopStormBridge.observeNativeSurgeSource(source); assertTrue(world.pendingControls().isEmpty());
+        }
+        var valid = privateNativeSurge(s, new HashMap<>(), true, true);
+        world.install(new Object(), false, () -> s.remote); CoopStormBridge.observeNativeSurgeSource(valid);
+        assertTrue(world.pendingControls().isEmpty());
+        world.install(new Object(), true, () -> s.remote); CoopStormBridge.observeNativeSurgeSource(valid);
+        assertEquals(CoopStormControl.Action.SURGE_SOURCE, world.pendingControls().get(0).action());
+    }
+
     @Test void guestTrackerRefreshReusesSameGridButANewGenerationReplacesIt() {
         Scene s = new Scene(4, 4); CoopStormBridge.configureGuest(true);
         CoopStormSnapshot first = snapshot(4, 4, List.of(row(1, 1, 2, 2, 0, 1, 0, 1, 0, 1)));
@@ -408,7 +483,27 @@ class CoopStormNativeTest {
             public float remoteTimeScale() { return scale; }
             public void tileOff(float x, float y, float radius, float wait) { fail("Host queued Guest control"); }
             public void surgeWindow(float x, float y, float e, float t) { fail("Host queued Guest window"); }
+            public void surgeSource(float x, float y) { fail("Host queued Guest surge source"); }
         });
+    }
+
+    private static SlipstreamTerrainPlugin2 privateNativeSurge(Scene s, Map<String, Object> memory,
+                                                               boolean alive, boolean hyperspace) throws Exception {
+        SlipstreamTerrainPlugin2 plugin = new SlipstreamTerrainPlugin2();
+        plugin.getParams().enteringSlipstreamTextOverride = "Entering slipsurge";
+        plugin.getParams().enteringSlipstreamTextDurationOverride = 0.1f;
+        plugin.getParams().forceNoWindVisualEffectOnFleets = true;
+        CampaignTerrainAPI entity = stub(CampaignTerrainAPI.class, (name, args) -> switch (name) {
+            case "isAlive" -> alive; case "isInHyperspace" -> hyperspace;
+            case "getContainingLocation" -> s.hyperspace;
+            case "getMemoryWithoutUpdate" -> ApiProxies.memory(memory);
+            default -> null;
+        });
+        for (Class<?> type = SlipstreamTerrainPlugin2.class; type != Object.class; type = type.getSuperclass()) {
+            try { Field field = type.getDeclaredField("entity"); field.setAccessible(true); field.set(plugin, entity); return plugin; }
+            catch (NoSuchFieldException ignored) { }
+        }
+        throw new AssertionError("Native terrain entity field not found");
     }
 
     private static final class TestTerrain extends HyperspaceTerrainPlugin {

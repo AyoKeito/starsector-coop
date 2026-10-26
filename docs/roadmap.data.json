@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 is partial. M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. Audits 93 (358 checks) and 99 (744 checks) close the two final M3 release checks. M4 is implemented with native acceptance pending; M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed."
+      "note": "P26 is partial. M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. Audits 93 (358 checks) and 99 (744 checks) close the two final M3 release checks. M4 has bounded native passes with recovery/remaining checks open; M5 and Guest-proximity triggering remain unbuilt; deferred edge cases remain unpassed."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "The V1 queue is complete. P26 now has M1/M2, shared wrecks and bounded M3 acceptance complete. Remaining P26 work is M4 storms (native acceptance pending), M5 sensor ghosts/Leviathan trails and Guest-proximity triggering. Deferred M3 edge cases remain unpassed and non-blocking."
+      "note": "The V1 queue is complete. P26 now has M1/M2, shared wrecks and bounded M3 acceptance complete. Remaining P26 work is M4 storms (bounded native passes; remaining checks open), M5 sensor ghosts/Leviathan trails and Guest-proximity triggering. Deferred M3 edge cases remain unpassed and non-blocking."
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and M3 within the agreed bounded release scope are complete; M4 is implemented with native acceptance pending; M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
+      "note": "P33 is built. P26 remains partial: M1/M2, shared wrecks and M3 within the agreed bounded release scope are complete; M4 has bounded native passes with recovery/remaining checks open; M5 and Guest-proximity triggering remain unbuilt. Deferred M3 edge cases remain unpassed. P22, P25 and P27 remain queued."
     }
   ],
-  "hereHead": "You are here: P26 PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 is implemented and passes offline tests; native two-client acceptance remains open. M5 and Guest-proximity triggering are follow-ups.",
-  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and M3 within its agreed bounded release scope are complete. <b>M4 storm replication is implemented and passes offline verification.</b> Host owns native grids and actual tracker phases across both players' neighborhoods. Guest sends bounded stream/surge weather intents for Host validation; its surge itself and each owner's strike timing, boost and damage stay local. Narrow pinned native forks preserve existing class names and add primitive saved metadata, replacing the old subclass/no-migration design for M4 only. Complete storm snapshots use bounded fragments when needed. The clean build passes 4,445 Java tests with one existing skip across 282 suites; MCP passes 103/103. Verify native same-cell phases, separated players, shared surge weather, save/load and reconnect using the new read-only storm probes. M4 has no native acceptance pass yet. M5 sensor ghosts/Leviathan trails and Guest-proximity triggering remain unbuilt. M3's dated evidence and deferred unpassed edge cases stay in the implementation plan. Co-op-only pause stays.",
+  "hereHead": "You are here: P26 PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 has bounded native phase, surge, reconnect and save passes; surge-tail recovery and remaining native checks stay open.",
+  "here": "<b>V1 is complete at 0.1.5;</b> P19/P23 are signed off. <b>P26 stays PARTIAL.</b> M1/M2, shared wrecks and bounded M3 acceptance are complete. <b>M4 has bounded native passes</b> for phase evolution, separated viewers, Guest surge expansion/clear, same-session reconnect and coordinated saving. Both saves match all 405,000 grid cells and 2,273 tracker rows, including 1,079 Guest-only rows. Host reload preserves every saved cell identity; a surviving private surge tail then exposes lost source authorization. The transient SURGE_SOURCE recovery fix passes the clean offline suite: 4,450 Java tests, one existing skip across 282 suites; MCP passes 103/103. Native recovery retesting, Guest reload, ordinary stream clearing and owner-only strike observations remain. Exact phase checks use explicit paused QA clock pairing and do not establish production clock reconciliation or frame lockstep. M5 and Guest-proximity triggering remain follow-ups. Co-op-only pause stays.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
-      "head": "Run M4 native acceptance",
-      "state": "M4 implementation and offline tests pass; native acceptance pending",
-      "body": "Deploy the clean M4 commit to both clients and load the backed-up Mar 22, c207 pair. Pass = equal complete grids and canonical phases at selected global cells after pausing and receiving a current checkpoint, including separated players, shared Guest surge weather, reconnect and save/load. Keep strike timing, boosts and damage owner-local. M4 stays open until these native checks pass. M5 and Guest-proximity triggering remain follow-ups."
+      "head": "Verify M4 surge-tail recovery and finish native checks",
+      "state": "bounded native passes recorded; recovery fix offline-verified",
+      "body": "Relaunch the clean recovery build and load the backed-up Mar 28, c207 pair. Pass = the surviving Guest-private surge tail re-advertises its source after reset/load, its valid OFF messages are accepted, accelerated coverage stays ended and Host receives no private surge geometry. Then finish Guest reload/new-session convergence, ordinary stream clearing and owner-only strike observations. Native phase/surge/reconnect/save results and preserved harness failures are in the dated M4 report; M4 remains partial."
     },
     {
       "sev": "scope",
@@ -905,7 +905,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "P26 remains PARTIAL. M1/M2, shared wrecks and bounded M3 release acceptance are complete. M4 is implemented with Host-owned native storm grids and tracker phases, both-player coverage, shared Guest stream/surge weather controls, primitive saved metadata and read-only storm probes. Offline verification passes 4,445 Java tests with one existing skip and 103 MCP tests; native acceptance remains open. M5 and Guest-proximity triggering remain unbuilt; M3's deferred edge cases remain unpassed.",
+      "summary": "P26 remains PARTIAL. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 has bounded native phase/evolution, separated coverage, Guest surge/clear, same-session reconnect and coordinated-save passes. All 405,000 saved grid cells and 2,273 saved tracker rows match. Reload exposes a private surge-tail source-authorization defect; the fix passes 4,450 Java tests with one existing skip and 103 MCP tests. Native recovery and remaining reload/stream/strike checks stay open. M5 and Guest-proximity triggering remain unbuilt.",
       "introduces": [
         "CoopSlipstreamAuthority",
         "CoopSlipstreamFadeDriver + transient native fade bridge",
@@ -930,15 +930,18 @@
         "segment polyline + live per-segment fader state replication",
         "primitive saved generation recipe carrying the Host's effective EPEC seed, resolved specials, original member identities and exploration overlays",
         "bridge stream table (committed-phase checks; raw calendars retained) + temp-system manifest",
-        "paused QA clock alignment + successful seed-lock fingerprint diagnostic"
+        "paused QA clock alignment + successful seed-lock fingerprint diagnostic",
+      "Host-owned native storm grids and actual tracker phases across both viewer windows",
+      "STORM_SET/GRID/CONTROL with bounded atomic snapshots, native surge coverage and recurring private source recovery",
+      "primitive storm save metadata, pure global-cell probes and strict checkpoint comparison"
       ],
       "residue": [
         "M3 release acceptance is complete within agreed bounds from audits 93 (358 checks) and 99 (744 checks). Deferred, unpassed follow-ups: late expiry/new-session ACCEPT delivery, isolated owner/handler replacement and private-map retirement. Exact queued-observation continuity across reconnect, simultaneous first-claim fairness and delivered conflicting wire REJECT remain unobserved.",
         "guest-proximity abyssal EPEC triggering: follow-up; floating-wreck generation near a separated Guest is part of accepted M1",
-        "M4 hyperspace storms: implementation and offline verification pass; native two-client acceptance pending.",
+        "M4 hyperspace storms: bounded native passes recorded; verify surge-tail recovery, Guest reload and remaining stream/strike checks.",
         "M5 guest sensor ghosts and Leviathan trails: remaining unbuilt P26 milestone"
       ],
-      "note": "M4 work started 2026-10-24. User approved shared Guest surge weather changes, validated and published by Host, while the surge itself stays Guest-local. User relaxed the no-migration policy for M4 where it reduces complexity: narrow forks keep native class names and add primitive saved storm metadata. Offline verification passes 4,445 Java tests with one existing skip across 282 suites and 103 MCP tests. Native acceptance is pending. M3 remains accepted only within its recorded bounded scope; its deferred variants are unpassed. Paired Mar 22, c207 checkpoint 99b and backups are available for M4 testing. M5 and Guest-proximity triggering remain follow-ups; co-op-only pause stays."
+      "note": "Native M4 checks on 4072ba0512c0 run 2026-10-26 without user input: baseline/purity, ordinary generations 0→1→2, separated windows, Guest-local surge geometry with shared rate5/clear, same-session grace/resume and paired native saves. The saved union has 1,194 Host-only and 1,079 Guest-only rows. Host reload retains all saved identities; native zero-day materialization and one pending WANE transition are qualified separately. SURGE_SOURCE recovers surviving-tail authorization after reset; its clean offline suite passes 4,450 Java tests plus one existing skip. Native recovery retesting and remaining reload/stream/strike checks are open. M4 and P26 remain partial. M3 deferred variants remain unpassed, M5 and Guest-proximity triggering remain follow-ups, and co-op-only pause stays."
     },
     {
       "id": "27",

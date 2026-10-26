@@ -2,7 +2,9 @@ package coop.storm;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
 import coop.presence.CoopPresenceRegistry;
 import org.lwjgl.util.vector.Vector2f;
 
@@ -14,6 +16,7 @@ public final class CoopStormBridge {
         float remoteTimeScale();
         void tileOff(float x, float y, float radius, float waitDays);
         void surgeWindow(float x, float y, float extraRadius, float timeScale);
+        void surgeSource(float x, float y);
     }
 
     private static volatile boolean guest;
@@ -75,6 +78,26 @@ public final class CoopStormBridge {
         if (fleet == null || !fleet.isInHyperspace()) return;
         Vector2f loc = fleet.getLocation();
         handler.surgeWindow(loc.x, loc.y, extraRadius, timeScale);
+    }
+
+    /** Called only by a live native clearing branch, including after the expansion script ended. */
+    public static void observeNativeSurgeSource(SlipstreamTerrainPlugin2 source) {
+        if (!isGuest() || handler == null || Global.getSector() == null || source == null
+                || source.getClass() != SlipstreamTerrainPlugin2.class || source.isDynamic()) return;
+        SectorEntityToken entity = source.getEntity();
+        var params = source.getParams();
+        CampaignFleetAPI fleet = Global.getSector().getPlayerFleet();
+        MemoryAPI memory = entity == null ? null : entity.getMemoryWithoutUpdate();
+        if (entity == null || !entity.isAlive() || !entity.isInHyperspace()
+                || entity.getContainingLocation() != Global.getSector().getHyperspace()
+                || memory == null || memory.contains("$coopStreamId")
+                || params == null || !"Entering slipsurge".equals(params.enteringSlipstreamTextOverride)
+                || params.enteringSlipstreamTextDurationOverride == null
+                || params.enteringSlipstreamTextDurationOverride.floatValue() != 0.1f
+                || !params.forceNoWindVisualEffectOnFleets || fleet == null || !fleet.isInHyperspace()
+                || fleet.getContainingLocation() != entity.getContainingLocation()) return;
+        Vector2f loc = fleet.getLocation();
+        if (loc != null) handler.surgeSource(loc.x, loc.y);
     }
 
     public static boolean isMirror(CampaignFleetAPI fleet) {

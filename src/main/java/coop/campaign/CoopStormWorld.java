@@ -66,6 +66,10 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
                 if (!currentSector() || !guest || !(extra == 16_000f && scale == 5f || extra == 0f && scale == 1f)) return;
                 queue("window", CoopStormControl.surgeWindow(UUID.randomUUID().toString(), latestRevision, x, y, extra, scale));
             }
+            @Override public void surgeSource(float x, float y) {
+                if (!currentSector() || !guest) return;
+                queue("surgeSource", CoopStormControl.surgeSource(UUID.randomUUID().toString(), latestRevision, x, y));
+            }
         });
     }
 
@@ -121,7 +125,8 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         if (!guest || !currentSector()) return List.of();
         List<CoopStormControl> result = new ArrayList<>(pending.values());
         result.sort(java.util.Comparator.comparingInt(control ->
-                control.action() == CoopStormControl.Action.SURGE_WINDOW ? 0 : 1));
+                control.action() == CoopStormControl.Action.SURGE_WINDOW ? 0
+                        : control.action() == CoopStormControl.Action.SURGE_SOURCE ? 1 : 2));
         pending.clear();
         return result;
     }
@@ -139,6 +144,13 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         float distance = Vector2f.sub(point, remote.getLocation(), null).length();
         if (!Float.isFinite(distance)) throw new IllegalArgumentException("Guest storm actor position is nonfinite");
         HyperspaceTerrainPlugin nativeWeather = requirePlugin();
+        if (control.action() == CoopStormControl.Action.SURGE_SOURCE) {
+            if (distance > REMOTE_POSITION_TOLERANCE)
+                throw new IllegalArgumentException("Storm surge source does not match current Guest position");
+            remoteSurgeSourceTimestamp = installedSector.getClock().getTimestamp();
+            remoteSurgeSourceKnown = true;
+            return;
+        }
         if (control.action() == CoopStormControl.Action.SURGE_WINDOW) {
             boolean clear = control.extraRadius() == 0f && control.timeScale() == 1f;
             if (!(clear || control.extraRadius() == 16_000f && control.timeScale() == 5f)
