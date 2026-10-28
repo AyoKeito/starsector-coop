@@ -60,10 +60,12 @@ class CoopStormNativeTest {
             default -> null;
         }));
         CoopStormBridge.clear(); CoopStormBridge.configureGuest(false);
+        coop.ambient.CoopSlipstreamFadeBridge.clear();
     }
 
     @AfterEach void cleanup() {
         CoopStormBridge.clear(); CoopStormBridge.configureGuest(false);
+        coop.ambient.CoopSlipstreamFadeBridge.clear();
         Global.setSector(oldSector); Global.setSettings(oldSettings);
     }
 
@@ -331,6 +333,39 @@ class CoopStormNativeTest {
         assertEquals(false, world.diagnostics("", 1).get("surgeSourceCurrent"));
     }
 
+    @Test void growingTrailAcceptsOnlyRecentExactHostCheckpointClearing() throws Exception {
+        Scene s = new Scene(4, 4);
+        SlipstreamTerrainPlugin2 trail = privateNativeSurge(s,
+                new HashMap<>(Map.of(coop.ambient.CoopSlipstreamFadeBridge.TRAIL_MARKER, true)), true, true);
+        trail.setDynamic(true);
+        var segment = new SlipstreamTerrainPlugin2.SlipstreamSegment();
+        segment.loc.set(200, -100); segment.width = 1288; segment.bMult = 1;
+        segment.fader.setBrightness(1); trail.getSegments().add(segment);
+        s.terrains.add(stub(CampaignTerrainAPI.class, (name, args) -> switch (name) {
+            case "getPlugin" -> trail; case "isAlive" -> true; default -> null;
+        }));
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector);
+        world.install(new Object(), false, () -> s.remote);
+        long revision = world.captureHost().revision();
+        coop.ambient.CoopSlipstreamFadeBridge.rememberTrailCheckpoint(trail, s.timestamp);
+        segment.width += 30;
+
+        world.applyControl(CoopStormControl.tileOff(uuid(), revision, 200, -100, 1000, 0.5f), "Guest");
+        assertAcceptedControls(world, 0, 0, 1, 0);
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(
+                CoopStormControl.tileOff(uuid(), revision, 200, -100, 1005, 0.5f), "Guest"));
+        s.timestamp += 3 * 86_400_000L; // This fixture converts two seconds to two days.
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(
+                CoopStormControl.tileOff(uuid(), revision, 200, -100, 1000, 0.5f), "Guest"));
+        assertAcceptedControls(world, 0, 0, 1, 0);
+
+        coop.ambient.CoopSlipstreamFadeBridge.rememberTrailCheckpoint(trail, s.timestamp);
+        segment.width += 30;
+        coop.ambient.CoopSlipstreamFadeBridge.clear();
+        assertThrows(IllegalArgumentException.class, () -> world.applyControl(
+                CoopStormControl.tileOff(uuid(), revision, 200, -100, 1015, 0.5f), "Guest"));
+    }
+
     @Test void survivingNativeTailReadvertisesBeforeOffWithoutRestartingExpansion() throws Exception {
         Scene s = new Scene(4, 4);
         CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), true, () -> s.remote);
@@ -580,10 +615,11 @@ class CoopStormNativeTest {
         final Vector2f hostPoint = new Vector2f(), remotePoint = new Vector2f();
         final List<CampaignTerrainAPI> terrains = new ArrayList<>();
         float elapsedDays;
+        long timestamp = 100L;
         final LocationAPI hyperspace = stub(LocationAPI.class, (name, args) -> name.equals("getTerrainCopy") ? terrains : null);
         final CampaignFleetAPI player = fleet(hostPoint, true), remote = fleet(remotePoint, false);
         final CampaignClockAPI clock = stub(CampaignClockAPI.class, (name, args) -> switch (name) {
-            case "getTimestamp" -> 100L;
+            case "getTimestamp" -> timestamp;
             case "getElapsedDaysSince" -> elapsedDays;
             case "convertToDays" -> args[0];
             default -> null;

@@ -16,7 +16,7 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26: finish M4 visual/boost checks, M5 and Guest-proximity encounter triggering."
+      "note": "P26: verify M4/M5 natively, then address Guest-proximity encounter triggering."
     },
     {
       "key": "next",
@@ -37,15 +37,15 @@
       "note": "P26 remains partial; P22, P25 and P27 are queued, and P33 is built."
     }
   ],
-  "hereHead": "You are here: P26 ambient-world replication; finish M4 visual/boost checks, then M5 and Guest-proximity triggering.",
-  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. Finish M4 visual and boost/mirror observations, then build M5 sensor ghosts/Leviathan trails and Guest-proximity encounter triggering. Detailed test results stay in the implementation plan and acceptance reports.",
+  "hereHead": "You are here: P26 ambient-world replication; M4/M5 native verification is deferred.",
+  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 storms and M5 cosmetic ghosts/Leviathan trails are implemented; native verification is deferred. Guest-proximity encounter triggering remains unbuilt. Detailed results stay in the implementation plan and acceptance reports.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
-      "head": "Finish M4 storm acceptance",
-      "state": "automatic clearing passes; visual/boost observations open",
-      "body": "Finish the visual and boost/mirror checks. Pass when the M4 acceptance report records the results and explicitly resolves the remaining evidence limits."
+      "head": "Verify M4 storms and M5 ghosts/trails",
+      "state": "implemented; remaining native checks deferred",
+      "body": "Resume M4 visual and boost/mirror observations, then check M5 cosmetic ghosts and shared trail growth, fades, reload and reconnect. Record evidence in the plan and acceptance reports."
     },
     {
       "sev": "scope",
@@ -898,17 +898,18 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Shares Host-owned slipstreams, floating wrecks, temporary abyssal systems, lights and hyperspace storms. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 is implemented with native acceptance still partial.",
+      "summary": "Shares Host-owned slipstreams, wrecks, temporary abyssal systems, lights and storms. M1/M2, shared wrecks and bounded M3 acceptance are complete. M4 storms and M5 cosmetic ghosts/Leviathan trails are implemented; native verification is deferred.",
       "introduces": [
         "Slipstream geometry and fades",
         "Shared wrecks and salvage",
         "Temporary abyssal systems",
         "Shared lights and actor rewards",
-        "Host-owned storm grids and phases"
+        "Host-owned storm grids and phases",
+        "Local cosmetic ghosts and shared trails"
       ],
       "residue": [
         "M4: finish visual and boost/mirror observations.",
-        "M5: Guest sensor ghosts and Leviathan trails.",
+        "M5: verify native ghosts, trail growth/fades and lifecycle.",
         "Guest-proximity encounter triggering; deferred M3 edge cases."
       ],
       "note": "Milestone details and test evidence are in the implementation plan and dated acceptance reports."

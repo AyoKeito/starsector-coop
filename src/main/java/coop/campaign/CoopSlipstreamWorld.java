@@ -20,6 +20,7 @@ import org.lwjgl.util.vector.Vector2f;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
@@ -46,6 +47,7 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
     private static boolean controllingHost;
     private static boolean frozen;
     private static final Map<SlipstreamTerrainPlugin2, Controlled> CONTROLS = new IdentityHashMap<>();
+    private static final Map<SlipstreamTerrainPlugin2, CampaignTerrainAPI> TRAILS = new IdentityHashMap<>();
     private static final Map<String, List<CoopSlipstreamRecord>> PENDING = new LinkedHashMap<>();
 
     private static Handles handles;
@@ -71,15 +73,28 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
                                       Boolean authoritativeHostPaused) {
         if (sector == null) return;
         selectControlledSector(sector);
+        boolean roleChanged = controllingHost != host;
         controllingHost = host;
         frozen = holdForGrace;
         List<CampaignTerrainAPI> terrains = hyperspace(sector).getTerrainCopy();
         Set<CampaignTerrainAPI> live = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<CampaignTerrainAPI> liveTrails = Collections.newSetFromMap(new IdentityHashMap<>());
         for (CampaignTerrainAPI terrain : terrains) {
-            if (eligible(terrain) && (host || ownedId(terrain) != null)) live.add(terrain);
+            if (!eligible(terrain) || !host && ownedId(terrain) == null) continue;
+            if (plugin(terrain).isDynamic()) {
+                if (!host || CoopSlipstreamFadeBridge.isNativeTrail(plugin(terrain))) liveTrails.add(terrain);
+            } else live.add(terrain);
         }
         for (Controlled old : new ArrayList<>(CONTROLS.values())) {
             if (!live.contains(old.terrain) || old.host != host) release(old.terrain, true);
+        }
+        for (CampaignTerrainAPI old : new ArrayList<>(TRAILS.values())) {
+            if (!liveTrails.contains(old) || roleChanged) release(old, true);
+        }
+        for (CampaignTerrainAPI trail : liveTrails) {
+            SlipstreamTerrainPlugin2 plugin = plugin(trail);
+            TRAILS.put(plugin, trail);
+            if (!host) CoopSlipstreamFadeBridge.registerTrailReplica(plugin);
         }
         if (sector.getClock() == null) {
             if (!live.isEmpty()) throw new IllegalStateException("Controlled slipstreams require a campaign clock");
@@ -134,7 +149,13 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         if (sector == null || sector.getClock() == null) return;
         selectControlledSector(sector);
         for (CampaignTerrainAPI terrain : hyperspace(sector).getTerrainCopy()) {
-            if (!eligible(terrain) || !(terrain.getMemoryWithoutUpdate().get(FADE_ORIGIN) instanceof Number)) continue;
+            if (!eligible(terrain)) continue;
+            if (plugin(terrain).isDynamic()) {
+                TRAILS.put(plugin(terrain), terrain);
+                if (ownedId(terrain) != null) CoopSlipstreamFadeBridge.registerTrailReplica(plugin(terrain));
+                continue;
+            }
+            if (!(terrain.getMemoryWithoutUpdate().get(FADE_ORIGIN) instanceof Number)) continue;
             CoopSlipstreamRecord.Timeline timeline = savedTimeline(terrain,
                     sector.getClock().getTimestamp(), sector.isPaused(),
                     sector.getCurrentLocation() == sector.getHyperspace());
@@ -151,7 +172,9 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
     /** No plugin, sector, cursor or transport references survive a solo/session/load boundary. */
     public static void releaseControlled() {
         for (Controlled controlled : new ArrayList<>(CONTROLS.values())) release(controlled.terrain, true);
+        for (CampaignTerrainAPI trail : new ArrayList<>(TRAILS.values())) release(trail, true);
         CONTROLS.clear();
+        TRAILS.clear();
         PENDING.clear();
         CoopSlipstreamFadeBridge.clear();
         controlledSector = null;
@@ -184,7 +207,9 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
 
     private static void release(CampaignTerrainAPI terrain, boolean forgetTimeline) {
         if (!(terrain.getPlugin() instanceof SlipstreamTerrainPlugin2 plugin)) return;
-        if (CONTROLS.remove(plugin) != null) CoopSlipstreamFadeBridge.unregister(plugin);
+        boolean controlled = CONTROLS.remove(plugin) != null;
+        boolean trail = TRAILS.remove(plugin) != null;
+        if (controlled || trail) CoopSlipstreamFadeBridge.unregister(plugin);
         if (forgetTimeline) {
             MemoryAPI memory = terrain.getMemoryWithoutUpdate();
             for (String key : List.of(FADE_ORIGIN, FADE_TICK, FADE_CAPTURE, FADE_PAUSED, FADE_HYPERSPACE)) memory.unset(key);
@@ -265,13 +290,30 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         Set<CampaignTerrainAPI> seasonal = seasonal(sector);
         List<CoopSlipstreamRecord> records = new ArrayList<>();
         for (CampaignTerrainAPI terrain : hyperspace(sector).getTerrainCopy()) {
-            if (eligible(terrain)) {
-                records.add(capture(sector, terrain, terrain.getId(), seasonal.contains(terrain)
-                        ? CoopSlipstreamRecord.Kind.SEASONAL : CoopSlipstreamRecord.Kind.OTHER));
+            if (eligible(terrain) && (!plugin(terrain).isDynamic()
+                    || CoopSlipstreamFadeBridge.isNativeTrail(plugin(terrain)))) {
+                if (plugin(terrain).isDynamic() && plugin(terrain).getSegments().isEmpty()) continue;
+                CoopSlipstreamRecord record = capture(sector, terrain, terrain.getId(), plugin(terrain).isDynamic()
+                        ? CoopSlipstreamRecord.Kind.TRAIL : seasonal.contains(terrain)
+                        ? CoopSlipstreamRecord.Kind.SEASONAL : CoopSlipstreamRecord.Kind.OTHER);
+                records.add(record);
             }
         }
         records.sort(Comparator.comparing(CoopSlipstreamRecord::hostId));
         return List.copyOf(records);
+    }
+
+    @Override
+    public void published(CoopSlipstreamRecord record) {
+        if (record.kind() != CoopSlipstreamRecord.Kind.TRAIL) return;
+        for (CampaignTerrainAPI terrain : hyperspace(sector()).getTerrainCopy()) {
+            if (record.hostId().equals(terrain.getId()) && terrain.getPlugin() instanceof SlipstreamTerrainPlugin2 plugin
+                    && CoopSlipstreamFadeBridge.isNativeTrail(plugin)) {
+                CoopSlipstreamFadeBridge.rememberTrailCheckpoint(plugin, record.timeline().captureCampaignMillis());
+                return;
+            }
+        }
+        throw new IllegalStateException("Published native trail is no longer present: " + record.hostId());
     }
 
     @Override
@@ -309,7 +351,8 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         for (CampaignTerrainAPI candidate : hyper.getTerrainCopy()) {
             if (!record.hostId().equals(ownedId(candidate))) continue;
             if (terrain == null && eligible(candidate)
-                    && sameGeometry(plugin(candidate), record.segments())) {
+                    && plugin(candidate).isDynamic() == (record.kind() == CoopSlipstreamRecord.Kind.TRAIL)
+                    && (record.kind() == CoopSlipstreamRecord.Kind.TRAIL || sameGeometry(plugin(candidate), record.segments()))) {
                 terrain = candidate;
             } else {
                 release(candidate, true);
@@ -331,6 +374,7 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
             terrain = addedTerrain;
             plugin = plugin(terrain);
             try {
+                plugin.setDynamic(record.kind() == CoopSlipstreamRecord.Kind.TRAIL);
                 for (CoopSlipstreamRecord.Segment segment : record.segments()) {
                     plugin.addSegment(new Vector2f(segment.x(), segment.y()), segment.width());
                 }
@@ -344,6 +388,12 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
             restoreParams(plugin.getParams(), record.params());
             apply(terrain, plugin, record, false);
         }
+        if (record.kind() == CoopSlipstreamRecord.Kind.TRAIL) {
+            release(terrain, true);
+            TRAILS.put(plugin, terrain);
+            CoopSlipstreamFadeBridge.registerTrailReplica(plugin);
+            return;
+        }
         CoopSlipstreamFadeBridge.register(plugin);
         NativeFadePort port = new NativeFadePort(terrain, false);
         Controlled controlled = new Controlled(terrain, false, port,
@@ -354,6 +404,7 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
 
     private static void apply(CampaignTerrainAPI terrain, SlipstreamTerrainPlugin2 plugin,
                               CoopSlipstreamRecord record, boolean created) {
+        if (record.kind() == CoopSlipstreamRecord.Kind.TRAIL) reconcileTrailSegments(plugin, record.segments());
         restoreSegments(plugin, record.segments());
         // recompute initializes the segment indices, directions and lengths used by both fades.
         plugin.recompute();
@@ -365,6 +416,7 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         MemoryAPI memory = terrain.getMemoryWithoutUpdate();
         memory.set(STREAM_ID, record.hostId());
         memory.set(STREAM_KIND, record.kind().name());
+        if (record.kind() == CoopSlipstreamRecord.Kind.TRAIL) memory.set(CoopSlipstreamFadeBridge.TRAIL_MARKER, true);
         CoopSlipstreamRecord.SurgeWaveState wave = record.surgeWave();
         CoopSlipstreamFadeBridge.restoreSurgeWave(plugin,
                 new CoopSlipstreamFadeBridge.SurgeWaveState(wave.present(), wave.done(), wave.index(),
@@ -372,6 +424,31 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         restoreSegments(plugin, record.segments());
         restoreFade(plugin, record.fade());
         plugin.recomputeEncounterPoints();
+    }
+
+    /** Reuse matching native points so append, head trimming and width updates keep local discovery. */
+    private static void reconcileTrailSegments(SlipstreamTerrainPlugin2 plugin,
+                                               List<CoopSlipstreamRecord.Segment> wanted) {
+        Map<Position, ArrayDeque<SlipstreamSegment>> available = new LinkedHashMap<>();
+        for (SlipstreamSegment segment : plugin.getSegments()) {
+            available.computeIfAbsent(new Position(segment.loc.x, segment.loc.y), ignored -> new ArrayDeque<>()).add(segment);
+        }
+        List<SlipstreamSegment> ordered = new ArrayList<>(wanted.size());
+        for (CoopSlipstreamRecord.Segment source : wanted) {
+            ArrayDeque<SlipstreamSegment> matches = available.get(new Position(source.x(), source.y()));
+            SlipstreamSegment target = matches == null ? null : matches.pollFirst();
+            if (target == null) {
+                plugin.addSegment(new Vector2f(source.x(), source.y()), source.width());
+                target = plugin.getSegments().get(plugin.getSegments().size() - 1);
+            }
+            ordered.add(target);
+        }
+        plugin.getSegments().clear();
+        plugin.getSegments().addAll(ordered);
+    }
+
+    private record Position(float x, float y) {
+        private Position { x = x == 0f ? 0f : x; y = y == 0f ? 0f : y; }
     }
 
     private static void restoreSegments(SlipstreamTerrainPlugin2 plugin,
@@ -422,7 +499,8 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         seasonal(sector);
         LocationAPI hyper = hyperspace(sector);
         for (CampaignTerrainAPI terrain : hyper.getTerrainCopy()) {
-            if (observedSeasonal.contains(terrain) && ownedId(terrain) == null) {
+            if ((observedSeasonal.contains(terrain) || terrain.getPlugin() instanceof SlipstreamTerrainPlugin2 plugin
+                    && CoopSlipstreamFadeBridge.isNativeTrail(plugin)) && ownedId(terrain) == null) {
                 release(terrain, true);
                 hyper.removeEntity(terrain);
             }
@@ -448,8 +526,9 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         List<TableRow> rows = new ArrayList<>();
         for (CampaignTerrainAPI terrain : hyperspace(sector).getTerrainCopy()) {
             if (!eligible(terrain)) continue;
+            if (plugin(terrain).isDynamic() && plugin(terrain).getSegments().isEmpty()) continue;
             String id = ownedId(terrain);
-            CoopSlipstreamRecord.Kind kind = seasonal.contains(terrain)
+            CoopSlipstreamRecord.Kind kind = plugin(terrain).isDynamic() ? CoopSlipstreamRecord.Kind.TRAIL : seasonal.contains(terrain)
                     ? CoopSlipstreamRecord.Kind.SEASONAL : CoopSlipstreamRecord.Kind.OTHER;
             if (id != null) {
                 Object storedKind = terrain.getMemoryWithoutUpdate().get(STREAM_KIND);
@@ -651,7 +730,10 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
 
     private static boolean eligible(CampaignTerrainAPI terrain) {
         return terrain != null && terrain.isAlive()
-                && terrain.getPlugin() instanceof SlipstreamTerrainPlugin2 plugin && !plugin.isDynamic();
+                && terrain.getPlugin() instanceof SlipstreamTerrainPlugin2 plugin
+                && (!plugin.isDynamic() || CoopSlipstreamFadeBridge.isNativeTrail(plugin)
+                || ownedId(terrain) != null && CoopSlipstreamRecord.Kind.TRAIL.name()
+                .equals(terrain.getMemoryWithoutUpdate().get(STREAM_KIND)));
     }
 
     private static SlipstreamTerrainPlugin2 plugin(CampaignTerrainAPI terrain) {

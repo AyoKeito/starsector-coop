@@ -6,6 +6,8 @@ import com.thoughtworks.xstream.XStream;
 import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
 import coop.campaign.CoopSlipstreamWorld;
+import coop.campaign.CoopSensorGhostManager;
+import coop.ambient.CoopSlipstreamFadeBridge;
 import coop.ambient.CoopWreckBridge;
 import coop.ambient.CoopLightBridge;
 import coop.ambient.CoopEncounterReplayBridge;
@@ -359,8 +361,8 @@ public class CoopModPlugin extends BaseModPlugin {
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
         CoopMirrorOrphanSweeper.sweep(Global.getSector());
-        // Recreate transient control before the first terrain frame, including background batches.
-        CoopSlipstreamWorld.prepareLoad(Global.getSector());
+        // Tag saved native trail owners before replacing Guest's world-affecting ghost manager.
+        prepareAmbientWorld(Global.getSector());
         // Before the pump, so it sits earlier in the transient script list and runs first each frame:
         // it captures the engine's per-frame delta for the full-fidelity guest-system drive and is the
         // always-on observer that releases the drive when the pump stops ticking it.
@@ -395,6 +397,15 @@ public class CoopModPlugin extends BaseModPlugin {
         // depends on it, and it must not stand between a load and a working session.
         installExpectedCampaignNotice(newGame);
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
+    }
+
+    static void prepareAmbientWorld(com.fs.starfarer.api.campaign.SectorAPI sector) {
+        if (sector == null) return;
+        CoopSlipstreamFadeBridge.markExistingNativeTrails(sector);
+        boolean guest = CoopNetStartupConfig.fromSystemProperties().role() == coop.net.CoopConnectionRole.GUEST;
+        CoopSensorGhostManager.install(sector, guest);
+        // Recreate transient terrain control before the first native or background terrain frame.
+        CoopSlipstreamWorld.prepareLoad(sector);
     }
 
     /**
@@ -649,6 +660,7 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void beforeGameSave() {
         CoopFullFidelitySystemDriver.beginSave();
+        CoopSensorGhostManager.beforeSave(Global.getSector());
         CoopGuestSnapshotStore.writeIntoCurrentSector();
         // Phase 21: the tally goes in, the two intel pages come out. Both pages are transient by
         // design (see CoopSessionIntel) -- nothing of either class may reach XStream -- while the
@@ -680,6 +692,7 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void onGameSaveFailed() {
         CoopFullFidelitySystemDriver.endSave();
+        CoopSensorGhostManager.afterSave(Global.getSector());
         CoopSessionIntel.ensureRegistered(Global.getSector());
         CoopSessionStatsIntel.ensureRegistered(Global.getSector());
         CoopOptionsPage.ensureRegistered(Global.getSector());
@@ -690,6 +703,7 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void afterGameSave() {
         CoopFullFidelitySystemDriver.endSave();
+        CoopSensorGhostManager.afterSave(Global.getSector());
         // Phase 21: put the transient pages back, before anything else. The save is written; from
         // here the player is back in the campaign and expects the intel screen intact.
         CoopSessionIntel.ensureRegistered(Global.getSector());

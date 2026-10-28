@@ -1,16 +1,21 @@
 package coop.fleet;
 
 import com.fs.starfarer.api.EveryFrameScript;
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import coop.campaign.CoopSensorGhostManager;
 import coop.ambient.CoopLightBridge;
 import coop.fleet.CoopNpcFleetSuppressor.BaseIntelCleanup;
 import coop.fleet.CoopNpcFleetSuppressor.ManagerHandle;
 import coop.net.CoopConnectionRole;
+import coop.presence.CoopPresenceRegistry;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -75,6 +80,7 @@ class CoopNpcFleetSuppressorTest {
     void doesNotMatchUnrelatedScripts() {
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName("CoopNetPump"));
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName("CoopCampaignReplicator"));
+        assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName("CoopSensorGhostManager"));
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName(""));
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName(null));
     }
@@ -207,6 +213,61 @@ class CoopNpcFleetSuppressorTest {
         assertFalse(sector.memory.containsKey("$ghostManager"), "stale ghost handle must be unset");
         assertSame(sector.removed.get(0), sector.memory.get("$core_pirateBaseManager"),
                 "the pirate base manager handle is backfilled, never cleared");
+    }
+
+    @Test
+    void lateNativeGhostManagersDoNotRemoveOrUncacheTheOwnedCosmeticReplacement() {
+        withGhostReplacement((sector, api, replacement) -> {
+            CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+            sector.scripts.add(new SensorGhostManager());
+            sector.transientScripts.add(new SensorGhostManager());
+
+            suppressor.tick(api, 0L);
+
+            assertEquals(2, sector.removed.size());
+            assertTrue(sector.scripts.isEmpty());
+            assertEquals(List.of(replacement), sector.transientScripts);
+            assertSame(replacement, sector.memory.get("$ghostManager"));
+            assertTrue(CoopSensorGhostManager.ownsCachedHandle(api));
+
+            // Reconnect/load re-arms the same native suppression pass, without replacing M5 state.
+            sector.scripts.add(new SensorGhostManager());
+            suppressor.reset();
+            suppressor.tick(api, 1L);
+            assertEquals(3, sector.removed.size());
+            assertEquals(List.of(replacement), sector.transientScripts);
+            assertSame(replacement, sector.memory.get("$ghostManager"));
+        });
+    }
+
+    @Test
+    void anUnregisteredCosmeticManagerCannotKeepItsStaleNativeCache() {
+        withGhostReplacement((sector, api, replacement) -> {
+            sector.transientScripts.remove(replacement);
+            sector.scripts.add(new SensorGhostManager());
+
+            new CoopNpcFleetSuppressor().tick(api, 0L);
+
+            assertFalse(sector.memory.containsKey("$ghostManager"));
+            assertFalse(CoopSensorGhostManager.ownsCachedHandle(api));
+        });
+    }
+
+    @Test
+    void aReplacementFromAnotherSectorCannotPreserveThatSectorsGhostHandle() {
+        withGhostReplacement((oldSector, oldApi, replacement) -> {
+            RecordingSector loaded = new RecordingSector();
+            SectorAPI current = loaded.proxy();
+            loaded.scripts.add(new SensorGhostManager());
+            loaded.transientScripts.add(replacement);
+            loaded.memory.put("$ghostManager", replacement);
+            Global.setSector(current);
+
+            new CoopNpcFleetSuppressor().tick(current, 0L);
+
+            assertFalse(loaded.memory.containsKey("$ghostManager"));
+            assertFalse(CoopSensorGhostManager.ownsCachedHandle(current));
+        });
     }
 
     @Test
@@ -742,6 +803,33 @@ class CoopNpcFleetSuppressorTest {
         }
     }
 
+    @FunctionalInterface
+    private interface GhostReplacementCase {
+        void run(RecordingSector sector, SectorAPI api, EveryFrameScript replacement);
+    }
+
+    private static void withGhostReplacement(GhostReplacementCase test) {
+        SectorAPI oldSector = Global.getSector();
+        SettingsAPI oldSettings = Global.getSettings();
+        RecordingSector sector = new RecordingSector();
+        SectorAPI api = sector.proxy();
+        SettingsAPI baseSettings = ApiProxies.whiteSettings();
+        Global.setSector(api);
+        Global.setSettings((SettingsAPI) Proxy.newProxyInstance(SettingsAPI.class.getClassLoader(),
+                new Class<?>[]{SettingsAPI.class}, (proxy, method, args) ->
+                        method.getName().equals("getVersionString") ? CoopPresenceRegistry.PINNED_VERSION
+                                : method.invoke(baseSettings, args)));
+        try {
+            CoopSensorGhostManager.install(api, true);
+            Object replacement = sector.memory.get("$ghostManager");
+            assertTrue(replacement instanceof CoopSensorGhostManager);
+            test.run(sector, api, (EveryFrameScript) replacement);
+        } finally {
+            Global.setSector(oldSector);
+            Global.setSettings(oldSettings);
+        }
+    }
+
     /** SectorAPI recording script removals and sector-memory writes. */
     private static final class RecordingSector {
         private final List<EveryFrameScript> scripts = new ArrayList<>();
@@ -766,6 +854,7 @@ class CoopNpcFleetSuppressorTest {
                             yield null;
                         }
                         case "contains" -> memory.containsKey((String) args[0]);
+                        case "get" -> memory.get((String) args[0]);
                         case "getBoolean" -> Boolean.TRUE.equals(memory.get((String) args[0]));
                         default -> null;
                     });
@@ -779,6 +868,10 @@ class CoopNpcFleetSuppressorTest {
                         case "equals" -> proxy == args[0];
                         case "getScripts" -> new ArrayList<>(scripts);
                         case "getTransientScripts" -> new ArrayList<>(transientScripts);
+                        case "addTransientScript" -> {
+                            transientScripts.add((EveryFrameScript) args[0]);
+                            yield null;
+                        }
                         case "removeScript", "removeTransientScript" -> {
                             EveryFrameScript script = (EveryFrameScript) args[0];
                             if (scripts.remove(script) || transientScripts.remove(script)) {

@@ -302,6 +302,47 @@ class CoopSlipstreamAuthorityTest {
     }
 
     @Test
+    void nativeTrailGrowthAndWidthChangesPublishAtTheCheckpointCadence() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord base = stream("trail", false);
+        var initial = new CoopSlipstreamRecord("trail", CoopSlipstreamRecord.Kind.TRAIL,
+                base.params(), List.of(), base.segments().subList(0, 1),
+                CoopSlipstreamRecord.Fade.idle(), base.timeline(),
+                CoopSlipstreamRecord.SurgeWaveState.absent());
+        f.world.host = List.of(initial);
+        f.authority.tickHost();
+        assertEquals(List.of(initial), f.world.published);
+        f.net.sent.clear();
+
+        var widened = new CoopSlipstreamRecord.Segment(0, 0, 350, .6f,
+                initial.segments().get(0).fader());
+        var grown = new CoopSlipstreamRecord("trail", CoopSlipstreamRecord.Kind.TRAIL,
+                base.params(), List.of(), List.of(widened, base.segments().get(1)),
+                CoopSlipstreamRecord.Fade.idle(), base.timeline(),
+                CoopSlipstreamRecord.SurgeWaveState.absent());
+        f.world.host = List.of(grown);
+        f.now.set(249);
+        f.authority.tickHost();
+        assertTrue(f.net.sent.isEmpty());
+        assertEquals(1, f.world.published.size());
+        f.now.set(250);
+        f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals(grown, CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream")));
+        assertEquals(List.of(initial, grown), f.world.published);
+        f.net.sent.clear();
+        f.now.set(500);
+        f.authority.tickHost();
+        assertTrue(f.net.sent.isEmpty(), "an unchanged trail checkpoint does not resend");
+
+        f.world.host = List.of();
+        f.now.set(750);
+        f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STREAM_REMOVE), f.types());
+    }
+
+    @Test
     void staleLifecycleMessagesAreHarmlessAndFreshSessionRearmsOnlyTheSweep() {
         Fixture f = new Fixture();
         CoopSlipstreamRecord.Fade fade = stream("expired", true).fade();
@@ -382,7 +423,9 @@ class CoopSlipstreamAuthorityTest {
         final Map<String, CoopSlipstreamRecord> guest = new LinkedHashMap<>();
         final List<String> localSurges = new ArrayList<>();
         final List<String> calls = new ArrayList<>();
+        final List<CoopSlipstreamRecord> published = new ArrayList<>();
         @Override public List<CoopSlipstreamRecord> captureHost() { return host; }
+        @Override public void published(CoopSlipstreamRecord record) { published.add(record); }
         @Override public Set<String> taggedIds() { return Set.copyOf(guest.keySet()); }
         @Override public void upsert(CoopSlipstreamRecord record) {
             calls.add("upsert:" + record.hostId());

@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.comm.IntelInfoPlugin;
 import com.fs.starfarer.api.campaign.comm.IntelManagerAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import coop.campaign.CoopSensorGhostManager;
 import coop.net.CoopConnectionRole;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
@@ -112,8 +113,8 @@ public final class CoopNpcFleetSuppressor {
      * bounty intel and several missions.
      */
     private static final Map<String, ManagerHandle> MANAGER_HANDLES = Map.ofEntries(
-            // Lazy script-scan cache with no external callers: null it so nothing keeps servicing the
-            // removed manager (SensorGhostManager.getGhostManager(), key "$ghostManager").
+            // Remove the native manager's lazy cache, but keep M5's owned transient replacement
+            // when vanilla registers another native script after the replacement was installed.
             Map.entry("SensorGhostManager", new ManagerHandle("$ghostManager", true)),
             // Same lazy-scan pattern, but AbyssalLightEntityPlugin dereferences the result without a
             // null check; keeping the handle makes that call a no-op instead of a crash.
@@ -269,7 +270,10 @@ public final class CoopNpcFleetSuppressor {
                 return;
             }
             if (handle.clearAfterRemoval) {
-                memory.unset(handle.key);
+                boolean ownedGhostReplacement = "$ghostManager".equals(handle.key)
+                        && memory.get(handle.key) instanceof CoopSensorGhostManager
+                        && CoopSensorGhostManager.ownsCachedHandle(sector);
+                if (!ownedGhostReplacement) memory.unset(handle.key);
             } else if (!memory.contains(handle.key)) {
                 // Backfill so vanilla's unconditional getInstance() dereference stays safe even when
                 // nothing populated the lazy cache before we removed the script.
@@ -499,9 +503,9 @@ public final class CoopNpcFleetSuppressor {
     static final class ManagerHandle {
         final String key;
         /**
-         * True: unset the key — nothing dereferences it and a stale handle keeps the removed manager
-         * reachable. False: leave it in place (backfilling if absent) — vanilla dereferences this
-         * handle without a null check, so clearing it would crash the guest.
+         * True: unset the removed manager's key, except an owned M5 ghost replacement's cache.
+         * False: leave it in place (backfilling if absent), since vanilla dereferences this handle
+         * without a null check.
          */
         final boolean clearAfterRemoval;
 

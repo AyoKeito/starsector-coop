@@ -87,6 +87,45 @@ class CoopSlipstreamFadeBridgeTest {
     }
 
     @Test
+    void trailReplicaHoldsHostCheckpointWhileNativeParticlesKeepAdvancing() {
+        Fixture f = new Fixture();
+        f.plugin.setDynamic(true);
+        f.plugin.spawn();
+        CoopSlipstreamFadeBridge.registerTrailReplica(f.plugin);
+
+        f.plugin.advance(0.1f);
+
+        assertEquals(0.2f, f.plugin.first().fader.getBrightness());
+        assertEquals(0f, f.plugin.spawnElapsed());
+        assertEquals(1, f.plugin.recomputes);
+        assertEquals(1, f.plugin.particleAdds);
+        assertEquals(1, f.plugin.particleAdvances);
+        assertFalse(CoopSlipstreamFadeBridge.isControlled(f.plugin));
+        assertTrue(CoopSlipstreamFadeBridge.holdsNativeFade(f.plugin));
+        CoopSlipstreamFadeBridge.unregister(f.plugin);
+        f.plugin.advance(0.1f);
+        assertEquals(0.3f, f.plugin.first().fader.getBrightness(), 0.000001f);
+        assertTrue(f.plugin.spawnElapsed() > 0f);
+    }
+
+    @Test
+    void trailReplicaWaitsForHostRemovalEvenAfterItsTerminalFade() {
+        Fixture f = new Fixture();
+        f.plugin.setDynamic(true);
+        f.plugin.finishedDespawn();
+        CoopSlipstreamFadeBridge.registerTrailReplica(f.plugin);
+
+        f.plugin.advance(0.1f);
+
+        assertTrue(f.scripts.isEmpty());
+        assertFalse(f.tags.contains(Tags.FADING_OUT_AND_EXPIRING));
+        CoopSlipstreamFadeBridge.clear();
+        f.plugin.advance(0.1f);
+        assertEquals(1, f.scripts.size());
+        assertTrue(f.tags.contains(Tags.FADING_OUT_AND_EXPIRING));
+    }
+
+    @Test
     void nativeBackgroundFaderConditionUsesTheHostMode() {
         Fixture f = new Fixture();
         CoopSlipstreamFadeBridge.register(f.plugin);

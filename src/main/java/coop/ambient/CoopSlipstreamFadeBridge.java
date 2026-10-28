@@ -3,17 +3,25 @@ package coop.ambient;
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.impl.campaign.ghosts.GBIGenerateSlipstream;
+import com.fs.starfarer.api.impl.campaign.ghosts.SensorGhost;
+import com.fs.starfarer.api.impl.campaign.ghosts.types.LeviathanCalfGhost;
+import com.fs.starfarer.api.impl.campaign.ghosts.types.LeviathanGhost;
 import com.fs.starfarer.api.impl.campaign.abilities.GenerateSlipsurgeAbility.SlipsurgeFadeInScript;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2.SlipstreamSegment;
 import com.fs.starfarer.api.util.FaderUtil;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Transient ownership of native slipstream fades. This class belongs only to coop-forks.jar, in
@@ -23,7 +31,15 @@ import java.util.Objects;
 public final class CoopSlipstreamFadeBridge {
     public static final String PINNED_VERSION = "0.98a-RC8";
     private static final String HOOK_VERSION = "0.98a-RC8/canonical-fade-1";
+    public static final String TRAIL_MARKER = "$coopLeviathanTrail";
+    private static final String TRAIL_HOOK_VERSION = "0.98a-RC8/leviathan-trail-1";
     private static final Map<SlipstreamTerrainPlugin2, Control> CONTROLS = new IdentityHashMap<>();
+    private static final Set<SlipstreamTerrainPlugin2> TRAIL_REPLICAS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Map<SlipstreamTerrainPlugin2, ArrayDeque<TrailCheckpoint>> TRAIL_CHECKPOINTS =
+            new IdentityHashMap<>();
+    private static final int MAX_TRAIL_SOURCES = 256;
+    private static final int MAX_TRAIL_CHECKPOINT_CIRCLES = 131_072;
 
     private CoopSlipstreamFadeBridge() {
     }
@@ -56,16 +72,127 @@ public final class CoopSlipstreamFadeBridge {
 
     public static synchronized void unregister(SlipstreamTerrainPlugin2 plugin) {
         CONTROLS.remove(plugin);
+        TRAIL_REPLICAS.remove(plugin);
+        TRAIL_CHECKPOINTS.remove(plugin);
     }
 
     /** Releases all old object identities on session/load teardown; native scripts resume normally. */
     public static synchronized void clear() {
         CONTROLS.clear();
+        TRAIL_REPLICAS.clear();
+        TRAIL_CHECKPOINTS.clear();
     }
 
     public static synchronized boolean isControlled(SlipstreamTerrainPlugin2 plugin) {
         return plugin != null && !plugin.isDynamic() && CONTROLS.containsKey(plugin);
     }
+
+    /** Guest trail snapshots hold native faders; their real fleet/particle/sound work stays native. */
+    public static synchronized boolean holdsNativeFade(SlipstreamTerrainPlugin2 plugin) {
+        return isControlled(plugin) || TRAIL_REPLICAS.contains(plugin);
+    }
+
+    public static synchronized void registerTrailReplica(SlipstreamTerrainPlugin2 plugin) {
+        Objects.requireNonNull(plugin, "trail plugin");
+        if (!plugin.isDynamic()) throw new IllegalArgumentException("Trail replica must be dynamic");
+        Objects.requireNonNull(plugin.getEntity(), "trail entity");
+        requirePinnedHooks();
+        requireTrailHooks();
+        TRAIL_REPLICAS.add(plugin);
+    }
+
+    /** Called by the pinned native generator, never by a Guest ghost creator. */
+    public static void observeNativeTrail(SensorGhost ghost, SlipstreamTerrainPlugin2 plugin) {
+        if (ghost == null || plugin == null || plugin.getClass() != SlipstreamTerrainPlugin2.class
+                || !plugin.isDynamic() || (ghost.getClass() != LeviathanGhost.class
+                && ghost.getClass() != LeviathanCalfGhost.class)) return;
+        SectorEntityToken entity = plugin.getEntity();
+        if (entity != null && entity.isAlive()) entity.getMemoryWithoutUpdate().set(TRAIL_MARKER, true);
+    }
+
+    /** Re-identify deserialized live native producers before removing the Guest's unsafe ghosts. */
+    public static void markExistingNativeTrails(SectorAPI sector) {
+        if (sector == null || sector.getHyperspace() == null) return;
+        requireTrailHooks();
+        for (SectorEntityToken entity : new ArrayList<>(sector.getHyperspace().getCustomEntities())) {
+            for (EveryFrameScript script : new ArrayList<>(entity.getScripts())) {
+                if (script.getClass() == GBIGenerateSlipstream.class) {
+                    ((GBIGenerateSlipstream) script).coopMarkTrail();
+                }
+            }
+        }
+    }
+
+    /** A custom dynamic plugin is never adopted just because it happens to use the native params. */
+    public static boolean isNativeTrail(SlipstreamTerrainPlugin2 plugin) {
+        if (plugin == null || plugin.getClass() != SlipstreamTerrainPlugin2.class || !plugin.isDynamic()) return false;
+        SectorEntityToken entity = plugin.getEntity();
+        return entity != null && entity.isAlive()
+                && Boolean.TRUE.equals(entity.getMemoryWithoutUpdate().get(TRAIL_MARKER));
+    }
+
+    /** Actual Host checkpoint circles authorize bounded delayed Guest weather controls. */
+    public static synchronized void rememberTrailCheckpoint(SlipstreamTerrainPlugin2 plugin, long timestamp) {
+        if (!isNativeTrail(plugin)) throw new IllegalArgumentException("Only native Leviathan trails have checkpoints");
+        if (plugin.getSegments().size() > 4096) throw new IllegalArgumentException("Too many native trail segments");
+        if (!TRAIL_CHECKPOINTS.containsKey(plugin) && TRAIL_CHECKPOINTS.size() >= MAX_TRAIL_SOURCES) {
+            throw new IllegalStateException("Too many native trail checkpoint sources");
+        }
+        List<TrailCircle> circles = new ArrayList<>();
+        for (SlipstreamSegment segment : plugin.getSegments()) {
+            if (!segment.fader.isFadedOut() && segment.fader.getBrightness() * segment.bMult > 0.05f) {
+                circles.add(new TrailCircle(segment.loc.x, segment.loc.y,
+                        segment.width * 0.5f + plugin.getParams().edgeWidth + 100f));
+            }
+        }
+        ArrayDeque<TrailCheckpoint> old = TRAIL_CHECKPOINTS.get(plugin);
+        ArrayDeque<TrailCheckpoint> checkpoints = old == null ? new ArrayDeque<>() : new ArrayDeque<>(old);
+        if (!checkpoints.isEmpty() && checkpoints.getLast().timestamp == timestamp) checkpoints.removeLast();
+        checkpoints.addLast(new TrailCheckpoint(timestamp, List.copyOf(circles)));
+        while (checkpoints.size() > 8) checkpoints.removeFirst();
+        int totalCircles = checkpoints.stream().mapToInt(checkpoint -> checkpoint.circles.size()).sum();
+        for (var entry : TRAIL_CHECKPOINTS.entrySet()) {
+            if (entry.getKey() != plugin) {
+                totalCircles += entry.getValue().stream().mapToInt(checkpoint -> checkpoint.circles.size()).sum();
+            }
+        }
+        if (totalCircles > MAX_TRAIL_CHECKPOINT_CIRCLES) throw new IllegalStateException("Native trail checkpoint cache is full");
+        TRAIL_CHECKPOINTS.put(plugin, checkpoints);
+    }
+
+    public static synchronized boolean matchesPublishedTrailClear(SlipstreamTerrainPlugin2 plugin,
+                                                                  float x, float y, float radius) {
+        if (!isNativeTrail(plugin) || !Float.isFinite(x) || !Float.isFinite(y)
+                || !Float.isFinite(radius) || radius <= 0f || Global.getSector() == null
+                || Global.getSector().getClock() == null) return false;
+        ArrayDeque<TrailCheckpoint> checkpoints = TRAIL_CHECKPOINTS.get(plugin);
+        if (checkpoints == null) return false;
+        long now = Global.getSector().getClock().getTimestamp();
+        double maxAge = Global.getSector().getClock().convertToDays(2f) * 86_400_000d;
+        if (!Double.isFinite(maxAge) || maxAge <= 0d) return false;
+        for (TrailCheckpoint checkpoint : checkpoints) {
+            double age = (double) now - checkpoint.timestamp;
+            if (age < 0d || age > maxAge) continue;
+            for (TrailCircle circle : checkpoint.circles) {
+                if (Math.abs(circle.x - x) <= 2f && Math.abs(circle.y - y) <= 2f
+                        && Math.abs(circle.radius - radius) <= 2f) return true;
+            }
+        }
+        return false;
+    }
+
+    private static void requireTrailHooks() {
+        try {
+            if (!TRAIL_HOOK_VERSION.equals(GBIGenerateSlipstream.coopTrailHookVersion())) {
+                throw new IllegalStateException("Native Leviathan trail hook version mismatch");
+            }
+        } catch (LinkageError error) {
+            throw new IllegalStateException("Native Leviathan trail hooks are missing from coop-forks.jar", error);
+        }
+    }
+
+    private record TrailCircle(float x, float y, float radius) { }
+    private record TrailCheckpoint(long timestamp, List<TrailCircle> circles) { }
 
     /** Native hook input: true only within a host-owned canonical step. */
     public static synchronized boolean allowsNativeExpiry(SlipstreamTerrainPlugin2 plugin) {

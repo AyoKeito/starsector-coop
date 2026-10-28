@@ -319,7 +319,7 @@ public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 		if (allFaded) {
 			// COOP FORK: guest lifetime belongs to the host STREAM_REMOVE; fade fields below
 			// still advance normally. Host canonical steps alone may install native expiry.
-			if (!CoopSlipstreamFadeBridge.isControlled(this) ||
+			if (!CoopSlipstreamFadeBridge.holdsNativeFade(this) ||
 					CoopSlipstreamFadeBridge.allowsNativeExpiry(this)) {
 				Misc.fadeAndExpire(entity);
 			}
@@ -446,7 +446,7 @@ public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 		advanceParticles(amount);
 		
 		// COOP FORK: all non-fade physics/particles/render work above and below stays native.
-		if (!CoopSlipstreamFadeBridge.isControlled(this)) {
+		if (!CoopSlipstreamFadeBridge.holdsNativeFade(this)) {
 			advanceSpawn(amount);
 			advanceDespawn(amount);
 		}
@@ -655,7 +655,7 @@ public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 	
 	protected void advanceNearbySegments(float amount) {
 		// COOP FORK: only the two native fader loops are controlled, never nearby physics.
-		boolean coopFadeControlled = CoopSlipstreamFadeBridge.isControlled(this);
+		boolean coopFadeControlled = CoopSlipstreamFadeBridge.holdsNativeFade(this);
 //		if (isDespawning()) {
 //			System.out.println("3f23f23f32");
 //		}

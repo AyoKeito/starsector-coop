@@ -13,7 +13,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.LongSupplier;
 
-/** Host-owned, non-dynamic hyperspace terrain. All calls run on the campaign thread. */
+/** Host-owned hyperspace terrain, including native Leviathan trail checkpoints. */
 public final class CoopSlipstreamAuthority {
     static final long HOST_POLL_INTERVAL_MILLIS = 250L;
 
@@ -27,6 +27,8 @@ public final class CoopSlipstreamAuthority {
         void remove(String hostId);
         /** Must run before the guest's SlipstreamManager script is suppressed. */
         void sweepSeasonal();
+        /** Complete record was enqueued; native trail circles can now validate delayed Guest OFF. */
+        default void published(CoopSlipstreamRecord record) { }
     }
 
     private final CoopNetService service;
@@ -84,17 +86,22 @@ public final class CoopSlipstreamAuthority {
                 // One campaign frame, ordered TCP: manifest first, then every complete record.
                 service.send(CoopMessages.streamSet(session.sessionId(), service.nextSeq(), now,
                         CoopSlipstreamRecord.encodeIds(current.keySet())));
-                adds.values().forEach(service::send);
+                for (CoopSlipstreamRecord record : current.values()) {
+                    service.send(adds.get(record.hostId()));
+                    world.published(record);
+                }
                 fullBroadcast = false;
             } else {
                 for (CoopSlipstreamRecord record : current.values()) {
                     CoopSlipstreamRecord previous = known.get(record.hostId());
-                    if (previous == null || despawnChanged(previous, record)
+                    if (previous == null || record.kind() == CoopSlipstreamRecord.Kind.TRAIL && !record.equals(previous)
+                            || despawnChanged(previous, record)
                             || activeTransition(record) || activeTransition(previous)) {
                         // A full checkpoint keeps native counters, live faders and surge cursor on
                         // the same committed grid tick. A compact DESPAWN alone cannot do that.
                         // previous-active also publishes the final settled state exactly once.
                         service.send(adds.get(record.hostId()));
+                        world.published(record);
                     }
                 }
                 for (String id : known.keySet()) {

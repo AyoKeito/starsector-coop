@@ -34,7 +34,7 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
     private static final float MAX_WIDTH = 100_000f;
     private static final double MAX_TOTAL_LENGTH = 2_000_000d;
 
-    public enum Kind { SEASONAL, OTHER }
+    public enum Kind { SEASONAL, OTHER, TRAIL }
 
     /** Names correspond exactly to the engine's public FaderUtil.State. */
     public enum FaderState { IN, OUT, IDLE }
@@ -51,9 +51,13 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
         surgeWave = Objects.requireNonNull(surgeWave, "surgeWave");
         terrainTags = checkedStrings(terrainTags, "terrain tags", MAX_TAGS);
         segments = List.copyOf(Objects.requireNonNull(segments, "segments"));
-        checkCount(segments.size(), MIN_SEGMENTS, MAX_SEGMENTS, "segments");
+        // Native Leviathan trails begin with one point and grow; seasonal/surge routes need three.
+        checkCount(segments.size(), kind == Kind.TRAIL ? 1 : MIN_SEGMENTS, MAX_SEGMENTS, "segments");
         if (surgeWave.index() > segments.size()) {
             throw new IllegalArgumentException("Surge wave cursor exceeds segment count");
+        }
+        if (kind == Kind.TRAIL && surgeWave.present()) {
+            throw new IllegalArgumentException("Leviathan trail cannot carry a slipsurge wave");
         }
         double totalLength = 0;
         for (int i = 1; i < segments.size(); i++) {
@@ -379,7 +383,7 @@ public record CoopSlipstreamRecord(int version, String hostId, Kind kind, Params
         int tagCount = r.count(0, MAX_TAGS, "terrain tags");
         List<String> tags = new ArrayList<>(tagCount);
         for (int i = 0; i < tagCount; i++) tags.add(r.next());
-        int segmentCount = r.count(MIN_SEGMENTS, MAX_SEGMENTS, "segments");
+        int segmentCount = r.count(kind == Kind.TRAIL ? 1 : MIN_SEGMENTS, MAX_SEGMENTS, "segments");
         List<Segment> segments = new ArrayList<>(segmentCount);
         for (int i = 0; i < segmentCount; i++) {
             float x = r.number(), y = r.number(), width = r.number(), mult = r.number();

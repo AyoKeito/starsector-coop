@@ -31,6 +31,45 @@ class CoopSlipstreamRecordTest {
     private static final int TAG_COUNT = 31;
 
     @Test
+    void nativeTrailBirthAndGrowthRoundTripWithoutWeakeningOtherStreamBounds() {
+        for (int size : List.of(1, 2, 3, 40)) {
+            CoopSlipstreamRecord trail = trail("leviathan", size);
+            assertEquals(trail, CoopSlipstreamRecord.decode(trail.encode()));
+            assertEquals(Kind.TRAIL, trail.kind());
+            assertFalse(trail.surgeWave().present());
+            if (size < CoopSlipstreamRecord.MIN_SEGMENTS) {
+                for (Kind kind : List.of(Kind.SEASONAL, Kind.OTHER)) {
+                    assertThrows(IllegalArgumentException.class, () -> new CoopSlipstreamRecord(
+                            trail.hostId(), kind, trail.params(), trail.terrainTags(), trail.segments(),
+                            trail.fade(), trail.timeline(), trail.surgeWave()));
+                    assertRejected(CoopDelimited.split(trail.encode()), 2, kind.name());
+                }
+            }
+        }
+    }
+
+    @Test
+    void trailRecordsRejectEmptyOversizedAndTruncatedGeometry() {
+        assertThrows(IllegalArgumentException.class, () -> trail("empty", 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> trail("too-many", CoopSlipstreamRecord.MAX_SEGMENTS + 1));
+        List<String> fields = CoopDelimited.split(trail("birth", 1).encode());
+        for (int size = 0; size < fields.size(); size++) {
+            String prefix = join(fields.subList(0, size));
+            assertThrows(IllegalArgumentException.class, () -> CoopSlipstreamRecord.decode(prefix));
+        }
+    }
+
+    @Test
+    void trailCannotInstallAnIndependentSlipsurgeWave() {
+        CoopSlipstreamRecord trail = trail("trail", 3);
+        assertThrows(IllegalArgumentException.class, () -> checkpoint(trail, trail.timeline(),
+                new SurgeWaveState(true, false, 0, 0f, 1f)));
+        CoopSlipstreamRecord surge = surge("surge", 3, 2);
+        assertRejected(CoopDelimited.split(surge.encode()), 2, Kind.TRAIL.name());
+    }
+
+    @Test
     void surgeRoundTripsEveryNondefaultParamAndUnfinishedFade() {
         CoopSlipstreamRecord record = surge("host-surge", 3, 32);
 
@@ -406,6 +445,12 @@ class CoopSlipstreamRecordTest {
         fields.set(0, Integer.toString(CoopSlipstreamRecord.VERSION));
         fields.set(2, "513");
         assertThrows(IllegalArgumentException.class, () -> Despawn.decode(join(fields)));
+    }
+
+    private static CoopSlipstreamRecord trail(String id, int segmentCount) {
+        return new CoopSlipstreamRecord(id, Kind.TRAIL, Params.defaults(), List.of("trail"),
+                segments(segmentCount), new Fade(null, 0f, 0f, null, 0f, 0f, 0f),
+                Timeline.atOrigin(-2_000_000L, false, true), SurgeWaveState.absent());
     }
 
     private static CoopSlipstreamRecord surge(String id, int segmentCount, int noiseCount) {

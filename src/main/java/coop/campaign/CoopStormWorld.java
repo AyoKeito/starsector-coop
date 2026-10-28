@@ -192,6 +192,9 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
     private boolean matchesSharedStream(CoopStormControl control) {
         for (CampaignTerrainAPI terrain : installedSector.getHyperspace().getTerrainCopy()) {
             if (!(terrain.getPlugin() instanceof SlipstreamTerrainPlugin2 stream) || !terrain.isAlive()) continue;
+            // Trail widths change between polls; accept only exact, recent Host-published geometry.
+            if (coop.ambient.CoopSlipstreamFadeBridge.matchesPublishedTrailClear(
+                    stream, control.x(), control.y(), control.radius())) return true;
             for (SlipstreamTerrainPlugin2.SlipstreamSegment segment : stream.getSegments()) {
                 float expectedRadius = segment.width * 0.5f + stream.getParams().edgeWidth + 100f;
                 if (Math.abs(expectedRadius - control.radius()) <= 2f

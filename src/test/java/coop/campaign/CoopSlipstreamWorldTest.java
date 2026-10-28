@@ -121,6 +121,65 @@ class CoopSlipstreamWorldTest {
     }
 
     @Test
+    void trailBirthGrowthAndWidthCheckpointsKeepNativeIdentityAndDiscovery() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord source = record("trail", false, 0);
+        f.world.upsert(trail("trail", source.segments().subList(0, 1)));
+        FakeTerrain replica = f.lastCreated;
+        SlipstreamTerrainPlugin2.SlipstreamSegment first = replica.plugin.getSegments().get(0);
+        first.discovered = true;
+        assertTrue(replica.plugin.isDynamic());
+        assertTrue(CoopSlipstreamFadeBridge.holdsNativeFade(replica.plugin));
+        assertFalse(CoopSlipstreamFadeBridge.isControlled(replica.plugin));
+
+        f.world.upsert(trail("trail", source.segments().subList(0, 2)));
+        var changed = new CoopSlipstreamRecord.Segment(0f, 0f, 850f, 0.23f,
+                new CoopSlipstreamRecord.Fader(0.61f, 1f, 7f,
+                        CoopSlipstreamRecord.FaderState.IN, false, false));
+        CoopSlipstreamRecord grown = trail("trail", List.of(changed,
+                source.segments().get(1), source.segments().get(2)));
+        f.world.upsert(grown);
+
+        assertEquals(List.of(replica.terrain), f.terrains);
+        assertSame(first, replica.plugin.getSegments().get(0));
+        assertTrue(first.discovered);
+        assertEquals(850f, first.width);
+        assertEquals(0.23f, first.bMult);
+        assertEquals(0.61f, first.fader.getBrightness());
+        assertRecipe(grown, f.world.captureTable().get(0).stream());
+        assertFalse(replica.saved.containsKey(CoopSlipstreamWorld.FADE_ORIGIN));
+    }
+
+    @Test
+    void trailHeadTrimmingAndReloadKeepSurvivingDiscoveryWithoutLocalAging() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord source = record("trail", false, 0);
+        f.world.upsert(trail("trail", source.segments()));
+        FakeTerrain replica = f.lastCreated;
+        SlipstreamTerrainPlugin2.SlipstreamSegment kept = replica.plugin.getSegments().get(1);
+        kept.discovered = true;
+        CoopSlipstreamRecord trimmed = trail("trail", source.segments().subList(1, 3));
+
+        f.world.upsert(trimmed);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false);
+        f.timestamp.set(10_000_000L);
+        CoopSlipstreamWorld.tickControlled(f.sector, false, false);
+
+        assertSame(replica.terrain, f.terrains.get(0));
+        assertSame(kept, replica.plugin.getSegments().get(0));
+        assertTrue(kept.discovered);
+        assertEquals(trimmed.segments(), f.world.captureTable().get(0).stream().segments());
+        CoopSlipstreamWorld.releaseControlled();
+        assertFalse(CoopSlipstreamFadeBridge.holdsNativeFade(replica.plugin));
+        CoopSlipstreamWorld.prepareLoad(f.sector);
+        assertTrue(CoopSlipstreamFadeBridge.holdsNativeFade(replica.plugin));
+        assertFalse(replica.saved.containsKey(CoopSlipstreamWorld.FADE_ORIGIN));
+        f.world.remove("trail");
+        assertTrue(f.terrains.isEmpty());
+        assertFalse(CoopSlipstreamFadeBridge.holdsNativeFade(replica.plugin));
+    }
+
+    @Test
     void repeatedSurgeUpsertsDoNotRestartOrDuplicateTheNativeFadeInScript() {
         Fixture f = new Fixture();
         CoopSlipstreamRecord source = record("surge", true, 0);
@@ -610,6 +669,14 @@ class CoopSlipstreamWorldTest {
     private static CoopSlipstreamRecord.Fade fade() {
         return new CoopSlipstreamRecord.Fade(new float[]{0.1f, 0.7f}, 3f, 1.2f,
                 new float[]{0.2f, 0.8f}, -0.3f, 10f, 2.5f);
+    }
+
+    private static CoopSlipstreamRecord trail(String id, List<CoopSlipstreamRecord.Segment> segments) {
+        CoopSlipstreamRecord base = record(id, false, 0);
+        return new CoopSlipstreamRecord(id, CoopSlipstreamRecord.Kind.TRAIL, base.params(),
+                base.terrainTags(), segments, CoopSlipstreamRecord.Fade.idle(),
+                CoopSlipstreamRecord.Timeline.atOrigin(123L, false, true),
+                CoopSlipstreamRecord.SurgeWaveState.absent());
     }
 
     private static final class Fixture {
