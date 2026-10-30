@@ -17,6 +17,7 @@ public final class CoopStormBridge {
         void tileOff(float x, float y, float radius, float waitDays);
         void surgeWindow(float x, float y, float extraRadius, float timeScale);
         void surgeSource(float x, float y);
+        default boolean executionDiagnosticsEnabled() { return false; }
     }
 
     private static volatile boolean guest;
@@ -37,14 +38,15 @@ public final class CoopStormBridge {
         owner = newOwner;
         handler = value;
         guest = isGuest;
+        CoopStormExecutionProbe.install(value::executionDiagnosticsEnabled);
     }
 
     public static void uninstall(Object oldOwner) {
-        if (owner == oldOwner) { handler = null; owner = null; }
+        if (owner == oldOwner) { handler = null; owner = null; CoopStormExecutionProbe.clear(); }
     }
 
     /** Role belongs to the launch and deliberately survives campaign replacement. */
-    public static void clear() { handler = null; owner = null; versionOk = null; }
+    public static void clear() { handler = null; owner = null; versionOk = null; CoopStormExecutionProbe.clear(); }
 
     public static CampaignFleetAPI remoteFleet() {
         return !isGuest() && sharing() ? handler.remoteFleet() : null;

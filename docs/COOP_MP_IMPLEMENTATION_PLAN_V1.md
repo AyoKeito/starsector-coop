@@ -2741,6 +2741,12 @@ The 1,352 Host samples, 97 reconnect samples and 24 pending-through-grace sample
 
 **Offline verification, 2026-10-28:** the clean `test build` passes 4,482 Java tests with one existing skip, zero failures and 284 suites; focused M5/integration checks pass 183 tests. The unchanged MCP suite passes 103/103. No games were deployed, launched or exercised for this M5 pass; M4/M5 native acceptance remains deferred.
 
+**MCP acceptance tooling, 2026-10-31:** `ghosts` reads cache/registration, native ghost behavior/entity rows and bounded trail segment identity/discovery without invoking lazy manager lookup. Diagnostic-only `ghostspawn` makes one native Guest cosmetic or Host Leviathan/Calf attempt; it requires a paused active session in hyperspace, preserves native refusal and is never retried after an uncertain reply. These tools enable deterministic setup and observation; their offline tests do not establish native M5 acceptance.
+
+`storms.execution` adds diagnostic-only owner/mirror counters and a 64-event primitive journal for native strike attempts/refusals, returned boost installation, actual velocity writes and returned CR/hull-damage calls. A narrow pinned `HyperStormBoost` fork observes the native velocity call without changing saved fields or physics. Session/campaign ownership changes clear observations; queries neither execute effects nor reset evidence. This removes the previous probe limitation for the M4 boost/mirror gate, which still requires positive native observations.
+
+The tooling clean build passes 4,499 Java tests with one existing skip across 286 suites; the MCP suite passes 105/105 and a real MCP stdio SDK handshake/list-tools smoke passes six assertions. Native M4/M5 checks remain open; the user requested MCP checks first and computer use is on hold.
+
 **Stretch (separate decision, may stay unbuilt):** guest-proximity triggering — replace the host's `EncounterManager` with a coop-aware variant that also generates/range-checks EPs around the guest's mirrored fleet, so ambient encounters fire when the players travel apart. Without it, encounters trigger only around the host (today's v1 behavior minus the guest's divergent local sim). The manager is ~200 lines of pure API and replaceable by the same `removeScript`/`addScript` mechanism; the EP providers are listener-driven (`ListenerUtil.generateEncounterPoints`).
 
 **Decision points to settle before building:**

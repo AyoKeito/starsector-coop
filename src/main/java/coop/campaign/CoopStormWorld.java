@@ -9,6 +9,9 @@ import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
 import coop.storm.CoopStormBridge;
 import coop.storm.CoopStormControl;
 import coop.storm.CoopStormSnapshot;
+import coop.storm.CoopStormExecutionProbe;
+import coop.debug.CoopAgentBridge;
+import coop.util.CoopDebug;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
@@ -59,6 +62,9 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         resetTransport();
         owner = newOwner; installedSector = sector; guest = isGuest; remoteFleetSupplier = remoteSupplier;
         CoopStormBridge.install(owner, guest, new CoopStormBridge.Handler() {
+            @Override public boolean executionDiagnosticsEnabled() {
+                return currentSector() && CoopDebug.diagnosticsEnabled() && CoopAgentBridge.configuredPort() != 0;
+            }
             @Override public CampaignFleetAPI remoteFleet() { return currentSector() ? remoteFleetSupplier.get() : null; }
             @Override public float remoteExtraRadius() { return windowCurrent() ? remoteExtraRadius : 0f; }
             @Override public float remoteTimeScale() { return windowCurrent() ? remoteTimeScale : 1f; }
@@ -220,6 +226,7 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         result.putIfAbsent("available", false);
         result.put("role", (owner == null ? CoopStormBridge.isGuest() : guest) ? "GUEST" : "HOST");
         result.put("pendingControlCount", pending.size());
+        result.put("execution", CoopStormExecutionProbe.snapshot());
         result.put("acceptedSurgeSourceCount", acceptedSurgeSourceCount);
         result.put("acceptedSurgeWindowCount", acceptedSurgeWindowCount);
         result.put("acceptedSharedOffCount", acceptedSharedOffCount);

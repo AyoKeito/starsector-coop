@@ -76,6 +76,7 @@ export const READ_ONLY_COMMANDS = Object.freeze(
     'feed',
     'screen',
     'streams',
+    'ghosts',
     'wrecks',
     'encounters',
     'lights',

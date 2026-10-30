@@ -15,6 +15,8 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 import java.security.MessageDigest;
 import coop.storm.CoopStormBridge;
+// COOP FORK: opt-in observations after native physical calls return; never saved.
+import coop.storm.CoopStormExecutionProbe;
 import coop.storm.CoopStormSnapshot;
 import coop.storm.CoopStormGrid;
 
@@ -1514,7 +1516,9 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 	
 	protected void applyStormStrikes(CellStateTracker cell, CampaignFleetAPI fleet, float days) {
 		// COOP FORK: physical strike outcomes stay on the fleet owner's engine.
-		if (!CoopStormBridge.allowStrikes(fleet)) return;
+		boolean coopAllowStrike = CoopStormBridge.allowStrikes(fleet);
+		CoopStormExecutionProbe.observeAttempt(fleet, cell.i, cell.j, coopAllowStrike);
+		if (!coopAllowStrike) return;
 		
 		if (cell.flicker != null && cell.flicker.getWait() > 0) {
 			cell.flicker.setNumBursts(0);
@@ -1526,6 +1530,8 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 
 		
 		fleet.addScript(new HyperStormBoost(cell, fleet));
+		// COOP FORK: this count means native installation returned, not that velocity advanced.
+		CoopStormExecutionProbe.observeBoostInstalled(fleet, cell.i, cell.j);
 		
 		String key = STORM_STRIKE_TIMEOUT_KEY;
 		MemoryAPI mem = fleet.getMemoryWithoutUpdate();
@@ -1598,12 +1604,16 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 		
 		if (crDamage > 0) {
 			member.getRepairTracker().applyCREvent(-crDamage, "hyperstorm", "Hyperspace storm strike");
+			// COOP FORK: record returned native damage calls with their actual selected member.
+			CoopStormExecutionProbe.observeCrApplied(fleet, cell.i, cell.j, member.getId(), crDamage);
 		}
 		
 		float hitStrength = member.getStats().getArmorBonus().computeEffective(member.getHullSpec().getArmorRating());
 		hitStrength *= strikeDamage / crPerDep;
 		if (hitStrength > 0) {
 			member.getStatus().applyDamage(hitStrength);
+			// COOP FORK: observation only; native hull clamping below stays unchanged.
+			CoopStormExecutionProbe.observeHullApplied(fleet, cell.i, cell.j, member.getId(), hitStrength);
 			if (member.getStatus().getHullFraction() < 0.01f) {
 				member.getStatus().setHullFraction(0.01f);
 			}

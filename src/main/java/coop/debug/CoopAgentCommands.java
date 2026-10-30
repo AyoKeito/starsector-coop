@@ -260,6 +260,8 @@ public final class CoopAgentCommands {
         map.put("feed", CoopAgentCommands::feed);
         map.put("screen", CoopAgentCommands::screen);
         map.put("streams", CoopAgentCommands::streams);
+        map.put("ghosts", CoopAgentCommands::ghosts);
+        map.put("ghostspawn", CoopAgentCommands::ghostspawn);
         map.put("wrecks", CoopAgentCommands::wrecks);
         map.put("wreckspawn", CoopAgentCommands::wreckspawn);
         map.put("wreckconsume", CoopAgentCommands::wreckconsume);
@@ -291,6 +293,21 @@ public final class CoopAgentCommands {
     }
 
     // ---- Queries --------------------------------------------------------------------------------
+
+    /** M5 native diagnostics never call the mutating native manager lookup. */
+    static JSONObject ghosts(JSONObject args, Context context) throws JSONException {
+        if (args.length() != 0) throw new IllegalArgumentException("ghosts accepts no arguments");
+        return new JSONObject(coop.campaign.CoopGhostDiagnostics.capture(requireSector(context)));
+    }
+
+    /** Fixed native creator setup for opt-in M5 acceptance; no custom terrain or RNG writes. */
+    static JSONObject ghostspawn(JSONObject args, Context context) throws JSONException {
+        if (args.length() != 1 || !args.has("kind"))
+            throw new IllegalArgumentException("ghostspawn requires only kind");
+        CoopNetPump pump = context.pump();
+        return new JSONObject(coop.campaign.CoopGhostDiagnostics.spawn(requireSector(context),
+                roleOf(pump), pump != null && pump.gameplaySessionActiveForBridge(), requiredString(args, "kind")));
+    }
 
     /** Saved membership and a fresh gameplay snapshot; this reader never captures or renames. */
     static JSONObject encounters(JSONObject args, Context context) throws JSONException {

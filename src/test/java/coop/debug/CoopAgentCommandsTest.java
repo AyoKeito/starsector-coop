@@ -195,7 +195,7 @@ class CoopAgentCommandsTest {
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
                 java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "entities",
-                        "expedition", "feed", "fleets", "give", "hirable", "intel", "landmarks",
+                        "expedition", "feed", "fleets", "ghosts", "ghostspawn", "give", "hirable", "intel", "landmarks",
                         "mark", "market", "markets", "memory", "netfault", "objective", "ownfleet",
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
                         "teleport", "visibility", "streams", "storms", "streamadd", "streamdespawn", "clockalign",
@@ -301,6 +301,26 @@ class CoopAgentCommandsTest {
         assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
                 "the verb must be wired; without a sector it refuses for the same reason every"
                         + " other verb does");
+    }
+
+    @Test
+    void m5NativeDiagnosticsAreRegisteredAndValidateArguments() throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+        for (String request : java.util.List.of(
+                "{\"id\":41,\"cmd\":\"ghosts\"}",
+                "{\"id\":42,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\"}}")) {
+            JSONObject response = new JSONObject(commands.dispatch(request, EMPTY_CONTEXT));
+            assertFalse(response.getBoolean("ok"));
+            assertEquals("IllegalStateException: no campaign loaded", response.getString("error"));
+        }
+        for (String request : java.util.List.of(
+                "{\"id\":43,\"cmd\":\"ghosts\",\"args\":{\"advance\":1}}",
+                "{\"id\":44,\"cmd\":\"ghostspawn\"}",
+                "{\"id\":45,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\",\"seed\":1}}")) {
+            JSONObject response = new JSONObject(commands.dispatch(request, EMPTY_CONTEXT));
+            assertFalse(response.getBoolean("ok"));
+            assertTrue(response.getString("error").startsWith("IllegalArgumentException:"));
+        }
     }
 
     // ---- netfault --------------------------------------------------------------------------------

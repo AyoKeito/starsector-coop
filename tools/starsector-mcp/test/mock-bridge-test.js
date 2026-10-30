@@ -228,7 +228,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   assert.deepEqual(
     [...READ_ONLY_COMMANDS].sort(),
     [
-      'barpool', 'cargo', 'colonizable', 'encounters', 'entities', 'feed', 'fleets', 'hirable', 'intel',
+      'barpool', 'cargo', 'colonizable', 'encounters', 'entities', 'feed', 'fleets', 'ghosts', 'hirable', 'intel',
       'landmarks', 'lights', 'market', 'markets', 'screen', 'status', 'storms', 'streams', 'survey', 'visibility', 'wrecks'
     ]
   );
@@ -239,7 +239,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
     'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
-    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold'
+    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -274,10 +274,37 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('lights'), 2);
   assert.equal((await client.send('storms')).campaignTimestamp, 123);
   assert.equal(calls.get('storms'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold']) {
+  assert.equal((await client.send('ghosts')).campaignTimestamp, 123);
+  assert.equal(calls.get('ghosts'), 2);
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
+});
+
+test('ghost diagnostics and native setup preserve results and role refusals', async (t) => {
+  const table = { cacheType: 'coop.campaign.CoopSensorGhostManager', ownedCachedHandle: true,
+    managers: [], trails: [{ id: 'trail-a', segments: [{ identity: 'local-7', discovered: true }] }] };
+  const hostBridge = new MockBridge((request) => request.cmd === 'ghosts'
+    ? { ok: true, data: table }
+    : request.args.kind === 'leviathan'
+      ? { ok: true, data: { created: 1, kind: request.args.kind } }
+      : { ok: false, error: 'IllegalStateException: Cosmetic setup requires Guest' });
+  const guestBridge = new MockBridge((request) => request.cmd === 'ghosts'
+    ? { ok: true, data: table }
+    : request.args.kind === 'charger'
+      ? { ok: true, data: { created: 0, refusedByNativeCreator: true } }
+      : { ok: false, error: 'IllegalStateException: Trail setup requires Host' });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.deepEqual(await ssDump(bridges, 'guest', 'ghosts'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'ghostspawn', { kind: 'leviathan' }), { created: 1, kind: 'leviathan' });
+  assert.deepEqual(await ssAct(bridges, 'guest', 'ghostspawn', { kind: 'charger' }), { created: 0, refusedByNativeCreator: true });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'ghostspawn', { kind: 'calf' }), /Trail setup requires Host/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'ghostspawn', { kind: 'charger' }), /Cosmetic setup requires Guest/);
+  await assert.rejects(() => ssDump(bridges, 'host', 'ghostspawn'), /unknown query verb/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'ghosts'), /unknown action verb/);
 });
 
 test('encounter query and native QA creation preserve arguments and guest refusal', async (t) => {
@@ -609,6 +636,16 @@ test('storm grid/generation and every native sampled timer remain gameplay compa
     assert.equal(result.status, 'FAIL'); assert.equal(result.equal, false);
     assert.ok(result.differences.length > 0);
   }
+});
+
+test('local storm execution evidence is returned separately from shared-weather equality', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  host.execution = { enabled: true, sequence: 1, counts: { 'OWNER.velocityWrites': 1 },
+    events: [{ fleetId: 'host-owner', action: 'velocityWrites' }] };
+  guest.execution = { enabled: true, sequence: 0, counts: { 'OWNER.velocityWrites': 0 }, events: [] };
+  assert.equal(diffStorms(host, guest).status, 'PASS');
+  assert.equal(host.execution.counts['OWNER.velocityWrites'], 1);
+  assert.equal(guest.execution.counts['OWNER.velocityWrites'], 0);
 });
 
 test('storm rows from different global cells never count as equal samples', () => {

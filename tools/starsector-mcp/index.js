@@ -80,6 +80,9 @@ const TOOLS = [
       'streams (no args: hyperspace streams keyed by canonical host id, with kind, full params, ' +
       'segment geometry and faders, fade state, and effective brightness sampled every 1000 units ' +
       'plus the endpoint; each row and the table carry their campaignTimestamp); ' +
+      'ghosts (no args: pure cached/registered ghost-manager and native entity observations, ' +
+      'with bounded dynamic trail segment identities, geometry, faders and local discovery; ' +
+      'cosmetic ghosts and object identities are local, so inspect each instance separately); ' +
       'encounters (no args: recipe-bearing temporary abyssal systems keyed by shared instance id, ' +
       'structured saved recipes and current gameplay manifests including canonical entity ids, ' +
       'identity lookup checks, in-system and linked hyperspace entities, orbits, conditions, survey, ' +
@@ -163,6 +166,10 @@ const TOOLS = [
       'the current month; invoked confirms the call, while streams confirms any resulting terrain), ' +
       'streamdespawn (host only, no args: starts a 10 game-day fade with zero delay on each live ' +
       'seasonal stream that is not already despawning; started is the count), ' +
+      'ghostspawn{kind:charger|no_ghost|ziggurat|abyssal_drifter|leviathan|calf} ' +
+      '(diagnostic QA only, active paused session with real player in hyperspace required: ' +
+      'safe cosmetic kinds require Guest, leviathan/calf require Host; one native creation attempt ' +
+      'preserves environment refusal and RNG; never retried after an uncertain response), ' +
       'encounterspawn{creator?:parent|dire, x, y, depth, threatRollRan?:boolean, seed?:decimal-string} ' +
       '(host-only QA: invokes the exact native encounter creator once at these coordinates, optionally ' +
       'sets its exact effective 64-bit seed, verifies one new temporary abyssal system, and returns ' +
