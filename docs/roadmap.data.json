@@ -16,7 +16,7 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26: verify M4/M5 natively, then address Guest-proximity encounter triggering."
+      "note": "P26: finish M4/M5 visual acceptance; Guest-proximity triggering remains separate."
     },
     {
       "key": "next",
@@ -37,15 +37,15 @@
       "note": "P26 remains partial; P22, P25 and P27 are queued, and P33 is built."
     }
   ],
-  "hereHead": "You are here: P26 ambient-world replication; finish MCP reload and storm execution checks.",
-  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. M5 MCP checks cover native ghosts, trail growth, discovery, expiry, reconnect and saving. Finish reload and M4 execution checks before visual acceptance. Guest-proximity encounter triggering remains unbuilt. Detailed results stay in the plan and acceptance reports.",
+  "hereHead": "You are here: P26 bounded M4/M5 MCP checks pass; native visual checks remain.",
+  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. Bounded M4 execution and M5 lifecycle/travel MCP checks pass. Finish native visual acceptance; computer use remains paused. Guest-proximity encounter triggering remains unbuilt. Evidence and limits stay in the plan and acceptance reports.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
       "head": "Verify M4 storms and M5 ghosts/trails",
-      "state": "bounded M5 MCP passes; reload and M4 execution open",
-      "body": "Complete MCP reload and M4 boost/mirror checks using the native probes and course setup. Complete visual checks when computer use resumes. Record evidence in the plan and acceptance reports."
+      "state": "bounded MCP acceptance recorded; visual checks open",
+      "body": "Compare the same global storm and owner-only effects visually, then inspect local ghosts and shared trail rendering. Resume computer use when requested. Record results and evidence limits in the acceptance reports."
     },
     {
       "sev": "scope",
@@ -898,7 +898,7 @@
       "theme": "terrain",
       "track": "post-v1",
       "status": "partial",
-      "summary": "Shares Host-owned slipstreams, wrecks, temporary abyssal systems, lights and storms. M1/M2, shared wrecks and bounded M3 acceptance are complete. M5 MCP checks cover safe ghosts, shared trail growth, discovery and expiry. M4 execution and M5 reload/visual checks remain.",
+      "summary": "Shares Host-owned slipstreams, wrecks, temporary abyssal systems, lights and storms. M1/M2, shared wrecks and bounded M3 acceptance are complete. Bounded M4 execution and M5 ghost/trail lifecycle, reload and travel MCP checks pass. Native visual acceptance remains open.",
       "introduces": [
         "Slipstream geometry and fades",
         "Shared wrecks and salvage",
@@ -908,8 +908,8 @@
         "Local cosmetic ghosts and shared trails"
       ],
       "residue": [
-        "M4: finish native boost/mirror and visual checks.",
-        "M5: finish reload, travel/weather and visual checks.",
+        "M4: visual storm/boost/mirror observations.",
+        "M5: visual ghosts/trails; evidence limits remain recorded.",
         "Guest-proximity encounter triggering; deferred M3 edge cases."
       ],
       "note": "Milestone details and test evidence are in the implementation plan and dated acceptance reports."

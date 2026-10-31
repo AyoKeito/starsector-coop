@@ -108,6 +108,15 @@ class CoopStormActorDiagnosticsTest {
         assertEquals("storm_world_not_current", actor(uninstalled, "owner").get("reason"));
     }
 
+    @Test void cloudlessPointInsideGridDoesNotReportOutsideGrid() {
+        Scene scene = new Scene(); scene.terrain.clearClouds();
+        Map<String, Object> owner = actor(scene.world.diagnostics("", 1), "owner");
+        assertNull(owner.get("selectedTile"));
+        assertEquals("no_native_tile_selected", nested(owner, "selectedCell").get("reason"));
+        assertEquals(List.of(2, 2), owner.get("exactTile"));
+        assertEquals(true, nested(owner, "exactCell").get("present"));
+    }
+
     @Test void absentDynamicGoSlowBonusUsesNativeZeroWithoutCreatingTheMissingEntry() {
         Scene scene = new Scene(); scene.mods.clear();
         Map<String, Object> owner = actor(scene.world.diagnostics("", 1), "owner");
@@ -124,6 +133,8 @@ class CoopStormActorDiagnosticsTest {
     }
 
     private static final class NativeTerrain extends HyperspaceTerrainPlugin {
+        void clearClouds() { for (int[] row : tiles) java.util.Arrays.fill(row, -1); }
+
         NativeTerrain(LocationAPI hyperspace) {
             params = new TileParams("", 4, 4, "terrain", "deep_hyperspace", 1, 1, "Hyperspace");
             tiles = new int[4][4];

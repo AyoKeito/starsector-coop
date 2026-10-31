@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-31 (0.1.5). P26 remains PARTIAL: M1/M2, shared wrecks and M3 within its agreed bounded native release scope are complete. M4 native acceptance remains partial; M5 is implemented with native acceptance pending. MCP acceptance tooling is ready; computer-use checks remain on hold. Guest-proximity triggering remains unbuilt. Deferred M3 edge cases remain unpassed; dated runtime scopes and verdicts are retained below and in the native acceptance report.
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-10-31 (0.1.5). P26 remains PARTIAL: M1/M2, shared wrecks and bounded M3 acceptance are complete. Bounded M4 execution/owner-guard and M5 lifecycle/travel MCP checks pass; native visual acceptance remains open. Guest-proximity triggering remains unbuilt. Deferred M3 edges and the mature M1 timeline diagnostic difference retain their recorded limits. See the dated acceptance reports for runtime scope and evidence.
 
 October 20 MCP-only checks add bounded pending-save/retry, automatic preclaim cancellation and native TCP reconnect recovery; full conflicting-request rejection remains inconclusive. October 21 native loading then exposes and fixes premature rejection before Guest's fleet mirror exists. `CoopLightWorld` checks actor readiness after cached-result lookup and before any new result/tombstone, leaving unknown/dead/unplaced actors retryable. Native reload on `47cdbc98dbcb` recovers the original pending request once, with a 248-check independent audit. That runtime's clean build passes 4,334 tests plus one existing skip across 273 suites; focused World/Authority tests pass 26/21. These counts precede the new post-native-grant QA hook. That run's clear checkpoint 99j preserves Feb 25, c207 and 234 equal fields after explicit QA alignment. The later uncertain-grant native Save/Load subcase passes on `8fd6b06`; audit 99 now closes bounded automatic reserved-Guest-lease contention and native handoff. See the dated [native acceptance report](P26_M3_NATIVE_ACCEPTANCE_2026-10-20.md) for preserved failures and limits.
 
@@ -324,7 +324,7 @@ Owns: every wire type, since the enum lives here.
   The `GBIGenerateSlipstream` fork marks exact native Leviathan/Calf trails; existing v2 stream
   records carry TRAIL geometry/faders every 250 ms. `CoopSlipstreamWorld` updates Guest points in
   place, while the fade bridge holds registered replicas between checkpoints and retains bounded
-  published Host geometry for M4 clear validation. Native M5 acceptance remains deferred.
+  published Host geometry for M4 clear validation. Bounded M5 MCP checks pass; visuals remain open.
 - `CoopGhostDiagnostics` - opt-in M5 acceptance tools: read-only `ghosts` reports cached and
   registered managers plus bounded native ghost/trail identities and discovery; `ghostspawn`
   invokes one fixed native creator or Host trail constructor under diagnostic/session/pause gates.

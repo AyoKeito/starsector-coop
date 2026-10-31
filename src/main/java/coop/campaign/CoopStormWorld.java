@@ -326,7 +326,7 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
 
     private static Map<String, Object> cell(HyperspaceTerrainPlugin plugin, int[] tile) {
         Map<String, Object> result = new LinkedHashMap<>();
-        if (tile == null) { result.put("present", false); result.put("reason", "outside_native_grid"); return result; }
+        if (tile == null) { result.put("present", false); result.put("reason", "no_native_tile_selected"); return result; }
         var rows = plugin.getActiveCells();
         if (rows == null || tile[0] < 0 || tile[0] >= rows.length || rows[tile[0]] == null
                 || tile[1] < 0 || tile[1] >= rows[tile[0]].length)

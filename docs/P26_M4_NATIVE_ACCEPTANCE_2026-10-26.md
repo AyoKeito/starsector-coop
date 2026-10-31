@@ -72,4 +72,4 @@ Final `checkpoint-1793030377707.json` passes 14 coordinated save/backup checks f
 
 ## Still open
 
-The automated native recovery, paired reload, shared-control, isolated shared-clearing and real-owner strike cases above are closed within their stated bounds. Visual comparison of the same global storm and native boost/mirror execution observations remain open. Direct mirror strike/boost execution counters are not exposed by the current bridge; unit tests verify the owner guard. M4 and P26 remain partial rather than converting those limits into passes.
+The automated native recovery, paired reload, shared-control, isolated shared-clearing and real-owner strike cases above are closed within their stated bounds. This October 26 run does not expose direct mirror strike/boost counters. The [October 31 MCP continuation](P26_M45_MCP_ACCEPTANCE_2026-10-31.md) adds probes and bounded positive owner-execution/mirror-guard evidence, retaining its getter-buffering limit. Visual comparison of the same global storm and native effects remains open. M4 and P26 remain partial.
