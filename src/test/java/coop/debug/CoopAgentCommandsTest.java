@@ -200,7 +200,7 @@ class CoopAgentCommandsTest {
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
                         "teleport", "visibility", "streams", "storms", "streamadd", "streamdespawn", "clockalign",
                         "wrecks", "wreckspawn", "wreckconsume", "encounters", "encounterspawn", "lights", "lightspawn",
-                        "lightgrantfault", "lightmessagehold"),
+                        "lightgrantfault", "lightmessagehold", "course"),
                 new CoopAgentCommands().verbs());
     }
 
@@ -308,7 +308,9 @@ class CoopAgentCommandsTest {
         CoopAgentCommands commands = new CoopAgentCommands();
         for (String request : java.util.List.of(
                 "{\"id\":41,\"cmd\":\"ghosts\"}",
-                "{\"id\":42,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\"}}")) {
+                "{\"id\":42,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\"}}",
+                "{\"id\":46,\"cmd\":\"course\",\"args\":{\"x\":1,\"y\":2}}",
+                "{\"id\":47,\"cmd\":\"course\",\"args\":{\"clear\":true}}")) {
             JSONObject response = new JSONObject(commands.dispatch(request, EMPTY_CONTEXT));
             assertFalse(response.getBoolean("ok"));
             assertEquals("IllegalStateException: no campaign loaded", response.getString("error"));
@@ -316,7 +318,10 @@ class CoopAgentCommandsTest {
         for (String request : java.util.List.of(
                 "{\"id\":43,\"cmd\":\"ghosts\",\"args\":{\"advance\":1}}",
                 "{\"id\":44,\"cmd\":\"ghostspawn\"}",
-                "{\"id\":45,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\",\"seed\":1}}")) {
+                "{\"id\":45,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\",\"seed\":1}}",
+                "{\"id\":48,\"cmd\":\"course\",\"args\":{\"clear\":false}}",
+                "{\"id\":49,\"cmd\":\"course\",\"args\":{\"x\":1}}",
+                "{\"id\":50,\"cmd\":\"course\",\"args\":{\"x\":1,\"y\":2,\"clear\":true}}")) {
             JSONObject response = new JSONObject(commands.dispatch(request, EMPTY_CONTEXT));
             assertFalse(response.getBoolean("ok"));
             assertTrue(response.getString("error").startsWith("IllegalArgumentException:"));

@@ -239,7 +239,7 @@ test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', (
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
     'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
-    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn'
+    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn', 'course'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -276,10 +276,22 @@ test('dropped ambient queries retry once, while triggers and clock alignment are
   assert.equal(calls.get('storms'), 2);
   assert.equal((await client.send('ghosts')).campaignTimestamp, 123);
   assert.equal(calls.get('ghosts'), 2);
-  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn']) {
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn', 'course']) {
     await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
     assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
   }
+});
+
+test('native course setup and clearing stay action-only and preserve arguments', async (t) => {
+  const hostBridge = new MockBridge(request => ({ ok:true, data:{ nativeCourse:true, args:request.args } }));
+  const guestBridge = new MockBridge(() => ({ ok:false, error:'IllegalStateException: Course setup requires paused campaign' }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges=bridgesFor(hostBridge.port,guestBridge.port);
+  t.after(async()=>{bridges.closeAll();await hostBridge.stop();await guestBridge.stop();});
+  for(const args of [{x:125,y:-35},{clear:true}])
+    assert.deepEqual(await ssAct(bridges,'host','course',args),{nativeCourse:true,args});
+  await assert.rejects(()=>ssAct(bridges,'guest','course',{x:0,y:0}),/paused campaign/);
+  await assert.rejects(()=>ssDump(bridges,'host','course'),/unknown query verb/);
 });
 
 test('ghost diagnostics and native setup preserve results and role refusals', async (t) => {

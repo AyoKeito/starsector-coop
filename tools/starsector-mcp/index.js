@@ -93,7 +93,8 @@ const TOOLS = [
       'storms{cells?:"i,j;i,j", limit?:1..128} (pure storm-World diagnostics: raw timestamp, ' +
       'authoritative revision/generation/frame anchor, whole-grid hash and native tracker timers ' +
       'at global grid indices; default samples around both viewers, available:false is not an ' +
-      'empty grid, and the query never evolves weather or queues controls); ' +
+      'empty grid; execution records native owner/mirror effects, actors reads native effect gates; ' +
+      'the query never evolves weather or queues controls); ' +
       'status, markets and barpool take none. ' +
       'colonizable, landmarks and entities rows carry x/y, the location-local coordinates ss_act ' +
       'teleport takes alongside systemId.',
@@ -170,6 +171,9 @@ const TOOLS = [
       '(diagnostic QA only, active paused session with real player in hyperspace required: ' +
       'safe cosmetic kinds require Guest, leviathan/calf require Host; one native creation attempt ' +
       'preserves environment refusal and RNG; never retried after an uncertain response), ' +
+      'course{x,y} or course{clear:true} (diagnostic QA only, paused active campaign required: ' +
+      'uses native course steering to a point in the current location, or clears that native course; ' +
+      'never sets velocity or NPC assignments and never retries an uncertain response), ' +
       'encounterspawn{creator?:parent|dire, x, y, depth, threatRollRan?:boolean, seed?:decimal-string} ' +
       '(host-only QA: invokes the exact native encounter creator once at these coordinates, optionally ' +
       'sets its exact effective 64-bit seed, verifies one new temporary abyssal system, and returns ' +

@@ -3,6 +3,9 @@ package coop.campaign;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.terrain.BaseTerrain;
+import com.fs.starfarer.api.impl.campaign.ids.Stats;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceTerrainPlugin;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceTerrainPlugin.CellState;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
@@ -12,6 +15,7 @@ import coop.storm.CoopStormSnapshot;
 import coop.storm.CoopStormExecutionProbe;
 import coop.debug.CoopAgentBridge;
 import coop.util.CoopDebug;
+import com.fs.starfarer.api.util.Misc;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
@@ -227,6 +231,7 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         result.put("role", (owner == null ? CoopStormBridge.isGuest() : guest) ? "GUEST" : "HOST");
         result.put("pendingControlCount", pending.size());
         result.put("execution", CoopStormExecutionProbe.snapshot());
+        result.put("actors", actors(plugin));
         result.put("acceptedSurgeSourceCount", acceptedSurgeSourceCount);
         result.put("acceptedSurgeWindowCount", acceptedSurgeWindowCount);
         result.put("acceptedSharedOffCount", acceptedSharedOffCount);
@@ -242,6 +247,99 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
         result.put("surgeWindowCurrent", window);
         result.put("effectiveRemoteExtraRadius", window ? remoteExtraRadius : 0f);
         result.put("effectiveRemoteTimeScale", window ? remoteTimeScale : 1f);
+        return result;
+    }
+
+    /** Reads the exact native strike gates without applying terrain or changing cached memory. */
+    private Map<String, Object> actors(HyperspaceTerrainPlugin plugin) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        boolean current = currentSector();
+        result.put("available", current && plugin != null);
+        if (!current) result.put("reason", "storm_world_not_installed_for_current_campaign");
+        else if (plugin == null) result.put("reason", "native_hyperspace_terrain_unavailable");
+        result.put("owner", actor(plugin, current ? installedSector.getPlayerFleet() : null,
+                current ? "local_player_unavailable" : "storm_world_not_current"));
+        result.put("peer", actor(plugin, current ? remoteFleetSupplier.get() : null,
+                current ? "peer_mirror_unavailable" : "storm_world_not_current"));
+        return result;
+    }
+
+    private static Map<String, Object> actor(HyperspaceTerrainPlugin plugin, CampaignFleetAPI fleet, String missingReason) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("present", fleet != null);
+        if (fleet == null) { result.put("reason", missingReason); return result; }
+        result.put("id", fleet.getId());
+        result.put("identity", Integer.toUnsignedString(System.identityHashCode(fleet), 16));
+        result.put("isPlayerFleet", fleet.isPlayerFleet());
+        result.put("isMirror", CoopStormBridge.isMirror(fleet));
+        Vector2f position = fleet.getLocation(), velocity = fleet.getVelocity();
+        result.put("x", position == null ? null : position.x); result.put("y", position == null ? null : position.y);
+        result.put("velocityX", velocity == null ? null : velocity.x); result.put("velocityY", velocity == null ? null : velocity.y);
+        result.put("speed", velocity == null ? null : velocity.length()); result.put("radius", fleet.getRadius());
+        result.put("currentBurn", fleet.getCurrBurnLevel());
+        result.put("inHyperspace", fleet.isInHyperspace());
+        result.put("transition", fleet.isInHyperspaceTransition());
+        result.put("inBattle", fleet.getBattle() != null);
+        MemoryAPI memory = fleet.getMemoryWithoutUpdate();
+        Object mutex = memory == null ? null : memory.get(BaseTerrain.TERRAIN_LOCK_KEY);
+        result.put("terrainMutexType", mutex == null ? null : mutex.getClass().getName());
+        result.put("terrainMutexValue", mutex == null || mutex instanceof String || mutex instanceof Number
+                || mutex instanceof Boolean ? mutex : "nonprimitive");
+        result.put("nativeGatesAvailable", false);
+        if (plugin == null) { result.put("reason", "native_hyperspace_terrain_unavailable"); return result; }
+        if (position == null || velocity == null || fleet.getStats() == null || fleet.getFleetData() == null) {
+            result.put("reason", "native_fleet_gate_inputs_unavailable"); return result;
+        }
+        if (plugin.getEntity() == null || plugin.getActiveCells() == null) {
+            result.put("reason", "native_hyperspace_terrain_not_initialized"); return result;
+        }
+        int goSlowBurn = goSlowBurn(fleet);
+        result.put("goSlowBurn", goSlowBurn);
+        result.put("slowMoving", fleet.getCurrBurnLevel() <= goSlowBurn);
+        result.put("nativeGatesAvailable", true);
+        result.put("terrainId", plugin.getEntity() == null ? null : plugin.getEntity().getId());
+        result.put("terrainPrevented", plugin.isPreventedFromAffecting(fleet));
+        result.put("inClouds", plugin.isInClouds(fleet));
+        result.put("locationInClouds", plugin.isInClouds(position, fleet.getRadius()));
+        int[] selected = plugin.getTilePreferStorm(position, fleet.getRadius());
+        int[] exact = plugin.getTile(position);
+        result.put("selectedTile", tile(selected)); result.put("selectedCell", cell(plugin, selected));
+        result.put("exactTile", tile(exact)); result.put("exactCell", cell(plugin, exact));
+        return result;
+    }
+
+    /** Exact pinned Misc math, reading existing mods instead of lazily creating one via getMod. */
+    private static int goSlowBurn(CampaignFleetAPI fleet) {
+        var dynamic = fleet.getStats().getDynamic();
+        if (dynamic == null || dynamic.getMods() == null)
+            throw new IllegalStateException("Native fleet has no dynamic stat map");
+        var modifier = dynamic.getMods().get(Stats.MOVE_SLOW_SPEED_BONUS_MOD);
+        float bonus = modifier == null ? 0f : modifier.computeEffective(0f);
+        int burn = Math.round(fleet.getFleetData().getMinBurnLevel() * Misc.SNEAK_BURN_MULT);
+        burn += bonus;
+        return burn;
+    }
+
+    private static List<Integer> tile(int[] coordinates) {
+        return coordinates == null ? null : List.of(coordinates[0], coordinates[1]);
+    }
+
+    private static Map<String, Object> cell(HyperspaceTerrainPlugin plugin, int[] tile) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (tile == null) { result.put("present", false); result.put("reason", "outside_native_grid"); return result; }
+        var rows = plugin.getActiveCells();
+        if (rows == null || tile[0] < 0 || tile[0] >= rows.length || rows[tile[0]] == null
+                || tile[1] < 0 || tile[1] >= rows[tile[0]].length)
+            throw new IllegalStateException("Native storm tile is outside tracker dimensions");
+        var state = rows[tile[0]][tile[1]];
+        result.put("present", state != null);
+        if (state == null) { result.put("reason", "native_tracker_absent"); return result; }
+        result.put("i", state.i); result.put("j", state.j); result.put("epoch", state.coopEpoch);
+        result.put("phase", state.state == null ? null : state.state.name());
+        result.put("storming", state.isStorming()); result.put("signaling", state.isSignaling());
+        result.put("wait", state.wait); result.put("signal", state.signal); result.put("wane", state.wane);
+        result.put("flickerPresent", state.flicker != null);
+        result.put("peakFrame", state.flicker != null && state.flicker.isPeakFrame());
         return result;
     }
 

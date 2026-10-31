@@ -56,6 +56,7 @@ export const ACTION_VERBS = [
   'streamadd',
   'streamdespawn',
   'ghostspawn',
+  'course',
   'wreckspawn',
   'wreckconsume',
   'encounterspawn',

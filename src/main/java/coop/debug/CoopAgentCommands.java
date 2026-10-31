@@ -262,6 +262,7 @@ public final class CoopAgentCommands {
         map.put("streams", CoopAgentCommands::streams);
         map.put("ghosts", CoopAgentCommands::ghosts);
         map.put("ghostspawn", CoopAgentCommands::ghostspawn);
+        map.put("course", CoopAgentCommands::course);
         map.put("wrecks", CoopAgentCommands::wrecks);
         map.put("wreckspawn", CoopAgentCommands::wreckspawn);
         map.put("wreckconsume", CoopAgentCommands::wreckconsume);
@@ -293,6 +294,23 @@ public final class CoopAgentCommands {
     }
 
     // ---- Queries --------------------------------------------------------------------------------
+
+    /** Native course steering for opt-in autonomous campaign checks. */
+    static JSONObject course(JSONObject args, Context context) throws JSONException {
+        boolean clear = args.has("clear");
+        Float x = null, y = null;
+        if (clear) {
+            if (args.length() != 1 || !optionalBoolean(args, "clear", false))
+                throw new IllegalArgumentException("course requires x/y or only clear:true");
+        } else {
+            if (args.length() != 2 || !args.has("x") || !args.has("y"))
+                throw new IllegalArgumentException("course requires x/y or only clear:true");
+            x = (float) requiredDouble(args, "x"); y = (float) requiredDouble(args, "y");
+        }
+        CoopNetPump pump = context.pump();
+        return new JSONObject(CoopCourseDiagnostics.set(requireSector(context),
+                pump != null && pump.gameplaySessionActiveForBridge(), x, y, clear));
+    }
 
     /** M5 native diagnostics never call the mutating native manager lookup. */
     static JSONObject ghosts(JSONObject args, Context context) throws JSONException {

@@ -339,6 +339,8 @@ Owns: every wire type, since the enum lives here.
   Opt-in `storms.execution` adds bounded actual owner/mirror strike/boost/damage observations;
   the pinned `HyperStormBoost` fork records returned velocity writes without saved fields.
   Queries remain pure and physical execution stays outside shared-weather equality.
+  `storms.actors` exposes native burn/cloud/mutex/phase gates without lazy stat writes. Guarded
+  action-only `course` uses native player autopilot; it never writes velocity or NPC assignments.
 - `CoopLightAuthority` / `CoopLightRecord` / `CoopLightCodec` / `CoopLightWorld` - M3 free-standing
   native hyperspace lights, accepted within the agreed bounded native release scope. The Host captures resolved
   params and positions directly, retaining all native spawn shapes and their existing global RNG
